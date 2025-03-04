@@ -4,7 +4,7 @@ __pycache__/
 *$py.class
 
 # C extensions
-*.so
+# *.so  # clients libraries must not be ignored
 
 # Distribution / packaging
 .Python

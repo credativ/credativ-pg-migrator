@@ -289,6 +289,7 @@ class Orchestrator:
                     'worker_id': worker_id,
                     'source_schema': source_schema,
                     'source_table': source_table,
+                    'source_columns': table_data['source_columns'],
                     'target_schema': target_schema,
                     'target_table': target_table,
                     'target_columns': table_data['target_columns'],

@@ -856,6 +856,7 @@ class InformixConnector(DatabaseConnector):
             worker_id = settings['worker_id']
             source_schema = settings['source_schema']
             source_table = settings['source_table']
+            source_columns = settings['source_columns']
             target_schema = settings['target_schema']
             target_table = settings['target_table']
             target_columns = settings['target_columns']
@@ -889,6 +890,20 @@ class InformixConnector(DatabaseConnector):
 
                     # Convert Polars DataFrame to list of tuples for insertion
                     records = df.to_dicts()
+
+                    # Adjust binary or bytea types
+                    for record in records:
+                        for order_num, column in source_columns.items():
+                            column_name = column['name']
+                            column_type = column['type']
+                            # if column_type.lower() in ['binary', 'bytea']:
+                            if column_type.lower() in ['blob']:
+                                record[column_name] = bytes(record[column_name].getBytes(1, int(record[column_name].length())))  # Convert 'com.informix.jdbc.IfxCblob' to bytes
+                            elif column_type.lower() in ['clob']:
+                                # elif isinstance(record[column_name], IfxCblob):
+                                record[column_name] = record[column_name].getSubString(1, int(record[column_name].length()))  # Convert IfxCblob to string
+                                # record[column_name] = bytes(record[column_name].getBytes(1, int(record[column_name].length())))  # Convert IfxBblob to bytes
+                                # record[column_name] = record[column_name].read()  # Convert IfxBblob to bytes
 
                     part_name = f'insert data: {target_table} - {offset}'
                     migrate_target_connection.insert_batch(target_schema, target_table, target_columns, records)

@@ -57,7 +57,7 @@ class DatabaseConnector(ABC):
         """
         Converts the columns of one source table to the target database type and SQL syntax.
         Returns:
-          - dictionary of converted columns - necessary for data migration
+          - dictionary of converted columns - the same as dictionaly returned by fetch_table_columns, but with all conversion -> necessary for data migration
           - SQL statement to create the table in the target database - used for table creation
         """
         pass

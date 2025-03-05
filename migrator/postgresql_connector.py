@@ -208,23 +208,24 @@ class PostgreSQLConnector(DatabaseConnector):
     def migrate_table(self, migrate_target_connection, settings):
         return 0
 
-    def insert_batch(self, table_schema: str, table_name: str, columns: list, data: list):
+    def insert_batch(self, table_schema: str, table_name: str, columns: dict, data: list):
         try:
             # Ensure data is a list of tuples
             if isinstance(data, list) and all(isinstance(item, dict) for item in data):
                 formatted_data = []
                 for item in data:
                     row = []
-                    for col in columns.split(','):
-                        col = col.strip()
-                        row.append(item[f'{col}'])
+                    for col in sorted(columns.keys()):
+                        col_name = columns[col]['name']
+                        row.append(item.get(col_name))
                     formatted_data.append(tuple(row))
                 data = formatted_data
 
             with self.connection.cursor() as cursor:
+                column_names = [f'"{columns[col]["name"]}"' for col in sorted(columns.keys())]
                 insert_query = sql.SQL(f"""
-                    INSERT INTO "{table_schema}"."{table_name}" ({', '.join([f'"{col.strip()}"' for col in columns.split(',')])})
-                    VALUES ({', '.join(['%s' for col in columns.split(',')])})
+                    INSERT INTO "{table_schema}"."{table_name}" ({', '.join(column_names)})
+                    VALUES ({', '.join(['%s' for _ in column_names])})
                 """)
                 self.connection.autocommit = False
                 psycopg2.extras.execute_batch(cursor, insert_query, data)

@@ -294,6 +294,30 @@ class PostgreSQLConnector(DatabaseConnector):
             self.logger.error(f"Error executing sequence query: {query}")
             self.logger.error(e)
 
+    def get_sequence_current_value(self, sequence_id: int):
+        try:
+            query = f"""select '"'||relnamespace::regnamespace::text||'"."'||relname||'"' as seqname from pg_class where oid = {sequence_id}"""
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            sequence_data = cursor.fetchone()
+            sequence_name = f"{sequence_data[0]}"
+
+            query = f"""
+                SELECT last_value
+                FROM {sequence_name}
+            """
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            cur_value = cursor.fetchone()[0]
+            cursor.close()
+            self.disconnect()
+            return cur_value
+        except psycopg2.Error as e:
+            self.logger.error(f"Error executing query: {query}")
+            self.logger.error(e)
+            raise
+
     def get_rows_count(self, table_schema: str, table_name: str):
         query = f"""
             SELECT count(*)

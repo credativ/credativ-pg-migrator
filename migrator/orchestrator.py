@@ -306,12 +306,15 @@ class Orchestrator:
                     sequences = worker_target_connection.fetch_sequences(target_schema, target_table)
                     if sequences:
                         for order_num, sequence_details in sequences.items():
+                            sequence_id = sequence_details['id']
                             sequence_name = sequence_details['name']
                             sequence_sql = sequence_details['set_sequence_sql']
                             if self.config_parser.get_log_level() == 'DEBUG':
                                 self.logger.debug(f"Worker {worker_id}: Setting sequence with SQL: {sequence_sql}")
                             worker_target_connection.execute_query(sequence_sql)
                             self.logger.info(f"Worker {worker_id}: Sequence ({order_num}) {sequence_name} set successfully for table {target_table}.")
+                            seq_curr_val = worker_target_connection.get_sequence_current_value(sequence_id)
+                            self.logger.info(f"Worker {worker_id}: Current value of sequence {sequence_name} is {seq_curr_val}.")
                     else:
                         self.logger.info(f"Worker {worker_id}: No sequences found for table {target_table}.")
                 else:

@@ -148,6 +148,12 @@ class DatabaseConnector(ABC):
         """
         pass
 
+    def get_sequence_current_value(self, sequence_id: int):
+        """
+        Returns the current value of the sequence.
+        """
+        pass
+
     @abstractmethod
     def execute_query(self, query: str, params=None):
         """

@@ -942,6 +942,14 @@ class InformixConnector(DatabaseConnector):
     def rollback_transaction(self):
         self.connection.rollback()
 
+    def get_sequence_maxvalue(self, sequence_id: int):
+        query = f"SELECT maxval FROM syssqlsequences WHERE seqid = {sequence_id}"
+        cursor = self.connection.cursor()
+        cursor.execute(query)
+        maxval = cursor.fetchone()[0]
+        cursor.close()
+        return maxval
+
     def handle_error(self, e, description=None):
         self.logger.error(f"An error in {self.__class__.__name__} ({description}): {e}")
         self.logger.error(traceback.format_exc())

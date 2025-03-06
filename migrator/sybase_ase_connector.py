@@ -547,5 +547,182 @@ class SybaseASEConnector(DatabaseConnector):
         cursor.close()
         return count
 
+    def analyze_id_distribution_batch(self, schema_name, table_name, id_column, analyze_batch_percent, analyze_batch_size, debug=False):
+        cur = self.connection.cursor()
+
+        cur.execute(sql.SQL("CREATE TEMP TABLE IF NOT EXISTS temp_id_ranges (batch_start BIGINT, batch_end BIGINT, row_count BIGINT)"))
+
+        cur.execute(sql.SQL("SELECT MIN({}) FROM {}.{}").format(
+            sql.Identifier(id_column),
+            sql.Identifier(schema_name),
+            sql.Identifier(table_name)
+        ))
+        min_id = cur.fetchone()[0]
+
+        cur.execute(sql.SQL("SELECT MAX({}) FROM {}.{}").format(
+            sql.Identifier(id_column),
+            sql.Identifier(schema_name),
+            sql.Identifier(table_name)
+        ))
+        max_id = cur.fetchone()[0]
+
+        min_pk = min_id
+        max_pk = max_id
+        total_range = max_id - min_id
+        current_batch_percent = analyze_batch_percent
+        current_start = min_id
+        loop_counter = 0
+        previous_row_count = 0
+        same_previous_row_count = 0
+        current_decrease_ratio = 2
+
+        while current_start <= max_id:
+            current_batch_size = int(total_range / 100 * current_batch_percent)
+            if current_batch_size < analyze_batch_size:
+                current_batch_size = analyze_batch_size
+                current_decrease_ratio = 2
+                if debug:
+                    print(f"{loop_counter}: resetting current_decrease_ratio to {current_decrease_ratio}")
+
+            current_end = current_start + current_batch_size
+
+            if debug:
+                print(f"{loop_counter}: Loop counter: {loop_counter}, current_batch_percent: {round(current_batch_percent, 8)}, current_batch_size: {current_batch_size}, current_start: {current_start} (min: {min_id}), current_end: {current_end} (max: {max_id}), perc: {round(current_start / max_id * 100, 4)}")
+
+            if current_end > max_id:
+                current_end = max_id
+
+            loop_counter += 1
+            cur.execute(sql.SQL("SELECT COUNT(*) FROM {}.{} WHERE {} BETWEEN %s AND %s").format(
+                sql.Identifier(schema_name),
+                sql.Identifier(table_name),
+                sql.Identifier(id_column)
+            ), (current_start, current_end))
+            testing_row_count = cur.fetchone()[0]
+
+            if debug:
+                print(f"{loop_counter}: Testing row count: {testing_row_count}")
+
+            if testing_row_count == previous_row_count:
+                same_previous_row_count += 1
+                if same_previous_row_count >= 2:
+                    current_decrease_ratio *= 2
+                    if debug:
+                        print(f"{loop_counter}: changing current_decrease_ratio to {current_decrease_ratio}")
+                    same_previous_row_count = 0
+            else:
+                same_previous_row_count = 0
+
+            previous_row_count = testing_row_count
+
+            if testing_row_count > analyze_batch_size:
+                current_batch_percent /= current_decrease_ratio
+                if debug:
+                    print(f"{loop_counter}: Decreasing analyze_batch_percent to {round(current_batch_percent, 8)}")
+                continue
+
+            if testing_row_count == 0:
+                current_batch_percent *= 1.5
+                if debug:
+                    print(f"{loop_counter}: Increasing analyze_batch_percent to {round(current_batch_percent, 8)} without restarting loop")
+
+            cur.execute(sql.SQL("INSERT INTO temp_id_ranges SELECT %s::bigint AS batch_start, %s::bigint AS batch_end, COUNT(*) AS row_count FROM {}.{} WHERE {} BETWEEN %s AND %s").format(
+                sql.Identifier(schema_name),
+                sql.Identifier(table_name),
+                sql.Identifier(id_column)
+            ), (current_start, current_end, current_start, current_end))
+
+            current_start = current_end + 1
+            if debug:
+                print(f"{loop_counter}: loop end - new current_start: {current_start}")
+
+        if debug:
+            print(f"{loop_counter}: second loop")
+
+        current_start = min_id
+        while current_start <= max_id:
+            cur.execute(sql.SQL("""
+                SELECT min(batch_start) as batch_start, max(batch_end) as batch_end, max(cumulative_row_count) as row_count
+                FROM (
+                    SELECT batch_start, batch_end, sum(row_count) over (order by batch_start) as cumulative_row_count
+                    FROM temp_id_ranges
+                    WHERE batch_start >= %s::bigint
+                    ORDER BY batch_start
+                ) subquery
+                WHERE cumulative_row_count <= %s::bigint
+            """), (current_start, analyze_batch_size))
+            result = cur.fetchone()
+            if result:
+                batch_start, batch_end, row_count = result
+                yield min_pk, max_pk, batch_start, batch_end, row_count
+            current_start = batch_end
+
+        cur.execute(sql.SQL("SELECT * FROM temp_id_ranges WHERE row_count > %s::bigint"), (analyze_batch_size,))
+        for record in cur.fetchall():
+            batch_start, batch_end, row_count = record
+            yield min_pk, max_pk, batch_start, batch_end, row_count
+
+        cur.execute("DROP TABLE temp_id_ranges")
+        if debug:
+            print(f"{loop_counter}: Done")
+
     def migrate_table(self, migrate_target_connection, settings):
-        return 0
+        part_name = 'initialize'
+        try:
+            worker_id = settings['worker_id']
+            source_schema = settings['source_schema']
+            source_table = settings['source_table']
+            source_columns = settings['source_columns']
+            target_schema = settings['target_schema']
+            target_table = settings['target_table']
+            target_columns = settings['target_columns']
+            primary_key_columns = settings['primary_key_columns']
+            batch_size = settings['batch_size']
+            source_table_rows = self.get_rows_count(source_schema, source_table)
+
+            if source_table_rows == 0:
+                self.logger.info(f"Worker {worker_id}: Table {source_table} is empty - skipping data migration.")
+                return 0
+            else:
+                self.logger.info(f"Worker {worker_id}: Table {source_table} has {source_table_rows} rows - starting data migration.")
+                offset = 0
+                while True:
+                    part_name = f'prepare fetch data: {source_table} - {offset}'
+                    if primary_key_columns:
+                        query = f"SELECT TOP {batch_size} * FROM {source_schema}.{source_table} WHERE {primary_key_columns} > (SELECT MAX({primary_key_columns}) FROM (SELECT TOP {offset} {primary_key_columns} FROM {source_schema}.{source_table} ORDER BY {primary_key_columns}) AS temp) ORDER BY {primary_key_columns}"
+                    else:
+                        query = f"SELECT TOP {batch_size} * FROM {source_schema}.{source_table} WHERE id > {offset} ORDER BY id"
+
+                    if self.config_parser.get_log_level() == 'DEBUG':
+                        self.logger.debug(f"Worker {worker_id}: Fetching data with query: {query}")
+
+                    part_name = f'do fetch data: {source_table} - {offset}'
+                    df = pl.read_database(query, self.connection)
+                    if df.is_empty():
+                        break
+
+                    self.logger.info(f"Worker {worker_id}: Fetched {len(df)} rows from source table {source_table}.")
+                    # self.logger.info(f"Worker {worker_id}: Migrating batch starting at offset {offset} for table {table_name}.")
+
+                    # Convert Polars DataFrame to list of tuples for insertion
+                    records = df.to_dicts()
+
+                    # Adjust binary or bytea types
+                    for record in records:
+                        for order_num, column in source_columns.items():
+                            column_name = column['name']
+                            column_type = column['type']
+                            if column_type.lower() in ['binary', 'varbinary']:
+                                record[column_name] = bytes(record[column_name])
+
+                    part_name = f'insert data: {target_table} - {offset}'
+                    migrate_target_connection.insert_batch(target_schema, target_table, target_columns, records)
+                    self.logger.info(f"Worker {worker_id}: inserted {len(df)} rows into target table {target_table}.")
+
+                    offset += batch_size
+
+                self.logger.info(f"Worker {worker_id}: Finished migrating data for table {source_table}.")
+                return source_table_rows
+        except Exception as e:
+            self.logger.error(f"Worker {worker_id}: Error during {part_name} -> {e}")
+            raise e

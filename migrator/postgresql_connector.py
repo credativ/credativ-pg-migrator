@@ -48,10 +48,12 @@ class PostgreSQLConnector(DatabaseConnector):
             self.logger.error(e)
             raise
 
-    def fetch_table_columns(self, table_schema: str, table_name: str) -> dict:
+    def fetch_table_columns(self, table_schema: str, table_name: str, migrator_tables=None) -> dict:
+        result = {}
         try:
             query =f"""
                     SELECT
+                        ordinal_position,
                         column_name,
                         data_type, /* udt_name, */
                         CASE WHEN character_maximum_length IS NOT NULL
@@ -69,12 +71,18 @@ class PostgreSQLConnector(DatabaseConnector):
             if self.config_parser.get_log_level() == 'DEBUG':
                 self.logger.debug(f"Reading columns for {table_name}")
             cursor.execute(query)
-            columns = {row[0]:
-                        {'type': row[1], 'length': row[2], 'nullable': row[3], 'default': row[4]}
-                        for row in cursor.fetchall()}
+            for row in cursor.fetchall():
+                result[row[0]] = {
+                    'name': row[1],
+                    'type': row[2],
+                    'length': row[3],
+                    'nullable': row[4],
+                    'default': row[5]
+                }
             cursor.close()
             self.disconnect()
-            return columns
+            return result
+
         except psycopg2.Error as e:
             self.logger.error(f"Error executing query: {query}")
             self.logger.error(e)

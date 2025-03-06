@@ -153,8 +153,9 @@ class InformixConnector(DatabaseConnector):
                 # if self.config_parser.get_log_level() == 'DEBUG':
                 #     self.logger.debug(f"0 default: {result[row[0]]['default']}")
                 # checking for default values substitution with the origingal data type
-                if result[row[0]]['default'] != '':
-                    result[row[0]]['default'] = migrator_tables.check_default_values_substitution(result[row[0]]['name'], result[row[0]]['type'], result[row[0]]['default'])
+                if migrator_tables:
+                    if result[row[0]]['default'] != '':
+                        result[row[0]]['default'] = migrator_tables.check_default_values_substitution(result[row[0]]['name'], result[row[0]]['type'], result[row[0]]['default'])
 
             cursor.close()
             self.disconnect()

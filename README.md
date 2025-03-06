@@ -10,6 +10,8 @@ Repository contains python solution for migration of the whole database from leg
 - Rudimentary migration of views
 - Conversion and migration of functions, procedures, triggers
 - Customizable substitutions of data types and default values of columns
+- Migrator provides reach logging and error handling, has 2 levels of logging - INFO and DEBUG, in case of error, detailed error message is printed
+- By default logging messages are printed both to console and to log file, name of the log file is configurable in command line arguments
 
 ## Source databases
 
@@ -18,6 +20,7 @@ Repository contains python solution for migration of the whole database from leg
 - Solution currently supports these source databases:
   - Sybase ASE
   - Informix
+- both databases can be accessed either via ODBC or JDBC
 
 ## Target databases
 
@@ -30,11 +33,24 @@ Repository contains python solution for migration of the whole database from leg
 - Migration database is a PostgreSQL database, credentials must be configured in the configuration file
 - In most cases we assume that the migration database will the same as the target database, but it is possible to use a different database from the same or different PostgreSQL server
 
+## Configuration file
+
+- Configuration file is a YAML file
+- Settings available in the config file are described in the documentation
+
 ## Todo
 
-- Add richer support for views
-- Most likely not all constrains are covered
+- In Informix we currently do not support ROW data type (corresponds with PostgreSQL composite type)
+- We currently do not support automatic migration of cross-database references - see in notes to TODO
+- Not all types of default values are currently supported
+- Not all constrains are covered
+- In bot cases (defaults/constrints), we add them into tool case by case, as we encounter them, each legacy system uses its own internal format, but documentation does not contain examples of internal representation of all possible cases
 - Add support for PostgreSQL as source database
+
+### Notes to TODO
+
+- Many legacy systems allowed cross-database queries, which is not supported in PostgreSQL and requires usage of foreign data wrappers
+- Functions / procedures and views that use cross-database queries must be manually adjusted
 
 ## Structure of the repository
 

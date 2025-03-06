@@ -9,3 +9,9 @@ cd migrator
 . ../migrator_venv/bin/activate
 
 echo ""> ../logs/informix_bfr_20250304.log; python3 main.py --config=../config/informix_bfr.yaml --log-file=../logs/informix_bfr_20250303.log --log-level=DEBUG
+
+echo ""> ../logs/informix_iwadb_20250306.log; python3 main.py --config=../config/informix_iwadb.yaml --log-file=../logs/informix_iwadb_20250306.log --log-level=DEBUG
+
+## Data check
+
+echo ""> ../logs/informix_iwadb_20250306_check.log; python3 data_check.py --config=../config/informix_iwadb.yaml --log-file=../logs/informix_iwadb_20250306_check.log --log-level=DEBUG

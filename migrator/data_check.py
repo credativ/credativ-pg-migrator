@@ -34,6 +34,8 @@ def main():
         logger.logger.info('Starting configuration parser...')
         config_parser = ConfigParser(args)
 
+        table_name = "t_dokumente"
+
         # Print the parsed configuration
         if args.log_level == 'DEBUG':
             logger.logger.debug(f"Parsed configuration: {config_parser.config}")
@@ -48,23 +50,53 @@ def main():
 
         part_name = 'fetch source data'
         source_schema = config_parser.get_source_schema()
+        source_tables = source_connection.fetch_table_names(source_schema)
+        # Loop over source_tables to find the record with the specified table name
+        source_table_record = None
+        for _, record in source_tables.items():
+            if record['schema_name'] == source_schema and record['table_name'] == table_name:
+                source_table_record = record
+                break
 
-        table_name = "t_dokumente"
+        if not source_table_record:
+            raise ValueError(f"Table {source_schema}.{table_name} not found in source database.")
+
+        source_table_indexes = source_connection.fetch_indexes(source_table_record['id'], source_schema, table_name)
+        for _, index in source_table_indexes.items():
+            if index['type'] == 'PRIMARY KEY':
+                source_primary_key_columns = index['columns']
+                break
 
         source_columns = source_connection.fetch_table_columns(source_schema, table_name, migrator_tables=None)
         logger.logger.debug(f"Source columns: {source_columns}")
 
         logger.logger.info(f"Fetching data from source table {source_schema}.{table_name}...")
-        source_data = fetch_table_data(logger, source_connection, source_schema, table_name, source_columns)
+        source_data = fetch_table_data(logger, source_connection, source_schema, table_name, source_columns, source_primary_key_columns)
 
         part_name = 'fetch target data'
         target_schema = config_parser.get_target_schema()
+        target_tables = target_connection.fetch_table_names(target_schema)
+
+        target_table_record = None
+        for _, record in target_tables.items():
+            if record['schema_name'] == target_schema and record['table_name'] == table_name:
+                target_table_record = record
+                break
+
+        if not target_table_record:
+            raise ValueError(f"Table {target_schema}.{table_name} not found in target database.")
+
+        target_table_indexes = target_connection.fetch_indexes(target_table_record['id'], target_schema, table_name)
+        for _, index in target_table_indexes.items():
+            if index['type'] == 'PRIMARY KEY':
+                target_primary_key_columns = index['columns']
+                break
 
         target_columns = target_connection.fetch_table_columns(target_schema, table_name, migrator_tables=None)
         logger.logger.debug(f"Target columns: {target_columns}")
 
         logger.logger.info(f"Fetching data from target table {target_schema}.{table_name}...")
-        target_data = fetch_table_data(logger, target_connection, target_schema, table_name, target_columns)
+        target_data = fetch_table_data(logger, target_connection, target_schema, table_name, target_columns, target_primary_key_columns)
 
         part_name = 'compare data'
         logger.logger.info("Comparing data...")
@@ -92,11 +124,16 @@ def connect_to_db(logger, config_parser, source_or_target):
     else:
         raise ValueError(f"Unsupported database type: {db_type}")
 
-def fetch_table_data(logger, connection, schema, table_name, columns):
+def fetch_table_data(logger, connection, schema, table_name, columns, primary_key_columns):
     try:
         part_name = 'connect'
         connection.connect()
-        query = f"SELECT * FROM {schema}.{table_name} LIMIT 30"
+
+        if primary_key_columns:
+            query = f"SELECT * FROM {schema}.{table_name} ORDER BY {primary_key_columns}"
+        else:
+            query = f"SELECT * FROM {schema}.{table_name}"
+        logger.logger.debug(f"Query: {query}")
         cursor = connection.connection.cursor()
         cursor.execute(query)
 
@@ -121,16 +158,16 @@ def fetch_table_data(logger, connection, schema, table_name, columns):
             for _, column in columns.items():
                 column_name = column['name']
                 column_type = column['type']
-                # if column_type.lower() in ['binary', 'bytea']:
+                # logger.logger.debug(f"Column {column_name} type: {column_type}")
                 if column_type.lower() in ['blob']:
-                    # logger.logger.debug(f"Converting {column_name} from {column_type} to bytes...")
                     record[column_name] = bytes(record[column_name].getBytes(1, int(record[column_name].length())))  # Convert 'com.informix.jdbc.IfxCblob' to bytes
+                elif column_type.lower() in ['bytea']:
+                    record[column_name] = bytes(record[column_name])
                 elif column_type.lower() in ['clob']:
-                    # logger.logger.debug(f"Converting {column_name} from {column_type} to string...")
-                    # elif isinstance(record[column_name], IfxCblob):
                     record[column_name] = record[column_name].getSubString(1, int(record[column_name].length()))  # Convert IfxCblob to string
-                    # record[column_name] = bytes(record[column_name].getBytes(1, int(record[column_name].length())))  # Convert IfxBblob to bytes
-                    # record[column_name] = record[column_name].read()  # Convert IfxBblob to bytes
+                elif column_type.lower() in ['date', 'datetime', 'time', 'timestamp', 'timestamp without time zone', 'timestamp with time zone']:
+                    if not isinstance(record[column_name], str):
+                        record[column_name] = str(record[column_name])
 
         return pl.DataFrame(records)
     except Exception as e:
@@ -147,18 +184,28 @@ def compare_data(source_data, target_data, logger):
         if target_data.is_empty():
             logger.logger.info("Target table is empty.")
         return
+
+    # Ensure both columns have the same type
+    if 'content_blob' in source_data.columns:
+        for column in source_data.columns:
+            if column == 'content_blob':
+                source_data = source_data.with_columns(pl.col(column).cast(pl.Binary))
+    if 'content_blob' in target_data.columns:
+        for column in target_data.columns:
+            if column == 'content_blob':
+                target_data = target_data.with_columns(pl.col(column).cast(pl.Binary))
+
     if source_data.equals(target_data):
         logger.logger.info("Data matches between source and target tables.")
     else:
         logger.logger.error("Data mismatch found between source and target tables.")
-        source_diff = source_data.filter(~source_data.is_in(target_data))
-        target_diff = target_data.filter(~target_data.is_in(source_data))
-
-        logger.logger.debug("Differences in source data:")
-        logger.logger.debug(source_diff)
-
-        logger.logger.debug("Differences in target data:")
-        logger.logger.debug(target_diff)
+        differences = pl.concat([source_data, target_data]).unique(keep="none")
+        if not differences.is_empty():
+            logger.logger.info(f"Differences found between source and target tables:")
+            logger.logger.info(differences)
+            logger.logger.info(f"In total, {int(len(differences)/2)} differences found between source and target tables.")
+        else:
+            logger.logger.info("No differences found between source and target tables.")
 
 def ctrlc_signal_handler(sig, frame):
     print("Program interrupted with Ctrl+C")

@@ -4,6 +4,7 @@ from psycopg2 import sql
 from database_connector import DatabaseConnector
 from migrator_logging import MigratorLogger
 import traceback
+import re
 
 class PostgreSQLConnector(DatabaseConnector):
     def __init__(self, config_parser, source_or_target):
@@ -26,23 +27,31 @@ class PostgreSQLConnector(DatabaseConnector):
 
     def fetch_table_names(self, schema: str = 'public'):
         query = f"""
-            SELECT relname, oid
+            SELECT oid, relname
             FROM pg_class
             WHERE relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = '{schema}')
             AND relkind in ('r', 'p')
             ORDER BY relname
         """
-        if self.config_parser.get_log_level() == 'DEBUG':
-            self.logger.debug(f"Reading table names for {schema}")
-            self.logger.debug(f"Query: {query}")
+        # if self.config_parser.get_log_level() == 'DEBUG':
+        #     self.logger.debug(f"Reading table names for {schema}")
+        #     self.logger.debug(f"Query: {query}")
         try:
+            tables = {}
+            order_num = 1
             self.connect()
             cursor = self.connection.cursor()
             cursor.execute(query)
-            table_names = {row[0]: row[1] for row in cursor.fetchall()}
+            for row in cursor.fetchall():
+                tables[order_num] = {
+                    'id': row[0],
+                    'schema_name': schema,
+                    'table_name': row[1]
+                }
+                order_num += 1
             cursor.close()
             self.disconnect()
-            return table_names
+            return tables
         except psycopg2.Error as e:
             self.logger.error(f"Error executing query: {query}")
             self.logger.error(e)
@@ -110,53 +119,43 @@ class PostgreSQLConnector(DatabaseConnector):
 
     def fetch_indexes(self, table_id: int, table_schema: str, table_name: str):
         table_indexes = {}
+        order_num = 1
         query = f"""
             SELECT
-                indexname,
-                indexdef
-            FROM pg_indexes
-            WHERE schemaname = '{table_schema}' AND tablename = '{table_name}'
+                i.indexname,
+                i.indexdef,
+                coalesce(c.constraint_type, 'INDEX') as type
+            FROM pg_indexes i
+            LEFT JOIN information_schema.table_constraints c
+            ON i.schemaname = c.table_schema
+                and i.tablename = c.table_name
+                and i.indexname = c.constraint_name
+            WHERE i.schemaname = '{table_schema}' AND i.tablename = '{table_name}'
         """
-        if self.config_parser.get_log_level() == 'DEBUG':
-            self.logger.debug(f"Reading indexes for {table_name}")
-            self.logger.debug(f"Query: {query}")
+        # if self.config_parser.get_log_level() == 'DEBUG':
+        #     self.logger.debug(f"Reading indexes for {table_name}")
+        #     self.logger.debug(f"Query: {query}")
         try:
             self.connect()
             cursor = self.connection.cursor()
             cursor.execute(query)
             for row in cursor.fetchall():
-                table_indexes[row[0]] = {
-                    'index_type': "UNIQUE" if "UNIQUE INDEX" in row[1] else "INDEX",
-                    'index_sql': row[1],
-                    'index_columns': ', '.join([col.strip() for col in row[1].split('(')[1].split(')')[0].split(',')])
+                columns_match = re.search(r'\((.*?)\)', row[1])
+                columns = columns_match.group(1) if columns_match else ''
+                table_indexes[order_num] = {
+                    'name': row[0],
+                    'type': row[2],
+                    'columns': columns,
+                    'sql': row[1]
                 }
+                order_num += 1
 
             if self.config_parser.get_log_level() == 'DEBUG':
                 self.logger.debug(f"Indexes: {table_indexes}")
 
-            query = f"""
-            SELECT tco.constraint_name,
-                string_agg(kcu.column_name, ', ' ORDER BY kcu.ordinal_position) as key_columns
-            FROM information_schema.table_constraints tco
-            JOIN information_schema.key_column_usage kcu
-                ON kcu.constraint_name = tco.constraint_name
-                AND kcu.constraint_schema = tco.constraint_schema
-                AND kcu.constraint_name = tco.constraint_name
-            WHERE tco.constraint_type = 'PRIMARY KEY' AND
-                kcu.table_schema = '{table_schema}' AND
-                kcu.table_name = '{table_name}'
-            GROUP BY tco.constraint_name
-            """
-            cursor.execute(query)
-            primary_key = cursor.fetchone()
-            if primary_key:
-                table_indexes[primary_key[0]] = {
-                    'index_type': "PRIMARY KEY",
-                    'index_sql': table_indexes[primary_key[0]]['index_sql'],
-                    'index_columns': primary_key[1]
-                }
             cursor.close()
             self.disconnect()
+
             return table_indexes
         except psycopg2.Error as e:
             self.logger.error(f"Error executing query: {query}")

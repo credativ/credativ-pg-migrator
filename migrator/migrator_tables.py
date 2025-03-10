@@ -21,6 +21,7 @@ class MigratorTables:
         self.create_table_for_constraints()
         self.create_table_for_funcprocs()
         self.create_table_for_sequences()
+        self.create_table_for_triggers()
 
     def prepare_data_types_substitution(self):
         # Drop table if exists
@@ -338,6 +339,31 @@ class MigratorTables:
             )
         """)
 
+    def create_table_for_triggers(self):
+        table_name = self.config_parser.get_protocol_name_triggers()
+        self.protocol_connection.execute_query(self.drop_table_sql.format(protocol_schema=self.protocol_schema, table_name=table_name))
+        self.protocol_connection.execute_query(f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."{table_name}"
+            (id SERIAL PRIMARY KEY,
+            source_schema TEXT,
+            source_table TEXT,
+            source_table_id INTEGER,
+            target_schema TEXT,
+            target_table TEXT,
+            trigger_id BIGINT,
+            trigger_name TEXT,
+            trigger_event TEXT,
+            trigger_new TEXT,
+            trigger_old TEXT,
+            trigger_sql TEXT,
+            task_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            task_started TIMESTAMP,
+            task_completed TIMESTAMP,
+            success BOOLEAN,
+            message TEXT
+            )
+        """)
+
     def decode_table_row(self, row):
         return {
             'id': row[0],
@@ -398,6 +424,22 @@ class MigratorTables:
             'column_name': row[3],
             'sequence_name': row[4],
             'set_sequence_sql': row[5]
+        }
+
+    def decode_trigger_row(self, row):
+        return {
+            'id': row[0],
+            'source_schema': row[1],
+            'source_table': row[2],
+            'source_table_id': row[3],
+            'target_schema': row[4],
+            'target_table': row[5],
+            'trigger_id': row[6],
+            'trigger_name': row[7],
+            'trigger_event': row[8],
+            'trigger_new': row[9],
+            'trigger_old': row[10],
+            'trigger_sql': row[11]
         }
 
     def insert_protocol(self, object_type, object_name, object_action, object_ddl, execution_timestamp, execution_success, execution_error_message, row_type, execution_results):
@@ -612,6 +654,44 @@ class MigratorTables:
             self.logger.error(e)
             raise
 
+    def insert_trigger(self, source_schema, source_table, source_table_id, target_schema, target_table, trigger_id, trigger_name, trigger_event, trigger_new, trigger_old, trigger_sql):
+        table_name = self.config_parser.get_protocol_name_triggers()
+        query = f"""
+            INSERT INTO "{self.protocol_schema}"."{table_name}"
+            (source_schema, source_table, source_table_id, target_schema, target_table, trigger_id, trigger_name, trigger_event, trigger_new, trigger_old, trigger_sql)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """
+        params = (source_schema, source_table, source_table_id, target_schema, target_table, trigger_id, trigger_name, trigger_event, trigger_new, trigger_old, trigger_sql)
+        try:
+            self.protocol_connection.execute_query(query, params)
+            # if self.config_parser.get_log_level() == 'DEBUG':
+            #     self.logger.debug(f"Info for Trigger {trigger_name} inserted into {table_name}.")
+        except Exception as e:
+            self.logger.error(f"Error inserting trigger info {trigger_name} into {table_name}.")
+            self.logger.error(e)
+            raise
+
+    def update_trigger_status(self, row_id, success, message):
+        table_name = self.config_parser.get_protocol_name_triggers()
+        query = f"""
+            UPDATE "{self.protocol_schema}"."{table_name}"
+            SET task_completed = CURRENT_TIMESTAMP,
+            success = {'TRUE' if success else 'FALSE'}, message = '{message}'
+            WHERE id = {row_id}
+        """
+        # if self.config_parser.get_log_level() == 'DEBUG':
+        #     self.logger.debug(f"update_trigger_status query: {query}")
+        try:
+            self.protocol_connection.connection.cursor().execute(query)
+            self.protocol_connection.commit_transaction()
+            # if self.config_parser.get_log_level() == 'DEBUG':
+            #     self.logger.debug(f"Status for trigger {row_id} in {table_name} updated.")
+        except Exception as e:
+            self.logger.error(f"Error updating status for trigger {row_id} in {table_name}.")
+            self.logger.error(f"Query: {query}")
+            self.logger.error(e)
+            raise
+
     def select_primary_key(self, target_schema, target_table):
         tables_table = self.config_parser.get_protocol_name_tables()
         indexes_table = self.config_parser.get_protocol_name_indexes()
@@ -686,6 +766,8 @@ class MigratorTables:
         self.print_summary('Indexes', self.config_parser.get_protocol_name_indexes())
         self.print_summary('Constraints', self.config_parser.get_protocol_name_constraints())
         self.print_summary('Functions / procedures', self.config_parser.get_protocol_name_funcprocs())
+        self.print_summary('Sequences', self.config_parser.get_protocol_name_sequences())
+        self.print_summary('Triggers', self.config_parser.get_protocol_name_triggers())
 
     def fetch_all_tables(self):
         query = f"""SELECT * FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_tables()}" ORDER BY id"""

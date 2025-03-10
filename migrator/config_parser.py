@@ -126,6 +126,9 @@ class ConfigParser:
     def get_protocol_name_sequences(self):
         return f"{self.get_protocol_name()}_sequences"
 
+    def get_protocol_name_triggers(self):
+        return f"{self.get_protocol_name()}_triggers"
+
     def get_data_types_substitution(self):
         return self.config.get('data_types_substitution', {})
 
@@ -136,23 +139,35 @@ class ConfigParser:
     def should_drop_tables(self):
         return self.config.get('migration', {}).get('drop_tables', False) # Default to False
 
+    def should_truncate_tables(self):
+        return self.config.get('migration', {}).get('truncate_tables', False)
+
     def should_create_tables(self):
         return self.config.get('migration', {}).get('create_tables', False)
 
     def should_migrate_data(self):
         return self.config.get('migration', {}).get('migrate_data', False)
 
-    def should_migrate_funcprocs(self):
-        return self.config.get('migration', {}).get('migrate_funcprocs', False)
-
-    def get_batch_size(self):
-        return int(self.config.get('migration', {}).get('batch_size', 100000))
-
     def should_migrate_indexes(self):
         return self.config.get('migration', {}).get('migrate_indexes', False) # Default to False
 
     def should_migrate_constraints(self):
         return self.config.get('migration', {}).get('migrate_constraints', False) # Default to False
+
+    def should_migrate_funcprocs(self):
+        return self.config.get('migration', {}).get('migrate_funcprocs', False)
+
+    def should_set_sequences(self):
+        return self.config.get('migration', {}).get('set_sequences', False)
+
+    def should_migrate_triggers(self):
+        return self.config.get('migration', {}).get('migrate_triggers', False)
+
+    def should_migrate_views(self):
+        return self.config.get('migration', {}).get('migrate_views', False)
+
+    def get_batch_size(self):
+        return int(self.config.get('migration', {}).get('batch_size', 100000))
 
     def get_parallel_workers_count(self):
         return int(self.config.get('migration', {}).get('parallel_workers', 1)) # Default to 1

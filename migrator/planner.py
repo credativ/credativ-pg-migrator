@@ -104,6 +104,31 @@ class Planner:
                 else:
                     self.logger.info("Skipping constraint migration.")
 
+                if self.config_parser.should_migrate_triggers():
+                    triggers = self.source_connection.fetch_triggers(table_info['id'], self.source_schema, table_info['table_name'])
+                    if self.config_parser.get_log_level() == 'DEBUG':
+                        self.logger.debug(f"Triggers: {triggers}")
+                    if triggers:
+                        for _, trigger_details in triggers.items():
+                            self.migrator_tables.insert_triggers(
+                                self.source_schema,
+                                table_info['table_name'],
+                                table_info['id'],
+                                self.target_schema,
+                                table_info['table_name'],
+                                trigger_details['id'],
+                                trigger_details['name'],
+                                trigger_details['event'],
+                                trigger_details['new'],
+                                trigger_details['old'],
+                                trigger_details['sql']
+                            )
+                        self.logger.info(f"Trigger {trigger_details['name']} for table {table_info['table_name']}")
+                    else:
+                        self.logger.info(f"No triggers found for table {table_info['table_name']}.")
+                else:
+                    self.logger.info("Skipping trigger migration.")
+
                 self.logger.info(f"Table {table_info['table_name']} processed successfully.")
 
             self.migrator_tables.update_main_status('Planner', True, 'finished OK')

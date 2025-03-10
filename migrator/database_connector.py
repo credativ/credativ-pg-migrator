@@ -102,6 +102,20 @@ class DatabaseConnector(ABC):
         """
         pass
 
+    def fetch_triggers(self, table_id: int, table_schema: str, table_name: str):
+        """
+        Fetch triggers for a table.
+        Returns a dictionary:
+            { ordinary_number: {
+                'name': trigger_name:
+                'event': trigger_event,
+                'new': referencing_new,
+                'old': referencing_old,
+                'sql': create_trigger_sql
+                }
+            }
+        """
+        pass
     @abstractmethod
     def fetch_funcproc_names(self, schema: str):
         """

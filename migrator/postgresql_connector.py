@@ -183,6 +183,9 @@ class PostgreSQLConnector(DatabaseConnector):
             self.logger.error(e)
             raise
 
+    def fetch_triggers(self, table_id: int, table_schema: str, table_name: str):
+        pass
+
     def execute_query(self, query: str, params=None):
         with self.connection.cursor() as cursor:
             cursor.execute(query, params)

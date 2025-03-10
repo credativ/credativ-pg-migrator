@@ -554,10 +554,12 @@ class InformixConnector(DatabaseConnector):
 
                 postgresql_code = re.sub(r'^\s*DEFINE\s+', '\nDECLARE\n', postgresql_code, count=1, flags=re.MULTILINE | re.IGNORECASE)
                 postgresql_code = re.sub(r'^\s*DEFINE\s+', '', postgresql_code, flags=re.MULTILINE | re.IGNORECASE)
-                # Replace variable declarations with %TYPE where LIKE is used
-                postgresql_code = re.sub(r'\s+(\w+)\s+LIKE\s+([\w\d_]+)\.(\w+);', r'\n\1 \2.\3%TYPE;', postgresql_code, flags=re.IGNORECASE)
-                # if self.config_parser.get_log_level() == 'DEBUG':
-                #     self.logger.debug(f'[0000] postgresql_code: {postgresql_code}')
+
+            # Replace variable declarations with %TYPE where LIKE is used
+            # declarations with LIKE can be also in the header
+            postgresql_code = re.sub(r'\s+(\w+)\s+LIKE\s+([\w\d_]+)\.(\w+);', r'\n\1 \2.\3%TYPE;', postgresql_code, flags=re.IGNORECASE)
+            # if self.config_parser.get_log_level() == 'DEBUG':
+            #     self.logger.debug(f'[0000] postgresql_code: {postgresql_code}')
 
             # Replace SELECT INTO TEMP with CREATE TEMP TABLE
             postgresql_code = re.sub(
@@ -917,6 +919,61 @@ class InformixConnector(DatabaseConnector):
         except Exception as e:
             self.logger.error(f"Worker {worker_id}: Error during {part_name} -> {e}")
             raise e
+
+
+    def fetch_triggers(self, table_id: int, table_schema: str, table_name: str):
+        try:
+            query = f"""
+            select tr.trigid, tr.trigname,
+            case when tr.event = 'D' then 'ON DELETE'
+            when tr.event = 'I' then 'ON INSERT'
+            when tr.event = 'U' then 'ON UPDATE'
+            when tr.event = 'S' then 'ON SELECT'
+            when tr.event = 'd' then 'INSTEAD OF Delete'
+            when tr.event = 'i' then 'INSTEAD OF Insert'
+            when tr.event = 'u' then 'INSTEAD OF Update'
+            else tr.event end as trigger_event,
+            tr.old, tr.new
+            from systriggers tr
+            where tr.owner = '{table_schema}' and tr.tabid = {table_id}
+            """
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            triggers = {}
+            order_num = 1
+            if self.config_parser.get_log_level() == 'DEBUG':
+                self.logger.debug(f"fetch_triggers query: {query}")
+            for row in cursor.fetchall():
+                if self.config_parser.get_log_level() == 'DEBUG':
+                    self.logger.debug(f"fetch_triggers row: {row}")
+                triggers[order_num] = {
+                    'trigid': row[0],
+                    'trigname': row[1],
+                    'trigger_event': row[2],
+                    'old': row[3],
+                    'new': row[4]
+                }
+
+                query = f"""
+                SELECT data
+                FROM systrigbody
+                WHERE datakey IN ('A', 'D')
+                AND trigid = {row[0]}
+                ORDER BY trigid, datakey DESC, seqno
+                """
+                cursor.execute(query)
+                trigger_code = cursor.fetchall()
+                trigger_code_str = ''.join([body[0] for body in trigger_code])
+                triggers[order_num]['sql'] = trigger_code_str
+                order_num += 1
+            cursor.close()
+            self.disconnect()
+            return triggers
+        except Exception as e:
+            self.logger.error(f"Error when fetching triggers for the table {table_name}/{table_id}: {e}")
+            raise
+
 
     def execute_query(self, query: str, params=None):
         cursor = self.connection.cursor()

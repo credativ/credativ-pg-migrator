@@ -110,7 +110,7 @@ class Planner:
                         self.logger.debug(f"Triggers: {triggers}")
                     if triggers:
                         for _, trigger_details in triggers.items():
-                            self.migrator_tables.insert_triggers(
+                            self.migrator_tables.insert_trigger(
                                 self.source_schema,
                                 table_info['table_name'],
                                 table_info['id'],

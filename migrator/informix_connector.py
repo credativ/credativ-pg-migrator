@@ -942,17 +942,18 @@ class InformixConnector(DatabaseConnector):
             cursor.execute(query)
             triggers = {}
             order_num = 1
-            if self.config_parser.get_log_level() == 'DEBUG':
-                self.logger.debug(f"fetch_triggers query: {query}")
+            # if self.config_parser.get_log_level() == 'DEBUG':
+            #     self.logger.debug(f"fetch_triggers query: {query}")
             for row in cursor.fetchall():
                 if self.config_parser.get_log_level() == 'DEBUG':
                     self.logger.debug(f"fetch_triggers row: {row}")
                 triggers[order_num] = {
-                    'trigid': row[0],
-                    'trigname': row[1],
-                    'trigger_event': row[2],
-                    'old': row[3],
-                    'new': row[4]
+                    'id': row[0],
+                    'name': row[1].strip(),
+                    'event': row[2].strip(),
+                    'old': row[3].strip() if row[3] else '',
+                    'new': row[4].strip() if row[4] else '',
+                    'sql': ''
                 }
 
                 query = f"""
@@ -964,7 +965,7 @@ class InformixConnector(DatabaseConnector):
                 """
                 cursor.execute(query)
                 trigger_code = cursor.fetchall()
-                trigger_code_str = ''.join([body[0] for body in trigger_code])
+                trigger_code_str = ''.join([body[0].strip() for body in trigger_code])
                 triggers[order_num]['sql'] = trigger_code_str
                 order_num += 1
             cursor.close()

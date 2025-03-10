@@ -107,6 +107,7 @@ class DatabaseConnector(ABC):
         Fetch triggers for a table.
         Returns a dictionary:
             { ordinary_number: {
+                'id': trigger_id,
                 'name': trigger_name:
                 'event': trigger_event,
                 'new': referencing_new,

@@ -318,73 +318,120 @@ class InformixConnector(DatabaseConnector):
         # Get all indexes for the table
         order_num = 1
         table_constraints = {}
-        index_query = f"""
-        SELECT idxname, idxtype, clustered
-        FROM sysindexes WHERE tabid = {source_table_id}
-        """
+        create_constr_query = ""
+        constr_id = 0
+
+        # index_query = f"""
+        # SELECT idxname, idxtype, clustered
+        # FROM sysindexes WHERE tabid = {source_table_id}
+        # """
 
         self.connect()
         cursor = self.connection.cursor()
-        if self.config_parser.get_log_level() == 'DEBUG':
-            self.logger.debug(f"Reading constraints for {target_table_name}")
-        cursor.execute(index_query)
-        indexes = cursor.fetchall()
 
-        for index in indexes:
+        # if self.config_parser.get_log_level() == 'DEBUG':
+        #     self.logger.debug(f"Reading constraints for {target_table_name}")
+        # cursor.execute(index_query)
+        # indexes = cursor.fetchall()
+
+        # for index in indexes:
+            # index_name = index[0]
             # Check if the index is a primary key by looking at sysconstraints
-            cursor.execute(f"""
-            SELECT constrtype, constrname FROM sysconstraints
-            WHERE tabid = {source_table_id} AND idxname = '{index[0]}'
-            """)
-            constraint = cursor.fetchone()
-            if constraint and constraint[0] == 'R':
+
+        cursor.execute(f"""
+        SELECT constrtype, constrname, idxname FROM sysconstraints
+        WHERE tabid = {source_table_id}
+        """)
+        constraints = cursor.fetchall()
+        for constraint in constraints:
+            if constraint[0] in ('C', 'N', 'R'):
                 constr_type = constraint[0]
                 constr_name = constraint[1]
+                index_name = constraint[2]
 
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.info(f"Processing table: {target_table_name} ({source_table_id}) - foreign key: {constr_name}")
-                # Get foreign key details
-                find_fk_query = f"""
-                SELECT
-                    trim(t.owner), t.tabname AS table_name, c.constrname AS constraint_name, col.colname,
-                    trim(rt.owner), rt.tabname AS referenced_table_name, r.delrule, pc.constrname as primary_key_name, rcol.colname as referenced_column
-                FROM sysconstraints c
-                JOIN systables t ON c.tabid = t.tabid
-                JOIN sysindexes i ON c.idxname = i.idxname
-                JOIN syscolumns col ON t.tabid = col.tabid AND col.colno IN (i.part1, i.part2, i.part3, i.part4, i.part5, i.part6, i.part7, i.part8, i.part9, i.part10, i.part11, i.part12, i.part13, i.part14, i.part15, i.part16)
-                JOIN sysreferences r ON c.constrid = r.constrid
-                JOIN systables rt ON r.ptabid = rt.tabid
-                JOIN sysconstraints pc ON r.primary = pc.constrid
-                JOIN sysindexes pi ON pc.idxname = pi.idxname
-                JOIN syscolumns rcol ON rt.tabid = rcol.tabid AND rcol.colno IN (pi.part1, pi.part2, pi.part3, pi.part4, pi.part5, pi.part6, pi.part7, pi.part8, pi.part9, pi.part10, pi.part11, pi.part12, pi.part13, pi.part14, pi.part15, pi.part16)
-                WHERE c.constrtype = 'R' AND c.tabid = {source_table_id} AND c.constrname = '{constr_name}'
-                """
-                # print(f"find_fk_query: {find_fk_query}")
-                cursor.execute(find_fk_query)
-                fk_details = cursor.fetchone()
-                if self.config_parser.get_log_level() == 'DEBUG':
-                        self.logger.debug(f"fk_details: {fk_details}")
-
-                if cursor.rowcount > 1:
-                    raise ValueError(f"ERROR: Multiple foreign key details found for table {target_table_name} and index {index[0]}/{constr_name}")
-
-                # main_schema = fk_details[0]
-                # main_table_name = fk_details[1]
-                fk_name = fk_details[2]
-                fk_column = fk_details[3]
-                # ref_schema = fk_details[4]
-                ref_table_name = fk_details[5]
-                ref_column = fk_details[8]
-
-                create_fk_query = f"""ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{fk_name}" FOREIGN KEY ("{fk_column}") REFERENCES "{target_schema}"."{ref_table_name}" ("{ref_column}");"""
-
-                if create_fk_query:
+                if constr_type == 'R':
                     if self.config_parser.get_log_level() == 'DEBUG':
-                        self.logger.debug(f"SQL: {create_fk_query}")
+                        self.logger.info(f"Processing table: {target_table_name} ({source_table_id}) - foreign key: {constr_name}")
+                    # Get foreign key details
+                    find_fk_query = f"""
+                    SELECT
+                        trim(t.owner), t.tabname AS table_name, c.constrname AS constraint_name, col.colname,
+                        trim(rt.owner), rt.tabname AS referenced_table_name, r.delrule, pc.constrname as primary_key_name, rcol.colname as referenced_column,
+                        c.constrid
+                    FROM sysconstraints c
+                    JOIN systables t ON c.tabid = t.tabid
+                    JOIN sysindexes i ON c.idxname = i.idxname
+                    JOIN syscolumns col ON t.tabid = col.tabid AND col.colno IN (i.part1, i.part2, i.part3, i.part4, i.part5, i.part6, i.part7, i.part8, i.part9, i.part10, i.part11, i.part12, i.part13, i.part14, i.part15, i.part16)
+                    JOIN sysreferences r ON c.constrid = r.constrid
+                    JOIN systables rt ON r.ptabid = rt.tabid
+                    JOIN sysconstraints pc ON r.primary = pc.constrid
+                    JOIN sysindexes pi ON pc.idxname = pi.idxname
+                    JOIN syscolumns rcol ON rt.tabid = rcol.tabid AND rcol.colno IN (pi.part1, pi.part2, pi.part3, pi.part4, pi.part5, pi.part6, pi.part7, pi.part8, pi.part9, pi.part10, pi.part11, pi.part12, pi.part13, pi.part14, pi.part15, pi.part16)
+                    WHERE c.constrtype = 'R' AND c.tabid = {source_table_id} AND c.constrname = '{constr_name}'
+                    """
+                    # print(f"find_fk_query: {find_fk_query}")
+                    cursor.execute(find_fk_query)
+                    fk_details = cursor.fetchone()
+                    if self.config_parser.get_log_level() == 'DEBUG':
+                            self.logger.debug(f"fk_details: {fk_details}")
+
+                    if cursor.rowcount > 1:
+                        raise ValueError(f"ERROR: Multiple foreign key details found for table {target_table_name} and index {index_name}/{constr_name}")
+
+                    # main_schema = fk_details[0]
+                    # main_table_name = fk_details[1]
+                    fk_name = fk_details[2]
+                    fk_column = fk_details[3]
+                    # ref_schema = fk_details[4]
+                    ref_table_name = fk_details[5]
+                    ref_column = fk_details[8]
+                    constr_id = fk_details[9]
+
+                    create_constr_query = f"""ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{fk_name}" FOREIGN KEY ("{fk_column}") REFERENCES "{target_schema}"."{ref_table_name}" ("{ref_column}");"""
+
+                elif constr_type == 'C':
+                    find_ck_ids_query = f"""
+                    SELECT distinct c.constrid
+                    FROM sysconstraints c
+                    JOIN syschecks ck ON c.constrid = ck.constrid
+                    WHERE c.tabid = {source_table_id}
+                    AND c.constrtype = 'C'
+                    AND ck.type in ('T', 's')
+                    ORDER BY c.constrid
+                    """
+                    cursor.execute(find_ck_ids_query)
+                    ck_ids = cursor.fetchall()
+                    for ck_id_row in ck_ids:
+                        constr_id = ck_id_row[0]
+
+                        find_ck_query = f"""
+                            SELECT ck.checktext
+                            FROM sysconstraints c
+                            JOIN syschecks ck ON c.constrid = ck.constrid
+                            WHERE c.tabid = {source_table_id}
+                            AND c.constrid = {constr_id}
+                            AND c.constrtype = 'C'
+                            AND ck.type in ('T', 's')
+                            ORDER BY seqno
+                        """
+                        cursor.execute(find_ck_query)
+                        ck_details = cursor.fetchall()
+                        ck_sql = ''.join([f"{ck[0].strip()}" for ck in ck_details])
+                        ck_name = f"ck_{target_table_name}_{constr_name}"
+                        create_constr_query = f"""ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{ck_name}" CHECK ({ck_sql});"""
+
+
+                if self.config_parser.get_log_level() == 'DEBUG':
+                    self.logger.debug(f"constraint: ({constr_id}) {constr_name}, type: {constr_type}, sql: {create_constr_query}")
+
+                if create_constr_query:
+                    if self.config_parser.get_log_level() == 'DEBUG':
+                        self.logger.debug(f"SQL: {create_constr_query}")
                     table_constraints[order_num] = {
+                        'id': constr_id,
                         'name': constr_name,
                         'type': constr_type,
-                        'sql': create_fk_query
+                        'sql': create_constr_query
                     }
                     order_num += 1
 
@@ -965,7 +1012,20 @@ class InformixConnector(DatabaseConnector):
                 """
                 cursor.execute(query)
                 trigger_code = cursor.fetchall()
-                trigger_code_str = ''.join([body[0].strip() for body in trigger_code])
+                trigger_code_str = '\n'.join([body[0].strip() for body in trigger_code])
+
+                trigger_code_lines = trigger_code_str.split('\n')
+
+                for i, line in enumerate(trigger_code_lines):
+                    line = line.strip()  # Remove trailing spaces
+                    if line.startswith("--"):
+                        trigger_code_lines[i] = f"/* {line.strip()} */"
+
+                trigger_code_str = '\n'.join(trigger_code_lines)
+
+                if self.config_parser.get_log_level() == 'DEBUG':
+                    self.logger.debug(f"trigger SQL: {trigger_code_str}")
+
                 triggers[order_num]['sql'] = trigger_code_str
                 order_num += 1
             cursor.close()

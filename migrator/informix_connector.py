@@ -430,7 +430,7 @@ class InformixConnector(DatabaseConnector):
                     table_constraints[order_num] = {
                         'id': constr_id,
                         'name': constr_name,
-                        'type': constr_type,
+                        'type': 'FOREIGN KEY' if constr_type == 'R' else 'CHECK' if constr_type == 'C' else constr_type,
                         'sql': create_constr_query
                     }
                     order_num += 1

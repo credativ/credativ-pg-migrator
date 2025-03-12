@@ -717,7 +717,7 @@ class MigratorTables:
             self.logger.error(e)
             return None
 
-    def print_summary(self, objects, migrator_table_name):
+    def print_summary(self, objects, migrator_table_name, additional_columns=None):
         try:
             self.logger.info(f"{objects} summary:")
             query = f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{migrator_table_name}" """
@@ -725,14 +725,30 @@ class MigratorTables:
             cursor.execute(query)
             summary = cursor.fetchone()[0]
             self.logger.info(f"    Found in source: {summary}")
+            if additional_columns:
+                columns_count = len(additional_columns.split(','))
+                columns_numbers = ', '.join(str(i + 2) for i in range(columns_count))
+                query = f"""SELECT COUNT(*), {additional_columns} FROM "{self.protocol_schema}"."{migrator_table_name}" GROUP BY {columns_numbers} ORDER BY {columns_numbers}"""
+                cursor.execute(query)
+                rows = cursor.fetchall()
+                for row in rows:
+                    self.logger.info(f"        {row[1:]}: {row[0]}")
 
             query = f"""SELECT success, COUNT(*) FROM "{self.protocol_schema}"."{migrator_table_name}" GROUP BY 1 ORDER BY 1"""
             cursor.execute(query)
             rows = cursor.fetchall()
-            cursor.close()
             for row in rows:
                 status = "successfully migrated" if row[0] else "error" if row[0] is False else "unknown status"
                 self.logger.info(f"    {status}: {row[1]}")
+            if additional_columns:
+                query = f"""SELECT COUNT(*), {additional_columns} FROM "{self.protocol_schema}"."{migrator_table_name}" WHERE success = True GROUP BY {columns_numbers} ORDER BY {columns_numbers}"""
+                cursor.execute(query)
+                rows = cursor.fetchall()
+                for row in rows:
+                    status = "successfully migrated" if row[0] else "error" if row[0] is False else "unknown status"
+                    self.logger.info(f"        {row[1:]}: {row[0]}")
+            cursor.close()
+
         except Exception as e:
             self.logger.error(f"Error printing migration summary.")
             self.logger.error(e)
@@ -763,8 +779,8 @@ class MigratorTables:
         self.print_main(self.config_parser.get_protocol_name_main())
         self.logger.info("Migration summary:")
         self.print_summary('Tables', self.config_parser.get_protocol_name_tables())
-        self.print_summary('Indexes', self.config_parser.get_protocol_name_indexes())
-        self.print_summary('Constraints', self.config_parser.get_protocol_name_constraints())
+        self.print_summary('Indexes', self.config_parser.get_protocol_name_indexes(), 'index_type')
+        self.print_summary('Constraints', self.config_parser.get_protocol_name_constraints(), 'constraint_type')
         self.print_summary('Functions / procedures', self.config_parser.get_protocol_name_funcprocs())
         self.print_summary('Sequences', self.config_parser.get_protocol_name_sequences())
         self.print_summary('Triggers', self.config_parser.get_protocol_name_triggers())

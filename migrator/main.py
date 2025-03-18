@@ -62,3 +62,4 @@ def ctrlc_signal_handler(sig, frame):
 
 if __name__ == "__main__":
     main()
+    print('All done')

@@ -9,6 +9,9 @@ class ConfigParser:
         self.validate_config()
 
     def validate_config(self):
+
+        ## //TODO source.schema or source.owner is required - not both
+
         include_tables = self.config['include_tables']
         exclude_tables = self.config['exclude_tables']
 

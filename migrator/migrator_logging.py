@@ -1,6 +1,8 @@
 import logging
 import inspect
 import os
+import signal
+import sys
 
 class MigratorLogger:
     def __init__(self, log_file):
@@ -30,12 +32,6 @@ class MigratorLogger:
         for handler in self.logger.handlers[:]:
             handler.close()
             self.logger.removeHandler(handler)
-
-    # def print_message(self, message):
-    #     caller_frame = inspect.stack()[1]
-    #     caller_class = caller_frame.frame.f_globals["__name__"]
-    #     caller_method = caller_frame.function
-    #     self.logger.info(f"[{caller_class}.{caller_method}] {message}")
 
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

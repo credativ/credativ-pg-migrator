@@ -102,6 +102,28 @@ def main():
         logger.logger.info("Comparing data...")
         compare_data(source_data, target_data, logger)
 
+        logger.logger.info("Comparing sizes of columns for matching 'id' values...")
+
+        source_data = source_data.sort(target_primary_key_columns)
+        target_data = target_data.sort(target_primary_key_columns)
+
+        for source_row in source_data.iter_rows(named=True):
+            source_id = source_row[target_primary_key_columns]
+            source_row_df = source_data.filter(pl.col(target_primary_key_columns) == source_id)
+            target_row_df = target_data.filter(pl.col(target_primary_key_columns) == source_id)
+
+            if not source_row_df.equals(target_row_df):
+                logger.logger.error(f"Data mismatch found for id {source_id}:")
+                logger.logger.info(f"Source row: {source_row_df}")
+                logger.logger.info(f"Target row: {target_row_df}")
+
+            for column in source_row_df.columns:
+                source_size = source_row_df[column][0].__sizeof__()
+                target_size = target_row_df[column][0].__sizeof__()
+                if (source_row_df[column][0] != target_row_df[column][0]) or (source_size != target_size):
+                    logger.logger.error(f"Data mismatch found for {source_id}: '{column}'")
+                # logger.logger.info(f"{source_id}: '{column}' - source: {source_size} / target: {target_size}")
+
         logger.logger.info("Data Check Done")
 
     except Exception as e:

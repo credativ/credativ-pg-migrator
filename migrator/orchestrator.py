@@ -480,7 +480,11 @@ class Orchestrator:
                         if self.config_parser.get_log_level() == 'DEBUG':
                             self.logger.debug(f"Trigger details: {trigger_detail}")
 
-                        converted_code = self.source_connection.convert_trigger(trigger_detail['trigger_sql'])
+                        settings = {
+                            'source_schema': self.config_parser.get_source_schema(),
+                            'target_schema': self.config_parser.get_target_schema(),
+                        }
+                        converted_code = self.source_connection.convert_trigger(trigger_detail['trigger_sql'], settings)
                         try:
                             if converted_code is not None:
                                 self.logger.info(f"Creating trigger {trigger_detail['trigger_name']} in target database.")

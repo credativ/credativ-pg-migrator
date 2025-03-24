@@ -102,6 +102,7 @@ class DatabaseConnector(ABC):
         """
         pass
 
+    @abstractmethod
     def fetch_triggers(self, table_id: int, table_schema: str, table_name: str):
         """
         Fetch triggers for a table.
@@ -117,6 +118,11 @@ class DatabaseConnector(ABC):
             }
         """
         pass
+
+    @abstractmethod
+    def convert_trigger(self, trig: str, settings: dict):
+        pass
+
     @abstractmethod
     def fetch_funcproc_names(self, schema: str):
         """
@@ -163,6 +169,37 @@ class DatabaseConnector(ABC):
         """
         pass
 
+    @abstractmethod
+    def fetch_views_names(self, source_schema: str):
+        """
+        Fetch view names in the specified schema.
+        Returns: dict
+        { ordinary_number: {
+            'id': view_id,
+            'schema_name': schema_name,
+            'view_name': view_name
+            }
+        }
+        """
+        pass
+
+    @abstractmethod
+    def fetch_view_code(self, view_id: int):
+        """
+        Fetch the code of a view.
+        Returns a string with the code.
+        """
+        pass
+
+    @abstractmethod
+    def convert_view_code(self, view_code: str, source_schema: str, target_schema: str):
+        """
+        Convert view to the target database type.
+        table_list - contains the list of all tables in the target schema - used for adding target_schema prefix to table names in the view code.
+        """
+        pass
+
+    @abstractmethod
     def get_sequence_current_value(self, sequence_id: int):
         """
         Returns the current value of the sequence.

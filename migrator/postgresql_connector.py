@@ -338,3 +338,15 @@ class PostgreSQLConnector(DatabaseConnector):
         count = cursor.fetchone()[0]
         cursor.close()
         return count
+
+    def convert_trigger(self, trigger_id: int, target_db_type: str, target_schema: str):
+        pass
+
+    def fetch_views_names(self, source_schema: str):
+        pass
+
+    def fetch_view_code(self, view_id: int):
+        pass
+
+    def convert_view_code(self, view_code: str, source_schema: str, target_schema: str):
+        pass

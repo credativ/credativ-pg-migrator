@@ -131,6 +131,23 @@ class Planner:
 
                 self.logger.info(f"Table {table_info['table_name']} processed successfully.")
 
+            if self.config_parser.should_migrate_views():
+                self.logger.info("Processing views...")
+                views = self.source_connection.fetch_views_names(self.source_schema)
+                for order_num, view_info in views.items():
+                    self.logger.info(f"Processing view ({order_num}): {view_info}")
+                    view_sql = self.source_connection.fetch_view_code(view_info['id'])
+                    if self.config_parser.get_log_level() == 'DEBUG':
+                        self.logger.debug(f"Source view SQL: {view_sql}")
+                    converted_view_sql = self.source_connection.convert_view_code(view_sql, self.source_schema, self.target_schema)
+                    if self.config_parser.get_log_level() == 'DEBUG':
+                        self.logger.debug(f"Converted view SQL: {converted_view_sql}")
+                    self.migrator_tables.insert_view(self.source_schema, view_info['view_name'], view_info['id'], view_sql, self.target_schema, view_info['view_name'], converted_view_sql)
+                    self.logger.info(f"View {view_info['view_name']} processed successfully.")
+                self.logger.info("Views processed successfully.")
+            else:
+                self.logger.info("Skipping views migration.")
+
             self.migrator_tables.update_main_status('Planner', True, 'finished OK')
 
             try:

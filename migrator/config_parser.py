@@ -136,6 +136,9 @@ class ConfigParser:
     def get_protocol_name_triggers(self):
         return f"{self.get_protocol_name()}_triggers"
 
+    def get_protocol_name_views(self):
+        return f"{self.get_protocol_name()}_views"
+
     def get_data_types_substitution(self):
         return self.config.get('data_types_substitution', {})
 

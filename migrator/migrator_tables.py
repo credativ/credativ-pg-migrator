@@ -22,6 +22,7 @@ class MigratorTables:
         self.create_table_for_funcprocs()
         self.create_table_for_sequences()
         self.create_table_for_triggers()
+        self.create_table_for_views()
 
     def prepare_data_types_substitution(self):
         # Drop table if exists
@@ -365,6 +366,27 @@ class MigratorTables:
             )
         """)
 
+    def create_table_for_views(self):
+        table_name = self.config_parser.get_protocol_name_views()
+        self.protocol_connection.execute_query(self.drop_table_sql.format(protocol_schema=self.protocol_schema, table_name=table_name))
+        self.protocol_connection.execute_query(f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."{table_name}"
+            (id SERIAL PRIMARY KEY,
+            source_schema TEXT,
+            source_view_name TEXT,
+            source_view_id INTEGER,
+            source_view_sql TEXT,
+            target_schema TEXT,
+            target_view_name TEXT,
+            target_view_sql TEXT,
+            task_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            task_started TIMESTAMP,
+            task_completed TIMESTAMP,
+            success BOOLEAN,
+            message TEXT
+            )
+        """)
+
     def decode_table_row(self, row):
         return {
             'id': row[0],
@@ -442,6 +464,18 @@ class MigratorTables:
             'trigger_old': row[10],
             'trigger_row_statement': row[11],
             'trigger_sql': row[12]
+        }
+
+    def decode_view_row(self, row):
+        return {
+            'id': row[0],
+            'source_schema': row[1],
+            'source_view_name': row[2],
+            'source_view_id': row[3],
+            'source_view_sql': row[4],
+            'target_schema': row[5],
+            'target_view_name': row[6],
+            'target_view_sql': row[7]
         }
 
     def insert_protocol(self, object_type, object_name, object_action, object_ddl, execution_timestamp, execution_success, execution_error_message, row_type, execution_results):
@@ -710,6 +744,60 @@ class MigratorTables:
             self.logger.error(e)
             return None
 
+    def insert_view(self, source_schema, source_view_name, source_view_id, source_view_sql, target_schema, target_view_name, target_view_sql):
+        table_name = self.config_parser.get_protocol_name_views()
+        query = f"""
+            INSERT INTO "{self.protocol_schema}"."{table_name}"
+            (source_schema, source_view_name, source_view_id, source_view_sql, target_schema, target_view_name, target_view_sql)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+        """
+        params = (source_schema, source_view_name, source_view_id, source_view_sql, target_schema, target_view_name, target_view_sql)
+        try:
+            self.protocol_connection.execute_query(query, params)
+            # if self.config_parser.get_log_level() == 'DEBUG':
+            #     self.logger.debug(f"Info for View {source_view_name} inserted into {table_name}.")
+        except Exception as e:
+            self.logger.error(f"Error inserting view info {source_view_name} into {table_name}.")
+            self.logger.error(e)
+            raise
+
+    def select_views(self):
+        table_name = self.config_parser.get_protocol_name_views()
+        query = f"""
+            SELECT * FROM "{self.protocol_schema}"."{table_name}" ORDER BY id
+        """
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            cursor.close()
+            return rows
+        except Exception as e:
+            self.logger.error(f"Error selecting views.")
+            self.logger.error(e)
+            return None
+
+    def update_view_status(self, row_id, success, message):
+        table_name = self.config_parser.get_protocol_name_views()
+        query = f"""
+            UPDATE "{self.protocol_schema}"."{table_name}"
+            SET task_completed = CURRENT_TIMESTAMP,
+            success = {'TRUE' if success else 'FALSE'}, message = '{message}'
+            WHERE id = {row_id}
+        """
+        # if self.config_parser.get_log_level() == 'DEBUG':
+        #     self.logger.debug(f"update_view_status query: {query}")
+        try:
+            self.protocol_connection.connection.cursor().execute(query)
+            self.protocol_connection.commit_transaction()
+            # if self.config_parser.get_log_level() == 'DEBUG':
+            #     self.logger.debug(f"Status for view {row_id} in {table_name} updated.")
+        except Exception as e:
+            self.logger.error(f"Error updating status for view {row_id} in {table_name}.")
+            self.logger.error(f"Query: {query}")
+            self.logger.error(e)
+            raise
+
     def select_primary_key(self, target_schema, target_table):
         tables_table = self.config_parser.get_protocol_name_tables()
         indexes_table = self.config_parser.get_protocol_name_indexes()
@@ -802,6 +890,7 @@ class MigratorTables:
         self.print_summary('Functions / procedures', self.config_parser.get_protocol_name_funcprocs())
         self.print_summary('Sequences', self.config_parser.get_protocol_name_sequences())
         self.print_summary('Triggers', self.config_parser.get_protocol_name_triggers())
+        self.print_summary('Views', self.config_parser.get_protocol_name_views())
 
     def fetch_all_tables(self):
         query = f"""SELECT * FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_tables()}" ORDER BY id"""

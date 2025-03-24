@@ -30,6 +30,7 @@ class Orchestrator:
             self.run_migrate_constraints()
             self.run_migrate_funcprocs()
             self.run_migrate_triggers()
+            self.run_migrate_views()
 
             self.run_post_migration_script()
             self.logger.info("Orchestration complete.")
@@ -467,7 +468,7 @@ class Orchestrator:
         self.migrator_tables.update_main_status('Orchestrator - functions/procedures migration', True, 'finished OK')
 
     def run_migrate_triggers(self):
-        self.migrator_tables.insert_main('Orchestrator - functions/procedures migration')
+        self.migrator_tables.insert_main('Orchestrator - triggers migration')
         try:
             if self.config_parser.should_migrate_triggers():
                 self.logger.info("Migrating triggers.")
@@ -513,6 +514,34 @@ class Orchestrator:
                 self.logger.info("Skipping trigger migration as requested.")
         except Exception as e:
             self.handle_error(e, 'migrate_triggers')
+
+    def run_migrate_views(self):
+        self.migrator_tables.insert_main('Orchestrator - views migration')
+
+        if self.config_parser.should_migrate_views():
+            self.logger.info("Migrating views.")
+
+            all_views = self.migrator_tables.select_views()
+            if all_views:
+                for one_view in all_views:
+                    view_detail = self.migrator_tables.decode_view_row(one_view)
+                    self.logger.info(f"Processing view {view_detail['source_view_name']}")
+                    if self.config_parser.get_log_level() == 'DEBUG':
+                        self.logger.debug(f"View details: {view_detail}")
+
+                    try:
+                        self.target_connection.connect()
+                        self.target_connection.execute_query(view_detail['target_view_sql'])
+                        self.migrator_tables.update_view_status(view_detail['id'], True, 'migrated OK')
+                        self.logger.info(f"View {view_detail['source_view_name']} migrated successfully.")
+                        self.target_connection.disconnect()
+                    except Exception as e:
+                        self.migrator_tables.update_view_status(view_detail['id'], False, 'ERROR in migration - see log')
+                        self.handle_error(e, f"migrate_view {view_detail['source_view_name']}")
+            else:
+                self.logger.info("No views found to migrate.")
+        else:
+            self.logger.info("Skipping view migration as requested.")
 
     def handle_error(self, e, description=None):
         self.logger.error(f"An error in {self.__class__.__name__} ({description}): {e}")

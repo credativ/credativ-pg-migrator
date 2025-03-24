@@ -165,6 +165,55 @@ class InformixConnector(DatabaseConnector):
             self.logger.error(e)
             raise
 
+    def fetch_views_names(self, source_schema: str):
+        views = {}
+        order_num = 1
+        query = f"""
+            SELECT DISTINCT v.tabid, t.tabname
+            FROM sysviews v
+            JOIN systables t on v.tabid = t.tabid
+            WHERE t.owner = '{source_schema}'
+            ORDER BY t.tabname
+        """
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            for row in cursor.fetchall():
+                views[order_num] = {
+                    'id': row[0],
+                    'schema_name': source_schema,
+                    'view_name': row[1]
+                }
+                order_num += 1
+            cursor.close()
+            self.disconnect()
+            return views
+        except jaydebeapi.Error as e:
+            self.logger.error(f"Error executing query: {query}")
+            self.logger.error(e)
+            raise
+
+    def fetch_view_code(self, view_id: int):
+        query = f"""
+        SELECT v.viewtext
+        FROM sysviews v
+        WHERE v.tabid = {view_id}
+        ORDER BY v.seqno
+        """
+        self.connect()
+        cursor = self.connection.cursor()
+        cursor.execute(query)
+        view_code = cursor.fetchall()
+        cursor.close()
+        self.disconnect()
+        view_code_str = ''.join([code[0] for code in view_code])
+        return view_code_str
+
+    def convert_view_code(self, view_code: str, source_schema: str, target_schema: str):
+        converted_view_code = view_code.replace(f'"{source_schema}".', f'"{target_schema}".')
+        return converted_view_code
+
     def convert_table_columns(self, target_db_type: str, table_schema: str, table_name: str, source_columns: dict):
         type_mapping = {}
         create_table_sql = ""
@@ -1282,3 +1331,5 @@ class InformixConnector(DatabaseConnector):
         cursor.close()
         return count
 
+    def get_sequence_current_value(self, sequence_id: int):
+        pass

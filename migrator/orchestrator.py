@@ -29,6 +29,7 @@ class Orchestrator:
             self.run_migrate_indexes()
             self.run_migrate_constraints()
             self.run_migrate_funcprocs()
+            self.run_migrate_triggers()
 
             self.run_post_migration_script()
             self.logger.info("Orchestration complete.")
@@ -461,9 +462,53 @@ class Orchestrator:
             else:
                 self.logger.info("No functions or procedures found to migrate.")
         else:
-            self.logger.info("Skipping function and procedure migration.")
+            self.logger.info("Skipping function and procedure migration as requested.")
 
         self.migrator_tables.update_main_status('Orchestrator - functions/procedures migration', True, 'finished OK')
+
+    def run_migrate_triggers(self):
+        self.migrator_tables.insert_main('Orchestrator - functions/procedures migration')
+        try:
+            if self.config_parser.should_migrate_triggers():
+                self.logger.info("Migrating triggers.")
+
+                all_triggers = self.migrator_tables.select_triggers()
+                if all_triggers:
+                    for one_trigger in all_triggers:
+                        trigger_detail = self.migrator_tables.decode_trigger_row(one_trigger)
+                        self.logger.info(f"Processing trigger {trigger_detail['trigger_name']}")
+                        if self.config_parser.get_log_level() == 'DEBUG':
+                            self.logger.debug(f"Trigger details: {trigger_detail}")
+
+                        converted_code = trigger_detail['trigger_sql']
+                        try:
+                            if converted_code is not None:
+                                self.logger.info(f"Creating trigger {trigger_detail['trigger_name']} in target database.")
+                                self.target_connection.connect()
+                                self.target_connection.execute_query(converted_code)
+                                if self.config_parser.get_log_level() == 'DEBUG':
+                                    self.logger.debug(f"[OK] Source code for {trigger_detail['trigger_name']}: {trigger_detail['trigger_sql']}")
+                                    self.logger.debug(f"[OK] Converted code for {trigger_detail['trigger_name']}: {converted_code}")
+                                self.migrator_tables.update_trigger_status(trigger_detail['id'], True, 'migrated OK')
+                            else:
+                                self.logger.info(f"Skipping trigger {trigger_detail['trigger_name']} - no conversion.")
+                                self.migrator_tables.update_trigger_status(trigger_detail['id'], False, 'no conversion')
+                            self.target_connection.disconnect()
+                        except Exception as e:
+                            if self.config_parser.get_log_level() == 'DEBUG':
+                                self.logger.debug(f"[ERROR] Migrating trigger {trigger_detail['trigger_name']}.")
+                                self.logger.debug(f"[ERROR] Source code for {trigger_detail['trigger_name']}: {trigger_detail['trigger_sql']}")
+                                self.logger.debug(f"[ERROR] Converted code for {trigger_detail['trigger_name']}: {converted_code}")
+                            self.migrator_tables.update_trigger_status(trigger_detail['id'], False, 'ERROR in migration - see log')
+                            self.handle_error(e, f"migrate_trigger {trigger_detail['trigger_name']}")
+
+                    self.logger.info("Triggers migrated successfully.")
+                else:
+                    self.logger.info("No triggers found to migrate.")
+            else:
+                self.logger.info("Skipping trigger migration as requested.")
+        except Exception as e:
+            self.handle_error(e, 'migrate_triggers')
 
     def handle_error(self, e, description=None):
         self.logger.error(f"An error in {self.__class__.__name__} ({description}): {e}")

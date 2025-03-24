@@ -1007,12 +1007,12 @@ class InformixConnector(DatabaseConnector):
             query = f"""
             select tr.trigid, tr.trigname,
             case when tr.event = 'D' then 'ON DELETE'
-            when tr.event = 'I' then 'ON INSERT'
-            when tr.event = 'U' then 'ON UPDATE'
-            when tr.event = 'S' then 'ON SELECT'
-            when tr.event = 'd' then 'INSTEAD OF Delete'
-            when tr.event = 'i' then 'INSTEAD OF Insert'
-            when tr.event = 'u' then 'INSTEAD OF Update'
+            when tr.event = 'I' then 'INSERT'
+            when tr.event = 'U' then 'UPDATE'
+            when tr.event = 'S' then 'SELECT'
+            when tr.event = 'd' then 'INSTEAD OF DELETE'
+            when tr.event = 'i' then 'INSTEAD OF INSERT'
+            when tr.event = 'u' then 'INSTEAD OF UPDATE'
             else tr.event end as trigger_event,
             tr.old, tr.new
             from systriggers tr
@@ -1032,6 +1032,7 @@ class InformixConnector(DatabaseConnector):
                     'id': row[0],
                     'name': row[1].strip(),
                     'event': row[2].strip(),
+                    'row_statement': '',
                     'old': row[3].strip() if row[3] else '',
                     'new': row[4].strip() if row[4] else '',
                     'sql': ''
@@ -1061,6 +1062,7 @@ class InformixConnector(DatabaseConnector):
                     self.logger.debug(f"trigger SQL: {trigger_code_str}")
 
                 triggers[order_num]['sql'] = trigger_code_str
+                triggers[order_num]['row_statement'] = 'FOR EACH ROW' if 'FOR EACH ROW' in trigger_code_str.upper() else ''
                 order_num += 1
             cursor.close()
             self.disconnect()

@@ -355,6 +355,7 @@ class MigratorTables:
             trigger_event TEXT,
             trigger_new TEXT,
             trigger_old TEXT,
+            trigger_row_statement TEXT,
             trigger_sql TEXT,
             task_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             task_started TIMESTAMP,
@@ -439,7 +440,8 @@ class MigratorTables:
             'trigger_event': row[8],
             'trigger_new': row[9],
             'trigger_old': row[10],
-            'trigger_sql': row[11]
+            'trigger_row_statement': row[11],
+            'trigger_sql': row[12]
         }
 
     def insert_protocol(self, object_type, object_name, object_action, object_ddl, execution_timestamp, execution_success, execution_error_message, row_type, execution_results):
@@ -691,6 +693,22 @@ class MigratorTables:
             self.logger.error(f"Query: {query}")
             self.logger.error(e)
             raise
+
+    def select_triggers(self):
+        table_name = self.config_parser.get_protocol_name_triggers()
+        query = f"""
+            SELECT * FROM "{self.protocol_schema}"."{table_name}" ORDER BY id
+        """
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            cursor.close()
+            return rows
+        except Exception as e:
+            self.logger.error(f"Error selecting triggers.")
+            self.logger.error(e)
+            return None
 
     def select_primary_key(self, target_schema, target_table):
         tables_table = self.config_parser.get_protocol_name_tables()

@@ -1071,6 +1071,94 @@ class InformixConnector(DatabaseConnector):
             self.logger.error(f"Error when fetching triggers for the table {table_name}/{table_id}: {e}")
             raise
 
+    def convert_trigger(self, trig: str):
+        pgsql_trigger_code = ''
+        # Extract schema, trigger name, and operation (insert/update)
+        header_match = re.match(r'"([^"]+)"\.(\S+)\s+(insert|update)', trig, re.IGNORECASE)
+        schema = header_match.group(1)
+        trigger_name = header_match.group(2)
+        operation = header_match.group(3).lower()
+
+        # Extract the table name (assumes: on "schemaname".table)
+        table_match = re.search(r'\s+on\s+"([^"]+)"\.(\S+)', trig, re.IGNORECASE)
+        if table_match:
+            table_schema = table_match.group(1)
+            table_name = table_match.group(2)
+        else:
+            table_schema = schema
+            table_name = "unknown_table"
+
+        # Generate a function name (e.g. ins_climate_data_func)
+        function_name = trigger_name + "_func"
+
+        # Replace procedure call: convert 'execute procedure' to 'PERFORM' and adjust references.
+        # This regex finds the call and captures the schema, procedure name, and arguments.
+        proc_calls = re.findall(r'execute procedure\s+otherdb:"([^"]+)"\.(\S+)\((.*?)\)\s*;?', trig, re.IGNORECASE | re.DOTALL)
+
+        # Prepare function body lines
+        func_body_lines = []
+
+        if operation == "insert":
+            if proc_calls:
+                # Assume single procedure call for insert
+                proc_schema, proc_name, proc_args = proc_calls[0]
+                # Clean up the arguments and replace 'post.' with 'NEW.' and 'prev.' with 'OLD.'
+                proc_args = proc_args.replace("post.", "NEW.").replace("prev.", "OLD.")
+                proc_args = re.sub(r'\s+', ' ', proc_args).strip()
+                func_body_lines.append(f"    PERFORM {proc_schema}.{proc_name}({proc_args});")
+            else:
+                func_body_lines.append("    -- No procedure call found")
+
+        elif operation == "update":
+            # For update, we might have multiple conditions. Here we look for when clauses.
+            # This simplistic approach assumes two procedure calls, each optionally preceded by a WHEN condition.
+            # First, extract when conditions.
+            when_matches = re.findall(r'when\s*\((.*?)\)\s*\(', trig, re.IGNORECASE | re.DOTALL)
+            # Replace references in conditions.
+            when_conditions = [w.replace("post.", "NEW.").replace("prev.", "OLD.").strip() for w in when_matches]
+
+            if proc_calls:
+                # Depending on the number of procedure calls and conditions, build IF blocks.
+                if len(proc_calls) >= 2 and len(when_conditions) >= 2:
+                    # First procedure call for NEW value condition
+                    proc_schema1, proc_name1, proc_args1 = proc_calls[0]
+                    proc_args1 = proc_args1.replace("post.", "NEW.").replace("prev.", "OLD.")
+                    proc_args1 = re.sub(r'\s+', ' ', proc_args1).strip()
+                    func_body_lines.append(f"    IF {when_conditions[0]} THEN")
+                    func_body_lines.append(f"        PERFORM {proc_schema1}.{proc_name1}({proc_args1});")
+                    func_body_lines.append("    END IF;")
+
+                    # Second procedure call for OLD value condition
+                    proc_schema2, proc_name2, proc_args2 = proc_calls[1]
+                    proc_args2 = proc_args2.replace("post.", "NEW.").replace("prev.", "OLD.")
+                    proc_args2 = re.sub(r'\s+', ' ', proc_args2).strip()
+                    func_body_lines.append(f"    IF {when_conditions[1]} THEN")
+                    func_body_lines.append(f"        PERFORM {proc_schema2}.{proc_name2}({proc_args2});")
+                    func_body_lines.append("    END IF;")
+                else:
+                    func_body_lines.append("    -- Complex update trigger logic: manual adjustment may be required")
+            else:
+                func_body_lines.append("    -- No procedure call found")
+
+        # Build the trigger function code
+        func_code = f"""CREATE OR REPLACE FUNCTION {schema}.{function_name}()
+            RETURNS trigger AS $$
+            BEGIN
+            {chr(10).join(func_body_lines)}
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql;
+            """
+
+            # Assume AFTER trigger timing; adjust as needed.
+        trigger_code = f"""CREATE TRIGGER {trigger_name}
+            AFTER {operation.upper()} ON {table_schema}.{table_name}
+            FOR EACH ROW EXECUTE FUNCTION {schema}.{function_name}();
+            """
+
+        pgsql_trigger_code = func_code + "\n" + trigger_code
+
+        return pgsql_trigger_code
 
     def execute_query(self, query: str, params=None):
         cursor = self.connection.cursor()

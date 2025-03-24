@@ -518,6 +518,7 @@ class InformixConnector(DatabaseConnector):
             # Split the code based on "\n
             commands = [command.strip() for command in postgresql_code.split('\n') if command.strip()]
             postgresql_code = ''
+            line_number = 0
             for command in commands:
                 if command.startswith('--'):
                     command = command.replace(command, f"\n/* {command.strip()} */;")
@@ -531,6 +532,13 @@ class InformixConnector(DatabaseConnector):
                 for keyword in keywords:
                     command = re.sub(r'(?i)\b' + re.escape(keyword) + r'\b', ";" + keyword, command, flags=re.IGNORECASE)
 
+                if command.startswith('REFERENCING'):
+                    command = f"RETURNS TRIGGER AS $$\n/* {command} */"
+
+                    # Comment out lines starting with FOR followed by a single word within the first 5 lines
+                if re.match(r'^\s*FOR\s+\w+\s*$', command, flags=re.IGNORECASE) and line_number <= 5:
+                    command = f"/* {command} */"
+
                 # Add ";" after specific keywords (case insensitive)
                 keywords = ["ELSE", "END IF", "END LOOP", "END WHILE", "END FOR", "END FUNCTION", "END PROCEDURE", "THEN", "END EXCEPTION",
                             "EXIT FOREACH", "END FOREACH", "CONTINUE FOREACH", "EXIT WHILE", "EXIT FOR", "EXIT LOOP"]
@@ -541,6 +549,7 @@ class InformixConnector(DatabaseConnector):
                     command = re.sub(r',\s*\bOUTER\b', ' LEFT OUTER JOIN ', command, flags=re.IGNORECASE)
 
                 postgresql_code += ' ' + command + ' '
+                line_number += 1
 
             # Split the code based on ";"
             commands = postgresql_code.split(';')
@@ -564,6 +573,20 @@ class InformixConnector(DatabaseConnector):
             # if self.config_parser.get_log_level() == 'DEBUG':
             #     self.logger.debug(f'[1] postgresql_code: {postgresql_code}')
 
+            # Replace CREATE PROCEDURE ... RETURNS TRIGGER AS with CREATE FUNCTION
+            # postgresql_code = re.sub(
+            #     r'CREATE\s+PROCEDURE\s+(\w+\.\w+)\s*\(.*?\)\s+RETURNS\s+TRIGGER\s+AS',
+            #     r'CREATE FUNCTION \1 RETURNS TRIGGER AS',
+            #     postgresql_code,
+            #     flags=re.MULTILINE | re.IGNORECASE
+            # )
+            postgresql_code = re.sub(
+                r'CREATE\s+PROCEDURE\s+("?\w+"?\."?\w+"?\s*\(\))\s+RETURNS\s+TRIGGER\s+AS\b(.*)',
+                r'CREATE FUNCTION \1 RETURNS TRIGGER AS \2',
+                postgresql_code,
+                flags=re.MULTILINE | re.IGNORECASE
+            )
+
             # Replace CREATE PROCEDURE ... RETURNING with CREATE FUNCTION
             postgresql_code = re.sub(
                 r'CREATE\s+PROCEDURE\s+(.*?)\s+RETURNING',
@@ -576,6 +599,14 @@ class InformixConnector(DatabaseConnector):
             postgresql_code = re.sub(
                 r'(\b\w+\b\s+\b\w+\b.*?\bRETURNING\b)',
                 lambda match: re.sub(r'\bRETURNING\b', r'\nRETURNING', match.group(0)),
+                postgresql_code,
+                flags=re.IGNORECASE
+            )
+
+            # Replace source_schema in the function/procedure name with target_schema
+            postgresql_code = re.sub(
+                rf'CREATE\s+(FUNCTION|PROCEDURE)\s+"{source_schema}"\.',
+                rf'CREATE \1 "{target_schema}".',
                 postgresql_code,
                 flags=re.IGNORECASE
             )
@@ -604,7 +635,10 @@ class InformixConnector(DatabaseConnector):
 
             # Replace variable declarations with %TYPE where LIKE is used
             # declarations with LIKE can be also in the header
+            # postgresql_code = re.sub(r'\s+(\w+)\s+LIKE\s+([\w\d_]+)\.(\w+);', r'\n\1 \2.\3%TYPE;', postgresql_code, flags=re.IGNORECASE)
+            # Replace variable declarations with %TYPE where LIKE is used
             postgresql_code = re.sub(r'\s+(\w+)\s+LIKE\s+([\w\d_]+)\.(\w+);', r'\n\1 \2.\3%TYPE;', postgresql_code, flags=re.IGNORECASE)
+            postgresql_code = re.sub(r'\(([^)]+)\)', lambda match: re.sub(r'(\w+)\s+LIKE\s+([\w\d_]+)\.(\w+)', r'\1 \2.\3%TYPE', match.group(0)), postgresql_code, flags=re.IGNORECASE)
             # if self.config_parser.get_log_level() == 'DEBUG':
             #     self.logger.debug(f'[0000] postgresql_code: {postgresql_code}')
 

@@ -39,6 +39,9 @@ class ConfigParser:
         source_config = self.get_source_config()
         return source_config.get('schema', source_config.get('owner', 'public'))
 
+    def get_source_owner(self):
+        return self.get_source_schema()
+
     def get_source_db_type(self):
         return self.config['source']['type']
 

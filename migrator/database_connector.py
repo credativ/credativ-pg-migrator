@@ -192,7 +192,7 @@ class DatabaseConnector(ABC):
         pass
 
     @abstractmethod
-    def convert_view_code(self, view_code: str, source_schema: str, target_schema: str):
+    def convert_view_code(self, view_code: str, settings: dict):
         """
         Convert view to the target database type.
         table_list - contains the list of all tables in the target schema - used for adding target_schema prefix to table names in the view code.

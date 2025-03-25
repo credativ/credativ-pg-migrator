@@ -47,12 +47,15 @@ class SybaseASEConnector(DatabaseConnector):
             pass
 
     def fetch_table_names(self, table_schema: str):
+        # 2048 = proxy table referencing remote table
         query = f"""
             SELECT
             o.id as table_id,
             o.name as table_name
             FROM sysobjects o
-            WHERE user_name(o.uid) = '{table_schema}' AND o.type = 'U'
+            WHERE user_name(o.uid) = '{table_schema}'
+            AND o.type = 'U'
+            AND (o.sysstat & 2048 <> 2048)
             ORDER BY o.name
         """
         try:
@@ -726,3 +729,71 @@ class SybaseASEConnector(DatabaseConnector):
         except Exception as e:
             self.logger.error(f"Worker {worker_id}: Error during {part_name} -> {e}")
             raise e
+
+    def convert_trigger(self, trigger_name, trigger_code, source_schema, target_schema, table_list):
+        return None
+
+    def fetch_triggers(self, schema_name, table_name):
+        pass
+
+    def fetch_views_names(self, owner_name):
+        views = {}
+        order_num = 1
+        query = f"""
+            SELECT * FROM (
+                SELECT
+                id,
+                user_name(uid) as view_owner,
+                name as view_name
+                FROM sysobjects WHERE type = 'V') a
+            WHERE a.view_owner = '{owner_name}'
+        """
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            for row in rows:
+                views[order_num] = {
+                    'id': row[0],
+                    'schema_name': row[1],
+                    'view_name': row[2]
+                }
+                order_num += 1
+            cursor.close()
+            self.disconnect()
+            return views
+        except Error as e:
+            self.logger.error(f"Error executing query: {query}")
+            self.logger.error(e)
+            raise
+
+    def fetch_view_code(self, view_id):
+        query = f"""
+            SELECT c.text
+            FROM syscomments c
+            JOIN sysobjects o
+            ON o.id=c.id
+            WHERE o.id = {view_id}
+            ORDER BY c.colid
+        """
+        self.connect()
+        cursor = self.connection.cursor()
+        cursor.execute(query)
+        view_code = cursor.fetchall()
+        cursor.close()
+        self.disconnect()
+        view_code_str = ' '.join([code[0] for code in view_code])
+        return view_code_str
+
+    def convert_view_code(self, view_code: str, settings: dict):
+        if self.config_parser.get_log_level() == 'DEBUG':
+            self.logger.debug(f"settings in convert_view_code: {settings}")
+        converted_code = view_code
+        converted_code = converted_code.replace(f"{settings['source_database']}..", f"{settings['target_schema']}.")
+        converted_code = converted_code.replace(f"{settings['source_database']}.{settings['source_schema']}.", f"{settings['target_schema']}.")
+        converted_code = converted_code.replace(f"{settings['source_schema']}.", f"{settings['target_schema']}.")
+        return converted_code
+
+    def get_sequence_current_value(self, sequence_name):
+        pass

@@ -151,7 +151,12 @@ class Planner:
                     view_sql = self.source_connection.fetch_view_code(view_info['id'])
                     if self.config_parser.get_log_level() == 'DEBUG':
                         self.logger.debug(f"Source view SQL: {view_sql}")
-                    converted_view_sql = self.source_connection.convert_view_code(view_sql, self.source_schema, self.target_schema)
+                    settings = {
+                        'source_database': self.config_parser.get_source_db_name(),
+                        'source_schema': self.config_parser.get_source_schema(),
+                        'target_schema': self.config_parser.get_target_schema(),
+                    }
+                    converted_view_sql = self.source_connection.convert_view_code(view_sql, settings)
                     if self.config_parser.get_log_level() == 'DEBUG':
                         self.logger.debug(f"Converted view SQL: {converted_view_sql}")
                     self.migrator_tables.insert_view(self.source_schema, view_info['view_name'], view_info['id'], view_sql, self.target_schema, view_info['view_name'], converted_view_sql)

@@ -210,8 +210,9 @@ class InformixConnector(DatabaseConnector):
         view_code_str = ''.join([code[0] for code in view_code])
         return view_code_str
 
-    def convert_view_code(self, view_code: str, source_schema: str, target_schema: str):
-        converted_view_code = view_code.replace(f'"{source_schema}".', f'"{target_schema}".')
+    def convert_view_code(self, view_code: str, settings: dict):
+        converted_view_code = view_code
+        converted_view_code = converted_view_code.replace(f'''"{settings['source_schema']}".''', f'''"{settings['target_schema']}".''')
         return converted_view_code
 
     def convert_table_columns(self, target_db_type: str, table_schema: str, table_name: str, source_columns: dict):

@@ -348,5 +348,5 @@ class PostgreSQLConnector(DatabaseConnector):
     def fetch_view_code(self, view_id: int):
         pass
 
-    def convert_view_code(self, view_code: str, source_schema: str, target_schema: str):
+    def convert_view_code(self, view_code: str, settings: dict):
         pass

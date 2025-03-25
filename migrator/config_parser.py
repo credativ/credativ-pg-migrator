@@ -35,6 +35,9 @@ class ConfigParser:
     def get_source_config(self):
         return self.config['source']
 
+    def get_source_db_name(self):
+        return self.get_source_config()['database']
+
     def get_source_schema(self):
         source_config = self.get_source_config()
         return source_config.get('schema', source_config.get('owner', 'public'))

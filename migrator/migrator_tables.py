@@ -225,8 +225,12 @@ class MigratorTables:
             cursor.close()
             # if self.config_parser.get_log_level() == 'DEBUG':
             #     self.logger.debug(f"Returned row: {row}")
-            main_row = self.decode_main_row(row)
-            self.update_protocol('main', main_row['id'], success, message, None)
+            if row:
+                main_row = self.decode_main_row(row)
+                self.update_protocol('main', main_row['id'], success, message, None)
+            else:
+                self.logger.error(f"Error updating status for task {task_name} in {table_name}.")
+                self.logger.error(f"Error: No protocol row returned.")
         except Exception as e:
             self.logger.error(f"Error updating status for task {task_name} in {table_name}.")
             self.logger.error(f"Query: {query}")
@@ -598,8 +602,12 @@ class MigratorTables:
 
             # if self.config_parser.get_log_level() == 'DEBUG':
             #     self.logger.debug(f"(update_table_status) returned row: {row}")
-            table_row = self.decode_table_row(row)
-            self.update_protocol('table', table_row['id'], success, message, None)
+            if row:
+                table_row = self.decode_table_row(row)
+                self.update_protocol('table', table_row['id'], success, message, None)
+            else:
+                self.logger.error(f"Error updating status for table {row_id} in {table_name}.")
+                self.logger.error(f"Error: No protocol row returned.")
         except Exception as e:
             self.logger.error(f"Error updating status for table {row_id} in {table_name}.")
             self.logger.error(f"Query: {query}")
@@ -649,8 +657,12 @@ class MigratorTables:
 
             # if self.config_parser.get_log_level() == 'DEBUG':
             #     self.logger.debug(f"Returned row: {row}")
-            index_row = self.decode_index_row(row)
-            self.update_protocol('index', index_row['id'], success, message, None)
+            if row:
+                index_row = self.decode_index_row(row)
+                self.update_protocol('index', index_row['id'], success, message, None)
+            else:
+                self.logger.error(f"Error updating status for index {row_id} in {table_name}.")
+                self.logger.error(f"Error: No protocol row returned.")
         except Exception as e:
             self.logger.error(f"Error updating status for index {row_id} in {table_name}.")
             self.logger.error(f"Query: {query}")
@@ -701,8 +713,12 @@ class MigratorTables:
 
             # if self.config_parser.get_log_level() == 'DEBUG':
             #     self.logger.debug(f"Returned row: {row}")
-            constraint_row = self.decode_constraint_row(row)
-            self.update_protocol('constraint', constraint_row['id'], success, message, None)
+            if row:
+                constraint_row = self.decode_constraint_row(row)
+                self.update_protocol('constraint', constraint_row['id'], success, message, None)
+            else:
+                self.logger.error(f"Error updating status for constraint {row_id} in {table_name}.")
+                self.logger.error(f"Error: No protocol row returned.")
         except Exception as e:
             self.logger.error(f"Error updating status for constraint {row_id} in {table_name}.")
             self.logger.error(f"Query: {query}")
@@ -733,7 +749,7 @@ class MigratorTables:
             self.logger.error(e)
             raise
 
-    def update_funcproc_status(self, funcproc_id, success, message):
+    def update_funcproc_status(self, source_funcproc_id, success, message):
         table_name = self.config_parser.get_protocol_name_funcprocs()
         query = f"""
             UPDATE "{self.protocol_schema}"."{table_name}"
@@ -743,7 +759,7 @@ class MigratorTables:
             WHERE source_funcproc_id = %s
             RETURNING *
         """
-        params = ('TRUE' if success else 'FALSE', message, funcproc_id)
+        params = ('TRUE' if success else 'FALSE', message, source_funcproc_id)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -751,11 +767,16 @@ class MigratorTables:
             cursor.close()
 
             # if self.config_parser.get_log_level() == 'DEBUG':
+            #     self.logger.debug(f"Parameters: {params}")
             #     self.logger.debug(f"Returned row: {row}")
-            funcproc_row = self.decode_funcproc_row(row)
-            self.update_protocol('funcproc', funcproc_row['id'], success, message, None)
+            if row:
+                funcproc_row = self.decode_funcproc_row(row)
+                self.update_protocol('funcproc', funcproc_row['id'], success, message, None)
+            else:
+                self.logger.error(f"Error updating status for funcproc {source_funcproc_id} in {table_name}.")
+                self.logger.error(f"Error: No protocol row returned.")
         except Exception as e:
-            self.logger.error(f"Error updating status for funcproc {funcproc_id} in {table_name}.")
+            self.logger.error(f"Error updating status for funcproc {source_funcproc_id} in {table_name}.")
             self.logger.error(f"Query: {query}")
             self.logger.error(e)
             raise
@@ -791,7 +812,7 @@ class MigratorTables:
             SET task_completed = CURRENT_TIMESTAMP,
             success = %s,
             message = %s
-            WHERE sequence_id = %s
+            WHERE id = %s
             RETURNING *
         """
         params = ('TRUE' if success else 'FALSE', message, sequence_id)
@@ -803,8 +824,12 @@ class MigratorTables:
 
             # if self.config_parser.get_log_level() == 'DEBUG':
             #     self.logger.debug(f"Returned row: {row}")
-            sequence_row = self.decode_sequence_row(row)
-            self.update_protocol('sequence', sequence_row['sequence_id'], success, message, None)
+            if row:
+                sequence_row = self.decode_sequence_row(row)
+                self.update_protocol('sequence', sequence_row['sequence_id'], success, message, None)
+            else:
+                self.logger.error(f"Error updating status for sequence {sequence_id} in {table_name}.")
+                self.logger.error(f"Error: No protocol row returned.")
         except Exception as e:
             self.logger.error(f"Error updating status for sequence_if {sequence_id} in {table_name}.")
             self.logger.error(f"Query: {query}")
@@ -854,8 +879,12 @@ class MigratorTables:
 
             # if self.config_parser.get_log_level() == 'DEBUG':
             #     self.logger.debug(f"Returned row: {row}")
-            trigger_row = self.decode_trigger_row(row)
-            self.update_protocol('trigger', trigger_row['id'], success, message, None)
+            if row:
+                trigger_row = self.decode_trigger_row(row)
+                self.update_protocol('trigger', trigger_row['id'], success, message, None)
+            else:
+                self.logger.error(f"Error updating status for trigger {row_id} in {table_name}.")
+                self.logger.error(f"Error: No protocol row returned.")
         except Exception as e:
             self.logger.error(f"Error updating status for trigger {row_id} in {table_name}.")
             self.logger.error(f"Query: {query}")
@@ -937,8 +966,12 @@ class MigratorTables:
 
             # if self.config_parser.get_log_level() == 'DEBUG':
             #     self.logger.debug(f"Returned row: {row}")
-            view_row = self.decode_view_row(row)
-            self.update_protocol('view', view_row['id'], success, message, None)
+            if row:
+                view_row = self.decode_view_row(row)
+                self.update_protocol('view', view_row['id'], success, message, None)
+            else:
+                self.logger.error(f"Error updating status for view {row_id} in {table_name}.")
+                self.logger.error(f"Error: No protocol row returned.")
         except Exception as e:
             self.logger.error(f"Error updating status for view {row_id} in {table_name}.")
             self.logger.error(f"Query: {query}")

@@ -48,6 +48,7 @@ class Orchestrator:
                 pass
 
         except Exception as e:
+            self.migrator_tables.update_main_status('Orchestrator', False, f'ERROR: {e}')
             self.handle_error(e, 'orchestration')
 
     def connect_to_source_db(self):
@@ -456,7 +457,7 @@ class Orchestrator:
                             self.logger.debug(f"[ERROR] Migrating {funcproc_type} {funcproc_data['name']}.")
                             self.logger.debug(f"[ERROR] Source code for {funcproc_data['name']}: {funcproc_code}")
                             self.logger.debug(f"[ERROR] Converted code for {funcproc_data['name']}: {converted_code}")
-                        self.migrator_tables.update_funcproc_status(funcproc_id, False, 'ERROR in migration - see log')
+                        self.migrator_tables.update_funcproc_status(funcproc_id, False, f'ERROR: {e}')
                         self.handle_error(e, f"migrate_funcproc {funcproc_type} {funcproc_data['name']}")
 
                 self.logger.info("Functions and procedures migrated successfully.")
@@ -500,7 +501,7 @@ class Orchestrator:
                                 self.logger.debug(f"[ERROR] Migrating trigger {trigger_detail['trigger_name']}.")
                                 self.logger.debug(f"[ERROR] Source code for {trigger_detail['trigger_name']}: {trigger_detail['trigger_source_sql']}")
                                 self.logger.debug(f"[ERROR] Converted code for {trigger_detail['trigger_name']}: {converted_code}")
-                            self.migrator_tables.update_trigger_status(trigger_detail['id'], False, 'ERROR in migration - see log')
+                            self.migrator_tables.update_trigger_status(trigger_detail['id'], False, f'ERROR: {e}')
                             self.handle_error(e, f"migrate_trigger {trigger_detail['trigger_name']}")
 
                     self.logger.info("Triggers migrated successfully.")
@@ -535,7 +536,7 @@ class Orchestrator:
                         self.logger.info(f"View {view_detail['source_view_name']} migrated successfully.")
                         self.target_connection.disconnect()
                     except Exception as e:
-                        self.migrator_tables.update_view_status(view_detail['id'], False, 'ERROR in migration - see log')
+                        self.migrator_tables.update_view_status(view_detail['id'], False, f'ERROR: {e}')
                         self.handle_error(e, f"migrate_view {view_detail['source_view_name']}")
             else:
                 self.logger.info("No views found to migrate.")

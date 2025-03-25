@@ -188,29 +188,45 @@ class MigratorTables:
 
     def insert_main(self, task_name):
         table_name = self.config_parser.get_protocol_name_main()
-        self.protocol_connection.execute_query(f"""
+        query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
-            (task_name)
-            VALUES ('{task_name}')
-        """)
-        # if self.config_parser.get_log_level() == 'DEBUG':
-        #     self.logger.debug(f"Task {task_name} inserted into {table_name}.")
+            (task_name) VALUES ('{task_name}')
+            RETURNING *
+        """
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query)
+            row = cursor.fetchone()
+            cursor.close()
+            # if self.config_parser.get_log_level() == 'DEBUG':
+            #     self.logger.debug(f"Returned row: {row}")
+            main_row = self.decode_main_row(row)
+            self.insert_protocol('main', task_name, 'start', None, None, None, None, 'info', None, main_row['id'])
+        except Exception as e:
+            self.logger.error(f"Error inserting task {task_name} into {table_name}.")
+            self.logger.error(e)
+            raise
 
     def update_main_status(self, task_name, success, message):
         table_name = self.config_parser.get_protocol_name_main()
         query = f"""
             UPDATE "{self.protocol_schema}"."{table_name}"
             SET task_completed = CURRENT_TIMESTAMP,
-            success = {'TRUE' if success else 'FALSE'}, message = '{message}'
-            WHERE task_name = '{task_name}'
+            success = %s,
+            message = %s
+            WHERE task_name = %s
+            RETURNING *
         """
-        # if self.config_parser.get_log_level() == 'DEBUG':
-        #     self.logger.debug(f"update_main_status query: {query}")
+        params = ('TRUE' if success else 'FALSE', message, task_name)
         try:
-            self.protocol_connection.execute_query(query)
-            self.protocol_connection.commit_transaction()
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
             # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Status for task {task_name} in {table_name} updated.")
+            #     self.logger.debug(f"Returned row: {row}")
+            main_row = self.decode_main_row(row)
+            self.update_protocol('main', main_row['id'], success, message, None)
         except Exception as e:
             self.logger.error(f"Error updating status for task {task_name} in {table_name}.")
             self.logger.error(f"Query: {query}")
@@ -518,14 +534,16 @@ class MigratorTables:
         table_name = self.config_parser.get_protocol_name()
         query = f"""
         UPDATE "{self.protocol_schema}"."{table_name}"
-        SET execution_success = {'TRUE' if execution_success else 'FALSE'},
-        execution_error_message = '{execution_error_message}',
-        execution_results = '{execution_results}',
+        SET execution_success = %s,
+        execution_error_message = %s,
+        execution_results = %s,
         execution_timestamp = CURRENT_TIMESTAMP
-        WHERE object_protocol_id = {object_protocol_id} AND object_type = '{object_type}'
+        WHERE object_protocol_id = %s
+        AND object_type = %s
         """
+        params = ('TRUE' if execution_success else 'FALSE', execution_error_message, execution_results, object_protocol_id, object_type)
         try:
-            self.protocol_connection.execute_query(query)
+            self.protocol_connection.execute_query(query, params)
             # if self.config_parser.get_log_level() == 'DEBUG':
             #     self.logger.debug(f"Info for {object_protocol_id} updated in {table_name}.")
         except Exception as e:
@@ -566,13 +584,15 @@ class MigratorTables:
         query = f"""
             UPDATE "{self.protocol_schema}"."{table_name}"
             SET task_completed = CURRENT_TIMESTAMP,
-            success = {'TRUE' if success else 'FALSE'}, message = '{message}'
-            WHERE id = {row_id}
+            success = %s,
+            message = %s
+            WHERE id = %s
             RETURNING *
         """
+        params = ('TRUE' if success else 'FALSE', message, row_id)
         try:
             cursor = self.protocol_connection.connection.cursor()
-            cursor.execute(query)
+            cursor.execute(query, params)
             row = cursor.fetchone()
             cursor.close()
 
@@ -615,13 +635,15 @@ class MigratorTables:
         query = f"""
             UPDATE "{self.protocol_schema}"."{table_name}"
             SET task_completed = CURRENT_TIMESTAMP,
-            success = {'TRUE' if success else 'FALSE'}, message = '{message}'
-            WHERE id = {row_id}
+            success = %s,
+            message = %s
+            WHERE id = %s
             RETURNING *
         """
+        params = ('TRUE' if success else 'FALSE', message, row_id)
         try:
             cursor = self.protocol_connection.connection.cursor()
-            cursor.execute(query)
+            cursor.execute(query, params)
             row = cursor.fetchone()
             cursor.close()
 
@@ -665,13 +687,15 @@ class MigratorTables:
         query = f"""
             UPDATE "{self.protocol_schema}"."{table_name}"
             SET task_completed = CURRENT_TIMESTAMP,
-            success = {'TRUE' if success else 'FALSE'}, message = '{message}'
-            WHERE id = {row_id}
+            success = %s,
+            message = %s
+            WHERE id = %s
             RETURNING *
         """
+        params = ('TRUE' if success else 'FALSE', message, row_id)
         try:
             cursor = self.protocol_connection.connection.cursor()
-            cursor.execute(query)
+            cursor.execute(query, params)
             row = cursor.fetchone()
             cursor.close()
 
@@ -714,13 +738,15 @@ class MigratorTables:
         query = f"""
             UPDATE "{self.protocol_schema}"."{table_name}"
             SET task_completed = CURRENT_TIMESTAMP,
-            success = {'TRUE' if success else 'FALSE'}, message = '{message}'
-            WHERE source_funcproc_id = {funcproc_id}
+            success = %s,
+            message = %s
+            WHERE source_funcproc_id = %s
             RETURNING *
         """
+        params = ('TRUE' if success else 'FALSE', message, funcproc_id)
         try:
             cursor = self.protocol_connection.connection.cursor()
-            cursor.execute(query)
+            cursor.execute(query, params)
             row = cursor.fetchone()
             cursor.close()
 
@@ -763,13 +789,15 @@ class MigratorTables:
         query = f"""
             UPDATE "{self.protocol_schema}"."{table_name}"
             SET task_completed = CURRENT_TIMESTAMP,
-            success = {'TRUE' if success else 'FALSE'}, message = '{message}'
-            WHERE sequence_id = {sequence_id}
+            success = %s,
+            message = %s
+            WHERE sequence_id = %s
             RETURNING *
         """
+        params = ('TRUE' if success else 'FALSE', message, sequence_id)
         try:
             cursor = self.protocol_connection.connection.cursor()
-            cursor.execute(query)
+            cursor.execute(query, params)
             row = cursor.fetchone()
             cursor.close()
 
@@ -812,13 +840,15 @@ class MigratorTables:
         query = f"""
             UPDATE "{self.protocol_schema}"."{table_name}"
             SET task_completed = CURRENT_TIMESTAMP,
-            success = {'TRUE' if success else 'FALSE'}, message = '{message}'
-            WHERE id = {row_id}
+            success = %s,
+            message = %s
+            WHERE id = %s
             RETURNING *
         """
+        params = ('TRUE' if success else 'FALSE', message, row_id)
         try:
             cursor = self.protocol_connection.connection.cursor()
-            cursor.execute(query)
+            cursor.execute(query, params)
             row = cursor.fetchone()
             cursor.close()
 
@@ -893,13 +923,15 @@ class MigratorTables:
         query = f"""
             UPDATE "{self.protocol_schema}"."{table_name}"
             SET task_completed = CURRENT_TIMESTAMP,
-            success = {'TRUE' if success else 'FALSE'}, message = '{message}'
-            WHERE id = {row_id}
+            success = %s,
+            message = %s
+            WHERE id = %s
             RETURNING *
         """
+        params = ('TRUE' if success else 'FALSE', message, row_id)
         try:
             cursor = self.protocol_connection.connection.cursor()
-            cursor.execute(query)
+            cursor.execute(query, params)
             row = cursor.fetchone()
             cursor.close()
 

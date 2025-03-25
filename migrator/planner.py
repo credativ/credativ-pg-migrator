@@ -173,6 +173,7 @@ class Planner:
 
             self.logger.info("Planner phase done successfully.")
         except Exception as e:
+            self.migrator_tables.update_main_status('Planner', False, f'ERROR: {e}')
             self.handle_error(e, "Planner")
 
     def pre_planning(self):

@@ -157,11 +157,13 @@ class MigratorTables:
             object_name TEXT,
             object_action TEXT,
             object_ddl TEXT,
+            insertion_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             execution_timestamp TIMESTAMP,
             execution_success BOOLEAN,
             execution_error_message TEXT,
             row_type TEXT default 'info',
-            execution_results TEXT
+            execution_results TEXT,
+            object_protocol_id BIGINT
         );
         """
         self.protocol_connection.execute_query(query)
@@ -357,7 +359,8 @@ class MigratorTables:
             trigger_new TEXT,
             trigger_old TEXT,
             trigger_row_statement TEXT,
-            trigger_sql TEXT,
+            trigger_source_sql TEXT,
+            trigger_target_sql TEXT,
             task_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             task_started TIMESTAMP,
             task_completed TIMESTAMP,
@@ -386,6 +389,21 @@ class MigratorTables:
             message TEXT
             )
         """)
+
+    def decode_protocol_row(self, row):
+        return {
+            'id': row[0],
+            'object_type': row[1],
+            'object_name': row[2],
+            'object_action': row[3],
+            'object_ddl': row[4],
+            'execution_timestamp': row[5],
+            'execution_success': row[6],
+            'execution_error_message': row[7],
+            'row_type': row[8],
+            'execution_results': row[9],
+            'object_protocol_id': row[10]
+        }
 
     def decode_table_row(self, row):
         return {
@@ -463,7 +481,8 @@ class MigratorTables:
             'trigger_new': row[9],
             'trigger_old': row[10],
             'trigger_row_statement': row[11],
-            'trigger_sql': row[12]
+            'trigger_source_sql': row[12],
+            'trigger_target_sql': row[13]
         }
 
     def decode_view_row(self, row):
@@ -478,20 +497,39 @@ class MigratorTables:
             'target_view_sql': row[7]
         }
 
-    def insert_protocol(self, object_type, object_name, object_action, object_ddl, execution_timestamp, execution_success, execution_error_message, row_type, execution_results):
+    def insert_protocol(self, object_type, object_name, object_action, object_ddl, execution_timestamp, execution_success, execution_error_message, row_type, execution_results, object_protocol_id):
         table_name = self.config_parser.get_protocol_name()
         query = f"""
         INSERT INTO "{self.protocol_schema}"."{table_name}"
-        (object_type, object_name, object_action, object_ddl, execution_timestamp, execution_success, execution_error_message, row_type, execution_results)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        (object_type, object_name, object_action, object_ddl, execution_timestamp, execution_success, execution_error_message, row_type, execution_results, object_protocol_id)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
-        params = (object_type, object_name, object_action, object_ddl, execution_timestamp, execution_success, execution_error_message, row_type, execution_results)
+        params = (object_type, object_name, object_action, object_ddl, execution_timestamp, execution_success, execution_error_message, row_type, execution_results, object_protocol_id)
         try:
             self.protocol_connection.execute_query(query, params)
             # if self.config_parser.get_log_level() == 'DEBUG':
             #     self.logger.debug(f"Info for {object_name} inserted into {table_name}.")
         except Exception as e:
             self.logger.error(f"Error inserting info {object_name} into {table_name}.")
+            self.logger.error(e)
+            raise
+
+    def update_protocol(self, object_type, object_protocol_id, execution_success, execution_error_message, execution_results):
+        table_name = self.config_parser.get_protocol_name()
+        query = f"""
+        UPDATE "{self.protocol_schema}"."{table_name}"
+        SET execution_success = {'TRUE' if execution_success else 'FALSE'},
+        execution_error_message = '{execution_error_message}',
+        execution_results = '{execution_results}',
+        execution_timestamp = CURRENT_TIMESTAMP
+        WHERE object_protocol_id = {object_protocol_id} AND object_type = '{object_type}'
+        """
+        try:
+            self.protocol_connection.execute_query(query)
+            # if self.config_parser.get_log_level() == 'DEBUG':
+            #     self.logger.debug(f"Info for {object_protocol_id} updated in {table_name}.")
+        except Exception as e:
+            self.logger.error(f"Error updating info {object_protocol_id} in {table_name}.")
             self.logger.error(e)
             raise
 
@@ -503,12 +541,19 @@ class MigratorTables:
             INSERT INTO "{self.protocol_schema}"."{table_name}"
             (source_schema, source_table, source_table_id, source_columns, target_schema, target_table, target_columns, target_table_sql)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING *
         """
         params = (source_schema, source_table, source_table_id, source_columns_str, target_schema, target_table, target_columns_str, target_table_sql)
         try:
-            self.protocol_connection.execute_query(query, params)
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+
             # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Info for Table {source_table} inserted into {table_name}.")
+            #     self.logger.debug(f"(insert_tables) returned row: {row}")
+            table_row = self.decode_table_row(row)
+            self.insert_protocol('table', target_table, 'create', target_table_sql, None, None, None, 'info', None, table_row['id'])
         except Exception as e:
             self.logger.error(f"Error inserting table info {source_table} into {table_name}.")
             self.logger.error(f"Source columns: {source_columns}")
@@ -523,14 +568,18 @@ class MigratorTables:
             SET task_completed = CURRENT_TIMESTAMP,
             success = {'TRUE' if success else 'FALSE'}, message = '{message}'
             WHERE id = {row_id}
+            RETURNING *
         """
-        # if self.config_parser.get_log_level() == 'DEBUG':
-        #     self.logger.debug(f"update_table_status query: {query}")
         try:
-            self.protocol_connection.connection.cursor().execute(query)
-            self.protocol_connection.commit_transaction()
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query)
+            row = cursor.fetchone()
+            cursor.close()
+
             # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Status for table {row_id} in {table_name} updated.")
+            #     self.logger.debug(f"(update_table_status) returned row: {row}")
+            table_row = self.decode_table_row(row)
+            self.update_protocol('table', table_row['id'], success, message, None)
         except Exception as e:
             self.logger.error(f"Error updating status for table {row_id} in {table_name}.")
             self.logger.error(f"Query: {query}")
@@ -543,12 +592,19 @@ class MigratorTables:
             INSERT INTO "{self.protocol_schema}"."{table_name}"
             (source_schema, source_table, source_table_id, index_name, index_type, target_schema, target_table, index_sql, index_columns)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING *
         """
         params = (source_schema, source_table, source_table_id, index_name, index_type, target_schema, target_table, index_sql, index_columns)
         try:
-            self.protocol_connection.execute_query(query, params)
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+
             # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Info for Index {index_name} inserted into {table_name}.")
+            #     self.logger.debug(f"Returned row: {row}")
+            index_row = self.decode_index_row(row)
+            self.insert_protocol('index', index_name, 'create', index_sql, None, None, None, 'info', None, index_row['id'])
         except Exception as e:
             self.logger.error(f"Error inserting index info {index_name} into {table_name}.")
             self.logger.error(e)
@@ -561,14 +617,18 @@ class MigratorTables:
             SET task_completed = CURRENT_TIMESTAMP,
             success = {'TRUE' if success else 'FALSE'}, message = '{message}'
             WHERE id = {row_id}
+            RETURNING *
         """
-        # if self.config_parser.get_log_level() == 'DEBUG':
-        #     self.logger.debug(f"update_index_status query: {query}")
         try:
-            self.protocol_connection.connection.cursor().execute(query)
-            self.protocol_connection.commit_transaction()
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query)
+            row = cursor.fetchone()
+            cursor.close()
+
             # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Status for index {row_id} in {table_name} updated.")
+            #     self.logger.debug(f"Returned row: {row}")
+            index_row = self.decode_index_row(row)
+            self.update_protocol('index', index_row['id'], success, message, None)
         except Exception as e:
             self.logger.error(f"Error updating status for index {row_id} in {table_name}.")
             self.logger.error(f"Query: {query}")
@@ -581,12 +641,19 @@ class MigratorTables:
             INSERT INTO "{self.protocol_schema}"."{table_name}"
             (source_schema, source_table, source_table_id, constraint_name, constraint_type, target_schema, target_table, constraint_sql)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING *
         """
         params = (source_schema, source_table, source_table_id, constraint_name, constraint_type, target_schema, target_table, constraint_sql)
         try:
-            self.protocol_connection.execute_query(query, params)
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+
             # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Info for Constraint {constraint_name} inserted into {table_name}.")
+            #     self.logger.debug(f"Returned row: {row}")
+            constraint_row = self.decode_constraint_row(row)
+            self.insert_protocol('constraint', constraint_name, 'create', constraint_sql, None, None, None, 'info', None, constraint_row['id'])
         except Exception as e:
             self.logger.error(f"Error inserting constraint info {constraint_name} into {table_name}.")
             self.logger.error(f"Query: {query}")
@@ -600,14 +667,18 @@ class MigratorTables:
             SET task_completed = CURRENT_TIMESTAMP,
             success = {'TRUE' if success else 'FALSE'}, message = '{message}'
             WHERE id = {row_id}
+            RETURNING *
         """
-        # if self.config_parser.get_log_level() == 'DEBUG':
-        #     self.logger.debug(f"update_constraint_status query: {query}")
         try:
-            self.protocol_connection.connection.cursor().execute(query)
-            self.protocol_connection.commit_transaction()
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query)
+            row = cursor.fetchone()
+            cursor.close()
+
             # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Status for constraint {row_id} in {table_name} updated.")
+            #     self.logger.debug(f"Returned row: {row}")
+            constraint_row = self.decode_constraint_row(row)
+            self.update_protocol('constraint', constraint_row['id'], success, message, None)
         except Exception as e:
             self.logger.error(f"Error updating status for constraint {row_id} in {table_name}.")
             self.logger.error(f"Query: {query}")
@@ -620,12 +691,19 @@ class MigratorTables:
             INSERT INTO "{self.protocol_schema}"."{table_name}"
             (source_schema, source_funcproc_name, source_funcproc_id, source_funcproc_sql, target_schema, target_funcproc_name, target_funcproc_sql)
             VALUES (%s, %s, %s, %s, %s, %s, %s)
+            RETURNING *
         """
         params = (source_schema, source_funcproc_name, source_funcproc_id, source_funcproc_sql, target_schema, target_funcproc_name, target_funcproc_sql)
         try:
-            self.protocol_connection.execute_query(query, params)
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+
             # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Info for Funcproc {source_funcproc_name} inserted into {table_name}.")
+            #     self.logger.debug(f"Returned row: {row}")
+            funcproc_row = self.decode_funcproc_row(row)
+            self.insert_protocol('funcproc', source_funcproc_name, 'create', target_funcproc_sql, None, None, None, 'info', None, funcproc_row['id'])
         except Exception as e:
             self.logger.error(f"Error inserting funcproc info {source_funcproc_name} into {table_name}.")
             self.logger.error(e)
@@ -638,14 +716,18 @@ class MigratorTables:
             SET task_completed = CURRENT_TIMESTAMP,
             success = {'TRUE' if success else 'FALSE'}, message = '{message}'
             WHERE source_funcproc_id = {funcproc_id}
+            RETURNING *
         """
-        # if self.config_parser.get_log_level() == 'DEBUG':
-        #     self.logger.debug(f"update_funcproc_status query: {query}")
         try:
-            self.protocol_connection.execute_query(query)
-            self.protocol_connection.commit_transaction()
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query)
+            row = cursor.fetchone()
+            cursor.close()
+
             # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Status for funcproc_id {funcproc_id} in {table_name} updated.")
+            #     self.logger.debug(f"Returned row: {row}")
+            funcproc_row = self.decode_funcproc_row(row)
+            self.update_protocol('funcproc', funcproc_row['id'], success, message, None)
         except Exception as e:
             self.logger.error(f"Error updating status for funcproc {funcproc_id} in {table_name}.")
             self.logger.error(f"Query: {query}")
@@ -658,12 +740,19 @@ class MigratorTables:
             INSERT INTO "{self.protocol_schema}"."{table_name}"
             (sequence_id, schema_name, table_name, column_name, sequence_name, set_sequence_sql)
             VALUES (%s, %s, %s, %s, %s, %s)
+            RETURNING *
         """
         params = (sequence_id, schema_name, table_name, column_name, sequence_name, set_sequence_sql)
         try:
-            self.protocol_connection.execute_query(query, params)
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+
             # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Info for Sequence {sequence_name} inserted into {table_name}.")
+            #     self.logger.debug(f"Returned row: {row}")
+            sequence_row = self.decode_sequence_row(row)
+            self.insert_protocol('sequence', sequence_name, 'create', set_sequence_sql, None, None, None, 'info', None, sequence_row['sequence_id'])
         except Exception as e:
             self.logger.error(f"Error inserting sequence info {sequence_name} into {table_name}.")
             self.logger.error(e)
@@ -676,32 +765,43 @@ class MigratorTables:
             SET task_completed = CURRENT_TIMESTAMP,
             success = {'TRUE' if success else 'FALSE'}, message = '{message}'
             WHERE sequence_id = {sequence_id}
+            RETURNING *
         """
-        # if self.config_parser.get_log_level() == 'DEBUG':
-        #     self.logger.debug(f"update_sequence_status query: {query}")
         try:
-            self.protocol_connection.connection.cursor().execute(query)
-            self.protocol_connection.commit_transaction()
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query)
+            row = cursor.fetchone()
+            cursor.close()
+
             # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Status for sequence {row_id} in {table_name} updated.")
+            #     self.logger.debug(f"Returned row: {row}")
+            sequence_row = self.decode_sequence_row(row)
+            self.update_protocol('sequence', sequence_row['sequence_id'], success, message, None)
         except Exception as e:
             self.logger.error(f"Error updating status for sequence_if {sequence_id} in {table_name}.")
             self.logger.error(f"Query: {query}")
             self.logger.error(e)
             raise
 
-    def insert_trigger(self, source_schema, source_table, source_table_id, target_schema, target_table, trigger_id, trigger_name, trigger_event, trigger_new, trigger_old, trigger_sql):
+    def insert_trigger(self, source_schema, source_table, source_table_id, target_schema, target_table, trigger_id, trigger_name, trigger_event, trigger_new, trigger_old, trigger_source_sql, trigger_target_sql):
         table_name = self.config_parser.get_protocol_name_triggers()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
-            (source_schema, source_table, source_table_id, target_schema, target_table, trigger_id, trigger_name, trigger_event, trigger_new, trigger_old, trigger_sql)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (source_schema, source_table, source_table_id, target_schema, target_table, trigger_id, trigger_name, trigger_event, trigger_new, trigger_old, trigger_source_sql, trigger_target_sql)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING *
         """
-        params = (source_schema, source_table, source_table_id, target_schema, target_table, trigger_id, trigger_name, trigger_event, trigger_new, trigger_old, trigger_sql)
+        params = (source_schema, source_table, source_table_id, target_schema, target_table, trigger_id, trigger_name, trigger_event, trigger_new, trigger_old, trigger_source_sql, trigger_target_sql)
         try:
-            self.protocol_connection.execute_query(query, params)
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+
             # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Info for Trigger {trigger_name} inserted into {table_name}.")
+            #     self.logger.debug(f"Returned row: {row}")
+            trigger_row = self.decode_trigger_row(row)
+            self.insert_protocol('trigger', trigger_name, 'create', trigger_target_sql, None, None, None, 'info', None, trigger_row['id'])
         except Exception as e:
             self.logger.error(f"Error inserting trigger info {trigger_name} into {table_name}.")
             self.logger.error(e)
@@ -714,14 +814,18 @@ class MigratorTables:
             SET task_completed = CURRENT_TIMESTAMP,
             success = {'TRUE' if success else 'FALSE'}, message = '{message}'
             WHERE id = {row_id}
+            RETURNING *
         """
-        # if self.config_parser.get_log_level() == 'DEBUG':
-        #     self.logger.debug(f"update_trigger_status query: {query}")
         try:
-            self.protocol_connection.connection.cursor().execute(query)
-            self.protocol_connection.commit_transaction()
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query)
+            row = cursor.fetchone()
+            cursor.close()
+
             # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Status for trigger {row_id} in {table_name} updated.")
+            #     self.logger.debug(f"Returned row: {row}")
+            trigger_row = self.decode_trigger_row(row)
+            self.update_protocol('trigger', trigger_row['id'], success, message, None)
         except Exception as e:
             self.logger.error(f"Error updating status for trigger {row_id} in {table_name}.")
             self.logger.error(f"Query: {query}")
@@ -750,12 +854,19 @@ class MigratorTables:
             INSERT INTO "{self.protocol_schema}"."{table_name}"
             (source_schema, source_view_name, source_view_id, source_view_sql, target_schema, target_view_name, target_view_sql)
             VALUES (%s, %s, %s, %s, %s, %s, %s)
+            RETURNING *
         """
         params = (source_schema, source_view_name, source_view_id, source_view_sql, target_schema, target_view_name, target_view_sql)
         try:
-            self.protocol_connection.execute_query(query, params)
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+
             # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Info for View {source_view_name} inserted into {table_name}.")
+            #     self.logger.debug(f"Returned row: {row}")
+            view_row = self.decode_view_row(row)
+            self.insert_protocol('view', source_view_name, 'create', target_view_sql, None, None, None, 'info', None, view_row['id'])
         except Exception as e:
             self.logger.error(f"Error inserting view info {source_view_name} into {table_name}.")
             self.logger.error(e)
@@ -784,14 +895,18 @@ class MigratorTables:
             SET task_completed = CURRENT_TIMESTAMP,
             success = {'TRUE' if success else 'FALSE'}, message = '{message}'
             WHERE id = {row_id}
+            RETURNING *
         """
-        # if self.config_parser.get_log_level() == 'DEBUG':
-        #     self.logger.debug(f"update_view_status query: {query}")
         try:
-            self.protocol_connection.connection.cursor().execute(query)
-            self.protocol_connection.commit_transaction()
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query)
+            row = cursor.fetchone()
+            cursor.close()
+
             # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Status for view {row_id} in {table_name} updated.")
+            #     self.logger.debug(f"Returned row: {row}")
+            view_row = self.decode_view_row(row)
+            self.update_protocol('view', view_row['id'], success, message, None)
         except Exception as e:
             self.logger.error(f"Error updating status for view {row_id} in {table_name}.")
             self.logger.error(f"Query: {query}")

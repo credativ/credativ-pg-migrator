@@ -110,6 +110,17 @@ class Planner:
                         self.logger.debug(f"Triggers: {triggers}")
                     if triggers:
                         for _, trigger_details in triggers.items():
+
+                            settings = {
+                                'source_schema': self.config_parser.get_source_schema(),
+                                'target_schema': self.config_parser.get_target_schema(),
+                            }
+                            converted_code = self.source_connection.convert_trigger(trigger_details['sql'], settings)
+
+                            if self.config_parser.get_log_level() == 'DEBUG':
+                                self.logger.debug(f"Source trigger code: {trigger_details['sql']}")
+                                self.logger.debug(f"Converted trigger code: {converted_code}")
+
                             self.migrator_tables.insert_trigger(
                                 self.source_schema,
                                 table_info['table_name'],
@@ -121,7 +132,8 @@ class Planner:
                                 trigger_details['event'],
                                 trigger_details['new'],
                                 trigger_details['old'],
-                                trigger_details['sql']
+                                trigger_details['sql'],
+                                converted_code
                             )
                         self.logger.info(f"Trigger {trigger_details['name']} for table {table_info['table_name']}")
                     else:

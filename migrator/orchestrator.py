@@ -109,7 +109,6 @@ class Orchestrator:
                         for future in done:
                             table_done = futures[future]
                             if future.result() == False:
-                                self.migrator_tables.update_table_status(table_done['id'], False, 'ERROR in migration - see log')
                                 if self.on_error_action == 'stop':
                                     self.logger.error("Stopping execution due to error.")
                                     exit(1)
@@ -126,7 +125,6 @@ class Orchestrator:
                 for future in concurrent.futures.as_completed(futures):
                     table_done = futures[future]
                     if future.result() == False:
-                        self.migrator_tables.update_table_status(table_done['id'], False, 'ERROR in migration - see log')
                         if self.on_error_action == 'stop':
                             self.logger.error("Stopping execution due to error.")
                             exit(1)
@@ -156,7 +154,6 @@ class Orchestrator:
                         for future in done:
                             index_done = futures[future]
                             if future.result() == False:
-                                self.migrator_tables.update_index_status(index_done['id'], False, 'ERROR in index creation - see log')
                                 if self.on_error_action == 'stop':
                                     self.logger.error("Stopping execution due to error.")
                                     exit(1)
@@ -172,7 +169,6 @@ class Orchestrator:
                 for future in concurrent.futures.as_completed(futures):
                     index_done = futures[future]
                     if future.result() == False:
-                        self.migrator_tables.update_index_status(index_done['id'], False, 'ERROR in index creation - see log')
                         if self.on_error_action == 'stop':
                             self.logger.error("Stopping execution due to error.")
                             exit(1)
@@ -202,7 +198,6 @@ class Orchestrator:
                         for future in done:
                             constraint_done = futures[future]
                             if future.result() == False:
-                                self.migrator_tables.update_constraint_status(constraint_done['id'], False, 'ERROR in constraint creation - see log')
                                 if self.on_error_action == 'stop':
                                     self.logger.error("Stopping execution due to error.")
                                     exit(1)
@@ -218,7 +213,6 @@ class Orchestrator:
                 for future in concurrent.futures.as_completed(futures):
                     constraint_done = futures[future]
                     if future.result() == False:
-                        self.migrator_tables.update_constraint_status(constraint_done['id'], False, 'ERROR in constraint creation - see log')
                         if self.on_error_action == 'stop':
                             self.logger.error("Stopping execution due to error.")
                             exit(1)
@@ -339,6 +333,7 @@ class Orchestrator:
                 worker_target_connection.disconnect()
             except Exception as e:
                 pass
+            self.migrator_tables.update_table_status(table_data['id'], False, f'ERROR: {e_main}')
             self.handle_error(e_main, f"table_worker {worker_id} ({part_name}) {target_table}")
             return False
 
@@ -367,6 +362,7 @@ class Orchestrator:
             worker_target_connection.disconnect()
             return True
         except Exception as e:
+            self.migrator_tables.update_index_status(index_data['id'], False, f'ERROR: {e}')
             self.handle_error(e, f"index_worker {worker_id} {index_name}")
             return False
 
@@ -395,6 +391,7 @@ class Orchestrator:
             worker_target_connection.disconnect()
             return True
         except Exception as e:
+            self.migrator_tables.update_constraint_status(constraint_data['id'], False, f'ERROR: {e}')
             self.handle_error(e, f"constraint_worker {worker_id} {constraint_name}")
             return False
 

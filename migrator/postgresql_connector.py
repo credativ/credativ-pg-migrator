@@ -346,9 +346,22 @@ class PostgreSQLConnector(DatabaseConnector):
                 # if self.config_parser.get_log_level() == 'DEBUG':
                 #     self.logger.debug(f"Insert query: {insert_query}")
                 self.connection.autocommit = False
-                psycopg2.extras.execute_batch(cursor, insert_query, data)
+                try:
+                    psycopg2.extras.execute_batch(cursor, insert_query, data)
+                except psycopg2.Error as e:
+                    self.logger.error(f"Error inserting batch data: {e}")
+                    self.logger.error(f"Trying to insert row by row.")
+                    self.connection.rollback()
+                    for row in data:
+                        try:
+                            cursor.execute(insert_query, row)
+                            self.connection.commit()
+                        except psycopg2.Error as e:
+                            self.connection.rollback()
+                            self.logger.error(f"Error inserting row: {row}")
+
         except psycopg2.Error as e:
-            self.logger.error(f"Error inserting batch data: {e}")
+            self.logger.error(f"Error befor inserting batch data: {e}")
             raise
         finally:
             self.connection.commit()

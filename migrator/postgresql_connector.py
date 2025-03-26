@@ -5,7 +5,6 @@ from database_connector import DatabaseConnector
 from migrator_logging import MigratorLogger
 import traceback
 import re
-import polars as pl
 
 class PostgreSQLConnector(DatabaseConnector):
     def __init__(self, config_parser, source_or_target):
@@ -297,23 +296,26 @@ class PostgreSQLConnector(DatabaseConnector):
                         self.logger.debug(f"Worker {worker_id}: Fetching data with query: {query}")
 
                     part_name = f'do fetch data: {source_table} - {offset}'
-                    df = pl.read_database(query, self.connection).to_pandas()
-                    # if df.is_empty():
-                    if df.empty:
+
+                    cursor = self.connection.cursor()
+                    cursor.execute(query)
+                    rows = cursor.fetchall()
+                    cursor.close()
+                    if not rows:
                         break
 
-                    self.logger.info(f"Worker {worker_id}: Fetched {len(df)} rows from {source_schema}.{source_table}.")
-                    records = df.to_dict()
-
-                    for record in records:
+                    records = []
+                    for row in rows:
+                        record = {}
                         for order_num, column in source_columns.items():
                             column_name = column['name']
                             column_type = column['type']
                             if column_type in ['bytea']:
-                                record[column_name] = record[column_name].tobytes()
+                                record[column_name] = row[int(order_num) - 1].tobytes()
+                            else:
+                                record[column_name] = row[int(order_num) - 1]
+                        records.append(record)
 
-                    # if self.config_parser.get_log_level() == 'DEBUG':
-                    #     self.logger.debug(f"Worker {worker_id}: fetched data: {records}")
                     part_name = f'insert data: {source_table} - {offset}: {len(records)} rows'
                     migrate_target_connection.insert_batch(target_schema, target_table, target_columns, records)
                     self.logger.info(f"Worker {worker_id}: Inserted {len(records)} rows into {target_schema}.{target_table}.")
@@ -341,8 +343,8 @@ class PostgreSQLConnector(DatabaseConnector):
             with self.connection.cursor() as cursor:
                 column_names = [f'"{columns[col]["name"]}"' for col in sorted(columns.keys())]
                 insert_query = sql.SQL(f"""INSERT INTO "{table_schema}"."{table_name}" ({', '.join(column_names)}) VALUES ({', '.join(['%s' for _ in column_names])})""")
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"Insert query: {insert_query}")
+                # if self.config_parser.get_log_level() == 'DEBUG':
+                #     self.logger.debug(f"Insert query: {insert_query}")
                 self.connection.autocommit = False
                 psycopg2.extras.execute_batch(cursor, insert_query, data)
         except psycopg2.Error as e:

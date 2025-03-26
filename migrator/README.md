@@ -18,6 +18,10 @@ echo "" > ../logs/informix_sinter_20250310.log; python3 main.py --config=../conf
 
 echo "" > ../logs/sybase_1und1_ccd_20250320.log; python3 main.py --config=../config/sybase/sybase_1und1_ccd.yaml --log-file=../logs/sybase_1und1_ccd_20250320.log --log-level=DEBUG
 
+## OMDB
+
+echo "" > ../logs/omdb_20250326.log; python3 main.py --config=../tests/omdb/omdb.yaml --log-level=DEBUG --log-file=../logs/omdb_20250326.log
+
 ## Data check
 
 echo ""> ../logs/informix_iwadb_20250306_check.log; python3 data_check.py --config=../config/informix_iwadb.yaml --log-file=../logs/informix_iwadb_20250306_check.log --log-level=DEBUG

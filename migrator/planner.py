@@ -107,9 +107,11 @@ class Planner:
                 if self.config_parser.get_log_level() == 'DEBUG':
                     self.logger.debug(f"Target columns: {target_columns}")
                     self.logger.debug(f"Target table SQL: {target_table_sql}")
-                self.migrator_tables.insert_tables(self.source_schema, table_info['table_name'], table_info['id'], source_columns, self.target_schema, table_info['table_name'], target_columns, target_table_sql)
+                self.migrator_tables.insert_tables(self.source_schema, table_info['table_name'], table_info['id'], source_columns,
+                                                   self.target_schema, table_info['table_name'], target_columns, target_table_sql, table_info['comment'])
             except Exception as e:
-                self.migrator_tables.insert_tables(self.source_schema, table_info['table_name'], table_info['id'], source_columns, self.target_schema, table_info['table_name'], target_columns, target_table_sql)
+                self.migrator_tables.insert_tables(self.source_schema, table_info['table_name'], table_info['id'], source_columns,
+                                                   self.target_schema, table_info['table_name'], target_columns, target_table_sql, table_info['comment'])
                 self.handle_error(e, f"Table {table_info['table_name']}")
                 continue
 
@@ -128,7 +130,8 @@ class Planner:
                             self.target_schema,
                             table_info['table_name'],
                             index_details['sql'],
-                            index_details['columns']
+                            index_details['columns'],
+                            index_details['comment']
                         )
                     self.logger.info(f"Index {index_details['name']} for table {table_info['table_name']}")
                 else:
@@ -150,7 +153,8 @@ class Planner:
                             constraint_details['type'],
                             self.target_schema,
                             table_info['table_name'],
-                            constraint_details['sql']
+                            constraint_details['sql'],
+                            constraint_details['comment']
                         )
                     self.logger.info(f"Constraint {constraint_details['name']} for table {table_info['table_name']}")
                 else:
@@ -187,7 +191,8 @@ class Planner:
                             trigger_details['new'],
                             trigger_details['old'],
                             trigger_details['sql'],
-                            converted_code
+                            converted_code,
+                            trigger_details['comment']
                         )
                     self.logger.info(f"Trigger {trigger_details['name']} for table {table_info['table_name']}")
                 else:
@@ -216,7 +221,8 @@ class Planner:
                 converted_view_sql = self.source_connection.convert_view_code(view_sql, settings)
                 if self.config_parser.get_log_level() == 'DEBUG':
                     self.logger.debug(f"Converted view SQL: {converted_view_sql}")
-                self.migrator_tables.insert_view(self.source_schema, view_info['view_name'], view_info['id'], view_sql, self.target_schema, view_info['view_name'], converted_view_sql)
+                self.migrator_tables.insert_view(self.source_schema, view_info['view_name'], view_info['id'], view_sql,
+                                                 self.target_schema, view_info['view_name'], converted_view_sql, view_info['comment'])
                 self.logger.info(f"View {view_info['view_name']} processed successfully.")
             self.logger.info("Views processed successfully.")
         else:
@@ -235,7 +241,8 @@ class Planner:
             converted_type_sql = type_sql.replace(f'{self.source_schema}.', f'{self.target_schema}.')
             if self.config_parser.get_log_level() == 'DEBUG':
                 self.logger.debug(f"Converted type SQL: {converted_type_sql}")
-            self.migrator_tables.insert_user_defined_type(self.source_schema, type_info['type_name'], type_sql, self.target_schema, type_info['type_name'], converted_type_sql)
+            self.migrator_tables.insert_user_defined_type(self.source_schema, type_info['type_name'], type_sql,
+                                                          self.target_schema, type_info['type_name'], converted_type_sql, type_info['comment'])
             self.logger.info(f"User defined type {type_info['type_name']} processed successfully.")
         self.logger.info("Planner - User defined types processed successfully.")
 

@@ -27,7 +27,10 @@ class PostgreSQLConnector(DatabaseConnector):
 
     def fetch_table_names(self, schema: str = 'public'):
         query = f"""
-            SELECT oid, relname
+            SELECT
+                oid,
+                relname,
+                obj_description(oid, 'pg_class') as table_comment
             FROM pg_class
             WHERE relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = '{schema}')
             AND relkind in ('r', 'p')
@@ -46,7 +49,8 @@ class PostgreSQLConnector(DatabaseConnector):
                 tables[order_num] = {
                     'id': row[0],
                     'schema_name': schema,
-                    'table_name': row[1]
+                    'table_name': row[1],
+                    'comment': row[2]
                 }
                 order_num += 1
             cursor.close()
@@ -72,7 +76,8 @@ class PostgreSQLConnector(DatabaseConnector):
                             THEN ''
                         ELSE 'NOT NULL' END AS nullable,
                         c.column_default,
-                        u.udt_schema||'.'||u.udt_name as full_udt_name
+                        u.udt_schema||'.'||u.udt_name as full_udt_name,
+                        col_description((c.schema_name||'.'||c.table_name)::regclass::oid, c.ordinal_position) as column_comment
                     FROM information_schema.columns c
                     LEFT JOIN information_schema.column_udt_usage u ON c.table_schema = u.table_schema
                         AND c.table_name = u.table_name
@@ -97,6 +102,7 @@ class PostgreSQLConnector(DatabaseConnector):
                     'length': row[3],
                     'nullable': row[4],
                     'default': row[5],
+                    'comment': row[7],
                     'other': other
                 }
             cursor.close()
@@ -117,7 +123,10 @@ class PostgreSQLConnector(DatabaseConnector):
             for col, info in columns.items():
                 converted_schema[col] = {
                     'name': info['name'],
-                    'nullable': info['nullable']
+                    'nullable': info['nullable'],
+                    'default': info['default'],
+                    'comment': info['comment'],
+                    'other': info['other']
                 }
                 if (info['length'] is not None
                     and info['type'].upper() in ('CHAR', 'VARCHAR', 'CHARACTER VARYING')):
@@ -125,7 +134,7 @@ class PostgreSQLConnector(DatabaseConnector):
                 else:
                     converted_schema[col]['type'] = info['type']
 
-            create_table_sql = ', '.join([(f'"{info["name"]}" {info["type"]} {info["nullable"]}').strip()
+            create_table_sql = ', '.join([(f'''"{info["name"]}" {info["type"]} {info["nullable"]} {'DEFAULT ' + info['default'] if info['default'] else ''}''').strip()
                                           for _, info in converted_schema.items()])
             create_table_sql = f"""CREATE TABLE "{table_schema}"."{table_name}" ({create_table_sql})"""
         else:
@@ -140,7 +149,8 @@ class PostgreSQLConnector(DatabaseConnector):
             SELECT
                 i.indexname,
                 i.indexdef,
-                coalesce(c.constraint_type, 'INDEX') as type
+                coalesce(c.constraint_type, 'INDEX') as type,
+                obj_description(i.indexrelid, 'pg_class') as index_comment
             FROM pg_indexes i
             JOIN pg_class t
             ON t.relnamespace::regnamespace::text = i.schemaname
@@ -170,7 +180,8 @@ class PostgreSQLConnector(DatabaseConnector):
                     'name': index_name,
                     'type': index_type,
                     'columns': columns,
-                    'sql': index_sql
+                    'sql': index_sql,
+                    'comment': row[3]
                 }
                 order_num += 1
             cursor.close()
@@ -205,7 +216,8 @@ class PostgreSQLConnector(DatabaseConnector):
                     THEN 'EXCLUSION'
                 ELSE contype
                 END as type,
-                pg_get_constraintdef(oid) as condef
+                pg_get_constraintdef(oid) as condef,
+                obj_description(oid, 'pg_constraint') as constraint_comment
             FROM pg_constraint
             WHERE conrelid = '{source_table_id}'::regclass
         """
@@ -223,7 +235,8 @@ class PostgreSQLConnector(DatabaseConnector):
                     'id': row[0],
                     'name': constraint_name,
                     'type': constraint_type,
-                    'sql': constraint_sql
+                    'sql': constraint_sql,
+                    'comment': row[4]
                 }
                 order_num += 1
             cursor.close()

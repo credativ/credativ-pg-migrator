@@ -260,6 +260,7 @@ class MigratorTables:
             target_schema_name TEXT,
             target_type_name TEXT,
             target_type_sql TEXT,
+            type_comment TEXT,
             task_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             task_started TIMESTAMP,
             task_completed TIMESTAMP,
@@ -270,15 +271,15 @@ class MigratorTables:
         # if self.config_parser.get_log_level() == 'DEBUG':
         #     self.logger.debug(f"User defined types table {table_name} created.")
 
-    def insert_user_defined_type(self, source_schema_name, source_type_name, source_type_sql, target_schema_name, target_type_name, target_type_sql):
+    def insert_user_defined_type(self, source_schema_name, source_type_name, source_type_sql, target_schema_name, target_type_name, target_type_sql, type_comment):
         table_name = self.config_parser.get_protocol_name_user_defined_types()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
-            (source_schema_name, source_type_name, source_type_sql, target_schema_name, target_type_name, target_type_sql)
-            VALUES (%s, %s, %s, %s, %s, %s)
+            (source_schema_name, source_type_name, source_type_sql, target_schema_name, target_type_name, target_type_sql, type_comment)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (source_schema_name, source_type_name, source_type_sql, target_schema_name, target_type_name, target_type_sql)
+        params = (source_schema_name, source_type_name, source_type_sql, target_schema_name, target_type_name, target_type_sql, type_comment)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -333,7 +334,8 @@ class MigratorTables:
             'source_type_sql': row[3],
             'target_schema_name': row[4],
             'target_type_name': row[5],
-            'target_type_sql': row[6]
+            'target_type_sql': row[6],
+            'type_comment': row[7]
         }
 
     def fetch_all_user_defined_types(self):
@@ -441,6 +443,7 @@ class MigratorTables:
             target_table TEXT,
             target_columns TEXT,
             target_table_sql TEXT,
+            table_comment TEXT,
             task_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             task_started TIMESTAMP,
             task_completed TIMESTAMP,
@@ -466,6 +469,7 @@ class MigratorTables:
             target_table TEXT,
             index_sql TEXT,
             index_columns TEXT,
+            index_comment TEXT,
             task_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             task_started TIMESTAMP,
             task_completed TIMESTAMP,
@@ -490,6 +494,7 @@ class MigratorTables:
             target_schema TEXT,
             target_table TEXT,
             constraint_sql TEXT,
+            constraint_comment TEXT,
             task_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             task_started TIMESTAMP,
             task_completed TIMESTAMP,
@@ -513,6 +518,7 @@ class MigratorTables:
             target_schema TEXT,
             target_funcproc_name TEXT,
             target_funcproc_sql TEXT,
+            funcproc_comment TEXT,
             task_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             task_started TIMESTAMP,
             task_completed TIMESTAMP,
@@ -561,6 +567,7 @@ class MigratorTables:
             trigger_row_statement TEXT,
             trigger_source_sql TEXT,
             trigger_target_sql TEXT,
+            trigger_comment TEXT,
             task_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             task_started TIMESTAMP,
             task_completed TIMESTAMP,
@@ -582,6 +589,7 @@ class MigratorTables:
             target_schema TEXT,
             target_view_name TEXT,
             target_view_sql TEXT,
+            view_comment TEXT,
             task_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             task_started TIMESTAMP,
             task_completed TIMESTAMP,
@@ -615,7 +623,8 @@ class MigratorTables:
             'target_schema': row[5],
             'target_table': row[6],
             'target_columns': json.loads(row[7]),
-            'target_table_sql': row[8]
+            'target_table_sql': row[8],
+            'table_comment': row[9]
         }
 
     def decode_index_row(self, row):
@@ -629,7 +638,8 @@ class MigratorTables:
             'target_schema': row[6],
             'target_table': row[7],
             'index_sql': row[8],
-            'index_columns': row[9]
+            'index_columns': row[9],
+            'index_comment': row[10]
         }
 
     def decode_constraint_row(self, row):
@@ -642,7 +652,8 @@ class MigratorTables:
             'constraint_type': row[5],
             'target_schema': row[6],
             'target_table': row[7],
-            'constraint_sql': row[8]
+            'constraint_sql': row[8],
+            'constraint_comment': row[9]
         }
 
     def decode_funcproc_row(self, row):
@@ -654,7 +665,8 @@ class MigratorTables:
             'source_funcproc_sql': row[4],
             'target_schema': row[5],
             'target_funcproc_name': row[6],
-            'target_funcproc_sql': row[7]
+            'target_funcproc_sql': row[7],
+            'funcproc_comment': row[8]
         }
 
     def decode_sequence_row(self, row):
@@ -682,7 +694,8 @@ class MigratorTables:
             'trigger_old': row[10],
             'trigger_row_statement': row[11],
             'trigger_source_sql': row[12],
-            'trigger_target_sql': row[13]
+            'trigger_target_sql': row[13],
+            'trigger_comment': row[14]
         }
 
     def decode_view_row(self, row):
@@ -694,7 +707,8 @@ class MigratorTables:
             'source_view_sql': row[4],
             'target_schema': row[5],
             'target_view_name': row[6],
-            'target_view_sql': row[7]
+            'target_view_sql': row[7],
+            'view_comment': row[8]
         }
 
     def insert_protocol(self, object_type, object_name, object_action, object_ddl, execution_timestamp, execution_success, execution_error_message, row_type, execution_results, object_protocol_id):
@@ -735,17 +749,17 @@ class MigratorTables:
             self.logger.error(e)
             raise
 
-    def insert_tables(self, source_schema, source_table, source_table_id, source_columns, target_schema, target_table, target_columns, target_table_sql):
+    def insert_tables(self, source_schema, source_table, source_table_id, source_columns, target_schema, target_table, target_columns, target_table_sql, table_comment):
         table_name = self.config_parser.get_protocol_name_tables()
         source_columns_str = json.dumps(source_columns)
         target_columns_str = json.dumps(target_columns)
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
-            (source_schema, source_table, source_table_id, source_columns, target_schema, target_table, target_columns, target_table_sql)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            (source_schema, source_table, source_table_id, source_columns, target_schema, target_table, target_columns, target_table_sql, table_comment)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (source_schema, source_table, source_table_id, source_columns_str, target_schema, target_table, target_columns_str, target_table_sql)
+        params = (source_schema, source_table, source_table_id, source_columns_str, target_schema, target_table, target_columns_str, target_table_sql, table_comment)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -794,15 +808,15 @@ class MigratorTables:
             self.logger.error(e)
             raise
 
-    def insert_indexes(self, source_schema, source_table, source_table_id, index_name, index_type, target_schema, target_table, index_sql, index_columns):
+    def insert_indexes(self, source_schema, source_table, source_table_id, index_name, index_type, target_schema, target_table, index_sql, index_columns, index_comment):
         table_name = self.config_parser.get_protocol_name_indexes()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
-            (source_schema, source_table, source_table_id, index_name, index_type, target_schema, target_table, index_sql, index_columns)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (source_schema, source_table, source_table_id, index_name, index_type, target_schema, target_table, index_sql, index_columns, index_comment)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (source_schema, source_table, source_table_id, index_name, index_type, target_schema, target_table, index_sql, index_columns)
+        params = (source_schema, source_table, source_table_id, index_name, index_type, target_schema, target_table, index_sql, index_columns, index_comment)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -849,15 +863,15 @@ class MigratorTables:
             self.logger.error(e)
             raise
 
-    def insert_constraints(self, source_schema, source_table, source_table_id, constraint_name, constraint_type, target_schema, target_table, constraint_sql):
+    def insert_constraints(self, source_schema, source_table, source_table_id, constraint_name, constraint_type, target_schema, target_table, constraint_sql, constraint_comment):
         table_name = self.config_parser.get_protocol_name_constraints()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
-            (source_schema, source_table, source_table_id, constraint_name, constraint_type, target_schema, target_table, constraint_sql)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            (source_schema, source_table, source_table_id, constraint_name, constraint_type, target_schema, target_table, constraint_sql, constraint_comment)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (source_schema, source_table, source_table_id, constraint_name, constraint_type, target_schema, target_table, constraint_sql)
+        params = (source_schema, source_table, source_table_id, constraint_name, constraint_type, target_schema, target_table, constraint_sql, constraint_comment)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -905,15 +919,15 @@ class MigratorTables:
             self.logger.error(e)
             raise
 
-    def insert_funcprocs(self, source_schema, source_funcproc_name, source_funcproc_id, source_funcproc_sql, target_schema, target_funcproc_name, target_funcproc_sql):
+    def insert_funcprocs(self, source_schema, source_funcproc_name, source_funcproc_id, source_funcproc_sql, target_schema, target_funcproc_name, target_funcproc_sql, funcproc_comment):
         table_name = self.config_parser.get_protocol_name_funcprocs()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
-            (source_schema, source_funcproc_name, source_funcproc_id, source_funcproc_sql, target_schema, target_funcproc_name, target_funcproc_sql)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            (source_schema, source_funcproc_name, source_funcproc_id, source_funcproc_sql, target_schema, target_funcproc_name, target_funcproc_sql, funcproc_comment)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (source_schema, source_funcproc_name, source_funcproc_id, source_funcproc_sql, target_schema, target_funcproc_name, target_funcproc_sql)
+        params = (source_schema, source_funcproc_name, source_funcproc_id, source_funcproc_sql, target_schema, target_funcproc_name, target_funcproc_sql, funcproc_comment)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -1016,15 +1030,15 @@ class MigratorTables:
             self.logger.error(e)
             raise
 
-    def insert_trigger(self, source_schema, source_table, source_table_id, target_schema, target_table, trigger_id, trigger_name, trigger_event, trigger_new, trigger_old, trigger_source_sql, trigger_target_sql):
+    def insert_trigger(self, source_schema, source_table, source_table_id, target_schema, target_table, trigger_id, trigger_name, trigger_event, trigger_new, trigger_old, trigger_source_sql, trigger_target_sql, trigger_comment):
         table_name = self.config_parser.get_protocol_name_triggers()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
-            (source_schema, source_table, source_table_id, target_schema, target_table, trigger_id, trigger_name, trigger_event, trigger_new, trigger_old, trigger_source_sql, trigger_target_sql)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (source_schema, source_table, source_table_id, target_schema, target_table, trigger_id, trigger_name, trigger_event, trigger_new, trigger_old, trigger_source_sql, trigger_target_sql, trigger_comment)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (source_schema, source_table, source_table_id, target_schema, target_table, trigger_id, trigger_name, trigger_event, trigger_new, trigger_old, trigger_source_sql, trigger_target_sql)
+        params = (source_schema, source_table, source_table_id, target_schema, target_table, trigger_id, trigger_name, trigger_event, trigger_new, trigger_old, trigger_source_sql, trigger_target_sql, trigger_comment)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -1087,15 +1101,15 @@ class MigratorTables:
             self.logger.error(e)
             return None
 
-    def insert_view(self, source_schema, source_view_name, source_view_id, source_view_sql, target_schema, target_view_name, target_view_sql):
+    def insert_view(self, source_schema, source_view_name, source_view_id, source_view_sql, target_schema, target_view_name, target_view_sql, view_comment):
         table_name = self.config_parser.get_protocol_name_views()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
-            (source_schema, source_view_name, source_view_id, source_view_sql, target_schema, target_view_name, target_view_sql)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            (source_schema, source_view_name, source_view_id, source_view_sql, target_schema, target_view_name, target_view_sql, view_comment)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (source_schema, source_view_name, source_view_id, source_view_sql, target_schema, target_view_name, target_view_sql)
+        params = (source_schema, source_view_name, source_view_id, source_view_sql, target_schema, target_view_name, target_view_sql, view_comment)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)

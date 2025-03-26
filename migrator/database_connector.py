@@ -45,6 +45,7 @@ class DatabaseConnector(ABC):
             'length': column_length,
             'nullable': column_nullable,
             'default': column_default_value,
+            'comment': column_comment,
             'other': specific_column_properties
             }
         }
@@ -83,6 +84,7 @@ class DatabaseConnector(ABC):
                 'type': index_type,   # INDEX, UNIQUE, PRIMARY KEY
                 'columns': "column_name1, column_name2, ..."
                 'sql': create_index_sql,
+                'comment': index_comment
                 }
             }
         """
@@ -96,7 +98,8 @@ class DatabaseConnector(ABC):
             { ordinary_number: {
                 'name': constraint_name:
                 'type': constraint_type,
-                'sql': create_constraint_sql
+                'sql': create_constraint_sql,
+                'comment': constraint_comment
                 }
             }
         """
@@ -113,7 +116,8 @@ class DatabaseConnector(ABC):
                 'event': trigger_event,
                 'new': referencing_new,
                 'old': referencing_old,
-                'sql': create_trigger_sql
+                'sql': create_trigger_sql,
+                'comment': trigger_comment
                 }
             }
         """
@@ -131,7 +135,8 @@ class DatabaseConnector(ABC):
         { ordinary_number: {
             'name': funcproc_name:
             'id': funcproc_id,
-            'type': 'FUNCTION' or 'PROCEDURE'
+            'type': 'FUNCTION' or 'PROCEDURE',
+            'comment': funcproc_comment
             }
         }
         """
@@ -177,7 +182,8 @@ class DatabaseConnector(ABC):
         { ordinary_number: {
             'id': view_id,
             'schema_name': schema_name,
-            'view_name': view_name
+            'view_name': view_name,
+            'comment': view_comment
             }
         }
         """
@@ -248,7 +254,8 @@ class DatabaseConnector(ABC):
         { ordinary_number: {
             'schema_name': schema_name,
             'type_name': type_name,
-            'sql': type_sql
+            'sql': type_sql,
+            'comment': type_comment
             }
         }
         """

@@ -312,6 +312,7 @@ class Orchestrator:
                     'target_schema': target_schema,
                     'target_table': target_table,
                     'target_columns': table_data['target_columns'],
+                    'table_comment': table_data['table_comment'],
                     'primary_key_columns': table_data['primary_key_columns'],
                     'batch_size': settings['batch_size'],
                 }

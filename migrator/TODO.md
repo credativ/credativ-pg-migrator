@@ -1,0 +1,2 @@
+- comments on all objects
+- data migration protocol

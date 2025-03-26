@@ -86,7 +86,8 @@ class PostgreSQLConnector(DatabaseConnector):
                     'type': row[2],
                     'length': row[3],
                     'nullable': row[4],
-                    'default': row[5]
+                    'default': row[5],
+                    'other': ''
                 }
             cursor.close()
             self.disconnect()
@@ -103,14 +104,19 @@ class PostgreSQLConnector(DatabaseConnector):
         converted_schema = {}
 
         if target_db_type == 'postgresql':
-            converted_schema = columns
+            for col, info in columns.items():
+                converted_schema[col] = {
+                    'name': info['name'],
+                    'nullable': info['nullable']
+                }
+                if (info['length'] is not None
+                    and info['type'].upper() in ('CHAR', 'VARCHAR', 'CHARACTER VARYING')):
+                    converted_schema[col]['type'] = f"{info['type']}({info['length']})"
+                else:
+                    converted_schema[col]['type'] = info['type']
 
-            create_table_sql = ", ".join([
-                f""""{col}" {info['type']}({info['length']}) {info['nullable']}""".strip()
-                if 'length' in info and info['length'] is not None and info['type'].upper() in ('CHAR', 'VARCHAR', 'CHARACTER VARYING')
-                else f""""{col}" {info['type']} {info['nullable']}"""
-                for col, info in converted_schema.items()
-            ])
+            create_table_sql = ', '.join([(f'"{info["name"]}" {info["type"]} {info["nullable"]}').strip()
+                                          for _, info in converted_schema.items()])
             create_table_sql = f"""CREATE TABLE "{table_schema}"."{table_name}" ({create_table_sql})"""
         else:
             raise ValueError(f"Unsupported target database type: {target_db_type}")
@@ -163,9 +169,29 @@ class PostgreSQLConnector(DatabaseConnector):
             raise
 
     def fetch_constraints(self, table_id: int, table_schema: str, table_name: str):
+        order_num = 1
+        constraints = {}
+        # c = check constraint, f = foreign key constraint, n = not-null constraint (domains only),
+        # p = primary key constraint, u = unique constraint, t = constraint trigger,
+        # x = exclusion constraint
         query = f"""
             SELECT
+                oid,
                 conname,
+                CASE WHEN contype = 'c'
+                    THEN 'CHECK'
+                WHEN contype = 'f'
+                    THEN 'FOREIGN KEY'
+                WHEN contype = 'p'
+                    THEN 'PRIMARY KEY'
+                WHEN contype = 'u'
+                    THEN 'UNIQUE'
+                WHEN contype = 't'
+                    THEN 'TRIGGER'
+                WHEN contype = 'x'
+                    THEN 'EXCLUSION'
+                ELSE contype
+                END as type,
                 pg_get_constraintdef(oid) as condef
             FROM pg_constraint
             WHERE conrelid = '{table_id}'::regclass
@@ -174,7 +200,14 @@ class PostgreSQLConnector(DatabaseConnector):
             self.connect()
             cursor = self.connection.cursor()
             cursor.execute(query)
-            constraints = {row[0]: {'constraint_type': row[1].split()[0], 'constraint_sql': row[1]} for row in cursor.fetchall()}
+            for row in cursor.fetchall():
+                constraints[order_num] = {
+                    'id': row[0],
+                    'name': row[1],
+                    'type': row[2],
+                    'sql': row[3]
+                }
+                order_num += 1
             cursor.close()
             self.disconnect()
             return constraints
@@ -343,10 +376,55 @@ class PostgreSQLConnector(DatabaseConnector):
         pass
 
     def fetch_views_names(self, source_schema: str):
-        pass
+        views = {}
+        order_num = 1
+        query = f"""
+            SELECT
+                oid,
+                relname as viewname
+            FROM pg_class
+            WHERE relkind = 'v'
+            AND relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = '{source_schema}')
+            AND relname NOT LIKE 'pg_%'
+            ORDER BY viewname
+        """
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            for row in cursor.fetchall():
+                views[order_num] = {
+                    'id': row[0],
+                    'schema_name': source_schema,
+                    'view_name': row[1]
+                }
+                order_num += 1
+            cursor.close()
+            self.disconnect()
+            return views
+        except psycopg2.Error as e:
+            self.logger.error(f"Error executing query: {query}")
+            self.logger.error(e)
+            raise
 
     def fetch_view_code(self, view_id: int):
-        pass
+        query = f"""
+            SELECT definition
+            FROM pg_views
+            WHERE oid = {view_id}
+        """
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            view_code = cursor.fetchone()[0]
+            cursor.close()
+            self.disconnect()
+            return view_code
+        except psycopg2.Error as e:
+            self.logger.error(f"Error executing query: {query}")
+            self.logger.error(e)
+            raise
 
     def convert_view_code(self, view_code: str, settings: dict):
-        pass
+        return view_code

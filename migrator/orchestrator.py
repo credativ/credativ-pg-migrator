@@ -25,6 +25,7 @@ class Orchestrator:
         try:
             self.logger.info("Starting orchestration...")
 
+            self.run_create_user_defined_types()
             self.run_migrate_tables()
             self.run_migrate_indexes()
             self.run_migrate_constraints()
@@ -136,6 +137,27 @@ class Orchestrator:
             self.logger.info("No tables to create.")
 
         self.migrator_tables.update_main_status('Orchestrator - tables migration', True, 'finished OK')
+
+    def run_create_user_defined_types(self):
+        self.migrator_tables.insert_main('Orchestrator - user defined types migration')
+        self.logger.info("Migrating user defined types.")
+        user_defined_types = self.migrator_tables.fetch_all_user_defined_types()
+        if len(user_defined_types) > 0:
+            for type_row in user_defined_types:
+                type_data = self.migrator_tables.decode_user_defined_type_row(type_row)
+                self.logger.info(f"Creating user defined type {type_data['target_type_name']} in target database.")
+                try:
+                    self.target_connection.connect()
+                    self.target_connection.execute_query(type_data['target_type_sql'])
+                    self.migrator_tables.update_user_defined_type_status(type_data['id'], True, 'migrated OK')
+                    self.logger.info(f"User defined type {type_data['target_type_name']} created successfully.")
+                    self.target_connection.disconnect()
+                except Exception as e:
+                    self.migrator_tables.update_user_defined_type_status(type_data['id'], False, f'ERROR: {e}')
+                    self.handle_error(e, f"create_user_defined_type {type_data['target_type_name']}")
+            self.logger.info("User defined types migrated successfully.")
+        else:
+            self.logger.info("No user defined types found to migrate.")
 
     def run_migrate_indexes(self):
         self.migrator_tables.insert_main('Orchestrator - indexes migration')

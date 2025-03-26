@@ -16,6 +16,7 @@ class MigratorTables:
     def create_all(self):
         self.create_protocol()
         self.create_table_for_main()
+        self.create_table_for_user_defined_types()
         self.create_table_for_tables()
         self.create_table_for_indexes()
         self.create_table_for_constraints()
@@ -246,6 +247,185 @@ class MigratorTables:
             'success': row[4],
             'message': row[5]
         }
+
+    def create_table_for_user_defined_types(self):
+        table_name = self.config_parser.get_protocol_name_user_defined_types()
+        self.protocol_connection.execute_query(self.drop_table_sql.format(protocol_schema=self.protocol_schema, table_name=table_name))
+        self.protocol_connection.execute_query(f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."{table_name}"
+            (id SERIAL PRIMARY KEY,
+            source_schema_name TEXT,
+            source_type_name TEXT,
+            source_type_sql TEXT,
+            target_schema_name TEXT,
+            target_type_name TEXT,
+            target_type_sql TEXT,
+            task_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            task_started TIMESTAMP,
+            task_completed TIMESTAMP,
+            success BOOLEAN,
+            message TEXT
+            )
+        """)
+        # if self.config_parser.get_log_level() == 'DEBUG':
+        #     self.logger.debug(f"User defined types table {table_name} created.")
+
+    def insert_user_defined_type(self, source_schema_name, source_type_name, source_type_sql, target_schema_name, target_type_name, target_type_sql):
+        table_name = self.config_parser.get_protocol_name_user_defined_types()
+        query = f"""
+            INSERT INTO "{self.protocol_schema}"."{table_name}"
+            (source_schema_name, source_type_name, source_type_sql, target_schema_name, target_type_name, target_type_sql)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            RETURNING *
+        """
+        params = (source_schema_name, source_type_name, source_type_sql, target_schema_name, target_type_name, target_type_sql)
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+
+            # if self.config_parser.get_log_level() == 'DEBUG':
+            #     self.logger.debug(f"Returned row: {row}")
+            user_defined_type_row = self.decode_user_defined_type_row(row)
+            self.insert_protocol('user_defined_type', target_type_name, 'create', target_type_sql, None, None, None, 'info', None, user_defined_type_row['id'])
+        except Exception as e:
+            self.logger.error(f"Error inserting user defined type {target_type_name} into {table_name}.")
+            self.logger.error(e)
+            raise
+
+    def update_user_defined_type_status(self, row_id, success, message):
+        table_name = self.config_parser.get_protocol_name_user_defined_types()
+        query = f"""
+            UPDATE "{self.protocol_schema}"."{table_name}"
+            SET task_completed = CURRENT_TIMESTAMP,
+            success = %s,
+            message = %s
+            WHERE id = %s
+            RETURNING *
+        """
+        params = ('TRUE' if success else 'FALSE', message, row_id)
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+
+            # if self.config_parser.get_log_level() == 'DEBUG':
+            #     self.logger.debug(f"Returned row: {row}")
+            if row:
+                user_defined_type_row = self.decode_user_defined_type_row(row)
+                self.update_protocol('user_defined_type', user_defined_type_row['id'], success, message, None)
+            else:
+                self.logger.error(f"Error updating status for user defined type {row_id} in {table_name}.")
+                self.logger.error(f"Error: No protocol row returned.")
+        except Exception as e:
+            self.logger.error(f"Error updating status for user defined type {row_id} in {table_name}.")
+            self.logger.error(f"Query: {query}")
+            self.logger.error(e)
+            raise
+
+    def decode_user_defined_type_row(self, row):
+        return {
+            'id': row[0],
+            'source_schema_name': row[1],
+            'source_type_name': row[2],
+            'source_type_sql': row[3],
+            'target_schema_name': row[4],
+            'target_type_name': row[5],
+            'target_type_sql': row[6]
+        }
+
+    def fetch_all_user_defined_types(self):
+        table_name = self.config_parser.get_protocol_name_user_defined_types()
+        query = f"""
+            SELECT *
+            FROM "{self.protocol_schema}"."{table_name}" ORDER BY id
+        """
+        cursor = self.protocol_connection.connection.cursor()
+        cursor.execute(query)
+        rows = cursor.fetchall()
+        cursor.close()
+        return rows
+
+    def create_table_for_data_migration(self):
+        table_name = self.config_parser.get_protocol_name_data_migration()
+        self.protocol_connection.execute_query(self.drop_table_sql.format(protocol_schema=self.protocol_schema, table_name=table_name))
+        self.protocol_connection.execute_query(f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."{table_name}"
+            (id SERIAL PRIMARY KEY,
+            source_schema TEXT,
+            source_table TEXT,
+            source_table_id INTEGER,
+            source_table_rows BIGINT    ,
+            target_schema TEXT,
+            target_table TEXT,
+            target_table_rows BIGINT,
+            task_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            task_started TIMESTAMP,
+            task_completed TIMESTAMP,
+            success BOOLEAN,
+            message TEXT
+            )
+        """)
+        # if self.config_parser.get_log_level() == 'DEBUG':
+        #     self.logger.debug(f"Data migration table {table_name} created.")
+
+    def insert_data_migration(self, source_schema, source_table, source_table_id, source_table_rows, target_schema, target_table, target_table_rows):
+        table_name = self.config_parser.get_protocol_name_data_migration()
+        query = f"""
+            INSERT INTO "{self.protocol_schema}"."{table_name}"
+            (source_schema, source_table, source_table_id, source_table_rows, target_schema, target_table, target_table_rows)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            RETURNING *
+        """
+        params = (source_schema, source_table, source_table_id, source_table_rows, target_schema, target_table, target_table_rows)
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+
+            # if self.config_parser.get_log_level() == 'DEBUG':
+            #     self.logger.debug(f"Returned row: {row}")
+            data_migration_row = self.decode_data_migration_row(row)
+            self.insert_protocol('data_migration', target_table, 'create', None, None, None, None, 'info', None, data_migration_row['id'])
+        except Exception as e:
+            self.logger.error(f"Error inserting data migration {target_table} into {table_name}.")
+            self.logger.error(e)
+            raise
+
+    def update_data_migration_status(self, row_id, success, message, target_table_rows):
+        table_name = self.config_parser.get_protocol_name_data_migration()
+        query = f"""
+            UPDATE "{self.protocol_schema}"."{table_name}"
+            SET task_completed = CURRENT_TIMESTAMP,
+            success = %s,
+            message = %s,
+            target_table_rows = %s
+            WHERE id = %s
+            RETURNING *
+        """
+        params = ('TRUE' if success else 'FALSE', message, target_table_rows, row_id)
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+
+            # if self.config_parser.get_log_level() == 'DEBUG':
+            #     self.logger.debug(f"Returned row: {row}")
+            if row:
+                data_migration_row = self.decode_data_migration_row(row)
+                self.update_protocol('data_migration', data_migration_row['id'], success, message, 'source rows: ' + str(data_migration_row['source_table_rows']) + ', target rows: ' + str(target_table_rows))
+            else:
+                self.logger.error(f"Error updating status for data migration {row_id} in {table_name}.")
+                self.logger.error(f"Error: No protocol row returned.")
+        except Exception as e:
+            self.logger.error(f"Error updating status for data migration {row_id} in {table_name}.")
+            self.logger.error(f"Query: {query}")
+            self.logger.error(e)
+            raise
 
     def create_table_for_tables(self):
         table_name = self.config_parser.get_protocol_name_tables()
@@ -1064,6 +1244,7 @@ class MigratorTables:
         self.logger.info("Migration time stats:")
         self.print_main(self.config_parser.get_protocol_name_main())
         self.logger.info("Migration summary:")
+        self.print_summary('User Defined Types', self.config_parser.get_protocol_name_user_defined_types())
         self.print_summary('Tables', self.config_parser.get_protocol_name_tables())
         self.print_summary('Indexes', self.config_parser.get_protocol_name_indexes(), 'index_type')
         self.print_summary('Constraints', self.config_parser.get_protocol_name_constraints(), 'constraint_type')

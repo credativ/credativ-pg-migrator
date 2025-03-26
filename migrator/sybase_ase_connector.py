@@ -797,3 +797,6 @@ class SybaseASEConnector(DatabaseConnector):
 
     def get_sequence_current_value(self, sequence_name):
         pass
+
+    def fetch_user_defined_types(self, schema: str):
+        pass

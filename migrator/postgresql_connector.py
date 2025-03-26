@@ -5,6 +5,7 @@ from database_connector import DatabaseConnector
 from migrator_logging import MigratorLogger
 import traceback
 import re
+import polars as pl
 
 class PostgreSQLConnector(DatabaseConnector):
     def __init__(self, config_parser, source_or_target):
@@ -62,18 +63,23 @@ class PostgreSQLConnector(DatabaseConnector):
         try:
             query =f"""
                     SELECT
-                        ordinal_position,
-                        column_name,
-                        data_type, /* udt_name, */
-                        CASE WHEN character_maximum_length IS NOT NULL
-                            THEN character_maximum_length
-                        ELSE numeric_precision END as length,
-                        CASE WHEN upper(is_nullable)='YES'
+                        c.ordinal_position,
+                        c.column_name,
+                        c.data_type,
+                        CASE WHEN c.character_maximum_length IS NOT NULL
+                            THEN c.character_maximum_length
+                        ELSE c.numeric_precision END as length,
+                        CASE WHEN upper(c.is_nullable)='YES'
                             THEN ''
                         ELSE 'NOT NULL' END AS nullable,
-                        column_default
-                    FROM information_schema.columns
-                    WHERE table_name = '{table_name}' AND table_schema = '{table_schema}'
+                        c.column_default,
+                        u.udt_schema||'.'||u.udt_name as full_udt_name
+                    FROM information_schema.columns c
+                    LEFT JOIN information_schema.column_udt_usage u ON c.table_schema = u.table_schema
+                        AND c.table_name = u.table_name
+                        AND c.column_name = u.column_name
+                        AND c.udt_name = u.udt_name
+                    WHERE c.table_name = '{table_name}' AND c.table_schema = '{table_schema}'
                 """
             self.connect()
             cursor = self.connection.cursor()
@@ -81,13 +87,18 @@ class PostgreSQLConnector(DatabaseConnector):
                 self.logger.debug(f"Reading columns for {table_name}")
             cursor.execute(query)
             for row in cursor.fetchall():
+                data_type = row[2].upper()
+                other = ''
+                if data_type == 'USER-DEFINED':
+                    data_type = row[6].upper()
+                    other = 'USER-DEFINED'
                 result[row[0]] = {
                     'name': row[1],
-                    'type': row[2],
+                    'type': data_type,
                     'length': row[3],
                     'nullable': row[4],
                     'default': row[5],
-                    'other': ''
+                    'other': other
                 }
             cursor.close()
             self.disconnect()
@@ -123,7 +134,7 @@ class PostgreSQLConnector(DatabaseConnector):
 
         return converted_schema, create_table_sql
 
-    def fetch_indexes(self, table_id: int, table_schema: str, table_name: str):
+    def fetch_indexes(self, source_table_id: int, target_schema, target_table_name):
         table_indexes = {}
         order_num = 1
         query = f"""
@@ -132,11 +143,14 @@ class PostgreSQLConnector(DatabaseConnector):
                 i.indexdef,
                 coalesce(c.constraint_type, 'INDEX') as type
             FROM pg_indexes i
+            JOIN pg_class t
+            ON t.relnamespace::regnamespace::text = i.schemaname
+            AND t.relname = i.tablename
             LEFT JOIN information_schema.table_constraints c
             ON i.schemaname = c.table_schema
                 and i.tablename = c.table_name
                 and i.indexname = c.constraint_name
-            WHERE i.schemaname = '{table_schema}' AND i.tablename = '{table_name}'
+            WHERE t.oid = {source_table_id}
         """
         # if self.config_parser.get_log_level() == 'DEBUG':
         #     self.logger.debug(f"Reading indexes for {table_name}")
@@ -148,27 +162,27 @@ class PostgreSQLConnector(DatabaseConnector):
             for row in cursor.fetchall():
                 columns_match = re.search(r'\((.*?)\)', row[1])
                 columns = columns_match.group(1) if columns_match else ''
+                index_name = row[0]
+                index_type = row[2]
+                index_sql = row[1]
+                if index_type == 'PRIMARY KEY':
+                    index_sql = f'ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{index_name}" PRIMARY KEY ({columns});'
                 table_indexes[order_num] = {
-                    'name': row[0],
-                    'type': row[2],
+                    'name': index_name,
+                    'type': index_type,
                     'columns': columns,
-                    'sql': row[1]
+                    'sql': index_sql
                 }
                 order_num += 1
-
-            if self.config_parser.get_log_level() == 'DEBUG':
-                self.logger.debug(f"Indexes: {table_indexes}")
-
             cursor.close()
             self.disconnect()
-
             return table_indexes
         except psycopg2.Error as e:
             self.logger.error(f"Error executing query: {query}")
             self.logger.error(e)
             raise
 
-    def fetch_constraints(self, table_id: int, table_schema: str, table_name: str):
+    def fetch_constraints(self, source_table_id: int, target_schema, target_table_name):
         order_num = 1
         constraints = {}
         # c = check constraint, f = foreign key constraint, n = not-null constraint (domains only),
@@ -182,7 +196,7 @@ class PostgreSQLConnector(DatabaseConnector):
                     THEN 'CHECK'
                 WHEN contype = 'f'
                     THEN 'FOREIGN KEY'
-                WHEN contype = 'p'
+                WHEN upper(contype) = 'P'
                     THEN 'PRIMARY KEY'
                 WHEN contype = 'u'
                     THEN 'UNIQUE'
@@ -194,18 +208,23 @@ class PostgreSQLConnector(DatabaseConnector):
                 END as type,
                 pg_get_constraintdef(oid) as condef
             FROM pg_constraint
-            WHERE conrelid = '{table_id}'::regclass
+            WHERE conrelid = '{source_table_id}'::regclass
         """
         try:
             self.connect()
             cursor = self.connection.cursor()
             cursor.execute(query)
             for row in cursor.fetchall():
+                constraint_name = row[1]
+                constraint_type = row[2]
+                constraint_sql = row[3]
+                if constraint_type in ('PRIMARY KEY', 'p', 'P'):
+                    continue # Primary key is handled in fetch_indexes
                 constraints[order_num] = {
                     'id': row[0],
-                    'name': row[1],
-                    'type': row[2],
-                    'sql': row[3]
+                    'name': constraint_name,
+                    'type': constraint_type,
+                    'sql': constraint_sql
                 }
                 order_num += 1
             cursor.close()
@@ -249,7 +268,59 @@ class PostgreSQLConnector(DatabaseConnector):
         self.connection.rollback()
 
     def migrate_table(self, migrate_target_connection, settings):
-        return 0
+        part_name = 'initialize'
+        try:
+            worker_id = settings['worker_id']
+            source_schema = settings['source_schema']
+            source_table = settings['source_table']
+            source_columns = settings['source_columns']
+            target_schema = settings['target_schema']
+            target_table = settings['target_table']
+            target_columns = settings['target_columns']
+            primary_key_columns = settings['primary_key_columns']
+            batch_size = settings['batch_size']
+
+            source_table_rows = self.get_rows_count(source_schema, source_table)
+            if source_table_rows == 0:
+                self.logger.info(f"Worker {worker_id}: Table {source_schema}.{source_table} has no rows. Skipping migration.")
+                return
+            else:
+                self.logger.info(f"Worker {worker_id}: Table {source_schema}.{source_table} has {source_table_rows} rows.")
+                offset = 0
+                while True:
+                    part_name = f'prepare fetch data: {source_table} - {offset}'
+                    if primary_key_columns:
+                        query = f"""SELECT * FROM "{source_schema}"."{source_table}" ORDER BY {primary_key_columns} LIMIT {batch_size} OFFSET {offset}"""
+                    else:
+                        query = f"""SELECT * FROM "{source_schema}"."{source_table}" ORDER BY ctid LIMIT {batch_size} OFFSET {offset}"""
+                    if self.config_parser.get_log_level() == 'DEBUG':
+                        self.logger.debug(f"Worker {worker_id}: Fetching data with query: {query}")
+
+                    part_name = f'do fetch data: {source_table} - {offset}'
+                    df = pl.read_database(query, self.connection)
+                    if df.is_empty():
+                        break
+
+                    self.logger.info(f"Worker {worker_id}: Fetched {len(df)} rows from {source_schema}.{source_table}.")
+                    records = df.to_dict()
+
+                    for record in records:
+                        for order_num, column in source_columns.items():
+                            column_name = column['name']
+                            column_type = column['type']
+                            if column_type in ['bytea']:
+                                record[column_name] = record[column_name].tobytes()
+
+                    part_name = f'insert data: {source_table} - {offset}'
+                    migrate_target_connection.insert_batch(target_schema, target_table, target_columns, records)
+                    self.logger.info(f"Worker {worker_id}: Inserted {len(records)} rows into {target_schema}.{target_table}.")
+                    offset += batch_size
+
+                self.logger.info(f"Worker {worker_id}: Finished migrating table {source_schema}.{source_table}.")
+                return source_table_rows
+        except Exception as e:
+            self.logger.error(f"Woker {worker_id}: Error in {part_name}: {e}")
+            raise e
 
     def insert_batch(self, table_schema: str, table_name: str, columns: dict, data: list):
         try:
@@ -428,3 +499,36 @@ class PostgreSQLConnector(DatabaseConnector):
 
     def convert_view_code(self, view_code: str, settings: dict):
         return view_code
+
+    def fetch_user_defined_types(self, schema: str):
+        user_defined_types = {}
+        order_num = 1
+        query = f"""
+            SELECT t.typnamespace::regnamespace::text as schemaname, typname as type_name,
+                'CREATE TYPE "'||t.typnamespace::regnamespace||'"."'||typname||'" As ENUM ('||string_agg(''''||e.enumlabel||'''', ',' ORDER BY e.enumsortorder)::text||');' AS elements
+            FROM pg_type AS t
+            LEFT JOIN pg_enum AS e ON e.enumtypid = t.oid
+            WHERE t.typnamespace::regnamespace::text NOT IN ('pg_catalog', 'information_schema')
+            AND t.typtype = 'e'
+            AND t.typcategory = 'E'
+            GROUP BY t.oid ORDER BY t.typnamespace::regnamespace, typname;
+        """
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            for row in rows:
+                user_defined_types[order_num] = {
+                    'schema_name': row[0],
+                    'type_name': row[1],
+                    'sql': row[2]
+                }
+                order_num += 1
+            cursor.close()
+            self.disconnect()
+            return user_defined_types
+        except psycopg2.Error as e:
+            self.logger.error(f"Error executing query: {query}")
+            self.logger.error(e)
+            raise

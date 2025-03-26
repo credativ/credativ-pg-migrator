@@ -121,8 +121,14 @@ class ConfigParser:
     def get_protocol_name_main(self):
         return f"{self.get_protocol_name()}_main"
 
+    def get_protocol_name_user_defined_types(self):
+        return f"{self.get_protocol_name()}_user_defined_types"
+
     def get_protocol_name_tables(self):
         return f"{self.get_protocol_name()}_tables"
+
+    def get_protocol_name_data_migration(self):
+        return f"{self.get_protocol_name()}_data_migration"
 
     def get_protocol_name_indexes(self):
         return f"{self.get_protocol_name()}_indexes"

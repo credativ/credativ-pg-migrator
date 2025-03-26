@@ -72,7 +72,7 @@ class DatabaseConnector(ABC):
         pass
 
     @abstractmethod
-    def fetch_indexes(self, table_id: int, table_schema: str, table_name: str):
+    def fetch_indexes(self, source_table_id: int, target_schema, target_table_name):
         """
         Fetch indexes for a table.
         Returned SQL for index creation must be compatible with the target database.
@@ -89,7 +89,7 @@ class DatabaseConnector(ABC):
         pass
 
     @abstractmethod
-    def fetch_constraints(self, table_id: int, table_schema: str, table_name: str):
+    def fetch_constraints(self, source_table_id: int, target_schema, target_table_name):
         """
         Fetch constraints for a table.
         Returns a dictionary:
@@ -239,3 +239,16 @@ class DatabaseConnector(ABC):
         Returns a number of rows in a table
         """
         pass
+
+    @abstractmethod
+    def fetch_user_defined_types(self, schema: str):
+        """
+        Returns user defined types in the specified schema / all schemas - depending on the database.
+        Returns: dict
+        { ordinary_number: {
+            'schema_name': schema_name,
+            'type_name': type_name,
+            'sql': type_sql
+            }
+        }
+        """

@@ -19,151 +19,15 @@ class Planner:
         self.target_schema = self.config_parser.get_target_schema()
         self.pre_script = self.config_parser.get_pre_migration_script()
         self.post_script = self.config_parser.get_post_migration_script()
+        self.user_defined_types = {}
 
     def create_plan(self):
         try:
             self.pre_planning()
 
-            source_tables = self.source_connection.fetch_table_names(self.source_schema)
-            include_tables = self.config_parser.get_include_tables()
-            exclude_tables = self.config_parser.get_exclude_tables() or []
-
-            if self.config_parser.get_log_level() == 'DEBUG':
-                self.logger.debug(f"Source schema: {self.source_schema}")
-                self.logger.debug(f"Source tables: {source_tables}")
-                self.logger.debug(f"Include tables: {include_tables}")
-                self.logger.debug(f"Exclude tables: {exclude_tables}")
-
-            for order_num, table_info in source_tables.items():
-                self.logger.info(f"Processing table ({order_num}/{table_info['id']}): {table_info['table_name']}")
-                if not any(fnmatch.fnmatch(table_info['table_name'], pattern) for pattern in include_tables):
-                    continue
-                if any(fnmatch.fnmatch(table_info['table_name'], pattern) for pattern in exclude_tables):
-                    self.logger.info(f"Table {table_info['table_name']} is excluded from migration.")
-                    continue
-
-                source_columns = []
-                target_columns = []
-                target_table_sql = None
-                try:
-                    source_columns = self.source_connection.fetch_table_columns(self.source_schema, table_info['table_name'], self.migrator_tables)
-                    if self.config_parser.get_log_level() == 'DEBUG':
-                        self.logger.debug(f"Source columns: {source_columns}")
-                    target_columns, target_table_sql = self.source_connection.convert_table_columns(self.config_parser.get_target_db_type(), self.target_schema, table_info['table_name'], source_columns)
-                    if self.config_parser.get_log_level() == 'DEBUG':
-                        self.logger.debug(f"Target columns: {target_columns}")
-                        self.logger.debug(f"Target table SQL: {target_table_sql}")
-                    self.migrator_tables.insert_tables(self.source_schema, table_info['table_name'], table_info['id'], source_columns, self.target_schema, table_info['table_name'], target_columns, target_table_sql)
-                except Exception as e:
-                    self.migrator_tables.insert_tables(self.source_schema, table_info['table_name'], table_info['id'], source_columns, self.target_schema, table_info['table_name'], target_columns, target_table_sql)
-                    self.handle_error(e, f"Table {table_info['table_name']}")
-                    continue
-
-                if self.config_parser.should_migrate_indexes():
-                    indexes = self.source_connection.fetch_indexes(table_info['id'], self.target_schema, table_info['table_name'])
-                    if self.config_parser.get_log_level() == 'DEBUG':
-                        self.logger.debug(f"Indexes: {indexes}")
-                    if indexes:
-                        for _, index_details in indexes.items():
-                            self.migrator_tables.insert_indexes(
-                                self.source_schema,
-                                table_info['table_name'],
-                                table_info['id'],
-                                index_details['name'],
-                                index_details['type'],
-                                self.target_schema,
-                                table_info['table_name'],
-                                index_details['sql'],
-                                index_details['columns']
-                            )
-                        self.logger.info(f"Index {index_details['name']} for table {table_info['table_name']}")
-                    else:
-                        self.logger.info(f"No indexes found for table {table_info['table_name']}.")
-                else:
-                    self.logger.info("Skipping index migration.")
-
-                if self.config_parser.should_migrate_constraints():
-                    constraints = self.source_connection.fetch_constraints(table_info['id'], self.target_schema, table_info['table_name'])
-                    if self.config_parser.get_log_level() == 'DEBUG':
-                        self.logger.debug(f"Constraints: {constraints}")
-                    if constraints:
-                        for _, constraint_details in constraints.items():
-                            self.migrator_tables.insert_constraints(
-                                self.source_schema,
-                                table_info['table_name'],
-                                table_info['id'],
-                                constraint_details['name'],
-                                constraint_details['type'],
-                                self.target_schema,
-                                table_info['table_name'],
-                                constraint_details['sql']
-                            )
-                        self.logger.info(f"Constraint {constraint_details['name']} for table {table_info['table_name']}")
-                    else:
-                        self.logger.info(f"No constraints found for table {table_info['table_name']}.")
-                else:
-                    self.logger.info("Skipping constraint migration.")
-
-                if self.config_parser.should_migrate_triggers():
-                    triggers = self.source_connection.fetch_triggers(table_info['id'], self.source_schema, table_info['table_name'])
-                    if self.config_parser.get_log_level() == 'DEBUG':
-                        self.logger.debug(f"Triggers: {triggers}")
-                    if triggers:
-                        for _, trigger_details in triggers.items():
-
-                            settings = {
-                                'source_schema': self.config_parser.get_source_schema(),
-                                'target_schema': self.config_parser.get_target_schema(),
-                            }
-                            converted_code = self.source_connection.convert_trigger(trigger_details['sql'], settings)
-
-                            if self.config_parser.get_log_level() == 'DEBUG':
-                                self.logger.debug(f"Source trigger code: {trigger_details['sql']}")
-                                self.logger.debug(f"Converted trigger code: {converted_code}")
-
-                            self.migrator_tables.insert_trigger(
-                                self.source_schema,
-                                table_info['table_name'],
-                                table_info['id'],
-                                self.target_schema,
-                                table_info['table_name'],
-                                trigger_details['id'],
-                                trigger_details['name'],
-                                trigger_details['event'],
-                                trigger_details['new'],
-                                trigger_details['old'],
-                                trigger_details['sql'],
-                                converted_code
-                            )
-                        self.logger.info(f"Trigger {trigger_details['name']} for table {table_info['table_name']}")
-                    else:
-                        self.logger.info(f"No triggers found for table {table_info['table_name']}.")
-                else:
-                    self.logger.info("Skipping trigger migration.")
-
-                self.logger.info(f"Table {table_info['table_name']} processed successfully.")
-
-            if self.config_parser.should_migrate_views():
-                self.logger.info("Processing views...")
-                views = self.source_connection.fetch_views_names(self.source_schema)
-                for order_num, view_info in views.items():
-                    self.logger.info(f"Processing view ({order_num}): {view_info}")
-                    view_sql = self.source_connection.fetch_view_code(view_info['id'])
-                    if self.config_parser.get_log_level() == 'DEBUG':
-                        self.logger.debug(f"Source view SQL: {view_sql}")
-                    settings = {
-                        'source_database': self.config_parser.get_source_db_name(),
-                        'source_schema': self.config_parser.get_source_schema(),
-                        'target_schema': self.config_parser.get_target_schema(),
-                    }
-                    converted_view_sql = self.source_connection.convert_view_code(view_sql, settings)
-                    if self.config_parser.get_log_level() == 'DEBUG':
-                        self.logger.debug(f"Converted view SQL: {converted_view_sql}")
-                    self.migrator_tables.insert_view(self.source_schema, view_info['view_name'], view_info['id'], view_sql, self.target_schema, view_info['view_name'], converted_view_sql)
-                    self.logger.info(f"View {view_info['view_name']} processed successfully.")
-                self.logger.info("Views processed successfully.")
-            else:
-                self.logger.info("Skipping views migration.")
+            self.run_prepare_user_defined_types()
+            self.run_prepare_tables()
+            self.run_prepare_views()
 
             self.migrator_tables.update_main_status('Planner', True, 'finished OK')
 
@@ -211,6 +75,169 @@ class Planner:
             self.logger.info("Pre-planning part done successfully.")
         except Exception as e:
             self.handle_error(e, "Pre-planning runs")
+
+    def run_prepare_tables(self):
+        self.logger.info("Planner - Preparing tables...")
+        source_tables = self.source_connection.fetch_table_names(self.source_schema)
+        include_tables = self.config_parser.get_include_tables()
+        exclude_tables = self.config_parser.get_exclude_tables() or []
+
+        if self.config_parser.get_log_level() == 'DEBUG':
+            self.logger.debug(f"Source schema: {self.source_schema}")
+            self.logger.debug(f"Source tables: {source_tables}")
+            self.logger.debug(f"Include tables: {include_tables}")
+            self.logger.debug(f"Exclude tables: {exclude_tables}")
+
+        for order_num, table_info in source_tables.items():
+            self.logger.info(f"Processing table ({order_num}/{table_info['id']}): {table_info['table_name']}")
+            if not any(fnmatch.fnmatch(table_info['table_name'], pattern) for pattern in include_tables):
+                continue
+            if any(fnmatch.fnmatch(table_info['table_name'], pattern) for pattern in exclude_tables):
+                self.logger.info(f"Table {table_info['table_name']} is excluded from migration.")
+                continue
+
+            source_columns = []
+            target_columns = []
+            target_table_sql = None
+            try:
+                source_columns = self.source_connection.fetch_table_columns(self.source_schema, table_info['table_name'], self.migrator_tables)
+                if self.config_parser.get_log_level() == 'DEBUG':
+                    self.logger.debug(f"Source columns: {source_columns}")
+                target_columns, target_table_sql = self.source_connection.convert_table_columns(self.config_parser.get_target_db_type(), self.target_schema, table_info['table_name'], source_columns)
+                if self.config_parser.get_log_level() == 'DEBUG':
+                    self.logger.debug(f"Target columns: {target_columns}")
+                    self.logger.debug(f"Target table SQL: {target_table_sql}")
+                self.migrator_tables.insert_tables(self.source_schema, table_info['table_name'], table_info['id'], source_columns, self.target_schema, table_info['table_name'], target_columns, target_table_sql)
+            except Exception as e:
+                self.migrator_tables.insert_tables(self.source_schema, table_info['table_name'], table_info['id'], source_columns, self.target_schema, table_info['table_name'], target_columns, target_table_sql)
+                self.handle_error(e, f"Table {table_info['table_name']}")
+                continue
+
+            if self.config_parser.should_migrate_indexes():
+                indexes = self.source_connection.fetch_indexes(table_info['id'], self.target_schema, table_info['table_name'])
+                if self.config_parser.get_log_level() == 'DEBUG':
+                    self.logger.debug(f"Indexes: {indexes}")
+                if indexes:
+                    for _, index_details in indexes.items():
+                        self.migrator_tables.insert_indexes(
+                            self.source_schema,
+                            table_info['table_name'],
+                            table_info['id'],
+                            index_details['name'],
+                            index_details['type'],
+                            self.target_schema,
+                            table_info['table_name'],
+                            index_details['sql'],
+                            index_details['columns']
+                        )
+                    self.logger.info(f"Index {index_details['name']} for table {table_info['table_name']}")
+                else:
+                    self.logger.info(f"No indexes found for table {table_info['table_name']}.")
+            else:
+                self.logger.info("Skipping index migration.")
+
+            if self.config_parser.should_migrate_constraints():
+                constraints = self.source_connection.fetch_constraints(table_info['id'], self.target_schema, table_info['table_name'])
+                if self.config_parser.get_log_level() == 'DEBUG':
+                    self.logger.debug(f"Constraints: {constraints}")
+                if constraints:
+                    for _, constraint_details in constraints.items():
+                        self.migrator_tables.insert_constraints(
+                            self.source_schema,
+                            table_info['table_name'],
+                            table_info['id'],
+                            constraint_details['name'],
+                            constraint_details['type'],
+                            self.target_schema,
+                            table_info['table_name'],
+                            constraint_details['sql']
+                        )
+                    self.logger.info(f"Constraint {constraint_details['name']} for table {table_info['table_name']}")
+                else:
+                    self.logger.info(f"No constraints found for table {table_info['table_name']}.")
+            else:
+                self.logger.info("Skipping constraint migration.")
+
+            if self.config_parser.should_migrate_triggers():
+                triggers = self.source_connection.fetch_triggers(table_info['id'], self.source_schema, table_info['table_name'])
+                if self.config_parser.get_log_level() == 'DEBUG':
+                    self.logger.debug(f"Triggers: {triggers}")
+                if triggers:
+                    for _, trigger_details in triggers.items():
+
+                        settings = {
+                            'source_schema': self.config_parser.get_source_schema(),
+                            'target_schema': self.config_parser.get_target_schema(),
+                        }
+                        converted_code = self.source_connection.convert_trigger(trigger_details['sql'], settings)
+
+                        if self.config_parser.get_log_level() == 'DEBUG':
+                            self.logger.debug(f"Source trigger code: {trigger_details['sql']}")
+                            self.logger.debug(f"Converted trigger code: {converted_code}")
+
+                        self.migrator_tables.insert_trigger(
+                            self.source_schema,
+                            table_info['table_name'],
+                            table_info['id'],
+                            self.target_schema,
+                            table_info['table_name'],
+                            trigger_details['id'],
+                            trigger_details['name'],
+                            trigger_details['event'],
+                            trigger_details['new'],
+                            trigger_details['old'],
+                            trigger_details['sql'],
+                            converted_code
+                        )
+                    self.logger.info(f"Trigger {trigger_details['name']} for table {table_info['table_name']}")
+                else:
+                    self.logger.info(f"No triggers found for table {table_info['table_name']}.")
+            else:
+                self.logger.info("Skipping trigger migration.")
+
+            self.logger.info(f"Table {table_info['table_name']} processed successfully.")
+        self.logger.info("Planner - Tables processed successfully.")
+
+    def run_prepare_views(self):
+        self.logger.info("Planner - Preparing views...")
+        if self.config_parser.should_migrate_views():
+            self.logger.info("Processing views...")
+            views = self.source_connection.fetch_views_names(self.source_schema)
+            for order_num, view_info in views.items():
+                self.logger.info(f"Processing view ({order_num}): {view_info}")
+                view_sql = self.source_connection.fetch_view_code(view_info['id'])
+                if self.config_parser.get_log_level() == 'DEBUG':
+                    self.logger.debug(f"Source view SQL: {view_sql}")
+                settings = {
+                    'source_database': self.config_parser.get_source_db_name(),
+                    'source_schema': self.config_parser.get_source_schema(),
+                    'target_schema': self.config_parser.get_target_schema(),
+                }
+                converted_view_sql = self.source_connection.convert_view_code(view_sql, settings)
+                if self.config_parser.get_log_level() == 'DEBUG':
+                    self.logger.debug(f"Converted view SQL: {converted_view_sql}")
+                self.migrator_tables.insert_view(self.source_schema, view_info['view_name'], view_info['id'], view_sql, self.target_schema, view_info['view_name'], converted_view_sql)
+                self.logger.info(f"View {view_info['view_name']} processed successfully.")
+            self.logger.info("Views processed successfully.")
+        else:
+            self.logger.info("Skipping views migration.")
+        self.logger.info("Planner - Views processed successfully.")
+
+    def run_prepare_user_defined_types(self):
+        self.logger.info("Planner - Preparing user defined types...")
+        user_defined_types = self.source_connection.fetch_user_defined_types(self.source_schema)
+        if self.config_parser.get_log_level() == 'DEBUG':
+            self.logger.debug(f"User defined types: {user_defined_types}")
+        for order_num, type_info in user_defined_types.items():
+            type_sql = type_info['sql']
+            if self.config_parser.get_log_level() == 'DEBUG':
+                self.logger.debug(f"Source type SQL: {type_sql}")
+            converted_type_sql = type_sql.replace(f'{self.source_schema}.', f'{self.target_schema}.')
+            if self.config_parser.get_log_level() == 'DEBUG':
+                self.logger.debug(f"Converted type SQL: {converted_type_sql}")
+            self.migrator_tables.insert_user_defined_type(self.source_schema, type_info['type_name'], type_sql, self.target_schema, type_info['type_name'], converted_type_sql)
+            self.logger.info(f"User defined type {type_info['type_name']} processed successfully.")
+        self.logger.info("Planner - User defined types processed successfully.")
 
     def run_pre_migration_script(self):
         pre_migration_script = self.config_parser.get_pre_migration_script()

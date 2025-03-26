@@ -1334,3 +1334,6 @@ class InformixConnector(DatabaseConnector):
 
     def get_sequence_current_value(self, sequence_id: int):
         pass
+
+    def fetch_user_defined_types(self, schema: str):
+        pass

@@ -9,8 +9,8 @@ import traceback
 
 class MsSQLConnector(DatabaseConnector):
     def __init__(self, config_parser, source_or_target):
-        if source_or_target not in ['source', 'target']:
-            raise ValueError(f"MS SQL Server supports both source and target roles")
+        if source_or_target not in ['source']:
+            raise ValueError(f"Migrator supports only source role for MS SQL Server")
 
         self.connection = None
         self.config_parser = config_parser

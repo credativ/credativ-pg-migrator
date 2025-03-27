@@ -77,7 +77,7 @@ class PostgreSQLConnector(DatabaseConnector):
                         ELSE 'NOT NULL' END AS nullable,
                         c.column_default,
                         u.udt_schema||'.'||u.udt_name as full_udt_name,
-                        col_description((c.schema_name||'.'||c.table_name)::regclass::oid, c.ordinal_position) as column_comment
+                        col_description((c.table_schema||'.'||c.table_name)::regclass::oid, c.ordinal_position) as column_comment
                     FROM information_schema.columns c
                     LEFT JOIN information_schema.column_udt_usage u ON c.table_schema = u.table_schema
                         AND c.table_name = u.table_name
@@ -150,7 +150,7 @@ class PostgreSQLConnector(DatabaseConnector):
                 i.indexname,
                 i.indexdef,
                 coalesce(c.constraint_type, 'INDEX') as type,
-                obj_description(i.indexrelid, 'pg_class') as index_comment
+                obj_description((i.schemaname||'.'||i.indexname)::regclass::oid, 'pg_class') as index_comment
             FROM pg_indexes i
             JOIN pg_class t
             ON t.relnamespace::regnamespace::text = i.schemaname
@@ -202,9 +202,9 @@ class PostgreSQLConnector(DatabaseConnector):
             SELECT
                 oid,
                 conname,
-                CASE WHEN contype = 'c'
+                CASE WHEN upper(contype) = 'C'
                     THEN 'CHECK'
-                WHEN contype = 'f'
+                WHEN upper(contype) = 'F'
                     THEN 'FOREIGN KEY'
                 WHEN upper(contype) = 'P'
                     THEN 'PRIMARY KEY'
@@ -228,7 +228,7 @@ class PostgreSQLConnector(DatabaseConnector):
             for row in cursor.fetchall():
                 constraint_name = row[1]
                 constraint_type = row[2]
-                constraint_sql = row[3]
+                constraint_sql = f'ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{constraint_name}" {row[3]}'
                 if constraint_type in ('PRIMARY KEY', 'p', 'P'):
                     continue # Primary key is handled in fetch_indexes
                 constraints[order_num] = {
@@ -482,7 +482,8 @@ class PostgreSQLConnector(DatabaseConnector):
         query = f"""
             SELECT
                 oid,
-                relname as viewname
+                relname as viewname,
+                obj_description(oid, 'pg_class') as view_comment
             FROM pg_class
             WHERE relkind = 'v'
             AND relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = '{source_schema}')
@@ -497,7 +498,8 @@ class PostgreSQLConnector(DatabaseConnector):
                 views[order_num] = {
                     'id': row[0],
                     'schema_name': source_schema,
-                    'view_name': row[1]
+                    'view_name': row[1],
+                    'comment': row[2]
                 }
                 order_num += 1
             cursor.close()
@@ -512,7 +514,7 @@ class PostgreSQLConnector(DatabaseConnector):
         query = f"""
             SELECT definition
             FROM pg_views
-            WHERE oid = {view_id}
+            WHERE (schemaname||'.'||viewname)::regclass::oid = {view_id}
         """
         try:
             self.connect()
@@ -535,7 +537,8 @@ class PostgreSQLConnector(DatabaseConnector):
         order_num = 1
         query = f"""
             SELECT t.typnamespace::regnamespace::text as schemaname, typname as type_name,
-                'CREATE TYPE "'||t.typnamespace::regnamespace||'"."'||typname||'" As ENUM ('||string_agg(''''||e.enumlabel||'''', ',' ORDER BY e.enumsortorder)::text||');' AS elements
+                'CREATE TYPE "'||t.typnamespace::regnamespace||'"."'||typname||'" As ENUM ('||string_agg(''''||e.enumlabel||'''', ',' ORDER BY e.enumsortorder)::text||');' AS elements,
+                obj_description(t.oid, 'pg_type') as type_comment
             FROM pg_type AS t
             LEFT JOIN pg_enum AS e ON e.enumtypid = t.oid
             WHERE t.typnamespace::regnamespace::text NOT IN ('pg_catalog', 'information_schema')
@@ -552,7 +555,8 @@ class PostgreSQLConnector(DatabaseConnector):
                 user_defined_types[order_num] = {
                     'schema_name': row[0],
                     'type_name': row[1],
-                    'sql': row[2]
+                    'sql': row[2],
+                    'comment': row[3]
                 }
                 order_num += 1
             cursor.close()

@@ -32,6 +32,7 @@ class Orchestrator:
             self.run_migrate_funcprocs()
             self.run_migrate_triggers()
             self.run_migrate_views()
+            self.run_migrate_comments()
 
             self.run_post_migration_script()
             self.logger.info("Orchestration complete.")
@@ -158,6 +159,7 @@ class Orchestrator:
             self.logger.info("User defined types migrated successfully.")
         else:
             self.logger.info("No user defined types found to migrate.")
+        self.migrator_tables.update_main_status('Orchestrator - user defined types migration', True, 'finished OK')
 
     def run_migrate_indexes(self):
         self.migrator_tables.insert_main('Orchestrator - indexes migration')
@@ -494,7 +496,7 @@ class Orchestrator:
             if self.config_parser.should_migrate_triggers():
                 self.logger.info("Migrating triggers.")
 
-                all_triggers = self.migrator_tables.select_triggers()
+                all_triggers = self.migrator_tables.fetch_all_triggers()
                 if all_triggers:
                     for one_trigger in all_triggers:
                         trigger_detail = self.migrator_tables.decode_trigger_row(one_trigger)
@@ -541,7 +543,7 @@ class Orchestrator:
         if self.config_parser.should_migrate_views():
             self.logger.info("Migrating views.")
 
-            all_views = self.migrator_tables.select_views()
+            all_views = self.migrator_tables.fetch_all_views()
             if all_views:
                 for one_view in all_views:
                     view_detail = self.migrator_tables.decode_view_row(one_view)
@@ -564,6 +566,69 @@ class Orchestrator:
             self.logger.info("Skipping view migration as requested.")
         self.migrator_tables.update_main_status('Orchestrator - views migration', True, 'finished OK')
 
+    def run_migrate_comments(self):
+        self.migrator_tables.insert_main('Orchestrator - comments migration')
+        self.logger.info("Migrating comments.")
+        all_tables = self.migrator_tables.fetch_all_tables()
+        self.target_connection.connect()
+
+        for table_detail in all_tables:
+            table_data = self.migrator_tables.decode_table_row(table_detail)
+            if table_data['table_comment']:
+                query = f"""COMMENT ON TABLE "{table_data['target_schema']}"."{table_data['target_table']}" IS '{table_data['table_comment']}'"""
+                self.logger.info(f"Setting comment for table {table_data['target_table']} in target database.")
+                self.target_connection.execute_query(query)
+
+            for col in table_data['target_columns'].keys():
+                column_comment = table_data['target_columns'][col]['comment']
+                if column_comment:
+                    query = f"""COMMENT ON COLUMN "{table_data['target_columns'][col]['target_schema']}"."{table_data['target_columns'][col]['target_table']}"."{column_data['target_columns'][col]['target_column']}" IS '{column_comment}'"""
+                    self.logger.info(f"Setting comment for column {column_data['target_columns'][col]['target_column']} in target database.")
+                    self.target_connection.execute_query(query)
+
+        all_indexes = self.migrator_tables.fetch_all_indexes()
+        for index_detail in all_indexes:
+            index_data = self.migrator_tables.decode_index_row(index_detail)
+            if index_data['index_comment']:
+                query = f"""COMMENT ON INDEX "{index_data['target_schema']}"."{index_data['target_index']}" IS '{index_data['index_comment']}'"""
+                self.logger.info(f"Setting comment for index {index_data['target_index']} in target database.")
+                self.target_connection.execute_query(query)
+
+        all_constraints = self.migrator_tables.fetch_all_constraints()
+        for constraint_detail in all_constraints:
+            constraint_data = self.migrator_tables.decode_constraint_row(constraint_detail)
+            if constraint_data['constraint_comment']:
+                query = f"""COMMENT ON CONSTRAINT "{constraint_data['target_schema']}"."{constraint_data['target_constraint']}" IS '{constraint_data['constraint_comment']}'"""
+                self.logger.info(f"Setting comment for constraint {constraint_data['target_constraint']} in target database.")
+                self.target_connection.execute_query(query)
+
+        all_triggers = self.migrator_tables.fetch_all_triggers()
+        for trigger_detail in all_triggers:
+            trigger_data = self.migrator_tables.decode_trigger_row(trigger_detail)
+            if trigger_data['trigger_comment']:
+                query = f"""COMMENT ON TRIGGER "{trigger_data['target_schema']}"."{trigger_data['target_trigger']}" IS '{trigger_data['trigger_comment']}'"""
+                self.logger.info(f"Setting comment for trigger {trigger_data['target_trigger']} in target database.")
+                self.target_connection.execute_query(query)
+
+        all_views = self.migrator_tables.fetch_all_views()
+        for view_detail in all_views:
+            view_data = self.migrator_tables.decode_view_row(view_detail)
+            if view_data['view_comment']:
+                query = f"""COMMENT ON VIEW "{view_data['target_schema']}"."{view_data['target_view']}" IS '{view_data['view_comment']}'"""
+                self.logger.info(f"Setting comment for view {view_data['target_view']} in target database.")
+                self.target_connection.execute_query(query)
+
+        all_user_defined_types = self.migrator_tables.fetch_all_user_defined_types()
+        for type_detail in all_user_defined_types:
+            type_data = self.migrator_tables.decode_user_defined_type_row(type_detail)
+            if type_data['type_comment']:
+                query = f"""COMMENT ON TYPE "{type_data['target_schema']}"."{type_data['target_type']}" IS '{type_data['type_comment']}'"""
+                self.logger.info(f"Setting comment for user defined type {type_data['target_type']} in target database.")
+                self.target_connection.execute_query(query)
+
+        self.target_connection.disconnect()
+        self.migrator_tables.update_main_status('Orchestrator - comments migration', True, 'finished OK')
+        self.logger.info("Comments migrated successfully.")
 
     def handle_error(self, e, description=None):
         self.logger.error(f"An error in {self.__class__.__name__} ({description}): {e}")

@@ -340,10 +340,7 @@ class MigratorTables:
 
     def fetch_all_user_defined_types(self):
         table_name = self.config_parser.get_protocol_name_user_defined_types()
-        query = f"""
-            SELECT *
-            FROM "{self.protocol_schema}"."{table_name}" ORDER BY id
-        """
+        query = f"""SELECT * FROM "{self.protocol_schema}"."{table_name}" ORDER BY id"""
         cursor = self.protocol_connection.connection.cursor()
         cursor.execute(query)
         rows = cursor.fetchall()
@@ -1085,7 +1082,7 @@ class MigratorTables:
             self.logger.error(e)
             raise
 
-    def select_triggers(self):
+    def fetch_all_triggers(self):
         table_name = self.config_parser.get_protocol_name_triggers()
         query = f"""
             SELECT * FROM "{self.protocol_schema}"."{table_name}" ORDER BY id
@@ -1125,11 +1122,9 @@ class MigratorTables:
             self.logger.error(e)
             raise
 
-    def select_views(self):
+    def fetch_all_views(self):
         table_name = self.config_parser.get_protocol_name_views()
-        query = f"""
-            SELECT * FROM "{self.protocol_schema}"."{table_name}" ORDER BY id
-        """
+        query = f"""SELECT * FROM "{self.protocol_schema}"."{table_name}" ORDER BY id"""
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query)
@@ -1247,7 +1242,7 @@ class MigratorTables:
                     length = task_data['task_completed'] - task_data['task_started']
                 else:
                     length = "none"
-                status = f"{task_data['task_name'][:40]:<40} -> start: {str(task_data['task_started'])[:19]:<19} | end: {str(task_data['task_completed'])[:19]:<19} | length: {str(length)[:19]}"
+                status = f"{task_data['task_name'][:50]:<50} -> start: {str(task_data['task_started'])[:19]:<19} | end: {str(task_data['task_completed'])[:19]:<19} | length: {str(length)[:19]}"
                 self.logger.info(f"{status}")
         except Exception as e:
             self.logger.error(f"Error printing migration summary.")

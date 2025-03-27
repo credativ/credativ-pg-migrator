@@ -1,6 +1,7 @@
 # Development of credativ-pg-migrator
 
 Repository contains python solution for migration of the whole database from legacy systems to PostgreSQL.
+Testing OMDB example is in the ./tests/omdb directory - see README.md in that directory for more information.
 
 ## Main features
 

@@ -10,7 +10,7 @@ import traceback
 class MsSQLConnector(DatabaseConnector):
     def __init__(self, config_parser, source_or_target):
         if source_or_target not in ['source']:
-            raise ValueError(f"Migrator supports only source role for MS SQL Server")
+            raise ValueError(f"MS SQL Server is only supported as a source database. Current value: {source_or_target}")
 
         self.connection = None
         self.config_parser = config_parser
@@ -49,6 +49,7 @@ class MsSQLConnector(DatabaseConnector):
         query = f"""
             SELECT
                 t.object_id AS table_id,
+                s.name AS schema_name,
                 t.name AS table_name
             FROM sys.tables t
             JOIN sys.schemas s ON t.schema_id = s.schema_id
@@ -64,8 +65,8 @@ class MsSQLConnector(DatabaseConnector):
             for row in cursor.fetchall():
                 tables[order_num] = {
                     'id': row[0],
-                    'schema_name': table_schema,
-                    'table_name': row[1]
+                    'schema_name': row[1],
+                    'table_name': row[2]
                 }
                 order_num += 1
             cursor.close()
@@ -244,4 +245,36 @@ class MsSQLConnector(DatabaseConnector):
     def get_rows_count(self, table_schema: str, table_name: str):
         query = f"""SELECT COUNT(*) FROM [{table_schema}].[{table_name}]"""
         # ...existing code from SybaseASEConnector.get_rows_count...
+        pass
+
+    def fetch_sequences(self):
+        query = """
+            SELECT
+                s.name AS sequence_name,
+                s.object_id AS sequence_id,
+                s.start_value AS start_value,
+                s.increment AS increment_value,
+                s.min_value AS min_value,
+                s.max_value AS max_value,
+                s.cycle_option AS cycle_option
+            FROM sys.sequences s
+        """
+        # ...existing code from SybaseASEConnector.fetch_sequences...
+        pass
+
+    def fetch_user_defined_types(self):
+        query = """
+            SELECT
+                s.name AS type_name,
+                s.system_type_id AS system_type_id,
+                s.user_type_id AS user_type_id,
+                s.max_length AS max_length,
+                s.is_nullable AS is_nullable
+            FROM sys.types s
+            WHERE s.is_user_defined = 1
+        """
+        # ...existing code from SybaseASEConnector.fetch_user_defined_types...
+        pass
+
+    def get_sequence_current_value(self, sequence_name: str):
         pass

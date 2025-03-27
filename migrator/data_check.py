@@ -8,6 +8,7 @@ from migrator_logging import MigratorLogger
 from postgresql_connector import PostgreSQLConnector
 from informix_connector import InformixConnector
 from sybase_ase_connector import SybaseASEConnector
+from ms_sql_connector import MsSQLConnector
 import polars as pl
 import sys
 import os
@@ -143,6 +144,8 @@ def connect_to_db(logger, config_parser, source_or_target):
         return InformixConnector(config_parser, source_or_target)
     elif db_type == 'sybase_ase':
         return SybaseASEConnector(config_parser, source_or_target)
+    elif db_type == 'mssql':
+        return MsSQLConnector(config_parser, source_or_target)
     else:
         raise ValueError(f"Unsupported database type: {db_type}")
 

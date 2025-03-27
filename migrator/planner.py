@@ -4,6 +4,7 @@ from postgresql_connector import PostgreSQLConnector
 from sybase_ase_connector import SybaseASEConnector
 from informix_connector import InformixConnector
 from migrator_tables import MigratorTables
+from ms_sql_connector import MsSQLConnector
 import fnmatch
 import traceback
 
@@ -270,6 +271,8 @@ class Planner:
             return InformixConnector(self.config_parser, 'source')
         elif source_db_type == 'sybase_ase':
             return SybaseASEConnector(self.config_parser, 'source')
+        elif source_db_type == 'mssql':
+            return MsSQLConnector(self.config_parser, 'source')
         else:
             raise ValueError(f"Unsupported source database type: {source_db_type}")
 
@@ -279,8 +282,6 @@ class Planner:
             self.logger.debug(f"Connecting to target database with connection string: {self.config_parser.get_target_connect_string()}")
         if target_db_type == 'postgresql':
             return PostgreSQLConnector(self.config_parser, 'target')
-        # elif target_db_type == 'informix':
-        #     return InformixConnector(self.config_parser, 'target')
         else:
             raise ValueError(f"Unsupported target database type: {target_db_type}")
 

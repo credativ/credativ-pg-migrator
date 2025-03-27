@@ -202,11 +202,11 @@ class PostgreSQLConnector(DatabaseConnector):
             SELECT
                 oid,
                 conname,
-                CASE WHEN upper(contype) = 'C'
+                CASE WHEN contype = 'c'
                     THEN 'CHECK'
-                WHEN upper(contype) = 'F'
+                WHEN contype = 'f'
                     THEN 'FOREIGN KEY'
-                WHEN upper(contype) = 'P'
+                WHEN contype = 'p'
                     THEN 'PRIMARY KEY'
                 WHEN contype = 'u'
                     THEN 'UNIQUE'
@@ -214,7 +214,7 @@ class PostgreSQLConnector(DatabaseConnector):
                     THEN 'TRIGGER'
                 WHEN contype = 'x'
                     THEN 'EXCLUSION'
-                ELSE contype
+                ELSE contype::text
                 END as type,
                 pg_get_constraintdef(oid) as condef,
                 obj_description(oid, 'pg_constraint') as constraint_comment

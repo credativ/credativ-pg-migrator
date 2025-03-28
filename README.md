@@ -1,27 +1,31 @@
 # Development of credativ-pg-migrator
 
 Repository contains python solution for migration of the whole database from legacy systems to PostgreSQL.
-Testing OMDB example is in the ./tests/omdb directory - see README.md in that directory for more information.
+Testing PostgreSQL->PostgreSQL OMDB example is in the ./tests/omdb directory - see README.md in that directory for more information.
+
+## Architecture
+
+![Architecture](./docs/images/architecture.jpg)
 
 ## Main features
 
-- Pure python solution, uses only staandard libraries, structured in modules, written in object-oriented style
-- Supports migration of tables, column constraints, primary keys, indexes, foreign keys from source to target database
-- Post migrattion setting of current values of sequences on the target database
-- Rudimentary migration of views
-- Conversion and migration of functions, procedures, triggers
-- Customizable substitutions of data types and default values of columns
+- Pure python solution, uses only standard libraries, structured in modules, written in object-oriented style in classes
+- Supports migration of tables, column constraints and defaults, primary keys, secondary indexes, foreign keys, functions/procedures, triggers and views from source to target database
+- If tables have sequences, migrator sets current values of sequences on the target database
+- Migration of views is currently only in rudimentary version, just replacing source schema names in code with target schema names
+- Conversion and migration of functions, procedures, triggers currently fully works for Informix, and is in progress for Sybase
+- Migrator allows customizable substitutions of data types, default values of columns, calls of remote objects
 - Migrator provides reach logging and error handling, has 2 levels of logging - INFO and DEBUG, in case of error, detailed error message is printed
 - By default logging messages are printed both to console and to log file, name of the log file is configurable in command line arguments
+- Rich information is also logged to the migration database - see below
 
 ## Source databases
 
+- Currently supported source databases are Informix, Sybase ASE, PostgreSQL
+- Basic support for MS SQL Server is in progress
 - Source database connector must implement DatabaseConnector class from the migrator.database_connector module
 - Methods of this class contain descriptions of actions and return values that are expected by the migrator tool
-- Solution currently supports these source databases:
-  - Sybase ASE
-  - Informix
-- both databases can be accessed either via ODBC or JDBC
+- Support database should be accessed via ODBC, JDBC or native client libraries
 
 ## Target databases
 
@@ -32,7 +36,7 @@ Testing OMDB example is in the ./tests/omdb directory - see README.md in that di
 
 - Solution uses a migration database to store metadata about the migration process
 - Migration database is a PostgreSQL database, credentials must be configured in the configuration file
-- In most cases we assume that the migration database will the same as the target database, but it is possible to use a different database from the same or different PostgreSQL server
+- In most cases we assume that the migration database will the same as the target database, but it is fully possible to use a different database from the same or different PostgreSQL server
 
 ## Configuration file
 
@@ -42,16 +46,8 @@ Testing OMDB example is in the ./tests/omdb directory - see README.md in that di
 ## Todo
 
 - In Informix we currently do not support ROW data type (corresponds with PostgreSQL composite type)
-- We currently do not support automatic migration of cross-database references - see in notes to TODO
+- Automatic replacement of cross-database references is in progress
 - Not all types of default values are currently supported
-- Not all constrains are covered
-- In bot cases (defaults/constrints), we add them into tool case by case, as we encounter them, each legacy system uses its own internal format, but documentation does not contain examples of internal representation of all possible cases
-- Add support for PostgreSQL as source database
-
-### Notes to TODO
-
-- Many legacy systems allowed cross-database queries, which is not supported in PostgreSQL and requires usage of foreign data wrappers
-- Functions / procedures and views that use cross-database queries must be manually adjusted
 
 ## Structure of the repository
 

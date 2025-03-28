@@ -12,6 +12,7 @@ class PostgreSQLConnector(DatabaseConnector):
         self.config_parser = config_parser
         self.source_or_target = source_or_target
         self.logger = MigratorLogger(self.config_parser.get_log_file()).logger
+        # self.session_settings = self.prepare_session_settings
 
     def connect(self):
         connection_string = self.config_parser.get_connect_string(self.source_or_target)
@@ -566,4 +567,30 @@ class PostgreSQLConnector(DatabaseConnector):
         except psycopg2.Error as e:
             self.logger.error(f"Error executing query: {query}")
             self.logger.error(e)
+            raise
+
+    def prepare_session_settings(self):
+        """
+        Prepare session settings for the database connection.
+        """
+        filtered_settings = ""
+        try:
+            settings = self.config_parser.get_target_db_session_settings()
+            self.connect()
+            cursor = self.connection.cursor()
+            matching_settings = cursor.execute("SELECT name FROM pg_settings WHERE name IN %s", (tuple(settings.keys()),)).fetchall()
+            cursor.close()
+            self.disconnect()
+            if not matching_settings:
+                self.logger.warning("No settings found to prepare.")
+                return filtered_settings
+            self.logger.info("Preparing session settings...")
+            # Set the session settings
+            for setting in matching_settings:
+                setting_name = setting[0]
+                filtered_settings += f"SET {setting_name} = {settings[setting_name]};"
+            self.logger.info(f"Session settings prepared: {filtered_settings}")
+            return filtered_settings
+        except psycopg2.Error as e:
+            self.logger.error(f"Error preparing session settings: {e}")
             raise

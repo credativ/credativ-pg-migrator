@@ -257,6 +257,7 @@ class Orchestrator:
         part_name = 'start'
         worker_source_connection = None
         worker_target_connection = None
+        rows_migrated = 0
         try:
             target_schema = table_data['target_schema']
             target_table = table_data['target_table']

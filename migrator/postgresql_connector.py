@@ -281,6 +281,7 @@ class PostgreSQLConnector(DatabaseConnector):
 
     def migrate_table(self, migrate_target_connection, settings):
         part_name = 'initialize'
+        source_table_rows = 0
         try:
             worker_id = settings['worker_id']
             source_schema = settings['source_schema']
@@ -295,7 +296,7 @@ class PostgreSQLConnector(DatabaseConnector):
             source_table_rows = self.get_rows_count(source_schema, source_table)
             if source_table_rows == 0:
                 self.logger.info(f"Worker {worker_id}: Table {source_schema}.{source_table} has no rows. Skipping migration.")
-                return
+                return 0
             else:
                 self.logger.info(f"Worker {worker_id}: Table {source_schema}.{source_table} has {source_table_rows} rows.")
                 offset = 0

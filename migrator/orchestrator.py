@@ -416,7 +416,11 @@ class Orchestrator:
 
             worker_target_connection.connect()
 
+            query = f'''SET SESSION search_path TO {constraint_data['target_schema']};'''
+            worker_target_connection.execute_query(query)
             worker_target_connection.execute_query(create_constraint_sql)
+            query = 'RESET search_path;'
+            worker_target_connection.execute_query(query)
             self.logger.info(f"""Worker {worker_id}: Constraint "{constraint_name}" created successfully.""")
 
             worker_target_connection.disconnect()

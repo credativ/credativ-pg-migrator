@@ -244,4 +244,4 @@ class ConfigParser:
         return self.config.get('migrator', {}).get('indent', constants.MIGRATOR_DEFAULT_INDENT)
 
     def get_target_db_session_settings(self):
-        return self.config.get('settings', {})
+        return self.config['target'].get('settings', {})

@@ -387,6 +387,11 @@ class Orchestrator:
 
             worker_target_connection.connect()
 
+            if worker_target_connection.session_settings:
+                if self.config_parser.get_log_level() == 'DEBUG':
+                    self.logger.info(f"Worker {worker_id}: Executing session settings: {worker_target_connection.session_settings}")
+                worker_target_connection.execute_query(worker_target_connection.session_settings)
+
             worker_target_connection.execute_query(create_index_sql)
             self.logger.info(f"""Worker {worker_id}: Index "{index_name}" created successfully.""")
 
@@ -418,6 +423,12 @@ class Orchestrator:
 
             query = f'''SET SESSION search_path TO {constraint_data['target_schema']};'''
             worker_target_connection.execute_query(query)
+
+            if worker_target_connection.session_settings:
+                if self.config_parser.get_log_level() == 'DEBUG':
+                    self.logger.info(f"Worker {worker_id}: Executing session settings: {worker_target_connection.session_settings}")
+                worker_target_connection.execute_query(worker_target_connection.session_settings)
+
             worker_target_connection.execute_query(create_constraint_sql)
             query = 'RESET search_path;'
             worker_target_connection.execute_query(query)

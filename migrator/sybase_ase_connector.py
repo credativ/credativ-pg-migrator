@@ -68,7 +68,8 @@ class SybaseASEConnector(DatabaseConnector):
                 tables[order_num] = {
                     'id': row[0],
                     'schema_name': table_schema,
-                    'table_name': row[1]
+                    'table_name': row[1],
+                    'comment': ''
                 }
                 order_num += 1
             cursor.close()
@@ -144,6 +145,7 @@ class SybaseASEConnector(DatabaseConnector):
                     'default': row[10].replace('DEFAULT', '').strip().strip('"')
                         if row[10] and row[10].replace('DEFAULT', '').strip().startswith('"') and row[10].replace('DEFAULT', '').strip().endswith('"')
                         else (row[10].replace('DEFAULT', '').strip() if row[10] else ''),
+                    'comment': '',
                     'other': 'IDENTITY' if row[6] == 1 else ''
                 }
 
@@ -293,6 +295,7 @@ class SybaseASEConnector(DatabaseConnector):
                     'length': length,
                     'default': column_info['default'],
                     'nullable': column_info['nullable'],
+                    'comment': column_info['comment'],
                     'other': column_info['other']
                 }
 
@@ -375,7 +378,8 @@ class SybaseASEConnector(DatabaseConnector):
                         'name': index_name,
                         'type': "PRIMARY KEY" if index_primary_key == 1 else "UNIQUE" if index_unique == 1 and index_primary_key == 0 else "INDEX",
                         'columns': index_columns,
-                        'sql': create_index_query
+                        'sql': create_index_query,
+                        'comment': ''
                     }
                     order_num += 1
 
@@ -437,7 +441,8 @@ class SybaseASEConnector(DatabaseConnector):
                 table_constraints[order_num] = {
                     'name': fk_name,
                     'type': 'FOREIGN KEY',
-                    'sql': create_fk_query
+                    'sql': create_fk_query,
+                    'comment': ''
                 }
                 order_num += 1
 
@@ -477,7 +482,8 @@ class SybaseASEConnector(DatabaseConnector):
             funcproc_data[order_num] = {
                 'name': row[0],
                 'id': row[1],
-                'type': row[2]
+                'type': row[2],
+                'comment': ''
             }
             order_num += 1
         cursor.close()
@@ -757,7 +763,8 @@ class SybaseASEConnector(DatabaseConnector):
                 views[order_num] = {
                     'id': row[0],
                     'schema_name': row[1],
-                    'view_name': row[2]
+                    'view_name': row[2],
+                    'comment': ''
                 }
                 order_num += 1
             cursor.close()

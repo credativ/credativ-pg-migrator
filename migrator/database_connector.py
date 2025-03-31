@@ -29,7 +29,8 @@ class DatabaseConnector(ABC):
         { ordinary_number: {
             'id': table_id,
             'schema_name': schema_name,
-            'table_name': table_name
+            'table_name': table_name,
+            'comment': table_comment
             }
         }
         """

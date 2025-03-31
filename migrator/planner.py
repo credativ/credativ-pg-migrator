@@ -235,17 +235,20 @@ class Planner:
         user_defined_types = self.source_connection.fetch_user_defined_types(self.source_schema)
         if self.config_parser.get_log_level() == 'DEBUG':
             self.logger.debug(f"User defined types: {user_defined_types}")
-        for order_num, type_info in user_defined_types.items():
-            type_sql = type_info['sql']
-            if self.config_parser.get_log_level() == 'DEBUG':
-                self.logger.debug(f"Source type SQL: {type_sql}")
-            converted_type_sql = type_sql.replace(f'{self.source_schema}.', f'{self.target_schema}.')
-            if self.config_parser.get_log_level() == 'DEBUG':
-                self.logger.debug(f"Converted type SQL: {converted_type_sql}")
-            self.migrator_tables.insert_user_defined_type(self.source_schema, type_info['type_name'], type_sql,
-                                                          self.target_schema, type_info['type_name'], converted_type_sql, type_info['comment'])
-            self.logger.info(f"User defined type {type_info['type_name']} processed successfully.")
-        self.logger.info("Planner - User defined types processed successfully.")
+        if user_defined_types:
+            for order_num, type_info in user_defined_types.items():
+                type_sql = type_info['sql']
+                if self.config_parser.get_log_level() == 'DEBUG':
+                    self.logger.debug(f"Source type SQL: {type_sql}")
+                converted_type_sql = type_sql.replace(f'{self.source_schema}.', f'{self.target_schema}.')
+                if self.config_parser.get_log_level() == 'DEBUG':
+                    self.logger.debug(f"Converted type SQL: {converted_type_sql}")
+                self.migrator_tables.insert_user_defined_type(self.source_schema, type_info['type_name'], type_sql,
+                                                            self.target_schema, type_info['type_name'], converted_type_sql, type_info['comment'])
+                self.logger.info(f"User defined type {type_info['type_name']} processed successfully.")
+            self.logger.info("Planner - User defined types processed successfully.")
+        else:
+            self.logger.info("No user defined types found.")
 
     def run_pre_migration_script(self):
         pre_migration_script = self.config_parser.get_pre_migration_script()

@@ -134,6 +134,9 @@ class ConfigParser:
     def get_protocol_name_tables(self):
         return f"{self.get_protocol_name()}_tables"
 
+    def get_protocol_name_pk_ranges(self):
+        return f"{self.get_protocol_name()}_pk_ranges"
+
     def get_protocol_name_data_migration(self):
         return f"{self.get_protocol_name()}_data_migration"
 

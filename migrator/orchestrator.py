@@ -99,7 +99,8 @@ class Orchestrator:
             'create_tables': self.config_parser.should_create_tables(),
             'drop_tables': self.config_parser.should_drop_tables(),
             'migrate_data': self.config_parser.should_migrate_data(),
-            'batch_size': self.config_parser.get_batch_size()
+            'batch_size': self.config_parser.get_batch_size(),
+            'migrator_tables': self.migrator_tables
         }
 
         self.logger.info(f"Starting {workers_requested} parallel workers to create tables in target database.")
@@ -323,6 +324,7 @@ class Orchestrator:
                     'table_comment': table_data['table_comment'],
                     'primary_key_columns': table_data['primary_key_columns'],
                     'batch_size': settings['batch_size'],
+                    'migrator_tables': settings['migrator_tables'],
                 }
                 rows_migrated = worker_source_connection.migrate_table(worker_target_connection, settings)
                 worker_source_connection.disconnect()
@@ -481,7 +483,7 @@ class Orchestrator:
                                             self.config_parser.get_target_schema(),
                                             table_names)
 
-                        self.migrator_tables.insert_funcprocs(self.source_schema, funcproc_data['name'], funcproc_id, funcproc_code, self.target_schema, funcproc_data['name'], converted_code)
+                        self.migrator_tables.insert_funcprocs(self.source_schema, funcproc_data['name'], funcproc_id, funcproc_code, self.target_schema, funcproc_data['name'], converted_code, funcproc_data['comment'])
 
                         if converted_code is not None:
                             self.logger.info(f"Creating {funcproc_type} {funcproc_data['name']} in target database.")
@@ -574,9 +576,16 @@ class Orchestrator:
 
                     try:
                         self.target_connection.connect()
+
+                        query = f'''SET SESSION search_path TO {view_detail['target_schema']};'''
+                        self.target_connection.execute_query(query)
+
                         self.target_connection.execute_query(view_detail['target_view_sql'])
                         self.migrator_tables.update_view_status(view_detail['id'], True, 'migrated OK')
                         self.logger.info(f"View {view_detail['source_view_name']} migrated successfully.")
+
+                        query = f'''RESET search_path;'''
+                        self.target_connection.execute_query(query)
                         self.target_connection.disconnect()
                     except Exception as e:
                         self.migrator_tables.update_view_status(view_detail['id'], False, f'ERROR: {e}')

@@ -18,6 +18,7 @@ class MigratorTables:
         self.create_table_for_main()
         self.create_table_for_user_defined_types()
         self.create_table_for_tables()
+        self.create_table_for_pk_ranges()
         self.create_table_for_indexes()
         self.create_table_for_constraints()
         self.create_table_for_funcprocs()
@@ -425,6 +426,71 @@ class MigratorTables:
             self.logger.error(f"Query: {query}")
             self.logger.error(e)
             raise
+
+    def create_table_for_pk_ranges(self):
+        table_name = self.config_parser.get_protocol_name_pk_ranges()
+        self.protocol_connection.execute_query(self.drop_table_sql.format(protocol_schema=self.protocol_schema, table_name=table_name))
+        self.protocol_connection.execute_query(f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."{table_name}"
+            (id SERIAL PRIMARY KEY,
+            source_schema TEXT,
+            source_table TEXT,
+            source_table_id INTEGER,
+            worker_id TEXT,
+            batch_start BIGINT,
+            batch_end BIGINT,
+            row_count BIGINT
+            )
+        """)
+        # if self.config_parser.get_log_level() == 'DEBUG':
+        #     self.logger.debug(f"PK ranges table {table_name} created.")
+
+    def insert_pk_ranges(self, source_schema, source_table, source_table_id, worker_id, batch_start, batch_end, row_count):
+        table_name = self.config_parser.get_protocol_name_pk_ranges()
+        query = f"""
+            INSERT INTO "{self.protocol_schema}"."{table_name}"
+            (source_schema, source_table, source_table_id, worker_id, batch_start, batch_end, row_count)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            RETURNING *
+        """
+        params = (source_schema, source_table, source_table_id, worker_id, batch_start, batch_end, row_count)
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+
+            # if self.config_parser.get_log_level() == 'DEBUG':
+            #     self.logger.debug(f"Returned row: {row}")
+            data_migration_row = self.decode_pk_ranges_row(row)
+            self.insert_protocol('data_migration', source_table, 'pk_range',
+                                 f'PK range: {batch_start} - {batch_end} / {row_count}',
+                                 None, True, None, 'info', None, data_migration_row['id'])
+        except Exception as e:
+            self.logger.error(f"Error inserting PK ranges {source_table} into {table_name}.")
+            self.logger.error(e)
+            raise
+
+    def fetch_all_pk_ranges(self, worker_id):
+        table_name = self.config_parser.get_protocol_name_pk_ranges()
+        query = f"""SELECT batch_start, batch_end, row_count FROM "{self.protocol_schema}"."{table_name}" WHERE worker_id = '{worker_id}' ORDER BY id"""
+        cursor = self.protocol_connection.connection.cursor()
+        cursor.execute(query)
+        rows = cursor.fetchall()
+        cursor.close()
+        return rows
+
+    def decode_pk_ranges_row(self, row):
+        return {
+            'id': row[0],
+            'source_schema': row[1],
+            'source_table': row[2],
+            'source_table_id': row[3],
+            'worker_id': row[4],
+            'batch_start': row[5],
+            'batch_end': row[6],
+            'row_count': row[7]
+        }
 
     def create_table_for_tables(self):
         table_name = self.config_parser.get_protocol_name_tables()

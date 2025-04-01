@@ -65,7 +65,8 @@ class InformixConnector(DatabaseConnector):
                 tables[order_num] = {
                     'id': row[0],
                     'schema_name': table_schema,
-                    'table_name': row[1]
+                    'table_name': row[1],
+                    'comment': ''
                 }
                 order_num += 1
             cursor.close()
@@ -147,7 +148,8 @@ class InformixConnector(DatabaseConnector):
                     'length': row[3],
                     'nullable': row[4],
                     'default': re.sub(r'[^\x20-\x7E]', ' ', row[5]).strip() if row[5] else '',
-                    'other': ''
+                    'other': '',
+                    'comment': ''
                 }
 
                 # if self.config_parser.get_log_level() == 'DEBUG':
@@ -183,7 +185,8 @@ class InformixConnector(DatabaseConnector):
                 views[order_num] = {
                     'id': row[0],
                     'schema_name': source_schema,
-                    'view_name': row[1]
+                    'view_name': row[1],
+                    'comment': ''
                 }
                 order_num += 1
             cursor.close()
@@ -265,7 +268,8 @@ class InformixConnector(DatabaseConnector):
                     'length': length,
                     'nullable': column_info['nullable'],
                     'default': column_info['default'],
-                    'other': column_info['other']
+                    'other': column_info['other'],
+                    'comment': column_info['comment']
                 }
 
             create_table_sql_parts = []
@@ -351,7 +355,8 @@ class InformixConnector(DatabaseConnector):
                         'name': index_name,
                         'type': "PRIMARY KEY" if index_type == 'P' else "UNIQUE" if index_type == 'U' else "INDEX",
                         'columns': columns_list,
-                        'sql': create_index_query
+                        'sql': create_index_query,
+                        'comment': ''
                     }
                     order_num += 1
 
@@ -481,7 +486,8 @@ class InformixConnector(DatabaseConnector):
                         'id': constr_id,
                         'name': constr_name,
                         'type': 'FOREIGN KEY' if constr_type == 'R' else 'CHECK' if constr_type == 'C' else constr_type,
-                        'sql': create_constr_query
+                        'sql': create_constr_query,
+                        'comment': ''
                     }
                     order_num += 1
 
@@ -511,7 +517,8 @@ class InformixConnector(DatabaseConnector):
             funcproc_data[order_num] = {
                 'name': row[0],
                 'id': row[1],
-                'type': row[2]
+                'type': row[2],
+                'comment': ''
             }
             order_num += 1
         cursor.close()
@@ -1085,7 +1092,8 @@ class InformixConnector(DatabaseConnector):
                     'row_statement': '',
                     'old': row[3].strip() if row[3] else '',
                     'new': row[4].strip() if row[4] else '',
-                    'sql': ''
+                    'sql': '',
+                    'comment': ''
                 }
 
                 query = f"""

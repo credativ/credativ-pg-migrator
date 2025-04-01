@@ -8,7 +8,9 @@ cd migrator
 
 . ../migrator_venv/bin/activate
 
-echo ""> ../logs/informix_bfr_20250304.log; python3 main.py --config=../config/bfr/informix_bfr.yaml --log-file=../logs/informix_bfr_20250304.log --log-level=DEBUG
+echo ""> ../logs/informix_bfr_stoffdbp_20250401.log; python3 main.py --config=../config/bfr/informix_bfr_stoffdbp.yaml --log-file=../logs/informix_bfr_stoffdbp_20250401.log --log-level=DEBUG
+
+echo ""> ../logs/informix_bfr_gifas2read_20250401.log; python3 main.py --config=../config/bfr/informix_bfr_gifas2read.yaml --log-file=../logs/informix_bfr_gifas2read_20250401.log --log-level=DEBUG
 
 echo ""> ../logs/informix_iwadb_20250306.log; python3 main.py --config=../config/informix_iwadb.yaml --log-file=../logs/informix_iwadb_20250306.log --log-level=DEBUG
 

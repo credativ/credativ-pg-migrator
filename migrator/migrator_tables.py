@@ -179,6 +179,7 @@ class MigratorTables:
             CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."{table_name}"
             (id SERIAL PRIMARY KEY,
             task_name TEXT,
+            subtask_name TEXT,
             task_started TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             task_completed TIMESTAMP,
             success BOOLEAN,
@@ -188,11 +189,11 @@ class MigratorTables:
         # if self.config_parser.get_log_level() == 'DEBUG':
         #     self.logger.debug(f"Tasks table {table_name} created.")
 
-    def insert_main(self, task_name):
+    def insert_main(self, task_name, subtask_name):
         table_name = self.config_parser.get_protocol_name_main()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
-            (task_name) VALUES ('{task_name}')
+            (task_name, subtask_name) VALUES ('{task_name}', '{subtask_name}')
             RETURNING *
         """
         try:
@@ -203,13 +204,13 @@ class MigratorTables:
             # if self.config_parser.get_log_level() == 'DEBUG':
             #     self.logger.debug(f"Returned row: {row}")
             main_row = self.decode_main_row(row)
-            self.insert_protocol('main', task_name, 'start', None, None, None, None, 'info', None, main_row['id'])
+            self.insert_protocol('main', task_name + ': ' + subtask_name, 'start', None, None, None, None, 'info', None, main_row['id'])
         except Exception as e:
             self.logger.error(f"Error inserting task {task_name} into {table_name}.")
             self.logger.error(e)
             raise
 
-    def update_main_status(self, task_name, success, message):
+    def update_main_status(self, task_name, subtask_name, success, message):
         table_name = self.config_parser.get_protocol_name_main()
         query = f"""
             UPDATE "{self.protocol_schema}"."{table_name}"
@@ -217,9 +218,10 @@ class MigratorTables:
             success = %s,
             message = %s
             WHERE task_name = %s
+            AND subtask_name = %s
             RETURNING *
         """
-        params = ('TRUE' if success else 'FALSE', message, task_name)
+        params = ('TRUE' if success else 'FALSE', message, task_name, subtask_name)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -243,10 +245,11 @@ class MigratorTables:
         return {
             'id': row[0],
             'task_name': row[1],
-            'task_started': row[2],
-            'task_completed': row[3],
-            'success': row[4],
-            'message': row[5]
+            'subtask_name': row[2],
+            'task_started': row[3],
+            'task_completed': row[4],
+            'success': row[5],
+            'message': row[6]
         }
 
     def create_table_for_user_defined_types(self):
@@ -1308,7 +1311,10 @@ class MigratorTables:
                     length = task_data['task_completed'] - task_data['task_started']
                 else:
                     length = "none"
-                status = f"{task_data['task_name'][:50]:<50} -> start: {str(task_data['task_started'])[:19]:<19} | end: {str(task_data['task_completed'])[:19]:<19} | length: {str(length)[:19]}"
+                intendation = ''
+                if task_data['subtask_name'] != '':
+                    intendation = '    '
+                status = f"{intendation}{(task_data['task_name']+': '+task_data['subtask_name'])[:50]:<50} -> start: {str(task_data['task_started'])[:19]:<19} | end: {str(task_data['task_completed'])[:19]:<19} | length: {str(length)[:19]}"
                 self.logger.info(f"{status}")
         except Exception as e:
             self.logger.error(f"Error printing migration summary.")

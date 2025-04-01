@@ -20,7 +20,7 @@ class Orchestrator:
         self.on_error_action = self.config_parser.get_on_error_action()
         self.source_schema = self.config_parser.get_source_schema()
         self.target_schema = self.config_parser.get_target_schema()
-        self.migrator_tables.insert_main('Orchestrator')
+        self.migrator_tables.insert_main('Orchestrator','')
 
     def run(self):
         try:
@@ -37,7 +37,7 @@ class Orchestrator:
 
             self.run_post_migration_script()
             self.logger.info("Orchestration complete.")
-            self.migrator_tables.update_main_status('Orchestrator', True, 'finished OK')
+            self.migrator_tables.update_main_status('Orchestrator', '', True, 'finished OK')
 
             self.migrator_tables.print_migration_summary()
 
@@ -51,7 +51,7 @@ class Orchestrator:
                 pass
 
         except Exception as e:
-            self.migrator_tables.update_main_status('Orchestrator', False, f'ERROR: {e}')
+            self.migrator_tables.update_main_status('Orchestrator', '', False, f'ERROR: {e}')
             self.handle_error(e, 'orchestration')
 
     def connect_to_source_db(self):
@@ -91,7 +91,7 @@ class Orchestrator:
                 self.handle_error(e, 'post-migration script')
 
     def run_migrate_tables(self):
-        self.migrator_tables.insert_main('Orchestrator - tables migration')
+        self.migrator_tables.insert_main('Orchestrator', 'tables migration')
         workers_requested = self.config_parser.get_parallel_workers_count()
         settings = {
             'source_db_type': self.config_parser.get_source_db_type(),
@@ -141,10 +141,10 @@ class Orchestrator:
         else:
             self.logger.info("No tables to create.")
 
-        self.migrator_tables.update_main_status('Orchestrator - tables migration', True, 'finished OK')
+        self.migrator_tables.update_main_status('Orchestrator', 'tables migration', True, 'finished OK')
 
     def run_create_user_defined_types(self):
-        self.migrator_tables.insert_main('Orchestrator - user defined types migration')
+        self.migrator_tables.insert_main('Orchestrator', 'user defined types migration')
         self.logger.info("Migrating user defined types.")
         user_defined_types = self.migrator_tables.fetch_all_user_defined_types()
         if len(user_defined_types) > 0:
@@ -163,10 +163,10 @@ class Orchestrator:
             self.logger.info("User defined types migrated successfully.")
         else:
             self.logger.info("No user defined types found to migrate.")
-        self.migrator_tables.update_main_status('Orchestrator - user defined types migration', True, 'finished OK')
+        self.migrator_tables.update_main_status('Orchestrator', 'user defined types migration', True, 'finished OK')
 
     def run_migrate_indexes(self):
-        self.migrator_tables.insert_main('Orchestrator - indexes migration')
+        self.migrator_tables.insert_main('Orchestrator', 'indexes migration')
         workers_requested = self.config_parser.get_parallel_workers_count()
         target_db_type = self.config_parser.get_target_db_type()
 
@@ -207,10 +207,10 @@ class Orchestrator:
         else:
             self.logger.info("No indexes to create.")
 
-        self.migrator_tables.update_main_status('Orchestrator - indexes migration', True, 'finished OK')
+        self.migrator_tables.update_main_status('Orchestrator', 'indexes migration', True, 'finished OK')
 
     def run_migrate_constraints(self):
-        self.migrator_tables.insert_main('Orchestrator - constraints migration')
+        self.migrator_tables.insert_main('Orchestrator', 'constraints migration')
         workers_requested = self.config_parser.get_parallel_workers_count()
         target_db_type = self.config_parser.get_target_db_type()
 
@@ -251,7 +251,7 @@ class Orchestrator:
         else:
             self.logger.info("No constraints to create.")
 
-        self.migrator_tables.update_main_status('Orchestrator - constraints migration', True, 'finished OK')
+        self.migrator_tables.update_main_status('Orchestrator', 'constraints migration', True, 'finished OK')
 
     def table_worker(self, table_data, settings):
         worker_id = uuid.uuid4()
@@ -444,7 +444,7 @@ class Orchestrator:
             return False
 
     def run_migrate_funcprocs(self):
-        self.migrator_tables.insert_main('Orchestrator - functions/procedures migration')
+        self.migrator_tables.insert_main('Orchestrator', 'functions/procedures migration')
         include_funcprocs = self.config_parser.get_include_funcprocs() or []
         exclude_funcprocs = self.config_parser.get_exclude_funcprocs() or []
 
@@ -511,10 +511,10 @@ class Orchestrator:
         else:
             self.logger.info("Skipping function and procedure migration as requested.")
 
-        self.migrator_tables.update_main_status('Orchestrator - functions/procedures migration', True, 'finished OK')
+        self.migrator_tables.update_main_status('Orchestrator', 'functions/procedures migration', True, 'finished OK')
 
     def run_migrate_triggers(self):
-        self.migrator_tables.insert_main('Orchestrator - triggers migration')
+        self.migrator_tables.insert_main('Orchestrator', 'triggers migration')
         try:
             if self.config_parser.should_migrate_triggers():
                 self.logger.info("Migrating triggers.")
@@ -555,13 +555,13 @@ class Orchestrator:
             else:
                 self.logger.info("Skipping trigger migration as requested.")
 
-            self.migrator_tables.update_main_status('Orchestrator - triggers migration', True, 'finished OK')
+            self.migrator_tables.update_main_status('Orchestrator', 'triggers migration', True, 'finished OK')
 
         except Exception as e:
             self.handle_error(e, 'migrate_triggers')
 
     def run_migrate_views(self):
-        self.migrator_tables.insert_main('Orchestrator - views migration')
+        self.migrator_tables.insert_main('Orchestrator', 'views migration')
 
         if self.config_parser.should_migrate_views():
             self.logger.info("Migrating views.")
@@ -594,10 +594,10 @@ class Orchestrator:
                 self.logger.info("No views found to migrate.")
         else:
             self.logger.info("Skipping view migration as requested.")
-        self.migrator_tables.update_main_status('Orchestrator - views migration', True, 'finished OK')
+        self.migrator_tables.update_main_status('Orchestrator', 'views migration', True, 'finished OK')
 
     def run_migrate_comments(self):
-        self.migrator_tables.insert_main('Orchestrator - comments migration')
+        self.migrator_tables.insert_main('Orchestrator', 'comments migration')
         self.logger.info("Migrating comments.")
         all_tables = self.migrator_tables.fetch_all_tables()
         self.target_connection.connect()
@@ -657,7 +657,7 @@ class Orchestrator:
                 self.target_connection.execute_query(query)
 
         self.target_connection.disconnect()
-        self.migrator_tables.update_main_status('Orchestrator - comments migration', True, 'finished OK')
+        self.migrator_tables.update_main_status('Orchestrator', 'comments migration', True, 'finished OK')
         self.logger.info("Comments migrated successfully.")
 
     def handle_error(self, e, description=None):

@@ -30,7 +30,7 @@ class Planner:
             self.run_prepare_tables()
             self.run_prepare_views()
 
-            self.migrator_tables.update_main_status('Planner', True, 'finished OK')
+            self.migrator_tables.update_main_status('Planner', '', True, 'finished OK')
 
             try:
                 self.source_connection.disconnect()
@@ -43,7 +43,7 @@ class Planner:
 
             self.logger.info("Planner phase done successfully.")
         except Exception as e:
-            self.migrator_tables.update_main_status('Planner', False, f'ERROR: {e}')
+            self.migrator_tables.update_main_status('Planner', '', False, f'ERROR: {e}')
             self.handle_error(e, "Planner")
 
     def pre_planning(self):
@@ -69,7 +69,7 @@ class Planner:
 
             self.logger.info("Creating migration plan...")
             self.migrator_tables.create_all()
-            self.migrator_tables.insert_main('Planner')
+            self.migrator_tables.insert_main('Planner', '')
             self.migrator_tables.prepare_data_types_substitution()
             self.migrator_tables.prepare_default_values_substitution()
 

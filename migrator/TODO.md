@@ -1,5 +1,9 @@
 - comments on all objects
-- data migration protocol
-- migrator_log table ??
 
-- repair of failed batch insert
+- SAP HANA ???
+
+- dlt library ???
+  - https://dlthub.com/docs/pipelines/sql_database_oracle/load-data-with-python-from-sql_database_oracle-to-duckdb
+  - https://dlthub.com/docs/intro
+
+	

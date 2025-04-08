@@ -997,16 +997,19 @@ class InformixConnector(DatabaseConnector):
             worker_id = settings['worker_id']
             source_schema = settings['source_schema']
             source_table = settings['source_table']
+            source_table_id = settings['source_table_id']
             source_columns = settings['source_columns']
             target_schema = settings['target_schema']
             target_table = settings['target_table']
             target_columns = settings['target_columns']
             primary_key_columns = settings['primary_key_columns']
             batch_size = settings['batch_size']
+            migrator_tables = settings['migrator_tables']
             source_table_rows = self.get_rows_count(source_schema, source_table)
 
             if source_table_rows == 0:
                 self.logger.info(f"Worker {worker_id}: Table {source_table} is empty - skipping data migration.")
+                migrator_tables.insert_data_migration(source_schema, source_table, source_table_id, source_table_rows, 0, worker_id, 0, target_schema, target_table, 0, 0)
                 return 0
             else:
                 self.logger.info(f"Worker {worker_id}: Table {source_table} has {source_table_rows} rows - starting data migration.")
@@ -1047,7 +1050,7 @@ class InformixConnector(DatabaseConnector):
                                 # record[column_name] = record[column_name].read()  # Convert IfxBblob to bytes
 
                     part_name = f'insert data: {target_table} - {offset}'
-                    migrate_target_connection.insert_batch(target_schema, target_table, target_columns, records)
+                    inserted_rows = migrate_target_connection.insert_batch(target_schema, target_table, target_columns, records)
                     self.logger.info(f"Worker {worker_id}: inserted {len(df)} rows into target table {target_table}.")
 
                     offset += batch_size

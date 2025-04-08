@@ -344,6 +344,7 @@ class PostgreSQLConnector(DatabaseConnector):
             raise e
 
     def insert_batch(self, table_schema: str, table_name: str, columns: dict, data: list):
+        inserted_rows = 0
         try:
             # Ensure data is a list of tuples
             if isinstance(data, list) and all(isinstance(item, dict) for item in data):
@@ -368,6 +369,7 @@ class PostgreSQLConnector(DatabaseConnector):
                             self.logger.info(f"Insert into {table_name}: Executing session settings: {self.session_settings}")
                         cursor.execute(self.session_settings)
                     psycopg2.extras.execute_batch(cursor, insert_query, data)
+                    inserted_rows = len(data)
                 except psycopg2.Error as e:
                     self.logger.error(f"Error inserting batch data: {e}")
                     self.logger.error(f"Trying to insert row by row.")
@@ -375,6 +377,7 @@ class PostgreSQLConnector(DatabaseConnector):
                     for row in data:
                         try:
                             cursor.execute(insert_query, row)
+                            inserted_rows += 1
                             self.connection.commit()
                         except psycopg2.Error as e:
                             self.connection.rollback()

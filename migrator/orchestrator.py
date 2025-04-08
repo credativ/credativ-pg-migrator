@@ -284,7 +284,7 @@ class Orchestrator:
 
             if settings['drop_tables']:
                 part_name = 'drop table'
-                worker_target_connection.execute_query(f"DROP TABLE IF EXISTS {target_schema}.{target_table}")
+                worker_target_connection.execute_query(f"DROP TABLE IF EXISTS {target_schema}.{target_table} CASCADE")
                 self.logger.info(f"""Worker {worker_id}: Table "{target_table}" dropped successfully.""")
 
             if settings['create_tables']:
@@ -317,6 +317,7 @@ class Orchestrator:
                     'worker_id': worker_id,
                     'source_schema': source_schema,
                     'source_table': source_table,
+                    'source_table_id': table_data['source_table_id'],
                     'source_columns': table_data['source_columns'],
                     'target_schema': target_schema,
                     'target_table': target_table,

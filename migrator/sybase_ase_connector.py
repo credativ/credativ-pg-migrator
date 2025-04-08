@@ -562,17 +562,17 @@ class SybaseASEConnector(DatabaseConnector):
         current_batch_percent = 20
         analyze_batch_size = self.config_parser.get_batch_size()
 
-        cur = self.connection.cursor()
-        temp_table = f"temp_id_ranges_{worker_id.replace('-', '_')}"
-        cur.execute(f"""DROP TABLE IF EXISTS "{temp_table}" """)
-        cur.execute(f"""CREATE TEMP TABLE IF NOT EXISTS "{temp_table}" (batch_start BIGINT, batch_end BIGINT, row_count BIGINT)""")
+        sybase_cursor = self.connection.cursor()
+        temp_table = f"temp_id_ranges_{str(worker_id).replace('-', '_')}"
+        migrator_tables.protocol_connection.execute_query(f"""DROP TABLE IF EXISTS "{temp_table}" """)
+        migrator_tables.protocol_connection.execute_query(f"""CREATE TEMP TABLE IF NOT EXISTS "{temp_table}" (batch_start BIGINT, batch_end BIGINT, row_count BIGINT)""")
 
         pk_range_table = self.config_parser.get_protocol_name_pk_ranges()
-        cur.execute(f"SELECT MIN({pk_column}) FROM {schema_name}.{table_name}")
-        min_id = cur.fetchone()[0]
+        sybase_cursor.execute(f"SELECT MIN({pk_column}) FROM {schema_name}.{table_name}")
+        min_id = sybase_cursor.fetchone()[0]
 
-        cur.execute(f"SELECT MAX({pk_column}) FROM {schema_name}.{table_name}")
-        max_id = cur.fetchone()[0]
+        sybase_cursor.execute(f"SELECT MAX({pk_column}) FROM {schema_name}.{table_name}")
+        max_id = sybase_cursor.fetchone()[0]
 
         min_pk = min_id
         max_pk = max_id
@@ -600,8 +600,8 @@ class SybaseASEConnector(DatabaseConnector):
                 current_end = max_id
 
             loop_counter += 1
-            cur.execute(f"""SELECT COUNT(*) FROM {schema_name}.{table_name} WHERE {pk_column} BETWEEN %s AND %s""", (current_start, current_end))
-            testing_row_count = cur.fetchone()[0]
+            sybase_cursor.execute(f"""SELECT COUNT(*) FROM {schema_name}.{table_name} WHERE {pk_column} BETWEEN %s AND %s""", (current_start, current_end))
+            testing_row_count = sybase_cursor.fetchone()[0]
 
             if self.config_parser.get_log_level() == 'DEBUG':
                 self.logger.debug(f"Worker: {worker_id}: PK analysis: {loop_counter}: Testing row count: {testing_row_count}")
@@ -629,7 +629,7 @@ class SybaseASEConnector(DatabaseConnector):
                 if self.config_parser.get_log_level() == 'DEBUG':
                     self.logger.debug(f"Worker: {worker_id}: PK analysis: {loop_counter}: Increasing analyze_batch_percent to {round(current_batch_percent, 8)} without restarting loop")
 
-            cur.execute(f"""SELECT
+            sybase_cursor.execute(f"""SELECT
                         %s::bigint AS batch_start,
                         %s::bigint AS batch_end,
                         COUNT(*) AS row_count
@@ -637,14 +637,14 @@ class SybaseASEConnector(DatabaseConnector):
                         WHERE {pk_column} BETWEEN %s AND %s""",
                         (current_start, current_end, current_start, current_end))
 
-            result = cur.fetchone()
+            result = sybase_cursor.fetchone()
             if result:
                 insert_batch_start = result[0]
                 insert_batch_end = result[1]
                 insert_row_count = result[2]
                 if self.config_parser.get_log_level() == 'DEBUG':
                     self.logger.debug(f"Worker: {worker_id}: PK analysis: {loop_counter}: Insert batch into temp table: start: {insert_batch_start}, end: {insert_batch_end}, row count: {insert_row_count}")
-                cur.execute(f"""INSERT INTO "{temp_table}" (batch_start, batch_end, row_count) VALUES (%s, %s, %s)""", (insert_batch_start, insert_batch_end, insert_row_count))
+                migrator_tables.protocol_connection.execute_query(f"""INSERT INTO "{temp_table}" (batch_start, batch_end, row_count) VALUES (%s, %s, %s)""", (insert_batch_start, insert_batch_end, insert_row_count))
 
             current_start = current_end + 1
             if self.config_parser.get_log_level() == 'DEBUG':
@@ -655,7 +655,7 @@ class SybaseASEConnector(DatabaseConnector):
 
         current_start = min_id
         while current_start <= max_id:
-            cur.execute("""
+            migrator_tables.protocol_connection.execute_query("""
                 SELECT
                     min(batch_start) as batch_start,
                     max(batch_end) as batch_end,
@@ -671,7 +671,7 @@ class SybaseASEConnector(DatabaseConnector):
                 ) subquery
                 WHERE cumulative_row_count <= %s::bigint
             """, (current_start, analyze_batch_size))
-            result = cur.fetchone()
+            result = migrator_tables.fetchone()
             if result:
                 insert_batch_start = result[0]
                 insert_batch_end = result[1]
@@ -682,7 +682,7 @@ class SybaseASEConnector(DatabaseConnector):
             migrator_tables.insert_pk_ranges(worker_id, pk_range_table, schema_name, table_name, pk_column, insert_batch_start, insert_batch_end, insert_row_count)
             current_start = insert_batch_end
 
-        cur.execute(f"""DROP TABLE IF EXISTS "{temp_table}" """)
+        migrator_tables.protocol_connection.execute_query(f"""DROP TABLE IF EXISTS "{temp_table}" """)
         self.connection.commit()
         self.logger.info(f"Worker: {worker_id}: PK analysis: {loop_counter}: Finished analyzing PK distribution for table {table_name}.")
 
@@ -692,6 +692,7 @@ class SybaseASEConnector(DatabaseConnector):
             worker_id = settings['worker_id']
             source_schema = settings['source_schema']
             source_table = settings['source_table']
+            source_table_id = settings['source_table_id']
             source_columns = settings['source_columns']
             target_schema = settings['target_schema']
             target_table = settings['target_table']
@@ -703,13 +704,14 @@ class SybaseASEConnector(DatabaseConnector):
 
             if source_table_rows == 0:
                 self.logger.info(f"Worker {worker_id}: Table {source_table} is empty - skipping data migration.")
+                migrator_tables.insert_data_migration(source_schema, source_table, source_table_id, source_table_rows, 0, worker_id, 0, target_schema, target_table, 0, 0)
                 return 0
             else:
                 self.logger.info(f"Worker {worker_id}: Table {source_table} has {source_table_rows} rows - starting data migration.")
 
                 if source_table_rows > batch_size:
                     self.logger.info(f"Worker {worker_id}: Analyzing PK distribution for table {source_table} in batches.")
-                    self.analyze_pk_distribution_batches(self, migrator_tables, source_schema, source_table, primary_key_columns, worker_id)
+                    self.analyze_pk_distribution_batches(migrator_tables, source_schema, source_table, primary_key_columns, worker_id)
 
                     rows_pk_ranges = migrator_tables.fetch_all_pk_ranges(worker_id)
                     if self.config_parser.get_log_level() == 'DEBUG':
@@ -723,11 +725,32 @@ class SybaseASEConnector(DatabaseConnector):
                         process_batch_start = pk_range[0]
                         process_batch_end = pk_range[1]
                         process_row_count = pk_range[2]
+                        self.logger.info(f"Worker {worker_id}: Processing batch: start: {process_batch_start}, end: {process_batch_end}, row count: {process_row_count}")
+
+                        part_name = f'prepare fetch all data: {source_table}'
+                        query = f"SELECT * FROM {source_schema}.{source_table} where {primary_key_columns} BETWEEN {process_batch_start} AND {process_batch_end}"
                         if self.config_parser.get_log_level() == 'DEBUG':
-                            self.logger.debug(f"Worker {worker_id}: Processing batch: start: {process_batch_start}, end: {process_batch_end}, row count: {process_row_count}")
+                            self.logger.debug(f"Worker {worker_id}: Fetching data with query: {query}")
+                        part_name = f'do fetch all data: {source_table}'
+                        df = pl.read_database(query, self.connection)
+                        self.logger.info(f"Worker {worker_id}: Fetched {len(df)} rows from source table {source_table}.")
+
+                        records = df.to_dicts()
+                        # Adjust binary or bytea types
+                        for record in records:
+                            for order_num, column in source_columns.items():
+                                column_name = column['name']
+                                column_type = column['type']
+                                if column_type.lower() in ['binary', 'varbinary']:
+                                    record[column_name] = bytes(record[column_name])
+                        part_name = f'insert data: {target_table}'
+                        inserted_rows = migrate_target_connection.insert_batch(target_schema, target_table, target_columns, records)
+                        self.logger.info(f"Worker {worker_id}: inserted {inserted_rows} rows into target table {target_table}.")
 
                 else:
-                    ## If the table has >= batch_size rows, we can fetch all rows in one go
+                    ## If the table has <= batch_size rows, we can fetch all rows in one go
+                    protocol_id = migrator_tables.insert_data_migration(source_schema, source_table, source_table_id, source_table_rows, source_table_rows, worker_id, 0, target_schema, target_table, 0, 0)
+
                     self.logger.info(f"Worker {worker_id}: Fetching all data for table {source_table}")
                     part_name = f'prepare fetch all data: {source_table}'
                     query = f"SELECT * FROM {source_schema}.{source_table}"
@@ -753,8 +776,12 @@ class SybaseASEConnector(DatabaseConnector):
                                 record[column_name] = bytes(record[column_name])
 
                     part_name = f'insert all data: {target_table}'
-                    migrate_target_connection.insert_batch(target_schema, target_table, target_columns, records)
-                    self.logger.info(f"Worker {worker_id}: inserted {len(df)} rows into target table {target_table}.")
+                    inserted_rows = migrate_target_connection.insert_batch(target_schema, target_table, target_columns, records)
+                    self.logger.info(f"Worker {worker_id}: inserted {inserted_rows} rows into target table {target_table}.")
+
+                    target_table_rows = migrate_target_connection.get_rows_count(target_schema, target_table)
+                    self.logger.info(f"Worker {worker_id}: Target table {target_schema}.{target_table} has {target_table_rows} rows")
+                    migrator_tables.update_data_migration_status(protocol_id, True, 'OK', target_table_rows, inserted_rows)
 
                     self.logger.info(f"Worker {worker_id}: Finished migrating data for table {source_table}.")
                 return source_table_rows

@@ -18,6 +18,7 @@ class MigratorTables:
         self.create_table_for_main()
         self.create_table_for_user_defined_types()
         self.create_table_for_tables()
+        self.create_table_for_data_migration()
         self.create_table_for_pk_ranges()
         self.create_table_for_indexes()
         self.create_table_for_constraints()
@@ -360,10 +361,14 @@ class MigratorTables:
             source_schema TEXT,
             source_table TEXT,
             source_table_id INTEGER,
-            source_table_rows BIGINT    ,
+            source_table_rows INTEGER,
+            batch_read INTEGER,
+            worker_id TEXT,
+            loop_id INTEGER,
             target_schema TEXT,
             target_table TEXT,
-            target_table_rows BIGINT,
+            target_table_rows INTEGER,
+            batch_inserted INTEGER,
             task_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             task_started TIMESTAMP,
             task_completed TIMESTAMP,
@@ -374,15 +379,18 @@ class MigratorTables:
         # if self.config_parser.get_log_level() == 'DEBUG':
         #     self.logger.debug(f"Data migration table {table_name} created.")
 
-    def insert_data_migration(self, source_schema, source_table, source_table_id, source_table_rows, target_schema, target_table, target_table_rows):
+    def insert_data_migration(self, source_schema, source_table, source_table_id, source_table_rows, batch_read, worker_id, loop_id, target_schema, target_table, target_table_rows, batch_inserted):
         table_name = self.config_parser.get_protocol_name_data_migration()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
-            (source_schema, source_table, source_table_id, source_table_rows, target_schema, target_table, target_table_rows)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            (source_schema, source_table, source_table_id, source_table_rows, batch_read, worker_id, loop_id, target_schema, target_table, target_table_rows, batch_inserted)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (source_schema, source_table, source_table_id, source_table_rows, target_schema, target_table, target_table_rows)
+        params = (source_schema, source_table, source_table_id, source_table_rows, batch_read, str(worker_id), loop_id, target_schema, target_table, target_table_rows, batch_inserted)
+        # if self.config_parser.get_log_level() == 'DEBUG':
+        #     self.logger.debug(f"Data migration insert query: {query}")
+        #     self.logger.debug(f"Data migration insert params: {params}")
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -393,23 +401,25 @@ class MigratorTables:
             #     self.logger.debug(f"Returned row: {row}")
             data_migration_row = self.decode_data_migration_row(row)
             self.insert_protocol('data_migration', target_table, 'create', None, None, None, None, 'info', None, data_migration_row['id'])
+            return data_migration_row['id']
         except Exception as e:
             self.logger.error(f"Error inserting data migration {target_table} into {table_name}.")
             self.logger.error(e)
             raise
 
-    def update_data_migration_status(self, row_id, success, message, target_table_rows):
+    def update_data_migration_status(self, row_id, success, message, target_table_rows, batch_inserted):
         table_name = self.config_parser.get_protocol_name_data_migration()
         query = f"""
             UPDATE "{self.protocol_schema}"."{table_name}"
             SET task_completed = CURRENT_TIMESTAMP,
             success = %s,
             message = %s,
-            target_table_rows = %s
+            target_table_rows = %s,
+            batch_inserted = %s
             WHERE id = %s
             RETURNING *
         """
-        params = ('TRUE' if success else 'FALSE', message, target_table_rows, row_id)
+        params = ('TRUE' if success else 'FALSE', message, target_table_rows, batch_inserted, row_id)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -429,6 +439,22 @@ class MigratorTables:
             self.logger.error(f"Query: {query}")
             self.logger.error(e)
             raise
+
+    def decode_data_migration_row(self, row):
+        return {
+            'id': row[0],
+            'source_schema': row[1],
+            'source_table': row[2],
+            'source_table_id': row[3],
+            'source_table_rows': row[4],
+            'batch_read': row[5],
+            'worker_id': row[6],
+            'loop_id': row[7],
+            'target_schema': row[8],
+            'target_table': row[9],
+            'target_table_rows': row[10],
+            'batch_inserted': row[11]
+        }
 
     def create_table_for_pk_ranges(self):
         table_name = self.config_parser.get_protocol_name_pk_ranges()

@@ -1271,7 +1271,9 @@ class MigratorTables:
             JOIN "{self.protocol_schema}"."{indexes_table}" i ON i.source_table_id = t.source_table_id
             WHERE t.target_schema = '{target_schema}' AND
                 t.target_table = '{target_table}' AND
-                index_type = 'PRIMARY KEY'
+                index_type in ('PRIMARY KEY', 'UNIQUE')
+            ORDER BY CASE WHEN i.index_type = 'PRIMARY KEY' THEN 1 ELSE 2 END
+            LIMIT 1
         """
         try:
             cursor = self.protocol_connection.connection.cursor()

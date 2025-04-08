@@ -709,33 +709,70 @@ class SybaseASEConnector(DatabaseConnector):
             else:
                 self.logger.info(f"Worker {worker_id}: Table {source_table} has {source_table_rows} rows - starting data migration.")
 
-                if source_table_rows > batch_size:
-                    self.logger.info(f"Worker {worker_id}: Analyzing PK distribution for table {source_table} in batches.")
-                    self.analyze_pk_distribution_batches(migrator_tables, source_schema, source_table, primary_key_columns, worker_id)
+                if primary_key_columns is None:
+                    self.logger.info(f"Worker {worker_id}: No primary key found for table {source_table} - skipping data migration.")
+                    migrator_tables.insert_data_migration(source_schema, source_table, source_table_id, source_table_rows, 0, worker_id, 0, target_schema, target_table, 0, 0)
+                    return 0
 
-                    rows_pk_ranges = migrator_tables.fetch_all_pk_ranges(worker_id)
-                    if self.config_parser.get_log_level() == 'DEBUG':
-                        self.logger.debug(f"Worker {worker_id}: PK ranges found: {rows_pk_ranges}")
+                else:
+                    if source_table_rows > batch_size:
+                        self.logger.info(f"Worker {worker_id}: Analyzing PK distribution for table {source_table} in batches (PK: {primary_key_columns}).")
+                        self.analyze_pk_distribution_batches(migrator_tables, source_schema, source_table, primary_key_columns, worker_id)
 
-                    if rows_pk_ranges == 0:
-                        self.logger.info(f"Worker {worker_id}: No PK ranges found - skipping data migration.")
-                        return 0
+                        rows_pk_ranges = migrator_tables.fetch_all_pk_ranges(worker_id)
+                        if self.config_parser.get_log_level() == 'DEBUG':
+                            self.logger.debug(f"Worker {worker_id}: PK ranges found: {rows_pk_ranges}")
 
-                    for pk_range in rows_pk_ranges:
-                        process_batch_start = pk_range[0]
-                        process_batch_end = pk_range[1]
-                        process_row_count = pk_range[2]
-                        self.logger.info(f"Worker {worker_id}: Processing batch: start: {process_batch_start}, end: {process_batch_end}, row count: {process_row_count}")
+                        if rows_pk_ranges == 0:
+                            self.logger.info(f"Worker {worker_id}: No PK ranges found - skipping data migration.")
+                            return 0
 
+                        for pk_range in rows_pk_ranges:
+                            process_batch_start = pk_range[0]
+                            process_batch_end = pk_range[1]
+                            process_row_count = pk_range[2]
+                            self.logger.info(f"Worker {worker_id}: Processing batch: start: {process_batch_start}, end: {process_batch_end}, row count: {process_row_count}")
+
+                            part_name = f'prepare fetch all data: {source_table}'
+                            query = f"SELECT * FROM {source_schema}.{source_table} where {primary_key_columns} BETWEEN {process_batch_start} AND {process_batch_end}"
+                            if self.config_parser.get_log_level() == 'DEBUG':
+                                self.logger.debug(f"Worker {worker_id}: Fetching data with query: {query}")
+                            part_name = f'do fetch all data: {source_table}'
+                            df = pl.read_database(query, self.connection)
+                            self.logger.info(f"Worker {worker_id}: Fetched {len(df)} rows from source table {source_table}.")
+
+                            records = df.to_dicts()
+                            # Adjust binary or bytea types
+                            for record in records:
+                                for order_num, column in source_columns.items():
+                                    column_name = column['name']
+                                    column_type = column['type']
+                                    if column_type.lower() in ['binary', 'varbinary']:
+                                        record[column_name] = bytes(record[column_name])
+                            part_name = f'insert data: {target_table}'
+                            inserted_rows = migrate_target_connection.insert_batch(target_schema, target_table, target_columns, records)
+                            self.logger.info(f"Worker {worker_id}: inserted {inserted_rows} rows into target table {target_table}.")
+
+                    else:
+                        ## If the table has <= batch_size rows, we can fetch all rows in one go
+                        protocol_id = migrator_tables.insert_data_migration(source_schema, source_table, source_table_id, source_table_rows, source_table_rows, worker_id, 0, target_schema, target_table, 0, 0)
+
+                        self.logger.info(f"Worker {worker_id}: Fetching all data for table {source_table}")
                         part_name = f'prepare fetch all data: {source_table}'
-                        query = f"SELECT * FROM {source_schema}.{source_table} where {primary_key_columns} BETWEEN {process_batch_start} AND {process_batch_end}"
+                        query = f"SELECT * FROM {source_schema}.{source_table}"
+
                         if self.config_parser.get_log_level() == 'DEBUG':
                             self.logger.debug(f"Worker {worker_id}: Fetching data with query: {query}")
+
                         part_name = f'do fetch all data: {source_table}'
                         df = pl.read_database(query, self.connection)
-                        self.logger.info(f"Worker {worker_id}: Fetched {len(df)} rows from source table {source_table}.")
 
+                        self.logger.info(f"Worker {worker_id}: Fetched {len(df)} rows from source table {source_table}.")
+                        # self.logger.info(f"Worker {worker_id}: Migrating batch starting at offset {offset} for table {table_name}.")
+
+                        # Convert Polars DataFrame to list of tuples for insertion
                         records = df.to_dicts()
+
                         # Adjust binary or bytea types
                         for record in records:
                             for order_num, column in source_columns.items():
@@ -743,48 +780,17 @@ class SybaseASEConnector(DatabaseConnector):
                                 column_type = column['type']
                                 if column_type.lower() in ['binary', 'varbinary']:
                                     record[column_name] = bytes(record[column_name])
-                        part_name = f'insert data: {target_table}'
+
+                        part_name = f'insert all data: {target_table}'
                         inserted_rows = migrate_target_connection.insert_batch(target_schema, target_table, target_columns, records)
                         self.logger.info(f"Worker {worker_id}: inserted {inserted_rows} rows into target table {target_table}.")
 
-                else:
-                    ## If the table has <= batch_size rows, we can fetch all rows in one go
-                    protocol_id = migrator_tables.insert_data_migration(source_schema, source_table, source_table_id, source_table_rows, source_table_rows, worker_id, 0, target_schema, target_table, 0, 0)
+                        target_table_rows = migrate_target_connection.get_rows_count(target_schema, target_table)
+                        self.logger.info(f"Worker {worker_id}: Target table {target_schema}.{target_table} has {target_table_rows} rows")
+                        migrator_tables.update_data_migration_status(protocol_id, True, 'OK', target_table_rows, inserted_rows)
 
-                    self.logger.info(f"Worker {worker_id}: Fetching all data for table {source_table}")
-                    part_name = f'prepare fetch all data: {source_table}'
-                    query = f"SELECT * FROM {source_schema}.{source_table}"
-
-                    if self.config_parser.get_log_level() == 'DEBUG':
-                        self.logger.debug(f"Worker {worker_id}: Fetching data with query: {query}")
-
-                    part_name = f'do fetch all data: {source_table}'
-                    df = pl.read_database(query, self.connection)
-
-                    self.logger.info(f"Worker {worker_id}: Fetched {len(df)} rows from source table {source_table}.")
-                    # self.logger.info(f"Worker {worker_id}: Migrating batch starting at offset {offset} for table {table_name}.")
-
-                    # Convert Polars DataFrame to list of tuples for insertion
-                    records = df.to_dicts()
-
-                    # Adjust binary or bytea types
-                    for record in records:
-                        for order_num, column in source_columns.items():
-                            column_name = column['name']
-                            column_type = column['type']
-                            if column_type.lower() in ['binary', 'varbinary']:
-                                record[column_name] = bytes(record[column_name])
-
-                    part_name = f'insert all data: {target_table}'
-                    inserted_rows = migrate_target_connection.insert_batch(target_schema, target_table, target_columns, records)
-                    self.logger.info(f"Worker {worker_id}: inserted {inserted_rows} rows into target table {target_table}.")
-
-                    target_table_rows = migrate_target_connection.get_rows_count(target_schema, target_table)
-                    self.logger.info(f"Worker {worker_id}: Target table {target_schema}.{target_table} has {target_table_rows} rows")
-                    migrator_tables.update_data_migration_status(protocol_id, True, 'OK', target_table_rows, inserted_rows)
-
-                    self.logger.info(f"Worker {worker_id}: Finished migrating data for table {source_table}.")
-                return source_table_rows
+                        self.logger.info(f"Worker {worker_id}: Finished migrating data for table {source_table}.")
+                    return source_table_rows
         except Exception as e:
             self.logger.error(f"Worker {worker_id}: Error during {part_name} -> {e}")
             raise e

@@ -110,6 +110,7 @@ class Orchestrator:
                 futures = {}
                 for table_row in migrate_tables:
                     table_data = self.migrator_tables.decode_table_row(table_row)
+                    table_data['primary_key_columns'] = self.migrator_tables.select_primary_key(table_data['target_schema'], table_data['target_table'])
                     if len(futures) >= workers_requested:
                         done, _ = concurrent.futures.wait(futures, return_when=concurrent.futures.FIRST_COMPLETED)
                         for future in done:
@@ -122,7 +123,6 @@ class Orchestrator:
                                 self.migrator_tables.update_table_status(table_done['id'], True, 'migrated OK')
 
                             futures.pop(future)
-                    table_data['primary_key_columns'] = self.migrator_tables.select_primary_key(table_data['target_schema'], table_data['target_table'])
                     future = executor.submit(self.table_worker, table_data, settings)
                     futures[future] = table_data
 

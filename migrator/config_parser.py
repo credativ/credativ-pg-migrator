@@ -71,7 +71,8 @@ class ConfigParser:
         db_config = self.config[source_or_target]
         if db_config['type'] == 'postgresql':
             if connectivity == 'native' or connectivity is None:
-                return f"dbname={db_config['database']} user={db_config['username']} password={db_config['password']} host={db_config.get('host', 'localhost')} port={db_config['port']} sslmode={db_config.get('sslmode', 'prefer')}"
+                return f"""postgres://{db_config['username']}:{db_config['password']}@{db_config.get('host', 'localhost')}:{db_config['port']}/{db_config['database']}?sslmode={db_config.get('sslmode', 'prefer')}"""
+                # return f"""dbname="{db_config['database']}" user="{db_config['username']}" password="{db_config['password']}" host="{db_config.get('host', 'localhost')}" port="{db_config['port']}" sslmode={db_config.get('sslmode', 'prefer')}"""
             else:
                 raise ValueError(f"Unsupported Postgres connectivity: {connectivity}")
         elif db_config['type'] == 'informix':

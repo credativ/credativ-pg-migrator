@@ -251,16 +251,16 @@ class SybaseASEConnector(DatabaseConnector):
                 'BINARY': 'BYTEA',
                 'VARBINARY': 'BYTEA',
                 'IMAGE': 'BYTEA',
-                'CHAR': 'CHAR',
-                'NCHAR': 'CHAR',
-                'UNICHAR': 'CHAR',
+                'CHAR': 'TEXT',
+                'NCHAR': 'TEXT',
+                'UNICHAR': 'TEXT',
                 'NVARCHAR': 'TEXT',
                 'TEXT': 'TEXT',
                 'SYSNAME': 'TEXT',
                 'LONGSYSNAME': 'TEXT',
                 'LONG VARCHAR': 'TEXT',
                 'LONG NVARCHAR': 'TEXT',
-                'UNICHAR': 'CHAR',
+                'UNICHAR': 'TEXT',
                 'UNITEXT': 'TEXT',
                 'UNIVARCHAR': 'TEXT',
                 'VARCHAR': 'TEXT',
@@ -375,6 +375,7 @@ class SybaseASEConnector(DatabaseConnector):
                             if self.config_parser.get_log_level() == 'DEBUG':
                                 self.logger.debug(f"Table: {target_schema}.{target_table_name}, index: {index_name}, column: {column_name} has data type {column_data_type}")
                             index_columns_data_types.append(column_data_type)
+                            index_columns_data_types_str = ', '.join(index_columns_data_types)
 
                 create_index_query = None
                 if index_primary_key == 1:
@@ -392,7 +393,7 @@ class SybaseASEConnector(DatabaseConnector):
                         'type': "PRIMARY KEY" if index_primary_key == 1 else "UNIQUE" if index_unique == 1 and index_primary_key == 0 else "INDEX",
                         'columns': index_columns,
                         'columns_count': index_columns_count,
-                        'columns_data_types': index_columns_data_types,
+                        'columns_data_types': index_columns_data_types_str,
                         'sql': create_index_query,
                         'comment': ''
                     }
@@ -572,7 +573,6 @@ class SybaseASEConnector(DatabaseConnector):
         return count
 
     def analyze_pk_distribution_batches(self, values):
-
         migrator_tables = values['migrator_tables']
         schema_name = values['source_schema']
         table_name = values['source_table']
@@ -580,6 +580,7 @@ class SybaseASEConnector(DatabaseConnector):
         primary_key_columns_count = values['primary_key_columns_count']
         primary_key_columns_types = values['primary_key_columns_types']
         worker_id = values['worker_id']
+        analyze_batch_size = self.config_parser.get_batch_size()
 
         if primary_key_columns_count == 1 and primary_key_columns_types in ('BIGINT', 'INTEGER', 'NUMERIC', 'REAL', 'FLOAT'):
             # primary key is one column of numeric type - analysis with min/max values is much quicker
@@ -587,7 +588,6 @@ class SybaseASEConnector(DatabaseConnector):
                 self.logger.debug(f"Worker: {worker_id}: PK analysis: {primary_key_columns} ({primary_key_columns_types}): min/max analysis")
 
             current_batch_percent = 20
-            analyze_batch_size = self.config_parser.get_batch_size()
 
             sybase_cursor = self.connection.cursor()
             temp_table = f"temp_id_ranges_{str(worker_id).replace('-', '_')}"
@@ -728,6 +728,99 @@ class SybaseASEConnector(DatabaseConnector):
             # necessary for composite keys or non-numeric keys
             if self.config_parser.get_log_level() == 'DEBUG':
                 self.logger.debug(f"Worker: {worker_id}: PK analysis: {primary_key_columns} ({primary_key_columns_types}): analyzing all PK values")
+
+            primary_key_columns_list = primary_key_columns.split(',')
+            primary_key_columns_types_list = primary_key_columns_types.split(',')
+            temp_table_structure = ', '.join([f"{column.strip()} {column_type.strip()}" for column, column_type in zip(primary_key_columns_list, primary_key_columns_types_list)])
+            if self.config_parser.get_log_level() == 'DEBUG':
+                self.logger.debug(f"Worker: {worker_id}: PK analysis: {primary_key_columns}: temp table structure: {temp_table_structure}")
+
+            # step 1: create temp table with all PK values
+            sybase_cursor = self.connection.cursor()
+            temp_table = f"temp_id_ranges_{str(worker_id).replace('-', '_')}"
+            migrator_tables.protocol_connection.execute_query(f"""DROP TABLE IF EXISTS "{temp_table}" """)
+            migrator_tables.protocol_connection.execute_query(f"""CREATE TEMP TABLE {temp_table} ({temp_table_structure}) ON COMMIT PRESERVE ROWS""")
+
+            sybase_cursor = self.connection.cursor()
+            sybase_cursor.execute(f"""SELECT {primary_key_columns.replace("'","").replace('"','')} FROM {schema_name}.{table_name}""")
+            rows = sybase_cursor.fetchall()
+            pk_temp_table_row_count = len(rows)
+            for row in rows:
+                # if self.config_parser.get_log_level() == 'DEBUG':
+                #     self.logger.debug(f"Worker: {worker_id}: PK analysis: {primary_key_columns}: row: {row}")
+                insert_values = ', '.join([f"'{value}'" if isinstance(value, str) else str(value) for value in row])
+                migrator_tables.protocol_connection.execute_query(f"""INSERT INTO "{temp_table}" ({primary_key_columns}) VALUES ({insert_values})""")
+            if self.config_parser.get_log_level() == 'DEBUG':
+                self.logger.debug(f"Worker: {worker_id}: PK analysis: {primary_key_columns}: Inserted {pk_temp_table_row_count} rows into temp table {temp_table}")
+
+            # step 2: analyze distribution of PK values
+            pk_temp_table_offset = 0
+            batch_loop = 1
+            count_inserted_total = 0
+
+            migrator_tables_cursor = migrator_tables.protocol_connection.connection.cursor()
+            while True:
+                # Read min values
+                migrator_tables_cursor.execute(f"""SELECT {primary_key_columns.replace("'","").replace('"','')} FROM {temp_table}
+                    ORDER BY {primary_key_columns} LIMIT 1 OFFSET {pk_temp_table_offset}""")
+                rec_min_values = migrator_tables_cursor.fetchone()
+                if not rec_min_values:
+                    break
+
+                # Read max values
+                pk_temp_table_offset_max = pk_temp_table_offset + analyze_batch_size - 1
+                if pk_temp_table_offset_max > pk_temp_table_row_count:
+                    pk_temp_table_offset_max = pk_temp_table_row_count - 1
+
+                migrator_tables_cursor.execute(f"""SELECT {primary_key_columns} FROM {temp_table}
+                    ORDER BY {primary_key_columns} LIMIT 1 OFFSET {pk_temp_table_offset_max}""")
+                rec_max_values = migrator_tables_cursor.fetchone()
+                if not rec_max_values:
+                    break
+
+                if self.config_parser.get_log_level() == 'DEBUG':
+                    self.logger.debug(f"Worker: {worker_id}: PK analysis: {batch_loop}: Loop counter: {batch_loop}, PK values: {rec_min_values} / {rec_max_values}")
+
+                values = {}
+                values['source_schema'] = schema_name
+                values['source_table'] = table_name
+                values['source_table_id'] = 0
+                values['worker_id'] = worker_id
+                values['pk_columns'] = primary_key_columns
+                values['batch_start'] = rec_min_values
+                values['batch_end'] = rec_max_values
+                values['row_count'] = analyze_batch_size
+                migrator_tables.insert_pk_ranges(values)
+
+                # # Data transfer
+                # object_ddl = f"""
+                #     INSERT INTO {target_schema}.{table}
+                #     SELECT * FROM {sybase_sys_schema}.{table}
+                #     WHERE ({pk_columns}) BETWEEN {rec_min_values} AND {rec_max_values}
+                # """
+                # execution_timestamp = datetime.now()
+                # try:
+                #     cur.execute(object_ddl)
+                #     count_inserted = cur.rowcount
+                #     count_inserted_total += count_inserted
+                #     execution_success = True
+                #     print(f"{execution_timestamp}: (loop {batch_loop}) inserted batch of {count_inserted} rows - {count_inserted_total} in total")
+                # except Exception as e:
+                #     execution_success = False
+                #     execution_error_message = str(e)
+                #     print(f"Error: {execution_error_message}")
+                #     log_protocol(cur, migration_protocol_table, object_action, object_ddl, execution_timestamp, execution_success, execution_error_message)
+                #     break
+
+                # # Commit batch
+                # if execution_success and count_inserted > 0:
+                #     conn.commit()
+                #     print(f"{execution_timestamp}: Batch processing: COMMITTED batch for {table}: {rec_min_values} - {rec_max_values}")
+
+                pk_temp_table_offset += analyze_batch_size
+                batch_loop += 1
+
+
 
     def migrate_table(self, migrate_target_connection, settings):
         part_name = 'migrate_table initialize'

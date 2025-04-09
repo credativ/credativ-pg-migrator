@@ -347,6 +347,7 @@ class InformixConnector(DatabaseConnector):
                             if self.config_parser.get_log_level() == 'DEBUG':
                                 self.logger.debug(f"Table: {target_schema}.{target_table_name}, index: {index_name}, column: {column_name} has data type {column_data_type}")
                             index_columns_data_types.append(column_data_type)
+                            index_columns_data_types_str = ', '.join(index_columns_data_types)
 
                 create_index_query = None
                 if index_type == 'U':
@@ -368,7 +369,7 @@ class InformixConnector(DatabaseConnector):
                         'type': "PRIMARY KEY" if index_type == 'P' else "UNIQUE" if index_type == 'U' else "INDEX",
                         'columns': index_columns,
                         'columns_count': index_columns_count,
-                        'columns_data_types': index_columns_data_types,
+                        'columns_data_types': index_columns_data_types_str,
                         'sql': create_index_query,
                         'comment': ''
                     }

@@ -480,11 +480,11 @@ class MigratorTables:
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
             (source_schema, source_table, source_table_id, worker_id, pk_columns, batch_start, batch_end, row_count)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
         params = (values['source_schema'], values['source_table'], values['source_table_id'],
-                  values['worker_id'], values['pk_columns'],
+                  str(values['worker_id']), values['pk_columns'],
                   values['batch_start'], values['batch_end'], values['row_count'])
         try:
             cursor = self.protocol_connection.connection.cursor()

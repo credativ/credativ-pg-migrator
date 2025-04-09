@@ -188,6 +188,7 @@ class PostgreSQLConnector(DatabaseConnector):
                             if self.config_parser.get_log_level() == 'DEBUG':
                                 self.logger.debug(f"Table: {target_schema}.{target_table_name}, index: {index_name}, column: {column_name} has data type {column_data_type}")
                             index_columns_data_types.append(column_data_type)
+                            index_columns_data_types_str = ', '.join(index_columns_data_types)
 
                 if index_type == 'PRIMARY KEY':
                     index_sql = f'ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{index_name}" PRIMARY KEY ({index_columns});'
@@ -196,7 +197,7 @@ class PostgreSQLConnector(DatabaseConnector):
                     'type': index_type,
                     'columns': index_columns,
                     'columns_count': index_columns_count,
-                    'columns_data_types': index_columns_data_types,
+                    'columns_data_types': index_columns_data_types_str,
                     'sql': index_sql,
                     'comment': row[3]
                 }

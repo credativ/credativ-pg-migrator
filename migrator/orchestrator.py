@@ -110,7 +110,9 @@ class Orchestrator:
                 futures = {}
                 for table_row in migrate_tables:
                     table_data = self.migrator_tables.decode_table_row(table_row)
-                    table_data['primary_key_columns'] = self.migrator_tables.select_primary_key(table_data['target_schema'], table_data['target_table'])
+                    (table_data['primary_key_columns'],
+                    table_data['primary_key_columns_count'],
+                    table_data['primary_key_columns_types']) = self.migrator_tables.select_primary_key(table_data['target_schema'], table_data['target_table'])
                     if len(futures) >= workers_requested:
                         done, _ = concurrent.futures.wait(futures, return_when=concurrent.futures.FIRST_COMPLETED)
                         for future in done:
@@ -308,15 +310,13 @@ class Orchestrator:
 
                 part_name = 'migrate data'
                 self.logger.info(f"Worker {worker_id}: Migrating data for table {target_table} from source database.")
-                source_schema = table_data['source_schema']
-                source_table = table_data['source_table']
 
                 worker_source_connection.connect()
 
                 settings = {
                     'worker_id': worker_id,
-                    'source_schema': source_schema,
-                    'source_table': source_table,
+                    'source_schema': table_data['source_schema'],
+                    'source_table': table_data['source_table'],
                     'source_table_id': table_data['source_table_id'],
                     'source_columns': table_data['source_columns'],
                     'target_schema': target_schema,
@@ -324,6 +324,8 @@ class Orchestrator:
                     'target_columns': table_data['target_columns'],
                     'table_comment': table_data['table_comment'],
                     'primary_key_columns': table_data['primary_key_columns'],
+                    'primary_key_columns_count': table_data['primary_key_columns_count'],
+                    'primary_key_columns_types': table_data['primary_key_columns_types'],
                     'batch_size': settings['batch_size'],
                     'migrator_tables': settings['migrator_tables'],
                 }

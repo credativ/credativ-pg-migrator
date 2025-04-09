@@ -292,7 +292,7 @@ class InformixConnector(DatabaseConnector):
 
         return converted, create_table_sql
 
-    def fetch_indexes(self, source_table_id: int, target_schema, target_table_name):
+    def fetch_indexes(self, source_table_id: int, target_schema, target_table_name, target_columns):
         table_indexes = {}
         order_num = 1
         query = f"""
@@ -332,18 +332,30 @@ class InformixConnector(DatabaseConnector):
                     index_type = constraint[0]
                     index_name = constraint[1]
 
-                columns_list = ', '.join([f'"{col}"' for col in columns])
+                index_columns = ', '.join([f'"{col}"' for col in columns])
                 if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"Columns list: {columns_list}, index type: {index_type}, clustered: {index[2]}")
+                    self.logger.debug(f"Columns list: {index_columns}, index type: {index_type}, clustered: {index[2]}")
+
+                index_columns_count = 0
+                index_columns_data_types = []
+                for column_name in index_columns.split(','):
+                    column_name = column_name.strip().strip('"')
+                    for order_num, column_info in target_columns.items():
+                        if column_name == column_info['name']:
+                            index_columns_count += 1
+                            column_data_type = column_info['type']
+                            if self.config_parser.get_log_level() == 'DEBUG':
+                                self.logger.debug(f"Table: {target_schema}.{target_table_name}, index: {index_name}, column: {column_name} has data type {column_data_type}")
+                            index_columns_data_types.append(column_data_type)
 
                 create_index_query = None
                 if index_type == 'U':
-                    create_index_query = f"""CREATE UNIQUE INDEX "{index_name}" ON "{target_schema}"."{target_table_name}" ({columns_list});"""
+                    create_index_query = f"""CREATE UNIQUE INDEX "{index_name}" ON "{target_schema}"."{target_table_name}" ({index_columns});"""
                 elif index_type == 'P':
-                    create_index_query = f"""ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{index_name}" PRIMARY KEY ({columns_list});"""
+                    create_index_query = f"""ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{index_name}" PRIMARY KEY ({index_columns});"""
                 else:
                     if index_type != 'R':
-                        create_index_query = f"""CREATE INDEX "{index_name}" ON "{target_schema}"."{target_table_name}" ({columns_list});"""
+                        create_index_query = f"""CREATE INDEX "{index_name}" ON "{target_schema}"."{target_table_name}" ({index_columns});"""
                     else:
                         pass
                         # Skipping Foreign key
@@ -354,7 +366,9 @@ class InformixConnector(DatabaseConnector):
                     table_indexes[order_num] = {
                         'name': index_name,
                         'type': "PRIMARY KEY" if index_type == 'P' else "UNIQUE" if index_type == 'U' else "INDEX",
-                        'columns': columns_list,
+                        'columns': index_columns,
+                        'columns_count': index_columns_count,
+                        'columns_data_types': index_columns_data_types,
                         'sql': create_index_query,
                         'comment': ''
                     }

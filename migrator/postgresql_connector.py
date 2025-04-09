@@ -172,16 +172,31 @@ class PostgreSQLConnector(DatabaseConnector):
             cursor.execute(query)
             for row in cursor.fetchall():
                 columns_match = re.search(r'\((.*?)\)', row[1])
-                columns = columns_match.group(1) if columns_match else ''
+                index_columns = columns_match.group(1) if columns_match else ''
                 index_name = row[0]
                 index_type = row[2]
                 index_sql = row[1]
+
+                index_columns_count = 0
+                index_columns_data_types = []
+                for column_name in index_columns.split(','):
+                    column_name = column_name.strip().strip('"')
+                    for order_num, column_info in target_columns.items():
+                        if column_name == column_info['name']:
+                            index_columns_count += 1
+                            column_data_type = column_info['type']
+                            if self.config_parser.get_log_level() == 'DEBUG':
+                                self.logger.debug(f"Table: {target_schema}.{target_table_name}, index: {index_name}, column: {column_name} has data type {column_data_type}")
+                            index_columns_data_types.append(column_data_type)
+
                 if index_type == 'PRIMARY KEY':
-                    index_sql = f'ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{index_name}" PRIMARY KEY ({columns});'
+                    index_sql = f'ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{index_name}" PRIMARY KEY ({index_columns});'
                 table_indexes[order_num] = {
                     'name': index_name,
                     'type': index_type,
-                    'columns': columns,
+                    'columns': index_columns,
+                    'columns_count': index_columns_count,
+                    'columns_data_types': index_columns_data_types,
                     'sql': index_sql,
                     'comment': row[3]
                 }

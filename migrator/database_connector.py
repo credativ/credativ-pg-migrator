@@ -84,6 +84,8 @@ class DatabaseConnector(ABC):
                 'name': index_name,
                 'type': index_type,   # INDEX, UNIQUE, PRIMARY KEY
                 'columns': "column_name1, column_name2, ..."
+                'columns_count': index_columns_count,
+                'columns_data_types': [data_type1, data_type2, ...],
                 'sql': create_index_sql,
                 'comment': index_comment
                 }

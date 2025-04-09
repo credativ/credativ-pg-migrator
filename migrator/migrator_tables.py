@@ -466,23 +466,26 @@ class MigratorTables:
             source_table TEXT,
             source_table_id INTEGER,
             worker_id TEXT,
-            batch_start BIGINT,
-            batch_end BIGINT,
+            pk_columns TEXT,
+            batch_start TEXT,
+            batch_end TEXT,
             row_count BIGINT
             )
         """)
         # if self.config_parser.get_log_level() == 'DEBUG':
         #     self.logger.debug(f"PK ranges table {table_name} created.")
 
-    def insert_pk_ranges(self, source_schema, source_table, source_table_id, worker_id, batch_start, batch_end, row_count):
+    def insert_pk_ranges(self, values):
         table_name = self.config_parser.get_protocol_name_pk_ranges()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
-            (source_schema, source_table, source_table_id, worker_id, batch_start, batch_end, row_count)
+            (source_schema, source_table, source_table_id, worker_id, pk_columns, batch_start, batch_end, row_count)
             VALUES (%s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (source_schema, source_table, source_table_id, worker_id, batch_start, batch_end, row_count)
+        params = (values['source_schema'], values['source_table'], values['source_table_id'],
+                  values['worker_id'], values['pk_columns'],
+                  values['batch_start'], values['batch_end'], values['row_count'])
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -492,11 +495,11 @@ class MigratorTables:
             # if self.config_parser.get_log_level() == 'DEBUG':
             #     self.logger.debug(f"Returned row: {row}")
             data_migration_row = self.decode_pk_ranges_row(row)
-            self.insert_protocol('data_migration', source_table, 'pk_range',
-                                 f'PK range: {batch_start} - {batch_end} / {row_count}',
+            self.insert_protocol('data_migration', values['source_table'], 'pk_range',
+                                 f'''PK range: {values['batch_start']} - {values['batch_end']} / {values['row_count']}''',
                                  None, True, None, 'info', None, data_migration_row['id'])
         except Exception as e:
-            self.logger.error(f"Error inserting PK ranges {source_table} into {table_name}.")
+            self.logger.error(f"Error inserting PK ranges {values['source_table']} into {table_name}.")
             self.logger.error(e)
             raise
 
@@ -561,6 +564,8 @@ class MigratorTables:
             target_table TEXT,
             index_sql TEXT,
             index_columns TEXT,
+            index_columns_count INTEGER,
+            index_columns_data_types TEXT,
             index_comment TEXT,
             task_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             task_started TIMESTAMP,
@@ -731,7 +736,9 @@ class MigratorTables:
             'target_table': row[7],
             'index_sql': row[8],
             'index_columns': row[9],
-            'index_comment': row[10]
+            'index_columns_count': row[10],
+            'index_columns_data_types': row[11],
+            'index_comment': row[12]
         }
 
     def decode_constraint_row(self, row):
@@ -900,15 +907,19 @@ class MigratorTables:
             self.logger.error(e)
             raise
 
-    def insert_indexes(self, source_schema, source_table, source_table_id, index_name, index_type, target_schema, target_table, index_sql, index_columns, index_comment):
+    def insert_indexes(self, values):
         table_name = self.config_parser.get_protocol_name_indexes()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
-            (source_schema, source_table, source_table_id, index_name, index_type, target_schema, target_table, index_sql, index_columns, index_comment)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (source_schema, source_table, source_table_id, index_name, index_type,
+            target_schema, target_table, index_sql, index_columns, index_columns_count, index_columns_data_types, index_comment)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (source_schema, source_table, source_table_id, index_name, index_type, target_schema, target_table, index_sql, index_columns, index_comment)
+        params = (values['source_schema'], values['source_table'], values['source_table_id'],
+                  values['index_name'], values['index_type'], values['target_schema'],
+                  values['target_table'], values['index_sql'], values['index_columns'],
+                  values['index_columns_count'], values['index_columns_data_types'], values['index_comment'])
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -918,9 +929,9 @@ class MigratorTables:
             # if self.config_parser.get_log_level() == 'DEBUG':
             #     self.logger.debug(f"Returned row: {row}")
             index_row = self.decode_index_row(row)
-            self.insert_protocol('index', index_name, 'create', index_sql, None, None, None, 'info', None, index_row['id'])
+            self.insert_protocol('index', values['index_name'], 'create', values['index_sql'], None, None, None, 'info', None, index_row['id'])
         except Exception as e:
-            self.logger.error(f"Error inserting index info {index_name} into {table_name}.")
+            self.logger.error(f"Error inserting index info {values['index_name']} into {table_name}.")
             self.logger.error(e)
             raise
 
@@ -1266,7 +1277,10 @@ class MigratorTables:
         tables_table = self.config_parser.get_protocol_name_tables()
         indexes_table = self.config_parser.get_protocol_name_indexes()
         query = f"""
-            SELECT i.index_columns
+            SELECT
+                i.index_columns,
+                i.index_columns_count,
+                i.index_columns_data_types
             FROM "{self.protocol_schema}"."{tables_table}" t
             JOIN "{self.protocol_schema}"."{indexes_table}" i ON i.source_table_id = t.source_table_id
             WHERE t.target_schema = '{target_schema}' AND
@@ -1281,13 +1295,13 @@ class MigratorTables:
             index_columns = cursor.fetchone()
             cursor.close()
             if index_columns:
-                return index_columns[0]
+                return index_columns[0], index_columns[1], index_columns[2]
             else:
-                return None
+                return None, None, None
         except Exception as e:
             self.logger.error(f"Error selecting primary key for {target_schema}.{target_table}.")
             self.logger.error(e)
-            return None
+            return None, None, None
 
     def print_summary(self, objects, migrator_table_name, additional_columns=None):
         try:

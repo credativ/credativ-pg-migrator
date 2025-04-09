@@ -117,23 +117,25 @@ class Planner:
                 continue
 
             if self.config_parser.should_migrate_indexes():
-                indexes = self.source_connection.fetch_indexes(table_info['id'], self.target_schema, table_info['table_name'])
+                indexes = self.source_connection.fetch_indexes(table_info['id'], self.target_schema, table_info['table_name'], target_columns)
                 if self.config_parser.get_log_level() == 'DEBUG':
                     self.logger.debug(f"Indexes: {indexes}")
                 if indexes:
                     for _, index_details in indexes.items():
-                        self.migrator_tables.insert_indexes(
-                            self.source_schema,
-                            table_info['table_name'],
-                            table_info['id'],
-                            index_details['name'],
-                            index_details['type'],
-                            self.target_schema,
-                            table_info['table_name'],
-                            index_details['sql'],
-                            index_details['columns'],
-                            index_details['comment']
-                        )
+                        values = {}
+                        values['source_schema'] = self.source_schema
+                        values['source_table'] = table_info['table_name']
+                        values['source_table_id'] = table_info['id']
+                        values['index_name'] = index_details['name']
+                        values['index_type'] = index_details['type']
+                        values['target_schema'] = self.target_schema
+                        values['target_table'] = table_info['table_name']
+                        values['index_sql'] = index_details['sql']
+                        values['index_columns'] = index_details['columns']
+                        values['index_columns_count'] = index_details['columns_count']
+                        values['index_columns_data_types'] = index_details['columns_data_types']
+                        values['index_comment'] = index_details['comment']
+                        self.migrator_tables.insert_indexes( values )
                     self.logger.info(f"Index {index_details['name']} for table {table_info['table_name']}")
                 else:
                     self.logger.info(f"No indexes found for table {table_info['table_name']}.")

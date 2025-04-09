@@ -723,107 +723,118 @@ class SybaseASEConnector(DatabaseConnector):
             self.connection.commit()
             self.logger.info(f"Worker: {worker_id}: PK analysis: {loop_counter}: Finished analyzing PK distribution for table {table_name}.")
 
-        else:
-            # we need to do slower analysis with selecting all values of primary key
-            # necessary for composite keys or non-numeric keys
-            if self.config_parser.get_log_level() == 'DEBUG':
-                self.logger.debug(f"Worker: {worker_id}: PK analysis: {primary_key_columns} ({primary_key_columns_types}): analyzing all PK values")
+        # unfortunately, the following code is not working as expected - Sybase does not support BETWEEN for multiple columns as PostgreSQL does
+        # this solution worked for foreign data wrapper but not for native connection
+        # if PK has more than one column, we shall use cursor
+        # else:
 
-            primary_key_columns_list = primary_key_columns.split(',')
-            primary_key_columns_types_list = primary_key_columns_types.split(',')
-            temp_table_structure = ', '.join([f"{column.strip()} {column_type.strip()}" for column, column_type in zip(primary_key_columns_list, primary_key_columns_types_list)])
-            if self.config_parser.get_log_level() == 'DEBUG':
-                self.logger.debug(f"Worker: {worker_id}: PK analysis: {primary_key_columns}: temp table structure: {temp_table_structure}")
+            # # we need to do slower analysis with selecting all values of primary key
+            # # necessary for composite keys or non-numeric keys
+            # if self.config_parser.get_log_level() == 'DEBUG':
+            #     self.logger.debug(f"Worker: {worker_id}: PK analysis: {primary_key_columns} ({primary_key_columns_types}): analyzing all PK values")
 
-            # step 1: create temp table with all PK values
-            sybase_cursor = self.connection.cursor()
-            temp_table = f"temp_id_ranges_{str(worker_id).replace('-', '_')}"
-            migrator_tables.protocol_connection.execute_query(f"""DROP TABLE IF EXISTS "{temp_table}" """)
-            migrator_tables.protocol_connection.execute_query(f"""CREATE TEMP TABLE {temp_table} ({temp_table_structure}) ON COMMIT PRESERVE ROWS""")
+            # primary_key_columns_list = primary_key_columns.split(',')
+            # primary_key_columns_types_list = primary_key_columns_types.split(',')
+            # temp_table_structure = ', '.join([f"{column.strip()} {column_type.strip()}" for column, column_type in zip(primary_key_columns_list, primary_key_columns_types_list)])
+            # if self.config_parser.get_log_level() == 'DEBUG':
+            #     self.logger.debug(f"Worker: {worker_id}: PK analysis: {primary_key_columns}: temp table structure: {temp_table_structure}")
 
-            sybase_cursor = self.connection.cursor()
-            sybase_cursor.execute(f"""SELECT {primary_key_columns.replace("'","").replace('"','')} FROM {schema_name}.{table_name}""")
-            rows = sybase_cursor.fetchall()
-            pk_temp_table_row_count = len(rows)
-            for row in rows:
-                # if self.config_parser.get_log_level() == 'DEBUG':
-                #     self.logger.debug(f"Worker: {worker_id}: PK analysis: {primary_key_columns}: row: {row}")
-                insert_values = ', '.join([f"'{value}'" if isinstance(value, str) else str(value) for value in row])
-                migrator_tables.protocol_connection.execute_query(f"""INSERT INTO "{temp_table}" ({primary_key_columns}) VALUES ({insert_values})""")
-            if self.config_parser.get_log_level() == 'DEBUG':
-                self.logger.debug(f"Worker: {worker_id}: PK analysis: {primary_key_columns}: Inserted {pk_temp_table_row_count} rows into temp table {temp_table}")
+            # # step 1: create temp table with all PK values
+            # sybase_cursor = self.connection.cursor()
+            # temp_table = f"temp_id_ranges_{str(worker_id).replace('-', '_')}"
+            # migrator_tables.protocol_connection.execute_query(f"""DROP TABLE IF EXISTS "{temp_table}" """)
+            # migrator_tables.protocol_connection.execute_query(f"""CREATE TEMP TABLE {temp_table} ({temp_table_structure}) ON COMMIT PRESERVE ROWS""")
 
-            # step 2: analyze distribution of PK values
-            pk_temp_table_offset = 0
-            batch_loop = 1
-            count_inserted_total = 0
+            # sybase_cursor = self.connection.cursor()
+            # sybase_cursor.execute(f"""SELECT {primary_key_columns.replace("'","").replace('"','')} FROM {schema_name}.{table_name} ORDER BY {primary_key_columns.replace("'","").replace('"','')}""")
+            # rows = sybase_cursor.fetchall()
+            # pk_temp_table_row_count = len(rows)
+            # for row in rows:
+            #     # if self.config_parser.get_log_level() == 'DEBUG':
+            #     #     self.logger.debug(f"Worker: {worker_id}: PK analysis: {primary_key_columns}: row: {row}")
+            #     insert_values = ', '.join([f"'{value}'" if isinstance(value, str) else str(value) for value in row])
+            #     migrator_tables.protocol_connection.execute_query(f"""INSERT INTO "{temp_table}" ({primary_key_columns}) VALUES ({insert_values})""")
+            # if self.config_parser.get_log_level() == 'DEBUG':
+            #     self.logger.debug(f"Worker: {worker_id}: PK analysis: {primary_key_columns}: Inserted {pk_temp_table_row_count} rows into temp table {temp_table}")
 
-            migrator_tables_cursor = migrator_tables.protocol_connection.connection.cursor()
-            while True:
-                # Read min values
-                migrator_tables_cursor.execute(f"""SELECT {primary_key_columns.replace("'","").replace('"','')} FROM {temp_table}
-                    ORDER BY {primary_key_columns} LIMIT 1 OFFSET {pk_temp_table_offset}""")
-                rec_min_values = migrator_tables_cursor.fetchone()
-                if not rec_min_values:
-                    break
+            # # step 2: analyze distribution of PK values
+            # pk_temp_table_offset = 0
+            # batch_loop = 1
+            # count_inserted_total = 0
 
-                # Read max values
-                pk_temp_table_offset_max = pk_temp_table_offset + analyze_batch_size - 1
-                if pk_temp_table_offset_max > pk_temp_table_row_count:
-                    pk_temp_table_offset_max = pk_temp_table_row_count - 1
+            # migrator_tables_cursor = migrator_tables.protocol_connection.connection.cursor()
+            # while True:
+            #     # Read min values
+            #     migrator_tables_cursor.execute(f"""SELECT {primary_key_columns.replace("'","").replace('"','')} FROM {temp_table}
+            #         ORDER BY {primary_key_columns} LIMIT 1 OFFSET {pk_temp_table_offset}""")
+            #     rec_min_values = migrator_tables_cursor.fetchone()
+            #     if not rec_min_values:
+            #         break
 
-                migrator_tables_cursor.execute(f"""SELECT {primary_key_columns} FROM {temp_table}
-                    ORDER BY {primary_key_columns} LIMIT 1 OFFSET {pk_temp_table_offset_max}""")
-                rec_max_values = migrator_tables_cursor.fetchone()
-                if not rec_max_values:
-                    break
+            #     # Read max values
+            #     pk_temp_table_offset_max = pk_temp_table_offset + analyze_batch_size - 1
+            #     if pk_temp_table_offset_max > pk_temp_table_row_count:
+            #         pk_temp_table_offset_max = pk_temp_table_row_count - 1
 
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"Worker: {worker_id}: PK analysis: {batch_loop}: Loop counter: {batch_loop}, PK values: {rec_min_values} / {rec_max_values}")
+            #     migrator_tables_cursor.execute(f"""SELECT {primary_key_columns} FROM {temp_table}
+            #         ORDER BY {primary_key_columns} LIMIT 1 OFFSET {pk_temp_table_offset_max}""")
+            #     rec_max_values = migrator_tables_cursor.fetchone()
+            #     if not rec_max_values:
+            #         break
 
-                values = {}
-                values['source_schema'] = schema_name
-                values['source_table'] = table_name
-                values['source_table_id'] = 0
-                values['worker_id'] = worker_id
-                values['pk_columns'] = primary_key_columns
-                values['batch_start'] = rec_min_values
-                values['batch_end'] = rec_max_values
-                values['row_count'] = analyze_batch_size
-                migrator_tables.insert_pk_ranges(values)
+            #     if self.config_parser.get_log_level() == 'DEBUG':
+            #         self.logger.debug(f"Worker: {worker_id}: PK analysis: {batch_loop}: Loop counter: {batch_loop}, PK values: {rec_min_values} / {rec_max_values}")
 
-                # # Data transfer
-                # object_ddl = f"""
-                #     INSERT INTO {target_schema}.{table}
-                #     SELECT * FROM {sybase_sys_schema}.{table}
-                #     WHERE ({pk_columns}) BETWEEN {rec_min_values} AND {rec_max_values}
-                # """
-                # execution_timestamp = datetime.now()
-                # try:
-                #     cur.execute(object_ddl)
-                #     count_inserted = cur.rowcount
-                #     count_inserted_total += count_inserted
-                #     execution_success = True
-                #     print(f"{execution_timestamp}: (loop {batch_loop}) inserted batch of {count_inserted} rows - {count_inserted_total} in total")
-                # except Exception as e:
-                #     execution_success = False
-                #     execution_error_message = str(e)
-                #     print(f"Error: {execution_error_message}")
-                #     log_protocol(cur, migration_protocol_table, object_action, object_ddl, execution_timestamp, execution_success, execution_error_message)
-                #     break
+            #     values = {}
+            #     values['source_schema'] = schema_name
+            #     values['source_table'] = table_name
+            #     values['source_table_id'] = 0
+            #     values['worker_id'] = worker_id
+            #     values['pk_columns'] = primary_key_columns
+            #     values['batch_start'] = str(rec_min_values)
+            #     values['batch_end'] = str(rec_max_values)
+            #     values['row_count'] = analyze_batch_size
+            #     migrator_tables.insert_pk_ranges(values)
 
-                # # Commit batch
-                # if execution_success and count_inserted > 0:
-                #     conn.commit()
-                #     print(f"{execution_timestamp}: Batch processing: COMMITTED batch for {table}: {rec_min_values} - {rec_max_values}")
-
-                pk_temp_table_offset += analyze_batch_size
-                batch_loop += 1
+            #     pk_temp_table_offset += analyze_batch_size
+            #     batch_loop += 1
 
 
 
     def migrate_table(self, migrate_target_connection, settings):
+
+        def migrate_with_cursor():
+            # Open a cursor and fetch rows in batches
+            query = f"SELECT * FROM {source_schema}.{source_table}"
+            if self.config_parser.get_log_level() == 'DEBUG':
+                self.logger.debug(f"Worker {worker_id}: Fetching data with cursor using query: {query}")
+
+            sybase_cursor = self.connection.cursor()
+            for df in pl.read_database(query, self.connection, iter_batches=True, batch_size=batch_size):
+                if df.is_empty():
+                    break
+
+                if self.config_parser.get_log_level() == 'DEBUG':
+                    self.logger.debug(f"Worker {worker_id}: Fetched {len(df)} rows from source table {source_table} using cursor.")
+
+                # Convert Polars DataFrame to list of dictionaries for insertion
+                records = df.to_dicts()
+                for record in records:
+                    for order_num, column in source_columns.items():
+                        column_name = column['name']
+                        column_type = column['type']
+                        if column_type.lower() in ['binary', 'varbinary']:
+                            record[column_name] = bytes(record[column_name]) if record[column_name] is not None else None
+
+                # Insert batch into target table
+                inserted_rows = migrate_target_connection.insert_batch(target_schema, target_table, target_columns, records)
+                self.logger.info(f"Worker {worker_id}: Inserted {inserted_rows} rows into target table {target_table}.")
+
+            sybase_cursor.close()
+            return inserted_rows
+
         part_name = 'migrate_table initialize'
+        inserted_rows = 0
         try:
             worker_id = settings['worker_id']
             source_schema = settings['source_schema']
@@ -848,9 +859,11 @@ class SybaseASEConnector(DatabaseConnector):
                 self.logger.info(f"Worker {worker_id}: Table {source_table} has {source_table_rows} rows - starting data migration.")
 
                 if primary_key_columns is None:
-                    self.logger.info(f"Worker {worker_id}: No primary key found for table {source_table} - skipping data migration.")
-                    migrator_tables.insert_data_migration(source_schema, source_table, source_table_id, source_table_rows, 0, worker_id, 0, target_schema, target_table, 0, 0)
-                    return 0
+                    self.logger.info(f"Worker {worker_id}: No primary key found for table {source_table} - using cursor.")
+                    # migrator_tables.insert_data_migration(source_schema, source_table, source_table_id, source_table_rows, 0, worker_id, 0, target_schema, target_table, 0, 0)
+                    # return 0
+
+                    inserted_rows = migrate_with_cursor()
 
                 else:
                     if source_table_rows > batch_size:
@@ -873,36 +886,46 @@ class SybaseASEConnector(DatabaseConnector):
                         if self.config_parser.get_log_level() == 'DEBUG':
                             self.logger.debug(f"Worker {worker_id}: PK ranges found: {rows_pk_ranges}")
 
-                        if rows_pk_ranges == 0:
-                            self.logger.info(f"Worker {worker_id}: No PK ranges found - skipping data migration.")
-                            return 0
+                        if len(rows_pk_ranges) == 0:
+                            self.logger.info(f"Worker {worker_id}: No PK ranges found - using cursor.")
+                            inserted_rows = migrate_with_cursor()
 
-                        part_name = 'migrate_table fetch data by pk ranges'
-                        for pk_range in rows_pk_ranges:
-                            process_batch_start = pk_range[0]
-                            process_batch_end = pk_range[1]
-                            process_row_count = pk_range[2]
-                            self.logger.info(f"Worker {worker_id}: Processing batch: start: {process_batch_start}, end: {process_batch_end}, row count: {process_row_count}")
+                        else:
+                            part_name = 'migrate_table fetch data by pk ranges'
+                            for pk_range in rows_pk_ranges:
+                                process_batch_start = pk_range[0]
+                                process_batch_end = pk_range[1]
+                                process_row_count = pk_range[2]
+                                self.logger.info(f"Worker {worker_id}: Processing batch: start: {process_batch_start}, end: {process_batch_end}, row count: {process_row_count}")
 
-                            part_name = f'prepare fetch all data: {source_table}'
-                            query = f"SELECT * FROM {source_schema}.{source_table} where {primary_key_columns} BETWEEN {process_batch_start} AND {process_batch_end}"
-                            if self.config_parser.get_log_level() == 'DEBUG':
-                                self.logger.debug(f"Worker {worker_id}: Fetching data with query: {query}")
-                            part_name = f'do fetch all data: {source_table}'
-                            df = pl.read_database(query, self.connection)
-                            self.logger.info(f"Worker {worker_id}: Fetched {len(df)} rows from source table {source_table}.")
+                                part_name = f'prepare fetch all data: {source_table}'
+                                primary_key_columns_list = primary_key_columns.split(',')
+                                process_batch_start_list = [part.strip() for part in process_batch_start.strip("()").split(",")]
+                                process_batch_end_list = [part.strip() for part in process_batch_end.strip("()").split(",")]
+                                pk_where_clause = ""
+                                for i in range(len(primary_key_columns_list)):
+                                    if pk_where_clause:
+                                        pk_where_clause += " AND"
+                                    pk_where_clause += f""" {primary_key_columns_list[i].replace('"','').replace("'","")} BETWEEN {process_batch_start_list[i]} AND {process_batch_end_list[i]} """
 
-                            records = df.to_dicts()
-                            # Adjust binary or bytea types
-                            for record in records:
-                                for order_num, column in source_columns.items():
-                                    column_name = column['name']
-                                    column_type = column['type']
-                                    if column_type.lower() in ['binary', 'varbinary']:
-                                        record[column_name] = bytes(record[column_name])
-                            part_name = f'insert data: {target_table}'
-                            inserted_rows = migrate_target_connection.insert_batch(target_schema, target_table, target_columns, records)
-                            self.logger.info(f"Worker {worker_id}: inserted {inserted_rows} rows into target table {target_table}.")
+                                query = f"""SELECT * FROM {source_schema}.{source_table} where {pk_where_clause}"""
+                                if self.config_parser.get_log_level() == 'DEBUG':
+                                    self.logger.debug(f"Worker {worker_id}: Fetching data with query: {query}")
+                                part_name = f'do fetch all data: {source_table}'
+                                df = pl.read_database(query, self.connection)
+                                self.logger.info(f"Worker {worker_id}: Fetched {len(df)} rows from source table {source_table}.")
+
+                                records = df.to_dicts()
+                                # Adjust binary or bytea types
+                                for record in records:
+                                    for order_num, column in source_columns.items():
+                                        column_name = column['name']
+                                        column_type = column['type']
+                                        if column_type.lower() in ['binary', 'varbinary']:
+                                            record[column_name] = bytes(record[column_name])
+                                part_name = f'insert data: {target_table}'
+                                inserted_rows = migrate_target_connection.insert_batch(target_schema, target_table, target_columns, records)
+                                self.logger.info(f"Worker {worker_id}: inserted {inserted_rows} rows into target table {target_table}.")
 
                     else:
                         ## If the table has <= batch_size rows, we can fetch all rows in one go
@@ -941,10 +964,13 @@ class SybaseASEConnector(DatabaseConnector):
                         migrator_tables.update_data_migration_status(protocol_id, True, 'OK', target_table_rows, inserted_rows)
 
                         self.logger.info(f"Worker {worker_id}: Finished migrating data for table {source_table}.")
-                    return source_table_rows
         except Exception as e:
             self.logger.error(f"Worker {worker_id}: Error during {part_name} -> {e}")
             raise e
+        finally:
+            if self.config_parser.get_log_level() == 'DEBUG':
+                self.logger.debug(f"Worker {worker_id}: Finished processing table {source_table}.")
+            return inserted_rows
 
     def convert_trigger(self, trigger_name, trigger_code, source_schema, target_schema, table_list):
         return None

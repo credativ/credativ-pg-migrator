@@ -405,6 +405,7 @@ class PostgreSQLConnector(DatabaseConnector):
         finally:
             self.connection.commit()
             self.connection.autocommit = True
+            return inserted_rows
 
     def fetch_funcproc_names(self, schema: str):
         pass

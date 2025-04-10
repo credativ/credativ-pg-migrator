@@ -1024,11 +1024,13 @@ class InformixConnector(DatabaseConnector):
 
             if source_table_rows == 0:
                 self.logger.info(f"Worker {worker_id}: Table {source_table} is empty - skipping data migration.")
-                migrator_tables.insert_data_migration(source_schema, source_table, source_table_id, source_table_rows, 0, worker_id, 0, target_schema, target_table, 0, 0)
+                migrator_tables.insert_data_migration(source_schema, source_table, source_table_id, source_table_rows, worker_id, target_schema, target_table, 0)
                 return 0
             else:
                 self.logger.info(f"Worker {worker_id}: Table {source_table} has {source_table_rows} rows - starting data migration.")
+                protocol_id = migrator_tables.insert_data_migration(source_schema, source_table, source_table_id, source_table_rows, worker_id, target_schema, target_table, 0)
                 offset = 0
+                total_inserted_rows = 0
                 while True:
                     part_name = f'prepare fetch data: {source_table} - {offset}'
                     if primary_key_columns:
@@ -1066,11 +1068,14 @@ class InformixConnector(DatabaseConnector):
 
                     part_name = f'insert data: {target_table} - {offset}'
                     inserted_rows = migrate_target_connection.insert_batch(target_schema, target_table, target_columns, records)
-                    self.logger.info(f"Worker {worker_id}: inserted {len(df)} rows into target table {target_table}.")
+                    total_inserted_rows += inserted_rows
+                    self.logger.info(f"Worker {worker_id}: Inserted {inserted_rows} (total: {total_inserted_rows} from: {source_table_rows} ({round(total_inserted_rows/source_table_rows*100, 2)}%)) rows into target table {target_table}")
 
                     offset += batch_size
 
+                target_table_rows = migrate_target_connection.get_rows_count(target_schema, target_table)
                 self.logger.info(f"Worker {worker_id}: Finished migrating data for table {source_table}.")
+                migrator_tables.update_data_migration_status(protocol_id, True, 'OK', target_table_rows)
                 return source_table_rows
         except Exception as e:
             self.logger.error(f"Worker {worker_id}: Error during {part_name} -> {e}")

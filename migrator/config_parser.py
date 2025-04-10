@@ -166,6 +166,9 @@ class ConfigParser:
         return self.config.get('default_values_substitution', {})
 
     ## Migration settings
+    def should_drop_schema(self):
+        return self.config.get('migration', {}).get('drop_schema', False)
+
     def should_drop_tables(self):
         return self.config.get('migration', {}).get('drop_tables', False) # Default to False
 

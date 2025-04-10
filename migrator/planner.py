@@ -62,6 +62,10 @@ class Planner:
             self.check_script_accessibility(self.post_script)
 
             self.target_connection.connect()
+            if self.config_parser.should_drop_schema():
+                self.logger.info(f"Dropping target schema '{self.target_schema}'...")
+                self.target_connection.execute_query(f"DROP SCHEMA IF EXISTS {self.target_schema} CASCADE")
+
             self.target_connection.execute_query(f"CREATE SCHEMA IF NOT EXISTS {self.target_schema}")
             self.target_connection.disconnect()
 

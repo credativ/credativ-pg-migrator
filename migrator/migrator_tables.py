@@ -19,7 +19,7 @@ class MigratorTables:
         self.create_table_for_user_defined_types()
         self.create_table_for_tables()
         self.create_table_for_data_migration()
-        self.create_table_for_pk_ranges()
+        # self.create_table_for_pk_ranges()
         self.create_table_for_indexes()
         self.create_table_for_constraints()
         self.create_table_for_funcprocs()
@@ -149,10 +149,14 @@ class MigratorTables:
         return target_default_value
 
     def create_protocol(self):
-        table_name = self.config_parser.get_protocol_name()
+        query = f"""DROP SCHEMA IF EXISTS "{self.protocol_schema}" CASCADE"""
+        self.protocol_connection.execute_query(query)
+
         query = f"""CREATE SCHEMA IF NOT EXISTS "{self.protocol_schema}" """
         self.protocol_connection.execute_query(query)
 
+        table_name = self.config_parser.get_protocol_name()
+        self.protocol_connection.execute_query(self.drop_table_sql.format(protocol_schema=self.protocol_schema, table_name=table_name))
         query = f"""
         CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."{table_name}" (
             id SERIAL PRIMARY KEY,
@@ -362,13 +366,10 @@ class MigratorTables:
             source_table TEXT,
             source_table_id INTEGER,
             source_table_rows INTEGER,
-            batch_read INTEGER,
             worker_id TEXT,
-            loop_id INTEGER,
             target_schema TEXT,
             target_table TEXT,
             target_table_rows INTEGER,
-            batch_inserted INTEGER,
             task_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             task_started TIMESTAMP,
             task_completed TIMESTAMP,
@@ -379,15 +380,15 @@ class MigratorTables:
         # if self.config_parser.get_log_level() == 'DEBUG':
         #     self.logger.debug(f"Data migration table {table_name} created.")
 
-    def insert_data_migration(self, source_schema, source_table, source_table_id, source_table_rows, batch_read, worker_id, loop_id, target_schema, target_table, target_table_rows, batch_inserted):
+    def insert_data_migration(self, source_schema, source_table, source_table_id, source_table_rows, worker_id, target_schema, target_table, target_table_rows):
         table_name = self.config_parser.get_protocol_name_data_migration()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
-            (source_schema, source_table, source_table_id, source_table_rows, batch_read, worker_id, loop_id, target_schema, target_table, target_table_rows, batch_inserted)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (source_schema, source_table, source_table_id, source_table_rows, worker_id, target_schema, target_table, target_table_rows)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (source_schema, source_table, source_table_id, source_table_rows, batch_read, str(worker_id), loop_id, target_schema, target_table, target_table_rows, batch_inserted)
+        params = (source_schema, source_table, source_table_id, source_table_rows, str(worker_id), target_schema, target_table, target_table_rows)
         # if self.config_parser.get_log_level() == 'DEBUG':
         #     self.logger.debug(f"Data migration insert query: {query}")
         #     self.logger.debug(f"Data migration insert params: {params}")
@@ -407,19 +408,18 @@ class MigratorTables:
             self.logger.error(e)
             raise
 
-    def update_data_migration_status(self, row_id, success, message, target_table_rows, batch_inserted):
+    def update_data_migration_status(self, row_id, success, message, target_table_rows):
         table_name = self.config_parser.get_protocol_name_data_migration()
         query = f"""
             UPDATE "{self.protocol_schema}"."{table_name}"
             SET task_completed = CURRENT_TIMESTAMP,
             success = %s,
             message = %s,
-            target_table_rows = %s,
-            batch_inserted = %s
+            target_table_rows = %s
             WHERE id = %s
             RETURNING *
         """
-        params = ('TRUE' if success else 'FALSE', message, target_table_rows, batch_inserted, row_id)
+        params = ('TRUE' if success else 'FALSE', message, target_table_rows, row_id)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -447,13 +447,10 @@ class MigratorTables:
             'source_table': row[2],
             'source_table_id': row[3],
             'source_table_rows': row[4],
-            'batch_read': row[5],
-            'worker_id': row[6],
-            'loop_id': row[7],
-            'target_schema': row[8],
-            'target_table': row[9],
-            'target_table_rows': row[10],
-            'batch_inserted': row[11]
+            'worker_id': row[5],
+            'target_schema': row[6],
+            'target_table': row[7],
+            'target_table_rows': row[8]
         }
 
     def create_table_for_pk_ranges(self):
@@ -1363,12 +1360,55 @@ class MigratorTables:
             self.logger.error(e)
             raise
 
+    def print_data_migration_summary(self):
+        self.logger.info("Data migration time stats:")
+        table_name = self.config_parser.get_protocol_name_data_migration()
+        query = f"""SELECT min(task_created) as min_time, max(task_completed) as max_time FROM "{self.protocol_schema}"."{table_name}" WHERE task_completed IS NOT NULL"""
+        cursor = self.protocol_connection.connection.cursor()
+        cursor.execute(query)
+        row = cursor.fetchone()
+        if row[0] and row[1]:
+            min_time = row[0]
+            max_time = row[1]
+            length = max_time - min_time
+            self.logger.info(f"    start: {str(min_time)[:19]} | end: {str(max_time)[:19]} | length: {str(length)[:19]}")
+        else:
+            self.logger.info("    No data migration tasks completed.")
+
+        query = f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{table_name}" """
+        cursor.execute(query)
+        summary = cursor.fetchone()[0]
+        self.logger.info(f"    Tables in total: {summary}")
+
+        query = f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{table_name}" WHERE source_table_rows = 0 OR source_table_rows IS NULL"""
+        cursor.execute(query)
+        summary = cursor.fetchone()[0]
+        self.logger.info(f"    Tables with 0 rows: {summary}")
+
+        query = f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{table_name}" WHERE source_table_rows > 0"""
+        cursor.execute(query)
+        summary = cursor.fetchone()[0]
+        self.logger.info(f"    Tables with rows: {summary}")
+
+        query = f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{table_name}" WHERE source_table_rows > 0 AND source_table_rows = target_table_rows"""
+        cursor.execute(query)
+        summary = cursor.fetchone()[0]
+        self.logger.info(f"    Tables fully migrated: {summary}")
+
+        query = f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{table_name}" WHERE source_table_rows > 0 AND source_table_rows <> target_table_rows"""
+        cursor.execute(query)
+        summary = cursor.fetchone()[0]
+        self.logger.info(f"    Tables NOT fully migrated: {summary}")
+
+        cursor.close()
+
     def print_migration_summary(self):
         self.logger.info("Migration time stats:")
         self.print_main(self.config_parser.get_protocol_name_main())
         self.logger.info("Migration summary:")
         self.print_summary('User Defined Types', self.config_parser.get_protocol_name_user_defined_types())
         self.print_summary('Tables', self.config_parser.get_protocol_name_tables())
+        self.print_data_migration_summary()
         self.print_summary('Indexes', self.config_parser.get_protocol_name_indexes(), 'index_type')
         self.print_summary('Constraints', self.config_parser.get_protocol_name_constraints(), 'constraint_type')
         self.print_summary('Functions / procedures', self.config_parser.get_protocol_name_funcprocs())

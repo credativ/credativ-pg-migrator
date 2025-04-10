@@ -387,7 +387,7 @@ class PostgreSQLConnector(DatabaseConnector):
                     psycopg2.extras.execute_batch(cursor, insert_query, data)
                     inserted_rows = len(data)
                 except psycopg2.Error as e:
-                    self.logger.error(f"Error inserting batch data: {e}")
+                    self.logger.error(f"Error inserting batch data into {table_name}: {e}")
                     self.logger.error(f"Trying to insert row by row.")
                     self.connection.rollback()
                     for row in data:
@@ -397,7 +397,8 @@ class PostgreSQLConnector(DatabaseConnector):
                             self.connection.commit()
                         except psycopg2.Error as e:
                             self.connection.rollback()
-                            self.logger.error(f"Error inserting row: {row}")
+                            self.logger.error(f"Error inserting row into {table_name}: {row}")
+                            self.logger.error(e)
 
         except psycopg2.Error as e:
             self.logger.error(f"Error before inserting batch data: {e}")

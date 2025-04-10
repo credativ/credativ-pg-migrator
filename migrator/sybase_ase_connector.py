@@ -803,7 +803,7 @@ class SybaseASEConnector(DatabaseConnector):
 
     def migrate_table(self, migrate_target_connection, settings):
 
-        def migrate_with_cursor():
+        def migrate_with_cursor(source_table_rows):
             # Open a cursor and fetch rows in batches
             query = f"SELECT * FROM {source_schema}.{source_table}"
             if self.config_parser.get_log_level() == 'DEBUG':
@@ -822,25 +822,38 @@ class SybaseASEConnector(DatabaseConnector):
 
             sybase_cursor = self.connection.cursor()
             sybase_cursor.execute(query)
+            total_inserted_rows = 0
             while True:
                 records = sybase_cursor.fetchmany(batch_size)
                 if not records:
                     break
                 if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"Worker {worker_id}: Fetched {len(records)} rows from source table {source_table} using cursor.")
+                    self.logger.debug(f"Worker {worker_id}: Fetched {len(records)} rows from source table {source_table} using cursor [1]")
 
                 # Convert records to a list of dictionaries
+                records = [
+                    {column['name']: value for column, value in zip(source_columns.values(), record)}
+                    for record in records
+                ]
                 for record in records:
                     for order_num, column in source_columns.items():
                         column_name = column['name']
                         column_type = column['type']
                         if column_type.lower() in ['binary', 'varbinary', 'image']:
                             record[column_name] = bytes(record[column_name]) if record[column_name] is not None else None
+                        elif column_type.lower() in ['datetime', 'smalldatetime', 'date', 'time', 'timestamp']:
+                            record[column_name] = str(record[column_name]) if record[column_name] is not None else None
 
                 # Insert batch into target table
+                if self.config_parser.get_log_level() == 'DEBUG':
+                    self.logger.debug(f"Worker {worker_id}: Starting insert of {len(records)} rows from source table {source_table} [1]")
                 inserted_rows = migrate_target_connection.insert_batch(target_schema, target_table, target_columns, records)
-                self.logger.info(f"Worker {worker_id}: Inserted {inserted_rows} rows into target table {target_table}.")
+                total_inserted_rows += inserted_rows
+                self.logger.info(f"Worker {worker_id}: Inserted {inserted_rows} (total: {total_inserted_rows} from: {source_table_rows} ({round(total_inserted_rows/source_table_rows*100, 2)}%)) rows into target table {target_table} [1]")
 
+            target_table_rows = migrate_target_connection.get_rows_count(target_schema, target_table)
+            self.logger.info(f"Worker {worker_id}: Target table {target_schema}.{target_table} has {target_table_rows} rows")
+            migrator_tables.update_data_migration_status(protocol_id, True, 'OK', target_table_rows, inserted_rows)
             sybase_cursor.close()
             return inserted_rows
 
@@ -874,7 +887,7 @@ class SybaseASEConnector(DatabaseConnector):
                     # migrator_tables.insert_data_migration(source_schema, source_table, source_table_id, source_table_rows, 0, worker_id, 0, target_schema, target_table, 0, 0)
                     # return 0
 
-                    inserted_rows = migrate_with_cursor()
+                    inserted_rows = migrate_with_cursor(source_table_rows)
 
                 else:
                     if source_table_rows > batch_size:
@@ -899,10 +912,11 @@ class SybaseASEConnector(DatabaseConnector):
 
                         if len(rows_pk_ranges) == 0:
                             self.logger.info(f"Worker {worker_id}: No PK ranges found - using cursor.")
-                            inserted_rows = migrate_with_cursor()
+                            inserted_rows = migrate_with_cursor(source_table_rows)
 
                         else:
                             part_name = 'migrate_table fetch data by pk ranges'
+                            total_inserted_rows = 0
                             for pk_range in rows_pk_ranges:
                                 process_batch_start = pk_range[0]
                                 process_batch_end = pk_range[1]
@@ -922,7 +936,7 @@ class SybaseASEConnector(DatabaseConnector):
                                 query = f"""SELECT * FROM {source_schema}.{source_table} where {pk_where_clause}"""
                                 if self.config_parser.get_log_level() == 'DEBUG':
                                     self.logger.debug(f"Worker {worker_id}: Fetching data with query: {query}")
-                                part_name = f'do fetch all data: {source_table}'
+                                part_name = f'do fetch all data [pk ranges][0]: {source_table}'
                                 ## Polars library is not always available
                                 # df = pl.read_database(query, self.connection)
                                 # self.logger.info(f"Worker {worker_id}: Fetched {len(df)} rows from source table {source_table}.")
@@ -937,21 +951,37 @@ class SybaseASEConnector(DatabaseConnector):
                                     if not records:
                                         break
                                     if self.config_parser.get_log_level() == 'DEBUG':
-                                        self.logger.debug(f"Worker {worker_id}: Fetched {len(records)} rows from source table {source_table} using cursor.")
+                                        self.logger.debug(f"Worker {worker_id}: Fetched {len(records)} rows from source table {source_table} using cursor [2]")
 
-                                for record in records:
-                                    for order_num, column in source_columns.items():
-                                        column_name = column['name']
-                                        column_type = column['type']
-                                        if column_type.lower() in ['binary', 'varbinary']:
-                                            record[column_name] = bytes(record[column_name])
-                                part_name = f'insert data: {target_table}'
-                                inserted_rows = migrate_target_connection.insert_batch(target_schema, target_table, target_columns, records)
-                                self.logger.info(f"Worker {worker_id}: inserted {inserted_rows} rows into target table {target_table}.")
-                                sybase_cursor.close()
+                                    records = [
+                                        {column['name']: value for column, value in zip(source_columns.values(), record)}
+                                        for record in records
+                                    ]
+                                    part_name = f'do fetch all data [pk ranges][1]: {source_table}'
+                                    for record in records:
+                                        for order_num, column in source_columns.items():
+                                            column_name = column['name']
+                                            column_type = column['type']
+                                            if column_type.lower() in ['binary', 'varbinary', 'image']:
+                                                record[column_name] = bytes(record[column_name]) if record[column_name] is not None else None
+                                            elif column_type.lower() in ['datetime', 'smalldatetime', 'date', 'time', 'timestamp']:
+                                                record[column_name] = str(record[column_name]) if record[column_name] is not None else None
+
+                                    part_name = f'insert data: {target_table}'
+                                    if self.config_parser.get_log_level() == 'DEBUG':
+                                        self.logger.debug(f"Worker {worker_id}: Starting insert of {len(records)} rows from source table {source_table} [2]")
+                                    inserted_rows = migrate_target_connection.insert_batch(target_schema, target_table, target_columns, records)
+                                    total_inserted_rows += inserted_rows
+                                    self.logger.info(f"Worker {worker_id}: inserted {inserted_rows} (total: {total_inserted_rows} from: {source_table_rows} ({round(total_inserted_rows/source_table_rows*100, 2)}%)) rows into target table {target_table} [2]")
+
+                            target_table_rows = migrate_target_connection.get_rows_count(target_schema, target_table)
+                            self.logger.info(f"Worker {worker_id}: Target table {target_schema}.{target_table} has {target_table_rows} rows")
+                            migrator_tables.update_data_migration_status(protocol_id, True, 'OK', target_table_rows, inserted_rows)
+                            sybase_cursor.close()
 
                     else:
                         ## If the table has <= batch_size rows, we can fetch all rows in one go
+                        total_inserted_rows = 0
                         protocol_id = migrator_tables.insert_data_migration(source_schema, source_table, source_table_id, source_table_rows, source_table_rows, worker_id, 0, target_schema, target_table, 0, 0)
 
                         self.logger.info(f"Worker {worker_id}: Fetching all data for table {source_table}")
@@ -961,7 +991,7 @@ class SybaseASEConnector(DatabaseConnector):
                         if self.config_parser.get_log_level() == 'DEBUG':
                             self.logger.debug(f"Worker {worker_id}: Fetching data with query: {query}")
 
-                        part_name = f'do fetch all data: {source_table}'
+                        part_name = f'do fetch all data [whole table][0]: {source_table}'
                         ## polars library is not always available
                         # df = pl.read_database(query, self.connection)
                         # self.logger.info(f"Worker {worker_id}: Fetched {len(df)} rows from source table {source_table}.")
@@ -978,17 +1008,27 @@ class SybaseASEConnector(DatabaseConnector):
                             if self.config_parser.get_log_level() == 'DEBUG':
                                 self.logger.debug(f"Worker {worker_id}: Fetched {len(records)} rows from source table {source_table} using cursor.")
 
-                        # Adjust binary or bytea types
-                        for record in records:
-                            for order_num, column in source_columns.items():
-                                column_name = column['name']
-                                column_type = column['type']
-                                if column_type.lower() in ['binary', 'varbinary']:
-                                    record[column_name] = bytes(record[column_name])
+                            records = [
+                                {column['name']: value for column, value in zip(source_columns.values(), record)}
+                                for record in records
+                            ]
+                            # Adjust binary or bytea types
+                            part_name = f'do fetch all data [whole table][1]: {source_table}'
+                            for record in records:
+                                for order_num, column in source_columns.items():
+                                    column_name = column['name']
+                                    column_type = column['type']
+                                    if column_type.lower() in ['binary', 'varbinary', 'image']:
+                                        record[column_name] = bytes(record[column_name]) if record[column_name] is not None else None
+                                    elif column_type.lower() in ['datetime', 'smalldatetime', 'date', 'time', 'timestamp']:
+                                        record[column_name] = str(record[column_name]) if record[column_name] is not None else None
 
-                        part_name = f'insert all data: {target_table}'
-                        inserted_rows = migrate_target_connection.insert_batch(target_schema, target_table, target_columns, records)
-                        self.logger.info(f"Worker {worker_id}: inserted {inserted_rows} rows into target table {target_table}.")
+                            part_name = f'insert all data: {target_table}'
+                            if self.config_parser.get_log_level() == 'DEBUG':
+                                self.logger.debug(f"Worker {worker_id}: Starting insert of {len(records)} rows from source table {source_table} [3]")
+                            inserted_rows = migrate_target_connection.insert_batch(target_schema, target_table, target_columns, records)
+                            total_inserted_rows += inserted_rows
+                            self.logger.info(f"Worker {worker_id}: inserted {inserted_rows} (total: {total_inserted_rows} from: {source_table_rows} ({round(total_inserted_rows/source_table_rows*100, 2)}%)) rows into target table {target_table} [3]")
 
                         target_table_rows = migrate_target_connection.get_rows_count(target_schema, target_table)
                         self.logger.info(f"Worker {worker_id}: Target table {target_schema}.{target_table} has {target_table_rows} rows")

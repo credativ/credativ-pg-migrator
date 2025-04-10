@@ -6,7 +6,7 @@ from database_connector import DatabaseConnector
 from migrator_logging import MigratorLogger
 import re
 import traceback
-import polars as pl
+#import polars as pl
 
 class SybaseASEConnector(DatabaseConnector):
     def __init__(self, config_parser, source_or_target):
@@ -809,21 +809,32 @@ class SybaseASEConnector(DatabaseConnector):
             if self.config_parser.get_log_level() == 'DEBUG':
                 self.logger.debug(f"Worker {worker_id}: Fetching data with cursor using query: {query}")
 
+            # # polars library is not always available
+            # for df in pl.read_database(query, self.connection, iter_batches=True, batch_size=batch_size):
+            #     if df.is_empty():
+            #         break
+
+            #     if self.config_parser.get_log_level() == 'DEBUG':
+            #         self.logger.debug(f"Worker {worker_id}: Fetched {len(df)} rows from source table {source_table} using cursor.")
+
+            #     # Convert Polars DataFrame to list of dictionaries for insertion
+            #     records = df.to_dicts()
+
             sybase_cursor = self.connection.cursor()
-            for df in pl.read_database(query, self.connection, iter_batches=True, batch_size=batch_size):
-                if df.is_empty():
+            sybase_cursor.execute(query)
+            while True:
+                records = sybase_cursor.fetchmany(batch_size)
+                if not records:
                     break
-
                 if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"Worker {worker_id}: Fetched {len(df)} rows from source table {source_table} using cursor.")
+                    self.logger.debug(f"Worker {worker_id}: Fetched {len(records)} rows from source table {source_table} using cursor.")
 
-                # Convert Polars DataFrame to list of dictionaries for insertion
-                records = df.to_dicts()
+                # Convert records to a list of dictionaries
                 for record in records:
                     for order_num, column in source_columns.items():
                         column_name = column['name']
                         column_type = column['type']
-                        if column_type.lower() in ['binary', 'varbinary']:
+                        if column_type.lower() in ['binary', 'varbinary', 'image']:
                             record[column_name] = bytes(record[column_name]) if record[column_name] is not None else None
 
                 # Insert batch into target table
@@ -912,11 +923,22 @@ class SybaseASEConnector(DatabaseConnector):
                                 if self.config_parser.get_log_level() == 'DEBUG':
                                     self.logger.debug(f"Worker {worker_id}: Fetching data with query: {query}")
                                 part_name = f'do fetch all data: {source_table}'
-                                df = pl.read_database(query, self.connection)
-                                self.logger.info(f"Worker {worker_id}: Fetched {len(df)} rows from source table {source_table}.")
+                                ## Polars library is not always available
+                                # df = pl.read_database(query, self.connection)
+                                # self.logger.info(f"Worker {worker_id}: Fetched {len(df)} rows from source table {source_table}.")
 
-                                records = df.to_dicts()
+                                # records = df.to_dicts()
                                 # Adjust binary or bytea types
+
+                                sybase_cursor = self.connection.cursor()
+                                sybase_cursor.execute(query)
+                                while True:
+                                    records = sybase_cursor.fetchmany(batch_size)
+                                    if not records:
+                                        break
+                                    if self.config_parser.get_log_level() == 'DEBUG':
+                                        self.logger.debug(f"Worker {worker_id}: Fetched {len(records)} rows from source table {source_table} using cursor.")
+
                                 for record in records:
                                     for order_num, column in source_columns.items():
                                         column_name = column['name']
@@ -926,6 +948,7 @@ class SybaseASEConnector(DatabaseConnector):
                                 part_name = f'insert data: {target_table}'
                                 inserted_rows = migrate_target_connection.insert_batch(target_schema, target_table, target_columns, records)
                                 self.logger.info(f"Worker {worker_id}: inserted {inserted_rows} rows into target table {target_table}.")
+                                sybase_cursor.close()
 
                     else:
                         ## If the table has <= batch_size rows, we can fetch all rows in one go
@@ -939,13 +962,21 @@ class SybaseASEConnector(DatabaseConnector):
                             self.logger.debug(f"Worker {worker_id}: Fetching data with query: {query}")
 
                         part_name = f'do fetch all data: {source_table}'
-                        df = pl.read_database(query, self.connection)
+                        ## polars library is not always available
+                        # df = pl.read_database(query, self.connection)
+                        # self.logger.info(f"Worker {worker_id}: Fetched {len(df)} rows from source table {source_table}.")
+                        # # self.logger.info(f"Worker {worker_id}: Migrating batch starting at offset {offset} for table {table_name}.")
+                        # # Convert Polars DataFrame to list of tuples for insertion
+                        # records = df.to_dicts()
 
-                        self.logger.info(f"Worker {worker_id}: Fetched {len(df)} rows from source table {source_table}.")
-                        # self.logger.info(f"Worker {worker_id}: Migrating batch starting at offset {offset} for table {table_name}.")
-
-                        # Convert Polars DataFrame to list of tuples for insertion
-                        records = df.to_dicts()
+                        sybase_cursor = self.connection.cursor()
+                        sybase_cursor.execute(query)
+                        while True:
+                            records = sybase_cursor.fetchmany(batch_size)
+                            if not records:
+                                break
+                            if self.config_parser.get_log_level() == 'DEBUG':
+                                self.logger.debug(f"Worker {worker_id}: Fetched {len(records)} rows from source table {source_table} using cursor.")
 
                         # Adjust binary or bytea types
                         for record in records:
@@ -962,6 +993,7 @@ class SybaseASEConnector(DatabaseConnector):
                         target_table_rows = migrate_target_connection.get_rows_count(target_schema, target_table)
                         self.logger.info(f"Worker {worker_id}: Target table {target_schema}.{target_table} has {target_table_rows} rows")
                         migrator_tables.update_data_migration_status(protocol_id, True, 'OK', target_table_rows, inserted_rows)
+                        sybase_cursor.close()
 
                         self.logger.info(f"Worker {worker_id}: Finished migrating data for table {source_table}.")
         except Exception as e:

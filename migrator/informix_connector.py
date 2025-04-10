@@ -1199,6 +1199,7 @@ class InformixConnector(DatabaseConnector):
             proc_calls = []
             # when_matches = re.findall(r'(?:when\s*\((.*?)\)\s*)?\(\s*(execute procedure.*?;?)\s*\)', trig, re.IGNORECASE | re.DOTALL | re.MULTILINE)
             when_matches = re.findall(r'(?:when\s*\((.*?)\)\s*)?\(\s*(execute procedure.*?\(.*?\));?\s*\)', trig, re.IGNORECASE | re.DOTALL | re.MULTILINE)
+            # when_matches = re.findall(r'(?:when\s*\((?:\((?:\((.*?)\))?\))?\)\s*)?\(\s*(execute procedure.*?\(.*?\));?\s*\)', trig, re.IGNORECASE | re.DOTALL | re.MULTILINE)
 
             if self.config_parser.get_log_level() == 'DEBUG':
                 self.logger.debug(f"when_matches: {when_matches}")

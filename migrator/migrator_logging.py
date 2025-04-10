@@ -1,8 +1,4 @@
 import logging
-import inspect
-import os
-import signal
-import sys
 
 class MigratorLogger:
     def __init__(self, log_file):

@@ -2,5 +2,4 @@ psycopg2
 jaydebeapi
 pyyaml
 polars
-pyarrow
-pandas
+pyodbc

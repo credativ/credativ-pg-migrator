@@ -153,8 +153,9 @@ class SybaseASEConnector(DatabaseConnector):
                 # if self.config_parser.get_log_level() == 'DEBUG':
                 #     self.logger.debug(f"0 default: {result[row[0]]['default']}")
                 # checking for default values substitution with the origingal data type
-                if result[row[0]]['default'] != '':
-                    result[row[0]]['default'] = migrator_tables.check_default_values_substitution(result[row[0]]['name'], result[row[0]]['type'], result[row[0]]['default'])
+                if migrator_tables is not None:
+                    if result[row[0]]['default'] != '':
+                        result[row[0]]['default'] = migrator_tables.check_default_values_substitution(result[row[0]]['name'], result[row[0]]['type'], result[row[0]]['default'])
 
                 query_custom_types = f"""
                     SELECT
@@ -200,15 +201,16 @@ class SybaseASEConnector(DatabaseConnector):
                 #     self.logger.debug(f"Substituting data type: {row[7]}, {migrator_tables.check_data_types_substitution(row[7])}")
                 #     if custom_types:
                 #         self.logger.debug(f"Substituting data type: {custom_type[5]}, {migrator_tables.check_data_types_substitution(custom_type[5])}")
-                substitution = migrator_tables.check_data_types_substitution(row[7])
-                if substitution and substitution != (None, None):
-                    result[row[0]]['type'], result[row[0]]['length'] = migrator_tables.check_data_types_substitution(row[7])
-                if custom_types and migrator_tables.check_data_types_substitution(custom_type[5]) != (None, None):
-                    result[row[0]]['type'], result[row[0]]['length'] = migrator_tables.check_data_types_substitution(custom_type[5])
+                if migrator_tables is not None:
+                    substitution = migrator_tables.check_data_types_substitution(row[7])
+                    if substitution and substitution != (None, None):
+                        result[row[0]]['type'], result[row[0]]['length'] = migrator_tables.check_data_types_substitution(row[7])
+                    if custom_types and migrator_tables.check_data_types_substitution(custom_type[5]) != (None, None):
+                        result[row[0]]['type'], result[row[0]]['length'] = migrator_tables.check_data_types_substitution(custom_type[5])
 
-                # checking for default values substitution with the new data type
-                if result[row[0]]['default'] != '':
-                    result[row[0]]['default'] = migrator_tables.check_default_values_substitution(result[row[0]]['name'], result[row[0]]['type'], result[row[0]]['default'])
+                    # checking for default values substitution with the new data type
+                    if result[row[0]]['default'] != '':
+                        result[row[0]]['default'] = migrator_tables.check_default_values_substitution(result[row[0]]['name'], result[row[0]]['type'], result[row[0]]['default'])
 
                 # if self.config_parser.get_log_level() == 'DEBUG':
                 #     self.logger.debug(f"1 default: {result[row[0]]['default']}")

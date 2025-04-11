@@ -4,7 +4,7 @@ from migrator_logging import MigratorLogger
 import re
 import traceback
 import pyodbc
-import polars as pl
+# import polars as pl
 
 class InformixConnector(DatabaseConnector):
     def __init__(self, config_parser, source_or_target):
@@ -1031,6 +1031,8 @@ class InformixConnector(DatabaseConnector):
                 protocol_id = migrator_tables.insert_data_migration(source_schema, source_table, source_table_id, source_table_rows, worker_id, target_schema, target_table, 0)
                 offset = 0
                 total_inserted_rows = 0
+                informix_cursor = self.connection.cursor()
+                # Fetch the data in batches
                 while True:
                     part_name = f'prepare fetch data: {source_table} - {offset}'
                     if primary_key_columns:
@@ -1042,21 +1044,33 @@ class InformixConnector(DatabaseConnector):
                         self.logger.debug(f"Worker {worker_id}: Fetching data with query: {query}")
 
                     part_name = f'do fetch data: {source_table} - {offset}'
-                    df = pl.read_database(query, self.connection)
-                    if df.is_empty():
+                    # # polars library is not always available
+                    # df = pl.read_database(query, self.connection)
+                    # if df.is_empty():
+                    #     break
+                    # self.logger.info(f"Worker {worker_id}: Fetched {len(df)} rows from source table {source_table}.")
+                    # # self.logger.info(f"Worker {worker_id}: Migrating batch starting at offset {offset} for table {table_name}.")
+                    # # Convert Polars DataFrame to list of tuples for insertion
+                    # records = df.to_dicts()
+
+                    informix_cursor.execute(query)
+                    records = informix_cursor.fetchall()
+                    if not records:
                         break
+                    if self.config_parser.get_log_level() == 'DEBUG':
+                        self.logger.debug(f"Worker {worker_id}: Fetched {len(records)} rows from source table {source_table}.")
 
-                    self.logger.info(f"Worker {worker_id}: Fetched {len(df)} rows from source table {source_table}.")
-                    # self.logger.info(f"Worker {worker_id}: Migrating batch starting at offset {offset} for table {table_name}.")
-
-                    # Convert Polars DataFrame to list of tuples for insertion
-                    records = df.to_dicts()
+                    records = [
+                        {column['name']: value for column, value in zip(source_columns.values(), record)}
+                        for record in records
+                    ]
 
                     # Adjust binary or bytea types
                     for record in records:
                         for order_num, column in source_columns.items():
                             column_name = column['name']
                             column_type = column['type']
+                            target_column_type = target_columns[order_num]['type']
                             # if column_type.lower() in ['binary', 'bytea']:
                             if column_type.lower() in ['blob']:
                                 record[column_name] = bytes(record[column_name].getBytes(1, int(record[column_name].length())))  # Convert 'com.informix.jdbc.IfxCblob' to bytes
@@ -1065,6 +1079,9 @@ class InformixConnector(DatabaseConnector):
                                 record[column_name] = record[column_name].getSubString(1, int(record[column_name].length()))  # Convert IfxCblob to string
                                 # record[column_name] = bytes(record[column_name].getBytes(1, int(record[column_name].length())))  # Convert IfxBblob to bytes
                                 # record[column_name] = record[column_name].read()  # Convert IfxBblob to bytes
+                            elif column_type.lower() in ['integer', 'smallint', 'tinyint', 'bit', 'boolean'] and target_column_type.lower() in ['boolean']:
+                                # Convert integer to boolean
+                                record[column_name] = bool(record[column_name])
 
                     part_name = f'insert data: {target_table} - {offset}'
                     inserted_rows = migrate_target_connection.insert_batch(target_schema, target_table, target_columns, records)

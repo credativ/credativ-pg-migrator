@@ -9,7 +9,7 @@ from postgresql_connector import PostgreSQLConnector
 from informix_connector import InformixConnector
 from sybase_ase_connector import SybaseASEConnector
 from ms_sql_connector import MsSQLConnector
-# import polars as pl
+import pandas as pd
 import sys
 import os
 import traceback
@@ -55,20 +55,12 @@ def main():
         # Loop over source_tables to find the record with the specified table name
         source_table_record = None
         for _, source_table_data in source_tables.items():
-
             source_table_name = source_table_data['table_name']
-
-            source_table_indexes = source_connection.fetch_indexes(source_table_record['id'], source_schema, source_table_name)
-            for _, index in source_table_indexes.items():
-                if index['type'] == 'PRIMARY KEY':
-                    source_primary_key_columns = index['columns']
-                    break
+            logger.logger.debug(f"Source table: {source_table_name}")
 
             source_columns = source_connection.fetch_table_columns(source_schema, source_table_name, migrator_tables=None)
-            logger.logger.debug(f"Source columns: {source_columns}")
-
-            logger.logger.info(f"Fetching data from source table {source_schema}.{source_table_name}...")
-            source_data = fetch_table_data(logger, source_connection, source_schema, source_table_name, source_columns, source_primary_key_columns)
+            if config_parser.get_log_level() == 'DEBUG':
+                logger.logger.debug(f"Source columns: {source_columns}")
 
             part_name = 'fetch target data'
             target_schema = config_parser.get_target_schema()
@@ -83,14 +75,28 @@ def main():
             if not target_table_record:
                 raise ValueError(f"Table {target_schema}.{source_table_name} not found in target database.")
 
-            target_table_indexes = target_connection.fetch_indexes(target_table_record['id'], target_schema, source_table_name)
+            target_columns = target_connection.fetch_table_columns(target_schema, source_table_name, migrator_tables=None)
+            if config_parser.get_log_level() == 'DEBUG':
+                logger.logger.debug(f"Target columns: {target_columns}")
+
+            part_name = 'fetch source data - indexes'
+            source_table_indexes = source_connection.fetch_indexes(source_table_record['id'], source_schema, source_table_name, target_columns)
+            if config_parser.get_log_level() == 'DEBUG':
+                logger.logger.debug(f"Source table indexes: {source_table_indexes}")
+            part_name = 'fetch source data - find primary key'
+            for _, index in source_table_indexes.items():
+                if index['type'] == 'PRIMARY KEY':
+                    source_primary_key_columns = index['columns']
+                    break
+
+            target_table_indexes = target_connection.fetch_indexes(target_table_record['id'], target_schema, source_table_name, target_columns)
             for _, index in target_table_indexes.items():
                 if index['type'] == 'PRIMARY KEY':
                     target_primary_key_columns = index['columns']
                     break
 
-            target_columns = target_connection.fetch_table_columns(target_schema, source_table_name, migrator_tables=None)
-            logger.logger.debug(f"Target columns: {target_columns}")
+            logger.logger.info(f"Fetching data from source table {source_schema}.{source_table_name}...")
+            source_data = fetch_table_data(logger, source_connection, source_schema, source_table_name, source_columns, source_primary_key_columns)
 
             logger.logger.info(f"Fetching data from target table {target_schema}.{source_table_name}...")
             target_data = fetch_table_data(logger, target_connection, target_schema, source_table_name, target_columns, target_primary_key_columns)
@@ -161,70 +167,70 @@ def fetch_table_data(logger, connection, schema, table_name, columns, primary_ke
         part_name = 'fetch data'
         data = cursor.fetchall()
         records = [dict(zip([column['name'] for column in columns.values()], row)) for row in data]
-        # logger.logger.debug(f"Data fetched from {schema}.{table_name}:")
-        # logger.logger.debug(data)
-        # connection.disconnect()
-
-        # df = pl.read_database(query, connection)
 
         logger.logger.info(f"Fetched {len(records)} rows from source table {table_name}.")
-        # self.logger.info(f"Worker {worker_id}: Migrating batch starting at offset {offset} for table {table_name}.")
 
         part_name = 'convert data'
-        # Convert Polars DataFrame to list of tuples for insertion
-        # records = df.to_dicts()
+        # Convert to pandas DataFrame
+        df = pd.DataFrame(records)
 
         # Adjust binary or bytea types
-        for record in records:
-            for _, column in columns.items():
-                column_name = column['name']
-                column_type = column['type']
-                # logger.logger.debug(f"Column {column_name} type: {column_type}")
-                if column_type.lower() in ['blob']:
-                    record[column_name] = bytes(record[column_name].getBytes(1, int(record[column_name].length())))  # Convert 'com.informix.jdbc.IfxCblob' to bytes
-                elif column_type.lower() in ['bytea']:
-                    record[column_name] = bytes(record[column_name])
-                elif column_type.lower() in ['clob']:
-                    record[column_name] = record[column_name].getSubString(1, int(record[column_name].length()))  # Convert IfxCblob to string
-                elif column_type.lower() in ['date', 'datetime', 'time', 'timestamp', 'timestamp without time zone', 'timestamp with time zone']:
-                    if not isinstance(record[column_name], str):
-                        record[column_name] = str(record[column_name])
+        for column in columns.values():
+            column_name = column['name']
+            column_type = column['type']
+            if column_type.lower() in ['blob', 'bytea']:
+                df[column_name] = df[column_name].apply(lambda x: bytes(x) if x is not None else None)
+            elif column_type.lower() in ['clob']:
+                df[column_name] = df[column_name].apply(lambda x: str(x) if x is not None else None)
+            elif column_type.lower() in ['date', 'datetime', 'time', 'timestamp', 'timestamp without time zone', 'timestamp with time zone']:
+                df[column_name] = pd.to_datetime(df[column_name], errors='coerce')
 
-        return pl.DataFrame(records)
+        return df
     except Exception as e:
         logger.logger.error(f"An error in fetch_table_data ({part_name}): {e}")
         connection.disconnect()
         sys.exit(1)
 
-
 def compare_data(source_data, target_data, logger):
-    tables_empty = source_data.is_empty() and target_data.is_empty()
-    if tables_empty:
-        if source_data.is_empty():
-            logger.logger.info("Source table is empty.")
-        if target_data.is_empty():
-            logger.logger.info("Target table is empty.")
+    if source_data.empty and target_data.empty:
+        logger.logger.info("Both source and target tables are empty.")
+        return
+    elif source_data.empty:
+        logger.logger.info("Source table is empty.")
+        return
+    elif target_data.empty:
+        logger.logger.info("Target table is empty.")
         return
 
-    # Ensure both columns have the same type
-    if 'content_blob' in source_data.columns:
-        for column in source_data.columns:
-            if column == 'content_blob':
-                source_data = source_data.with_columns(pl.col(column).cast(pl.Binary))
-    if 'content_blob' in target_data.columns:
-        for column in target_data.columns:
-            if column == 'content_blob':
-                target_data = target_data.with_columns(pl.col(column).cast(pl.Binary))
+    # # Ensure both columns have the same type
+    # if 'content_blob' in source_data.columns:
+    #     for column in source_data.columns:
+    #         if column == 'content_blob':
+    #             source_data = source_data.with_columns(pl.col(column).cast(pl.Binary))
+    # if 'content_blob' in target_data.columns:
+    #     for column in target_data.columns:
+    #         if column == 'content_blob':
+    #             target_data = target_data.with_columns(pl.col(column).cast(pl.Binary))
+
+    common_columns = source_data.columns.intersection(target_data.columns)
+    source_data = source_data[common_columns].astype(str)
+    target_data = target_data[common_columns].astype(str)
+
+    # Sort by primary key columns if available
+    primary_key_columns = list(common_columns)  # Replace with actual primary key columns if known
+    if primary_key_columns:
+        source_data = source_data.sort_values(by=primary_key_columns).reset_index(drop=True)
+        target_data = target_data.sort_values(by=primary_key_columns).reset_index(drop=True)
 
     if source_data.equals(target_data):
         logger.logger.info("Data matches between source and target tables.")
     else:
         logger.logger.error("Data mismatch found between source and target tables.")
-        differences = pl.concat([source_data, target_data]).unique(keep="none")
-        if not differences.is_empty():
+        differences = pd.concat([source_data, target_data]).drop_duplicates(keep=False)
+        if not differences.empty:
             logger.logger.info(f"Differences found between source and target tables:")
             logger.logger.info(differences)
-            logger.logger.info(f"In total, {int(len(differences)/2)} differences found between source and target tables.")
+            logger.logger.info(f"In total, {len(differences)} differences found between source and target tables.")
         else:
             logger.logger.info("No differences found between source and target tables.")
 

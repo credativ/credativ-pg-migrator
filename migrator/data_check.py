@@ -9,7 +9,7 @@ from postgresql_connector import PostgreSQLConnector
 from informix_connector import InformixConnector
 from sybase_ase_connector import SybaseASEConnector
 from ms_sql_connector import MsSQLConnector
-import polars as pl
+# import polars as pl
 import sys
 import os
 import traceback
@@ -35,7 +35,7 @@ def main():
         logger.logger.info('Starting configuration parser...')
         config_parser = ConfigParser(args)
 
-        table_name = "t_dokumente"
+        # table_name = "t_dokumente"
 
         # Print the parsed configuration
         if args.log_level == 'DEBUG':
@@ -54,76 +54,72 @@ def main():
         source_tables = source_connection.fetch_table_names(source_schema)
         # Loop over source_tables to find the record with the specified table name
         source_table_record = None
-        for _, record in source_tables.items():
-            if record['schema_name'] == source_schema and record['table_name'] == table_name:
-                source_table_record = record
-                break
+        for _, source_table_data in source_tables.items():
 
-        if not source_table_record:
-            raise ValueError(f"Table {source_schema}.{table_name} not found in source database.")
+            source_table_name = source_table_data['table_name']
 
-        source_table_indexes = source_connection.fetch_indexes(source_table_record['id'], source_schema, table_name)
-        for _, index in source_table_indexes.items():
-            if index['type'] == 'PRIMARY KEY':
-                source_primary_key_columns = index['columns']
-                break
+            source_table_indexes = source_connection.fetch_indexes(source_table_record['id'], source_schema, source_table_name)
+            for _, index in source_table_indexes.items():
+                if index['type'] == 'PRIMARY KEY':
+                    source_primary_key_columns = index['columns']
+                    break
 
-        source_columns = source_connection.fetch_table_columns(source_schema, table_name, migrator_tables=None)
-        logger.logger.debug(f"Source columns: {source_columns}")
+            source_columns = source_connection.fetch_table_columns(source_schema, source_table_name, migrator_tables=None)
+            logger.logger.debug(f"Source columns: {source_columns}")
 
-        logger.logger.info(f"Fetching data from source table {source_schema}.{table_name}...")
-        source_data = fetch_table_data(logger, source_connection, source_schema, table_name, source_columns, source_primary_key_columns)
+            logger.logger.info(f"Fetching data from source table {source_schema}.{source_table_name}...")
+            source_data = fetch_table_data(logger, source_connection, source_schema, source_table_name, source_columns, source_primary_key_columns)
 
-        part_name = 'fetch target data'
-        target_schema = config_parser.get_target_schema()
-        target_tables = target_connection.fetch_table_names(target_schema)
+            part_name = 'fetch target data'
+            target_schema = config_parser.get_target_schema()
+            target_tables = target_connection.fetch_table_names(target_schema)
 
-        target_table_record = None
-        for _, record in target_tables.items():
-            if record['schema_name'] == target_schema and record['table_name'] == table_name:
-                target_table_record = record
-                break
+            target_table_record = None
+            for _, record in target_tables.items():
+                if record['schema_name'] == target_schema and record['table_name'] == source_table_name:
+                    target_table_record = record
+                    break
 
-        if not target_table_record:
-            raise ValueError(f"Table {target_schema}.{table_name} not found in target database.")
+            if not target_table_record:
+                raise ValueError(f"Table {target_schema}.{source_table_name} not found in target database.")
 
-        target_table_indexes = target_connection.fetch_indexes(target_table_record['id'], target_schema, table_name)
-        for _, index in target_table_indexes.items():
-            if index['type'] == 'PRIMARY KEY':
-                target_primary_key_columns = index['columns']
-                break
+            target_table_indexes = target_connection.fetch_indexes(target_table_record['id'], target_schema, source_table_name)
+            for _, index in target_table_indexes.items():
+                if index['type'] == 'PRIMARY KEY':
+                    target_primary_key_columns = index['columns']
+                    break
 
-        target_columns = target_connection.fetch_table_columns(target_schema, table_name, migrator_tables=None)
-        logger.logger.debug(f"Target columns: {target_columns}")
+            target_columns = target_connection.fetch_table_columns(target_schema, source_table_name, migrator_tables=None)
+            logger.logger.debug(f"Target columns: {target_columns}")
 
-        logger.logger.info(f"Fetching data from target table {target_schema}.{table_name}...")
-        target_data = fetch_table_data(logger, target_connection, target_schema, table_name, target_columns, target_primary_key_columns)
+            logger.logger.info(f"Fetching data from target table {target_schema}.{source_table_name}...")
+            target_data = fetch_table_data(logger, target_connection, target_schema, source_table_name, target_columns, target_primary_key_columns)
 
-        part_name = 'compare data'
-        logger.logger.info("Comparing data...")
-        compare_data(source_data, target_data, logger)
+            part_name = 'compare data'
+            logger.logger.info("Comparing data...")
+            compare_data(source_data, target_data, logger)
 
-        logger.logger.info("Comparing sizes of columns for matching 'id' values...")
+            logger.logger.info("Comparing sizes of columns for matching PK values...")
 
-        source_data = source_data.sort(target_primary_key_columns)
-        target_data = target_data.sort(target_primary_key_columns)
+            source_data = source_data.sort(target_primary_key_columns)
+            target_data = target_data.sort(target_primary_key_columns)
 
-        for source_row in source_data.iter_rows(named=True):
-            source_id = source_row[target_primary_key_columns]
-            source_row_df = source_data.filter(pl.col(target_primary_key_columns) == source_id)
-            target_row_df = target_data.filter(pl.col(target_primary_key_columns) == source_id)
+            for source_row in source_data.iter_rows(named=True):
+                source_id = source_row[target_primary_key_columns]
+                source_row_df = source_data.filter(pl.col(target_primary_key_columns) == source_id)
+                target_row_df = target_data.filter(pl.col(target_primary_key_columns) == source_id)
 
-            if not source_row_df.equals(target_row_df):
-                logger.logger.error(f"Data mismatch found for id {source_id}:")
-                logger.logger.info(f"Source row: {source_row_df}")
-                logger.logger.info(f"Target row: {target_row_df}")
+                if not source_row_df.equals(target_row_df):
+                    logger.logger.error(f"Data mismatch found for id {source_id}:")
+                    logger.logger.info(f"Source row: {source_row_df}")
+                    logger.logger.info(f"Target row: {target_row_df}")
 
-            for column in source_row_df.columns:
-                source_size = source_row_df[column][0].__sizeof__()
-                target_size = target_row_df[column][0].__sizeof__()
-                if (source_row_df[column][0] != target_row_df[column][0]) or (source_size != target_size):
-                    logger.logger.error(f"Data mismatch found for {source_id}: '{column}'")
-                # logger.logger.info(f"{source_id}: '{column}' - source: {source_size} / target: {target_size}")
+                for column in source_row_df.columns:
+                    source_size = source_row_df[column][0].__sizeof__()
+                    target_size = target_row_df[column][0].__sizeof__()
+                    if (source_row_df[column][0] != target_row_df[column][0]) or (source_size != target_size):
+                        logger.logger.error(f"Data mismatch found for {source_id}: '{column}'")
+                    # logger.logger.info(f"{source_id}: '{column}' - source: {source_size} / target: {target_size}")
 
         logger.logger.info("Data Check Done")
 

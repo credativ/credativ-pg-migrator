@@ -25,3 +25,41 @@
 2025-04-10 09:19:42,760: [DEBUG] when_matches: []
 2025-04-10 09:19:42,760: [DEBUG] when_conditions: []
 2025-04-10 09:19:42,760: [DEBUG] proc_calls: []
+2025-04-12 11:36:15,309: [DEBUG] Trigger code: 
+2025-04-12 11:36:15,309: [DEBUG] Trigger code: "sysa".ins_smu insert on "sysa".smu referencing new as post                                                                                                                                                                                          for each row
+        when ((post.stoffnummer IN (996 ,997 ,998 )) )
+            (
+            --
+            -- Abhaldungmengen des Mischbetts betrachten:
+            --
+            -- Es werden nur die Bunkerabrechnungssaetze fuer die Mischgut-
+            -- saetze beruecksichtigt.
+            -- Bei den Daten, vom Leitsystem kommen, sind dies die Stoffschluessel
+            -- 996 (Mischbett A), 997 (Mischbett B), 998 (Mischbett C)
+            --
+            execute procedure vorfeld:"sysa".chg_abhaldung(post.ismu010 ,post.ismu040 ,hkmmaster:"sysa".mengendiff(0 ,post.ismu050 ),post.ismu060 )),
+        when ((post.ismu020 IN ('03' ,'04' )) )
+            (
+            --
+            -- Bunkerabzuege Bunker 3 und 4 betrachten:
+            --
+            -- Auftrag zur Bilanzierung der Brennstoffe in den Bunkern
+            --
+            execute procedure global:"sysa".must_write_600_bb(post.ismu010 ,'smu' )),
+        when (((((((post.ismu010 IS NOT NULL ) AND (post.ismu040 IS NOT NULL ) ) AND (post.ismu020 IN ('05' ,'09' ,'10' ,'11' ,'19' ,'101' ,'111' )) ) AND (post.stoffnummer NOT IN (996 ,997 ,998 )) ) AND (post.eigenschaft IS NULL ) ) AND ((post.ismu130 != 'L' ) OR (post.ismu130 IS NULL ) ) ) )
+            (
+            --
+            -- Bunkerabzuege der Zudosierbunker 5,9,10,11,19,101 und 111 betrachten:
+            --
+            -- ueber einen View zu Mischbett-/Monatswerten verdichten
+            --
+            insert into "sysa".changes (sid,tabelle,zeit,info)  values (DBINFO ('sessionid') ,'smu' ,post.ismu010 ,post.ismu040 ))
+    after
+        (
+        delete from "sysa".smb_n  where (((monat >= (select (min(x0.zeit ) - 5356800. ) from "sysa".changes x0 where (x0.sid = DBINFO ('sessionid') ) ) ) AND (monat <= (select (max(x1.zeit ) + 5356800. ) from "sysa".changes x1 where (x1.sid = DBINFO ('sessionid') ) ) ) ) AND (mischbett = ANY (select x2.info from "sysa".changes x2 where (x2.sid = DBINFO ('sessionid') ) ) ) ) ,
+        insert into "sysa".smb_n (monat,mischbett,bunker,stoff,menge) select x3.monat ,x3.mischbett ,x3.bunker ,x3.stoff ,x3.menge from "sysa".v_zudosierung x3 where (x3.mischbett = ANY (select x4.info from "sysa".changes x4 where (x4.sid = DBINFO ('sessionid') ) ) ) ,
+        delete from "sysa".changes  where (sid = DBINFO ('sessionid') ) );
+2025-04-12 11:36:15,309: [DEBUG] new_ref: post, old_ref: 
+2025-04-12 11:36:15,309: [DEBUG] Trigger name: ins_smu, Operation: insert
+2025-04-12 11:36:15,310: [DEBUG] Table name: smu, Schema: sysa
+2025-04-12 11:36:15,310: [DEBUG] when_matches: []

@@ -1170,27 +1170,32 @@ class InformixConnector(DatabaseConnector):
             raise
 
 
-    def convert_trigger(self, trig: str, settings: dict):
+    def convert_trigger(self, informix_code: str, settings: dict):
         pgsql_trigger_code = ''
         pgsql_triggers = []
         trigger_code = ''
         func_code = ''
 
         # Split the input into individual trigger definitions
-        triggers = re.split(r'(?i)create trigger', trig)
+        triggers = re.split(r'(?i)create trigger', informix_code, re.IGNORECASE | re.DOTALL | re.MULTILINE)
         for trig in triggers:
             trig = trig.strip()
             if not trig:
                 continue
 
-            # Remove all comments (lines starting with /* and ending with */)
-            trig = re.sub(r'/\*.*?\*/', '', trig, flags=re.DOTALL)
-            # Remove all new line characters from the original trigger code
-            trig = trig.replace('\n', ' ')
+            trig_lines = trig.split('\n')
+            trig_lines = [line.strip() for line in trig_lines]
+            trig_lines = [line for line in trig_lines if line != '--']
+            trig_lines = [f"/* {line.strip()} */" if line.startswith('--') else line for line in trig_lines]
+            trig = '\n'.join(trig_lines)
+            if self.config_parser.get_log_level() == 'DEBUG':
+                self.logger.debug(f"Trigger code: {trig}")
+
             # Replace groups of multiple spaces with just one space
             trig = re.sub(r'\s+', ' ', trig)
             # Add new line character before each word WHEN (case insensitive)
             trig = re.sub(r'(?i)\s*when', '\nWHEN', trig, flags=re.IGNORECASE)
+
             # Extract how NEW and OLD are referenced in Informix code
             new_ref = ""
             old_ref = ""
@@ -1199,6 +1204,9 @@ class InformixConnector(DatabaseConnector):
                 new_ref = ref_match.group(2) if ref_match.group(2) else ""
                 old_ref = ref_match.group(4) if ref_match.group(4) else ""
 
+            if self.config_parser.get_log_level() == 'DEBUG':
+                self.logger.debug(f"new_ref: {new_ref}, old_ref: {old_ref}")
+
             # Extract schema, trigger name, and operation (insert/update)
             header_match = re.match(r'"([^"]+)"\.(\S+)\s+(insert|update|delete)', trig, re.IGNORECASE)
             if not header_match:
@@ -1206,6 +1214,9 @@ class InformixConnector(DatabaseConnector):
             schema = header_match.group(1)
             trigger_name = header_match.group(2)
             operation = header_match.group(3).lower()
+
+            if self.config_parser.get_log_level() == 'DEBUG':
+                self.logger.debug(f"Trigger name: {trigger_name}, Operation: {operation}")
 
             # Extract the table name (assumes: on "schemaname".table)
             table_match = re.search(r'\s+on\s+"([^"]+)"\.(\S+)', trig, re.IGNORECASE)
@@ -1216,13 +1227,22 @@ class InformixConnector(DatabaseConnector):
                 table_schema = schema
                 table_name = "unknown_table"
 
+            if self.config_parser.get_log_level() == 'DEBUG':
+                self.logger.debug(f"Table name: {table_name}, Schema: {table_schema}")
+
             func_body_lines = []
 
-            when_conditions = []
-            proc_calls = []
+            order_num = 1
+            when_conditions = {}
+            proc_calls = {}
+
+            # when_pattern = re.compile(r'when\s*\((.*?)\)\s*\((.*?)\)', re.DOTALL | re.IGNORECASE)
+            # after_pattern = re.compile(r'after\s*\((.*)\)', re.DOTALL | re.IGNORECASE)
+
             # when_matches = re.findall(r'(?:when\s*\((.*?)\)\s*)?\(\s*(execute procedure.*?;?)\s*\)', trig, re.IGNORECASE | re.DOTALL | re.MULTILINE)
-            when_matches = re.findall(r'(?:when\s*\((.*?)\)\s*)?\(\s*(execute procedure.*?\(.*?\));?\s*\)', trig, re.IGNORECASE | re.DOTALL | re.MULTILINE)
+            # when_matches = re.findall(r'(?:when\s*\((.*?)\)\s*)?\(\s*(execute procedure.*?\(.*?\));?\s*\)', trig, re.IGNORECASE | re.DOTALL | re.MULTILINE)
             # when_matches = re.findall(r'(?:when\s*\((?:\((?:\((.*?)\))?\))?\)\s*)?\(\s*(execute procedure.*?\(.*?\));?\s*\)', trig, re.IGNORECASE | re.DOTALL | re.MULTILINE)
+            when_matches = re.findall(r'when\s*\((.*?)\)\s*\((.*?\)\s*\))', trig, re.IGNORECASE | re.DOTALL | re.MULTILINE)
 
             if self.config_parser.get_log_level() == 'DEBUG':
                 self.logger.debug(f"when_matches: {when_matches}")
@@ -1230,8 +1250,50 @@ class InformixConnector(DatabaseConnector):
             for match in when_matches:
                 when_condition = match[0]
                 proc_call = match[1]
-                when_conditions.append(when_condition)
-                proc_calls.append(proc_call)
+                when_conditions[order_num] = when_condition
+                proc_calls[order_num] = proc_call
+                order_num += 1
+                if self.config_parser.get_log_level() == 'DEBUG':
+                    self.logger.debug(f"when_condition: {when_condition}")
+                    self.logger.debug(f"proc_call: {proc_call}")
+
+            after_pattern = re.compile(r'after\s*\((.*)\)', re.DOTALL | re.IGNORECASE | re.MULTILINE)
+            # Extract AFTER clause
+            after_match = after_pattern.search(trig)
+            after_all_commands = []
+            after_current_command = []
+            if after_match:
+                after_content = after_match.group(1).strip()
+                # Split the content into individual SQL commands by commas, considering nested structures
+                open_parentheses = 0
+
+                for part in re.split(r'(,)', after_content):  # Keep commas as separate tokens
+                    if part == ',' and open_parentheses == 0:
+                    # Check if the current command starts with a valid SQL keyword
+                        if after_current_command and any(after_current_command[0].strip().lower().startswith(kw) for kw in ['insert', 'update', 'delete']):
+                            # End of a command
+                            after_all_commands.append(''.join(after_current_command).strip())
+                            after_current_command = []
+                        else:
+                            # Concatenate with the previous part
+                            if after_all_commands:
+                                after_all_commands[-1] += ',' + ''.join(after_current_command).strip()
+                                after_current_command = []
+                    else:
+                        after_current_command.append(part)
+                        # Track parentheses to handle nested structures
+                        open_parentheses += part.count('(') - part.count(')')
+
+                # Add the last command if any
+                if after_current_command:
+                    if any(after_current_command[0].strip().lower().startswith(kw) for kw in ['insert', 'update', 'delete']):
+                        after_all_commands.append(''.join(after_current_command).strip())
+                    else:
+                        if after_all_commands:
+                            after_all_commands[-1] += ',' + ''.join(after_current_command).strip()
+
+                if self.config_parser.get_log_level() == 'DEBUG':
+                    self.logger.debug(f"AFTER part after_all_commands: {after_all_commands}")
 
             if not proc_calls:
                 # Find everything after the words FOR EACH ROW and take it as actions
@@ -1252,9 +1314,9 @@ class InformixConnector(DatabaseConnector):
 
             function_name = trigger_name + "_trigfunc"
             counter = 0
-            if when_conditions and proc_calls:
+            if ((when_conditions and proc_calls) or after_all_commands):
 
-                for i in range(len(when_conditions)):
+                for i in when_conditions.keys():
                     proc_call = proc_calls[i].replace("execute procedure", "PERFORM")
 
                     if when_conditions[i]:
@@ -1262,7 +1324,23 @@ class InformixConnector(DatabaseConnector):
                         func_body_lines.append(f"        {proc_call.replace(settings['source_schema'], settings['target_schema'])};")
                         func_body_lines.append("    END IF;")
 
-            # Build the trigger function code
+                if re.search(r'for each row', trig, re.IGNORECASE) and after_all_commands:
+                    func_body_lines.append(f"""    /* AFTER part */""")
+                    for after_command in after_all_commands:
+                        if after_command:
+                            func_body_lines.append(f"""    {after_command.replace(f'''"{settings['source_schema']}"''', f'''"{settings['target_schema']}"''')};""")
+
+                if ((not re.search(r'for each row', trig, re.IGNORECASE) or re.search(r'before', trig, re.IGNORECASE))
+                    and after_all_commands):
+                    self.logger.error(f"Trigger {trigger_name} has AFTER clause but is not FOR EACH ROW. This is not supported!!!")
+                    func_body_lines.append("/* AFTER clause not migrated */")
+                    for after_command in after_all_commands:
+                        if after_command:
+                            func_body_lines.append(f"/*    {after_command.replace(settings['source_schema'], settings['target_schema'])}; */")
+
+                if self.config_parser.get_log_level() == 'DEBUG':
+                    self.logger.debug(f"func_body_lines: {func_body_lines}")
+
                 func_code = f"""CREATE OR REPLACE FUNCTION "{settings['target_schema']}"."{function_name + str(counter)}"()
                     RETURNS trigger AS $$
                     BEGIN

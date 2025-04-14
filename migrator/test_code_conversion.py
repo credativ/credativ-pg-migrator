@@ -39,10 +39,7 @@ def main(tested_code, code_type, source_db_type, source_schema, target_schema, t
 				'source_schema': source_schema,
 				'target_schema': target_schema
 			}
-			converted_code = informix_connector.convert_trigger(
-				trig=tested_code,
-				settings=settings
-			)
+			converted_code = informix_connector.convert_trigger(tested_code, settings )
 
 	print("***********************************************************************************")
 	print(f"{source_db_type} {code_type} Code:")

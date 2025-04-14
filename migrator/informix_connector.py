@@ -1243,6 +1243,7 @@ class InformixConnector(DatabaseConnector):
             # when_matches = re.findall(r'(?:when\s*\((.*?)\)\s*)?\(\s*(execute procedure.*?\(.*?\));?\s*\)', trig, re.IGNORECASE | re.DOTALL | re.MULTILINE)
             # when_matches = re.findall(r'(?:when\s*\((?:\((?:\((.*?)\))?\))?\)\s*)?\(\s*(execute procedure.*?\(.*?\));?\s*\)', trig, re.IGNORECASE | re.DOTALL | re.MULTILINE)
             when_matches = re.findall(r'when\s*\((.*?)\)\s*\((.*?\)\s*\))', trig, re.IGNORECASE | re.DOTALL | re.MULTILINE)
+            # when_matches = re.findall(r'when\s*\((.*?)\)\s*\((.*?\n*?)\)', trig, re.IGNORECASE | re.DOTALL | re.MULTILINE)
 
             if self.config_parser.get_log_level() == 'DEBUG':
                 self.logger.debug(f"when_matches: {when_matches}")
@@ -1250,6 +1251,7 @@ class InformixConnector(DatabaseConnector):
             for match in when_matches:
                 when_condition = match[0]
                 proc_call = match[1]
+                proc_call = re.sub(r'\*/', '*/\n', proc_call, flags=re.IGNORECASE)
                 when_conditions[order_num] = when_condition
                 proc_calls[order_num] = proc_call
                 order_num += 1
@@ -1395,7 +1397,7 @@ class InformixConnector(DatabaseConnector):
                         func_code = f"""CREATE OR REPLACE FUNCTION "{settings['target_schema']}"."{function_name + str(counter)}"()
                             RETURNS trigger AS $$
                             BEGIN
-                                {proc_call.replace(settings['source_schema'], settings['target_schema'])};
+                                {proc_call.replace(f'''"{settings['source_schema']}"''', f'''"{settings['target_schema']}"''')};
                                 RETURN NEW;
                             END;
                             $$ LANGUAGE plpgsql;"""

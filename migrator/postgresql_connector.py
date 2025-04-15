@@ -90,7 +90,7 @@ class PostgreSQLConnector(DatabaseConnector):
             self.connect()
             cursor = self.connection.cursor()
             if self.config_parser.get_log_level() == 'DEBUG':
-                self.logger.debug(f"Reading columns for {table_name}")
+                self.logger.debug(f"PostgreSQL: Reading columns for {table_schema}.{table_name}")
             cursor.execute(query)
             for row in cursor.fetchall():
                 data_type = row[2].upper()
@@ -144,7 +144,7 @@ class PostgreSQLConnector(DatabaseConnector):
 
         return converted_schema, create_table_sql
 
-    def fetch_indexes(self, source_table_id: int, target_schema, target_table_name):
+    def fetch_indexes(self, source_table_id: int, target_schema, target_table_name, target_columns):
         table_indexes = {}
         order_num = 1
         query = f"""

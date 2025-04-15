@@ -135,7 +135,7 @@ class SybaseASEConnector(DatabaseConnector):
             self.connect()
             cursor = self.connection.cursor()
             if self.config_parser.get_log_level() == 'DEBUG':
-                self.logger.debug(f"Reading columns for {table_name}")
+                self.logger.debug(f"Sybase ASE: Reading columns for {table_schema}.{table_name}")
             cursor.execute(query)
             for row in cursor.fetchall():
                 result[row[0]] = {

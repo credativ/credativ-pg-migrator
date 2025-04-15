@@ -1126,7 +1126,7 @@ class MigratorTables:
             SET task_completed = CURRENT_TIMESTAMP,
             success = %s,
             message = %s
-            WHERE id = %s
+            WHERE sequence_id = %s
             RETURNING *
         """
         params = ('TRUE' if success else 'FALSE', message, sequence_id)

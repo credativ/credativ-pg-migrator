@@ -19,3 +19,7 @@ echo "" > ../logs/omdb_20250326.log; python3 main.py --config=../tests/omdb/omdb
 ## Data check
 
 echo ""> ../logs/informix_iwadb_20250306_check.log; python3 data_check.py --config=../config/informix_iwadb.yaml --log-file=../logs/informix_iwadb_20250306_check.log --log-level=DEBUG
+
+## Manual test of code conversion
+
+../migrator_venv/bin/python3 test_code_conversion.py

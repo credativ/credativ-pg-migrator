@@ -105,14 +105,14 @@ def main():
                     target_primary_key_columns = index['columns']
                     break
 
-            logger.logger.info(f"Fetching data from source table {source_schema}.{source_table_name}...")
+            # logger.logger.info(f"Fetching data from source table {source_schema}.{source_table_name}...")
             source_data = fetch_table_data(logger, source_connection, source_schema, source_table_name, source_columns, source_primary_key_columns)
 
-            logger.logger.info(f"Fetching data from target table {target_schema}.{source_table_name}...")
+            # logger.logger.info(f"Fetching data from target table {target_schema}.{source_table_name}...")
             target_data = fetch_table_data(logger, target_connection, target_schema, source_table_name, target_columns, target_primary_key_columns)
 
             part_name = 'compare data'
-            logger.logger.info("Comparing data...")
+            # logger.logger.info("Comparing data...")
             compare_data(source_data, target_data, logger)
 
             if len(source_data) != 0 and len(target_data) != 0:
@@ -170,7 +170,7 @@ def fetch_table_data(logger, connection, schema, table_name, columns, primary_ke
             query = f"SELECT * FROM {schema}.{table_name} ORDER BY {primary_key_columns}"
         else:
             query = f"SELECT * FROM {schema}.{table_name}"
-        logger.logger.debug(f"Query: {query}")
+        # logger.logger.debug(f"Query: {query}")
         cursor = connection.connection.cursor()
         cursor.execute(query)
 
@@ -178,26 +178,32 @@ def fetch_table_data(logger, connection, schema, table_name, columns, primary_ke
         data = cursor.fetchall()
         records = [dict(zip([column['name'] for column in columns.values()], row)) for row in data]
 
-        logger.logger.info(f"Fetched {len(records)} rows from source table {table_name}.")
+        logger.logger.info(f"Fetched {len(records)} rows from table {schema}.{table_name} ({connection}).")
 
-        part_name = 'convert data'
+        part_name = 'convert data to DataFrame'
         # Convert to pandas DataFrame
         df = pd.DataFrame(records)
 
-        # Adjust binary or bytea types
-        for column in columns.values():
-            column_name = column['name']
-            column_type = column['type']
-            if column_type.lower() in ['blob', 'bytea']:
-                df[column_name] = df[column_name].apply(lambda x: bytes(x) if x is not None else None)
-            elif column_type.lower() in ['clob']:
-                df[column_name] = df[column_name].apply(lambda x: str(x) if x is not None else None)
-            elif column_type.lower() in ['date', 'datetime', 'time', 'timestamp', 'timestamp without time zone', 'timestamp with time zone']:
-                df[column_name] = pd.to_datetime(df[column_name], errors='coerce')
+        if len(df) != 0:
+            part_name = 'convert data types'
+            # Adjust binary or bytea types
+            for column in columns.values():
+                column_name = column['name']
+                column_type = column['type']
+                # logger.logger.debug(f"Column: {column_name}, Type: {column_type}")
+
+                if column_type.lower() in ['blob', 'bytea']:
+                    df[column_name] = df[column_name].apply(lambda x: bytes(x) if x is not None else None)
+                elif column_type.lower() in ['clob']:
+                    df[column_name] = df[column_name].apply(lambda x: str(x) if x is not None else None)
+                elif column_type.lower() in ['date', 'datetime', 'time', 'timestamp', 'timestamp without time zone', 'timestamp with time zone']:
+                    df[column_name] = pd.to_datetime(df[column_name], format='%Y.%m.%d %H:%M:%S.%f')
 
         return df
     except Exception as e:
         logger.logger.error(f"An error in fetch_table_data ({part_name}): {e}")
+        logger.logger.error("Full stack trace:")
+        logger.logger.error(traceback.format_exc())
         connection.disconnect()
         sys.exit(1)
 

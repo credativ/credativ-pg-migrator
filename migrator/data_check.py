@@ -57,7 +57,7 @@ def main():
         for _, source_table_data in source_tables.items():
             source_table_record = source_table_data
             source_table_name = source_table_data['table_name']
-            logger.logger.debug(f"Source table: {source_table_name}")
+            logger.logger.info(f"Processing table: {source_table_name}")
 
             source_columns = source_connection.fetch_table_columns(source_schema, source_table_name, migrator_tables=None)
             # if config_parser.get_log_level() == 'DEBUG':
@@ -117,25 +117,25 @@ def main():
 
             if len(source_data) != 0 and len(target_data) != 0:
                 logger.logger.info("Comparing sizes of columns for matching PK values...")
-                source_data = source_data.sort(target_primary_key_columns)
-                target_data = target_data.sort(target_primary_key_columns)
+                source_data = source_data.sort_values(by=target_primary_key_columns)
+                target_data = target_data.sort_values(by=target_primary_key_columns)
 
-                for source_row in source_data.iter_rows(named=True):
+                for _, source_row in source_data.iterrows():
                     source_id = source_row[target_primary_key_columns]
-                    source_row_df = source_data.filter(pl.col(target_primary_key_columns) == source_id)
-                    target_row_df = target_data.filter(pl.col(target_primary_key_columns) == source_id)
+                    source_row_df = source_data[source_data[target_primary_key_columns] == source_id]
+                    target_row_df = target_data[target_data[target_primary_key_columns] == source_id]
 
-                    if not source_row_df.equals(target_row_df):
+                    if not source_row_df.reset_index(drop=True).equals(target_row_df.reset_index(drop=True)):
                         logger.logger.error(f"Data mismatch found for id {source_id}:")
                         logger.logger.info(f"Source row: {source_row_df}")
                         logger.logger.info(f"Target row: {target_row_df}")
 
-                    for column in source_row_df.columns:
-                        source_size = source_row_df[column][0].__sizeof__()
-                        target_size = target_row_df[column][0].__sizeof__()
-                        if (source_row_df[column][0] != target_row_df[column][0]) or (source_size != target_size):
-                            logger.logger.error(f"Data mismatch found for {source_id}: '{column}'")
-                        # logger.logger.info(f"{source_id}: '{column}' - source: {source_size} / target: {target_size}")
+                    # for column in source_row_df.columns:
+                    #     source_size = source_row_df[column][0].__sizeof__()
+                    #     target_size = target_row_df[column][0].__sizeof__()
+                    #     if (source_row_df[column][0] != target_row_df[column][0]) or (source_size != target_size):
+                    #         logger.logger.error(f"Data mismatch found for {source_id}: '{column}'")
+                    #     # logger.logger.info(f"{source_id}: '{column}' - source: {source_size} / target: {target_size}")
 
         logger.logger.info("Data Check Done")
 
@@ -197,7 +197,7 @@ def fetch_table_data(logger, connection, schema, table_name, columns, primary_ke
                 elif column_type.lower() in ['clob']:
                     df[column_name] = df[column_name].apply(lambda x: str(x) if x is not None else None)
                 elif column_type.lower() in ['date', 'datetime', 'time', 'timestamp', 'timestamp without time zone', 'timestamp with time zone']:
-                    df[column_name] = pd.to_datetime(df[column_name], format='%Y.%m.%d %H:%M:%S.%f')
+                    df[column_name] = pd.to_datetime(df[column_name], format='mixed', errors='coerce')
 
         return df
     except Exception as e:

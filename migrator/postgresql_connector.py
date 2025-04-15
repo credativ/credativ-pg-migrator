@@ -433,8 +433,9 @@ class PostgreSQLConnector(DatabaseConnector):
                     c.relname::text AS sequence_name,
                     c.oid AS sequence_id,
                     a.attname AS column_name,
-                    'SELECT SETVAL( (SELECT oid from pg_class where relname = ''' || c.relname ||
-                    ''' and relkind = ''S''), (SELECT MAX(' || quote_ident(a.attname) || ') /*+ 1*/ FROM ' ||
+                    'SELECT SETVAL( (SELECT oid from pg_class s where s.relname = ''' || c.relname ||
+                    ''' and s.relkind = ''S'' AND s.relnamespace::regnamespace::text = ''' ||
+                    c.relnamespace::regnamespace::text || '''), (SELECT MAX(' || quote_ident(a.attname) || ') /*+ 1*/ FROM ' ||
                     quote_ident(t.relnamespace::regnamespace::text)||'.'|| quote_ident(t.relname) || '));' as sequence_sql
                 FROM
                     pg_depend d

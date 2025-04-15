@@ -340,7 +340,7 @@ class InformixConnector(DatabaseConnector):
                 index_columns_data_types = []
                 for column_name in index_columns.split(','):
                     column_name = column_name.strip().strip('"')
-                    for order_num, column_info in target_columns.items():
+                    for col_order_num, column_info in target_columns.items():
                         if column_name == column_info['name']:
                             index_columns_count += 1
                             column_data_type = column_info['type']
@@ -754,8 +754,8 @@ class InformixConnector(DatabaseConnector):
             header_match = re.search(r'CREATE PROCEDURE.*?\);', postgresql_code, flags=re.DOTALL | re.IGNORECASE)
             if header_match:
                 header_end = header_match.end()-1
-                # if self.config_parser.get_log_level() == 'DEBUG':
-                #     self.logger.debug(f"[1] header_end: {header_end}, postgresql_code: {postgresql_code[:header_end]}")
+                if self.config_parser.get_log_level() == 'DEBUG':
+                    self.logger.debug(f"[1] header_end: {header_end}, postgresql_code: {postgresql_code[:header_end]}")
                 postgresql_code = postgresql_code[:header_end] + ' AS $$\n' + postgresql_code[header_end:]
                 # if self.config_parser.get_log_level() == 'DEBUG':
                 #     self.logger.debug(f"[1] postgresql_code: {postgresql_code[:header_end+10]}")
@@ -773,8 +773,8 @@ class InformixConnector(DatabaseConnector):
             header_match = re.search(r'CREATE FUNCTION.*?RETURNING\s+\w+\s+;?', postgresql_code, flags=re.DOTALL | re.IGNORECASE)
             if header_match:
                 header_end = header_match.end()
-                # if self.config_parser.get_log_level() == 'DEBUG':
-                #     self.logger.debug(f"[2] header_end: {header_end}, postgresql_code: {postgresql_code[:header_end]}")
+                if self.config_parser.get_log_level() == 'DEBUG':
+                    self.logger.debug(f"[2] header_end: {header_end}, postgresql_code: {postgresql_code[:header_end]}")
                 postgresql_code_part = re.sub(r'RETURNING', 'RETURNS', postgresql_code[:header_end], flags=re.DOTALL | re.IGNORECASE)
                 if ';' in postgresql_code_part:
                     postgresql_code_part = re.sub(r';', ' AS $$\n', postgresql_code_part, flags=re.DOTALL | re.IGNORECASE)
@@ -787,8 +787,8 @@ class InformixConnector(DatabaseConnector):
             header_match = re.search(r'\s*RETURNING\s+\w+\s+;?', postgresql_code, flags=re.DOTALL | re.IGNORECASE)
             if header_match:
                 header_end = header_match.end()
-                # if self.config_parser.get_log_level() == 'DEBUG':
-                #     self.logger.debug(f"[3] header_end: {header_end}, postgresql_code: {postgresql_code[:header_end]}")
+                if self.config_parser.get_log_level() == 'DEBUG':
+                    self.logger.debug(f"[3] header_end: {header_end}, postgresql_code: {postgresql_code[:header_end]}")
                 postgresql_code_part = re.sub(r'RETURNING', 'RETURNS', postgresql_code[:header_end], flags=re.DOTALL | re.IGNORECASE)
                 if ';' in postgresql_code_part:
                     postgresql_code_part = re.sub(r';', ' AS $$\n', postgresql_code_part, flags=re.DOTALL | re.IGNORECASE)
@@ -834,7 +834,8 @@ class InformixConnector(DatabaseConnector):
             postgresql_code = re.sub(r'BEGIN;', 'BEGIN', postgresql_code, flags=re.IGNORECASE)
             postgresql_code = re.sub(r'^LOOP;', 'LOOP', postgresql_code, flags=re.IGNORECASE)
             postgresql_code = re.sub(r'ELSE;', 'ELSE', postgresql_code, flags=re.IGNORECASE)
-            postgresql_code = re.sub(r';;', ';', postgresql_code, flags=re.IGNORECASE)
+            postgresql_code = re.sub(r';;', ';', postgresql_code, flags=re.IGNORECASE )
+            postgresql_code = re.sub(r'\*/;', '*/', postgresql_code, flags=re.IGNORECASE)
 
             for table in table_list:
                 source_table_pattern = re.compile(rf'("{source_schema}"\.)?"{table}"')
@@ -857,6 +858,19 @@ class InformixConnector(DatabaseConnector):
             postgresql_code = "\n".join([line for line in postgresql_code.split('\n') if line.strip() != ";"])
             # Remove empty lines from the converted code
             postgresql_code = "\n".join([line for line in postgresql_code.splitlines() if line.strip()])
+
+            # Repair function header
+            # returning_matches = re.finditer(r'^\s*CREATE\s+FUNCTION\s+[\w\s]+\(\)\s+RETURNS\s+(\w+)\s*;', postgresql_code, flags=re.DOTALL | re.IGNORECASE | re.MULTILINE)
+            # returning_matches = re.finditer(r'^\s*CREATE\s+FUNCTION\s+[\w\s".]+\([\w\s".]+\)\s+RETURNS\s+(\w+)\s*;', postgresql_code, flags=re.DOTALL | re.IGNORECASE | re.MULTILINE)
+            returning_matches = re.finditer(r'^\s*(CREATE\s+FUNCTION\s+[\w\s".]+\([\w\s".]+\))\s+RETURNS\s+(\w+)\s*;', postgresql_code, flags=re.DOTALL | re.IGNORECASE | re.MULTILINE)
+            for match in returning_matches:
+                # if self.config_parser.get_log_level() == 'DEBUG':
+                #     self.logger.debug(f'[4] match.group(0): {match.group(0)}')
+                #     self.logger.debug(f'[4] match.group(1): {match.group(1)}')
+                #     self.logger.debug(f'[4] match.group(2): {match.group(2)}')
+                header_part = match.group(1)
+                return_type = match.group(2)
+                postgresql_code = postgresql_code.replace(match.group(0), f'{header_part} RETURNS {return_type} AS $$\n')
 
             # some procs /funcs have ON EXCEPTION block, some of them several times
             if "ON EXCEPTION" in postgresql_code:
@@ -928,17 +942,27 @@ class InformixConnector(DatabaseConnector):
                                         on_exception_line = next((line for line in exception_block if 'ON EXCEPTION SET' in line), None)
 
                                         set_variable_line = ''
+                                        variable_name = ''
                                         if on_exception_line:
                                             # Extract the variable name from the ON EXCEPTION line
-                                            variable_name = re.search(r'ON EXCEPTION SET (\w+);', on_exception_line).group(1)
-                                            set_variable_line = f"""{variable_name} = SQLSTATE||'-'||SQLERRM;"""
-                                            # match = re.search(r'ON EXCEPTION SET (.*?);', on_exception_line)
-                                            # variable_names = match.group(1).split(',') if match else ['unknown_variable']
-                                            # if len(variable_names) == 1:
-                                            #     set_variable_line = f"""{variable_names[0]} = SQLSTATE||'-'||SQLERRM;"""
-                                            # elif len(variable_names) == 3:
-                                            #     set_variable_line = f"""{variable_names[0]} = SQLSTATE;\n{variable_name[1]} = SQLSTATE;\n {variable_name[2]} = SQLERRM;"""
-                                            print(f'set_variable_line: {set_variable_line}')
+                                            match = re.search(r'ON EXCEPTION\s+SET\s+([\w\s,]+);', on_exception_line)
+                                            if match:
+                                                variable_names = [var.strip() for var in match.group(1).split(',')]
+                                                if len(variable_names) == 1:
+                                                    set_variable_line = f"""{variable_names[0]} = SQLSTATE||'-'||SQLERRM;"""
+                                                elif len(variable_names) == 2:
+                                                    set_variable_line = f"""{variable_names[0]} = SQLSTATE;\n{variable_names[1]} = SQLERRM;"""
+                                                elif len(variable_names) == 3:
+                                                    set_variable_line = f"""{variable_names[0]} = SQLSTATE;\n{variable_names[1]} = SQLERRM;\n{variable_names[2]} = '';"""
+                                                # match = re.search(r'ON EXCEPTION SET (.*?);', on_exception_line)
+                                                # variable_names = match.group(1).split(',') if match else ['unknown_variable']
+                                                # if len(variable_names) == 1:
+                                                #     set_variable_line = f"""{variable_names[0]} = SQLSTATE||'-'||SQLERRM;"""
+                                                # elif len(variable_names) == 3:
+                                                #     set_variable_line = f"""{variable_names[0]} = SQLSTATE;\n{variable_name[1]} = SQLSTATE;\n {variable_name[2]} = SQLERRM;"""
+                                                # print(f'set_variable_line: {set_variable_line}')
+                                            # else:
+                                            #     raise ValueError(f"Failed to find a match for 'ON EXCEPTION SET' in line: {on_exception_line}")
 
                                         # Modify the exception block
                                         modified_exception_block = [re.sub(r'ON EXCEPTION SET \w+', f'EXCEPTION WHEN OTHERS THEN\n{set_variable_line}', line) for line in exception_block]
@@ -966,14 +990,25 @@ class InformixConnector(DatabaseConnector):
                                 set_variable_line = ''
                                 if on_exception_line:
                                     # Extract the variable name from the ON EXCEPTION line
-                                    variable_name = re.search(r'ON EXCEPTION SET (\w+);', on_exception_line).group(1)
-                                    set_variable_line = f"""{variable_name} = SQLSTATE||'-'||SQLERRM;"""
-                                    # variable_names = match.group(1).split(',') if match else ['unknown_variable']
-                                    # if len(variable_names) == 1:
-                                    #     set_variable_line = f"""{variable_names[0]} = SQLSTATE||'-'||SQLERRM;"""
-                                    # elif len(variable_names) == 3:
-                                    #     set_variable_line = f"""{variable_names[0]} = SQLSTATE;\n{variable_name[1]} = SQLSTATE;\n {variable_name[2]} = SQLERRM;"""
-                                    print(f'set_variable_line: {set_variable_line}')
+                                    # variable_name = re.search(r'ON EXCEPTION SET (\w+);', on_exception_line).group(1)
+                                    variable_name = ''
+                                    match = re.search(r'ON EXCEPTION SET (\w+);', on_exception_line)
+                                    if match:
+                                        variable_names = [var.strip() for var in match.group(1).split(',')]
+                                        if len(variable_names) == 1:
+                                            set_variable_line = f"""{variable_names[0]} = SQLSTATE||'-'||SQLERRM;"""
+                                        elif len(variable_names) == 2:
+                                            set_variable_line = f"""{variable_names[0]} = SQLSTATE;\n{variable_names[1]} = SQLERRM;"""
+                                        elif len(variable_names) == 3:
+                                            set_variable_line = f"""{variable_names[0]} = SQLSTATE;\n{variable_names[1]} = SQLERRM;\n{variable_names[2]} = '';"""
+                                        # variable_names = match.group(1).split(',') if match else ['unknown_variable']
+                                        # if len(variable_names) == 1:
+                                        #     set_variable_line = f"""{variable_names[0]} = SQLSTATE||'-'||SQLERRM;"""
+                                        # elif len(variable_names) == 3:
+                                        #     set_variable_line = f"""{variable_names[0]} = SQLSTATE;\n{variable_name[1]} = SQLSTATE;\n {variable_name[2]} = SQLERRM;"""
+                                        # print(f'set_variable_line: {set_variable_line}')
+                                    # else:
+                                    #     raise ValueError(f"Failed to find a match for 'ON EXCEPTION SET' in line: {on_exception_line}")
 
                                 # Modify the exception block
                                 modified_exception_block = [re.sub(r'ON EXCEPTION SET \w+', f'EXCEPTION WHEN OTHERS THEN\n{set_variable_line}', line) for line in exception_block]
@@ -1174,208 +1209,218 @@ class InformixConnector(DatabaseConnector):
         pgsql_trigger_code = ''
         pgsql_triggers = []
         trigger_code = ''
+        trigger_name = ''
         func_code = ''
 
-        # Split the input into individual trigger definitions
-        triggers = re.split(r'(?i)create trigger', informix_code, re.IGNORECASE | re.DOTALL | re.MULTILINE)
-        for trig in triggers:
-            trig = trig.strip()
-            if not trig:
-                continue
+        try:
+            # Split the input into individual trigger definitions
+            triggers = re.split(r'(?i)create trigger', informix_code, re.IGNORECASE | re.DOTALL | re.MULTILINE)
+            for trig in triggers:
+                trig = trig.strip()
+                if not trig:
+                    continue
 
-            trig_lines = trig.split('\n')
-            trig_lines = [line.strip() for line in trig_lines]
-            trig_lines = [line for line in trig_lines if line != '--']
-            trig_lines = [f"/* {line.strip()} */" if line.startswith('--') else line for line in trig_lines]
-            trig = '\n'.join(trig_lines)
-            if self.config_parser.get_log_level() == 'DEBUG':
-                self.logger.debug(f"Trigger code: {trig}")
-
-            # Replace groups of multiple spaces with just one space
-            trig = re.sub(r'\s+', ' ', trig)
-            # Add new line character before each word WHEN (case insensitive)
-            trig = re.sub(r'(?i)\s*when', '\nWHEN', trig, flags=re.IGNORECASE)
-
-            # Extract how NEW and OLD are referenced in Informix code
-            new_ref = ""
-            old_ref = ""
-            ref_match = re.search(r'referencing\s+(new\s+as\s+(\S+))?\s*(old\s+as\s+(\S+))?', trig, re.IGNORECASE)
-            if ref_match:
-                new_ref = ref_match.group(2) if ref_match.group(2) else ""
-                old_ref = ref_match.group(4) if ref_match.group(4) else ""
-
-            if self.config_parser.get_log_level() == 'DEBUG':
-                self.logger.debug(f"new_ref: {new_ref}, old_ref: {old_ref}")
-
-            # Extract schema, trigger name, and operation (insert/update)
-            header_match = re.match(r'"([^"]+)"\.(\S+)\s+(insert|update|delete)', trig, re.IGNORECASE)
-            if not header_match:
-                continue
-            schema = header_match.group(1)
-            trigger_name = header_match.group(2)
-            operation = header_match.group(3).lower()
-
-            if self.config_parser.get_log_level() == 'DEBUG':
-                self.logger.debug(f"Trigger name: {trigger_name}, Operation: {operation}")
-
-            # Extract the table name (assumes: on "schemaname".table)
-            table_match = re.search(r'\s+on\s+"([^"]+)"\.(\S+)', trig, re.IGNORECASE)
-            if table_match:
-                table_schema = table_match.group(1)
-                table_name = table_match.group(2)
-            else:
-                table_schema = schema
-                table_name = "unknown_table"
-
-            if self.config_parser.get_log_level() == 'DEBUG':
-                self.logger.debug(f"Table name: {table_name}, Schema: {table_schema}")
-
-            func_body_lines = []
-
-            order_num = 1
-            when_conditions = {}
-            proc_calls = {}
-
-            # when_pattern = re.compile(r'when\s*\((.*?)\)\s*\((.*?)\)', re.DOTALL | re.IGNORECASE)
-            # after_pattern = re.compile(r'after\s*\((.*)\)', re.DOTALL | re.IGNORECASE)
-
-            # when_matches = re.findall(r'(?:when\s*\((.*?)\)\s*)?\(\s*(execute procedure.*?;?)\s*\)', trig, re.IGNORECASE | re.DOTALL | re.MULTILINE)
-            # when_matches = re.findall(r'(?:when\s*\((.*?)\)\s*)?\(\s*(execute procedure.*?\(.*?\));?\s*\)', trig, re.IGNORECASE | re.DOTALL | re.MULTILINE)
-            # when_matches = re.findall(r'(?:when\s*\((?:\((?:\((.*?)\))?\))?\)\s*)?\(\s*(execute procedure.*?\(.*?\));?\s*\)', trig, re.IGNORECASE | re.DOTALL | re.MULTILINE)
-            when_matches = re.findall(r'when\s*\((.*?)\)\s*\((.*?\)\s*\))', trig, re.IGNORECASE | re.DOTALL | re.MULTILINE)
-            # when_matches = re.findall(r'when\s*\((.*?)\)\s*\((.*?\n*?)\)', trig, re.IGNORECASE | re.DOTALL | re.MULTILINE)
-
-            if self.config_parser.get_log_level() == 'DEBUG':
-                self.logger.debug(f"when_matches: {when_matches}")
-
-            for match in when_matches:
-                when_condition = match[0]
-                proc_call = match[1]
-                proc_call = re.sub(r'\*/', '*/\n', proc_call, flags=re.IGNORECASE)
-                when_conditions[order_num] = when_condition
-                proc_calls[order_num] = proc_call
-                order_num += 1
+                trig_lines = trig.split('\n')
+                trig_lines = [line.strip() for line in trig_lines]
+                trig_lines = [line for line in trig_lines if line != '--']
+                trig_lines = [f"/* {line.strip()} */" if line.startswith('--') else line for line in trig_lines]
+                trig = '\n'.join(trig_lines)
                 if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"when_condition: {when_condition}")
-                    self.logger.debug(f"proc_call: {proc_call}")
+                    self.logger.debug(f"Trigger code: {trig}")
 
-            after_pattern = re.compile(r'after\s*\((.*)\)', re.DOTALL | re.IGNORECASE | re.MULTILINE)
-            # Extract AFTER clause
-            after_match = after_pattern.search(trig)
-            after_all_commands = []
-            after_current_command = []
-            if after_match:
-                after_content = after_match.group(1).strip()
-                # Split the content into individual SQL commands by commas, considering nested structures
-                open_parentheses = 0
+                # Replace groups of multiple spaces with just one space
+                trig = re.sub(r'\s+', ' ', trig)
+                # Add new line character before each word WHEN (case insensitive)
+                trig = re.sub(r'(?i)\s*when', '\nWHEN', trig, flags=re.IGNORECASE)
 
-                for part in re.split(r'(,)', after_content):  # Keep commas as separate tokens
-                    if part == ',' and open_parentheses == 0:
-                    # Check if the current command starts with a valid SQL keyword
-                        if after_current_command and any(after_current_command[0].strip().lower().startswith(kw) for kw in ['insert', 'update', 'delete']):
-                            # End of a command
-                            after_all_commands.append(''.join(after_current_command).strip())
-                            after_current_command = []
+                # Extract how NEW and OLD are referenced in Informix code
+                new_ref = ""
+                old_ref = ""
+                ref_match = re.search(r'referencing\s+(new\s+as\s+(\S+))?\s*(old\s+as\s+(\S+))?', trig, re.IGNORECASE)
+                if ref_match:
+                    new_ref = ref_match.group(2) if ref_match.group(2) else ""
+                    old_ref = ref_match.group(4) if ref_match.group(4) else ""
+
+                if self.config_parser.get_log_level() == 'DEBUG':
+                    self.logger.debug(f"new_ref: {new_ref}, old_ref: {old_ref}")
+
+                # Extract schema, trigger name, and operation (insert/update)
+                header_match = re.match(r'"([^"]+)"\.(\S+)\s+(insert|update|delete)', trig, re.IGNORECASE)
+                if not header_match:
+                    continue
+                schema = header_match.group(1)
+                trigger_name = header_match.group(2)
+                operation = header_match.group(3).lower()
+
+                if self.config_parser.get_log_level() == 'DEBUG':
+                    self.logger.debug(f"Trigger name: {trigger_name}, Operation: {operation}")
+
+                # Extract the table name (assumes: on "schemaname".table)
+                table_match = re.search(r'\s+on\s+"([^"]+)"\.(\S+)', trig, re.IGNORECASE)
+                if table_match:
+                    table_schema = table_match.group(1)
+                    table_name = table_match.group(2)
+                else:
+                    table_schema = schema
+                    table_name = "unknown_table"
+
+                if self.config_parser.get_log_level() == 'DEBUG':
+                    self.logger.debug(f"Table name: {table_name}, Schema: {table_schema}")
+
+                func_body_lines = []
+
+                order_num = 1
+                when_conditions = {}
+                proc_calls = {}
+
+                # when_pattern = re.compile(r'when\s*\((.*?)\)\s*\((.*?)\)', re.DOTALL | re.IGNORECASE)
+                # after_pattern = re.compile(r'after\s*\((.*)\)', re.DOTALL | re.IGNORECASE)
+
+                # when_matches = re.findall(r'(?:when\s*\((.*?)\)\s*)?\(\s*(execute procedure.*?;?)\s*\)', trig, re.IGNORECASE | re.DOTALL | re.MULTILINE)
+                # when_matches = re.findall(r'(?:when\s*\((.*?)\)\s*)?\(\s*(execute procedure.*?\(.*?\));?\s*\)', trig, re.IGNORECASE | re.DOTALL | re.MULTILINE)
+                # when_matches = re.findall(r'(?:when\s*\((?:\((?:\((.*?)\))?\))?\)\s*)?\(\s*(execute procedure.*?\(.*?\));?\s*\)', trig, re.IGNORECASE | re.DOTALL | re.MULTILINE)
+                when_matches = re.findall(r'when\s*\((.*?)\)\s*\((.*?\)\s*\))', trig, re.IGNORECASE | re.DOTALL | re.MULTILINE)
+                # when_matches = re.findall(r'when\s*\((.*?)\)\s*\((.*?\n*?)\)', trig, re.IGNORECASE | re.DOTALL | re.MULTILINE)
+
+                if self.config_parser.get_log_level() == 'DEBUG':
+                    self.logger.debug(f"when_matches: {when_matches}")
+
+                for match in when_matches:
+                    when_condition = match[0]
+                    proc_call = match[1]
+                    proc_call = re.sub(r'\*/', '*/\n', proc_call, flags=re.IGNORECASE)
+                    when_conditions[order_num] = when_condition
+                    proc_calls[order_num] = proc_call
+                    order_num += 1
+                    if self.config_parser.get_log_level() == 'DEBUG':
+                        self.logger.debug(f"when_condition: {when_condition}")
+                        self.logger.debug(f"proc_call: {proc_call}")
+
+                after_pattern = re.compile(r'after\s*\((.*)\)', re.DOTALL | re.IGNORECASE | re.MULTILINE)
+                # Extract AFTER clause
+                after_match = after_pattern.search(trig)
+                after_all_commands = []
+                after_current_command = []
+                if after_match:
+                    after_content = after_match.group(1).strip()
+                    # Split the content into individual SQL commands by commas, considering nested structures
+                    open_parentheses = 0
+
+                    for part in re.split(r'(,)', after_content):  # Keep commas as separate tokens
+                        if part == ',' and open_parentheses == 0:
+                        # Check if the current command starts with a valid SQL keyword
+                            if after_current_command and any(after_current_command[0].strip().lower().startswith(kw) for kw in ['insert', 'update', 'delete']):
+                                # End of a command
+                                after_all_commands.append(''.join(after_current_command).strip())
+                                after_current_command = []
+                            else:
+                                # Concatenate with the previous part
+                                if after_all_commands:
+                                    after_all_commands[-1] += ',' + ''.join(after_current_command).strip()
+                                    after_current_command = []
                         else:
-                            # Concatenate with the previous part
+                            after_current_command.append(part)
+                            # Track parentheses to handle nested structures
+                            open_parentheses += part.count('(') - part.count(')')
+
+                    # Add the last command if any
+                    if after_current_command:
+                        if any(after_current_command[0].strip().lower().startswith(kw) for kw in ['insert', 'update', 'delete']):
+                            after_all_commands.append(''.join(after_current_command).strip())
+                        else:
                             if after_all_commands:
                                 after_all_commands[-1] += ',' + ''.join(after_current_command).strip()
-                                after_current_command = []
-                    else:
-                        after_current_command.append(part)
-                        # Track parentheses to handle nested structures
-                        open_parentheses += part.count('(') - part.count(')')
 
-                # Add the last command if any
-                if after_current_command:
-                    if any(after_current_command[0].strip().lower().startswith(kw) for kw in ['insert', 'update', 'delete']):
-                        after_all_commands.append(''.join(after_current_command).strip())
-                    else:
-                        if after_all_commands:
-                            after_all_commands[-1] += ',' + ''.join(after_current_command).strip()
-
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"AFTER part after_all_commands: {after_all_commands}")
-
-            if not proc_calls:
-                # Find everything after the words FOR EACH ROW and take it as actions
-                actions_match = re.search(r'for each row\s*\((.*)\)', trig, re.IGNORECASE | re.DOTALL)
-                if actions_match:
-                    actions = actions_match.group(1).split(',')
-                    for action in actions:
-                        print(f"action: {action.strip()}")
-                        if "execute procedure" in action:
-                            # action = re.sub("execute procedure", "", action, flags=re.IGNORECASE) ## keep it for further processing
-                            action = re.sub("with trigger references", "", action, flags=re.IGNORECASE)
-                            action = action.replace(settings['source_schema'], settings['target_schema'])
-                        proc_calls.append(action.strip())
-
-            if self.config_parser.get_log_level() == 'DEBUG':
-                self.logger.debug(f"when_conditions: {when_conditions}")
-                self.logger.debug(f"proc_calls: {proc_calls}")
-
-            function_name = trigger_name + "_trigfunc"
-            counter = 0
-            if ((when_conditions and proc_calls) or after_all_commands):
-
-                for i in when_conditions.keys():
-                    proc_call = proc_calls[i].replace("execute procedure", "PERFORM")
-
-                    if when_conditions[i]:
-                        func_body_lines.append(f"    IF {when_conditions[i]} THEN")
-                        func_body_lines.append(f"        {proc_call.replace(settings['source_schema'], settings['target_schema'])};")
-                        func_body_lines.append("    END IF;")
-
-                if re.search(r'for each row', trig, re.IGNORECASE) and after_all_commands:
-                    func_body_lines.append(f"""    /* AFTER part */""")
-                    for after_command in after_all_commands:
-                        if after_command:
-                            func_body_lines.append(f"""    {after_command.replace(f'''"{settings['source_schema']}"''', f'''"{settings['target_schema']}"''')};""")
-
-                if ((not re.search(r'for each row', trig, re.IGNORECASE) or re.search(r'before', trig, re.IGNORECASE))
-                    and after_all_commands):
-                    self.logger.error(f"Trigger {trigger_name} has AFTER clause but is not FOR EACH ROW. This is not supported!!!")
-                    func_body_lines.append("/* AFTER clause not migrated */")
-                    for after_command in after_all_commands:
-                        if after_command:
-                            func_body_lines.append(f"/*    {after_command.replace(settings['source_schema'], settings['target_schema'])}; */")
-
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"func_body_lines: {func_body_lines}")
-
-                func_code = f"""CREATE OR REPLACE FUNCTION "{settings['target_schema']}"."{function_name + str(counter)}"()
-                    RETURNS trigger AS $$
-                    BEGIN
-                    {chr(10).join(func_body_lines)}
-                        RETURN NEW;
-                    END;
-                    $$ LANGUAGE plpgsql;"""
-
-                trigger_code = f"""CREATE TRIGGER "{trigger_name + str(counter)}" """
-
-                if re.search(r'for each row', trig, re.IGNORECASE):
-                    trigger_code += f"""\nAFTER {operation.upper()} ON "{table_schema.replace(settings['source_schema'], settings['target_schema'])}"."{table_name}" """
-
-                if new_ref:
-                    trigger_code += f"\nREFERENCING NEW TABLE AS {new_ref}"
-                if old_ref:
-                    trigger_code += f"\nREFERENCING OLD TABLE AS {old_ref}"
-
-                if re.search(r'for each row', trig, re.IGNORECASE):
-                    trigger_code += f"\nFOR EACH ROW"
-
-                trigger_code += f"\nEXECUTE FUNCTION {schema.replace(settings['source_schema'], settings['target_schema'])}.{function_name + str(counter)}();"
-                counter += 1
-
-                pgsql_triggers.append(func_code + "\n\n" + trigger_code)
-
-            elif not when_conditions and proc_calls:
-                for i in range(len(proc_calls)):
-                    trigger_code = ''
-                    func_code = ''
-                    proc_call = proc_calls[i]
                     if self.config_parser.get_log_level() == 'DEBUG':
-                        self.logger.debug(f"proc_call: {proc_call}")
+                        self.logger.debug(f"AFTER part after_all_commands: {after_all_commands}")
+
+                if not when_conditions and not proc_calls:
+                    action_all_commands = []
+                    action_current_command = []
+                    actions_match = re.search(r'for each row\s*\((.*)\)', trig, re.IGNORECASE | re.DOTALL)
+                    if actions_match:
+                        action_content = actions_match.group(1).strip()
+                        # Split the content into individual SQL commands by commas, considering nested structures
+                        open_parentheses = 0
+
+                        for part in re.split(r'(,)', action_content):  # Keep commas as separate tokens
+                            if part == ',' and open_parentheses == 0:
+                            # Check if the current command starts with a valid SQL keyword
+                                if action_current_command and any(action_current_command[0].strip().lower().startswith(kw) for kw in ['insert', 'update', 'delete']):
+                                    # End of a command
+                                    action_all_commands.append(''.join(action_current_command).strip())
+                                    action_current_command = []
+                                else:
+                                    # Concatenate with the previous part
+                                    if action_all_commands:
+                                        action_all_commands[-1] += ',' + ''.join(action_current_command).strip()
+                                        action_current_command = []
+                            else:
+                                action_current_command.append(part)
+                                # Track parentheses to handle nested structures
+                                open_parentheses += part.count('(') - part.count(')')
+
+                        # Add the last command if any
+                        if action_current_command:
+                            if any(action_current_command[0].strip().lower().startswith(kw) for kw in ['insert', 'update', 'delete']):
+                                action_all_commands.append(''.join(action_current_command).strip())
+                            else:
+                                if action_all_commands:
+                                    action_all_commands[-1] += ',' + ''.join(action_current_command).strip()
+
+                        if self.config_parser.get_log_level() == 'DEBUG':
+                            self.logger.debug(f"ACTION part action_all_commands: {action_all_commands}")
+
+                        actions = actions_match.group(1).split(',')
+                        for action in actions:
+                            print(f"action: {action.strip()}")
+                            if "execute procedure" in action:
+                                # action = re.sub("execute procedure", "", action, flags=re.IGNORECASE) ## keep it for further processing
+                                action = re.sub("with trigger references", "", action, flags=re.IGNORECASE)
+                                action = action.replace(settings['source_schema'], settings['target_schema'])
+                            proc_calls[order_num] = action.strip()
+                            order_num += 1
+
+                if self.config_parser.get_log_level() == 'DEBUG':
+                    self.logger.debug(f"when_conditions: {when_conditions}")
+                    self.logger.debug(f"proc_calls: {proc_calls}")
+
+                function_name = trigger_name + "_trigfunc"
+                counter = 0
+                if ((when_conditions and proc_calls) or after_all_commands):
+
+                    for i in when_conditions.keys():
+                        proc_call = proc_calls[i].replace("execute procedure", "PERFORM")
+
+                        if when_conditions[i]:
+                            func_body_lines.append(f"    IF {when_conditions[i]} THEN")
+                            func_body_lines.append(f"        {proc_call.replace(settings['source_schema'], settings['target_schema'])};")
+                            func_body_lines.append("    END IF;")
+
+                    if re.search(r'for each row', trig, re.IGNORECASE) and after_all_commands:
+                        func_body_lines.append(f"""    /* AFTER part */""")
+                        for after_command in after_all_commands:
+                            if after_command:
+                                func_body_lines.append(f"""    {after_command.replace(f'''"{settings['source_schema']}"''', f'''"{settings['target_schema']}"''')};""")
+
+                    if ((not re.search(r'for each row', trig, re.IGNORECASE) or re.search(r'before', trig, re.IGNORECASE))
+                        and after_all_commands):
+                        self.logger.error(f"Trigger {trigger_name} has AFTER clause but is not FOR EACH ROW. This is not supported!!!")
+                        func_body_lines.append("/* AFTER clause not migrated */")
+                        for after_command in after_all_commands:
+                            if after_command:
+                                func_body_lines.append(f"/*    {after_command.replace(settings['source_schema'], settings['target_schema'])}; */")
+
+                    if self.config_parser.get_log_level() == 'DEBUG':
+                        self.logger.debug(f"func_body_lines: {func_body_lines}")
+
+                    func_code = f"""CREATE OR REPLACE FUNCTION "{settings['target_schema']}"."{function_name + str(counter)}"()
+                        RETURNS trigger AS $$
+                        BEGIN
+                        {chr(10).join(func_body_lines)}
+                            RETURN NEW;
+                        END;
+                        $$ LANGUAGE plpgsql;"""
 
                     trigger_code = f"""CREATE TRIGGER "{trigger_name + str(counter)}" """
 
@@ -1390,23 +1435,52 @@ class InformixConnector(DatabaseConnector):
                     if re.search(r'for each row', trig, re.IGNORECASE):
                         trigger_code += f"\nFOR EACH ROW"
 
-                    if proc_call.startswith("execute procedure"):
-                        proc_call = proc_call.replace("execute procedure", "")
-                        trigger_code += f"\nEXECUTE FUNCTION {proc_call};"
-                    else:
-                        func_code = f"""CREATE OR REPLACE FUNCTION "{settings['target_schema']}"."{function_name + str(counter)}"()
-                            RETURNS trigger AS $$
-                            BEGIN
-                                {proc_call.replace(f'''"{settings['source_schema']}"''', f'''"{settings['target_schema']}"''')};
-                                RETURN NEW;
-                            END;
-                            $$ LANGUAGE plpgsql;"""
-                        trigger_code += f"\nEXECUTE FUNCTION {settings['target_schema']}.{function_name + str(counter)}();"
-                        counter += 1
+                    trigger_code += f"\nEXECUTE FUNCTION {schema.replace(settings['source_schema'], settings['target_schema'])}.{function_name + str(counter)}();"
+                    counter += 1
 
                     pgsql_triggers.append(func_code + "\n\n" + trigger_code)
 
-        pgsql_trigger_code = "\n\n".join(pgsql_triggers)
+                elif not when_conditions and proc_calls:
+                    for i in proc_calls.keys():
+                        trigger_code = ''
+                        func_code = ''
+                        proc_call = proc_calls[i]
+                        if self.config_parser.get_log_level() == 'DEBUG':
+                            self.logger.debug(f"proc_call: {proc_call}")
+
+                        trigger_code = f"""CREATE TRIGGER "{trigger_name + str(counter)}" """
+
+                        if re.search(r'for each row', trig, re.IGNORECASE):
+                            trigger_code += f"""\nAFTER {operation.upper()} ON "{table_schema.replace(settings['source_schema'], settings['target_schema'])}"."{table_name}" """
+
+                        if new_ref:
+                            trigger_code += f"\nREFERENCING NEW TABLE AS {new_ref}"
+                        if old_ref:
+                            trigger_code += f"\nREFERENCING OLD TABLE AS {old_ref}"
+
+                        if re.search(r'for each row', trig, re.IGNORECASE):
+                            trigger_code += f"\nFOR EACH ROW"
+
+                        if proc_call.startswith("execute procedure"):
+                            proc_call = proc_call.replace("execute procedure", "")
+                            trigger_code += f"\nEXECUTE FUNCTION {proc_call};"
+                        else:
+                            func_code = f"""CREATE OR REPLACE FUNCTION "{settings['target_schema']}"."{function_name + str(counter)}"()
+                                RETURNS trigger AS $$
+                                BEGIN
+                                    {proc_call.replace(f'''"{settings['source_schema']}"''', f'''"{settings['target_schema']}"''')};
+                                    RETURN NEW;
+                                END;
+                                $$ LANGUAGE plpgsql;"""
+                            trigger_code += f"\nEXECUTE FUNCTION {settings['target_schema']}.{function_name + str(counter)}();"
+                            counter += 1
+
+                        pgsql_triggers.append(func_code + "\n\n" + trigger_code)
+
+            pgsql_trigger_code = "\n\n".join(pgsql_triggers)
+        except Exception as e:
+            self.logger.error(f"Error converting trigger {trigger_name}: {e}")
+            self.logger.error(traceback.format_exc())
 
         return pgsql_trigger_code
 

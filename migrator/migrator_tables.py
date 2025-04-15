@@ -17,6 +17,7 @@ class MigratorTables:
         self.create_protocol()
         self.create_table_for_main()
         self.create_table_for_user_defined_types()
+        self.create_table_for_new_objects()
         self.create_table_for_tables()
         self.create_table_for_data_migration()
         # self.create_table_for_pk_ranges()
@@ -520,6 +521,25 @@ class MigratorTables:
             'batch_end': row[6],
             'row_count': row[7]
         }
+
+    def create_table_for_new_objects(self):
+        table_name = self.config_parser.get_protocol_name_new_objects()
+        self.protocol_connection.execute_query(self.drop_table_sql.format(protocol_schema=self.protocol_schema, table_name=table_name))
+        self.protocol_connection.execute_query(f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."{table_name}"
+            (id SERIAL PRIMARY KEY,
+            object_comment TEXT,
+            object_type TEXT,
+            object_sql TEXT,
+            task_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            task_started TIMESTAMP,
+            task_completed TIMESTAMP,
+            success BOOLEAN,
+            message TEXT
+            )
+        """)
+        # if self.config_parser.get_log_level() == 'DEBUG':
+        #     self.logger.debug(f"New objects table {table_name} created.")
 
     def create_table_for_tables(self):
         table_name = self.config_parser.get_protocol_name_tables()

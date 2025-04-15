@@ -374,7 +374,7 @@ class SybaseASEConnector(DatabaseConnector):
                 index_columns_data_types = []
                 for column_name in index_columns.split(','):
                     column_name = column_name.strip().strip('"')
-                    for order_num, column_info in target_columns.items():
+                    for col_order_num, column_info in target_columns.items():
                         if column_name == column_info['name']:
                             index_columns_count += 1
                             column_data_type = column_info['type']

@@ -459,7 +459,7 @@ class Orchestrator:
 
             if funcproc_names:
                 for order_num, funcproc_data in funcproc_names.items():
-                    self.logger.info(f"Processing func/proc {order_num}: {funcproc_data['name']}")
+                    self.logger.info(f"Processing func/proc {order_num}/{len(funcproc_names)}: {funcproc_data['name']}")
                     if not any(fnmatch.fnmatch(funcproc_data['name'], pattern) for pattern in include_funcprocs):
                         continue
                     if any(fnmatch.fnmatch(funcproc_data['name'], pattern) for pattern in exclude_funcprocs):

@@ -132,6 +132,9 @@ class ConfigParser:
     def get_protocol_name_user_defined_types(self):
         return f"{self.get_protocol_name()}_user_defined_types"
 
+    def get_protocol_name_new_objects(self):
+        return f"{self.get_protocol_name()}_new_objects"
+
     def get_protocol_name_tables(self):
         return f"{self.get_protocol_name()}_tables"
 

@@ -1381,7 +1381,7 @@ class MigratorTables:
             raise
 
     def print_data_migration_summary(self):
-        self.logger.info("Data migration time stats:")
+        self.logger.info("Table rows migration stats:")
         table_name = self.config_parser.get_protocol_name_data_migration()
         query = f"""SELECT min(task_created) as min_time, max(task_completed) as max_time FROM "{self.protocol_schema}"."{table_name}" WHERE task_completed IS NOT NULL"""
         cursor = self.protocol_connection.connection.cursor()
@@ -1403,27 +1403,29 @@ class MigratorTables:
         query = f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{table_name}" WHERE source_table_rows = 0 OR source_table_rows IS NULL"""
         cursor.execute(query)
         summary = cursor.fetchone()[0]
-        self.logger.info(f"    Tables with 0 rows: {summary}")
+        self.logger.info(f"    Empty tables (0 rows): {summary}")
 
         query = f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{table_name}" WHERE source_table_rows > 0"""
         cursor.execute(query)
         summary = cursor.fetchone()[0]
-        self.logger.info(f"    Tables with rows: {summary}")
+        self.logger.info(f"    Tables with data: {summary}")
 
         query = f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{table_name}" WHERE source_table_rows > 0 AND source_table_rows = target_table_rows"""
         cursor.execute(query)
         summary = cursor.fetchone()[0]
-        self.logger.info(f"    Tables fully migrated: {summary}")
+        self.logger.info(f"    Tables with data - fully migrated: {summary}")
 
         query = f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{table_name}" WHERE source_table_rows > 0 AND source_table_rows <> target_table_rows"""
         cursor.execute(query)
         summary = cursor.fetchone()[0]
-        self.logger.info(f"    Tables NOT fully migrated: {summary}")
+        self.logger.info(f"    Tables with data - NOT fully migrated: {summary}")
 
         cursor.close()
 
     def print_migration_summary(self):
-        self.logger.info("Migration time stats:")
+        self.logger.info("Migration stats:")
+        self.logger.info(f"    Source database: {self.config_parser.get_source_db_name()} (type: {self.config_parser.get_source_db_type()})")
+        self.logger.info(f"    Target database: {self.config_parser.get_target_db_name()} (type: {self.config_parser.get_target_db_type()})")
         self.print_main(self.config_parser.get_protocol_name_main())
         self.logger.info("Migration summary:")
         self.print_summary('User Defined Types', self.config_parser.get_protocol_name_user_defined_types())

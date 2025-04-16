@@ -504,7 +504,7 @@ class PostgreSQLConnector(DatabaseConnector):
 
     def get_table_size(self, table_schema: str, table_name: str):
         query = f"""
-            SELECT pg_toal_relation_size('{table_schema}.{table_name}')
+            SELECT pg_total_relation_size('{table_schema}.{table_name}')
         """
         cursor = self.connection.cursor()
         cursor.execute(query)

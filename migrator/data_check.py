@@ -10,10 +10,12 @@ from informix_connector import InformixConnector
 from sybase_ase_connector import SybaseASEConnector
 from ms_sql_connector import MsSQLConnector
 import pandas as pd
+import numpy as np
 import sys
 import os
 import traceback
 import signal
+import gc
 
 def main():
     cmd = CommandLine()
@@ -114,14 +116,20 @@ def main():
                         break
 
                 # logger.logger.info(f"Fetching data from source table {source_schema}.{source_table_name}...")
+                source_connection.connect()
+                source_table_rows = source_connection.get_rows_count(source_schema, source_table_name)
                 source_table_size = source_connection.get_table_size(source_schema, source_table_name)
-                logger.logger.info(f"Table {source_schema}.{source_table_name} size: {source_table_size} bytes ({source_table_size/1024/1024} MB)")
+                logger.logger.info(f"Source table {source_schema}.{source_table_name} rows: {source_table_rows} - size: {source_table_size} bytes ({source_table_size/1024/1024} MB)")
                 source_data = fetch_table_data(logger, source_connection, source_schema, source_table_name, source_columns, source_primary_key_columns)
+                source_connection.disconnect()
 
                 # logger.logger.info(f"Fetching data from target table {target_schema}.{source_table_name}...")
+                target_connection.connect()
+                target_table_rows = target_connection.get_rows_count(target_schema, source_table_name)
                 target_table_size = target_connection.get_table_size(target_schema, source_table_name)
-                logger.logger.info(f"Table {target_schema}.{source_table_name} size: {target_table_size} bytes ({target_table_size/1024/1024} MB)")
+                logger.logger.info(f"Target table {target_schema}.{source_table_name} rows: {target_table_rows} - size: {target_table_size} bytes ({target_table_size/1024/1024} MB)")
                 target_data = fetch_table_data(logger, target_connection, target_schema, source_table_name, target_columns, target_primary_key_columns)
+                target_connection.disconnect()
 
                 part_name = 'compare data'
                 # logger.logger.info("Comparing data...")
@@ -152,6 +160,11 @@ def main():
                 #         #     if (source_row_df[column][0] != target_row_df[column][0]) or (source_size != target_size):
                 #         #         logger.logger.error(f"Data mismatch found for {source_id}: '{column}'")
                 #         #     # logger.logger.info(f"{source_id}: '{column}' - source: {source_size} / target: {target_size}")
+
+                # Deallocate memory used by source_data and target_data
+                del source_data
+                del target_data
+                gc.collect()
 
             except Exception as e:
                 total_error_tables += 1
@@ -201,7 +214,6 @@ def connect_to_db(logger, config_parser, source_or_target):
 def fetch_table_data(logger, connection, schema, table_name, columns, primary_key_columns):
     try:
         part_name = 'connect'
-        connection.connect()
 
         if primary_key_columns:
             query = f"SELECT * FROM {schema}.{table_name} ORDER BY {primary_key_columns}"
@@ -229,6 +241,9 @@ def fetch_table_data(logger, connection, schema, table_name, columns, primary_ke
                 column_type = column['type']
                 # logger.logger.debug(f"Column: {column_name}, Type: {column_type}")
 
+                # Normalize NULL values for comparability
+                df = df.fillna(value=pd.NA)  # Replace NaN/NaT with pandas' NA
+
                 if column_type.lower() in ['blob', 'bytea', 'binary', 'varbinary', 'image']:
                     df[column_name] = df[column_name].apply(lambda x: x.getBytes(1, int(x.length())) if hasattr(x, 'getBytes') else (bytes(x) if x is not None else None))
                 elif column_type.lower() in ['clob']:
@@ -237,14 +252,11 @@ def fetch_table_data(logger, connection, schema, table_name, columns, primary_ke
                     df[column_name] = pd.to_datetime(df[column_name], format='mixed', errors='coerce')
                 elif column_type.lower() in ['boolean']:
                     df[column_name] = df[column_name].astype(bool)
-
-        connection.disconnect()
         return df
     except Exception as e:
         logger.logger.error(f"An error in fetch_table_data ({part_name}): {e}")
         logger.logger.error("Full stack trace:")
         logger.logger.error(traceback.format_exc())
-        connection.disconnect()
         sys.exit(1)
 
 def compare_data(source_data, target_data, logger, table_name):
@@ -268,6 +280,11 @@ def compare_data(source_data, target_data, logger, table_name):
     #         if column == 'content_blob':
     #             target_data = target_data.with_columns(pl.col(column).cast(pl.Binary))
 
+    source_data_memory = source_data.memory_usage(deep=True).sum() / 1024 / 1024
+    target_data_memory = target_data.memory_usage(deep=True).sum() / 1024 / 1024
+
+    logger.logger.info(f"Table {table_name}: source dataframe rows: {len(source_data)}, memory : {source_data_memory} MB")
+    logger.logger.info(f"Table {table_name}: target dataframe rows: {len(target_data)}, memory : {target_data_memory} MB")
     common_columns = source_data.columns.intersection(target_data.columns)
     source_data = source_data[common_columns].astype(str)
     target_data = target_data[common_columns].astype(str)
@@ -283,11 +300,21 @@ def compare_data(source_data, target_data, logger, table_name):
         return True
     else:
         logger.logger.error(f"Table {table_name}: Data MISMATCH found between source and target tables.")
-        differences = pd.concat([source_data, target_data]).drop_duplicates(keep=False)
-        if not differences.empty:
-            logger.logger.info(f"Table {table_name}: Differences found between source and target tables:")
-            logger.logger.info(differences)
-            logger.logger.info(f"Table {table_name}: In total, {len(differences)/2} differences found between source and target tables.")
+        if source_data_memory + target_data_memory > 1500:
+            logger.logger.info(f"Table {table_name}: Dataframes are too large to display differences - skipping.")
+        else:
+            try:
+                differences = pd.concat([source_data, target_data]).drop_duplicates(keep=False)
+            except Exception as e:
+                logger.logger.error(f"An error occurred while calculating differences: {e}")
+                logger.logger.error("Full stack trace:")
+                logger.logger.error(traceback.format_exc())
+
+            logger.logger.error(f"Table {table_name}: Differences found: {len(differences)} rows.")
+            if not differences.empty:
+                logger.logger.info(f"Table {table_name}: Differences found between source and target tables:")
+                logger.logger.info(differences)
+                logger.logger.info(f"Table {table_name}: In total, {len(differences)/2} differences found between source and target tables.")
         return False
 
 def ctrlc_signal_handler(sig, frame):

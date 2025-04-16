@@ -311,8 +311,8 @@ class InformixConnector(DatabaseConnector):
             for index in indexes:
                 if self.config_parser.get_log_level() == 'DEBUG':
                     self.logger.debug(f"Processing index: {index}")
-                index_name = index[0]
-                index_type = index[1]
+                index_name = index[0].strip()
+                index_type = index[1].strip()
                 colnos = [colno for colno in index[3:] if colno]
 
                 # Get column names for each colno
@@ -329,8 +329,8 @@ class InformixConnector(DatabaseConnector):
                 """)
                 constraint = cursor.fetchone()
                 if constraint and constraint[0] in ('P', 'R'):
-                    index_type = constraint[0]
-                    index_name = constraint[1]
+                    index_type = constraint[0].strip()
+                    index_name = constraint[1].strip()
 
                 index_columns = ', '.join([f'"{col}"' for col in columns])
                 if self.config_parser.get_log_level() == 'DEBUG':
@@ -351,12 +351,12 @@ class InformixConnector(DatabaseConnector):
 
                 create_index_query = None
                 if index_type == 'U':
-                    create_index_query = f"""CREATE UNIQUE INDEX "{index_name}" ON "{target_schema}"."{target_table_name}" ({index_columns});"""
+                    create_index_query = f"""CREATE UNIQUE INDEX "{index_name.strip()}" ON "{target_schema}"."{target_table_name}" ({index_columns});"""
                 elif index_type == 'P':
                     create_index_query = f"""ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{index_name}" PRIMARY KEY ({index_columns});"""
                 else:
                     if index_type != 'R':
-                        create_index_query = f"""CREATE INDEX "{index_name}" ON "{target_schema}"."{target_table_name}" ({index_columns});"""
+                        create_index_query = f"""CREATE INDEX "{index_name.strip()}" ON "{target_schema}"."{target_table_name}" ({index_columns});"""
                     else:
                         pass
                         # Skipping Foreign key
@@ -1537,6 +1537,12 @@ class InformixConnector(DatabaseConnector):
         count = cursor.fetchone()[0]
         cursor.close()
         return count
+
+    def get_table_size(self, table_schema: str, table_name: str):
+        """
+        Returns a size of the table in bytes
+        """
+        pass
 
     def get_sequence_current_value(self, sequence_id: int):
         pass

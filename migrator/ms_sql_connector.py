@@ -247,6 +247,12 @@ class MsSQLConnector(DatabaseConnector):
         # ...existing code from SybaseASEConnector.get_rows_count...
         pass
 
+    def get_table_size(self, table_schema: str, table_name: str):
+        """
+        Returns a size of the table in bytes
+        """
+        pass
+
     def fetch_sequences(self):
         query = """
             SELECT

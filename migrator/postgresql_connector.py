@@ -152,7 +152,7 @@ class PostgreSQLConnector(DatabaseConnector):
                 i.indexname,
                 i.indexdef,
                 coalesce(c.constraint_type, 'INDEX') as type,
-                obj_description((i.schemaname||'.'||i.indexname)::regclass::oid, 'pg_class') as index_comment
+                obj_description(('"'||i.schemaname||'"."'||i.indexname||'"')::regclass::oid, 'pg_class') as index_comment
             FROM pg_indexes i
             JOIN pg_class t
             ON t.relnamespace::regnamespace::text = i.schemaname
@@ -501,6 +501,16 @@ class PostgreSQLConnector(DatabaseConnector):
         count = cursor.fetchone()[0]
         cursor.close()
         return count
+
+    def get_table_size(self, table_schema: str, table_name: str):
+        query = f"""
+            SELECT pg_toal_relation_size('{table_schema}.{table_name}')
+        """
+        cursor = self.connection.cursor()
+        cursor.execute(query)
+        size = cursor.fetchone()[0]
+        cursor.close()
+        return size
 
     def convert_trigger(self, trigger_id: int, target_db_type: str, target_schema: str):
         pass

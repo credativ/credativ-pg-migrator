@@ -365,8 +365,8 @@ class SybaseASEConnector(DatabaseConnector):
             for index in indexes:
                 if self.config_parser.get_log_level() == 'DEBUG':
                     self.logger.debug(f"Processing index: {index}")
-                index_name = index[0]
-                index_unique = index[1]
+                index_name = index[0].strip()
+                index_unique = index[1]  ## integer 0 or 1
                 index_columns = index[2].strip()
                 index_primary_key = index[3]
 
@@ -1125,3 +1125,21 @@ class SybaseASEConnector(DatabaseConnector):
 
     def fetch_user_defined_types(self, schema: str):
         pass
+
+    def get_table_size(self, table_schema: str, table_name: str):
+        query = f"""
+            SELECT
+                data_pages(db_id(), o.id, 0)*b.blocksize as size_kb
+            FROM "{table_schema}".sysobjects o,
+                (SELECT low/1024 as blocksize
+                FROM master.{table_schema}.spt_values d
+                WHERE d.number = 1 AND d.type = 'E') b
+            WHERE type='U' and o.name = '{table_name}'
+            ORDER BY size_kb DESC """
+        self.connect()
+        cursor = self.connection.cursor()
+        cursor.execute(query)
+        row = cursor.fetchone()
+        cursor.close()
+        self.disconnect()
+        return row[0]

@@ -250,6 +250,13 @@ class DatabaseConnector(ABC):
         pass
 
     @abstractmethod
+    def get_table_size(self, table_schema: str, table_name: str):
+        """
+        Returns a size of the table in bytes
+        """
+        pass
+
+    @abstractmethod
     def fetch_user_defined_types(self, schema: str):
         """
         Returns user defined types in the specified schema / all schemas - depending on the database.

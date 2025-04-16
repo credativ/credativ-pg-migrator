@@ -114,9 +114,13 @@ def main():
                         break
 
                 # logger.logger.info(f"Fetching data from source table {source_schema}.{source_table_name}...")
+                source_table_size = source_connection.get_table_size(source_schema, source_table_name)
+                logger.logger.info(f"Table {source_schema}.{source_table_name} size: {source_table_size} bytes ({source_table_size/1024/1024} MB)")
                 source_data = fetch_table_data(logger, source_connection, source_schema, source_table_name, source_columns, source_primary_key_columns)
 
                 # logger.logger.info(f"Fetching data from target table {target_schema}.{source_table_name}...")
+                target_table_size = target_connection.get_table_size(target_schema, source_table_name)
+                logger.logger.info(f"Table {target_schema}.{source_table_name} size: {target_table_size} bytes ({target_table_size/1024/1024} MB)")
                 target_data = fetch_table_data(logger, target_connection, target_schema, source_table_name, target_columns, target_primary_key_columns)
 
                 part_name = 'compare data'

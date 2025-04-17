@@ -1,5 +1,5 @@
 psycopg2
 jaydebeapi
 pyyaml
-polars
+pandas
 pyodbc

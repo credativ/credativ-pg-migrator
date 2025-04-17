@@ -60,6 +60,9 @@ class ConfigParser:
     def get_target_db_type(self):
         return self.config['target']['type']
 
+    def get_target_db_name(self):
+        return self.get_target_config()['database']
+
     def get_target_schema(self):
         target_config = self.get_target_config()
         return target_config.get('schema', target_config.get('owner', 'public'))

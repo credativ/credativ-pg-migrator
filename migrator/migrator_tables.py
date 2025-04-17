@@ -1327,7 +1327,10 @@ class MigratorTables:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query)
             summary = cursor.fetchone()[0]
-            self.logger.info(f"    Found in source: {summary}")
+            if objects.lower() not in ['sequences']:
+                self.logger.info(f"    Found in source: {summary}")
+            else:
+                self.logger.info(f"    Found: {summary}")
             if additional_columns:
                 columns_count = len(additional_columns.split(','))
                 columns_numbers = ', '.join(str(i + 2) for i in range(columns_count))
@@ -1340,16 +1343,21 @@ class MigratorTables:
             query = f"""SELECT success, COUNT(*) FROM "{self.protocol_schema}"."{migrator_table_name}" GROUP BY 1 ORDER BY 1"""
             cursor.execute(query)
             rows = cursor.fetchall()
+            if objects.lower() not in ['sequences']:
+                success_description = "successfully migrated"
+            else:
+                success_description = "successfully set"
             for row in rows:
-                status = "successfully migrated" if row[0] else "error" if row[0] is False else "unknown status"
+                status = success_description if row[0] else "error" if row[0] is False else "unknown status"
+                row_success = row[0]
                 self.logger.info(f"    {status}: {row[1]}")
-            if additional_columns:
-                query = f"""SELECT COUNT(*), {additional_columns} FROM "{self.protocol_schema}"."{migrator_table_name}" WHERE success = True GROUP BY {columns_numbers} ORDER BY {columns_numbers}"""
-                cursor.execute(query)
-                rows = cursor.fetchall()
-                for row in rows:
-                    status = "successfully migrated" if row[0] else "error" if row[0] is False else "unknown status"
-                    self.logger.info(f"        {row[1:]}: {row[0]}")
+                if additional_columns:
+                    query = f"""SELECT COUNT(*), {additional_columns} FROM "{self.protocol_schema}"."{migrator_table_name}" WHERE success = {row_success} GROUP BY {columns_numbers} ORDER BY {columns_numbers}"""
+                    cursor.execute(query)
+                    rows = cursor.fetchall()
+                    for row in rows:
+                        # status = success_description if row[0] else "error" if row[0] is False else "unknown status"
+                        self.logger.info(f"        {row[1:]}: {row[0]}")
             cursor.close()
 
         except Exception as e:
@@ -1373,7 +1381,7 @@ class MigratorTables:
                 intendation = ''
                 if task_data['subtask_name'] != '':
                     intendation = '    '
-                status = f"{intendation}{(task_data['task_name']+': '+task_data['subtask_name'])[:50]:<50} -> start: {str(task_data['task_started'])[:19]:<19} | end: {str(task_data['task_completed'])[:19]:<19} | length: {str(length)[:19]}"
+                status = f"{intendation}{(task_data['task_name']+': '+task_data['subtask_name'])[:50]:<50} | {str(task_data['task_started'])[:19]:<19} -> {str(task_data['task_completed'])[:19]:<19} | length: {str(length)[:19]}"
                 self.logger.info(f"{status}")
         except Exception as e:
             self.logger.error(f"Error printing migration summary.")
@@ -1383,6 +1391,7 @@ class MigratorTables:
     def print_data_migration_summary(self):
         self.logger.info("Table rows migration stats:")
         table_name = self.config_parser.get_protocol_name_data_migration()
+        data_migration_table_name = self.config_parser.get_protocol_name_data_migration()
         query = f"""SELECT min(task_created) as min_time, max(task_completed) as max_time FROM "{self.protocol_schema}"."{table_name}" WHERE task_completed IS NOT NULL"""
         cursor = self.protocol_connection.connection.cursor()
         cursor.execute(query)
@@ -1415,26 +1424,64 @@ class MigratorTables:
         summary = cursor.fetchone()[0]
         self.logger.info(f"    Tables with data - fully migrated: {summary}")
 
+        query = f"""SELECT target_schema, target_table, source_table_rows, target_table_rows, task_completed - task_created as migration_time
+        FROM "{self.protocol_schema}"."{data_migration_table_name}" WHERE source_table_rows > 0 AND source_table_rows = target_table_rows
+        ORDER BY source_table_rows DESC LIMIT 10"""
+        cursor.execute(query)
+        rows = cursor.fetchall()
+        if rows:
+            self.logger.info("        Tables with data - fully migrated (top 10):")
+            max_table_name_length = max(len(row[1]) for row in rows) if rows else 0
+            max_table_name_length += 1
+            for row in rows:
+                target_schema = row[0]
+                target_table = row[1]
+                source_table_rows = row[2]
+                target_table_rows = row[3]
+                migration_time = row[4]
+                formatted_source_rows = f"{source_table_rows:,}".rjust(15)
+                formatted_target_rows = f"{target_table_rows:,}".rjust(15)
+                self.logger.info(f"        {target_schema}.{target_table[:max_table_name_length].ljust(max_table_name_length)}| {formatted_source_rows} = {formatted_target_rows} | length: {str(migration_time)[:19]:<19}")
+
         query = f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{table_name}" WHERE source_table_rows > 0 AND source_table_rows <> target_table_rows"""
         cursor.execute(query)
         summary = cursor.fetchone()[0]
         self.logger.info(f"    Tables with data - NOT fully migrated: {summary}")
 
+        query = f"""SELECT target_schema, target_table, source_table_rows, target_table_rows, task_completed - task_created as migration_time
+        FROM "{self.protocol_schema}"."{data_migration_table_name}" WHERE source_table_rows > 0 AND source_table_rows <> target_table_rows
+        ORDER BY source_table_rows DESC LIMIT 10"""
+        cursor.execute(query)
+        rows = cursor.fetchall()
+        if rows:
+            self.logger.info("        Tables with data - NOT fully migrated (top 10):")
+            max_table_name_length = max(len(row[1]) for row in rows) if rows else 0
+            max_table_name_length += 1
+            for row in rows:
+                target_schema = row[0]
+                target_table = row[1]
+                source_table_rows = row[2]
+                target_table_rows = row[3]
+                migration_time = row[4]
+                formatted_source_rows = f"{source_table_rows:,}".rjust(12)
+                formatted_source_rows = f"{target_table_rows:,}".rjust(12)
+                self.logger.info(f"        {target_schema}.{target_table[:max_table_name_length].ljust(max_table_name_length)}| {formatted_source_rows} <> {formatted_source_rows} | length: {str(migration_time)[:19]:<19}")
+
         cursor.close()
 
     def print_migration_summary(self):
         self.logger.info("Migration stats:")
-        self.logger.info(f"    Source database: {self.config_parser.get_source_db_name()} (type: {self.config_parser.get_source_db_type()})")
-        self.logger.info(f"    Target database: {self.config_parser.get_target_db_name()} (type: {self.config_parser.get_target_db_type()})")
+        self.logger.info(f"    Source database: {self.config_parser.get_source_db_name()}, schema: {self.config_parser.get_source_owner()} ({self.config_parser.get_source_db_type()})")
+        self.logger.info(f"    Target database: {self.config_parser.get_target_db_name()}, schema: {self.config_parser.get_target_schema()} ({self.config_parser.get_target_db_type()})")
         self.print_main(self.config_parser.get_protocol_name_main())
         self.logger.info("Migration summary:")
         self.print_summary('User Defined Types', self.config_parser.get_protocol_name_user_defined_types())
         self.print_summary('Tables', self.config_parser.get_protocol_name_tables())
         self.print_data_migration_summary()
+        self.print_summary('Sequences', self.config_parser.get_protocol_name_sequences())
         self.print_summary('Indexes', self.config_parser.get_protocol_name_indexes(), 'index_type')
         self.print_summary('Constraints', self.config_parser.get_protocol_name_constraints(), 'constraint_type')
         self.print_summary('Functions / procedures', self.config_parser.get_protocol_name_funcprocs())
-        self.print_summary('Sequences', self.config_parser.get_protocol_name_sequences())
         self.print_summary('Triggers', self.config_parser.get_protocol_name_triggers())
         self.print_summary('Views', self.config_parser.get_protocol_name_views())
 

@@ -575,6 +575,7 @@ class MigratorTables:
             source_schema TEXT,
             source_table TEXT,
             source_table_id INTEGER,
+            index_owner TEXT,
             index_name TEXT,
             index_type VARCHAR(30),
             target_schema TEXT,
@@ -747,15 +748,16 @@ class MigratorTables:
             'source_schema': row[1],
             'source_table': row[2],
             'source_table_id': row[3],
-            'index_name': row[4],
-            'index_type': row[5],
-            'target_schema': row[6],
-            'target_table': row[7],
-            'index_sql': row[8],
-            'index_columns': row[9],
-            'index_columns_count': row[10],
-            'index_columns_data_types': row[11],
-            'index_comment': row[12]
+            'index_owner': row[4],
+            'index_name': row[5],
+            'index_type': row[6],
+            'target_schema': row[7],
+            'target_table': row[8],
+            'index_sql': row[9],
+            'index_columns': row[10],
+            'index_columns_count': row[11],
+            'index_columns_data_types': row[12],
+            'index_comment': row[13]
         }
 
     def decode_constraint_row(self, row):
@@ -928,12 +930,12 @@ class MigratorTables:
         table_name = self.config_parser.get_protocol_name_indexes()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
-            (source_schema, source_table, source_table_id, index_name, index_type,
+            (source_schema, source_table, source_table_id, index_owner, index_name, index_type,
             target_schema, target_table, index_sql, index_columns, index_columns_count, index_columns_data_types, index_comment)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (values['source_schema'], values['source_table'], values['source_table_id'],
+        params = (values['source_schema'], values['source_table'], values['source_table_id'], values['index_owner'],
                   values['index_name'], values['index_type'], values['target_schema'],
                   values['target_table'], values['index_sql'], values['index_columns'],
                   values['index_columns_count'], values['index_columns_data_types'], values['index_comment'])
@@ -1479,7 +1481,7 @@ class MigratorTables:
         self.print_summary('Tables', self.config_parser.get_protocol_name_tables())
         self.print_data_migration_summary()
         self.print_summary('Sequences', self.config_parser.get_protocol_name_sequences())
-        self.print_summary('Indexes', self.config_parser.get_protocol_name_indexes(), 'index_type')
+        self.print_summary('Indexes', self.config_parser.get_protocol_name_indexes(), 'index_type, index_owner')
         self.print_summary('Constraints', self.config_parser.get_protocol_name_constraints(), 'constraint_type')
         self.print_summary('Functions / procedures', self.config_parser.get_protocol_name_funcprocs())
         self.print_summary('Triggers', self.config_parser.get_protocol_name_triggers())

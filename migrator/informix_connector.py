@@ -295,11 +295,19 @@ class InformixConnector(DatabaseConnector):
     def fetch_indexes(self, source_table_id: int, target_schema, target_table_name, target_columns):
         table_indexes = {}
         order_num = 1
+        index_columns_data_types_str = ''
         query = f"""
-            SELECT idxname, idxtype, clustered, part1, part2, part3, part4, part5, part6, part7, part8, part9, part10, part11, part12, part13, part14, part15, part16
-            FROM sysindexes
-            WHERE tabid = '{source_table_id}'
-            ORDER BY idxname
+            SELECT
+                coalesce(c.constrname, i.idxname) as index_name,
+                coalesce(c.constrtype, i.idxtype) as index_type,
+                i.clustered,
+                i.owner,
+                part1, part2, part3, part4, part5, part6, part7, part8, part9, part10, part11, part12, part13, part14, part15, part16
+            FROM sysindexes i
+            LEFT JOIN sysconstraints c
+            ON i.tabid = c.tabid and i.idxname = c.idxname
+            WHERE i.tabid = '{source_table_id}'
+            ORDER BY index_name
         """
         try:
             self.connect()
@@ -313,7 +321,8 @@ class InformixConnector(DatabaseConnector):
                     self.logger.debug(f"Processing index: {index}")
                 index_name = index[0].strip()
                 index_type = index[1].strip()
-                colnos = [colno for colno in index[3:] if colno]
+                index_owner = index[3].strip()
+                colnos = [colno for colno in index[4:] if colno]
 
                 # Get column names for each colno
                 columns = []
@@ -322,15 +331,16 @@ class InformixConnector(DatabaseConnector):
                     colname = cursor.fetchone()[0]
                     columns.append(colname)
 
-                # Check if the index is a primary key by looking at sysconstraints
-                cursor.execute(f"""
-                SELECT constrtype, constrname FROM sysconstraints
-                WHERE tabid = {source_table_id} AND idxname = '{index_name}'
-                """)
-                constraint = cursor.fetchone()
-                if constraint and constraint[0] in ('P', 'R'):
-                    index_type = constraint[0].strip()
-                    index_name = constraint[1].strip()
+                # this part is now included in the original query
+                # # Check if the index is a primary key by looking at sysconstraints
+                # cursor.execute(f"""
+                # SELECT constrtype, constrname FROM sysconstraints
+                # WHERE tabid = {source_table_id} AND idxname = '{index_name}'
+                # """)
+                # constraint = cursor.fetchone()
+                # if constraint and constraint[0] in ('P', 'R'):
+                #     index_type = constraint[0].strip()
+                #     index_name = constraint[1].strip()
 
                 index_columns = ', '.join([f'"{col}"' for col in columns])
                 if self.config_parser.get_log_level() == 'DEBUG':
@@ -367,6 +377,7 @@ class InformixConnector(DatabaseConnector):
                     table_indexes[order_num] = {
                         'name': index_name,
                         'type': "PRIMARY KEY" if index_type == 'P' else "UNIQUE" if index_type == 'U' else "INDEX",
+                        'owner': index_owner,
                         'columns': index_columns,
                         'columns_count': index_columns_count,
                         'columns_data_types': index_columns_data_types_str,
@@ -582,6 +593,8 @@ class InformixConnector(DatabaseConnector):
                     indent_level += 1
             return '\n'.join(indented_lines)
 
+        function_immutable = ''
+
         if target_db_type == 'postgresql':
             postgresql_code = funcproc_code
 
@@ -619,6 +632,16 @@ class InformixConnector(DatabaseConnector):
 
                 if re.search(r'\bOUTER\b', command, flags=re.IGNORECASE) and 'OUTER JOIN' not in command.upper():
                     command = re.sub(r',\s*\bOUTER\b', ' LEFT OUTER JOIN ', command, flags=re.IGNORECASE)
+
+                command = re.sub(r'\bDATETIME YEAR TO DAY', 'TIMESTAMP', command, flags=re.IGNORECASE)
+                command = re.sub(r'\bdatetime year to fraction\(5\)', 'TIMESTAMP', command, flags=re.IGNORECASE)
+                command = re.sub(r'\bdatetime year to fraction', 'TIMESTAMP', command, flags=re.IGNORECASE)
+                command = re.sub(r'\bDATETIME YEAR TO SECOND', 'TIMESTAMP', command, flags=re.IGNORECASE)
+
+                # Check if the code contains "WITH (NOT VARIANT);"
+                if re.search(r"\s*WITH\s*\(\s*NOT\s+VARIANT\s*\)\s*;?\s*", command, flags=re.MULTILINE | re.IGNORECASE | re.DOTALL):
+                    function_immutable = "IMMUTABLE"
+                    command = re.sub(r"\s*WITH\s*\(\s*NOT\s+VARIANT\s*\)\s*;?\s*", "", command, flags=re.MULTILINE | re.IGNORECASE | re.DOTALL)
 
                 postgresql_code += ' ' + command + ' '
                 line_number += 1
@@ -700,6 +723,9 @@ class InformixConnector(DatabaseConnector):
                 postgresql_code = re.sub(r'\blvarchar', 'text', postgresql_code, flags=re.IGNORECASE)
                 postgresql_code = re.sub(r'\bvarchar\(\d+\)', 'text', postgresql_code, flags=re.IGNORECASE)
                 postgresql_code = re.sub(r'\bDATETIME YEAR TO DAY', 'TIMESTAMP', postgresql_code, flags=re.IGNORECASE)
+                postgresql_code = re.sub(r'\bDATETIME YEAR TO SECOND', 'TIMESTAMP', postgresql_code, flags=re.IGNORECASE)
+                postgresql_code = re.sub(r'\bDATETIME YEAR TO FRACTION\(5\)', 'TIMESTAMP', postgresql_code, flags=re.IGNORECASE)
+                postgresql_code = re.sub(r'\bDATETIME YEAR TO FRACTION', 'TIMESTAMP', postgresql_code, flags=re.IGNORECASE)
                 # print(f'postgresql_code: {postgresql_code}')
 
                 postgresql_code = re.sub(r'^\s*DEFINE\s+', '\nDECLARE\n', postgresql_code, count=1, flags=re.MULTILINE | re.IGNORECASE)
@@ -806,7 +832,7 @@ class InformixConnector(DatabaseConnector):
                 postgresql_code = re.sub(r'AS\s+\$\$', 'AS $$\nBEGIN', postgresql_code, flags=re.IGNORECASE)
 
             # Replace Informix specific syntax with PostgreSQL syntax
-            returning_matches = re.finditer(r'RETURNING\s+(\w+)\s*;', postgresql_code, flags=re.DOTALL | re.IGNORECASE)
+            returning_matches = re.finditer(r'RETURNING\s+(\w+)\s*;', postgresql_code, flags=re.DOTALL | re.IGNORECASE | re.MULTILINE)
             for match in returning_matches:
                 return_type = match.group(1)
                 postgresql_code = postgresql_code.replace(match.group(0), f'RETURNS {return_type} AS $$\n')
@@ -852,7 +878,7 @@ class InformixConnector(DatabaseConnector):
                                     flags=re.MULTILINE | re.IGNORECASE)
 
             # Add function return type and language
-            postgresql_code += '\n$$ LANGUAGE plpgsql;'
+            postgresql_code += f'\n$$ LANGUAGE plpgsql {function_immutable};'
 
             # Remove lines which contain only ";"
             postgresql_code = "\n".join([line for line in postgresql_code.split('\n') if line.strip() != ";"])
@@ -862,7 +888,7 @@ class InformixConnector(DatabaseConnector):
             # Repair function header
             # returning_matches = re.finditer(r'^\s*CREATE\s+FUNCTION\s+[\w\s]+\(\)\s+RETURNS\s+(\w+)\s*;', postgresql_code, flags=re.DOTALL | re.IGNORECASE | re.MULTILINE)
             # returning_matches = re.finditer(r'^\s*CREATE\s+FUNCTION\s+[\w\s".]+\([\w\s".]+\)\s+RETURNS\s+(\w+)\s*;', postgresql_code, flags=re.DOTALL | re.IGNORECASE | re.MULTILINE)
-            returning_matches = re.finditer(r'^\s*(CREATE\s+FUNCTION\s+[\w\s".]+\([\w\s".]+\))\s+RETURNS\s+(\w+)\s*;', postgresql_code, flags=re.DOTALL | re.IGNORECASE | re.MULTILINE)
+            returning_matches = re.finditer(r'^\s*(CREATE\s+FUNCTION\s+.*?\))\s+RETURNS\s+(\w+)\s*;', postgresql_code, flags=re.DOTALL | re.IGNORECASE | re.MULTILINE)
             for match in returning_matches:
                 # if self.config_parser.get_log_level() == 'DEBUG':
                 #     self.logger.debug(f'[4] match.group(0): {match.group(0)}')
@@ -1018,7 +1044,7 @@ class InformixConnector(DatabaseConnector):
                                 #     self.logger.debug(f'modified_exception_block: {modified_exception_block}')
                                 #     self.logger.debug(f'lines: {lines}')
 
-                                end_index = next((i for i, line in enumerate(lines) if 'END;' in line and '$$ LANGUAGE plpgsql;' in lines[i + 1]), None)
+                                end_index = next((i for i, line in enumerate(lines) if 'END;' in line and '$$ LANGUAGE plpgsql {function_immutable};' in lines[i + 1]), None)
                                 if self.config_parser.get_log_level() == 'DEBUG':
                                     self.logger.debug(f'end_index: {end_index}')
                                 if end_index is not None:
@@ -1032,6 +1058,14 @@ class InformixConnector(DatabaseConnector):
             postgresql_code = indent_code(postgresql_code)
             # Remove empty lines from the converted code
             postgresql_code = "\n".join([line for line in postgresql_code.splitlines() if line.strip()])
+
+            # Check if the first or second line ends with AS $$ and the next line starts with RETURN
+            lines = postgresql_code.splitlines()
+            for i in range(len(lines) - 1):
+                if lines[i].strip().endswith("AS $$") and lines[i + 1].strip().startswith("RETURN"):
+                    lines.insert(i + 1, "BEGIN")
+                    break
+            postgresql_code = "\n".join(lines)
 
             return postgresql_code
 

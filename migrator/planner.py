@@ -130,6 +130,7 @@ class Planner:
                         values['source_schema'] = self.source_schema
                         values['source_table'] = table_info['table_name']
                         values['source_table_id'] = table_info['id']
+                        values['index_owner'] = index_details['owner']
                         values['index_name'] = index_details['name']
                         values['index_type'] = index_details['type']
                         values['target_schema'] = self.target_schema

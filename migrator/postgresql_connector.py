@@ -195,6 +195,7 @@ class PostgreSQLConnector(DatabaseConnector):
                 table_indexes[order_num] = {
                     'name': index_name,
                     'type': index_type,
+                    'owner': '',
                     'columns': index_columns,
                     'columns_count': index_columns_count,
                     'columns_data_types': index_columns_data_types_str,

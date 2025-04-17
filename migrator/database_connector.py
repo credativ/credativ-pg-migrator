@@ -83,6 +83,7 @@ class DatabaseConnector(ABC):
             { ordinary_number: {
                 'name': index_name,
                 'type': index_type,   # INDEX, UNIQUE, PRIMARY KEY
+                'owner': index_owner,  ## might be useful for some source databases
                 'columns': "column_name1, column_name2, ..."
                 'columns_count': index_columns_count,
                 'columns_data_types': [data_type1, data_type2, ...],
@@ -90,6 +91,11 @@ class DatabaseConnector(ABC):
                 'comment': index_comment
                 }
             }
+        Note to 'owner' value: some source databases like Informix have a concept of system indexes,
+        which are automatically created by the database engine. For example missing primary key index
+        on a table if Foreign Key constraint is defined on that column.
+        In this case, the owner of the index is set to 'informix' and these indexes might be confusing
+        for the user because they are not defined in his data model.
         """
         pass
 

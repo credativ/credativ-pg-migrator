@@ -369,6 +369,7 @@ class SybaseASEConnector(DatabaseConnector):
                 index_unique = index[1]  ## integer 0 or 1
                 index_columns = index[2].strip()
                 index_primary_key = index[3]
+                index_owner = ''
 
                 index_columns_count = 0
                 index_columns_data_types = []
@@ -397,6 +398,7 @@ class SybaseASEConnector(DatabaseConnector):
                     table_indexes[order_num] = {
                         'name': index_name,
                         'type': "PRIMARY KEY" if index_primary_key == 1 else "UNIQUE" if index_unique == 1 and index_primary_key == 0 else "INDEX",
+                        'owner': index_owner,
                         'columns': index_columns,
                         'columns_count': index_columns_count,
                         'columns_data_types': index_columns_data_types_str,

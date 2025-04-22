@@ -311,11 +311,14 @@ class PostgreSQLConnector(DatabaseConnector):
             worker_id = settings['worker_id']
             source_schema = settings['source_schema']
             source_table = settings['source_table']
+            source_table_id = settings['source_table_id']
             source_columns = settings['source_columns']
             target_schema = settings['target_schema']
             target_table = settings['target_table']
             target_columns = settings['target_columns']
             primary_key_columns = settings['primary_key_columns']
+            batch_size = settings['batch_size']
+            migrator_tables = settings['migrator_tables']
             batch_size = settings['batch_size']
 
             source_table_rows = self.get_rows_count(source_schema, source_table)
@@ -360,7 +363,9 @@ class PostgreSQLConnector(DatabaseConnector):
                     self.logger.info(f"Worker {worker_id}: Inserted {len(records)} rows into {target_schema}.{target_table}.")
                     offset += batch_size
 
-                self.logger.info(f"Worker {worker_id}: Finished migrating table {source_schema}.{source_table}.")
+                target_table_rows = migrate_target_connection.get_rows_count(target_schema, target_table)
+                self.logger.info(f"Worker {worker_id}: Finished migrating data for table {source_table}.")
+                migrator_tables.update_data_migration_status(protocol_id, True, 'OK', target_table_rows)
                 return source_table_rows
         except Exception as e:
             self.logger.error(f"Woker {worker_id}: Error in {part_name}: {e}")

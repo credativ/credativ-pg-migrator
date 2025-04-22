@@ -61,7 +61,7 @@ class MySQLConnector(DatabaseConnector):
                     'type': row[1],
                     'length': row[2],
                     'nullable': 'NOT NULL' if row[3] == 'NO' else '',
-                    'default': row[4],
+                    'default': row[4] if row[4] is not None else '',
                     'comment': '',
                     'other': ''
                 } for i, row in enumerate(cursor.fetchall())
@@ -148,8 +148,80 @@ class MySQLConnector(DatabaseConnector):
         return converted_columns, create_table_sql
 
     def migrate_table(self, migrate_target_connection, settings):
-        # Implement table migration logic
-        pass
+        part_name = 'initialize'
+        source_table_rows = 0
+        try:
+            worker_id = settings['worker_id']
+            source_schema = settings['source_schema']
+            source_table = settings['source_table']
+            source_table_id = settings['source_table_id']
+            source_columns = settings['source_columns']
+            target_schema = settings['target_schema']
+            target_table = settings['target_table']
+            target_columns = settings['target_columns']
+            primary_key_columns = settings['primary_key_columns']
+            batch_size = settings['batch_size']
+            migrator_tables = settings['migrator_tables']
+
+            source_table_rows = self.get_rows_count(source_schema, source_table)
+            if source_table_rows == 0:
+                self.logger.info(f"Worker {worker_id}: Table {source_schema}.{source_table} is empty, skipping migration.")
+                return 0
+            else:
+                self.logger.info(f"Worker {worker_id}: Table {source_schema}.{source_table} has {source_table_rows} rows.")
+                protocol_id = migrator_tables.insert_data_migration(source_schema, source_table, source_table_id, source_table_rows, worker_id, target_schema, target_table, 0)
+                offset = 0
+                total_inserted_rows = 0
+                mysql_cursor = self.connection.cursor()
+                while True:
+                    part_name = 'fetch_data: {source_table} - {offset}'
+                    if primary_key_columns:
+                        query = f"""SELECT * FROM {source_schema}.{source_table} ORDER BY {primary_key_columns} LIMIT {batch_size} OFFSET {offset}"""
+                    else:
+                        query = f"""SELECT * FROM {source_schema}.{source_table} LIMIT {batch_size} OFFSET {offset}"""
+                    mysql_cursor.execute(query)
+                    records = mysql_cursor.fetchall()
+                    if not records:
+                        break
+                    if self.config_parser.get_log_level() == 'DEBUG':
+                        self.logger.debug(f"Worker {worker_id}: Fetched {len(records)} rows from source table {source_table}.")
+
+                    records = [
+                        {column['name']: value for column, value in zip(source_columns.values(), record)}
+                        for record in records
+                    ]
+
+                    for record in records:
+                        for order_num, column in source_columns.items():
+                            column_name = column['name']
+                            column_type = column['type']
+                            target_column_type = target_columns[order_num]['type']
+                            # if column_type.lower() in ['binary', 'bytea']:
+                            if column_type.lower() in ['blob']:
+                                record[column_name] = bytes(record[column_name].getBytes(1, int(record[column_name].length())))  # Convert 'com.informix.jdbc.IfxCblob' to bytes
+                            elif column_type.lower() in ['clob']:
+                                # elif isinstance(record[column_name], IfxCblob):
+                                record[column_name] = record[column_name].getSubString(1, int(record[column_name].length()))  # Convert IfxCblob to string
+                                # record[column_name] = bytes(record[column_name].getBytes(1, int(record[column_name].length())))  # Convert IfxBblob to bytes
+                                # record[column_name] = record[column_name].read()  # Convert IfxBblob to bytes
+                            elif column_type.lower() in ['integer', 'smallint', 'tinyint', 'bit', 'boolean'] and target_column_type.lower() in ['boolean']:
+                                # Convert integer to boolean
+                                record[column_name] = bool(record[column_name])
+
+                    part_name = f'insert data: {target_table} - {offset}'
+                    inserted_rows = migrate_target_connection.insert_batch(target_schema, target_table, target_columns, records)
+                    total_inserted_rows += inserted_rows
+                    self.logger.info(f"Worker {worker_id}: Inserted {inserted_rows} (total: {total_inserted_rows} from: {source_table_rows} ({round(total_inserted_rows/source_table_rows*100, 2)}%)) rows into target table {target_table}")
+
+                    offset += batch_size
+
+                target_table_rows = migrate_target_connection.get_rows_count(target_schema, target_table)
+                self.logger.info(f"Worker {worker_id}: Finished migrating data for table {source_table}.")
+                migrator_tables.update_data_migration_status(protocol_id, True, 'OK', target_table_rows)
+                return target_table_rows
+        except mysql.connector.Error as e:
+            self.logger.error(f"Worker {worker_id}: Error during {part_name} -> {e}")
+            raise e
 
     def fetch_indexes(self, settings):
         source_table_id = settings['source_table_id']
@@ -160,7 +232,6 @@ class MySQLConnector(DatabaseConnector):
         target_columns = settings['target_columns']
         table_indexes = {}
         order_num = 1
-        index_columns_data_types_str = ''
         query = f"""
             SELECT DISTINCT INDEX_NAME, COLUMN_NAME, SEQ_IN_INDEX, NON_UNIQUE
             FROM INFORMATION_SCHEMA.STATISTICS
@@ -180,20 +251,45 @@ class MySQLConnector(DatabaseConnector):
                 if index_name not in table_indexes:
                     table_indexes[index_name] = {
                         'name': index_name,
+                        'owner': target_schema,
                         'columns': [],
-                        'unique': 'UNIQUE' if non_unique == 0 else '',
-                        'order_num': order_num
+                        'type': 'PRIMARY KEY' if index_name == 'PRIMARY' else 'UNIQUE' if non_unique == 0 else 'INDEX',
+                        'sql': '',
+                        'comment': '',
+                        'columns_data_types': [],
+                        'columns_count': 0
                     }
-                    order_num += 1
 
                 table_indexes[index_name]['columns'].append(column_name)
-                index_columns_data_types_str += f"{column_name} {target_columns[column_name]['type']}, "
+
+                for col_num, column_info in target_columns.items():
+                    if column_info['name'] == column_name:
+                        table_indexes[index_name]['columns_data_types'].append(column_info['type'])
 
             cursor.close()
             self.disconnect()
+            returned_indexes = {}
             for index_name, index_info in table_indexes.items():
+                index_info['columns_count'] = len(index_info['columns'])
                 index_info['columns'] = ', '.join(index_info['columns'])
-                index_info['columns_data_types'] = index_columns_data_types_str.rstrip(', ')
+                index_info['columns_data_types'] = ', '.join(index_info['columns_data_types'])
+
+                if index_info['type'] == 'PRIMARY KEY':
+                    index_info['sql'] = f"""ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{target_table_name}_{index_info['name']}" PRIMARY KEY ({index_info['columns']})"""
+                else:
+                    index_info['sql'] = f"""CREATE {'UNIQUE' if index_info['type'] == 'UNIQUE' else ''} INDEX "{target_table_name}_{index_info['name']}" ON "{target_schema}"."{target_table_name}" ({index_info['columns']})"""
+
+                returned_indexes[order_num] = {
+                    'name': index_info['name'],
+                    'owner': index_info['owner'],
+                    'columns': index_info['columns'],
+                    'type': index_info['type'],
+                    'sql': index_info['sql'],
+                    'comment': index_info['comment'],
+                    'columns_data_types': index_info['columns_data_types'],
+                    'columns_count': index_info['columns_count']
+                }
+                order_num += 1
             return table_indexes
         except mysql.connector.Error as e:
             self.logger.error(f"Error fetching indexes: {e}")

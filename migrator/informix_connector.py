@@ -1168,7 +1168,7 @@ class InformixConnector(DatabaseConnector):
                 target_table_rows = migrate_target_connection.get_rows_count(target_schema, target_table)
                 self.logger.info(f"Worker {worker_id}: Finished migrating data for table {source_table}.")
                 migrator_tables.update_data_migration_status(protocol_id, True, 'OK', target_table_rows)
-                return source_table_rows
+                return target_table_rows
         except Exception as e:
             self.logger.error(f"Worker {worker_id}: Error during {part_name} -> {e}")
             raise e

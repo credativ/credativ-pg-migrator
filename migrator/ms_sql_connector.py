@@ -128,7 +128,13 @@ class MsSQLConnector(DatabaseConnector):
         # ...existing code from SybaseASEConnector.convert_table_columns...
         pass
 
-    def fetch_indexes(self, source_table_id: int, target_schema, target_table_name):
+    def fetch_indexes(self, settings):
+        source_table_id = settings['source_table_id']
+        source_schema = settings['source_schema']
+        source_table_name = settings['source_table_name']
+        target_schema = settings['target_schema']
+        target_table_name = settings['target_table_name']
+        target_columns = settings['target_columns']
         query = f"""
             SELECT
                 i.name AS index_name,

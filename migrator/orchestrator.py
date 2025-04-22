@@ -6,6 +6,7 @@ from postgresql_connector import PostgreSQLConnector
 from informix_connector import InformixConnector
 from sybase_ase_connector import SybaseASEConnector
 from ms_sql_connector import MsSQLConnector
+from mysql_connector import MySQLConnector
 import traceback
 import uuid
 import fnmatch
@@ -66,6 +67,8 @@ class Orchestrator:
             return SybaseASEConnector(self.config_parser, 'source')
         elif source_db_type == 'mssql':
             return MsSQLConnector(self.config_parser, 'source')
+        elif source_db_type == 'mysql':
+            return MySQLConnector(self.config_parser, 'source')
         else:
             raise ValueError(f"Unsupported source database type: {source_db_type}")
 
@@ -305,6 +308,8 @@ class Orchestrator:
                     worker_source_connection = SybaseASEConnector(self.config_parser, 'source')
                 elif settings['source_db_type'] == 'mssql':
                     worker_source_connection = MsSQLConnector(self.config_parser, 'source')
+                elif settings['source_db_type'] == 'mysql':
+                    worker_source_connection = MySQLConnector(self.config_parser, 'source')
                 else:
                     raise ValueError(f"Unsupported source database type: {settings['source_db_type']}")
 

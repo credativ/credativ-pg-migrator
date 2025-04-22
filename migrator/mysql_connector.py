@@ -19,7 +19,8 @@ class MySQLConnector(DatabaseConnector):
             host=db_config['host'],
             user=db_config['username'],
             password=db_config['password'],
-            database=db_config['database']
+            database=db_config['database'],
+            port=db_config['port']
         )
 
     def disconnect(self):
@@ -72,17 +73,131 @@ class MySQLConnector(DatabaseConnector):
             self.logger.error(f"Error fetching table columns: {e}")
             raise
 
-    def convert_table_columns(self, target_db_type: str, table_schema: str, table_name: str, columns: dict):
-        # Implement conversion logic based on target_db_type
-        pass
+    def convert_table_columns(self, target_db_type: str, table_schema: str, table_name: str, source_columns: dict):
+        type_mapping = {}
+        converted_columns = {}
+        create_table_sql = ''
+        if target_db_type == 'postgresql':
+            type_mapping = {
+                'INT': 'INTEGER',
+                'VARCHAR': 'VARCHAR',
+                'TEXT': 'TEXT',
+                'CHAR': 'TEXT',
+                'FLOAT': 'REAL',
+                'DOUBLE': 'DOUBLE PRECISION',
+                'DECIMAL': 'NUMERIC',
+                'DATETIME': 'DATETIME',
+                'TIMESTAMP': 'TIMESTAMP',
+                'DATE': 'DATE',
+                'TIME': 'TIME',
+                'BOOLEAN': 'BOOLEAN',
+                'BLOB': 'BYTEA',
+                'JSON': 'JSON',
+                'ENUM': 'VARCHAR',
+                'SET': 'VARCHAR',
+                'TINYINT': 'SMALLINT',
+                'SMALLINT': 'SMALLINT',
+                'MEDIUMINT': 'INTEGER',
+                'BIGINT': 'BIGINT',
+                'BIT': 'BOOLEAN',
+                'YEAR': 'INTEGER',
+                'POINT': 'POINT',
+                # Add more type mappings as needed
+            }
+            for order_num, column_info in source_columns.items():
+                coltype = column_info['type'].upper()
+                length = column_info['length']
+
+                if type_mapping.get(coltype, 'UNKNOWN').startswith('UNKNOWN'):
+                    self.logger.info(f"Column {column_info['name']} - unknown data type: {column_info['type']}")
+                    # coltype = 'TEXT' ## default to TEXT may not be the best option -> let the table creation fail
+                else:
+                    coltype = type_mapping.get(coltype, 'TEXT')
+                if coltype == 'VARCHAR' and column_info['length'] >= 254:
+                    coltype = 'TEXT'
+                    length = ''
+
+                converted_columns[order_num] = {
+                    'name': column_info['name'],
+                    'type': coltype,
+                    'length': length,
+                    'nullable': column_info['nullable'],
+                    'default': column_info['default'],
+                    'other': column_info['other'],
+                    'comment': column_info['comment']
+                }
+
+            create_table_sql_parts = []
+            for _, info in converted_columns.items():
+                create_table_sql_column = ''
+                if 'length' in info and info['type'] in ('CHAR', 'VARCHAR'):
+                    create_table_sql_column = f""""{info['name']}" {info['type']}({info['length']}) {info['nullable']}"""
+                else:
+                    create_table_sql_column = f""""{info['name']}" {info['type']} {info['nullable']}"""
+                if info['default'] != '':
+                    if info['type'] in ('CHAR', 'VARCHAR', 'TEXT'):
+                        create_table_sql_column += f" DEFAULT '{info['default']}'".replace("''", "'")
+                    else:
+                        create_table_sql_column += f" DEFAULT {info['default']}"
+                create_table_sql_parts.append(create_table_sql_column)
+            create_table_sql = ", ".join(create_table_sql_parts)
+            create_table_sql = f"""CREATE TABLE "{table_schema}"."{table_name}" ({create_table_sql})"""
+        else:
+            raise ValueError(f"Unsupported target database type: {target_db_type}")
+
+        return converted_columns, create_table_sql
 
     def migrate_table(self, migrate_target_connection, settings):
         # Implement table migration logic
         pass
 
-    def fetch_indexes(self, source_table_id: int, target_schema, target_table_name):
-        # Implement index fetching logic
-        pass
+    def fetch_indexes(self, settings):
+        source_table_id = settings['source_table_id']
+        source_schema = settings['source_schema']
+        source_table_name = settings['source_table_name']
+        target_schema = settings['target_schema']
+        target_table_name = settings['target_table_name']
+        target_columns = settings['target_columns']
+        table_indexes = {}
+        order_num = 1
+        index_columns_data_types_str = ''
+        query = f"""
+            SELECT DISTINCT INDEX_NAME, COLUMN_NAME, SEQ_IN_INDEX, NON_UNIQUE
+            FROM INFORMATION_SCHEMA.STATISTICS
+            WHERE TABLE_SCHEMA = '{source_schema}' AND TABLE_NAME = '{source_table_name}'
+            ORDER BY INDEX_NAME, SEQ_IN_INDEX
+        """
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            for row in cursor.fetchall():
+                index_name = row[0]
+                column_name = row[1]
+                seq_in_index = row[2]
+                non_unique = row[3]
+
+                if index_name not in table_indexes:
+                    table_indexes[index_name] = {
+                        'name': index_name,
+                        'columns': [],
+                        'unique': 'UNIQUE' if non_unique == 0 else '',
+                        'order_num': order_num
+                    }
+                    order_num += 1
+
+                table_indexes[index_name]['columns'].append(column_name)
+                index_columns_data_types_str += f"{column_name} {target_columns[column_name]['type']}, "
+
+            cursor.close()
+            self.disconnect()
+            for index_name, index_info in table_indexes.items():
+                index_info['columns'] = ', '.join(index_info['columns'])
+                index_info['columns_data_types'] = index_columns_data_types_str.rstrip(', ')
+            return table_indexes
+        except mysql.connector.Error as e:
+            self.logger.error(f"Error fetching indexes: {e}")
+            raise
 
     def fetch_constraints(self, source_table_id: int, target_schema, target_table_name):
         # Implement constraint fetching logic

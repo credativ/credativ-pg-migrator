@@ -325,7 +325,13 @@ class SybaseASEConnector(DatabaseConnector):
 
         return converted, create_table_sql
 
-    def fetch_indexes(self, source_table_id: int, target_schema, target_table_name, target_columns):
+    def fetch_indexes(self, settings):
+        source_table_id = settings['source_table_id']
+        source_schema = settings['source_schema']
+        source_table_name = settings['source_table_name']
+        target_schema = settings['target_schema']
+        target_table_name = settings['target_table_name']
+        target_columns = settings['target_columns']
         table_indexes = {}
         order_num = 1
         query = f"""

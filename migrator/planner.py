@@ -5,6 +5,7 @@ from sybase_ase_connector import SybaseASEConnector
 from informix_connector import InformixConnector
 from migrator_tables import MigratorTables
 from ms_sql_connector import MsSQLConnector
+from mysql_connector import MySQLConnector
 import fnmatch
 import traceback
 
@@ -55,9 +56,14 @@ class Planner:
                 self.logger.debug(f"Pre migration script: {self.pre_script}")
                 self.logger.debug(f"Post migration script: {self.post_script}")
 
+
+            if self.config_parser.get_log_level() == 'DEBUG':
+                self.logger.debug("Connecting to source and target databases...")
             self.check_database_connection(self.source_connection, "Source Database")
             self.check_database_connection(self.target_connection, "Target Database")
 
+            if self.config_parser.get_log_level() == 'DEBUG':
+                self.logger.debug("Checking scripts accessibility...")
             self.check_script_accessibility(self.pre_script)
             self.check_script_accessibility(self.post_script)
 
@@ -104,6 +110,7 @@ class Planner:
             source_columns = []
             target_columns = []
             target_table_sql = None
+            settings = {}
             try:
                 source_columns = self.source_connection.fetch_table_columns(self.source_schema, table_info['table_name'], self.migrator_tables)
                 if self.config_parser.get_log_level() == 'DEBUG':
@@ -121,7 +128,14 @@ class Planner:
                 continue
 
             if self.config_parser.should_migrate_indexes():
-                indexes = self.source_connection.fetch_indexes(table_info['id'], self.target_schema, table_info['table_name'], target_columns)
+                settings['source_table_id'] = table_info['id']
+                settings['source_table_name'] = table_info['table_name']
+                settings['source_schema'] = self.source_schema
+                settings['target_schema'] = self.target_schema
+                settings['target_table_name'] = table_info['table_name']
+                settings['target_columns'] = target_columns
+
+                indexes = self.source_connection.fetch_indexes(settings)
                 if self.config_parser.get_log_level() == 'DEBUG':
                     self.logger.debug(f"Indexes: {indexes}")
                 if indexes:
@@ -283,6 +297,8 @@ class Planner:
             return SybaseASEConnector(self.config_parser, 'source')
         elif source_db_type == 'mssql':
             return MsSQLConnector(self.config_parser, 'source')
+        elif source_db_type == 'mysql':
+            return MySQLConnector(self.config_parser, 'source')
         else:
             raise ValueError(f"Unsupported source database type: {source_db_type}")
 
@@ -308,8 +324,13 @@ class Planner:
     def check_database_connection(self, connector, db_name):
         try:
             connector.connect()
-            connector.execute_query("SELECT 1")
+            cursor = connector.connection.cursor()
+            cursor.execute("SELECT 1")
+            result = cursor.fetchone()
+            if result[0] != 1:
+                raise ConnectionError(f"Connection to {db_name} failed.")
             self.logger.info(f"Connection to {db_name} is OK.")
+            cursor.close()
             connector.disconnect()
         except Exception as e:
             raise ConnectionError(f"Failed to connect to {db_name}: {e}")

@@ -122,7 +122,13 @@ class SQLAnywhereConnector(DatabaseConnector):
     def migrate_table(self, migrate_target_connection, settings):
         raise NotImplementedError("Table migration is not yet implemented for SQL Anywhere")
 
-    def fetch_indexes(self, source_table_id: int, target_schema, target_table_name):
+    def fetch_indexes(self, settings):
+        source_table_id = settings['source_table_id']
+        source_schema = settings['source_schema']
+        source_table_name = settings['source_table_name']
+        target_schema = settings['target_schema']
+        target_table_name = settings['target_table_name']
+        target_columns = settings['target_columns']
         raise NotImplementedError("Fetching indexes is not yet implemented for SQL Anywhere")
 
     def fetch_constraints(self, source_table_id: int, target_schema, target_table_name):

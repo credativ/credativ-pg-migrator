@@ -74,9 +74,16 @@ class DatabaseConnector(ABC):
         pass
 
     @abstractmethod
-    def fetch_indexes(self, source_table_id: int, target_schema, target_table_name):
+    def fetch_indexes(self, settings):
         """
         Fetch indexes for a table.
+        settings - dictionary with the following keys
+            - source_table_id: id of the table in the source database (does not exist in MySQL)
+            - source_schema: schema name of the table in the source database
+            - source_table_name: table name in the source database
+            - target_schema: target schema name
+            - target_table_name: target table name
+            - target_columns: list of target columns
         Returned SQL for index creation must be compatible with the target database.
         But this is usually not a big problem, syntax is usually the same for most databases.
         Returns a dictionary:

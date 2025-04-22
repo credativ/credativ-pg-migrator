@@ -151,8 +151,12 @@ class MsSQLConnector(DatabaseConnector):
         # ...existing code from SybaseASEConnector.fetch_indexes...
         pass
 
-    def fetch_constraints(self, source_table_id: int, target_schema, target_table_name):
-        # ...existing code from SybaseASEConnector.fetch_constraints...
+    def fetch_constraints(self, settings):
+        source_table_id = settings['source_table_id']
+        source_schema = settings['source_schema']
+        source_table_name = settings['source_table_name']
+        target_schema = settings['target_schema']
+        target_table_name = settings['target_table_name']
         pass
 
     def fetch_funcproc_names(self, schema: str):
@@ -199,7 +203,12 @@ class MsSQLConnector(DatabaseConnector):
         # ...existing code from SybaseASEConnector.fetch_views_names...
         pass
 
-    def fetch_view_code(self, view_id):
+    def fetch_view_code(self, settings):
+        view_id = settings['view_id']
+        source_schema = settings['source_schema']
+        source_view_name = settings['source_view_name']
+        target_schema = settings['target_schema']
+        target_view_name = settings['target_view_name']
         query = f"""
             SELECT m.definition
             FROM sys.sql_modules m

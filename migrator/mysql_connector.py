@@ -295,9 +295,25 @@ class MySQLConnector(DatabaseConnector):
             self.logger.error(f"Error fetching indexes: {e}")
             raise
 
-    def fetch_constraints(self, source_table_id: int, target_schema, target_table_name):
-        # Implement constraint fetching logic
-        pass
+    def fetch_constraints(self, settings):
+        source_table_id = settings['source_table_id']
+        source_schema = settings['source_schema']
+        source_table_name = settings['source_table_name']
+        target_schema = settings['target_schema']
+        target_table_name = settings['target_table_name']
+        order_num = 1
+        table_constraints = {}
+        create_constr_query = ""
+        query = f"""
+            SELECT
+                CONSTRAINT_NAME, TABLE_NAME, COLUMN_NAME,
+                REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME
+            FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
+            WHERE TABLE_SCHEMA = '{source_schema}' AND TABLE_NAME = '{source_table_name}'
+            AND REFERENCED_TABLE_NAME IS NOT NULL
+            ORDER BY CONSTRAINT_NAME, TABLE_NAME, COLUMN_NAME
+        """
+        return table_constraints
 
     def fetch_triggers(self, table_id: int, table_schema: str, table_name: str):
         # Implement trigger fetching logic
@@ -324,16 +340,57 @@ class MySQLConnector(DatabaseConnector):
         pass
 
     def fetch_views_names(self, source_schema: str):
-        # Implement view name fetching logic
-        pass
+        views = {}
+        order_num = 1
+        query = f"""SELECT TABLE_NAME FROM INFORMATION_SCHEMA.VIEWS WHERE TABLE_SCHEMA = '{source_schema}'"""
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            for row in cursor.fetchall():
+                view_name = row[0]
+                views[order_num] = {
+                    'id': None,
+                    'schema_name': source_schema,
+                    'view_name': view_name,
+                    'comment': ''
+                }
+                order_num += 1
+            cursor.close()
+            self.disconnect()
+            return views
+        except mysql.connector.Error as e:
+            self.logger.error(f"Error fetching view names: {e}")
+            raise
 
-    def fetch_view_code(self, view_id: int):
-        # Implement view code fetching logic
-        pass
+    def fetch_view_code(self, settings):
+        # view_id = settings['view_id']
+        source_schema = settings['source_schema']
+        source_view_name = settings['source_view_name']
+        # target_schema = settings['target_schema']
+        # target_view_name = settings['target_view_name']
+        query = f"""
+            SELECT VIEW_DEFINITION
+            FROM INFORMATION_SCHEMA.VIEWS
+            WHERE TABLE_SCHEMA = '{source_schema}' AND TABLE_NAME = '{source_view_name}'
+        """
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            view_code = cursor.fetchone()[0]
+            cursor.close()
+            self.disconnect()
+            return view_code
+        except mysql.connector.Error as e:
+            self.logger.error(f"Error fetching view {source_view_name} code: {e}")
+            raise
 
     def convert_view_code(self, view_code: str, settings: dict):
-        # Implement view code conversion logic
-        pass
+        converted_view_code = view_code
+        converted_view_code = converted_view_code.replace('`', '"')
+        converted_view_code = converted_view_code.replace(f'''"{settings['source_schema']}".''', f'''"{settings['target_schema']}".''')
+        return converted_view_code
 
     def get_sequence_current_value(self, sequence_id: int):
         # Implement sequence current value fetching logic

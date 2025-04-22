@@ -162,7 +162,14 @@ class Planner:
                 self.logger.info("Skipping index migration.")
 
             if self.config_parser.should_migrate_constraints():
-                constraints = self.source_connection.fetch_constraints(table_info['id'], self.target_schema, table_info['table_name'])
+                settings = {
+                    'source_table_id': table_info['id'],
+                    'source_schema': self.source_schema,
+                    'source_table_name': table_info['table_name'],
+                    'target_schema': self.target_schema,
+                    'target_table_name': table_info['table_name'],
+                }
+                constraints = self.source_connection.fetch_constraints(settings)
                 if self.config_parser.get_log_level() == 'DEBUG':
                     self.logger.debug(f"Constraints: {constraints}")
                 if constraints:
@@ -232,7 +239,14 @@ class Planner:
             views = self.source_connection.fetch_views_names(self.source_schema)
             for order_num, view_info in views.items():
                 self.logger.info(f"Processing view ({order_num}): {view_info}")
-                view_sql = self.source_connection.fetch_view_code(view_info['id'])
+                settings = {
+                    'view_id': view_info['id'],
+                    'source_schema': self.config_parser.get_source_schema(),
+                    'source_view_name': view_info['view_name'],
+                    'target_schema': self.config_parser.get_target_schema(),
+                    'target_view_name': view_info['view_name'],
+                }
+                view_sql = self.source_connection.fetch_view_code(settings)
                 if self.config_parser.get_log_level() == 'DEBUG':
                     self.logger.debug(f"Source view SQL: {view_sql}")
                 settings = {

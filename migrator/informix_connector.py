@@ -197,7 +197,12 @@ class InformixConnector(DatabaseConnector):
             self.logger.error(e)
             raise
 
-    def fetch_view_code(self, view_id: int):
+    def fetch_view_code(self, settings):
+        view_id = settings['view_id']
+        # source_schema = settings['source_schema']
+        # source_view_name = settings['source_view_name']
+        # target_schema = settings['target_schema']
+        # target_view_name = settings['target_view_name']
         query = f"""
         SELECT v.viewtext
         FROM sysviews v
@@ -401,7 +406,12 @@ class InformixConnector(DatabaseConnector):
             self.logger.error(e)
             raise
 
-    def fetch_constraints(self, source_table_id: int, target_schema, target_table_name):
+    def fetch_constraints(self, settings):
+        source_table_id = settings['source_table_id']
+        source_schema = settings['source_schema']
+        source_table_name = settings['source_table_name']
+        target_schema = settings['target_schema']
+        target_table_name = settings['target_table_name']
         # Get all indexes for the table
         order_num = 1
         table_constraints = {}

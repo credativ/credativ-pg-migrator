@@ -131,7 +131,12 @@ class SQLAnywhereConnector(DatabaseConnector):
         target_columns = settings['target_columns']
         raise NotImplementedError("Fetching indexes is not yet implemented for SQL Anywhere")
 
-    def fetch_constraints(self, source_table_id: int, target_schema, target_table_name):
+    def fetch_constraints(self, settings):
+        source_table_id = settings['source_table_id']
+        source_schema = settings['source_schema']
+        source_table_name = settings['source_table_name']
+        target_schema = settings['target_schema']
+        target_table_name = settings['target_table_name']
         raise NotImplementedError("Fetching constraints is not yet implemented for SQL Anywhere")
 
     def fetch_triggers(self, table_id: int, table_schema: str, table_name: str):
@@ -155,7 +160,12 @@ class SQLAnywhereConnector(DatabaseConnector):
     def fetch_views_names(self, source_schema: str):
         raise NotImplementedError("Fetching view names is not yet implemented for SQL Anywhere")
 
-    def fetch_view_code(self, view_id: int):
+    def fetch_view_code(self, settings):
+        view_id = settings['view_id']
+        source_schema = settings['source_schema']
+        source_view_name = settings['source_view_name']
+        target_schema = settings['target_schema']
+        target_view_name = settings['target_view_name']
         raise NotImplementedError("Fetching view code is not yet implemented for SQL Anywhere")
 
     def convert_view_code(self, view_code: str, settings: dict):

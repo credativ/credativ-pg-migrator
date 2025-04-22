@@ -107,8 +107,14 @@ class DatabaseConnector(ABC):
         pass
 
     @abstractmethod
-    def fetch_constraints(self, source_table_id: int, target_schema, target_table_name):
+    def fetch_constraints(self, settings):
         """
+        settings - dictionary with the following keys
+            - source_table_id: id of the table in the source database (does not exist in MySQL)
+            - source_schema: schema name of the table in the source database
+            - source_table_name: table name in the source database
+            - target_schema: target schema name
+            - target_table_name: target table name
         Fetch constraints for a table.
         Returns a dictionary:
             { ordinary_number: {
@@ -206,8 +212,14 @@ class DatabaseConnector(ABC):
         pass
 
     @abstractmethod
-    def fetch_view_code(self, view_id: int):
+    def fetch_view_code(self, settings):
         """
+        settings - dictionary with the following keys
+            - view_id: id of the view in the source database (does not exist in MySQL)
+            - source_schema: schema name of the view in the source database
+            - source_view_name: view name in the source database
+            - target_schema: target schema name
+            - target_view_name: target view name
         Fetch the code of a view.
         Returns a string with the code.
         """

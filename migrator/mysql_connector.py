@@ -32,6 +32,7 @@ class MySQLConnector(DatabaseConnector):
             SELECT TABLE_NAME
             FROM INFORMATION_SCHEMA.TABLES
             WHERE TABLE_SCHEMA = '{table_schema}'
+            AND TABLE_TYPE not in ('VIEW', 'SYSTEM VIEW')
         """
         try:
             self.connect()
@@ -233,9 +234,14 @@ class MySQLConnector(DatabaseConnector):
         table_indexes = {}
         order_num = 1
         query = f"""
-            SELECT DISTINCT INDEX_NAME, COLUMN_NAME, SEQ_IN_INDEX, NON_UNIQUE
-            FROM INFORMATION_SCHEMA.STATISTICS
-            WHERE TABLE_SCHEMA = '{source_schema}' AND TABLE_NAME = '{source_table_name}'
+            SELECT
+                DISTINCT INDEX_NAME, COLUMN_NAME, SEQ_IN_INDEX,
+                NON_UNIQUE, coalesce(CONSTRAINT_TYPE,'INDEX') as CONSTRAINT_TYPE
+            FROM INFORMATION_SCHEMA.STATISTICS S
+            LEFT JOIN INFORMATION_SCHEMA.TABLE_CONSTRAINTS tC
+            ON S.TABLE_SCHEMA = tC.TABLE_SCHEMA AND S.TABLE_NAME = tC.TABLE_NAME
+            AND S.INDEX_NAME = tC.CONSTRAINT_NAME
+            WHERE S.TABLE_SCHEMA = '{source_schema}' AND S.TABLE_NAME = '{source_table_name}'
             ORDER BY INDEX_NAME, SEQ_IN_INDEX
         """
         try:
@@ -247,13 +253,14 @@ class MySQLConnector(DatabaseConnector):
                 column_name = row[1]
                 seq_in_index = row[2]
                 non_unique = row[3]
+                constraint_type = row[4]
 
                 if index_name not in table_indexes:
                     table_indexes[index_name] = {
                         'name': index_name,
                         'owner': target_schema,
                         'columns': [],
-                        'type': 'PRIMARY KEY' if index_name == 'PRIMARY' else 'UNIQUE' if non_unique == 0 else 'INDEX',
+                        'type': constraint_type,
                         'sql': '',
                         'comment': '',
                         'columns_data_types': [],
@@ -290,7 +297,7 @@ class MySQLConnector(DatabaseConnector):
                     'columns_count': index_info['columns_count']
                 }
                 order_num += 1
-            return table_indexes
+            return returned_indexes
         except mysql.connector.Error as e:
             self.logger.error(f"Error fetching indexes: {e}")
             raise
@@ -304,16 +311,78 @@ class MySQLConnector(DatabaseConnector):
         order_num = 1
         table_constraints = {}
         create_constr_query = ""
+        returned_constraints = {}
         query = f"""
             SELECT
-                CONSTRAINT_NAME, TABLE_NAME, COLUMN_NAME,
-                REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME
-            FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
-            WHERE TABLE_SCHEMA = '{source_schema}' AND TABLE_NAME = '{source_table_name}'
-            AND REFERENCED_TABLE_NAME IS NOT NULL
-            ORDER BY CONSTRAINT_NAME, TABLE_NAME, COLUMN_NAME
+                TABLE_SCHEMA AS schema_name,
+                TABLE_NAME AS table_name,
+                COLUMN_NAME AS column_name,
+                CONSTRAINT_NAME AS foreign_key_name,
+                REFERENCED_TABLE_SCHEMA AS referenced_schema_name,
+                REFERENCED_TABLE_NAME AS referenced_table_name,
+                REFERENCED_COLUMN_NAME AS referenced_column_name,
+                ordinal_position,
+                position_in_unique_constraint
+            FROM
+                INFORMATION_SCHEMA.KEY_COLUMN_USAGE
+            WHERE
+                REFERENCED_TABLE_NAME IS NOT NULL
+                AND TABLE_SCHEMA = '{source_schema}'
+                AND TABLE_NAME = '{source_table_name}'
+            ORDER BY foreign_key_name, ordinal_position
         """
-        return table_constraints
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            for row in cursor.fetchall():
+                schema_name = row[0]
+                table_name = row[1]
+                column_name = row[2]
+                foreign_key_name = row[3]
+                referenced_schema_name = row[4]
+                referenced_table_name = row[5]
+                referenced_column_name = row[6]
+                ordinal_position = row[7]
+                position_in_unique_constraint = row[8]
+
+                if foreign_key_name not in table_constraints:
+                    table_constraints[foreign_key_name] = {
+                        'name': foreign_key_name,
+                        'columns': [],
+                        'referenced_table': f"{target_schema}.{referenced_table_name}",
+                        'referenced_columns': [],
+                        'sql': '',
+                        'comment': '',
+                        'columns_count': 0
+                    }
+
+                table_constraints[foreign_key_name]['columns'].append(column_name)
+                table_constraints[foreign_key_name]['referenced_columns'].append(referenced_column_name)
+
+            cursor.close()
+            self.disconnect()
+            for constraint, constraint_info in table_constraints.items():
+                constraint_info['columns_count'] = len(constraint_info['columns'])
+                constraint_info['columns'] = ', '.join(constraint_info['columns'])
+                constraint_info['referenced_columns'] = ', '.join(constraint_info['referenced_columns'])
+                constraint_info['sql'] = f"""ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{target_table_name}_{constraint_info['name']}" FOREIGN KEY ({constraint_info['columns']})
+                                            REFERENCES {constraint_info['referenced_table']} ({constraint_info['referenced_columns']})"""
+
+                returned_constraints[order_num] = {
+                    'name': f"{target_table_name}_{constraint_info['name']}",
+                    'type': 'FOREIGN KEY',
+                    'sql': constraint_info['sql'],
+                    'comment': constraint_info['comment'],
+                }
+                order_num += 1
+
+            return returned_constraints
+
+        except mysql.connector.Error as e:
+            self.logger.error(f"Error fetching constraints: {e}")
+            raise
+
 
     def fetch_triggers(self, table_id: int, table_schema: str, table_name: str):
         # Implement trigger fetching logic

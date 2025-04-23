@@ -6,6 +6,7 @@ from informix_connector import InformixConnector
 from migrator_tables import MigratorTables
 from ms_sql_connector import MsSQLConnector
 from mysql_connector import MySQLConnector
+from ibm_db2_connector import IBMDB2Connector
 import fnmatch
 import traceback
 

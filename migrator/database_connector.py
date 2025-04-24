@@ -44,6 +44,7 @@ class DatabaseConnector(ABC):
             'name': column_name,
             'type': column_type,
             'length': column_length,
+            'precision': column_precision,
             'nullable': column_nullable,
             'default': column_default_value,
             'comment': column_comment,

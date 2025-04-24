@@ -31,12 +31,7 @@ class IBMDB2Connector(DatabaseConnector):
             pass
 
     def fetch_table_names(self, table_schema: str):
-        query = f"""
-            SELECT TABNAME AS table_name
-            FROM SYSCAT.TABLES
-            WHERE TABSCHEMA = '{table_schema}'
-            ORDER BY TABNAME
-        """
+        query = f"""SELECT TABLEID, TABNAME FROM SYSCAT.TABLES WHERE TABSCHEMA = upper('{table_schema}') ORDER BY TABNAME"""
         try:
             tables = {}
             order_num = 1
@@ -45,46 +40,46 @@ class IBMDB2Connector(DatabaseConnector):
             cursor.execute(query)
             for row in cursor.fetchall():
                 tables[order_num] = {
-                    'id': None,
+                    'id': row[0],
                     'schema_name': table_schema,
-                    'table_name': row[0],
+                    'table_name': row[1],
                     'comment': ''
                 }
                 order_num += 1
             cursor.close()
             self.disconnect()
             return tables
-        except jaydebeapi.Error as e:
+        except Exception as e:
             self.logger.error(f"Error executing query: {query}")
             self.logger.error(e)
             raise
 
     def fetch_table_columns(self, table_schema: str, table_name: str, migrator_tables) -> dict:
         query = f"""
-            SELECT COLNAME, TYPENAME, LENGTH, NULLS, DEFAULT
+            SELECT COLNO, COLNAME, TYPENAME, "LENGTH", "SCALE", STRINGUNITSLENGTH, "NULLS", "DEFAULT"
             FROM SYSCAT.COLUMNS
-            WHERE TABSCHEMA = '{table_schema}' AND TABNAME = '{table_name}'
-            ORDER BY COLNO
+            WHERE TABSCHEMA = upper('{table_schema}') AND tabname = '{table_name}' ORDER BY COLNO
         """
         try:
             result = {}
             self.connect()
             cursor = self.connection.cursor()
             cursor.execute(query)
-            for idx, row in enumerate(cursor.fetchall(), start=1):
-                result[idx] = {
-                    'name': row[0],
-                    'type': row[1],
-                    'length': row[2],
-                    'nullable': 'NOT NULL' if row[3] == 'N' else '',
-                    'default': row[4],
+            for row in cursor.fetchall():
+                result[row[0]] = {
+                    'name': row[1],
+                    'type': row[2],
+                    'length': row[5] if row[5] else row[3],
+                    'precision': row[4],
+                    'nullable': 'NOT NULL' if row[6] == 'N' else '',
+                    'default': row[7] if row[7] else '',
                     'comment': '',
                     'other': ''
                 }
             cursor.close()
             self.disconnect()
             return result
-        except jaydebeapi.Error as e:
+        except Exception as e:
             self.logger.error(f"Error executing query: {query}")
             self.logger.error(e)
             raise
@@ -94,12 +89,195 @@ class IBMDB2Connector(DatabaseConnector):
         target_schema = settings['target_schema']
         target_table_name = settings['target_table_name']
         source_columns = settings['source_columns']
-        # Placeholder for column conversion logic
-        return source_columns, ""
+
+        type_mapping = {}
+        create_table_sql = ""
+        converted = {}
+        if target_db_type == 'postgresql':
+            type_mapping = {
+                'BIGDATETIME': 'TIMESTAMP',
+                'DATE': 'DATE',
+                'DATETIME': 'TIMESTAMP',
+                'SMALLDATETIME': 'TIMESTAMP',
+                'TIME': 'TIME',
+                'TIMESTAMP': 'TIMESTAMP',
+                'BIGINT': 'BIGINT',
+                'UNSIGNED BIGINT': 'BIGINT',
+                'INTEGER': 'INTEGER',
+                'INT': 'INTEGER',
+                'INT8': 'BIGINT',
+                'UNSIGNED INT': 'INTEGER',
+                'UINT': 'INTEGER',
+                'TINYINT': 'SMALLINT',
+                'SMALLINT': 'SMALLINT',
+
+                'BLOB': 'BYTEA',
+
+                'BOOLEAN': 'BOOLEAN',
+                'BIT': 'BOOLEAN',
+
+                'BINARY': 'BYTEA',
+                'VARBINARY': 'BYTEA',
+                'IMAGE': 'BYTEA',
+                'CHAR': 'TEXT',
+                'NCHAR': 'TEXT',
+                'UNICHAR': 'TEXT',
+                'NVARCHAR': 'TEXT',
+                'TEXT': 'TEXT',
+                'SYSNAME': 'TEXT',
+                'LONGSYSNAME': 'TEXT',
+                'LONG VARCHAR': 'TEXT',
+                'LONG NVARCHAR': 'TEXT',
+                'UNICHAR': 'TEXT',
+                'UNITEXT': 'TEXT',
+                'UNIVARCHAR': 'TEXT',
+                'VARCHAR': 'TEXT',
+
+                'CLOB': 'TEXT',
+                'DECIMAL': 'DECIMAL',
+                'DOUBLE PRECISION': 'DOUBLE PRECISION',
+                'FLOAT': 'FLOAT',
+                'INTERVAL': 'INTERVAL',
+                'MONEY': 'MONEY',
+                'NUMERIC': 'NUMERIC',
+                'REAL': 'REAL',
+                'SERIAL8': 'BIGSERIAL',
+                'SERIAL': 'SERIAL',
+                'SMALLFLOAT': 'REAL',
+            }
+
+            for order_num, column_info in source_columns.items():
+                coltype = column_info['type'].upper()
+                length = column_info['length']
+                if type_mapping.get(coltype, 'UNKNOWN').startswith('UNKNOWN'):
+                    self.logger.info(f"Column {column_info['name']} - unknown data type: {column_info['type']}")
+                    # coltype = 'TEXT' ## default to TEXT may not be the best option -> let the table creation fail
+                else:
+                    coltype = type_mapping.get(coltype, 'TEXT')
+                if coltype == 'VARCHAR' and int(column_info['length']) >= 254:
+                    coltype = 'TEXT'
+                    length = ''
+
+                converted[order_num] = {
+                    'name': column_info['name'],
+                    'type': coltype,
+                    'length': length,
+                    'default': column_info['default'],
+                    'nullable': column_info['nullable'],
+                    'comment': column_info['comment'],
+                    'other': column_info['other']
+                }
+
+            create_table_sql_parts = []
+            for _, info in converted.items():
+                if 'length' in info and info['type'] in ('CHAR', 'VARCHAR'):
+                    create_table_sql_parts.append(f""""{info['name']}" {info['type']}({info['length']}) {info['nullable']}""")
+                else:
+                    create_table_sql_parts.append(f""""{info['name']}" {info['type']} {info['nullable']}""")
+                if info['default']:
+                    if info['type'] in ('CHAR', 'VARCHAR', 'TEXT') and ('||' in info['default'] or '(' in info['default'] or ')' in info['default']):
+                        create_table_sql_parts[-1] += f""" DEFAULT {info['default']}""".replace("''", "'")
+                    elif info['type'] in ('CHAR', 'VARCHAR', 'TEXT'):
+                        create_table_sql_parts[-1] += f""" DEFAULT '{info['default']}'""".replace("''", "'")
+                    elif info['type'] in ('BOOLEAN', 'BIT'):
+                        create_table_sql_parts[-1] += f""" DEFAULT {info['default']}::BOOLEAN"""
+                    else:
+                        create_table_sql_parts[-1] += f" DEFAULT {info['default']}"
+            create_table_sql = ", ".join(create_table_sql_parts)
+            create_table_sql = f"""CREATE TABLE "{target_schema}"."{target_table_name}" ({create_table_sql})"""
+
+        else:
+            raise ValueError(f"Unsupported target database type: {target_db_type}")
+
+        return converted, create_table_sql
 
     def migrate_table(self, migrate_target_connection, settings):
-        # Placeholder for table migration logic
-        pass
+        part_name = 'migrate_table initialize'
+        inserted_rows = 0
+        target_table_rows = 0
+        try:
+            worker_id = settings['worker_id']
+            source_schema = settings['source_schema']
+            source_table = settings['source_table']
+            source_table_id = settings['source_table_id']
+            source_columns = settings['source_columns']
+            target_schema = settings['target_schema']
+            target_table = settings['target_table']
+            target_columns = settings['target_columns']
+            primary_key_columns = settings['primary_key_columns']
+            primary_key_columns_count = settings['primary_key_columns_count']
+            primary_key_columns_types = settings['primary_key_columns_types']
+            batch_size = settings['batch_size']
+            migrator_tables = settings['migrator_tables']
+            source_table_rows = self.get_rows_count(source_schema, source_table)
+
+            if source_table_rows == 0:
+                self.logger.info(f"Worker {worker_id}: Table {source_table} is empty - skipping data migration.")
+                migrator_tables.insert_data_migration(source_schema, source_table, source_table_id, source_table_rows, worker_id, target_schema, target_table, 0)
+                return 0
+            else:
+                part_name = 'migrate_table in batches using cursor'
+                self.logger.info(f"Worker {worker_id}: Table {source_table} has {source_table_rows} rows - starting data migration.")
+                protocol_id = migrator_tables.insert_data_migration(source_schema, source_table, source_table_id, source_table_rows, worker_id, target_schema, target_table, 0)
+
+                # Open a cursor and fetch rows in batches
+                query = f'''SELECT * FROM {source_schema.upper()}."{source_table}"'''
+                if self.config_parser.get_log_level() == 'DEBUG':
+                    self.logger.debug(f"Worker {worker_id}: Fetching data with cursor using query: {query}")
+
+                # # polars library is not always available
+                # for df in pl.read_database(query, self.connection, iter_batches=True, batch_size=batch_size):
+                #     if df.is_empty():
+                #         break
+
+                #     if self.config_parser.get_log_level() == 'DEBUG':
+                #         self.logger.debug(f"Worker {worker_id}: Fetched {len(df)} rows from source table {source_table} using cursor.")
+
+                #     # Convert Polars DataFrame to list of dictionaries for insertion
+                #     records = df.to_dicts()
+
+                cursor = self.connection.cursor()
+                cursor.execute(query)
+                total_inserted_rows = 0
+                while True:
+                    records = cursor.fetchmany(batch_size)
+                    if not records:
+                        break
+                    if self.config_parser.get_log_level() == 'DEBUG':
+                        self.logger.debug(f"Worker {worker_id}: Fetched {len(records)} rows from source table '{source_table}' using cursor")
+
+                    # Convert records to a list of dictionaries
+                    records = [
+                        {column['name']: value for column, value in zip(source_columns.values(), record)}
+                        for record in records
+                    ]
+                    for record in records:
+                        for order_num, column in source_columns.items():
+                            column_name = column['name']
+                            column_type = column['type']
+                            if column_type.lower() in ['binary', 'varbinary', 'image']:
+                                record[column_name] = bytes(record[column_name]) if record[column_name] is not None else None
+                            elif column_type.lower() in ['datetime', 'smalldatetime', 'date', 'time', 'timestamp']:
+                                record[column_name] = str(record[column_name]) if record[column_name] is not None else None
+
+                    # Insert batch into target table
+                    if self.config_parser.get_log_level() == 'DEBUG':
+                        self.logger.debug(f"Worker {worker_id}: Starting insert of {len(records)} rows from source table {source_table}")
+                    inserted_rows = migrate_target_connection.insert_batch(target_schema, target_table, target_columns, records)
+                    total_inserted_rows += inserted_rows
+                    self.logger.info(f"Worker {worker_id}: Inserted {inserted_rows} (total: {total_inserted_rows} from: {source_table_rows} ({round(total_inserted_rows/source_table_rows*100, 2)}%)) rows into target table '{target_table}'")
+
+                target_table_rows = migrate_target_connection.get_rows_count(target_schema, target_table)
+                self.logger.info(f"Worker {worker_id}: Target table {target_schema}.{target_table} has {target_table_rows} rows")
+                migrator_tables.update_data_migration_status(protocol_id, True, 'OK', target_table_rows)
+                cursor.close()
+        except Exception as e:
+            self.logger.error(f"Worker {worker_id}: Error during {part_name} -> {e}")
+            raise e
+        finally:
+            if self.config_parser.get_log_level() == 'DEBUG':
+                self.logger.debug(f"Worker {worker_id}: Finished processing table {source_table}.")
+            return target_table_rows
 
     def fetch_indexes(self, settings):
         source_table_id = settings['source_table_id']
@@ -172,7 +350,7 @@ class IBMDB2Connector(DatabaseConnector):
             else:
                 cursor.execute(query)
             cursor.close()
-        except jaydebeapi.Error as e:
+        except Exception as e:
             self.logger.error(f"Error executing query: {query}")
             self.logger.error(e)
             raise
@@ -184,7 +362,7 @@ class IBMDB2Connector(DatabaseConnector):
             cursor = self.connection.cursor()
             cursor.execute(script)
             cursor.close()
-        except jaydebeapi.Error as e:
+        except Exception as e:
             self.logger.error(f"Error executing script: {script_path}")
             self.logger.error(e)
             raise
@@ -200,14 +378,14 @@ class IBMDB2Connector(DatabaseConnector):
         self.connection.rollback()
 
     def get_rows_count(self, table_schema: str, table_name: str):
-        query = f"SELECT COUNT(*) FROM {table_schema}.{table_name}"
+        query = f"""SELECT COUNT(*) FROM {table_schema.upper()}."{table_name}" """
         try:
             cursor = self.connection.cursor()
             cursor.execute(query)
             count = cursor.fetchone()[0]
             cursor.close()
             return count
-        except jaydebeapi.Error as e:
+        except Exception as e:
             self.logger.error(f"Error executing query: {query}")
             self.logger.error(e)
             raise

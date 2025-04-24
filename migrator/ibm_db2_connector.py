@@ -346,7 +346,63 @@ class IBMDB2Connector(DatabaseConnector):
         source_table_name = settings['source_table_name']
         target_schema = settings['target_schema']
         target_table_name = settings['target_table_name']
-        return {}
+        order_num = 1
+        table_constraints = {}
+        create_constraint_query = None
+        query = f"""
+            SELECT CONSTNAME, TYPE
+            FROM SYSCAT.TABCONST
+            WHERE TABSCHEMA = '{source_schema.upper()}'
+            AND TABNAME = '{source_table_name}'
+            AND TYPE NOT IN ('P')
+            ORDER BY CONSTNAME;"""
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            for row in cursor.fetchall():
+                constraint_name = row[0]
+                constraint_type = row[1]
+
+                if constraint_type == 'F':
+                    constraint_type = 'FOREIGN KEY'
+                    query_fk = f"""
+                        SELECT PK_COLNAMES, REFTABNAME, FK_COLNAMES
+                        FROM SYSCAT.REFERENCES
+                        WHERE TABSCHEMA = '{source_schema.upper()}'
+                        AND TABNAME = '{source_table_name}'
+                        AND CONSTNAME = '{constraint_name}'
+                    """
+                    cursor.execute(query_fk)
+                    fk_row = cursor.fetchone()
+                    if fk_row:
+                        pk_columns = fk_row[0].strip().lstrip('+').split('+')
+                        pk_columns = ', '.join(f'"{col}"' for col in pk_columns)
+                        ref_table_name = fk_row[1]
+                        fk_columns = fk_row[2].strip().lstrip('+').split('+')
+                        fk_columns = ', '.join(f'"{col}"' for col in fk_columns)
+                        create_constraint_query = f"""ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{constraint_name}" FOREIGN KEY ({fk_columns}) REFERENCES "{target_schema}"."{ref_table_name}" ({pk_columns});"""
+                else:
+                    pass
+
+                if create_constraint_query:
+                    table_constraints[order_num] = {
+                        'name': constraint_name,
+                        'type': constraint_type,
+                        'owner': source_schema,
+                        'columns': [],
+                        'sql': create_constraint_query,
+                        'comment': '',
+                    }
+                    order_num += 1
+
+            cursor.close()
+            self.disconnect()
+            return table_constraints
+        except Exception as e:
+            self.logger.error(f"Error executing query: {query}")
+            self.logger.error(e)
+            raise
 
     def fetch_triggers(self, table_id: int, table_schema: str, table_name: str):
         # Placeholder for fetching triggers

@@ -1604,3 +1604,6 @@ class InformixConnector(DatabaseConnector):
 
     def fetch_user_defined_types(self, schema: str):
         pass
+
+    def testing_select(self):
+        return "SELECT 1"

@@ -673,3 +673,6 @@ class MsSQLConnector(DatabaseConnector):
 
     def get_sequence_current_value(self, sequence_name: str):
         pass
+
+    def testing_select(self):
+        return "SELECT 1"

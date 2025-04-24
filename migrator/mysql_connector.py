@@ -531,3 +531,6 @@ class MySQLConnector(DatabaseConnector):
     def fetch_user_defined_types(self, schema: str):
         # Implement user-defined type fetching logic
         pass
+
+    def testing_select(self):
+        return "SELECT 1"

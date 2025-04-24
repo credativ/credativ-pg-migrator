@@ -664,3 +664,6 @@ class PostgreSQLConnector(DatabaseConnector):
         except psycopg2.Error as e:
             self.logger.error(f"Error preparing session settings: {e}")
             raise
+
+    def testing_select(self):
+        return "SELECT 1"

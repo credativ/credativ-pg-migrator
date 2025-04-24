@@ -300,3 +300,11 @@ class DatabaseConnector(ABC):
         }
         """
         pass
+
+    @abstractmethod
+    def testing_select(self):
+        """
+        Simple select statement to test the connection.
+        Some databases require special form of statement
+        """
+        pass

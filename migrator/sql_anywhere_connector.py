@@ -216,3 +216,6 @@ class SQLAnywhereConnector(DatabaseConnector):
 
     def fetch_user_defined_types(self, schema: str):
         raise NotImplementedError("Fetching user-defined types is not yet implemented for SQL Anywhere")
+
+    def testing_select(self):
+        return "SELECT 1"

@@ -223,3 +223,6 @@ class OracleConnector(DatabaseConnector):
     def fetch_user_defined_types(self, schema: str):
         # Placeholder for fetching user-defined types
         return {}
+
+    def testing_select(self):
+        return "SELECT 1 FROM DUAL"

@@ -320,6 +320,8 @@ class Planner:
             return MsSQLConnector(self.config_parser, 'source')
         elif source_db_type == 'mysql':
             return MySQLConnector(self.config_parser, 'source')
+        elif source_db_type == 'ibm_db2':
+            return IBMDB2Connector(self.config_parser, 'source')
         else:
             raise ValueError(f"Unsupported source database type: {source_db_type}")
 
@@ -346,7 +348,8 @@ class Planner:
         try:
             connector.connect()
             cursor = connector.connection.cursor()
-            cursor.execute("SELECT 1")
+            query = connector.testing_select()
+            cursor.execute(query)
             result = cursor.fetchone()
             if result[0] != 1:
                 raise ConnectionError(f"Connection to {db_name} failed.")

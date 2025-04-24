@@ -1165,3 +1165,6 @@ class SybaseASEConnector(DatabaseConnector):
         cursor.close()
         # self.disconnect()
         return row[0]
+
+    def testing_select(self):
+        return 'SELECT 1'

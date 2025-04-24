@@ -1,6 +1,6 @@
 from database_connector import DatabaseConnector
 from migrator_logging import MigratorLogger
-import jaydebeapi
+import ibm_db_dbi
 
 class IBMDB2Connector(DatabaseConnector):
     def __init__(self, config_parser, source_or_target):
@@ -15,17 +15,13 @@ class IBMDB2Connector(DatabaseConnector):
 
     def connect(self):
         connection_string = self.config_parser.get_connect_string(self.source_or_target)
-        username = self.config_parser.get_db_config(self.source_or_target)['username']
-        password = self.config_parser.get_db_config(self.source_or_target)['password']
-        jdbc_driver = self.config_parser.get_db_config(self.source_or_target)['jdbc']['driver']
-        jdbc_libraries = self.config_parser.get_db_config(self.source_or_target)['jdbc']['libraries']
-        self.connection = jaydebeapi.connect(
-            jdbc_driver,
-            connection_string,
-            [username, password],
-            jdbc_libraries
-        )
-        self.connection.jconn.setAutoCommit(False)
+        try:
+            self.connection = ibm_db_dbi.connect(connection_string, "", "")
+            if not self.connection:
+                raise Exception("Failed to connect to the database")
+        except Exception as e:
+            self.logger.error(f"Unexpected error while conneting into the database: {e}")
+            raise
 
     def disconnect(self):
         try:
@@ -223,3 +219,6 @@ class IBMDB2Connector(DatabaseConnector):
     def fetch_user_defined_types(self, schema: str):
         # Placeholder for fetching user-defined types
         return {}
+
+    def testing_select(self):
+        return "SELECT 1 FROM SYSIBM.SYSDUMMY1"

@@ -223,7 +223,11 @@ class SybaseASEConnector(DatabaseConnector):
             self.logger.error(e)
             raise
 
-    def convert_table_columns(self, target_db_type: str, table_schema: str, table_name: str, source_columns: dict):
+    def convert_table_columns(self, settings):
+        target_db_type = settings['target_db_type']
+        target_schema = settings['target_schema']
+        target_table_name = settings['target_table_name']
+        source_columns = settings['source_columns']
         type_mapping = {}
         create_table_sql = ""
         converted = {}
@@ -318,7 +322,7 @@ class SybaseASEConnector(DatabaseConnector):
                     else:
                         create_table_sql_parts[-1] += f" DEFAULT {info['default']}"
             create_table_sql = ", ".join(create_table_sql_parts)
-            create_table_sql = f"""CREATE TABLE "{table_schema}"."{table_name}" ({create_table_sql})"""
+            create_table_sql = f"""CREATE TABLE "{target_schema}"."{target_table_name}" ({create_table_sql})"""
 
         else:
             raise ValueError(f"Unsupported target database type: {target_db_type}")
@@ -874,7 +878,7 @@ class SybaseASEConnector(DatabaseConnector):
             self.logger.info(f"Worker {worker_id}: Target table {target_schema}.{target_table} has {target_table_rows} rows")
             migrator_tables.update_data_migration_status(protocol_id, True, 'OK', target_table_rows)
             sybase_cursor.close()
-            return inserted_rows
+            return target_table_rows
 
         part_name = 'migrate_table initialize'
         inserted_rows = 0

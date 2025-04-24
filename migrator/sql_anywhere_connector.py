@@ -85,7 +85,11 @@ class SQLAnywhereConnector(DatabaseConnector):
             self.logger.error(e)
             raise
 
-    def convert_table_columns(self, target_db_type: str, table_schema: str, table_name: str, columns: dict):
+    def convert_table_columns(self, settings):
+        target_db_type = settings['target_db_type']
+        target_schema = settings['target_schema']
+        target_table_name = settings['target_table_name']
+        source_columns = settings['source_columns']
         # Basic implementation for converting table columns
         type_mapping = {
             'INTEGER': 'INTEGER',
@@ -98,7 +102,7 @@ class SQLAnywhereConnector(DatabaseConnector):
         converted = {}
         create_table_sql_parts = []
 
-        for order_num, column_info in columns.items():
+        for order_num, column_info in source_columns.items():
             coltype = type_mapping.get(column_info['type'].upper(), 'TEXT')
             length = column_info['length']
             converted[order_num] = {
@@ -116,7 +120,7 @@ class SQLAnywhereConnector(DatabaseConnector):
             else:
                 create_table_sql_parts.append(f"\"{column_info['name']}\" {coltype} {column_info['nullable']}")
 
-        create_table_sql = f"CREATE TABLE \"{table_schema}\".\"{table_name}\" ({', '.join(create_table_sql_parts)})"
+        create_table_sql = f"CREATE TABLE \"{target_schema}\".\"{target_table_name}\" ({', '.join(create_table_sql_parts)})"
         return converted, create_table_sql
 
     def migrate_table(self, migrate_target_connection, settings):

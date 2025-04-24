@@ -101,7 +101,7 @@ class Planner:
             self.logger.debug(f"Exclude tables: {exclude_tables}")
 
         for order_num, table_info in source_tables.items():
-            self.logger.info(f"Processing table ({order_num}/{table_info['id']}): {table_info['table_name']}")
+            self.logger.info(f"Processing table ({order_num}/{len(source_tables)}): {table_info['table_name']}")
             if not any(fnmatch.fnmatch(table_info['table_name'], pattern) for pattern in include_tables):
                 continue
             if any(fnmatch.fnmatch(table_info['table_name'], pattern) for pattern in exclude_tables):
@@ -116,7 +116,13 @@ class Planner:
                 source_columns = self.source_connection.fetch_table_columns(self.source_schema, table_info['table_name'], self.migrator_tables)
                 if self.config_parser.get_log_level() == 'DEBUG':
                     self.logger.debug(f"Source columns: {source_columns}")
-                target_columns, target_table_sql = self.source_connection.convert_table_columns(self.config_parser.get_target_db_type(), self.target_schema, table_info['table_name'], source_columns)
+                settings = {
+                    'target_db_type': self.config_parser.get_target_db_type(),
+                    'target_schema': self.target_schema,
+                    'target_table_name': table_info['table_name'],
+                    'source_columns': source_columns,
+                }
+                target_columns, target_table_sql = self.source_connection.convert_table_columns(settings)
                 if self.config_parser.get_log_level() == 'DEBUG':
                     self.logger.debug(f"Target columns: {target_columns}")
                     self.logger.debug(f"Target table SQL: {target_table_sql}")

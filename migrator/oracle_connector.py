@@ -92,9 +92,14 @@ class OracleConnector(DatabaseConnector):
             self.logger.error(e)
             raise
 
-    def convert_table_columns(self, target_db_type: str, table_schema: str, table_name: str, columns: dict):
+    def convert_table_columns(self, settings):
+        target_db_type = settings['target_db_type']
+        target_schema = settings['target_schema']
+        target_table_name = settings['target_table_name']
+        source_columns = settings['source_columns']
+        converted_columns = {}
         # Placeholder for conversion logic
-        return columns, ""
+        return converted_columns, ""
 
     def migrate_table(self, migrate_target_connection, settings):
         # Placeholder for migration logic

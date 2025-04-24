@@ -74,7 +74,11 @@ class MySQLConnector(DatabaseConnector):
             self.logger.error(f"Error fetching table columns: {e}")
             raise
 
-    def convert_table_columns(self, target_db_type: str, table_schema: str, table_name: str, source_columns: dict):
+    def convert_table_columns(self, settings):
+        target_db_type = settings['target_db_type']
+        target_schema = settings['target_schema']
+        target_table_name = settings['target_table_name']
+        source_columns = settings['source_columns']
         type_mapping = {}
         converted_columns = {}
         create_table_sql = ''
@@ -142,7 +146,7 @@ class MySQLConnector(DatabaseConnector):
                         create_table_sql_column += f" DEFAULT {info['default']}"
                 create_table_sql_parts.append(create_table_sql_column)
             create_table_sql = ", ".join(create_table_sql_parts)
-            create_table_sql = f"""CREATE TABLE "{table_schema}"."{table_name}" ({create_table_sql})"""
+            create_table_sql = f"""CREATE TABLE "{target_schema}"."{target_table_name}" ({create_table_sql})"""
         else:
             raise ValueError(f"Unsupported target database type: {target_db_type}")
 

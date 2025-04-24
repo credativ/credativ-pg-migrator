@@ -116,13 +116,17 @@ class PostgreSQLConnector(DatabaseConnector):
             self.logger.error(e)
             raise
 
-    def convert_table_columns(self, target_db_type: str, table_schema: str, table_name: str, columns: dict):
+    def convert_table_columns(self, settings):
+        target_db_type = settings['target_db_type']
+        target_schema = settings['target_schema']
+        target_table_name = settings['target_table_name']
+        source_columns = settings['source_columns']
         # type_mapping = {}
         create_table_sql = ""
         converted_schema = {}
 
         if target_db_type == 'postgresql':
-            for col, info in columns.items():
+            for col, info in source_columns.items():
                 converted_schema[col] = {
                     'name': info['name'],
                     'nullable': info['nullable'],
@@ -138,7 +142,7 @@ class PostgreSQLConnector(DatabaseConnector):
 
             create_table_sql = ', '.join([(f'''"{info["name"]}" {info["type"]} {info["nullable"]} {'DEFAULT ' + info['default'] if info['default'] else ''}''').strip()
                                           for _, info in converted_schema.items()])
-            create_table_sql = f"""CREATE TABLE "{table_schema}"."{table_name}" ({create_table_sql})"""
+            create_table_sql = f"""CREATE TABLE "{target_schema}"."{target_table_name}" ({create_table_sql})"""
         else:
             raise ValueError(f"Unsupported target database type: {target_db_type}")
 

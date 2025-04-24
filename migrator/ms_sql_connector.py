@@ -66,7 +66,8 @@ class MsSQLConnector(DatabaseConnector):
                 tables[order_num] = {
                     'id': row[0],
                     'schema_name': row[1],
-                    'table_name': row[2]
+                    'table_name': row[2],
+                    'comment': ''
                 }
                 order_num += 1
             cursor.close()
@@ -109,6 +110,7 @@ class MsSQLConnector(DatabaseConnector):
                     'length': row[3],
                     'nullable': 'NOT NULL' if not row[4] else '',
                     'default': row[6].strip('()') if row[6] else '',
+                    'comment': '',
                     'other': 'IDENTITY' if row[5] else ''
                 }
 
@@ -124,9 +126,111 @@ class MsSQLConnector(DatabaseConnector):
             self.logger.error(e)
             raise
 
-    def convert_table_columns(self, target_db_type: str, table_schema: str, table_name: str, source_columns: dict):
-        # ...existing code from SybaseASEConnector.convert_table_columns...
-        pass
+    def convert_table_columns(self, settings):
+        target_db_type = settings['target_db_type']
+        target_schema = settings['target_schema']
+        target_table_name = settings['target_table_name']
+        source_columns = settings['source_columns']
+        type_mapping = {}
+        create_table_sql = ""
+        converted = {}
+        if target_db_type == 'postgresql':
+            type_mapping = {
+                'BIGDATETIME': 'TIMESTAMP',
+                'DATE': 'DATE',
+                'DATETIME': 'TIMESTAMP',
+                'SMALLDATETIME': 'TIMESTAMP',
+                'TIME': 'TIME',
+                'TIMESTAMP': 'TIMESTAMP',
+                'BIGINT': 'BIGINT',
+                'UNSIGNED BIGINT': 'BIGINT',
+                'INTEGER': 'INTEGER',
+                'INT': 'INTEGER',
+                'INT8': 'BIGINT',
+                'UNSIGNED INT': 'INTEGER',
+                'UINT': 'INTEGER',
+                'TINYINT': 'SMALLINT',
+                'SMALLINT': 'SMALLINT',
+
+                'BLOB': 'BYTEA',
+
+                'BOOLEAN': 'BOOLEAN',
+                'BIT': 'BOOLEAN',
+
+                'BINARY': 'BYTEA',
+                'VARBINARY': 'BYTEA',
+                'IMAGE': 'BYTEA',
+                'CHAR': 'TEXT',
+                'NCHAR': 'TEXT',
+                'UNICHAR': 'TEXT',
+                'NVARCHAR': 'TEXT',
+                'TEXT': 'TEXT',
+                'SYSNAME': 'TEXT',
+                'LONGSYSNAME': 'TEXT',
+                'LONG VARCHAR': 'TEXT',
+                'LONG NVARCHAR': 'TEXT',
+                'UNICHAR': 'TEXT',
+                'UNITEXT': 'TEXT',
+                'UNIVARCHAR': 'TEXT',
+                'VARCHAR': 'TEXT',
+
+                'CLOB': 'TEXT',
+                'DECIMAL': 'DECIMAL',
+                'DOUBLE PRECISION': 'DOUBLE PRECISION',
+                'FLOAT': 'FLOAT',
+                'INTERVAL': 'INTERVAL',
+                'MONEY': 'MONEY',
+                'NUMERIC': 'NUMERIC',
+                'REAL': 'REAL',
+                'SERIAL8': 'BIGSERIAL',
+                'SERIAL': 'SERIAL',
+                'SMALLFLOAT': 'REAL',
+            }
+
+            for order_num, column_info in source_columns.items():
+                coltype = column_info['type'].upper()
+                length = column_info['length']
+                if type_mapping.get(coltype, 'UNKNOWN').startswith('UNKNOWN'):
+                    self.logger.info(f"Column {column_info['name']} - unknown data type: {column_info['type']}")
+                    # coltype = 'TEXT' ## default to TEXT may not be the best option -> let the table creation fail
+                else:
+                    coltype = type_mapping.get(coltype, 'TEXT')
+                if coltype == 'VARCHAR' and int(column_info['length']) >= 254:
+                    coltype = 'TEXT'
+                    length = ''
+
+                converted[order_num] = {
+                    'name': column_info['name'],
+                    'type': coltype,
+                    'length': length,
+                    'default': column_info['default'],
+                    'nullable': column_info['nullable'],
+                    'comment': column_info['comment'],
+                    'other': column_info['other']
+                }
+
+            create_table_sql_parts = []
+            for _, info in converted.items():
+                if 'length' in info and info['type'] in ('CHAR', 'VARCHAR'):
+                    create_table_sql_parts.append(f""""{info['name']}" {info['type']}({info['length']}) {info['nullable']}""")
+                else:
+                    create_table_sql_parts.append(f""""{info['name']}" {info['type']} {info['nullable']}""")
+                if info['default']:
+                    if info['type'] in ('CHAR', 'VARCHAR', 'TEXT') and ('||' in info['default'] or '(' in info['default'] or ')' in info['default']):
+                        create_table_sql_parts[-1] += f""" DEFAULT {info['default']}""".replace("''", "'")
+                    elif info['type'] in ('CHAR', 'VARCHAR', 'TEXT'):
+                        create_table_sql_parts[-1] += f""" DEFAULT '{info['default']}'""".replace("''", "'")
+                    elif info['type'] in ('BOOLEAN', 'BIT'):
+                        create_table_sql_parts[-1] += f""" DEFAULT {info['default']}::BOOLEAN"""
+                    else:
+                        create_table_sql_parts[-1] += f" DEFAULT {info['default']}"
+            create_table_sql = ", ".join(create_table_sql_parts)
+            create_table_sql = f"""CREATE TABLE "{target_schema}"."{target_table_name}" ({create_table_sql})"""
+
+        else:
+            raise ValueError(f"Unsupported target database type: {target_db_type}")
+
+        return converted, create_table_sql
 
     def fetch_indexes(self, settings):
         source_table_id = settings['source_table_id']
@@ -135,12 +239,14 @@ class MsSQLConnector(DatabaseConnector):
         target_schema = settings['target_schema']
         target_table_name = settings['target_table_name']
         target_columns = settings['target_columns']
+        table_indexes = {}
+        order_num = 1
         query = f"""
             SELECT
                 i.name AS index_name,
                 i.is_unique,
                 i.is_primary_key,
-                STRING_AGG(c.name, ', ') WITHIN GROUP (ORDER BY ic.index_column_id) AS column_list
+                STRING_AGG('"' + c.name + '"', ', ') WITHIN GROUP (ORDER BY ic.index_column_id) AS column_list
             FROM sys.indexes i
             JOIN sys.index_columns ic ON i.object_id = ic.object_id AND i.index_id = ic.index_id
             JOIN sys.columns c ON ic.object_id = c.object_id AND ic.column_id = c.column_id
@@ -148,16 +254,159 @@ class MsSQLConnector(DatabaseConnector):
             GROUP BY i.name, i.is_unique, i.is_primary_key
             ORDER BY i.name
         """
-        # ...existing code from SybaseASEConnector.fetch_indexes...
-        pass
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+
+            indexes = cursor.fetchall()
+
+            for index in indexes:
+                if self.config_parser.get_log_level() == 'DEBUG':
+                    self.logger.debug(f"Processing index: {index}")
+                index_name = index[0].strip()
+                index_unique = index[1]  ## integer 0 or 1
+                index_primary_key = index[2]  ## integer 0 or 1
+                index_columns = index[3].strip()
+                index_owner = ''
+
+                index_columns_count = 0
+                index_columns_data_types = []
+                for column_name in index_columns.split(','):
+                    column_name = column_name.strip().strip('"')
+                    for col_order_num, column_info in target_columns.items():
+                        if column_name == column_info['name']:
+                            index_columns_count += 1
+                            column_data_type = column_info['type']
+                            if self.config_parser.get_log_level() == 'DEBUG':
+                                self.logger.debug(f"Table: {target_schema}.{target_table_name}, index: {index_name}, column: {column_name} has data type {column_data_type}")
+                            index_columns_data_types.append(column_data_type)
+                            index_columns_data_types_str = ', '.join(index_columns_data_types)
+
+                create_index_query = None
+                if index_primary_key == 1:
+                    create_index_query = f"""ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{index_name}" PRIMARY KEY ({index_columns});"""
+                elif index_unique == 1 and index_primary_key == 0:
+                    create_index_query = f"""CREATE UNIQUE INDEX "{index_name}" ON "{target_schema}"."{target_table_name}" ({index_columns});"""
+                else:
+                    create_index_query = f"""CREATE INDEX "{index_name}" ON "{target_schema}"."{target_table_name}" ({index_columns});"""
+
+                if create_index_query:
+                    if self.config_parser.get_log_level() == 'DEBUG':
+                        self.logger.debug(f"SQL: {create_index_query}")
+                    table_indexes[order_num] = {
+                        'name': index_name,
+                        'type': "PRIMARY KEY" if index_primary_key == 1 else "UNIQUE" if index_unique == 1 and index_primary_key == 0 else "INDEX",
+                        'owner': index_owner,
+                        'columns': index_columns,
+                        'columns_count': index_columns_count,
+                        'columns_data_types': index_columns_data_types_str,
+                        'sql': create_index_query,
+                        'comment': ''
+                    }
+                    order_num += 1
+
+            cursor.close()
+            self.disconnect()
+            return table_indexes
+
+        except Error as e:
+            self.logger.error(f"Error executing query: {query}")
+            self.logger.error(e)
+            raise
 
     def fetch_constraints(self, settings):
+        """
+        Fetches table constraints from the source database and prepares them for migration.
+        MS SQL Server has several sys objects which show constraints:
+        sys.key_constraints - primary key and unique constraints
+        sys.check_constraints - check constraints
+        sys.foreign_keys - foreign key constraints
+        sys.default_constraints - default constraints
+        """
         source_table_id = settings['source_table_id']
         source_schema = settings['source_schema']
         source_table_name = settings['source_table_name']
         target_schema = settings['target_schema']
         target_table_name = settings['target_table_name']
-        pass
+        order_num = 1
+        table_constraints = {}
+        query = f"""
+            WITH ConstraintColumns AS (
+            SELECT
+                fk.name AS constraint_name,
+                STRING_AGG('"' + cc.name + '"', ', ') WITHIN GROUP (ORDER BY cc.column_id) AS constraint_columns
+            FROM sys.foreign_keys fk
+            JOIN sys.foreign_key_columns fkc ON fk.object_id = fkc.constraint_object_id
+            JOIN sys.columns cc ON fkc.parent_object_id = cc.object_id AND fkc.parent_column_id = cc.column_id
+            WHERE fk.parent_object_id = {source_table_id}
+            GROUP BY fk.name
+            ),
+            ReferencedColumns AS (
+            SELECT
+                fk.name AS constraint_name,
+                STRING_AGG('"' + rc.name + '"', ', ') WITHIN GROUP (ORDER BY rc.column_id) AS referenced_columns
+            FROM sys.foreign_keys fk
+            JOIN sys.foreign_key_columns fkc ON fk.object_id = fkc.constraint_object_id
+            JOIN sys.columns rc ON fkc.referenced_object_id = rc.object_id AND fkc.referenced_column_id = rc.column_id
+            WHERE fk.parent_object_id = {source_table_id}
+            GROUP BY fk.name
+            )
+            SELECT
+            fk.name AS constraint_name,
+            'FOREIGN KEY' AS constraint_type,
+            cc.constraint_columns,
+            rt.name AS referenced_table,
+            rc.referenced_columns,
+            pt.name AS constraint_table
+            FROM sys.foreign_keys fk
+            JOIN ConstraintColumns cc ON fk.name = cc.constraint_name
+            JOIN ReferencedColumns rc ON fk.name = rc.constraint_name
+            JOIN sys.tables rt ON fk.referenced_object_id = rt.object_id
+            JOIN sys.tables pt ON fk.parent_object_id = pt.object_id
+            WHERE fk.parent_object_id = {source_table_id}
+            ORDER BY fk.name
+        """
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+
+            constraints = cursor.fetchall()
+
+            for constraint in constraints:
+                if self.config_parser.get_log_level() == 'DEBUG':
+                    self.logger.debug(f"Processing constraint: {constraint}")
+                constraint_name = constraint[0].strip()
+                constraint_type = constraint[1].strip()
+                constraint_columns = constraint[2].strip()
+                constraint_owner = ''
+
+                if constraint_type == 'FOREIGN KEY':
+                    create_constraint_query = f"""ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{constraint_name}" {constraint_type} ({constraint_columns}) REFERENCES "{target_schema}"."{constraint[3]}" ({constraint[4]});"""
+                else:
+                    create_constraint_query = f"""ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{constraint_name}" {constraint_type} ({constraint_columns});"""
+
+                if create_constraint_query:
+                    if self.config_parser.get_log_level() == 'DEBUG':
+                        self.logger.debug(f"SQL: {create_constraint_query}")
+                    table_constraints[order_num] = {
+                        'name': constraint_name,
+                        'type': constraint_type,
+                        'owner': constraint_owner,
+                        'columns': constraint_columns,
+                        'sql': create_constraint_query,
+                        'comment': ''
+                    }
+                    order_num += 1
+
+            cursor.close()
+            self.disconnect()
+            return table_constraints
+        except Error as e:
+            self.logger.error(f"Error executing query: {query}")
+            self.logger.error(e)
+            raise
 
     def fetch_funcproc_names(self, schema: str):
         query = f"""
@@ -190,6 +439,8 @@ class MsSQLConnector(DatabaseConnector):
         pass
 
     def fetch_views_names(self, owner_name):
+        views = {}
+        order_num = 1
         query = f"""
             SELECT
                 v.object_id AS id,
@@ -200,8 +451,26 @@ class MsSQLConnector(DatabaseConnector):
             WHERE s.name = '{owner_name}'
             ORDER BY v.name
         """
-        # ...existing code from SybaseASEConnector.fetch_views_names...
-        pass
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            for row in rows:
+                views[order_num] = {
+                    'id': row[0],
+                    'schema_name': row[1],
+                    'view_name': row[2],
+                    'comment': ''
+                }
+                order_num += 1
+            cursor.close()
+            self.disconnect()
+            return views
+        except Error as e:
+            self.logger.error(f"Error executing query: {query}")
+            self.logger.error(e)
+            raise
 
     def fetch_view_code(self, settings):
         view_id = settings['view_id']
@@ -209,21 +478,120 @@ class MsSQLConnector(DatabaseConnector):
         source_view_name = settings['source_view_name']
         target_schema = settings['target_schema']
         target_view_name = settings['target_view_name']
+        view_code = ''
         query = f"""
             SELECT m.definition
             FROM sys.sql_modules m
             WHERE m.object_id = {view_id}
         """
-        # ...existing code from SybaseASEConnector.fetch_view_code...
-        pass
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            for row in rows:
+                view_code = row[0]
+                if self.config_parser.get_log_level() == 'DEBUG':
+                    self.logger.debug(f"View code for {source_schema}.{source_view_name}: {view_code}")
+                return view_code
+            cursor.close()
+            self.disconnect()
+            return view_code
+        except Error as e:
+            self.logger.error(f"Error executing query: {query}")
+            self.logger.error(e)
+            raise
 
     def convert_view_code(self, view_code: str, settings: dict):
         # ...existing code from SybaseASEConnector.convert_view_code...
         pass
 
     def migrate_table(self, migrate_target_connection, settings):
-        # ...existing code from SybaseASEConnector.migrate_table...
-        pass
+        part_name = 'migrate_table initialize'
+        inserted_rows = 0
+        try:
+            worker_id = settings['worker_id']
+            source_schema = settings['source_schema']
+            source_table = settings['source_table']
+            source_table_id = settings['source_table_id']
+            source_columns = settings['source_columns']
+            target_schema = settings['target_schema']
+            target_table = settings['target_table']
+            target_columns = settings['target_columns']
+            primary_key_columns = settings['primary_key_columns']
+            primary_key_columns_count = settings['primary_key_columns_count']
+            primary_key_columns_types = settings['primary_key_columns_types']
+            batch_size = settings['batch_size']
+            migrator_tables = settings['migrator_tables']
+            source_table_rows = self.get_rows_count(source_schema, source_table)
+
+            if source_table_rows == 0:
+                self.logger.info(f"Worker {worker_id}: Table {source_table} is empty - skipping data migration.")
+                migrator_tables.insert_data_migration(source_schema, source_table, source_table_id, source_table_rows, worker_id, target_schema, target_table, 0)
+                return 0
+            else:
+                part_name = 'migrate_table in batches using cursor'
+                self.logger.info(f"Worker {worker_id}: Table {source_table} has {source_table_rows} rows - starting data migration.")
+                protocol_id = migrator_tables.insert_data_migration(source_schema, source_table, source_table_id, source_table_rows, worker_id, target_schema, target_table, 0)
+
+                # Open a cursor and fetch rows in batches
+                query = f"SELECT * FROM {source_schema}.{source_table}"
+                if self.config_parser.get_log_level() == 'DEBUG':
+                    self.logger.debug(f"Worker {worker_id}: Fetching data with cursor using query: {query}")
+
+                # # polars library is not always available
+                # for df in pl.read_database(query, self.connection, iter_batches=True, batch_size=batch_size):
+                #     if df.is_empty():
+                #         break
+
+                #     if self.config_parser.get_log_level() == 'DEBUG':
+                #         self.logger.debug(f"Worker {worker_id}: Fetched {len(df)} rows from source table {source_table} using cursor.")
+
+                #     # Convert Polars DataFrame to list of dictionaries for insertion
+                #     records = df.to_dicts()
+
+                cursor = self.connection.cursor()
+                cursor.execute(query)
+                total_inserted_rows = 0
+                while True:
+                    records = cursor.fetchmany(batch_size)
+                    if not records:
+                        break
+                    if self.config_parser.get_log_level() == 'DEBUG':
+                        self.logger.debug(f"Worker {worker_id}: Fetched {len(records)} rows from source table '{source_table}' using cursor")
+
+                    # Convert records to a list of dictionaries
+                    records = [
+                        {column['name']: value for column, value in zip(source_columns.values(), record)}
+                        for record in records
+                    ]
+                    for record in records:
+                        for order_num, column in source_columns.items():
+                            column_name = column['name']
+                            column_type = column['type']
+                            if column_type.lower() in ['binary', 'varbinary', 'image']:
+                                record[column_name] = bytes(record[column_name]) if record[column_name] is not None else None
+                            elif column_type.lower() in ['datetime', 'smalldatetime', 'date', 'time', 'timestamp']:
+                                record[column_name] = str(record[column_name]) if record[column_name] is not None else None
+
+                    # Insert batch into target table
+                    if self.config_parser.get_log_level() == 'DEBUG':
+                        self.logger.debug(f"Worker {worker_id}: Starting insert of {len(records)} rows from source table {source_table}")
+                    inserted_rows = migrate_target_connection.insert_batch(target_schema, target_table, target_columns, records)
+                    total_inserted_rows += inserted_rows
+                    self.logger.info(f"Worker {worker_id}: Inserted {inserted_rows} (total: {total_inserted_rows} from: {source_table_rows} ({round(total_inserted_rows/source_table_rows*100, 2)}%)) rows into target table '{target_table}'")
+
+                target_table_rows = migrate_target_connection.get_rows_count(target_schema, target_table)
+                self.logger.info(f"Worker {worker_id}: Target table {target_schema}.{target_table} has {target_table_rows} rows")
+                migrator_tables.update_data_migration_status(protocol_id, True, 'OK', target_table_rows)
+                cursor.close()
+        except Exception as e:
+            self.logger.error(f"Worker {worker_id}: Error during {part_name} -> {e}")
+            raise e
+        finally:
+            if self.config_parser.get_log_level() == 'DEBUG':
+                self.logger.debug(f"Worker {worker_id}: Finished processing table {source_table}.")
+            return target_table_rows
 
     def fetch_triggers(self, schema_name, table_name):
         # ...existing code from SybaseASEConnector.fetch_triggers...
@@ -259,8 +627,14 @@ class MsSQLConnector(DatabaseConnector):
 
     def get_rows_count(self, table_schema: str, table_name: str):
         query = f"""SELECT COUNT(*) FROM [{table_schema}].[{table_name}]"""
-        # ...existing code from SybaseASEConnector.get_rows_count...
-        pass
+        # query = f"""SELECT COUNT(*) FROM {table_schema}.{table_name} """
+        if self.config_parser.get_log_level() == 'DEBUG':
+            self.logger.debug(f"get_rows_count query: {query}")
+        cursor = self.connection.cursor()
+        cursor.execute(query)
+        count = cursor.fetchone()[0]
+        cursor.close()
+        return count
 
     def get_table_size(self, table_schema: str, table_name: str):
         """
@@ -283,7 +657,7 @@ class MsSQLConnector(DatabaseConnector):
         # ...existing code from SybaseASEConnector.fetch_sequences...
         pass
 
-    def fetch_user_defined_types(self):
+    def fetch_user_defined_types(self, schema: str):
         query = """
             SELECT
                 s.name AS type_name,

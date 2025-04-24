@@ -7,6 +7,7 @@ from migrator_tables import MigratorTables
 from ms_sql_connector import MsSQLConnector
 from mysql_connector import MySQLConnector
 from ibm_db2_connector import IBMDB2Connector
+from sql_anywhere_connector import SQLAnywhereConnector
 import fnmatch
 import traceback
 
@@ -322,6 +323,8 @@ class Planner:
             return MySQLConnector(self.config_parser, 'source')
         elif source_db_type == 'ibm_db2':
             return IBMDB2Connector(self.config_parser, 'source')
+        elif source_db_type == 'sql_anywhere':
+            return SQLAnywhereConnector(self.config_parser, 'source')
         else:
             raise ValueError(f"Unsupported source database type: {source_db_type}")
 

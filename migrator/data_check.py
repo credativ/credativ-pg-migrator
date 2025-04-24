@@ -9,6 +9,7 @@ from postgresql_connector import PostgreSQLConnector
 from informix_connector import InformixConnector
 from sybase_ase_connector import SybaseASEConnector
 from ms_sql_connector import MsSQLConnector
+from sql_anywhere_connector import SQLAnywhereConnector
 import pandas as pd
 import numpy as np
 import sys
@@ -208,6 +209,8 @@ def connect_to_db(logger, config_parser, source_or_target):
         return SybaseASEConnector(config_parser, source_or_target)
     elif db_type == 'mssql':
         return MsSQLConnector(config_parser, source_or_target)
+    elif db_type == 'sql_anywhere':
+        return SQLAnywhereConnector(config_parser, source_or_target)
     else:
         raise ValueError(f"Unsupported database type: {db_type}")
 

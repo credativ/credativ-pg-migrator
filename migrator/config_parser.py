@@ -114,6 +114,18 @@ class ConfigParser:
                 return f"DATABASE={db_config['database']};HOSTNAME={db_config['host']};PORT={db_config['port']};PROTOCOL=TCPIP;UID={db_config['username']};PWD={db_config['password']}"
             else:
                 raise ValueError(f"Unsupported IBM DB2 connectivity: {connectivity}")
+        elif db_config['type'] == 'sql_anywhere':
+            if connectivity == 'native':
+                # return f"DSN={db_config['dsn']};UID={db_config['username']};PWD={db_config['password']}"
+                # return f"host={db_config['host']};port={db_config['port']};database={db_config['database']};uid={db_config['username']};pwd={db_config['password']}"
+                return f"host={db_config['host']}:{db_config['port']};dbn={db_config['database']};uid={db_config['username']};pwd={db_config['password']}"
+            # connection_string = "host=localhost:2639;uid=dba;pwd=sql;dbn=isovision"
+            # elif connectivity == 'odbc':
+            #     return f"DRIVER={db_config['odbc']['driver']};SERVER={db_config['host']};PORT={db_config['port']};DATABASE={db_config['database']};UID={db_config['username']};PWD={db_config['password']}"
+            # elif connectivity == 'jdbc':
+            #     return f"jdbc:sqlanywhere://{db_config['host']}:{db_config['port']}/{db_config['database']};UID={db_config['username']};PWD={db_config['password']}"
+            else:
+                raise ValueError(f"Unsupported SQL Anywhere connectivity: {connectivity}")
         else:
             raise ValueError(f"Unsupported database type: {db_config['type']}")
 

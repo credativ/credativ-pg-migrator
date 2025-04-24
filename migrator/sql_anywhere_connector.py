@@ -1,6 +1,6 @@
 from database_connector import DatabaseConnector
 from migrator_logging import MigratorLogger
-import pyodbc
+import sqlanydb
 
 class SQLAnywhereConnector(DatabaseConnector):
     def __init__(self, config_parser, source_or_target):
@@ -15,7 +15,7 @@ class SQLAnywhereConnector(DatabaseConnector):
 
     def connect(self):
         connection_string = self.config_parser.get_connect_string(self.source_or_target)
-        self.connection = pyodbc.connect(connection_string)
+        self.connection = sqlanydb.connect(connection_string)
 
     def disconnect(self):
         try:

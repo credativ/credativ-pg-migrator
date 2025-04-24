@@ -286,8 +286,59 @@ class IBMDB2Connector(DatabaseConnector):
         target_schema = settings['target_schema']
         target_table_name = settings['target_table_name']
         target_columns = settings['target_columns']
-        # Placeholder for fetching indexes
-        return {}
+
+        table_indexes = {}
+        order_num = 1
+        index_columns_data_types_str = ''
+        query = f"""
+            SELECT INDNAME, COLNAMES, COLCOUNT, UNIQUERULE, MADE_UNIQUE
+            FROM SYSCAT.INDEXES I
+            WHERE I.TABSCHEMA = upper('{settings['source_schema']}')
+            AND I.TABNAME = '{settings['source_table_name']}'
+            ORDER BY INDNAME
+        """
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            for row in cursor.fetchall():
+                index_name = row[0]
+                index_columns = row[1].lstrip('+').split('+')
+                index_columns = ', '.join(f'"{col}"' for col in index_columns)
+                index_columns_count = row[2]
+                index_unique = row[2]
+                index_type = row[3]
+                table_id = row[4]
+
+                create_index_query = None
+
+                if index_type == 'P':
+                    create_index_query = f"""ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{index_name}" PRIMARY KEY ({index_columns});"""
+                else:
+                    create_index_query = f"""CREATE {'UNIQUE' if index_type == 'U' else ''} INDEX "{index_name}" ON "{target_schema}"."{target_table_name}" ({index_columns});"""
+
+                table_indexes[order_num] = {
+                    'name': index_name,
+                    'type': 'PRIMARY KEY' if index_type == 'P' else 'UNIQUE' if index_type == 'U' else 'INDEX',
+                    'owner': settings['source_schema'],
+                    'columns': index_columns,
+                    'columns_count': index_columns_count,
+                    'columns_data_types': [],
+                    'sql': create_index_query,
+                    'comment': '',
+                }
+
+                order_num += 1
+
+            cursor.close()
+            self.disconnect()
+            if self.config_parser.get_log_level() == 'DEBUG':
+                self.logger.debug(f"Indexes for table {settings['source_table_name']} ({settings['source_schema']}): {index_columns_data_types_str}")
+            return table_indexes
+        except Exception as e:
+            self.logger.error(f"Error executing query: {query}")
+            self.logger.error(e)
+            raise
 
     def fetch_constraints(self, settings):
         source_table_id = settings['source_table_id']

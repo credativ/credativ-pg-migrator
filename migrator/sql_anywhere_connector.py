@@ -40,7 +40,8 @@ class SQLAnywhereConnector(DatabaseConnector):
         query = f"""
             SELECT table_id, table_name
             FROM sys.systable
-            WHERE creator = '{table_schema}'
+            WHERE creator in (SELECT DISTINCT user_id
+            FROM sys.SYSUSERPERM where user_name = '{table_schema}')
             AND table_type = 'BASE'
             ORDER BY table_name
         """
@@ -68,10 +69,17 @@ class SQLAnywhereConnector(DatabaseConnector):
 
     def fetch_table_columns(self, table_schema: str, table_name: str, migrator_tables) -> dict:
         query = f"""
-            SELECT column_id, column_name, domain_name, width, nulls, default
-            FROM sys.syscolumn
-            WHERE creator = '{table_schema}'
-            AND table_name = '{table_name}'
+            SELECT c.column_id, c.column_name, d.domain_name, c.width, c.scale, c.column_type, c."nulls", c."default"
+            FROM sys.syscolumn c
+            LEFT JOIN SYS.SYSDOMAIN d ON d.domain_id = c.domain_id
+            WHERE c.table_id = (
+                SELECT t.table_id FROM sys.systable t
+                WHERE t.creator in (
+                    SELECT DISTINCT user_id
+                    FROM sys.SYSUSERPERM where user_name = '{table_schema}'
+                    )
+                AND table_name = '{table_name}'
+                )
             ORDER BY column_id
         """
         try:
@@ -84,8 +92,9 @@ class SQLAnywhereConnector(DatabaseConnector):
                     'name': row[1],
                     'type': row[2],
                     'length': row[3],
-                    'nullable': 'NOT NULL' if row[4] == 'N' else '',
-                    'default': row[5],
+                    'precision': row[4],
+                    'nullable': 'NOT NULL' if row[6] == 'N' else '',
+                    'default': row[7],
                     'comment': '',
                     'other': ''
                 }
@@ -136,7 +145,80 @@ class SQLAnywhereConnector(DatabaseConnector):
         return converted, create_table_sql
 
     def migrate_table(self, migrate_target_connection, settings):
-        raise NotImplementedError("Table migration is not yet implemented for SQL Anywhere")
+        part_name = 'initialize'
+        try:
+            worker_id = settings['worker_id']
+            source_schema = settings['source_schema']
+            source_table = settings['source_table']
+            source_table_id = settings['source_table_id']
+            source_columns = settings['source_columns']
+            target_schema = settings['target_schema']
+            target_table = settings['target_table']
+            target_columns = settings['target_columns']
+            primary_key_columns = settings['primary_key_columns']
+            batch_size = settings['batch_size']
+            migrator_tables = settings['migrator_tables']
+            source_table_rows = self.get_rows_count(source_schema, source_table)
+
+            if source_table_rows == 0:
+                self.logger.info(f"Worker {worker_id}: Table {source_table} is empty - skipping data migration.")
+                migrator_tables.insert_data_migration(source_schema, source_table, source_table_id, source_table_rows, worker_id, target_schema, target_table, 0)
+                return 0
+            else:
+                self.logger.info(f"Worker {worker_id}: Table {source_table} has {source_table_rows} rows - starting data migration.")
+                protocol_id = migrator_tables.insert_data_migration(source_schema, source_table, source_table_id, source_table_rows, worker_id, target_schema, target_table, 0)
+                offset = 0
+                total_inserted_rows = 0
+                migration_cursor = self.connection.cursor()
+                query = f"SELECT * FROM {source_schema}.{source_table}"
+                # Fetch the data in batches
+                migration_cursor.execute(query)
+                total_inserted_rows = 0
+                while True:
+                    records = migration_cursor.fetchmany(batch_size)
+                    if not records:
+                        break
+                    if self.config_parser.get_log_level() == 'DEBUG':
+                        self.logger.debug(f"Worker {worker_id}: Fetched {len(records)} rows from source table '{source_table}' using cursor")
+
+                    records = [
+                        {column['name']: value for column, value in zip(source_columns.values(), record)}
+                        for record in records
+                    ]
+
+                    # Adjust binary or bytea types
+                    for record in records:
+                        for order_num, column in source_columns.items():
+                            column_name = column['name']
+                            column_type = column['type']
+                            target_column_type = target_columns[order_num]['type']
+                            # if column_type.lower() in ['binary', 'bytea']:
+                            if column_type.lower() in ['blob']:
+                                record[column_name] = bytes(record[column_name].getBytes(1, int(record[column_name].length())))  # Convert 'com.informix.jdbc.IfxCblob' to bytes
+                            elif column_type.lower() in ['clob']:
+                                # elif isinstance(record[column_name], IfxCblob):
+                                record[column_name] = record[column_name].getSubString(1, int(record[column_name].length()))  # Convert IfxCblob to string
+                                # record[column_name] = bytes(record[column_name].getBytes(1, int(record[column_name].length())))  # Convert IfxBblob to bytes
+                                # record[column_name] = record[column_name].read()  # Convert IfxBblob to bytes
+                            elif column_type.lower() in ['integer', 'smallint', 'tinyint', 'bit', 'boolean'] and target_column_type.lower() in ['boolean']:
+                                # Convert integer to boolean
+                                record[column_name] = bool(record[column_name])
+
+                    part_name = f'insert data: {target_table} - {offset}'
+                    inserted_rows = migrate_target_connection.insert_batch(target_schema, target_table, target_columns, records)
+                    total_inserted_rows += inserted_rows
+                    self.logger.info(f"Worker {worker_id}: Inserted {inserted_rows} (total: {total_inserted_rows} from: {source_table_rows} ({round(total_inserted_rows/source_table_rows*100, 2)}%)) rows into target table {target_table}")
+
+                    offset += batch_size
+
+                target_table_rows = migrate_target_connection.get_rows_count(target_schema, target_table)
+                self.logger.info(f"Worker {worker_id}: Finished migrating data for table {source_table}.")
+                migrator_tables.update_data_migration_status(protocol_id, True, 'OK', target_table_rows)
+                return target_table_rows
+        except Exception as e:
+            self.logger.error(f"Worker {worker_id}: Error during {part_name} -> {e}")
+            raise e
+
 
     def fetch_indexes(self, settings):
         source_table_id = settings['source_table_id']
@@ -145,7 +227,60 @@ class SQLAnywhereConnector(DatabaseConnector):
         target_schema = settings['target_schema']
         target_table_name = settings['target_table_name']
         target_columns = settings['target_columns']
-        raise NotImplementedError("Fetching indexes is not yet implemented for SQL Anywhere")
+
+        table_indexes = {}
+        order_num = 1
+        query = f"""
+            SELECT iname, indextype, colnames
+            FROM SYS.SYSINDEXES
+            WHERE creator = '{source_schema}'
+            AND tname = '{source_table_name}'
+            ORDER BY iname
+        """
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            for row in cursor.fetchall():
+                index_name = row[0]
+                index_type = row[1].upper()
+                index_columns = row[2]
+
+                columns = []
+                for col in index_columns.split(","):
+                    col = col.strip().replace(" ASC", "").replace(" DESC", "")
+                    if col not in columns:
+                        columns.append('"'+col+'"')
+                index_columns = ','.join(columns)
+
+                if index_type == 'NON-UNIQUE':
+                    index_type = 'INDEX'
+
+                if index_type == 'PRIMARY KEY':
+                    index_sql = f'''ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{target_table_name}_{index_name}" PRIMARY KEY ({index_columns})'''
+                else:
+                    index_sql = f'''CREATE {"UNIQUE" if index_type == "UNIQUE" else ""} INDEX "{target_table_name}_{index_name}" ON "{target_schema}"."{target_table_name}" ({index_columns})'''
+
+                if index_type != 'FOREIGN KEY':
+                    table_indexes[order_num] = {
+                        'name': index_name,
+                        'owner': source_schema,
+                        'type': index_type,
+                        'columns': index_columns,
+                        'columns_count': len(index_columns.split(',')),
+                        'columns_data_types': '',
+                        'sql': index_sql,
+                        'comment': '',
+                    }
+                    order_num += 1
+            cursor.close()
+            self.disconnect()
+
+            return table_indexes
+        except pyodbc.Error as e:
+            self.logger.error(f"Error executing query: {query}")
+            self.logger.error(e)
+            raise
 
     def fetch_constraints(self, settings):
         source_table_id = settings['source_table_id']
@@ -153,28 +288,101 @@ class SQLAnywhereConnector(DatabaseConnector):
         source_table_name = settings['source_table_name']
         target_schema = settings['target_schema']
         target_table_name = settings['target_table_name']
-        raise NotImplementedError("Fetching constraints is not yet implemented for SQL Anywhere")
+        order_num = 1
+        table_constraints = {}
+        query = f"""
+            SELECT "role" as fk_name, primary_creator, primary_tname, foreign_creator, foreign_tname, columns
+            FROM SYS.SYSFOREIGNKEYS s
+            WHERE (primary_creator = '{source_schema}' or foreign_creator = '{source_schema}')
+            AND primary_tname = '{source_table_name}'
+            ORDER BY "role"
+        """
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            for row in cursor.fetchall():
+                constraint_name = row[0]
+                constraint_type = 'FOREIGN KEY'
+                primary_table_name = row[2]
+                foreign_table_name = row[4]
+                sa_columns = row[5]
+                ref_columns, pk_columns = sa_columns.split(" IS ")
+                columns = []
+                for col in ref_columns.split(","):
+                    col = col.strip().replace(" ASC", "").replace(" DESC", "")
+                    if col not in columns:
+                        columns.append('"'+col+'"')
+                ref_columns = ','.join(columns)
+
+                columns = []
+                for col in pk_columns.split(","):
+                    col = col.strip().replace(" ASC", "").replace(" DESC", "")
+                    if col not in columns:
+                        columns.append('"'+col+'"')
+                pk_columns = ','.join(columns)
+
+                constraint_sql = f'''ALTER TABLE "{target_schema}"."{foreign_table_name}" ADD CONSTRAINT "{target_table_name}_{constraint_name}"
+                FOREIGN KEY ({ref_columns}) REFERENCES "{target_schema}"."{primary_table_name}" ({pk_columns})'''
+
+                table_constraints[order_num] = {
+                    'id': None,
+                    'name': constraint_name,
+                    'type': constraint_type,
+                    'sql': constraint_sql,
+                    'comment': '',
+                }
+                order_num += 1
+            cursor.close()
+            self.disconnect()
+
+            return table_constraints
+        except pyodbc.Error as e:
+            self.logger.error(f"Error executing query: {query}")
+            self.logger.error(e)
+            raise
 
     def fetch_triggers(self, table_id: int, table_schema: str, table_name: str):
-        raise NotImplementedError("Fetching triggers is not yet implemented for SQL Anywhere")
+        pass
 
     def convert_trigger(self, trig: str, settings: dict):
-        raise NotImplementedError("Trigger conversion is not yet implemented for SQL Anywhere")
+        pass
 
     def fetch_funcproc_names(self, schema: str):
-        raise NotImplementedError("Fetching function/procedure names is not yet implemented for SQL Anywhere")
+        pass
 
     def fetch_funcproc_code(self, funcproc_id: int):
-        raise NotImplementedError("Fetching function/procedure code is not yet implemented for SQL Anywhere")
+        pass
 
     def convert_funcproc_code(self, funcproc_code: str, target_db_type: str, source_schema: str, target_schema: str, table_list: list):
-        raise NotImplementedError("Function/procedure conversion is not yet implemented for SQL Anywhere")
+        pass
 
     def fetch_sequences(self, table_schema: str, table_name: str):
-        raise NotImplementedError("Fetching sequences is not yet implemented for SQL Anywhere")
+        pass
 
     def fetch_views_names(self, source_schema: str):
-        raise NotImplementedError("Fetching view names is not yet implemented for SQL Anywhere")
+        views = {}
+        order_num = 1
+        query = f"""SELECT viewname FROM sys.sysviews WHERE vcreator = '{source_schema}'"""
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            for row in cursor.fetchall():
+                views[order_num] = {
+                    'id': None,
+                    'schema_name': source_schema,
+                    'view_name': row[0],
+                    'comment': ''
+                }
+                order_num += 1
+            cursor.close()
+            self.disconnect()
+            return views
+        except pyodbc.Error as e:
+            self.logger.error(f"Error executing query: {query}")
+            self.logger.error(e)
+            raise
 
     def fetch_view_code(self, settings):
         view_id = settings['view_id']
@@ -182,13 +390,30 @@ class SQLAnywhereConnector(DatabaseConnector):
         source_view_name = settings['source_view_name']
         target_schema = settings['target_schema']
         target_view_name = settings['target_view_name']
-        raise NotImplementedError("Fetching view code is not yet implemented for SQL Anywhere")
+        query = f"""
+            SELECT viewtext
+            FROM sys.sysviews
+            WHERE vcreator = '{source_schema}'
+            AND viewname = '{source_view_name}'
+        """
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            view_code = cursor.fetchone()[0]
+            cursor.close()
+            self.disconnect()
+            return view_code
+        except pyodbc.Error as e:
+            self.logger.error(f"Error executing query: {query}")
+            self.logger.error(e)
+            raise
 
     def convert_view_code(self, view_code: str, settings: dict):
-        raise NotImplementedError("View conversion is not yet implemented for SQL Anywhere")
+        return view_code
 
     def get_sequence_current_value(self, sequence_id: int):
-        raise NotImplementedError("Fetching sequence current value is not yet implemented for SQL Anywhere")
+        pass
 
     def execute_query(self, query: str, params=None):
         cursor = self.connection.cursor()
@@ -227,7 +452,7 @@ class SQLAnywhereConnector(DatabaseConnector):
         raise NotImplementedError("Fetching table size is not yet implemented for SQL Anywhere")
 
     def fetch_user_defined_types(self, schema: str):
-        raise NotImplementedError("Fetching user-defined types is not yet implemented for SQL Anywhere")
+        pass
 
     def testing_select(self):
         return "SELECT 1"

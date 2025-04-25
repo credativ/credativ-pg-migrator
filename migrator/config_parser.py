@@ -4,9 +4,13 @@ import constants
 class ConfigParser:
     def __init__(self, args):
         self.args = args
-        with open(self.args.config, 'r') as file:
-            self.config = yaml.safe_load(file)
+        self.config = self.load_config(args.config)
         self.validate_config()
+
+    def load_config(self, config_file):
+        """Load the configuration file."""
+        with open(config_file, 'r') as file:
+            return yaml.safe_load(file)
 
     def validate_config(self):
 
@@ -31,6 +35,11 @@ class ConfigParser:
     ## Databases
     def get_db_config(self, source_or_target):
         return self.config[source_or_target]
+
+    def get_db_type(self, source_or_target):
+        if source_or_target not in ['source', 'target']:
+            raise ValueError(f"Invalid source_or_target: {source_or_target}")
+        return self.config[source_or_target]['type']
 
     def get_source_config(self):
         return self.config['source']

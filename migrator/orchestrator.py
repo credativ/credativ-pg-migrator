@@ -1,14 +1,8 @@
 import concurrent.futures
-# from worker import Worker
+import importlib
+import constants
 from migrator_logging import MigratorLogger
 from migrator_tables import MigratorTables
-from postgresql_connector import PostgreSQLConnector
-from informix_connector import InformixConnector
-from sybase_ase_connector import SybaseASEConnector
-from ms_sql_connector import MsSQLConnector
-from mysql_connector import MySQLConnector
-from ibm_db2_connector import IBMDB2Connector
-from sql_anywhere_connector import SQLAnywhereConnector
 import traceback
 import uuid
 import fnmatch
@@ -17,8 +11,8 @@ class Orchestrator:
     def __init__(self, config_parser):
         self.config_parser = config_parser
         self.logger = MigratorLogger(self.config_parser.get_log_file()).logger
-        self.source_connection = self.connect_to_source_db()
-        self.target_connection = self.connect_to_target_db()
+        self.source_connection = self.load_connector('source')
+        self.target_connection = self.load_connector('target')
         self.migrator_tables = MigratorTables(self.logger, self.config_parser)
         self.on_error_action = self.config_parser.get_on_error_action()
         self.source_schema = self.config_parser.get_source_schema()
@@ -57,35 +51,26 @@ class Orchestrator:
             self.migrator_tables.update_main_status('Orchestrator', '', False, f'ERROR: {e}')
             self.handle_error(e, 'orchestration')
 
-    def connect_to_source_db(self):
-        source_db_type = self.config_parser.get_source_db_type()
+    def load_connector(self, source_or_target):
+        """Dynamically load the database connector."""
+        # Get the database type from the config
+        database_type = self.config_parser.get_db_type(source_or_target)
         if self.config_parser.get_log_level() == 'DEBUG':
-            self.logger.debug(f"Connecting to source database with connection string: {self.config_parser.get_source_connect_string()}")
-        if source_db_type == 'postgresql':
-            return PostgreSQLConnector(self.config_parser, 'source')
-        elif source_db_type == 'informix':
-            return InformixConnector(self.config_parser, 'source')
-        elif source_db_type == 'sybase_ase':
-            return SybaseASEConnector(self.config_parser, 'source')
-        elif source_db_type == 'mssql':
-            return MsSQLConnector(self.config_parser, 'source')
-        elif source_db_type == 'mysql':
-            return MySQLConnector(self.config_parser, 'source')
-        elif source_db_type == 'ibm_db2':
-            return IBMDB2Connector(self.config_parser, 'source')
-        elif source_db_type == 'sql_anywhere':
-            return SQLAnywhereConnector(self.config_parser, 'source')
-        else:
-            raise ValueError(f"Unsupported source database type: {source_db_type}")
-
-    def connect_to_target_db(self):
-        target_db_type = self.config_parser.get_target_db_type()
-        if self.config_parser.get_log_level() == 'DEBUG':
-            self.logger.debug(f"Connecting to target database with connection string: {self.config_parser.get_target_connect_string()}")
-        if target_db_type == 'postgresql':
-            return PostgreSQLConnector(self.config_parser, 'target')
-        else:
-            raise ValueError(f"Unsupported target database type: {target_db_type}")
+            self.logger.debug(f"Loading connector for {source_or_target} with database type: {database_type}")
+        if source_or_target == 'target' and database_type != 'postgresql':
+            raise ValueError("Target database type must be 'postgresql'")
+        # Check if the database type is supported
+        database_module = constants.MIGRATOR_MODULES.get(database_type)
+        if not database_module:
+            raise ValueError(f"Unsupported database type: {database_type}")
+        # Import the module and get the class
+        module_name, class_name = database_module.split(':')
+        if not module_name or not class_name:
+            raise ValueError(f"Invalid module format: {database_module}")
+        # Import the module and get the class
+        module = importlib.import_module(module_name)
+        connector_class = getattr(module, class_name)
+        return connector_class(self.config_parser, source_or_target)
 
     def run_post_migration_script(self):
         post_migration_script = self.config_parser.get_post_migration_script()
@@ -283,7 +268,7 @@ class Orchestrator:
 
             # Each worker uses its own separate connection to the target database
             if settings['target_db_type'] == 'postgresql':
-                worker_target_connection = PostgreSQLConnector(self.config_parser, 'target')
+                worker_target_connection = self.load_connector('target')
             else:
                 raise ValueError(f"Unsupported target database type: {settings['target_db_type']}")
 
@@ -306,22 +291,7 @@ class Orchestrator:
             if settings['migrate_data']:
                 # data migration
                 part_name = 'connect source'
-                if settings['source_db_type'] == 'postgresql':
-                    worker_source_connection = PostgreSQLConnector(self.config_parser, 'source')
-                elif settings['source_db_type'] == 'informix':
-                    worker_source_connection = InformixConnector(self.config_parser, 'source')
-                elif settings['source_db_type'] == 'sybase_ase':
-                    worker_source_connection = SybaseASEConnector(self.config_parser, 'source')
-                elif settings['source_db_type'] == 'mssql':
-                    worker_source_connection = MsSQLConnector(self.config_parser, 'source')
-                elif settings['source_db_type'] == 'mysql':
-                    worker_source_connection = MySQLConnector(self.config_parser, 'source')
-                elif settings['source_db_type'] == 'ibm_db2':
-                    worker_source_connection = IBMDB2Connector(self.config_parser, 'source')
-                elif settings['source_db_type'] == 'sql_anywhere':
-                    worker_source_connection = SQLAnywhereConnector(self.config_parser, 'source')
-                else:
-                    raise ValueError(f"Unsupported source database type: {settings['source_db_type']}")
+                worker_source_connection = self.load_connector('source')
 
                 part_name = 'migrate data'
                 self.logger.info(f"Worker {worker_id}: Migrating data for table {target_table} from source database.")
@@ -404,10 +374,7 @@ class Orchestrator:
             self.logger.info(f"Worker {worker_id}: Creating index {index_name} in target database.")
 
             # Each worker uses its own separate connection to the target database
-            if target_db_type == 'postgresql':
-                worker_target_connection = PostgreSQLConnector(self.config_parser, 'target')
-            else:
-                raise ValueError(f"Unsupported target database type: {target_db_type}")
+            worker_target_connection = self.load_connector('target')
 
             if self.config_parser.get_log_level() == 'DEBUG':
                 self.logger.debug(f"Worker {worker_id}: Creating index with SQL: {create_index_sql}")
@@ -438,10 +405,7 @@ class Orchestrator:
             self.logger.info(f"Worker {worker_id}: Creating constraint {constraint_name} in target database.")
 
             # Each worker uses its own separate connection to the target database
-            if target_db_type == 'postgresql':
-                worker_target_connection = PostgreSQLConnector(self.config_parser, 'target')
-            else:
-                raise ValueError(f"Unsupported target database type: {target_db_type}")
+            worker_target_connection = self.load_connector('target')
 
             if self.config_parser.get_log_level() == 'DEBUG':
                 self.logger.debug(f"Worker {worker_id}: Creating constraint with SQL: {create_constraint_sql}")

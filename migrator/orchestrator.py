@@ -601,8 +601,8 @@ class Orchestrator:
             for col in table_data['target_columns'].keys():
                 column_comment = table_data['target_columns'][col]['comment']
                 if column_comment:
-                    query = f"""COMMENT ON COLUMN "{table_data['target_columns'][col]['target_schema']}"."{table_data['target_columns'][col]['target_table']}"."{column_data['target_columns'][col]['target_column']}" IS '{column_comment}'"""
-                    self.logger.info(f"Setting comment for column {column_data['target_columns'][col]['target_column']} in target database.")
+                    query = f"""COMMENT ON COLUMN "{table_data['target_columns'][col]['target_schema']}"."{table_data['target_columns'][col]['target_table']}"."{table_data['target_columns'][col]['target_column']}" IS '{column_comment}'"""
+                    self.logger.info(f"Setting comment for column {table_data['target_columns'][col]['target_column']} in target database.")
                     self.target_connection.execute_query(query)
 
         all_indexes = self.migrator_tables.fetch_all_indexes()

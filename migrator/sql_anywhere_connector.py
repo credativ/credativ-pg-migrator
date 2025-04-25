@@ -1,6 +1,7 @@
 from database_connector import DatabaseConnector
 from migrator_logging import MigratorLogger
 import sqlanydb
+import pyodbc
 
 class SQLAnywhereConnector(DatabaseConnector):
     def __init__(self, config_parser, source_or_target):
@@ -14,8 +15,19 @@ class SQLAnywhereConnector(DatabaseConnector):
         self.logger = MigratorLogger(self.config_parser.get_log_file()).logger
 
     def connect(self):
-        connection_string = self.config_parser.get_connect_string(self.source_or_target)
-        self.connection = sqlanydb.connect(connection_string)
+        if self.config_parser.get_connectivity(self.source_or_target) == 'native':
+            config = self.config_parser.get_db_config(self.source_or_target)
+            self.connection = sqlanydb.connect(
+                    userid=config['username'],
+                    pwd=config['password'],
+                    host=f"{config['host']}:{config['port']}",
+                    dbn=config['database'])
+            # self.connection = sqlanydb.connect(connection_string)
+        elif self.config_parser.get_connectivity(self.source_or_target) == 'odbc':
+            connection_string = self.config_parser.get_connect_string(self.source_or_target)
+            if self.config_parser.get_log_level() == 'DEBUG':
+                self.logger.debug(f"SQL Anywhere ODBC connection string: {connection_string}")
+            self.connection = pyodbc.connect(connection_string)
 
     def disconnect(self):
         try:

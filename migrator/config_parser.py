@@ -118,10 +118,10 @@ class ConfigParser:
             if connectivity == 'native':
                 # return f"DSN={db_config['dsn']};UID={db_config['username']};PWD={db_config['password']}"
                 # return f"host={db_config['host']};port={db_config['port']};database={db_config['database']};uid={db_config['username']};pwd={db_config['password']}"
-                return f"host={db_config['host']}:{db_config['port']};dbn={db_config['database']};uid={db_config['username']};pwd={db_config['password']}"
+                return f"HOST={db_config['host']};PORT={db_config['port']};UID={db_config['username']};PWD={db_config['password']};DBN={db_config['database']}"
             # connection_string = "host=localhost:2639;uid=dba;pwd=sql;dbn=isovision"
-            # elif connectivity == 'odbc':
-            #     return f"DRIVER={db_config['odbc']['driver']};SERVER={db_config['host']};PORT={db_config['port']};DATABASE={db_config['database']};UID={db_config['username']};PWD={db_config['password']}"
+            elif connectivity == 'odbc':
+                return f"DRIVER={'{'+db_config['odbc']['driver']+'}'};SERVER={db_config['host']};PORT={db_config['port']};UID={db_config['username']};PWD={db_config['password']};DBN={db_config['database']}"
             # elif connectivity == 'jdbc':
             #     return f"jdbc:sqlanywhere://{db_config['host']}:{db_config['port']}/{db_config['database']};UID={db_config['username']};PWD={db_config['password']}"
             else:

@@ -267,6 +267,18 @@ class ConfigParser:
     def get_exclude_tables(self):
         return self.config['exclude_tables']
 
+    def get_include_views(self):
+        include_views = self.config.get('include_views', [])
+        if type(include_views) is str:
+            return '.*'
+        elif type(include_views) is list:
+            return include_views
+        else:
+            return []
+
+    def get_exclude_views(self):
+        return self.config.get('exclude_views', [])
+
     def get_include_funcprocs(self):
         include_funcprocs = self.config.get('include_funcprocs', [])
         if type(include_funcprocs) is str:

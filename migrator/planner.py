@@ -261,8 +261,24 @@ class Planner:
         if self.config_parser.should_migrate_views():
             self.logger.info("Processing views...")
             views = self.source_connection.fetch_views_names(self.source_schema)
+
+            include_views = self.config_parser.get_include_views()
+            exclude_views = self.config_parser.get_exclude_views() or []
+
+            if self.config_parser.get_log_level() == 'DEBUG':
+                self.logger.debug(f"Source views: {views}")
+                self.logger.debug(f"Include views: {include_views}")
+                self.logger.debug(f"Exclude views: {exclude_views}")
+
             for order_num, view_info in views.items():
                 self.logger.info(f"Processing view ({order_num}): {view_info}")
+                if not any(fnmatch.fnmatch(view_info['view_name'], pattern) for pattern in include_views):
+                    self.logger.info(f"View {view_info['view_name']} does not match patterns for migration.")
+                    continue
+                if any(fnmatch.fnmatch(view_info['view_name'], pattern) for pattern in exclude_views):
+                    self.logger.info(f"View {view_info['view_name']} is excluded from migration.")
+                    continue
+                self.logger.info(f"View {view_info['view_name']} is included for migration.")
                 settings = {
                     'view_id': view_info['id'],
                     'source_schema': self.config_parser.get_source_schema(),

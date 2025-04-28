@@ -8,6 +8,6 @@ setup(
     author_email='josef.machytka@credativ.de',
     description='Description of my package',
     packages=find_packages(),
-    install_requires=['psycopg2', 'jaydebeapi', 'pyyaml', 'pandas', 'pyodbc'],
+    install_requires=['psycopg2', 'jaydebeapi', 'pyyaml', 'pandas', 'pyodbc', 'importlib'],
     entry_points={'console_scripts': ['credativ-pg-migrator = migrator:main']},
 )

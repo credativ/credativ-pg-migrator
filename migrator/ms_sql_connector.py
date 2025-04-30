@@ -136,6 +136,10 @@ class MsSQLConnector(DatabaseConnector):
         converted = {}
         if target_db_type == 'postgresql':
             type_mapping = {
+                'UNIQUEIDENTIFIER': 'UUID',
+                'ROWVERSION': 'BYTEA',
+                'SQL_VARIANT': 'BYTEA',
+
                 'BIGDATETIME': 'TIMESTAMP',
                 'DATE': 'DATE',
                 'DATETIME': 'TIMESTAMP',

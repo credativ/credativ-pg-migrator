@@ -331,8 +331,24 @@ class Orchestrator:
                     'primary_key_columns_types': table_data['primary_key_columns_types'],
                     'batch_size': settings['batch_size'],
                     'migrator_tables': settings['migrator_tables'],
-                    'migration_limitation': settings['migrator_tables'].check_data_migration_limitation(table_data['source_table']),
+                    'migration_limitation': '',
                 }
+
+                rows_migration_limitations = settings['migrator_tables'].get_records_data_migration_limitation(table_data['source_table'])
+                migration_limitations = []
+                if rows_migration_limitations:
+                    self.logger.info(f"Worker {worker_id}: Found data migration limitations matching table {target_table}: {rows_migration_limitations}")
+                    for limitation in rows_migration_limitations:
+                        where_clause = limitation[0]
+                        use_when_column_name = limitation[1]
+                        for col_order_num, column_info in table_data['source_columns'].items():
+                            column_name = column_info['name']
+                            if column_name == use_when_column_name or re.match(use_when_column_name, column_name):
+                                self.logger.info(f"Worker {worker_id}: Column {column_name} matches migration limitation.")
+                                migration_limitations.append(where_clause)
+                    if migration_limitations:
+                        settings['migration_limitation'] = f"{' AND '.join(migration_limitations)}" if migration_limitations else ''
+                        self.logger.info(f"Worker {worker_id}: Migration limitations for table {target_table}: {migration_limitations}")
                 rows_migrated = worker_source_connection.migrate_table(worker_target_connection, settings)
                 worker_source_connection.disconnect()
 

@@ -88,31 +88,34 @@ class MigratorTables:
         CREATE TABLE IF NOT EXISTS "{self.protocol_schema}".data_migration_limitation (
         source_table_name TEXT,
         where_limitation TEXT,
+        use_when_column_present TEXT,
         inserted TIMESTAMP DEFAULT clock_timestamp()
         )
         """)
 
         # Insert data into the table
-        for source_table_name, where_limitation in self.config_parser.get_data_migration_limitation():
+        for source_table_name, where_limitation, use_when_column_present in self.config_parser.get_data_migration_limitation():
             self.protocol_connection.execute_query(f"""
             INSERT INTO "{self.protocol_schema}".data_migration_limitation
-            (source_table_name, where_limitation)
-            VALUES (%s, %s)
-            """, (source_table_name, where_limitation))
+            (source_table_name, where_limitation, use_when_column_present)
+            VALUES (%s, %s, %s)
+            """, (source_table_name, where_limitation, use_when_column_present))
 
-    def check_data_migration_limitation(self, source_table_name):
+    def get_records_data_migration_limitation(self, source_table_name):
         query = f"""
-        SELECT where_limitation
+        SELECT where_limitation, use_when_column_present
         FROM "{self.protocol_schema}".data_migration_limitation
         WHERE trim('{source_table_name}') = trim(source_table_name)
         OR trim('{source_table_name}') ~ trim(source_table_name)
         """
+        # if self.config_parser.get_log_level() == 'DEBUG':
+        #     self.logger.debug(f"get_records_data_migration_limitation query: {query}")
         cursor = self.protocol_connection.connection.cursor()
         cursor.execute(query)
-        result = cursor.fetchone()
+        result = cursor.fetchall()
         cursor.close()
         if result:
-            return result[0]
+            return result
         else:
             return None
 

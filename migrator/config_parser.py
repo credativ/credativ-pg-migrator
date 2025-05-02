@@ -206,6 +206,12 @@ class ConfigParser:
     def get_default_values_substitution(self):
         return self.config.get('default_values_substitution', {})
 
+    def get_data_migration_limitation(self):
+        return self.config.get('data_migration_limitation', {})
+
+    def get_remote_objects_substitution(self):
+        return self.config.get('remote_objects_substitution', {})
+
     ## Migration settings
     def should_drop_schema(self):
         return self.config.get('migration', {}).get('drop_schema', False)

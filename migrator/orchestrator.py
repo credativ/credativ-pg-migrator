@@ -6,6 +6,7 @@ from migrator_tables import MigratorTables
 import traceback
 import uuid
 import fnmatch
+import re
 
 class Orchestrator:
     def __init__(self, config_parser):
@@ -94,7 +95,7 @@ class Orchestrator:
             'drop_tables': self.config_parser.should_drop_tables(),
             'migrate_data': self.config_parser.should_migrate_data(),
             'batch_size': self.config_parser.get_batch_size(),
-            'migrator_tables': self.migrator_tables
+            'migrator_tables': self.migrator_tables,
         }
 
         self.logger.info(f"Starting {workers_requested} parallel workers to create tables in target database.")
@@ -313,6 +314,7 @@ class Orchestrator:
                     'primary_key_columns_types': table_data['primary_key_columns_types'],
                     'batch_size': settings['batch_size'],
                     'migrator_tables': settings['migrator_tables'],
+                    'migration_limitation': settings['migrator_tables'].check_data_migration_limitation(table_data['source_table']),
                 }
                 rows_migrated = worker_source_connection.migrate_table(worker_target_connection, settings)
                 worker_source_connection.disconnect()
@@ -472,6 +474,13 @@ class Orchestrator:
                                             self.config_parser.get_target_schema(),
                                             table_names)
 
+                        rows = self.migrator_tables.get_records_remote_objects_substitution()
+                        if rows:
+                            for row in rows:
+                                if self.config_parser.get_log_level() == 'DEBUG':
+                                    self.logger.debug(f"Funcs/Procs - remote objects substituting {row[0]} with {row[1]}")
+                                converted_code = re.sub(re.escape(row[0]), row[1], converted_code, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
+
                         self.migrator_tables.insert_funcprocs(self.source_schema, funcproc_data['name'], funcproc_id, funcproc_code, self.target_schema, funcproc_data['name'], converted_code, funcproc_data['comment'])
 
                         if converted_code is not None:
@@ -517,6 +526,14 @@ class Orchestrator:
                             self.logger.debug(f"Trigger details: {trigger_detail}")
 
                         converted_code = trigger_detail['trigger_target_sql']
+
+                        rows = self.migrator_tables.get_records_remote_objects_substitution()
+                        if rows:
+                            for row in rows:
+                                if self.config_parser.get_log_level() == 'DEBUG':
+                                    self.logger.debug(f"Triggers - remote objects substituting {row[0]} with {row[1]}")
+                                converted_code = re.sub(re.escape(row[0]), row[1], converted_code, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
+
                         try:
                             if converted_code is not None:
                                 self.logger.info(f"Creating trigger {trigger_detail['trigger_name']} in target database.")

@@ -28,6 +28,11 @@ class MigratorTables:
         self.create_table_for_triggers()
         self.create_table_for_views()
 
+        self.prepare_data_types_substitution()
+        self.prepare_default_values_substitution()
+        self.prepare_data_migration_limitation()
+        self.prepare_remote_objects_substitution()
+
     def prepare_data_types_substitution(self):
         # Drop table if exists
         self.protocol_connection.execute_query(f"""
@@ -77,6 +82,77 @@ class MigratorTables:
                 return result[0], result[1]
             else:
                 return None, None
+
+    def prepare_data_migration_limitation(self):
+        # Drop table if exists
+        self.protocol_connection.execute_query(f"""
+        DROP TABLE IF EXISTS "{self.protocol_schema}".data_migration_limitation;
+        """)
+        # Create table if not exists
+        self.protocol_connection.execute_query(f"""
+        CREATE TABLE IF NOT EXISTS "{self.protocol_schema}".data_migration_limitation (
+        source_table_name TEXT,
+        where_limitation TEXT,
+        inserted TIMESTAMP DEFAULT clock_timestamp()
+        )
+        """)
+
+        # Insert data into the table
+        for source_table_name, where_limitation in self.config_parser.get_data_migration_limitation():
+            self.protocol_connection.execute_query(f"""
+            INSERT INTO "{self.protocol_schema}".data_migration_limitation
+            (source_table_name, where_limitation)
+            VALUES (%s, %s)
+            """, (source_table_name, where_limitation))
+
+    def check_data_migration_limitation(self, source_table_name):
+        query = f"""
+        SELECT where_limitation
+        FROM "{self.protocol_schema}".data_migration_limitation
+        WHERE trim('{source_table_name}') = trim(source_table_name)
+        OR trim('{source_table_name}') ~ trim(source_table_name)
+        """
+        cursor = self.protocol_connection.connection.cursor()
+        cursor.execute(query)
+        result = cursor.fetchone()
+        cursor.close()
+        if result:
+            return result[0]
+        else:
+            return None
+
+    def prepare_remote_objects_substitution(self):
+        # Drop table if exists
+        self.protocol_connection.execute_query(f"""
+        DROP TABLE IF EXISTS "{self.protocol_schema}".remote_objects_substitution;
+        """)
+        # Create table if not exists
+        self.protocol_connection.execute_query(f"""
+        CREATE TABLE IF NOT EXISTS "{self.protocol_schema}".remote_objects_substitution (
+        source_object_name TEXT,
+        target_object_name TEXT,
+        inserted TIMESTAMP DEFAULT clock_timestamp()
+        )
+        """)
+
+        # Insert data into the table
+        for source_object_name, target_object_name in self.config_parser.get_remote_objects_substitution():
+            self.protocol_connection.execute_query(f"""
+            INSERT INTO "{self.protocol_schema}".remote_objects_substitution
+            (source_object_name, target_object_name)
+            VALUES (%s, %s)
+            """, (source_object_name, target_object_name))
+
+    def get_records_remote_objects_substitution(self):
+        query = f"""
+        SELECT source_object_name, target_object_name
+        FROM "{self.protocol_schema}".remote_objects_substitution
+        """
+        cursor = self.protocol_connection.connection.cursor()
+        cursor.execute(query)
+        result = cursor.fetchall()
+        cursor.close()
+        return result
 
     def prepare_default_values_substitution(self):
         # Drop table if exists

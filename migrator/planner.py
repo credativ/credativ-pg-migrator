@@ -5,6 +5,7 @@ from migrator_logging import MigratorLogger
 from migrator_tables import MigratorTables
 import fnmatch
 import traceback
+import re
 
 class Planner:
     def __init__(self, config_parser):
@@ -132,7 +133,24 @@ class Planner:
             try:
                 source_columns = self.source_connection.fetch_table_columns(self.source_schema, table_info['table_name'], self.migrator_tables)
                 if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"Source columns: {source_columns}")
+                    self.logger.debug(f"Fetched source columns: {source_columns}")
+
+                for col_order_num, column_info in source_columns.items():
+
+                    # if self.config_parser.get_log_level() == 'DEBUG':
+                    #     self.logger.debug(f"Substituting data type: {row[7]}, {migrator_tables.check_data_types_substitution(row[7])}")
+
+                    substitution = self.migrator_tables.check_data_types_substitution(column_info['default'])
+                    if substitution and substitution != (None, None):
+                        column_info['type'], column_info['length'] = self.migrator_tables.check_data_types_substitution(column_info['default'])
+
+                    # checking for default values substitution with the new data type
+                    if column_info['default'] != '':
+                        column_info['default'] = self.migrator_tables.check_default_values_substitution(column_info['name'], column_info['type'], column_info['default'])
+
+                    # if self.config_parser.get_log_level() == 'DEBUG':
+                    #     self.logger.debug(f"1 default: {column_info['default']}")
+
                 settings = {
                     'target_db_type': self.config_parser.get_target_db_type(),
                     'target_schema': self.target_schema,
@@ -295,6 +313,14 @@ class Planner:
                     'target_schema': self.config_parser.get_target_schema(),
                 }
                 converted_view_sql = self.source_connection.convert_view_code(view_sql, settings)
+
+                rows = self.migrator_tables.get_records_remote_objects_substitution()
+                if rows:
+                    for row in rows:
+                        if self.config_parser.get_log_level() == 'DEBUG':
+                            self.logger.debug(f"Views - remote objects substituting {row[0]} with {row[1]}")
+                        converted_view_sql = re.sub(re.escape(row[0]), row[1], converted_view_sql, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
+
                 if self.config_parser.get_log_level() == 'DEBUG':
                     self.logger.debug(f"Converted view SQL: {converted_view_sql}")
                 self.migrator_tables.insert_view(self.source_schema, view_info['view_name'], view_info['id'], view_sql,

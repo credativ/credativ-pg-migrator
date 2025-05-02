@@ -167,6 +167,7 @@ class MySQLConnector(DatabaseConnector):
             primary_key_columns = settings['primary_key_columns']
             batch_size = settings['batch_size']
             migrator_tables = settings['migrator_tables']
+            migration_limitation = settings['migration_limitation']
 
             source_table_rows = self.get_rows_count(source_schema, source_table)
             if source_table_rows == 0:
@@ -175,17 +176,27 @@ class MySQLConnector(DatabaseConnector):
             else:
                 self.logger.info(f"Worker {worker_id}: Table {source_schema}.{source_table} has {source_table_rows} rows.")
                 protocol_id = migrator_tables.insert_data_migration(source_schema, source_table, source_table_id, source_table_rows, worker_id, target_schema, target_table, 0)
-                offset = 0
+
+                # Open a cursor and fetch rows in batches
+                query = f'''SELECT * FROM {source_schema.upper()}."{source_table}"'''
+                if migration_limitation:
+                    query += f" WHERE {migration_limitation}"
+
+                if self.config_parser.get_log_level() == 'DEBUG':
+                    self.logger.debug(f"Worker {worker_id}: Fetching data with cursor using query: {query}")
+
+                # offset = 0
                 total_inserted_rows = 0
-                mysql_cursor = self.connection.cursor()
+                cursor = self.connection.cursor()
                 while True:
-                    part_name = 'fetch_data: {source_table} - {offset}'
-                    if primary_key_columns:
-                        query = f"""SELECT * FROM {source_schema}.{source_table} ORDER BY {primary_key_columns} LIMIT {batch_size} OFFSET {offset}"""
-                    else:
-                        query = f"""SELECT * FROM {source_schema}.{source_table} LIMIT {batch_size} OFFSET {offset}"""
-                    mysql_cursor.execute(query)
-                    records = mysql_cursor.fetchall()
+                    # part_name = 'fetch_data: {source_table} - {offset}'
+                    # if primary_key_columns:
+                    #     query = f"""SELECT * FROM {source_schema}.{source_table} ORDER BY {primary_key_columns} LIMIT {batch_size} OFFSET {offset}"""
+                    # else:
+                    #     query = f"""SELECT * FROM {source_schema}.{source_table} LIMIT {batch_size} OFFSET {offset}"""
+                    # cursor.execute(query)
+                    # records = cursor.fetchall()
+                    records = cursor.fetchmany(batch_size)
                     if not records:
                         break
                     if self.config_parser.get_log_level() == 'DEBUG':
@@ -213,16 +224,18 @@ class MySQLConnector(DatabaseConnector):
                                 # Convert integer to boolean
                                 record[column_name] = bool(record[column_name])
 
-                    part_name = f'insert data: {target_table} - {offset}'
+                    if self.config_parser.get_log_level() == 'DEBUG':
+                        self.logger.debug(f"Worker {worker_id}: Starting insert of {len(records)} rows from source table {source_table}")
                     inserted_rows = migrate_target_connection.insert_batch(target_schema, target_table, target_columns, records)
                     total_inserted_rows += inserted_rows
                     self.logger.info(f"Worker {worker_id}: Inserted {inserted_rows} (total: {total_inserted_rows} from: {source_table_rows} ({round(total_inserted_rows/source_table_rows*100, 2)}%)) rows into target table {target_table}")
 
-                    offset += batch_size
+                    # offset += batch_size
 
                 target_table_rows = migrate_target_connection.get_rows_count(target_schema, target_table)
                 self.logger.info(f"Worker {worker_id}: Finished migrating data for table {source_table}.")
                 migrator_tables.update_data_migration_status(protocol_id, True, 'OK', target_table_rows)
+                cursor.close()
                 return target_table_rows
         except mysql.connector.Error as e:
             self.logger.error(f"Worker {worker_id}: Error during {part_name} -> {e}")

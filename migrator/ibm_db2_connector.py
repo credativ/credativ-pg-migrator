@@ -210,6 +210,7 @@ class IBMDB2Connector(DatabaseConnector):
             batch_size = settings['batch_size']
             migrator_tables = settings['migrator_tables']
             source_table_rows = self.get_rows_count(source_schema, source_table)
+            migration_limitation = settings['migration_limitation']
 
             if source_table_rows == 0:
                 self.logger.info(f"Worker {worker_id}: Table {source_table} is empty - skipping data migration.")
@@ -222,6 +223,9 @@ class IBMDB2Connector(DatabaseConnector):
 
                 # Open a cursor and fetch rows in batches
                 query = f'''SELECT * FROM {source_schema.upper()}."{source_table}"'''
+                if migration_limitation:
+                    query += f" WHERE {migration_limitation}"
+
                 if self.config_parser.get_log_level() == 'DEBUG':
                     self.logger.debug(f"Worker {worker_id}: Fetching data with cursor using query: {query}")
 
@@ -271,13 +275,10 @@ class IBMDB2Connector(DatabaseConnector):
                 self.logger.info(f"Worker {worker_id}: Target table {target_schema}.{target_table} has {target_table_rows} rows")
                 migrator_tables.update_data_migration_status(protocol_id, True, 'OK', target_table_rows)
                 cursor.close()
+                return target_table_rows
         except Exception as e:
             self.logger.error(f"Worker {worker_id}: Error during {part_name} -> {e}")
             raise e
-        finally:
-            if self.config_parser.get_log_level() == 'DEBUG':
-                self.logger.debug(f"Worker {worker_id}: Finished processing table {source_table}.")
-            return target_table_rows
 
     def fetch_indexes(self, settings):
         source_table_id = settings['source_table_id']

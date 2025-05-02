@@ -114,9 +114,9 @@ class MsSQLConnector(DatabaseConnector):
                     'other': 'IDENTITY' if row[5] else ''
                 }
 
-                # checking for default values substitution with the original data type
-                if result[row[0]]['default'] != '':
-                    result[row[0]]['default'] = migrator_tables.check_default_values_substitution(result[row[0]]['name'], result[row[0]]['type'], result[row[0]]['default'])
+                # # checking for default values substitution with the original data type
+                # if result[row[0]]['default'] != '':
+                #     result[row[0]]['default'] = migrator_tables.check_default_values_substitution(result[row[0]]['name'], result[row[0]]['type'], result[row[0]]['default'])
 
             cursor.close()
             self.disconnect()
@@ -528,6 +528,7 @@ class MsSQLConnector(DatabaseConnector):
             batch_size = settings['batch_size']
             migrator_tables = settings['migrator_tables']
             source_table_rows = self.get_rows_count(source_schema, source_table)
+            migration_limitation = settings['migration_limitation']
 
             if source_table_rows == 0:
                 self.logger.info(f"Worker {worker_id}: Table {source_table} is empty - skipping data migration.")
@@ -540,6 +541,9 @@ class MsSQLConnector(DatabaseConnector):
 
                 # Open a cursor and fetch rows in batches
                 query = f"SELECT * FROM {source_schema}.{source_table}"
+                if migration_limitation:
+                    query += f" WHERE {migration_limitation}"
+
                 if self.config_parser.get_log_level() == 'DEBUG':
                     self.logger.debug(f"Worker {worker_id}: Fetching data with cursor using query: {query}")
 

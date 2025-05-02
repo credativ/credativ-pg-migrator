@@ -150,12 +150,12 @@ class SybaseASEConnector(DatabaseConnector):
                     'other': 'IDENTITY' if row[6] == 1 else ''
                 }
 
-                # if self.config_parser.get_log_level() == 'DEBUG':
-                #     self.logger.debug(f"0 default: {result[row[0]]['default']}")
-                # checking for default values substitution with the origingal data type
-                if migrator_tables is not None:
-                    if result[row[0]]['default'] != '':
-                        result[row[0]]['default'] = migrator_tables.check_default_values_substitution(result[row[0]]['name'], result[row[0]]['type'], result[row[0]]['default'])
+                # # if self.config_parser.get_log_level() == 'DEBUG':
+                # #     self.logger.debug(f"0 default: {result[row[0]]['default']}")
+                # # checking for default values substitution with the origingal data type
+                # if migrator_tables is not None:
+                #     if result[row[0]]['default'] != '':
+                #         result[row[0]]['default'] = migrator_tables.check_default_values_substitution(result[row[0]]['name'], result[row[0]]['type'], result[row[0]]['default'])
 
                 query_custom_types = f"""
                     SELECT
@@ -196,24 +196,6 @@ class SybaseASEConnector(DatabaseConnector):
                     result[row[0]]['length'] = custom_type[2]
                     if custom_type[3] == 1:
                         result[row[0]]['other'] = 'IDENTITY'
-
-                # if self.config_parser.get_log_level() == 'DEBUG':
-                #     self.logger.debug(f"Substituting data type: {row[7]}, {migrator_tables.check_data_types_substitution(row[7])}")
-                #     if custom_types:
-                #         self.logger.debug(f"Substituting data type: {custom_type[5]}, {migrator_tables.check_data_types_substitution(custom_type[5])}")
-                if migrator_tables is not None:
-                    substitution = migrator_tables.check_data_types_substitution(row[7])
-                    if substitution and substitution != (None, None):
-                        result[row[0]]['type'], result[row[0]]['length'] = migrator_tables.check_data_types_substitution(row[7])
-                    if custom_types and migrator_tables.check_data_types_substitution(custom_type[5]) != (None, None):
-                        result[row[0]]['type'], result[row[0]]['length'] = migrator_tables.check_data_types_substitution(custom_type[5])
-
-                    # checking for default values substitution with the new data type
-                    if result[row[0]]['default'] != '':
-                        result[row[0]]['default'] = migrator_tables.check_default_values_substitution(result[row[0]]['name'], result[row[0]]['type'], result[row[0]]['default'])
-
-                # if self.config_parser.get_log_level() == 'DEBUG':
-                #     self.logger.debug(f"1 default: {result[row[0]]['default']}")
 
             cursor.close()
             self.disconnect()
@@ -897,6 +879,7 @@ class SybaseASEConnector(DatabaseConnector):
             batch_size = settings['batch_size']
             migrator_tables = settings['migrator_tables']
             source_table_rows = self.get_rows_count(source_schema, source_table)
+            migration_limitation = settings['migration_limitation']
 
             if source_table_rows == 0:
                 self.logger.info(f"Worker {worker_id}: Table {source_table} is empty - skipping data migration.")

@@ -7,6 +7,7 @@ import traceback
 import uuid
 import fnmatch
 import re
+import time
 
 class Orchestrator:
     def __init__(self, config_parser):
@@ -273,18 +274,34 @@ class Orchestrator:
             else:
                 raise ValueError(f"Unsupported target database type: {settings['target_db_type']}")
 
-            if self.config_parser.get_log_level() == 'DEBUG':
-                self.logger.debug(f"Worker {worker_id}: Creating table with SQL: {create_table_sql}")
-
             part_name = 'connect target'
             worker_target_connection.connect()
 
             if settings['drop_tables']:
+                if self.config_parser.get_log_level() == 'DEBUG':
+                    self.logger.debug(f"Worker {worker_id}: Dropping tabe {target_table}...")
                 part_name = 'drop table'
-                worker_target_connection.execute_query(f"DROP TABLE IF EXISTS {target_schema}.{target_table} CASCADE")
+                repeat_count = 0
+                ## Retry dropping the table if it fails due to locks or other issues
+                while True:
+                    try:
+                        worker_target_connection.execute_query(f"DROP TABLE IF EXISTS {target_schema}.{target_table} CASCADE")
+                        break
+                    except Exception as e:
+                        if repeat_count > 5:
+                            self.logger.error(f"Worker {worker_id}: Error dropping table {target_table}: {e}")
+                            self.migrator_tables.update_table_status(table_data['id'], False, f'ERROR: {e}')
+                            return False
+                        else:
+                            repeat_count += 1
+                            self.logger.info(f"Worker {worker_id}: Retrying to drop table {target_table} ({repeat_count})...")
+                            part_name = f'retry drop table ({repeat_count})'
+                            time.sleep(10)
                 self.logger.info(f"""Worker {worker_id}: Table "{target_table}" dropped successfully.""")
 
             if settings['create_tables']:
+                if self.config_parser.get_log_level() == 'DEBUG':
+                    self.logger.debug(f"Worker {worker_id}: Creating table with SQL: {create_table_sql}")
                 part_name = 'create table'
                 worker_target_connection.execute_query(create_table_sql)
                 self.logger.info(f"""Worker {worker_id}: Table "{target_table}" created successfully.""")
@@ -474,6 +491,8 @@ class Orchestrator:
                                             self.config_parser.get_target_schema(),
                                             table_names)
 
+                        if self.config_parser.get_log_level() == 'DEBUG':
+                            self.logger.debug("Checking for remote objects substitution in functions/procedures...")
                         rows = self.migrator_tables.get_records_remote_objects_substitution()
                         if rows:
                             for row in rows:
@@ -527,6 +546,8 @@ class Orchestrator:
 
                         converted_code = trigger_detail['trigger_target_sql']
 
+                        if self.config_parser.get_log_level() == 'DEBUG':
+                            self.logger.debug("Checking for remote objects substitution in triggers...")
                         rows = self.migrator_tables.get_records_remote_objects_substitution()
                         if rows:
                             for row in rows:

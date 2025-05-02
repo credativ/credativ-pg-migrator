@@ -28,11 +28,6 @@ class MigratorTables:
         self.create_table_for_triggers()
         self.create_table_for_views()
 
-        self.prepare_data_types_substitution()
-        self.prepare_default_values_substitution()
-        self.prepare_data_migration_limitation()
-        self.prepare_remote_objects_substitution()
-
     def prepare_data_types_substitution(self):
         # Drop table if exists
         self.protocol_connection.execute_query(f"""

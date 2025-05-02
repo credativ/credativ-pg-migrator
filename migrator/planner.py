@@ -101,6 +101,8 @@ class Planner:
             self.migrator_tables.insert_main('Planner', '')
             self.migrator_tables.prepare_data_types_substitution()
             self.migrator_tables.prepare_default_values_substitution()
+            self.migrator_tables.prepare_data_migration_limitation()
+            self.migrator_tables.prepare_remote_objects_substitution()
 
             self.logger.info("Pre-planning part done successfully.")
         except Exception as e:
@@ -137,9 +139,8 @@ class Planner:
 
                 for col_order_num, column_info in source_columns.items():
 
-                    # if self.config_parser.get_log_level() == 'DEBUG':
-                    #     self.logger.debug(f"Substituting data type: {row[7]}, {migrator_tables.check_data_types_substitution(row[7])}")
-
+                    if self.config_parser.get_log_level() == 'DEBUG':
+                        self.logger.debug(f"Checking for data types / default values substitutions for column {column_info}...")
                     substitution = self.migrator_tables.check_data_types_substitution(column_info['default'])
                     if substitution and substitution != (None, None):
                         column_info['type'], column_info['length'] = self.migrator_tables.check_data_types_substitution(column_info['default'])
@@ -314,6 +315,8 @@ class Planner:
                 }
                 converted_view_sql = self.source_connection.convert_view_code(view_sql, settings)
 
+                if self.config_parser.get_log_level() == 'DEBUG':
+                    self.logger.debug("Checking for remote objects substitution in view SQL...")
                 rows = self.migrator_tables.get_records_remote_objects_substitution()
                 if rows:
                     for row in rows:

@@ -31,6 +31,11 @@ class CommandLine:
             default=constants.MIGRATOR_DEFAULT_LOG,
             help=f'Path/name of the log file (default: {constants.MIGRATOR_DEFAULT_LOG})')
 
+        self.parser.add_argument(
+            '--version',
+            action='store_true',
+            help='Show the version of the tool')
+
     def parse_arguments(self):
         self.args = self.parser.parse_args()
         return self.args

@@ -7,6 +7,7 @@ from config_parser import ConfigParser
 from orchestrator import Orchestrator
 from migrator_logging import MigratorLogger
 from planner import Planner
+import constants
 import sys
 import os
 import traceback
@@ -16,6 +17,11 @@ import sys
 def main():
     cmd = CommandLine()
     args = cmd.parse_arguments()
+
+    # Check if the version flag is set
+    if args.version:
+        print(f"Version: {constants.MIGRATOR_VERSION}")
+        sys.exit(0)
 
     signal.signal(signal.SIGINT, ctrlc_signal_handler)
 

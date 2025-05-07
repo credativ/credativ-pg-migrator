@@ -1,7 +1,7 @@
 # Development of credativ-pg-migrator
 
 - Repository contains python solution for migration of the whole database from legacy systems to PostgreSQL.
-- Testing PostgreSQL->PostgreSQL OMDB example is in the [./tests/omdb directory](./tests/omdb/) - see [README](./tests/omdb/README.md) in that directory for more information.
+- Testing examples are in the [tests directory](./tests/) - see [README](./tests/README.md) for more information and READMEs in each subdirectory.
 
 ## Architecture
 
@@ -10,22 +10,29 @@
 ## Main features
 
 - Pure python solution, uses only standard libraries, structured in modules, written in object-oriented style in classes
-- Supports migration of tables, column constraints and defaults, primary keys, secondary indexes, foreign keys, functions/procedures, triggers and views from source to target database
+- Supports migration of tables, column constraints and defaults, data, primary keys, secondary indexes, foreign keys, functions/procedures, triggers and views from source to target database
 - If tables have sequences, migrator sets current values of sequences on the target database
 - Migration of views is currently only in rudimentary version, just replacing source schema names in code with target schema names
-- Conversion and migration of functions, procedures, triggers currently fully works for Informix, and is in progress for Sybase
-- Migrator allows customizable substitutions of data types, default values of columns, calls of remote objects
-- Migrator provides reach logging and error handling, has 2 levels of logging - INFO and DEBUG, in case of error, detailed error message is printed
-- By default logging messages are printed both to console and to log file, name of the log file is configurable in command line arguments
-- Rich information is also logged to the migration database - see below
+- Conversion and migration of functions, procedures, triggers currently fully works for Informix. Can be added on demand for other databases too.
+- Migrator allows customizable substitutions of data types, default values of columns, calls of remote objects.
+- User can also define limitations for migration of data - as where conditions for tables. This option requires good analysis of dependencies in the source database. Missing data can break Foreign Key constraints in the target database. See further in the documentation.
+- Migrator provides reach logging and error handling, has 2 levels of logging - INFO and DEBUG, in case of error, detailed error message is printed.
+- By default logging messages are printed both to console and to log file, name of the log file is configurable in command line arguments.
+- Rich information is also logged to the migration database - see below.
 
 ## Source databases
 
-- Currently supported source databases are Informix, Sybase ASE, PostgreSQL
-- Basic support for MS SQL Server is in progress
+- Currently supported source databases are:
+  - Informix
+  - Sybase ASE
+  - IBM dDB2 LUW
+  - MS SQL Server
+  - SQL Anywhere
+  - MySQL/MariaDB (engines with INFORMATION_SCHEMA)
+  - PostgreSQL
 - Source database connector must implement DatabaseConnector class from the migrator.database_connector module
 - Methods of this class contain descriptions of actions and return values that are expected by the migrator tool
-- Support database should be accessed via ODBC, JDBC or native client libraries
+- Support database should be accessed via ODBC, JDBC or native python libraries
 
 ## Target databases
 
@@ -37,17 +44,18 @@
 - Solution uses a migration database to store metadata about the migration process
 - Migration database is a PostgreSQL database, credentials must be configured in the configuration file
 - In most cases we assume that the migration database will the same as the target database, but it is fully possible to use a different database from the same or different PostgreSQL server
+- Migration protocol tables contain detailed information about all migrated objects, like source code, target code, success or failure of migration, etc.
 
 ## Configuration file
 
 - Configuration file is a YAML file
-- Settings available in the config file are described in the documentation
+- Settings available in the config file are described in [config_muster.yaml](./config_muster.yaml) file
 
-## Todo
+## TODO
 
 - In Informix we currently do not support ROW data type (corresponds with PostgreSQL composite type)
-- Automatic replacement of cross-database references is in progress
-- Not all types of default values are currently supported
+- Not all types of default values are currently supported simply because we do not know all possible values/functions. Every database is somehow unique, so these will be added on demand.
+- Support for Oracle is still in development due to issues with Oracle containers and testing databases.
 
 ## Structure of the repository
 

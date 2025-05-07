@@ -1,0 +1,129 @@
+# File contains muster configuration file for credativ-pg-migrator
+
+# Migrator database connection for metadata storage
+# Migrator created multiple tables in the database
+# In most cases we presume migrator database is the same as target database, just with different schema
+migrator:
+  type: "postgresql"
+  host: "localhost"
+  port: 5432
+  username: "postgres"
+  password: "postgres"
+  database: "database"
+  schema: "migration"
+
+# source database connection
+# type: "informix", "sybase_ase", "mssql", "ibm_db2", "mysql", "sql_anywhere", "postgresql"
+source:
+  type: "sybase_ase"
+  host: "localhost"
+  port: 5000
+  username: "sa"
+  password: "password"
+  database: "source_database"
+  # schema or owner - depending on the source database - not both
+  schema: "dbo"
+  # connectivity type - "jdbc", "odbc", "native"
+  # "native" does not have any additional section
+  connectivity: "odbc"
+  jdbc:
+    driver: "com.sybase.jdbc4.jdbc.SybDriver"
+    libraries: "../lib/jdbc/jconn4.jar"
+  odbc:
+    driver: 'FreeTDS'
+    libraries: "/usr/lib/x86_64-linux-gnu/odbc/libtdsodbc.so"
+
+# target database connection - always postgresql
+target:
+  type: "postgresql"
+  host: "localhost"
+  port: 5432
+  username: "postgres"
+  password: "postgres"
+  database: "target_database"
+  schema: "target_schema"
+  # settings for the migration process
+  # are optional, if present they will override the default settings in every connection
+  settings:
+    work_mem: '32MB'
+    maintenance_work_mem: '512MB'
+    # role: 'sybase_owner'
+    search_path: "migraene, public"
+
+# recipe for the migration process
+migration:
+  # drop schema if exists - uses DROP CASCADE if true
+  drop_schema: true
+  drop_tables: true
+  truncate_tables: true
+  create_tables: true
+  migrate_data: true
+  migrate_indexes: true
+  migrate_constraints: true
+  migrate_funcprocs: true
+  migrate_triggers: false
+  migrate_views: true
+  set_sequnces: true
+  on_error: continue # stop, continue
+  parallel_workers: 8
+  batch_size: 100000
+  # PostgreSQL scripts for the migration process
+  # Both run on the target database, before and after the migration
+  before_migration_script: scripts/informix_pre_migration.sql
+  after_migration_script: scripts/informix_post_migration.sql
+
+# Specify tables to include in the migration
+# Either one value "all" or list of specific table names or regular expressions
+include_tables: all
+  # - "table1"
+  # - "table_prefix_*"
+
+# Specify tables to exclude from the migration
+# Either empty (no tables excluded) or list of specific table names or regular expressions
+exclude_tables:
+  # - "z_skins"
+  # - "z_skins_er*"
+
+include_views: all
+  # - "view1"
+  # - "view_prefix_*"
+
+exclude_views:
+  # - "z_skins"
+  # - "z_skins_er*"
+
+include_funcprocs: all
+  # - "func1"
+
+exclude_funcprocs:
+  # - "proc1"
+
+
+# Data types substitution
+# source data type, target data type, target data type length
+data_types_substitution:
+  - ["TypMacAdresse", "TEXT", '']
+  - ["TypID", "BIGINT", '']
+
+# Default values substitution
+# column_name, source_column_data_type, source_default_value, target_default_value
+default_values_substitution:
+  - ["", "", "%getdate()%", "statement_timestamp()"]   ## condition with % to catch also "create default job_lastchange as getdate()", "(getdate())" and similar options
+  - ["", "", "db_name()", "current_database()"]
+
+# Substitutions for objects from other databases
+# Informix, Sybase ASE and some other databases allow to use objects from other databases
+# In PostgreSQL we must replace them with foreign tables linking to the original database
+# "source_db:source_schema.source_object", "target_schema.target_object"
+remote_objects_substitution:
+  - ["remotedb:dbo.table1", "remote_db.table1"]
+
+# functions_substitution:
+#   - ["dbo.func1", "func1"]
+
+# Limitations for data migration
+# "Table name (or pattern)", "condition for limiting data (without WHERE)", "column name (or pattern) - use condition when column is present in the table"
+data_migration_limitation:
+  - [".*", "date >= '2000-01-01'", "date"]
+  - [".*", "movie_id in (select id from movies where date >= '2000-01-01')", "movie_id"]
+  - ["movie_references", "referenced_id in (select id from movies where date >= '2000-01-01')", "referenced_id"]

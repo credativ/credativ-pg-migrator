@@ -3,7 +3,7 @@ import constants
 
 class CommandLine:
     def __init__(self):
-        self.parser = argparse.ArgumentParser(description="Data Migration Tool")
+        self.parser = argparse.ArgumentParser(description="""Data Migration Tool "credativ-pg-migrator", version: {}""".format(constants.MIGRATOR_VERSION))
         self.args = None
         self.setup_arguments()
 

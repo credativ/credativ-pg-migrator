@@ -1,8 +1,14 @@
 # Backlog
 
-# added retries for drop table due to deadlocks or other errors
+## 0.7.1 - 2025.05.07
 
-2025-05-02 13:17:42,519: [ERROR] An error in Orchestrator (table_worker bc89a768-dfb2-481c-84d1-bb955edbd1ad (drop table) category_names): deadlock detected
-DETAIL: Process 450 waits for AccessExclusiveLock on object 31229 of class 2606 of database 30001; blocked by process 451.
-Process 451 waits for AccessExclusiveLock on relation 31073 of database 30001; blocked by process 450.
-HINT: See server log for query details.
+- Fixed issue with migration limitations in Sybase ASE connector
+- Cleaned code of table migration in Sybase ASE connector - removed commented old code
+- Fixed migration summary - wrongly reported count of rows in target table for not fully migrated tables
+- Updated header of help command, added version of the code
+- Fixed issue with finding replacements for default values in migrator_tables
+- Added new debug messages to planner to better see custom defined substitutions
+
+## 0.7.0 - 2025.05.06
+
+- Added versioning of code in constants

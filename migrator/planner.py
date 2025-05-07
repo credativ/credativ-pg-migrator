@@ -141,13 +141,19 @@ class Planner:
 
                     if self.config_parser.get_log_level() == 'DEBUG':
                         self.logger.debug(f"Checking for data types / default values substitutions for column {column_info}...")
-                    substitution = self.migrator_tables.check_data_types_substitution(column_info['default'])
+                    substitution = self.migrator_tables.check_data_types_substitution(column_info['type'])
                     if substitution and substitution != (None, None):
                         column_info['type'], column_info['length'] = self.migrator_tables.check_data_types_substitution(column_info['default'])
+                        if self.config_parser.get_log_level() == 'DEBUG':
+                            self.logger.debug(f"Substituted data type: {column_info['type']}, length: {column_info['length']}")
 
                     # checking for default values substitution with the new data type
                     if column_info['default'] != '':
-                        column_info['default'] = self.migrator_tables.check_default_values_substitution(column_info['name'], column_info['type'], column_info['default'])
+                        substitution = self.migrator_tables.check_default_values_substitution(column_info['name'], column_info['type'], column_info['default'])
+                        if substitution and substitution != None:
+                            column_info['default'] = substitution
+                            if self.config_parser.get_log_level() == 'DEBUG':
+                                self.logger.debug(f"Substituted default value: {column_info['default']}")
 
                     # if self.config_parser.get_log_level() == 'DEBUG':
                     #     self.logger.debug(f"1 default: {column_info['default']}")

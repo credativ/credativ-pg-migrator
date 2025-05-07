@@ -55,7 +55,7 @@ class MigratorTables:
         query = f"""
         SELECT target_type, target_type_length
         FROM "{self.protocol_schema}".data_types_substitution
-        WHERE trim('{check_type}') = trim(source_type)
+        WHERE trim($escape${check_type}$escape$) = trim(source_type)
         """
         cursor = self.protocol_connection.connection.cursor()
         cursor.execute(query)
@@ -67,7 +67,7 @@ class MigratorTables:
             query = f"""
             SELECT target_type, target_type_length
             FROM "{self.protocol_schema}".data_types_substitution
-            WHERE trim('{check_type}') LIKE trim(source_type)
+            WHERE trim($escape${check_type}$escape$) LIKE trim(source_type)
             """
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query)
@@ -1540,8 +1540,8 @@ class MigratorTables:
                 target_table_rows = row[3]
                 migration_time = row[4]
                 formatted_source_rows = f"{source_table_rows:,}".rjust(12)
-                formatted_source_rows = f"{target_table_rows:,}".rjust(12)
-                self.logger.info(f"        {target_schema}.{target_table[:max_table_name_length].ljust(max_table_name_length)}| {formatted_source_rows} <> {formatted_source_rows} | length: {str(migration_time)[:19]:<19}")
+                formatted_target_rows = f"{target_table_rows:,}".rjust(12)
+                self.logger.info(f"        {target_schema}.{target_table[:max_table_name_length].ljust(max_table_name_length)}| {formatted_source_rows} <> {formatted_target_rows} | length: {str(migration_time)[:19]:<19}")
 
         cursor.close()
 

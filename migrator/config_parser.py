@@ -26,7 +26,7 @@ class ConfigParser:
         elif type(include_tables) is str and include_tables == '.*' and type(exclude_tables) is list:
             self.logger.info("Check of include_tables and exclude_tables passed - all tables will be included except for the ones specified")
         elif type(include_tables) is list and type(exclude_tables) is list:
-            if include_tables & exclude_tables:
+            if set(include_tables) & set(exclude_tables):
                 raise ValueError("Configuration error: There are tables specified in both 'include_tables.specific_tables' and 'exclude_tables.specific_tables'.")
 
         if self.config.get('log_level') == 'DEBUG':

@@ -1,5 +1,9 @@
 # Backlog
 
+## 0.7.2
+
+- 2025.05.12: Fixed issue in the config parser logic when both include and exclude tables patterns are defined
+
 ## 0.7.1 - 2025.05.07
 
 - Fixed issue with migration limitations in Sybase ASE connector

@@ -108,12 +108,73 @@ class OracleConnector(DatabaseConnector):
         target_table_name = settings['target_table_name']
         source_columns = settings['source_columns']
         converted_columns = {}
-        # Placeholder for conversion logic
-        return converted_columns, ""
+        create_table_sql = ""
+
+        if target_db_type == 'postgresql':
+            type_mapping = {
+                'VARCHAR': 'VARCHAR',
+                'VARCHAR2': 'VARCHAR',
+                'NUMBER': 'NUMERIC',
+                'DATE': 'TIMESTAMP',
+                'CLOB': 'TEXT',
+                'BLOB': 'BYTEA'
+            }
+
+            for order_num, column in source_columns.items():
+                column_name = column['name']
+                column_type = column['type']
+                column_length = column['length']
+                column_nullable = column['nullable']
+                column_default = column['default']
+                column_comment = column['comment']
+
+                if column_type in type_mapping:
+                    converted_type = type_mapping[column_type]
+                    if converted_type == 'VARCHAR' and column_length:
+                        if column_length > 254:
+                            converted_type = 'TEXT'
+                        else:
+                            converted_type += f"({column_length})"
+                else:
+                    column_type = 'TEXT'
+
+                converted_columns[order_num] = {
+                    'name': column_name,
+                    'type': converted_type,
+                    'length': column_length,
+                    'nullable': column_nullable,
+                    'default': column_default,
+                    'comment': column_comment
+                }
+
+            create_table_sql_parts = []
+            for _, info in converted_columns.items():
+                create_table_sql_column = ""
+                column_name = info['name']
+                column_type = info['type']
+                column_nullable = info['nullable']
+                column_default = info['default']
+                column_comment = info['comment']
+
+                create_table_sql_column = f'''"{column_name}" {column_type} {column_nullable}'''
+
+                if column_default:
+                    create_table_sql_parts.append(f"DEFAULT {column_default}")
+
+                if column_comment:
+                    create_table_sql_parts.append(f"COMMENT '{column_comment}'")
+
+                create_table_sql_parts.append(create_table_sql_column)
+
+            create_table_sql = ", ".join(create_table_sql_parts)
+            create_table_sql = f'''CREATE TABLE "{target_schema}"."{target_table_name}" ({create_table_sql});'''
+        else:
+            raise ValueError(f"Unsupported target database type: {target_db_type}")
+
+        return converted_columns, create_table_sql
 
     def migrate_table(self, migrate_target_connection, settings):
-        # Placeholder for migration logic
-        pass
+        return 0
 
     def fetch_indexes(self, settings):
         source_table_id = settings['source_table_id']
@@ -122,8 +183,43 @@ class OracleConnector(DatabaseConnector):
         target_schema = settings['target_schema']
         target_table_name = settings['target_table_name']
         target_columns = settings['target_columns']
-        # Placeholder for fetching indexes
+        table_indexes = {}
+        order_num = 1
         return {}
+
+        index_query = f"""
+            SELECT index_name, uniqueness, column_name
+            FROM all_ind_columns
+            WHERE table_owner = '{source_schema.upper()}' AND table_name = '{source_table_name.upper()}'
+            ORDER BY index_name, column_position
+        """
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(index_query)
+            for row in cursor.fetchall():
+                index_name = row[0]
+                uniqueness = row[1]
+                column_name = row[2]
+
+                if index_name not in table_indexes:
+                    table_indexes[index_name] = {
+                        'name': index_name,
+                        'unique': uniqueness,
+                        'columns': []
+                    }
+
+                if column_name in target_columns:
+                    table_indexes[index_name]['columns'].append(target_columns[column_name]['name'])
+
+            cursor.close()
+            self.disconnect()
+            return table_indexes
+
+        except Exception as e:
+            self.logger.error(f"Error executing query: {index_query}")
+            self.logger.error(e)
+            raise
 
     def fetch_constraints(self, settings):
         source_table_id = settings['source_table_id']

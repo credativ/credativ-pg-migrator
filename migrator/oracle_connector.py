@@ -16,9 +16,19 @@ class OracleConnector(DatabaseConnector):
     def connect(self):
         connection_string = self.config_parser.get_connect_string(self.source_or_target)
         username = self.config_parser.get_db_config(self.source_or_target)['username']
-        password = self.config_parser.get_db_config(self.source_or_target)['password']
         try:
-            self.connection = cx_Oracle.connect(username, password, connection_string)
+            if username == 'SYS':
+                self.connection = cx_Oracle.connect(user=username,
+                                                    password=self.config_parser.get_db_config(self.source_or_target)['password'],
+                                                    dsn=connection_string,
+                                                    encoding="UTF-8",
+                                                    mode=cx_Oracle.SYSDBA)
+            else:
+                self.connection = cx_Oracle.connect(user=username,
+                                                    password = self.config_parser.get_db_config(self.source_or_target)['password'],
+                                                    dsn=connection_string,
+                                                    encoding="UTF-8")
+
         except ImportError as e:
             self.logger.error("cx_Oracle module is not installed.")
             raise e

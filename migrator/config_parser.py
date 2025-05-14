@@ -135,6 +135,15 @@ class ConfigParser:
             #     return f"jdbc:sqlanywhere://{db_config['host']}:{db_config['port']}/{db_config['database']};UID={db_config['username']};PWD={db_config['password']}"
             else:
                 raise ValueError(f"Unsupported SQL Anywhere connectivity: {connectivity}")
+        elif db_config['type'] == 'oracle':
+            # if connectivity == 'native':
+            #     return f"oracle://{db_config['username']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
+            if connectivity == 'native':
+                return f"{db_config['host']}:{db_config['port']}/{db_config['database']}"
+            elif connectivity == 'jdbc':
+                return f"jdbc:oracle:thin:@{db_config['host']}:{db_config['port']}:{db_config['database']}"
+            else:
+                raise ValueError(f"Unsupported Oracle connectivity: {connectivity}")
         else:
             raise ValueError(f"Unsupported database type: {db_config['type']}")
 

@@ -186,6 +186,13 @@ class OracleConnector(DatabaseConnector):
         table_indexes = {}
         order_num = 1
 
+        ## for the future reference - oracle function to get DDL
+        # SELECT DBMS_METADATA.GET_DDL('INDEX', index_name, table_owner) AS ddl
+        # FROM   dba_indexes
+        # WHERE  table_owner = 'C##CHINOOK'
+        # AND  table_name = 'ALBUM';
+        # 'TABLE', 'INDEX', 'VIEW', 'SEQUENCE', 'PACKAGE', 'FUNCTION', 'PROCEDURE', 'CONSTRAINT', 'TRIGGER', 'SYNONYM'
+
         index_query = f"""
                         SELECT
                             ai.index_name,
@@ -263,8 +270,86 @@ class OracleConnector(DatabaseConnector):
         source_table_name = settings['source_table_name']
         target_schema = settings['target_schema']
         target_table_name = settings['target_table_name']
-        # Placeholder for fetching constraints
-        return {}
+        order_num = 1
+        table_constraints = {}
+        constraints_query = f"""
+            SELECT
+                fk_cons.constraint_name AS fk_constraint_name,
+                fk_cons.delete_rule,
+                fk_cons.status,
+                    listagg('"'||fk_col.column_name||'"', ', ') WITHIN GROUP (ORDER BY fk_col.position) AS fk_columns,
+                pk_cons.owner AS pk_owner,
+                pk_cons.table_name AS pk_table_name,
+                pk_cons.constraint_name AS pk_constraint_name,
+                    listagg('"'||pk_col.column_name||'"', ', ') WITHIN GROUP (ORDER BY pk_col.position) AS pk_columns
+            FROM
+                all_constraints fk_cons
+            JOIN
+                all_cons_columns fk_col ON fk_cons.owner = fk_col.owner
+                                        AND fk_cons.constraint_name = fk_col.constraint_name
+                                        AND fk_cons.table_name = fk_col.table_name
+            JOIN
+                all_constraints pk_cons ON fk_cons.r_owner = pk_cons.owner
+                                        AND fk_cons.r_constraint_name = pk_cons.constraint_name
+            JOIN
+                all_cons_columns pk_col ON pk_cons.owner = pk_col.owner
+                                        AND pk_cons.constraint_name = pk_col.constraint_name
+                                        AND pk_cons.table_name = pk_col.table_name
+                                        AND fk_col.position = pk_col.position -- Ensures correct order for composite keys
+            WHERE
+                fk_cons.constraint_type = 'R'
+                AND fk_cons.owner = '{source_schema.upper()}'
+                AND fk_cons.table_name = '{source_table_name.upper()}'
+            GROUP BY
+                fk_cons.constraint_name,
+                fk_cons.delete_rule,
+                fk_cons.status,
+                pk_cons.owner,
+                pk_cons.table_name,
+                pk_cons.constraint_name
+            ORDER BY
+                fk_cons.constraint_name
+        """
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(constraints_query)
+            for row in cursor.fetchall():
+                constraint_name = row[0]
+                delete_rule = row[1]
+                status = row[2]  ## ENABLED
+                fk_columns = row[3]
+                pk_owner = row[4]
+                pk_table_name = row[5]
+                pk_constraint_name = row[6]  ## corresponds to the primary key constraint name
+                pk_columns = row[7]
+                constraint_type = 'FOREIGN KEY'
+
+                if constraint_name not in table_constraints:
+                    table_constraints[order_num] = {
+                        'id': None,
+                        'name': constraint_name,
+                        'type': constraint_type,
+                        'sql': '',
+                        'comment': '',
+                    }
+
+                create_constraint_query = None
+                table_constraints[order_num]['sql'] = create_constraint_query
+                if delete_rule == 'CASCADE':
+                    create_constraint_query = f"""ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{constraint_name}" FOREIGN KEY ({fk_columns}) REFERENCES "{target_schema}"."{pk_table_name}" ({pk_columns}) ON DELETE CASCADE"""
+                else:
+                    create_constraint_query = f"""ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{constraint_name}" FOREIGN KEY ({fk_columns}) REFERENCES "{target_schema}"."{pk_table_name}" ({pk_columns})"""
+                table_constraints[order_num]['sql'] = create_constraint_query
+                order_num += 1
+
+            cursor.close()
+            self.disconnect()
+            return table_constraints
+        except Exception as e:
+            self.logger.error(f"Error executing query: {constraints_query}")
+            self.logger.error(e)
+            raise
 
     def fetch_triggers(self, table_id: int, table_schema: str, table_name: str):
         # Placeholder for fetching triggers

@@ -376,8 +376,33 @@ class OracleConnector(DatabaseConnector):
         return {}
 
     def fetch_views_names(self, source_schema: str):
-        # Placeholder for fetching view names
-        return {}
+        views = {}
+        order_num = 1
+        query = f"""
+            SELECT view_name
+            FROM all_views
+            WHERE owner = '{source_schema.upper()}'
+            ORDER BY view_name
+        """
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            for row in cursor.fetchall():
+                views[order_num] = {
+                    'id': None,
+                    'schema_name': source_schema,
+                    'view_name': row[0],
+                    'comment': ''
+                }
+                order_num += 1
+            cursor.close()
+            self.disconnect()
+            return views
+        except Exception as e:
+            self.logger.error(f"Error executing query: {query}")
+            self.logger.error(e)
+            raise
 
     def fetch_view_code(self, settings):
         view_id = settings['view_id']
@@ -385,8 +410,24 @@ class OracleConnector(DatabaseConnector):
         source_view_name = settings['source_view_name']
         target_schema = settings['target_schema']
         target_view_name = settings['target_view_name']
-        # Placeholder for fetching view code
-        return ""
+        query = f"""
+            SELECT text
+            FROM all_views
+            WHERE owner = '{source_schema.upper()}'
+            AND view_name = '{source_view_name.upper()}'
+        """
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            view_code = cursor.fetchone()[0]
+            cursor.close()
+            self.disconnect()
+            return view_code
+        except Exception as e:
+            self.logger.error(f"Error executing query: {query}")
+            self.logger.error(e)
+            raise
 
     def convert_view_code(self, view_code: str, settings: dict):
         # Placeholder for view conversion

@@ -127,3 +127,15 @@ data_migration_limitation:
   - [".*", "date >= '2000-01-01'", "date"]
   - [".*", "movie_id in (select id from movies where date >= '2000-01-01')", "movie_id"]
   - ["movie_references", "referenced_id in (select id from movies where date >= '2000-01-01')", "referenced_id"]
+
+# Configurable partitioning for target tables
+# partitioning:
+#   - description: "partitioning for table1 by date"
+#     table_name: "table1"
+#     partition_by: "date1"  ## one or more columns, comma separated
+#     partitioning_type: "range"  ## range, list, hash
+#     data_range: monthly  ## yearly, monthly, weekly, daily
+# date - by range, select unique values from the column from source table
+# integer - by range or list
+# hash - even data distribution
+

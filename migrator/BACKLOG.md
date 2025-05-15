@@ -1,8 +1,8 @@
 # Backlog
 
-## 0.7.2
+## 0.7.2 - 2025.05.xx
 
-- 2025.05.14: Continuing development of support for Oracle database migration
+- 2025.05.15: Updates in Oracle connector - implemented migration of the full data model
 - 2025.05.12: Fixed issue in the config parser logic when both include and exclude tables patterns are defined
 
 ## 0.7.1 - 2025.05.07

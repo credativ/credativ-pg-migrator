@@ -352,8 +352,53 @@ class OracleConnector(DatabaseConnector):
             raise
 
     def fetch_triggers(self, table_id: int, table_schema: str, table_name: str):
-        # Placeholder for fetching triggers
-        return {}
+        try:
+            triggers = {}
+            order_num = 1
+            query = f"""
+                SELECT
+                    trigger_name,
+                    trigger_type,
+                    triggering_event,
+                    status,
+                    referencing_names
+                FROM all_triggers
+                WHERE table_owner = '{table_schema.upper()}'
+                AND table_name = '{table_name.upper()}'
+                ORDER BY trigger_name
+            """
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            for row in cursor.fetchall():
+                referencing = row[4]
+                old_ref = ""
+                new_ref = ""
+                if referencing:
+                    parts = referencing.split()
+                    if "OLD" in parts:
+                        old_ref = parts[parts.index("OLD") + 2]
+                    if "NEW" in parts:
+                        new_ref = parts[parts.index("NEW") + 2]
+
+                triggers[order_num] = {
+                    'id': None,
+                    'name': row[0],
+                    'event': row[2],
+                    'row_statement': '',
+                    'old': old_ref,
+                    'new': new_ref,
+                    'sql': '',
+                    'comment': ''
+                }
+                order_num += 1
+            cursor.close()
+            self.disconnect()
+            return triggers
+        except Exception as e:
+            self.logger.error(f"Error executing query: {query}")
+            self.logger.error(e)
+            raise
 
     def convert_trigger(self, trig: str, settings: dict):
         # Placeholder for trigger conversion
@@ -430,8 +475,9 @@ class OracleConnector(DatabaseConnector):
             raise
 
     def convert_view_code(self, view_code: str, settings: dict):
-        # Placeholder for view conversion
-        return view_code
+        converted_view_code = view_code
+        converted_view_code = converted_view_code.replace(f'''"{settings['source_schema'].upper()}".''', f'''"{settings['target_schema']}".''')
+        return converted_view_code
 
     def get_sequence_current_value(self, sequence_id: int):
         # Placeholder for fetching sequence current value

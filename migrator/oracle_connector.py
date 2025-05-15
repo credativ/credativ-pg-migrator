@@ -117,7 +117,22 @@ class OracleConnector(DatabaseConnector):
                 'NUMBER': 'NUMERIC',
                 'DATE': 'TIMESTAMP',
                 'CLOB': 'TEXT',
-                'BLOB': 'BYTEA'
+                'BLOB': 'BYTEA',
+                'BOOLEAN': 'BOOLEAN',
+                'CHAR': 'CHAR',
+                'FLOAT': 'FLOAT',
+                'DOUBLE PRECISION': 'DOUBLE PRECISION',
+                'INTERVAL': 'INTERVAL',
+                'TIMESTAMP': 'TIMESTAMP',
+                'SERIAL': 'SERIAL',
+                'BIGSERIAL': 'BIGSERIAL',
+                'INT': 'INTEGER',
+                'BIGINT': 'BIGINT',
+                'INTEGER': 'INTEGER',
+                'SMALLINT': 'SMALLINT',
+                'REAL': 'REAL',
+                'DECIMAL': 'DECIMAL',
+                'NUMBER': 'NUMERIC',
             }
 
             for order_num, column in source_columns.items():
@@ -136,7 +151,7 @@ class OracleConnector(DatabaseConnector):
                         else:
                             converted_type += f"({column_length})"
                 else:
-                    column_type = 'TEXT'
+                    converted_type = 'TEXT'
 
                 converted_columns[order_num] = {
                     'name': column_name,
@@ -159,10 +174,10 @@ class OracleConnector(DatabaseConnector):
                 create_table_sql_column = f'''"{column_name}" {column_type} {column_nullable}'''
 
                 if column_default:
-                    create_table_sql_parts.append(f"DEFAULT {column_default}")
+                    create_table_sql_column +=(f" DEFAULT {column_default}")
 
                 if column_comment:
-                    create_table_sql_parts.append(f"COMMENT '{column_comment}'")
+                    create_table_sql_column +=(f" COMMENT '{column_comment}'")
 
                 create_table_sql_parts.append(create_table_sql_column)
 
@@ -172,6 +187,47 @@ class OracleConnector(DatabaseConnector):
             raise ValueError(f"Unsupported target database type: {target_db_type}")
 
         return converted_columns, create_table_sql
+
+    def get_sequence_details(self, sequence_owner, sequence_name):
+        query = f"""
+            SELECT
+                sequence_name,
+                min_value,
+                max_value,
+                increment_by,
+                cycle_flag,
+                order_flag,
+                cache_size,
+                last_number
+            FROM all_sequences
+            WHERE sequence_owner = '{sequence_owner.upper()}'
+            AND sequence_name = '{sequence_name.upper()}'
+        """
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            result = cursor.fetchone()
+            cursor.close()
+            self.disconnect()
+            if result:
+                return {
+                    'name': result[0],
+                    'min_value': result[1],
+                    'max_value': result[2],
+                    'increment_by': result[3],
+                    'cycle': result[4],
+                    'order': result[5],
+                    'cache_size': result[6],
+                    'last_value': result[7],
+                    'comment': ''
+                }
+            else:
+                return None
+        except Exception as e:
+            self.logger.error(f"Error executing query: {query}")
+            self.logger.error(e)
+            raise
 
     def migrate_table(self, migrate_target_connection, settings):
         return 0

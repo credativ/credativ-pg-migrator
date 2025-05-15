@@ -533,6 +533,10 @@ class SybaseASEConnector(DatabaseConnector):
     def fetch_sequences(self, table_schema: str, table_name: str):
         pass
 
+    def get_sequence_details(self, sequence_owner, sequence_name):
+        # Placeholder for fetching sequence details
+        return {}
+
     def execute_query(self, query: str, params=None):
         cursor = self.connection.cursor()
         if params:

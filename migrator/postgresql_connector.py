@@ -509,6 +509,10 @@ class PostgreSQLConnector(DatabaseConnector):
             self.logger.error(f"Error executing sequence query: {query}")
             self.logger.error(e)
 
+    def get_sequence_details(self, sequence_owner, sequence_name):
+        # Placeholder for fetching sequence details
+        return {}
+
     def get_sequence_current_value(self, sequence_id: int):
         try:
             query = f"""select '"'||relnamespace::regnamespace::text||'"."'||relname||'"' as seqname from pg_class where oid = {sequence_id}"""

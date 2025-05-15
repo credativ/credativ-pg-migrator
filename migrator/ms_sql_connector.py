@@ -665,6 +665,10 @@ class MsSQLConnector(DatabaseConnector):
         # ...existing code from SybaseASEConnector.fetch_sequences...
         pass
 
+    def get_sequence_details(self, sequence_owner, sequence_name):
+        # Placeholder for fetching sequence details
+        return {}
+
     def fetch_user_defined_types(self, schema: str):
         query = """
             SELECT

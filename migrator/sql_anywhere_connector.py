@@ -369,6 +369,10 @@ class SQLAnywhereConnector(DatabaseConnector):
     def fetch_sequences(self, table_schema: str, table_name: str):
         pass
 
+    def get_sequence_details(self, sequence_owner, sequence_name):
+        # Placeholder for fetching sequence details
+        return {}
+
     def fetch_views_names(self, source_schema: str):
         views = {}
         order_num = 1

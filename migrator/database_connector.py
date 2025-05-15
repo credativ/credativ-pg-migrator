@@ -47,6 +47,7 @@ class DatabaseConnector(ABC):
             'precision': column_precision,
             'nullable': column_nullable,
             'default': column_default_value,
+            'default_sequence': True / False,
             'comment': column_comment,
             'other': specific_column_properties
             }
@@ -197,6 +198,26 @@ class DatabaseConnector(ABC):
             'id': sequence_id,
             'column_name': column_name,
             'set_sequence_sql': set_sequence_sql
+            }
+        }
+        """
+        pass
+
+    @abstractmethod
+    def get_sequence_details(self, sequence_owner, sequence_name):
+        """
+        Returns the details of a sequence.
+        Returns: dict
+        { ordinary_number: {
+            'name': sequence_name:
+            'min_value': min_value,
+            'max_value': max_value,
+            'increment_by': increment_by,
+            'cycle': cycle,
+            'order': order,
+            'cache_size': cache_size,
+            'last_value': last_value,
+            'comment': sequence_comment
             }
         }
         """

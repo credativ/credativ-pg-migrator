@@ -429,6 +429,10 @@ class IBMDB2Connector(DatabaseConnector):
         # Placeholder for fetching sequences
         return {}
 
+    def get_sequence_details(self, sequence_owner, sequence_name):
+        # Placeholder for fetching sequence details
+        return {}
+
     def fetch_views_names(self, source_schema: str):
         # Placeholder for fetching view names
         return {}

@@ -155,8 +155,26 @@ class Planner:
                             if self.config_parser.get_log_level() == 'DEBUG':
                                 self.logger.debug(f"Substituted default value: {column_info['default']}")
 
-                    # if self.config_parser.get_log_level() == 'DEBUG':
-                    #     self.logger.debug(f"1 default: {column_info['default']}")
+                    # check if default is a sequence
+
+                    if self.config_parser.get_db_type('source') == 'oracle':
+                        if self.config_parser.get_log_level() == 'DEBUG':
+                            self.logger.debug(f"Checking if default value is a sequence for column {column_info['name']} (column_info['default'])...")
+                        if (isinstance(column_info['default'], str)
+                            and 'nextval' in column_info['default'].lower()):
+                            parts = column_info['default'].replace('"', '').split(".")
+                            if len(parts) == 3:
+                                owner, seq_name, _ = parts
+                                sequence_details = self.source_connection.get_sequence_details(owner, seq_name)
+                                if sequence_details:
+                                    if self.config_parser.get_log_level() == 'DEBUG':
+                                        self.logger.debug(f"Substituting default value containing sequence: {column_info['default']}")
+                                    column_info['default'] = ""
+                                    column_info['nullable'] = 'GENERATED ALWAYS AS IDENTITY'
+                                    if column_info['type'] in ('NUMBER'):
+                                        column_info['type'] = 'BIGINT'
+                            ## TODO: insert_internal_data_types_substitutions
+                            ## internal subtitution of this type breaks foreign key constraints
 
                 settings = {
                     'target_db_type': self.config_parser.get_target_db_type(),

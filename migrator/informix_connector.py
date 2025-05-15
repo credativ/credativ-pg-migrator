@@ -1096,6 +1096,10 @@ class InformixConnector(DatabaseConnector):
     def fetch_sequences(self, table_schema: str, table_name: str):
         pass
 
+    def get_sequence_details(self, sequence_owner, sequence_name):
+        # Placeholder for fetching sequence details
+        return {}
+
     def migrate_table(self, migrate_target_connection, settings):
         part_name = 'initialize'
         try:

@@ -8,6 +8,7 @@ import uuid
 import fnmatch
 import re
 import time
+import json
 
 class Orchestrator:
     def __init__(self, config_parser):
@@ -305,6 +306,17 @@ class Orchestrator:
                 part_name = 'create table'
                 worker_target_connection.execute_query(create_table_sql)
                 self.logger.info(f"""Worker {worker_id}: Table "{target_table}" created successfully.""")
+
+                if table_data['partitioned']:
+                    part_name = 'create partitions'
+                    self.logger.info(f"Worker {worker_id}: Creating partitions for table {target_table} in target database.")
+
+                    table_create_partitions_sql = json.loads(table_data['create_partitions_sql'])
+                    for partition_sql in table_create_partitions_sql:
+                        if self.config_parser.get_log_level() == 'DEBUG':
+                            self.logger.debug(f"Worker {worker_id}: Creating partition for table {target_table}: {partition_sql}")
+                        worker_target_connection.execute_query(partition_sql)
+                        self.logger.info(f"""Worker {worker_id}: Partition of "{target_table}" created successfully [{partition_sql}].""")
 
             if settings['migrate_data']:
                 # data migration

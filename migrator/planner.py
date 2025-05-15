@@ -6,6 +6,7 @@ from migrator_tables import MigratorTables
 import fnmatch
 import traceback
 import re
+import json
 
 class Planner:
     def __init__(self, config_parser):
@@ -135,6 +136,7 @@ class Planner:
             table_partitioned = False
             table_partitioning_columns = ''
             table_partitioned_by = ''
+            create_partitions_sql = ''
             try:
                 source_columns = self.source_connection.fetch_table_columns(self.source_schema, table_info['table_name'], self.migrator_tables)
                 if self.config_parser.get_log_level() == 'DEBUG':
@@ -194,12 +196,66 @@ class Planner:
                 if target_partitioning:
                     for partitioning_case in target_partitioning:
                         if partitioning_case['table_name'] == table_info['table_name']:
-                            target_table_sql += f" PARTITION BY {partitioning_case['partition_by']} ({partitioning_case['partitioning_columns']})"
+                            table_partitioning_columns = ', '.join(
+                                f'"{col.strip()}"' if not col.strip().startswith('"') and not col.strip().endswith('"') else col.strip()
+                                for col in partitioning_case['partitioning_columns'].split(',')
+                            )
+                            target_table_sql += f" PARTITION BY {partitioning_case['partition_by']} ({table_partitioning_columns})"
                             table_partitioned = True
-                            table_partitioning_columns = partitioning_case['partitioning_columns']
                             table_partitioned_by = partitioning_case['partition_by']
                             if self.config_parser.get_log_level() == 'DEBUG':
                                 self.logger.debug(f"Adding partitioning to table {table_info['table_name']}: {target_table_sql}")
+                            if 'date_range' in partitioning_case:
+                                if partitioning_case['date_range'] in ('year', 'month', 'week', 'day'):
+                                    query = f"""
+                                        SELECT min({table_partitioning_columns}) as min_value,
+                                        max({table_partitioning_columns}) as max_value
+                                        FROM {self.source_schema}.{table_info['table_name']}
+                                        """
+                                    self.source_connection.connect()
+                                    if self.config_parser.get_log_level() == 'DEBUG':
+                                        self.logger.debug(f"Query to get min/max values for partitioning: {query}")
+                                    cursor = self.source_connection.connection.cursor()
+                                    cursor.execute(query)
+                                    min_max = cursor.fetchall()
+                                    cursor.close()
+                                    self.source_connection.disconnect()
+                                    if min_max and len(min_max) > 0:
+                                        min_value = min_max[0][0]
+                                        max_value = min_max[0][1]
+                                        if self.config_parser.get_log_level() == 'DEBUG':
+                                            self.logger.debug(f"Min/Max values for partitioning: {min_value}, {max_value}")
+                                        if partitioning_case['date_range'] in ('year', 'month', 'week'):
+                                            query = f"""
+                                                SELECT
+                                                    'CREATE TABLE IF NOT EXISTS "{self.target_schema}"."{table_info['table_name']}_{partitioning_case['date_range']}_' ||
+                                                    to_char(gs.start_date, 'YYYYMMDD') || '" ' ||
+                                                    ' PARTITION OF "{self.target_schema}"."{table_info['table_name']}" ' ||
+                                                    ' FOR VALUES FROM (''' || to_char(gs.start_date, 'YYYY-MM-DD') ||
+                                                    ''') TO (''' || to_char(gs.end_date, 'YYYY-MM-DD') || ''')' AS create_partition_sql
+                                                FROM (
+                                                    SELECT
+                                                        date_trunc('{partitioning_case['date_range']}', generate_series)::date AS start_date,
+                                                        (date_trunc('{partitioning_case['date_range']}', generate_series) + interval '1 {partitioning_case['date_range']} - 1 day')::date AS end_date
+                                                    FROM generate_series(
+                                                        date_trunc('{partitioning_case['date_range']}', '{min_value}'::date), -- Replace '2023-01-15' with your start date
+                                                        date_trunc('{partitioning_case['date_range']}', '{max_value}0'::date), -- Replace '2023-05-10' with your end date
+                                                        '1 {partitioning_case['date_range']}'::interval)
+                                                ) gs
+                                            """
+                                            if self.config_parser.get_log_level() == 'DEBUG':
+                                                self.logger.debug(f"Create partitions SQL: {query}")
+                                            self.target_connection.connect()
+                                            cursor = self.target_connection.connection.cursor()
+                                            cursor.execute(query)
+                                            create_partitions_sql = cursor.fetchall()
+                                            # Convert create_partitions_sql into a JSON-encoded string for easy storage and decoding later
+
+                                            create_partitions_sql = json.dumps([row[0] for row in create_partitions_sql])
+                                            cursor.close()
+                                            self.target_connection.disconnect()
+                                            if self.config_parser.get_log_level() == 'DEBUG':
+                                                self.logger.debug(f"Create partitions SQL: {create_partitions_sql}")
 
                 settings = {
                     'source_schema': self.source_schema,
@@ -214,6 +270,7 @@ class Planner:
                     'partitioned': table_partitioned,
                     'partitioned_by': table_partitioned_by,
                     'partitioning_columns': table_partitioning_columns,
+                    'create_partitions_sql': create_partitions_sql,
                 }
                 self.migrator_tables.insert_tables(settings)
 
@@ -231,6 +288,7 @@ class Planner:
                     'partitioned': False,
                     'partitioned_by': '',
                     'partitioning_columns': '',
+                    'create_partitions_sql': '',
                 }
                 self.migrator_tables.insert_tables(settings)
                 self.handle_error(e, f"Table {table_info['table_name']}")

@@ -720,6 +720,7 @@ class MigratorTables:
             partitioned BOOLEAN,
             partitioned_by TEXT,
             partitioning_columns TEXT,
+            create_partitions_sql TEXT,
             task_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             task_started TIMESTAMP,
             task_completed TIMESTAMP,
@@ -903,7 +904,11 @@ class MigratorTables:
             'target_table': row[6],
             'target_columns': json.loads(row[7]),
             'target_table_sql': row[8],
-            'table_comment': row[9]
+            'table_comment': row[9],
+            'partitioned': row[10],
+            'partitioned_by': row[11],
+            'partitioning_columns': row[12],
+            'create_partitions_sql': row[13]
         }
 
     def decode_index_row(self, row):
@@ -1044,6 +1049,7 @@ class MigratorTables:
         partitioned = settings['partitioned']
         partitioned_by = settings['partitioned_by']
         partitioning_columns = settings['partitioning_columns']
+        create_partitions_sql = settings['create_partitions_sql']
 
         table_name = self.config_parser.get_protocol_name_tables()
         source_columns_str = json.dumps(source_columns)
@@ -1052,13 +1058,13 @@ class MigratorTables:
             INSERT INTO "{self.protocol_schema}"."{table_name}"
             (source_schema, source_table, source_table_id, source_columns,
             target_schema, target_table, target_columns, target_table_sql, table_comment,
-            partitioned, partitioned_by, partitioning_columns)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            partitioned, partitioned_by, partitioning_columns, create_partitions_sql)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
         params = (source_schema, source_table, source_table_id, source_columns_str,
                   target_schema, target_table, target_columns_str, target_table_sql, table_comment,
-                  partitioned, partitioned_by, partitioning_columns)
+                  partitioned, partitioned_by, partitioning_columns, create_partitions_sql)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)

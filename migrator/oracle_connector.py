@@ -185,32 +185,68 @@ class OracleConnector(DatabaseConnector):
         target_columns = settings['target_columns']
         table_indexes = {}
         order_num = 1
-        return {}
 
         index_query = f"""
-            SELECT index_name, uniqueness, column_name
-            FROM all_ind_columns
-            WHERE table_owner = '{source_schema.upper()}' AND table_name = '{source_table_name.upper()}'
-            ORDER BY index_name, column_position
-        """
+                        SELECT
+                            ai.index_name,
+                            c.constraint_type,
+                            ai.index_type,
+                            ai.uniqueness,
+                            listagg('"'||aic.column_name||'"', ', ') WITHIN GROUP (ORDER BY aic.column_position) AS indexed_columns,
+                            listagg('"'||aic.column_name||'" '|| aic.descend, ', ') WITHIN GROUP (ORDER BY aic.column_position) AS indexed_columns_orders
+                        FROM all_indexes ai
+                        JOIN all_ind_columns aic
+                        ON ai.owner = aic.index_owner AND ai.index_name = aic.index_name
+                        AND ai.table_owner = aic.table_owner AND ai.table_name = aic.table_name
+                        LEFT JOIN dba_constraints c
+                        ON c.owner = ai.owner AND c.table_name = ai.table_name AND c.constraint_name = ai.index_name
+                        WHERE
+                            ai.table_owner = '{source_schema.upper()}'
+                        	AND ai.table_name = '{source_table_name.upper()}'
+                        GROUP BY
+                            ai.owner,
+                            ai.index_name,
+                            c.constraint_type,
+                            ai.table_owner,
+                            ai.table_name,
+                            ai.index_type,
+                            ai.uniqueness
+                        ORDER BY
+                            ai.index_name
+            """
         try:
             self.connect()
             cursor = self.connection.cursor()
             cursor.execute(index_query)
             for row in cursor.fetchall():
                 index_name = row[0]
-                uniqueness = row[1]
-                column_name = row[2]
+                constraint_type = row[1]
+                index_type = row[2]
+                uniqueness = row[3]
+                columns_list = row[4]
+                columns_list_orders = row[5]
 
                 if index_name not in table_indexes:
-                    table_indexes[index_name] = {
+                    table_indexes[order_num] = {
                         'name': index_name,
-                        'unique': uniqueness,
-                        'columns': []
+                        'type': 'PRIMARY KEY' if constraint_type == 'P' else 'UNIQUE' if uniqueness == 'UNIQUE' else 'INDEX',
+                        'owner': source_schema,
+                        'columns': columns_list,
+                        'columns_count': len(columns_list.split(',')),
+                        'columns_data_types': [],
+                        'sql': '',
+                        'comment': '',
                     }
 
-                if column_name in target_columns:
-                    table_indexes[index_name]['columns'].append(target_columns[column_name]['name'])
+                create_index_query = None
+                if constraint_type == 'P':
+                    create_index_query = f"""ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{index_name}" PRIMARY KEY ({columns_list})"""
+                elif uniqueness == 'UNIQUE':
+                    create_index_query = f"""CREATE UNIQUE INDEX "{index_name}" on "{target_schema}"."{target_table_name}" ({columns_list_orders})"""
+                else:
+                    create_index_query = f"""CREATE INDEX "{index_name}" on "{target_schema}"."{target_table_name}" ({columns_list_orders})"""
+                table_indexes[order_num]['sql'] = create_index_query
+                order_num += 1
 
             cursor.close()
             self.disconnect()

@@ -3,8 +3,9 @@
 ## (not released yet) 0.7.2 - 2025.05.xx
 
 - 2025.05.15: Added experimental support for target table partitioning by range for date/timestamp columns
+  - (Remaining issue: PRIMARY KEY on PostgreSQL must contain partitioning column)
 - 2025.05.15: Replacement of NUMBER primary keys with sequence as default value in Oracle connector with BIGINT IDENTITY column
-  (Remaining issue: if used in FK, migrator must change also dependent columns to BIGINT)
+  - (Remaining issue: if used in FK, migrator must change also dependent columns to BIGINT)
 - 2025.05.15: Updates in Oracle connector - implemented migration of the full data model
 - 2025.05.14: Fixed issues with running Oracle in container, added testing databases for Oracle
 - 2025.05.12: Fixed issue in the config parser logic when both include and exclude tables patterns are defined

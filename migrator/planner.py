@@ -132,6 +132,9 @@ class Planner:
             target_columns = []
             target_table_sql = None
             settings = {}
+            table_partitioned = False
+            table_partitioning_columns = ''
+            table_partitioned_by = ''
             try:
                 source_columns = self.source_connection.fetch_table_columns(self.source_schema, table_info['table_name'], self.migrator_tables)
                 if self.config_parser.get_log_level() == 'DEBUG':
@@ -186,11 +189,50 @@ class Planner:
                 if self.config_parser.get_log_level() == 'DEBUG':
                     self.logger.debug(f"Target columns: {target_columns}")
                     self.logger.debug(f"Target table SQL: {target_table_sql}")
-                self.migrator_tables.insert_tables(self.source_schema, table_info['table_name'], table_info['id'], source_columns,
-                                                   self.target_schema, table_info['table_name'], target_columns, target_table_sql, table_info['comment'])
+
+                target_partitioning = self.config_parser.get_target_partitioning()
+                if target_partitioning:
+                    for partitioning_case in target_partitioning:
+                        if partitioning_case['table_name'] == table_info['table_name']:
+                            target_table_sql += f" PARTITION BY {partitioning_case['partition_by']} ({partitioning_case['partitioning_columns']})"
+                            table_partitioned = True
+                            table_partitioning_columns = partitioning_case['partitioning_columns']
+                            table_partitioned_by = partitioning_case['partition_by']
+                            if self.config_parser.get_log_level() == 'DEBUG':
+                                self.logger.debug(f"Adding partitioning to table {table_info['table_name']}: {target_table_sql}")
+
+                settings = {
+                    'source_schema': self.source_schema,
+                    'source_table': table_info['table_name'],
+                    'source_table_id': table_info['id'],
+                    'source_columns': source_columns,
+                    'target_schema': self.target_schema,
+                    'target_table': table_info['table_name'],
+                    'target_columns': target_columns,
+                    'target_table_sql': target_table_sql,
+                    'table_comment': table_info['comment'],
+                    'partitioned': table_partitioned,
+                    'partitioned_by': table_partitioned_by,
+                    'partitioning_columns': table_partitioning_columns,
+                }
+                self.migrator_tables.insert_tables(settings)
+
             except Exception as e:
-                self.migrator_tables.insert_tables(self.source_schema, table_info['table_name'], table_info['id'], source_columns,
-                                                   self.target_schema, table_info['table_name'], target_columns, target_table_sql, table_info['comment'])
+                settings = {
+                    'source_schema': self.source_schema,
+                    'source_table_name': table_info['table_name'],
+                    'source_table_id': table_info['id'],
+                    'source_columns': source_columns,
+                    'target_schema': self.target_schema,
+                    'target_table_name': table_info['table_name'],
+                    'target_columns': target_columns,
+                    'target_table_sql': target_table_sql,
+                    'table_comment': table_info['comment'],
+                    'partitioned': False,
+                    'partitioned_by': '',
+                    'partitioning_columns': '',
+                }
+                self.migrator_tables.insert_tables(settings)
                 self.handle_error(e, f"Table {table_info['table_name']}")
                 continue
 

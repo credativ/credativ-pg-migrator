@@ -182,7 +182,7 @@ class OracleConnector(DatabaseConnector):
                 create_table_sql_parts.append(create_table_sql_column)
 
             create_table_sql = ", ".join(create_table_sql_parts)
-            create_table_sql = f'''CREATE TABLE "{target_schema}"."{target_table_name}" ({create_table_sql});'''
+            create_table_sql = f'''CREATE TABLE "{target_schema}"."{target_table_name}" ({create_table_sql})'''
         else:
             raise ValueError(f"Unsupported target database type: {target_db_type}")
 

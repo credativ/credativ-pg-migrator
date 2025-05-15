@@ -322,3 +322,6 @@ class ConfigParser:
 
     def get_target_db_session_settings(self):
         return self.config['target'].get('settings', {})
+
+    def get_target_partitioning(self):
+        return self.config.get('target_partitioning', {})

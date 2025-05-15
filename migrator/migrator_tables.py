@@ -717,6 +717,9 @@ class MigratorTables:
             target_columns TEXT,
             target_table_sql TEXT,
             table_comment TEXT,
+            partitioned BOOLEAN,
+            partitioned_by TEXT,
+            partitioning_columns TEXT,
             task_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             task_started TIMESTAMP,
             task_completed TIMESTAMP,
@@ -1028,17 +1031,34 @@ class MigratorTables:
             self.logger.error(e)
             raise
 
-    def insert_tables(self, source_schema, source_table, source_table_id, source_columns, target_schema, target_table, target_columns, target_table_sql, table_comment):
+    def insert_tables(self, settings):
+        source_schema = settings['source_schema']
+        source_table = settings['source_table']
+        source_table_id = settings['source_table_id']
+        source_columns = settings['source_columns']
+        target_schema = settings['target_schema']
+        target_table = settings['target_table']
+        target_columns = settings['target_columns']
+        target_table_sql = settings['target_table_sql']
+        table_comment = settings['table_comment']
+        partitioned = settings['partitioned']
+        partitioned_by = settings['partitioned_by']
+        partitioning_columns = settings['partitioning_columns']
+
         table_name = self.config_parser.get_protocol_name_tables()
         source_columns_str = json.dumps(source_columns)
         target_columns_str = json.dumps(target_columns)
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
-            (source_schema, source_table, source_table_id, source_columns, target_schema, target_table, target_columns, target_table_sql, table_comment)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (source_schema, source_table, source_table_id, source_columns,
+            target_schema, target_table, target_columns, target_table_sql, table_comment,
+            partitioned, partitioned_by, partitioning_columns)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (source_schema, source_table, source_table_id, source_columns_str, target_schema, target_table, target_columns_str, target_table_sql, table_comment)
+        params = (source_schema, source_table, source_table_id, source_columns_str,
+                  target_schema, target_table, target_columns_str, target_table_sql, table_comment,
+                  partitioned, partitioned_by, partitioning_columns)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)

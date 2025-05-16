@@ -148,34 +148,34 @@ class Planner:
                         self.logger.debug(f"Checking for data types / default values substitutions for column {column_info}...")
                     substitution = self.migrator_tables.check_data_types_substitution(column_info['type'])
                     if substitution and substitution != (None, None):
-                        column_info['type'], column_info['length'] = self.migrator_tables.check_data_types_substitution(column_info['default'])
+                        column_info['type'], column_info['character_maximum_length'] = self.migrator_tables.check_data_types_substitution(column_info['column_default'])
                         if self.config_parser.get_log_level() == 'DEBUG':
-                            self.logger.debug(f"Substituted data type: {column_info['type']}, length: {column_info['length']}")
+                            self.logger.debug(f"Substituted data type: {column_info['type']}, length: {column_info['character_maximum_length']}")
 
                     # checking for default values substitution with the new data type
-                    if column_info['default'] != '':
-                        substitution = self.migrator_tables.check_default_values_substitution(column_info['name'], column_info['type'], column_info['default'])
+                    if column_info['column_default'] != '':
+                        substitution = self.migrator_tables.check_default_values_substitution(column_info['name'], column_info['type'], column_info['column_default'])
                         if substitution and substitution != None:
-                            column_info['default'] = substitution
+                            column_info['column_default'] = substitution
                             if self.config_parser.get_log_level() == 'DEBUG':
-                                self.logger.debug(f"Substituted default value: {column_info['default']}")
+                                self.logger.debug(f"Substituted default value: {column_info['column_default']}")
 
                     # check if default is a sequence
 
                     if self.config_parser.get_db_type('source') == 'oracle':
                         if self.config_parser.get_log_level() == 'DEBUG':
-                            self.logger.debug(f"Checking if default value is a sequence for column {column_info['name']} (column_info['default'])...")
-                        if (isinstance(column_info['default'], str)
-                            and 'nextval' in column_info['default'].lower()):
-                            parts = column_info['default'].replace('"', '').split(".")
+                            self.logger.debug(f"Checking if default value is a sequence for column {column_info['name']} (column_info['column_default'])...")
+                        if (isinstance(column_info['column_default'], str)
+                            and 'nextval' in column_info['column_default'].lower()):
+                            parts = column_info['column_default'].replace('"', '').split(".")
                             if len(parts) == 3:
                                 owner, seq_name, _ = parts
                                 sequence_details = self.source_connection.get_sequence_details(owner, seq_name)
                                 if sequence_details:
                                     if self.config_parser.get_log_level() == 'DEBUG':
-                                        self.logger.debug(f"Substituting default value containing sequence: {column_info['default']}")
-                                    column_info['default'] = ""
-                                    column_info['nullable'] = 'GENERATED ALWAYS AS IDENTITY'
+                                        self.logger.debug(f"Substituting default value containing sequence: {column_info['column_default']}")
+                                    column_info['column_default'] = ""
+                                    column_info['is_nullable'] = 'GENERATED ALWAYS AS IDENTITY'
                                     if column_info['type'] in ('NUMBER'):
                                         column_info['type'] = 'BIGINT'
                             ## TODO: insert_internal_data_types_substitutions

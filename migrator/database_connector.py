@@ -40,19 +40,53 @@ class DatabaseConnector(ABC):
     def fetch_table_columns(self, table_schema: str, table_name: str, migrator_tables) -> dict:
         """
         Returns a dictionary describing the schema of the specific table
+        Items names and values correspond with INFORMATION_SCHEMA.COLUMNS table
+        In case of legacy databases, content is suplied from system tables
+        Columns starting with 'replaced_*' store substituted values
+        Some connectors might add specific columns but these are not recognized by other connectors
+        Not all columns are used in all connectors
+
         { column_ordinary_number: {
-            'name': column_name,
-            'type': column_type,
-            'length': column_length,
-            'precision': column_precision,
-            'nullable': column_nullable,
-            'default': column_default_value,
-            'default_sequence': True / False,
-            'comment': column_comment,
-            'other': specific_column_properties
+            'column_name': column_name,
+            'is_nullable': 'YES' or 'NO',
+            'column_default': column_default_value,
+            'replaced_column_default': custom replacement value,
+            'data_type': data type from table definition,
+            'replaced_data_type': custom replacement value,
+            'column_type': full description of data type from table definition with all parameters,
+            'replaced_column_type': custom replacement value,
+            'character_maximum_length': length of the column,
+            'numeric_precision': precision of the column,
+            'numeric_scale': scale of the column,
+            'basic_data_type': basic data type for user defined types,
+            'basic_column_type': basic column type for user defined types with all parameters,
+            'is_identity': 'YES' or 'NO',
+            'column_comment': comment for the column,
+            'is_generated': 'YES' or 'NO',
+            'generation_expression': expression for generated column,
             }
         }
+
+        ## Special notes for some databases:
         # Informix default values: https://www.ibm.com/docs/en/informix-servers/12.10?topic=tables-sysdefaults
+        """
+        pass
+
+    @abstractmethod
+    def is_string_type(self, column_type: str) -> bool:
+        """
+        Check if the column type is a string type.
+        Returns True if it is a string type, False otherwise.
+        Legacy databases had very different types of string types, therefore this function
+        """
+        pass
+
+    @abstractmethod
+    def is_numeric_type(self, column_type: str) -> bool:
+        """
+        Check if the column type is a numeric type.
+        Returns True if it is a numeric type, False otherwise.
+        Legacy databases had very different types of numeric types, therefore this function
         """
         pass
 
@@ -67,6 +101,22 @@ class DatabaseConnector(ABC):
         Converts the columns of one source table to the target database type and SQL syntax.
         Returns:
           - dictionary of converted columns - the same as dictionaly returned by fetch_table_columns, but with all conversion -> necessary for data migration
+          - SQL statement to create the table in the target database - used for table creation
+        """
+        pass
+
+    @abstractmethod
+    def get_create_table_sql(self, settings):
+        """
+        This function is relevant only for target database
+        Centralizes creation of SQL DDL statement
+        settings - dictionary with the following keys
+            - target_db_type: str - target database type
+            - target_schema: str - schema name of the table in the target database
+            - target_table_name: str - table name in the source database
+            - source_columns: dict - dictionary of columns to be converted
+            - converted_columns: dict - dictionary of converted columns
+        Returns:
           - SQL statement to create the table in the target database - used for table creation
         """
         pass

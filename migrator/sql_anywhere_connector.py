@@ -91,12 +91,11 @@ class SQLAnywhereConnector(DatabaseConnector):
                 result[row[0]] = {
                     'name': row[1],
                     'type': row[2],
-                    'length': row[3],
+                    'character_maximum_length': row[3],
                     'precision': row[4],
-                    'nullable': 'NOT NULL' if row[6] == 'N' else '',
-                    'default': row[7],
+                    'is_nullable': 'NOT NULL' if row[6] == 'N' else '',
+                    'column_default': row[7],
                     'comment': '',
-                    'other': ''
                 }
             cursor.close()
             self.disconnect()
@@ -125,24 +124,34 @@ class SQLAnywhereConnector(DatabaseConnector):
 
         for order_num, column_info in source_columns.items():
             coltype = type_mapping.get(column_info['type'].upper(), 'TEXT')
-            length = column_info['length']
+            length = column_info['character_maximum_length']
             converted[order_num] = {
                 'name': column_info['name'],
                 'type': coltype,
-                'length': length,
-                'nullable': column_info['nullable'],
-                'default': column_info['default'],
+                'character_maximum_length': length,
+                'is_nullable': column_info['is_nullable'],
+                'column_default': column_info['column_default'],
                 'comment': column_info['comment'],
-                'other': column_info['other']
             }
 
             if coltype in ('CHAR', 'VARCHAR') and length:
-                create_table_sql_parts.append(f"\"{column_info['name']}\" {coltype}({length}) {column_info['nullable']}")
+                create_table_sql_parts.append(f"\"{column_info['name']}\" {coltype}({length}) {column_info['is_nullable']}")
             else:
-                create_table_sql_parts.append(f"\"{column_info['name']}\" {coltype} {column_info['nullable']}")
+                create_table_sql_parts.append(f"\"{column_info['name']}\" {coltype} {column_info['is_nullable']}")
 
         create_table_sql = f"CREATE TABLE \"{target_schema}\".\"{target_table_name}\" ({', '.join(create_table_sql_parts)})"
-        return converted, create_table_sql
+        return converted
+
+    def get_create_table_sql(self, settings):
+        return ""
+
+    def is_string_type(self, column_type: str) -> bool:
+        string_types = ['CHAR', 'VARCHAR', 'NCHAR', 'NVARCHAR', 'TEXT', 'LONG VARCHAR', 'LONG NVARCHAR', 'UNICHAR', 'UNIVARCHAR']
+        return column_type.upper() in string_types
+
+    def is_numeric_type(self, column_type: str) -> bool:
+        numeric_types = ['BIGINT', 'INTEGER', 'INT', 'TINYINT', 'SMALLINT', 'FLOAT', 'DOUBLE PRECISION', 'DECIMAL', 'NUMERIC']
+        return column_type.upper() in numeric_types
 
     def migrate_table(self, migrate_target_connection, settings):
         part_name = 'initialize'

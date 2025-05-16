@@ -138,24 +138,40 @@ class SybaseASEConnector(DatabaseConnector):
                 self.logger.debug(f"Sybase ASE: Reading columns for {table_schema}.{table_name}")
             cursor.execute(query)
             for row in cursor.fetchall():
-                result[row[0]] = {
-                    'name': row[1].strip(),
-                    'type': row[2].strip(),
-                    'length': row[3].strip(),
-                    'nullable': 'NOT NULL' if row[5] == 0 else '',
-                    'default': row[10].replace('DEFAULT', '').strip().strip('"')
-                        if row[10] and row[10].replace('DEFAULT', '').strip().startswith('"') and row[10].replace('DEFAULT', '').strip().endswith('"')
-                        else (row[10].replace('DEFAULT', '').strip() if row[10] else ''),
-                    'comment': '',
-                    'other': 'IDENTITY' if row[6] == 1 else ''
+                ordinal_position = row[0]
+                column_name = row[1].strip()
+                data_type = row[2].strip()
+                data_type_length = row[3].strip()
+                length = row[4]
+                column_nullable = row[5]
+                identity_column = row[6]
+                full_data_type_length = row[7].strip()
+                column_domain = row[8]
+                column_default_name = row[9]
+                column_default_value = row[10].replace('column_default', '').strip().strip('"') if row[10] and row[10].replace('column_default', '').strip().startswith('"') and row[10].replace('column_default', '').strip().endswith('"') else (row[10].replace('column_default', '').strip() if row[10] else '')
+                status = row[11]
+                variable_length = row[12]
+                data_type_precision = row[13]
+                data_type_scale = row[14]
+                type_nullable = row[15]
+                type_has_identity_property = row[16]
+                result[ordinal_position] = {
+                    'column_name': column_name,
+                    'data_type': data_type,
+                    'column_type': full_data_type_length,
+                    'character_maximum_length': length if self.is_string_type(row[3].strip()) else None,
+                    'is_nullable': 'NO' if column_nullable == 0 else 'YES',
+                    'column_default': column_default_value,
+                    'column_comment': '',
+                    'is_identity': 'YES' if identity_column == 1 else 'NO',
                 }
 
                 # # if self.config_parser.get_log_level() == 'DEBUG':
-                # #     self.logger.debug(f"0 default: {result[row[0]]['default']}")
+                # #     self.logger.debug(f"0 default: {result[row[0]]['column_default']}")
                 # # checking for default values substitution with the origingal data type
                 # if migrator_tables is not None:
-                #     if result[row[0]]['default'] != '':
-                #         result[row[0]]['default'] = migrator_tables.check_default_values_substitution(result[row[0]]['name'], result[row[0]]['type'], result[row[0]]['default'])
+                #     if result[row[0]]['column_default'] != '':
+                #         result[row[0]]['column_default'] = migrator_tables.check_default_values_substitution(result[row[0]]['name'], result[row[0]]['type'], result[row[0]]['column_default'])
 
                 query_custom_types = f"""
                     SELECT
@@ -192,10 +208,10 @@ class SybaseASEConnector(DatabaseConnector):
                 custom_types = cursor.fetchall()
                 if custom_types:
                     custom_type = custom_types[0]
-                    result[row[0]]['type'] = custom_type[1]
-                    result[row[0]]['length'] = custom_type[2]
+                    result[ordinal_position]['basic_data_type'] = custom_type[1]
+                    result[ordinal_position]['basic_column_type'] = custom_type[2]
                     if custom_type[3] == 1:
-                        result[row[0]]['other'] = 'IDENTITY'
+                        result[ordinal_position]['is_identity'] = 'YES'
 
             cursor.close()
             self.disconnect()
@@ -207,11 +223,8 @@ class SybaseASEConnector(DatabaseConnector):
 
     def convert_table_columns(self, settings):
         target_db_type = settings['target_db_type']
-        target_schema = settings['target_schema']
-        target_table_name = settings['target_table_name']
         source_columns = settings['source_columns']
         type_mapping = {}
-        create_table_sql = ""
         converted = {}
         if target_db_type == 'postgresql':
             type_mapping = {
@@ -267,49 +280,49 @@ class SybaseASEConnector(DatabaseConnector):
             }
 
             for order_num, column_info in source_columns.items():
-                coltype = column_info['type'].upper()
-                length = column_info['length']
+                coltype = column_info['data_type'].upper()
+                character_maximum_length = column_info['character_maximum_length']
                 if type_mapping.get(coltype, 'UNKNOWN').startswith('UNKNOWN'):
-                    self.logger.info(f"Column {column_info['name']} - unknown data type: {column_info['type']}")
+                    self.logger.info(f"Column {column_info['column_name']} - unknown data type: {column_info['data_type']}")
                     # coltype = 'TEXT' ## default to TEXT may not be the best option -> let the table creation fail
                 else:
                     coltype = type_mapping.get(coltype, 'TEXT')
-                if coltype == 'VARCHAR' and int(column_info['length']) >= 254:
+                if coltype == 'VARCHAR' and int(column_info['character_maximum_length']) >= 254:
                     coltype = 'TEXT'
-                    length = ''
+                    character_maximum_length = ''
 
                 converted[order_num] = {
-                    'name': column_info['name'],
-                    'type': coltype,
-                    'length': length,
-                    'default': column_info['default'],
-                    'nullable': column_info['nullable'],
-                    'comment': column_info['comment'],
-                    'other': column_info['other']
+                    'column_name': column_info['column_name'],
+                    'is_nullable': column_info['is_nullable'],
+                    'column_default': column_info['column_default'],
+                    'replaced_column_default': column_info['replaced_column_default'] if 'replaced_column_default' in column_info else '',
+                    'data_type': coltype,
+                    'replaced_data_type': column_info['replaced_data_type'] if 'replaced_data_type' in column_info else '',
+                    'character_maximum_length': character_maximum_length,
+                    'numeric_precision': column_info['numeric_precision'] if 'numeric_precision' in column_info else '',
+                    'numeric_scale': column_info['numeric_scale'] if 'numeric_scale' in column_info else '',
+                    'basic_data_type': column_info['basic_data_type'] if 'basic_data_type' in column_info else '',
+                    'basic_column_type': column_info['basic_column_type'] if 'basic_column_type' in column_info else '',
+                    'is_identity': column_info['is_identity'],
+                    'column_comment': column_info['column_comment'],
+                    'is_generated': column_info['is_generated'] if 'is_generated' in column_info else '',
+                    'generation_expression': column_info['generation_expression'] if 'generation_expression' in column_info else '',
                 }
-
-            create_table_sql_parts = []
-            for _, info in converted.items():
-                if 'length' in info and info['type'] in ('CHAR', 'VARCHAR'):
-                    create_table_sql_parts.append(f""""{info['name']}" {info['type']}({info['length']}) {info['nullable']}""")
-                else:
-                    create_table_sql_parts.append(f""""{info['name']}" {info['type']} {info['nullable']}""")
-                if info['default']:
-                    if info['type'] in ('CHAR', 'VARCHAR', 'TEXT') and ('||' in info['default'] or '(' in info['default'] or ')' in info['default']):
-                        create_table_sql_parts[-1] += f""" DEFAULT {info['default']}""".replace("''", "'")
-                    elif info['type'] in ('CHAR', 'VARCHAR', 'TEXT'):
-                        create_table_sql_parts[-1] += f""" DEFAULT '{info['default']}'""".replace("''", "'")
-                    elif info['type'] in ('BOOLEAN', 'BIT'):
-                        create_table_sql_parts[-1] += f""" DEFAULT {info['default']}::BOOLEAN"""
-                    else:
-                        create_table_sql_parts[-1] += f" DEFAULT {info['default']}"
-            create_table_sql = ", ".join(create_table_sql_parts)
-            create_table_sql = f"""CREATE TABLE "{target_schema}"."{target_table_name}" ({create_table_sql})"""
-
         else:
             raise ValueError(f"Unsupported target database type: {target_db_type}")
 
-        return converted, create_table_sql
+        return converted
+
+    def get_create_table_sql(self, settings):
+        return ""
+
+    def is_string_type(self, column_type: str) -> bool:
+        string_types = ['CHAR', 'VARCHAR', 'NCHAR', 'NVARCHAR', 'TEXT', 'LONG VARCHAR', 'LONG NVARCHAR', 'UNICHAR', 'UNIVARCHAR']
+        return column_type.upper() in string_types
+
+    def is_numeric_type(self, column_type: str) -> bool:
+        numeric_types = ['BIGINT', 'INTEGER', 'INT', 'TINYINT', 'SMALLINT', 'FLOAT', 'DOUBLE PRECISION', 'DECIMAL', 'NUMERIC']
+        return column_type.upper() in numeric_types
 
     def fetch_indexes(self, settings):
         source_table_id = settings['source_table_id']

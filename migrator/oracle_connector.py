@@ -88,11 +88,10 @@ class OracleConnector(DatabaseConnector):
                 result[row[0]] = {
                     'name': row[1],
                     'type': row[2],
-                    'length': row[3],
-                    'nullable': 'NOT NULL' if row[4] == 'N' else '',
-                    'default': row[5],
+                    'character_maximum_length': row[3],
+                    'is_nullable': 'NOT NULL' if row[4] == 'N' else '',
+                    'column_default': row[5],
                     'comment': '',
-                    'other': ''
                 }
             cursor.close()
             self.disconnect()
@@ -138,9 +137,9 @@ class OracleConnector(DatabaseConnector):
             for order_num, column in source_columns.items():
                 column_name = column['name']
                 column_type = column['type']
-                column_length = column['length']
-                column_nullable = column['nullable']
-                column_default = column['default']
+                column_length = column['character_maximum_length']
+                column_nullable = column['is_nullable']
+                column_default = column['column_default']
                 column_comment = column['comment']
 
                 if column_type in type_mapping:
@@ -156,9 +155,9 @@ class OracleConnector(DatabaseConnector):
                 converted_columns[order_num] = {
                     'name': column_name,
                     'type': converted_type,
-                    'length': column_length,
-                    'nullable': column_nullable,
-                    'default': column_default,
+                    'character_maximum_length': column_length,
+                    'is_nullable': column_nullable,
+                    'column_default': column_default,
                     'comment': column_comment
                 }
 
@@ -167,8 +166,8 @@ class OracleConnector(DatabaseConnector):
                 create_table_sql_column = ""
                 column_name = info['name']
                 column_type = info['type']
-                column_nullable = info['nullable']
-                column_default = info['default']
+                column_nullable = info['is_nullable']
+                column_default = info['column_default']
                 column_comment = info['comment']
 
                 create_table_sql_column = f'''"{column_name}" {column_type} {column_nullable}'''
@@ -186,7 +185,18 @@ class OracleConnector(DatabaseConnector):
         else:
             raise ValueError(f"Unsupported target database type: {target_db_type}")
 
-        return converted_columns, create_table_sql
+        return converted_columns
+
+    def get_create_table_sql(self, settings):
+        return ""
+
+    def is_string_type(self, column_type: str) -> bool:
+        string_types = ['CHAR', 'VARCHAR', 'NCHAR', 'NVARCHAR', 'TEXT', 'LONG VARCHAR', 'LONG NVARCHAR', 'UNICHAR', 'UNIVARCHAR']
+        return column_type.upper() in string_types
+
+    def is_numeric_type(self, column_type: str) -> bool:
+        numeric_types = ['BIGINT', 'INTEGER', 'INT', 'TINYINT', 'SMALLINT', 'FLOAT', 'DOUBLE PRECISION', 'DECIMAL', 'NUMERIC']
+        return column_type.upper() in numeric_types
 
     def get_sequence_details(self, sequence_owner, sequence_name):
         query = f"""

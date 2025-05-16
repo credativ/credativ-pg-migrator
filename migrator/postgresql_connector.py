@@ -94,18 +94,16 @@ class PostgreSQLConnector(DatabaseConnector):
             cursor.execute(query)
             for row in cursor.fetchall():
                 data_type = row[2].upper()
-                other = ''
                 if data_type == 'USER-DEFINED':
                     data_type = row[6].upper()
                     other = 'USER-DEFINED'
                 result[row[0]] = {
                     'name': row[1],
                     'type': data_type,
-                    'length': row[3],
-                    'nullable': row[4],
-                    'default': row[5],
+                    'character_maximum_length': row[3],
+                    'is_nullable': row[4],
+                    'column_default': row[5],
                     'comment': row[7],
-                    'other': other
                 }
             cursor.close()
             self.disconnect()
@@ -129,24 +127,60 @@ class PostgreSQLConnector(DatabaseConnector):
             for col, info in source_columns.items():
                 converted_schema[col] = {
                     'name': info['name'],
-                    'nullable': info['nullable'],
-                    'default': info['default'],
+                    'is_nullable': info['is_nullable'],
+                    'column_default': info['column_default'],
                     'comment': info['comment'],
-                    'other': info['other']
                 }
-                if (info['length'] is not None
+                if (info['character_maximum_length'] is not None
                     and info['type'].upper() in ('CHAR', 'VARCHAR', 'CHARACTER VARYING')):
-                    converted_schema[col]['type'] = f"{info['type']}({info['length']})"
+                    converted_schema[col]['type'] = f"{info['type']}({info['character_maximum_length']})"
                 else:
                     converted_schema[col]['type'] = info['type']
 
-            create_table_sql = ', '.join([(f'''"{info["name"]}" {info["type"]} {info["nullable"]} {'DEFAULT ' + info['default'] if info['default'] else ''}''').strip()
+            create_table_sql = ', '.join([(f'''"{info["name"]}" {info["type"]} {info["nullable"]} {'DEFAULT ' + info['column_default'] if info['column_default'] else ''}''').strip()
                                           for _, info in converted_schema.items()])
             create_table_sql = f"""CREATE TABLE "{target_schema}"."{target_table_name}" ({create_table_sql})"""
         else:
             raise ValueError(f"Unsupported target database type: {target_db_type}")
 
         return converted_schema, create_table_sql
+
+    def get_create_table_sql(self, settings):
+        target_schema = settings['target_schema']
+        target_table_name = settings['target_table']
+        # source_columns = settings['source_columns']
+        converted_columns = settings['converted_columns']
+
+        create_table_sql = ""
+        create_table_sql_parts = []
+
+        ## Sybase ASE
+        for _, info in converted_columns.items():
+            if 'character_maximum_length' in info and info['data_type'] in ('CHAR', 'VARCHAR'):
+                create_table_sql_parts.append(f""""{info['column_name']}" {info['data_type']}({info['character_maximum_length']}) {info['is_nullable']}""")
+            else:
+                create_table_sql_parts.append(f""""{info['column_name']}" {info['data_type']} {info['is_nullable']}""")
+            if info['column_default']:
+                if info['data_type'] in ('CHAR', 'VARCHAR', 'TEXT') and ('||' in info['column_default'] or '(' in info['column_default'] or ')' in info['column_default']):
+                    create_table_sql_parts[-1] += f""" DEFAULT {info['column_default']}""".replace("''", "'")
+                elif info['data_type'] in ('CHAR', 'VARCHAR', 'TEXT'):
+                    create_table_sql_parts[-1] += f""" DEFAULT '{info['column_default']}'""".replace("''", "'")
+                elif info['data_type'] in ('BOOLEAN', 'BIT'):
+                    create_table_sql_parts[-1] += f""" DEFAULT {info['column_default']}::BOOLEAN"""
+                else:
+                    create_table_sql_parts[-1] += f" DEFAULT {info['column_default']}"
+        create_table_sql = ", ".join(create_table_sql_parts)
+        create_table_sql = f"""CREATE TABLE "{target_schema}"."{target_table_name}" ({create_table_sql})"""
+
+        return create_table_sql
+
+    def is_string_type(self, column_type: str) -> bool:
+        string_types = ['CHAR', 'VARCHAR', 'NCHAR', 'NVARCHAR', 'TEXT', 'LONG VARCHAR', 'LONG NVARCHAR', 'UNICHAR', 'UNIVARCHAR']
+        return column_type.upper() in string_types
+
+    def is_numeric_type(self, column_type: str) -> bool:
+        numeric_types = ['BIGINT', 'INTEGER', 'INT', 'TINYINT', 'SMALLINT', 'FLOAT', 'DOUBLE PRECISION', 'DECIMAL', 'NUMERIC']
+        return column_type.upper() in numeric_types
 
     def fetch_indexes(self, settings):
         source_table_id = settings['source_table_id']

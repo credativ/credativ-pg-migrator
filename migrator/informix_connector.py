@@ -145,19 +145,18 @@ class InformixConnector(DatabaseConnector):
                 result[row[0]] = {
                     'name': row[1],
                     'type': row[2],
-                    'length': row[3],
-                    'nullable': row[4],
-                    'default': re.sub(r'[^\x20-\x7E]', ' ', row[5]).strip() if row[5] else '',
-                    'other': '',
+                    'character_maximum_length': row[3],
+                    'is_nullable': row[4],
+                    'column_default': re.sub(r'[^\x20-\x7E]', ' ', row[5]).strip() if row[5] else '',
                     'comment': ''
                 }
 
                 # # if self.config_parser.get_log_level() == 'DEBUG':
-                # #     self.logger.debug(f"0 default: {result[row[0]]['default']}")
+                # #     self.logger.debug(f"0 default: {result[row[0]]['column_default']}")
                 # # checking for default values substitution with the origingal data type
                 # if migrator_tables:
-                #     if result[row[0]]['default'] != '':
-                #         result[row[0]]['default'] = migrator_tables.check_default_values_substitution(result[row[0]]['name'], result[row[0]]['type'], result[row[0]]['default'])
+                #     if result[row[0]]['column_default'] != '':
+                #         result[row[0]]['column_default'] = migrator_tables.check_default_values_substitution(result[row[0]]['name'], result[row[0]]['type'], result[row[0]]['column_default'])
 
             cursor.close()
             self.disconnect()
@@ -262,45 +261,55 @@ class InformixConnector(DatabaseConnector):
 
             for order_num, column_info in source_columns.items():
                 coltype = column_info['type'].upper()
-                length = column_info['length']
+                length = column_info['character_maximum_length']
                 if type_mapping.get(coltype, 'UNKNOWN').startswith('UNKNOWN'):
                     self.logger.info(f"Column {column_info['name']} - unknown data type: {column_info['type']}")
                     # coltype = 'TEXT' ## default to TEXT may not be the best option -> let the table creation fail
                 else:
                     coltype = type_mapping.get(coltype, 'TEXT')
-                if coltype == 'VARCHAR' and column_info['length'] >= 254:
+                if coltype == 'VARCHAR' and column_info['character_maximum_length'] >= 254:
                     coltype = 'TEXT'
                     length = ''
 
                 converted[order_num] = {
                     'name': column_info['name'],
                     'type': coltype,
-                    'length': length,
-                    'nullable': column_info['nullable'],
-                    'default': column_info['default'],
-                    'other': column_info['other'],
+                    'character_maximum_length': length,
+                    'is_nullable': column_info['is_nullable'],
+                    'column_default': column_info['column_default'],
                     'comment': column_info['comment']
                 }
 
             create_table_sql_parts = []
             for _, info in converted.items():
                 create_table_sql_column = ''
-                if 'length' in info and info['type'] in ('CHAR', 'VARCHAR'):
-                    create_table_sql_column = f""""{info['name']}" {info['type']}({info['length']}) {info['nullable']}"""
+                if 'character_maximum_length' in info and info['type'] in ('CHAR', 'VARCHAR'):
+                    create_table_sql_column = f""""{info['name']}" {info['type']}({info['character_maximum_length']}) {info['is_nullable']}"""
                 else:
-                    create_table_sql_column = f""""{info['name']}" {info['type']} {info['nullable']}"""
-                if info['default'] != '':
+                    create_table_sql_column = f""""{info['name']}" {info['type']} {info['is_nullable']}"""
+                if info['column_default'] != '':
                     if info['type'] in ('CHAR', 'VARCHAR', 'TEXT'):
-                        create_table_sql_column += f" DEFAULT '{info['default']}'".replace("''", "'")
+                        create_table_sql_column += f" DEFAULT '{info['column_default']}'".replace("''", "'")
                     else:
-                        create_table_sql_column += f" DEFAULT {info['default']}"
+                        create_table_sql_column += f" DEFAULT {info['column_default']}"
                 create_table_sql_parts.append(create_table_sql_column)
             create_table_sql = ", ".join(create_table_sql_parts)
             create_table_sql = f"""CREATE TABLE "{target_schema}"."{target_table_name}" ({create_table_sql})"""
         else:
             raise ValueError(f"Unsupported target database type: {target_db_type}")
 
-        return converted, create_table_sql
+        return converted
+
+    def get_create_table_sql(self, settings):
+        return ""
+
+    def is_string_type(self, column_type: str) -> bool:
+        string_types = ['CHAR', 'VARCHAR', 'NCHAR', 'NVARCHAR', 'TEXT', 'LONG VARCHAR', 'LONG NVARCHAR', 'UNICHAR', 'UNIVARCHAR']
+        return column_type.upper() in string_types
+
+    def is_numeric_type(self, column_type: str) -> bool:
+        numeric_types = ['BIGINT', 'INTEGER', 'INT', 'TINYINT', 'SMALLINT', 'FLOAT', 'DOUBLE PRECISION', 'DECIMAL', 'NUMERIC']
+        return column_type.upper() in numeric_types
 
     def fetch_indexes(self, settings):
         source_table_id = settings['source_table_id']

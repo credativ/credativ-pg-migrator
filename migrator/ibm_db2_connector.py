@@ -69,12 +69,11 @@ class IBMDB2Connector(DatabaseConnector):
                 result[row[0]] = {
                     'name': row[1],
                     'type': row[2],
-                    'length': row[5] if row[5] else row[3],
+                    'character_maximum_length': row[5] if row[5] else row[3],
                     'precision': row[4],
-                    'nullable': 'NOT NULL' if row[6] == 'N' else '',
-                    'default': row[7] if row[7] else '',
+                    'is_nullable': 'NOT NULL' if row[6] == 'N' else '',
+                    'column_default': row[7] if row[7] else '',
                     'comment': '',
-                    'other': ''
                 }
             cursor.close()
             self.disconnect()
@@ -148,48 +147,58 @@ class IBMDB2Connector(DatabaseConnector):
 
             for order_num, column_info in source_columns.items():
                 coltype = column_info['type'].upper()
-                length = column_info['length']
+                length = column_info['character_maximum_length']
                 if type_mapping.get(coltype, 'UNKNOWN').startswith('UNKNOWN'):
                     self.logger.info(f"Column {column_info['name']} - unknown data type: {column_info['type']}")
                     # coltype = 'TEXT' ## default to TEXT may not be the best option -> let the table creation fail
                 else:
                     coltype = type_mapping.get(coltype, 'TEXT')
-                if coltype == 'VARCHAR' and int(column_info['length']) >= 254:
+                if coltype == 'VARCHAR' and int(column_info['character_maximum_length']) >= 254:
                     coltype = 'TEXT'
                     length = ''
 
                 converted[order_num] = {
                     'name': column_info['name'],
                     'type': coltype,
-                    'length': length,
-                    'default': column_info['default'],
-                    'nullable': column_info['nullable'],
+                    'character_maximum_length': length,
+                    'column_default': column_info['column_default'],
+                    'is_nullable': column_info['is_nullable'],
                     'comment': column_info['comment'],
-                    'other': column_info['other']
                 }
 
             create_table_sql_parts = []
             for _, info in converted.items():
-                if 'length' in info and info['type'] in ('CHAR', 'VARCHAR'):
-                    create_table_sql_parts.append(f""""{info['name']}" {info['type']}({info['length']}) {info['nullable']}""")
+                if 'character_maximum_length' in info and info['type'] in ('CHAR', 'VARCHAR'):
+                    create_table_sql_parts.append(f""""{info['name']}" {info['type']}({info['character_maximum_length']}) {info['is_nullable']}""")
                 else:
-                    create_table_sql_parts.append(f""""{info['name']}" {info['type']} {info['nullable']}""")
-                if info['default']:
-                    if info['type'] in ('CHAR', 'VARCHAR', 'TEXT') and ('||' in info['default'] or '(' in info['default'] or ')' in info['default']):
-                        create_table_sql_parts[-1] += f""" DEFAULT {info['default']}""".replace("''", "'")
+                    create_table_sql_parts.append(f""""{info['name']}" {info['type']} {info['is_nullable']}""")
+                if info['column_default']:
+                    if info['type'] in ('CHAR', 'VARCHAR', 'TEXT') and ('||' in info['column_default'] or '(' in info['column_default'] or ')' in info['column_default']):
+                        create_table_sql_parts[-1] += f""" DEFAULT {info['column_default']}""".replace("''", "'")
                     elif info['type'] in ('CHAR', 'VARCHAR', 'TEXT'):
-                        create_table_sql_parts[-1] += f""" DEFAULT '{info['default']}'""".replace("''", "'")
+                        create_table_sql_parts[-1] += f""" DEFAULT '{info['column_default']}'""".replace("''", "'")
                     elif info['type'] in ('BOOLEAN', 'BIT'):
-                        create_table_sql_parts[-1] += f""" DEFAULT {info['default']}::BOOLEAN"""
+                        create_table_sql_parts[-1] += f""" DEFAULT {info['column_default']}::BOOLEAN"""
                     else:
-                        create_table_sql_parts[-1] += f" DEFAULT {info['default']}"
+                        create_table_sql_parts[-1] += f" DEFAULT {info['column_default']}"
             create_table_sql = ", ".join(create_table_sql_parts)
             create_table_sql = f"""CREATE TABLE "{target_schema}"."{target_table_name}" ({create_table_sql})"""
 
         else:
             raise ValueError(f"Unsupported target database type: {target_db_type}")
 
-        return converted, create_table_sql
+        return converted
+
+    def get_create_table_sql(self, settings):
+        return ""
+
+    def is_string_type(self, column_type: str) -> bool:
+        string_types = ['CHAR', 'VARCHAR', 'NCHAR', 'NVARCHAR', 'TEXT', 'LONG VARCHAR', 'LONG NVARCHAR', 'UNICHAR', 'UNIVARCHAR']
+        return column_type.upper() in string_types
+
+    def is_numeric_type(self, column_type: str) -> bool:
+        numeric_types = ['BIGINT', 'INTEGER', 'INT', 'TINYINT', 'SMALLINT', 'FLOAT', 'DOUBLE PRECISION', 'DECIMAL', 'NUMERIC']
+        return column_type.upper() in numeric_types
 
     def migrate_table(self, migrate_target_connection, settings):
         part_name = 'migrate_table initialize'

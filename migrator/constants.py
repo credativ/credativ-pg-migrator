@@ -8,7 +8,7 @@ MIGRATOR_MODULES = {
 					'postgresql': 'postgresql_connector:PostgreSQLConnector',
 					'ibm_db2': 'ibm_db2_connector:IBMDB2Connector',
 					'informix': 'informix_connector:InformixConnector',
-					'ms_sql': 'ms_sql_connector:MsSQLConnector',
+					'mssql': 'ms_sql_connector:MsSQLConnector',
 					'mysql': 'mysql_connector:MySQLConnector',
 					'oracle': 'oracle_connector:OracleConnector',
 					'sql_anywhere': 'sql_anywhere_connector:SQLAnywhereConnector',

@@ -77,7 +77,13 @@ class OracleConnector(DatabaseConnector):
 
     def fetch_table_columns(self, table_schema: str, table_name: str, migrator_tables) -> dict:
         query = f"""
-            SELECT column_id, column_name, data_type, data_length, nullable, data_default
+            SELECT
+                column_id,
+                column_name,
+                data_type,
+                data_length,
+                nullable,
+                data_default
             FROM all_tab_columns
             WHERE owner = '{table_schema.upper()}' AND table_name = '{table_name.upper()}'
             ORDER BY column_id
@@ -88,16 +94,45 @@ class OracleConnector(DatabaseConnector):
             cursor = self.connection.cursor()
             cursor.execute(query)
             for row in cursor.fetchall():
-                result[row[0]] = {
-                    'name': row[1],
-                    'type': row[2],
-                    'character_maximum_length': row[3],
-                    'is_nullable': 'NOT NULL' if row[4] == 'N' else '',
-                    'column_default': row[5],
+                column_id = row[0]
+                column_name = row[1]
+                column_type = row[2]
+                column_length = row[3]
+                column_nullable = row[4]
+                column_default = row[5]
+                result[column_id] = {
+                    'column_name': column_name,
+                    'data_type': column_type,
+                    'character_maximum_length': column_length if self.is_string_type(column_type) else None,
+                    'numeric_precision': column_length if self.is_numeric_type(column_type) else None,
+                    'numeric_scale': None,
+                    'is_nullable': 'NO' if column_nullable == 'N' else 'YES',
+                    'is_identity': 'NO',
+                    'column_default': column_default,
                     'comment': '',
                 }
+
+                if self.config_parser.get_log_level() == 'DEBUG':
+                    self.logger.debug(f"Checking if default value is a sequence for column {'column_name'} ({column_default})...")
+                if (isinstance(column_default, str)
+                    and 'nextval' in column_default.lower()):
+                    parts = column_default.replace('"', '').split(".")
+                    if len(parts) == 3:
+                        owner, seq_name, _ = parts
+                        sequence_details = self.get_sequence_details(owner, seq_name)
+                        if sequence_details:
+                            if self.config_parser.get_log_level() == 'DEBUG':
+                                self.logger.debug(f"Substituting default value containing sequence: {column_default}")
+                            result[column_id]['column_default'] = ""
+                            result[column_id]['is_identity'] = 'YES'
+                            if column_type in ('NUMBER'):
+                                result[column_id]['data_type'] = 'BIGINT'
+                    ## TODO: insert_internal_data_types_substitutions
+                    ## internal subtitution of this type breaks foreign key constraints
+
             cursor.close()
             self.disconnect()
+
             return result
         except Exception as e:
             self.logger.error(f"Error executing query: {query}")
@@ -163,12 +198,12 @@ class OracleConnector(DatabaseConnector):
             AND sequence_name = '{sequence_name.upper()}'
         """
         try:
-            self.connect()
+            # self.connect()
             cursor = self.connection.cursor()
             cursor.execute(query)
             result = cursor.fetchone()
             cursor.close()
-            self.disconnect()
+            # self.disconnect()
             if result:
                 return {
                     'name': result[0],

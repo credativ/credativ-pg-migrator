@@ -160,27 +160,6 @@ class Planner:
                             if self.config_parser.get_log_level() == 'DEBUG':
                                 self.logger.debug(f"Substituted default value: {column_info['column_default']} -> {substitution}")
 
-                    # check if default is a sequence
-
-                    if self.config_parser.get_db_type('source') == 'oracle':
-                        if self.config_parser.get_log_level() == 'DEBUG':
-                            self.logger.debug(f"Checking if default value is a sequence for column {column_info['column_name']} (column_info['column_default'])...")
-                        if (isinstance(column_info['column_default'], str)
-                            and 'nextval' in column_info['column_default'].lower()):
-                            parts = column_info['column_default'].replace('"', '').split(".")
-                            if len(parts) == 3:
-                                owner, seq_name, _ = parts
-                                sequence_details = self.source_connection.get_sequence_details(owner, seq_name)
-                                if sequence_details:
-                                    if self.config_parser.get_log_level() == 'DEBUG':
-                                        self.logger.debug(f"Substituting default value containing sequence: {column_info['column_default']}")
-                                    column_info['column_default'] = ""
-                                    column_info['is_nullable'] = 'GENERATED ALWAYS AS IDENTITY'
-                                    if column_info['data_type'] in ('NUMBER'):
-                                        column_info['data_type'] = 'BIGINT'
-                            ## TODO: insert_internal_data_types_substitutions
-                            ## internal subtitution of this type breaks foreign key constraints
-
                 settings = {
                     'source_db_type': self.config_parser.get_source_db_type(),
                     'source_schema': self.source_schema,
@@ -417,6 +396,7 @@ class Planner:
 
             for order_num, column_info in source_columns.items():
                 coltype = column_info['data_type'].upper()
+                character_maximum_length = column_info['character_maximum_length'] if column_info['character_maximum_length'] is not None else 0
                 if source_db_type != 'postgresql':
                     if types_mapping.get(coltype, 'UNKNOWN').startswith('UNKNOWN'):
                         self.logger.info(f"Column {column_info['column_name']} - unknown data type: {column_info['data_type']}")
@@ -424,7 +404,7 @@ class Planner:
                     else:
                         coltype = types_mapping.get(coltype, 'TEXT')
 
-                    if self.source_connection.is_string_type(coltype) and int(column_info['character_maximum_length']) >= 254:
+                    if self.source_connection.is_string_type(coltype) and character_maximum_length >= 254:
                         coltype = 'TEXT'
 
                 converted[order_num] = {

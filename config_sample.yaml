@@ -32,6 +32,7 @@ source:
   odbc:
     driver: 'FreeTDS'
     libraries: "/usr/lib/x86_64-linux-gnu/odbc/libtdsodbc.so"
+  system_catalog: "SYSIBM" # so far only for ibm_db2 - SYSCAT or SYSIBM - sysibm simulates the information_schema
 
 # target database connection - always postgresql
 target:

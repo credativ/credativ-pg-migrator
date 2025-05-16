@@ -56,25 +56,62 @@ class IBMDB2Connector(DatabaseConnector):
             raise
 
     def fetch_table_columns(self, table_schema: str, table_name: str, migrator_tables) -> dict:
-        query = f"""
-            SELECT COLNO, COLNAME, TYPENAME, "LENGTH", "SCALE", STRINGUNITSLENGTH, "NULLS", "DEFAULT"
-            FROM SYSCAT.COLUMNS
-            WHERE TABSCHEMA = upper('{table_schema}') AND tabname = '{table_name}' ORDER BY COLNO
-        """
+        result = {}
         try:
-            result = {}
+            if self.config_parser.get_system_catalog() in ('SYSCAT','NONE'):
+                query = f"""
+                    SELECT
+                        COLNO,
+                        COLNAME,
+                        TYPENAME,
+                        "LENGTH",
+                        "LENGTH",
+                        "SCALE",
+                        "NULLS",
+                        "DEFAULT"
+                    FROM SYSCAT.COLUMNS
+                    WHERE TABSCHEMA = upper('{table_schema}') AND tabname = '{table_name}' ORDER BY COLNO
+                """
+            elif self.config_parser.get_system_catalog() == 'SYSIBM':
+                query = f"""
+                    SELECT
+                        ORDINAL_POSITION,
+                        COLUMN_NAME,
+                        DATA_TYPE,
+                        CHARACTER_MAXIMUM_LENGTH,
+                        NUMERIC_PRECISION,
+                        NUMERIC_SCALE,
+                        IS_NULLABLE,
+                        COLUMN_DEFAULT
+                    FROM SYSIBM.COLUMNS
+                    WHERE TABLE_NAME = '{table_name}' AND TBCREATOR = upper('{table_schema}') ORDER BY COLNO
+                """
+            else:
+                raise ValueError(f"Unsupported system catalog: {self.config_parser.get_system_catalog()}")
             self.connect()
             cursor = self.connection.cursor()
             cursor.execute(query)
             for row in cursor.fetchall():
-                result[row[0]] = {
-                    'name': row[1],
-                    'type': row[2],
-                    'character_maximum_length': row[5] if row[5] else row[3],
-                    'precision': row[4],
-                    'is_nullable': 'NOT NULL' if row[6] == 'N' else '',
-                    'column_default': row[7] if row[7] else '',
-                    'comment': '',
+                ordinal_position = row[0]
+                column_name = row[1]
+                column_type = row[2]
+                character_maximum_length = row[3]
+                numeric_precision = row[4]
+                numeric_scale = row[5]
+                is_nullable = row[6]
+                if self.config_parser.get_system_catalog() == 'SYSCAT':
+                    is_nullable = 'NO' if is_nullable == 'N' else 'YES'
+                column_default = row[7]
+                result[ordinal_position] = {
+                    'column_name': column_name,
+                    'data_type': column_type,
+                    'character_maximum_length': character_maximum_length,
+                    'numeric_precision': numeric_precision,
+                    'numeric_scale': numeric_scale,
+                    'is_nullable': is_nullable,
+                    'column_default': column_default,
+                    'column_comment': '',
+                    'is_identity': 'NO',
                 }
             cursor.close()
             self.disconnect()

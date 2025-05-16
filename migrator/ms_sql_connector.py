@@ -80,23 +80,44 @@ class MsSQLConnector(DatabaseConnector):
 
     def fetch_table_columns(self, table_schema: str, table_name: str, migrator_tables) -> dict:
         result = {}
-        query = f"""
-            SELECT
-                c.column_id AS ordinal_position,
-                c.name AS column_name,
-                t.name AS data_type,
-                c.max_length AS length,
-                c.is_nullable,
-                c.is_identity,
-                dc.definition AS default_value
-            FROM sys.columns c
-            JOIN sys.tables tb ON c.object_id = tb.object_id
-            JOIN sys.schemas s ON tb.schema_id = s.schema_id
-            JOIN sys.types t ON c.user_type_id = t.user_type_id
-            LEFT JOIN sys.default_constraints dc ON c.default_object_id = dc.object_id
-            WHERE s.name = '{table_schema}' AND tb.name = '{table_name}'
-            ORDER BY c.column_id
-        """
+        if self.config_parser.get_system_catalog() == 'INFORMATION_SCHEMA':
+            query = f"""
+                SELECT
+                    c.ordinal_position,
+                    c.column_name,
+                    c.data_type,
+                    c.character_maximum_length,
+                    c.numeric_precision,
+                    c.numeric_scale,
+                    c.is_nullable,
+                    'NO' AS is_identity,
+                    c.column_default
+                FROM information_schema.columns c
+                WHERE c.table_schema = '{table_schema}' AND c.table_name = '{table_name}'
+                ORDER BY c.ordinal_position
+            """
+        elif self.config_parser.get_system_catalog() in ('SYS', 'NONE'):
+            query = f"""
+                SELECT
+                    c.column_id AS ordinal_position,
+                    c.name AS column_name,
+                    t.name AS data_type,
+                    c.max_length AS length,
+                    c.precision AS numeric_precision,
+                    c.scale AS numeric_scale,
+                    c.is_nullable,
+                    c.is_identity,
+                    dc.definition AS default_value
+                FROM sys.columns c
+                JOIN sys.tables tb ON c.object_id = tb.object_id
+                JOIN sys.schemas s ON tb.schema_id = s.schema_id
+                JOIN sys.types t ON c.user_type_id = t.user_type_id
+                LEFT JOIN sys.default_constraints dc ON c.default_object_id = dc.object_id
+                WHERE s.name = '{table_schema}' AND tb.name = '{table_name}'
+                ORDER BY c.column_id
+            """
+        else:
+            raise ValueError(f"Unsupported system catalog: {self.config_parser.get_system_catalog()}")
         try:
             self.connect()
             cursor = self.connection.cursor()
@@ -104,20 +125,29 @@ class MsSQLConnector(DatabaseConnector):
                 self.logger.debug(f"MSSQL: Reading columns for {table_schema}.{table_name}")
             cursor.execute(query)
             for row in cursor.fetchall():
-                result[row[0]] = {
-                    'name': row[1],
-                    'type': row[2],
-                    'character_maximum_length': row[3],
-                    'is_nullable': 'NO' if not row[4] else 'YES',
-                    'column_default': row[6].strip('()') if row[6] else '',
-                    'comment': '',
-                    'is_identity': 'YES' if row[5] else 'NO'
+                ordinal_position = row[0]
+                column_name = row[1]
+                data_type = row[2]
+                character_maximum_length = row[3]
+                numeric_precision = row[4]
+                numeric_scale = row[5]
+                is_nullable = row[6]
+                is_identity = row[7]
+                column_default = row[8]
+                result[ordinal_position] = {
+                    'column_name': column_name,
+                    'data_type': data_type,
+                    'character_maximum_length': character_maximum_length,
+                    'numeric_precision': numeric_precision,
+                    'numeric_scale': numeric_scale,
+                    'is_nullable': is_nullable,
+                    'is_identity': is_identity,
+                    'column_default': column_default,
+                    'comment': ''
                 }
-
                 # # checking for default values substitution with the original data type
                 # if result[row[0]]['column_default'] != '':
                 #     result[row[0]]['column_default'] = migrator_tables.check_default_values_substitution(result[row[0]]['name'], result[row[0]]['type'], result[row[0]]['column_default'])
-
             cursor.close()
             self.disconnect()
             return result

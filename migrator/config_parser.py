@@ -154,7 +154,7 @@ class ConfigParser:
         return self.get_connect_string('target')
 
     def get_system_catalog(self):
-        return self.config.get('system_catalog', 'NONE')
+        return self.config.get('system_catalog', 'NONE').upper()
 
     ## Migrator
     def get_migrator_config(self):

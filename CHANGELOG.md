@@ -2,14 +2,19 @@
 
 ## (not released yet) 0.7.2 - 2025.05.xx
 
-- 2025.05.16: Full refactoring of the function convert_table_columns - redundant code removed from connectors, function replaced with a database specific function get_types_mapping, conversion of types moved to the planner
+- 2025.05.16: Serial and Serial8 data types in Informix migration are now replaced with INTEGER / BIGINT IDENTITY
+- Identity columns are now supported for all connectors
+- Added configurable system catalog for MS SQL Server and IBM DB2 LUW
+  - Rationale: newest versions support INFORMATION_SCHEMA so we can use it instead of system catalog, but older versions still need to use old system tables
+- Preparations for support of generated columns - MySQL allows both virtual and stored generated columns, PostgreSQL 17 has stored generated columns, PG 18 should add virtual generated columns
+- Full refactoring of the function convert_table_columns - redundant code removed from connectors, function replaced with a database specific function get_types_mapping, conversion of types moved to the planner
   - Rationale: previous solution was repeating the same code in all connectors and complicated custom replacements and handling of IDENTITY columns
   - This change will also simplify the replacement of data types for Forein Key columns
 - 2025.05.15: Added experimental support for target table partitioning by range for date/timestamp columns
   - Remaining issue: PRIMARY KEY on PostgreSQL must contain partitioning column
-- 2025.05.15: Replacement of NUMBER primary keys with sequence as default value in Oracle connector with BIGINT IDENTITY column
+- Replacement of NUMBER primary keys with sequence as default value in Oracle connector with BIGINT IDENTITY column
   - Remaining issue: if used in FK, migrator must change also dependent columns to BIGINT
-- 2025.05.15: Updates in Oracle connector - implemented migration of the full data model
+- Updates in Oracle connector - implemented migration of the full data model
 - 2025.05.14: Fixed issues with running Oracle in container, added testing databases for Oracle
 - 2025.05.12: Fixed issue in the config parser logic when both include and exclude tables patterns are defined
 

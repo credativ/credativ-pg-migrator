@@ -70,7 +70,15 @@ class SQLAnywhereConnector(DatabaseConnector):
 
     def fetch_table_columns(self, table_schema: str, table_name: str, migrator_tables) -> dict:
         query = f"""
-            SELECT c.column_id, c.column_name, d.domain_name, c.width, c.scale, c.column_type, c."nulls", c."default"
+            SELECT
+                c.column_id,
+                c.column_name,
+                d.domain_name,
+                c.width,
+                c.scale,
+                c.column_type,
+                c."nulls",
+                c."default"
             FROM sys.syscolumn c
             LEFT JOIN SYS.SYSDOMAIN d ON d.domain_id = c.domain_id
             WHERE c.table_id = (
@@ -90,13 +98,15 @@ class SQLAnywhereConnector(DatabaseConnector):
             cursor.execute(query)
             for row in cursor.fetchall():
                 result[row[0]] = {
-                    'name': row[1],
-                    'type': row[2],
-                    'character_maximum_length': row[3],
-                    'precision': row[4],
-                    'is_nullable': 'NOT NULL' if row[6] == 'N' else '',
-                    'column_default': row[7],
-                    'comment': '',
+                    'column_name': row[1],
+                    'data_type': row[2],
+                    'character_maximum_length': row[3] if self.is_string_type(row[2]) else None,
+                    'numeric_precision': row[3] if self.is_numeric_type(row[2]) else None,
+                    'numeric_scale': row[4],
+                    'is_nullable': 'NO' if row[6] == 'N' else 'YES',
+                    'is_identity': 'YES' if row[7] is not None and row[7].upper() == 'AUTOINCREMENT' else 'NO',
+                    'column_default': row[7] if row[7] is not None and row[7].upper() != 'AUTOINCREMENT' else None,
+                    'column_comment': '',
                 }
             cursor.close()
             self.disconnect()
@@ -112,11 +122,31 @@ class SQLAnywhereConnector(DatabaseConnector):
         if target_db_type == 'postgresql':
             types_mapping = {
                 'INTEGER': 'INTEGER',
-                'VARCHAR': 'TEXT',
-                'CHAR': 'TEXT',
+                'VARCHAR': 'VARCHAR',
+                'CHAR': 'CHAR',
                 'DATE': 'DATE',
                 'TIMESTAMP': 'TIMESTAMP',
-                'DECIMAL': 'DECIMAL'
+                'DECIMAL': 'DECIMAL',
+                'BINARY': 'BYTEA',
+                'LONG VARBINARY': 'BYTEA',
+                'LONG BINARY': 'BYTEA',
+                'BOOLEAN': 'BOOLEAN',
+                'FLOAT': 'REAL',
+                'DOUBLE PRECISION': 'DOUBLE PRECISION',
+                'SMALLINT': 'SMALLINT',
+                'BIGINT': 'BIGINT',
+                'TINYINT': 'SMALLINT',
+                'NUMERIC': 'NUMERIC',
+                'TEXT': 'TEXT',
+                'LONG VARCHAR': 'TEXT',
+                'LONG NVARCHAR': 'TEXT',
+                'UNICHAR': 'CHAR',
+                'UNIVARCHAR': 'VARCHAR',
+                'CLOB': 'TEXT',
+                'BLOB': 'BYTEA',
+                'XML': 'XML',
+                'JSON': 'JSON',
+                'UUID': 'UUID',
             }
         else:
             raise ValueError(f"Unsupported target database type: {target_db_type}")
@@ -187,7 +217,7 @@ class SQLAnywhereConnector(DatabaseConnector):
                         for order_num, column in source_columns.items():
                             column_name = column['column_name']
                             column_type = column['data_type']
-                            target_column_type = target_columns[order_num]['type']
+                            target_column_type = target_columns[order_num]['data_type']
                             # if column_type.lower() in ['binary', 'bytea']:
                             if column_type.lower() in ['blob']:
                                 record[column_name] = bytes(record[column_name].getBytes(1, int(record[column_name].length())))  # Convert 'com.informix.jdbc.IfxCblob' to bytes

@@ -155,10 +155,10 @@ class Planner:
                     # checking for default values substitution with the new data type
                     if column_info['column_default'] != '':
                         substitution = self.migrator_tables.check_default_values_substitution(column_info['column_name'], column_info['data_type'], column_info['column_default'])
-                        if substitution and substitution != None:
-                            column_info['column_default'] = substitution
+                        if substitution and substitution != None and column_info['column_default'] != substitution:
+                            column_info['replaced_column_default'] = substitution
                             if self.config_parser.get_log_level() == 'DEBUG':
-                                self.logger.debug(f"Substituted default value: {column_info['column_default']}")
+                                self.logger.debug(f"Substituted default value: {column_info['column_default']} -> {substitution}")
 
                     # check if default is a sequence
 

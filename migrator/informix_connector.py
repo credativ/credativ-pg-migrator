@@ -143,12 +143,15 @@ class InformixConnector(DatabaseConnector):
             cursor.execute(query)
             for row in cursor.fetchall():
                 result[row[0]] = {
-                    'name': row[1],
-                    'type': row[2],
+                    'column_name': row[1],
+                    'data_type': row[2],
                     'character_maximum_length': row[3],
+                    'numeric_precision': None,
+                    'numeric_scale': None,
                     'is_nullable': row[4],
+                    'is_identity': 'NO',
                     'column_default': re.sub(r'[^\x20-\x7E]', ' ', row[5]).strip() if row[5] else '',
-                    'comment': ''
+                    'column_comment': ''
                 }
 
                 # # if self.config_parser.get_log_level() == 'DEBUG':

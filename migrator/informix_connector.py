@@ -149,7 +149,7 @@ class InformixConnector(DatabaseConnector):
                     'numeric_precision': None,
                     'numeric_scale': None,
                     'is_nullable': row[4],
-                    'is_identity': 'NO',
+                    'is_identity': 'YES' if row[2] == 'SERIAL' or row[2] == 'SERIAL8' else 'NO',
                     'column_default': re.sub(r'[^\x20-\x7E]', ' ', row[5]).strip() if row[5] else '',
                     'column_comment': ''
                 }
@@ -246,8 +246,11 @@ class InformixConnector(DatabaseConnector):
                 'MONEY': 'MONEY',
                 'NCHAR': 'CHAR',
                 'NVARCHAR': 'VARCHAR',
-                'SERIAL8': 'BIGSERIAL',
-                'SERIAL': 'SERIAL',
+                # 'SERIAL8': 'BIGSERIAL',
+                # 'SERIAL': 'SERIAL',
+                # SERIAL & SERIAL8 are replaced in PostgreSQL with IDENTITY columns
+                'SERIAL8': 'BIGINT',
+                'SERIAL': 'INTEGER',
                 'SMALLFLOAT': 'REAL',
                 'SMALLINT': 'SMALLINT',
                 'TEXT': 'TEXT',
@@ -1095,13 +1098,14 @@ class InformixConnector(DatabaseConnector):
                 protocol_id = migrator_tables.insert_data_migration(source_schema, source_table, source_table_id, source_table_rows, worker_id, target_schema, target_table, 0)
                 # Fetch the data in batches
                 # Open a cursor and fetch rows in batches
-                query = f'''SELECT * FROM {source_schema.upper()}."{source_table}"'''
+                query = f'''SELECT * FROM "{source_schema}".{source_table}'''
                 if migration_limitation:
                     query += f" WHERE {migration_limitation}"
 
                 if self.config_parser.get_log_level() == 'DEBUG':
                     self.logger.debug(f"Worker {worker_id}: Fetching data with cursor using query: {query}")
 
+                part_name = 'execute query'
                 cursor = self.connection.cursor()
                 cursor.execute(query)
                 # offset = 0
@@ -1144,7 +1148,7 @@ class InformixConnector(DatabaseConnector):
                         for order_num, column in source_columns.items():
                             column_name = column['column_name']
                             column_type = column['data_type']
-                            target_column_type = target_columns[order_num]['type']
+                            target_column_type = target_columns[order_num]['data_type']
                             # if column_type.lower() in ['binary', 'bytea']:
                             if column_type.lower() in ['blob']:
                                 record[column_name] = bytes(record[column_name].getBytes(1, int(record[column_name].length())))  # Convert 'com.informix.jdbc.IfxCblob' to bytes

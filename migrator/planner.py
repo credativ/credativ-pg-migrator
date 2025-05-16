@@ -164,7 +164,7 @@ class Planner:
 
                     if self.config_parser.get_db_type('source') == 'oracle':
                         if self.config_parser.get_log_level() == 'DEBUG':
-                            self.logger.debug(f"Checking if default value is a sequence for column {column_info['name']} (column_info['column_default'])...")
+                            self.logger.debug(f"Checking if default value is a sequence for column {column_info['column_name']} (column_info['column_default'])...")
                         if (isinstance(column_info['column_default'], str)
                             and 'nextval' in column_info['column_default'].lower()):
                             parts = column_info['column_default'].replace('"', '').split(".")
@@ -176,20 +176,24 @@ class Planner:
                                         self.logger.debug(f"Substituting default value containing sequence: {column_info['column_default']}")
                                     column_info['column_default'] = ""
                                     column_info['is_nullable'] = 'GENERATED ALWAYS AS IDENTITY'
-                                    if column_info['type'] in ('NUMBER'):
-                                        column_info['type'] = 'BIGINT'
+                                    if column_info['data_type'] in ('NUMBER'):
+                                        column_info['data_type'] = 'BIGINT'
                             ## TODO: insert_internal_data_types_substitutions
                             ## internal subtitution of this type breaks foreign key constraints
 
                 settings = {
                     'source_db_type': self.config_parser.get_source_db_type(),
+                    'source_schema': self.source_schema,
+                    'source_table': table_info['table_name'],
+                    'source_table_id': table_info['id'],
                     'target_db_type': self.config_parser.get_target_db_type(),
                     'target_schema': self.target_schema,
-                    'target_table_name': table_info['table_name'],
+                    'target_table': table_info['table_name'],
                     'source_columns': source_columns,
                 }
                 target_columns = self.convert_table_columns(settings)
-                target_table_sql = self.source_connection.get_create_table_sql(settings)
+                settings['target_columns'] = target_columns
+                target_table_sql = self.target_connection.get_create_table_sql(settings)
                 if self.config_parser.get_log_level() == 'DEBUG':
                     self.logger.debug(f"Target columns: {target_columns}")
                     self.logger.debug(f"Target table SQL: {target_table_sql}")
@@ -432,7 +436,7 @@ class Planner:
                     'replaced_data_type': column_info['replaced_data_type'] if 'replaced_data_type' in column_info else '',
                     'column_type': column_info['column_type'] if 'column_type' in column_info else '',
                     'replaced_column_type': column_info['replaced_column_type'] if 'replaced_column_type' in column_info else '',
-                    'character_maximum_length': column_info['character_maximum_length'] if column_info['character_maximum_length'] is not None else '',
+                    'character_maximum_length': '' if coltype == 'TEXT' else column_info['character_maximum_length'] if column_info['character_maximum_length'] is not None else '',
                     'numeric_precision': column_info['numeric_precision'] if 'numeric_precision' in column_info else '',
                     'numeric_scale': column_info['numeric_scale'] if 'numeric_scale' in column_info else '',
                     'basic_data_type': column_info['basic_data_type'] if 'basic_data_type' in column_info else '',

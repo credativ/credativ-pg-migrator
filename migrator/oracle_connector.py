@@ -1,6 +1,7 @@
 from database_connector import DatabaseConnector
 from migrator_logging import MigratorLogger
 import cx_Oracle
+import traceback
 
 class OracleConnector(DatabaseConnector):
     def __init__(self, config_parser, source_or_target):
@@ -34,6 +35,8 @@ class OracleConnector(DatabaseConnector):
             raise e
         except cx_Oracle.DatabaseError as e:
             self.logger.error(f"Error connecting to Oracle database: {e}")
+            self.logger.logger.error("Full stack trace:")
+            self.logger.logger.error(traceback.format_exc())
             raise e
 
     def disconnect(self):

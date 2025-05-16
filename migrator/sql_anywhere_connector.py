@@ -2,6 +2,7 @@ from database_connector import DatabaseConnector
 from migrator_logging import MigratorLogger
 import sqlanydb
 import pyodbc
+import traceback
 
 class SQLAnywhereConnector(DatabaseConnector):
     def __init__(self, config_parser, source_or_target):
@@ -177,15 +178,15 @@ class SQLAnywhereConnector(DatabaseConnector):
                         self.logger.debug(f"Worker {worker_id}: Fetched {len(records)} rows from source table '{source_table}' using cursor")
 
                     records = [
-                        {column['name']: value for column, value in zip(source_columns.values(), record)}
+                        {column['column_name']: value for column, value in zip(source_columns.values(), record)}
                         for record in records
                     ]
 
                     # Adjust binary or bytea types
                     for record in records:
                         for order_num, column in source_columns.items():
-                            column_name = column['name']
-                            column_type = column['type']
+                            column_name = column['column_name']
+                            column_type = column['data_type']
                             target_column_type = target_columns[order_num]['type']
                             # if column_type.lower() in ['binary', 'bytea']:
                             if column_type.lower() in ['blob']:
@@ -214,6 +215,8 @@ class SQLAnywhereConnector(DatabaseConnector):
                 return target_table_rows
         except Exception as e:
             self.logger.error(f"Worker {worker_id}: Error during {part_name} -> {e}")
+            self.logger.error("Full stack trace:")
+            self.logger.error(traceback.format_exc())
             raise e
 
 

@@ -351,9 +351,9 @@ class SybaseASEConnector(DatabaseConnector):
                 for column_name in index_columns.split(','):
                     column_name = column_name.strip().strip('"')
                     for col_order_num, column_info in target_columns.items():
-                        if column_name == column_info['name']:
+                        if column_name == column_info['column_name']:
                             index_columns_count += 1
-                            column_data_type = column_info['type']
+                            column_data_type = column_info['data_type']
                             if self.config_parser.get_log_level() == 'DEBUG':
                                 self.logger.debug(f"Table: {target_schema}.{target_table_name}, index: {index_name}, column: {column_name} has data type {column_data_type}")
                             index_columns_data_types.append(column_data_type)
@@ -845,13 +845,13 @@ class SybaseASEConnector(DatabaseConnector):
 
                     # Convert records to a list of dictionaries
                     records = [
-                        {column['name']: value for column, value in zip(source_columns.values(), record)}
+                        {column['column_name']: value for column, value in zip(source_columns.values(), record)}
                         for record in records
                     ]
                     for record in records:
                         for order_num, column in source_columns.items():
-                            column_name = column['name']
-                            column_type = column['type']
+                            column_name = column['column_name']
+                            column_type = column['data_type']
                             if column_type.lower() in ['binary', 'varbinary', 'image']:
                                 record[column_name] = bytes(record[column_name]) if record[column_name] is not None else None
                             elif column_type.lower() in ['datetime', 'smalldatetime', 'date', 'time', 'timestamp']:
@@ -871,6 +871,8 @@ class SybaseASEConnector(DatabaseConnector):
 
         except Exception as e:
             self.logger.error(f"Worker {worker_id}: Error during {part_name} -> {e}")
+            self.logger.error("Full stack trace:")
+            self.logger.error(traceback.format_exc())
             raise e
         finally:
             if self.config_parser.get_log_level() == 'DEBUG':

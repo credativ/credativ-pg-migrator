@@ -354,7 +354,7 @@ class Orchestrator:
                         where_clause = limitation[0]
                         use_when_column_name = limitation[1]
                         for col_order_num, column_info in table_data['source_columns'].items():
-                            column_name = column_info['name']
+                            column_name = column_info['column_name']
                             if column_name == use_when_column_name or re.match(use_when_column_name, column_name):
                                 self.logger.info(f"Worker {worker_id}: Column {column_name} matches migration limitation.")
                                 migration_limitations.append(where_clause)
@@ -665,7 +665,7 @@ class Orchestrator:
                 self.target_connection.execute_query(query)
 
             for col in table_data['target_columns'].keys():
-                column_comment = table_data['target_columns'][col]['comment']
+                column_comment = table_data['target_columns'][col]['column_comment']
                 if column_comment:
                     query = f"""COMMENT ON COLUMN "{table_data['target_columns'][col]['target_schema']}"."{table_data['target_columns'][col]['target_table']}"."{table_data['target_columns'][col]['target_column']}" IS '{column_comment}'"""
                     self.logger.info(f"Setting comment for column {table_data['target_columns'][col]['target_column']} in target database.")

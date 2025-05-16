@@ -1,6 +1,7 @@
 from database_connector import DatabaseConnector
 from migrator_logging import MigratorLogger
 import ibm_db_dbi
+import traceback
 
 class IBMDB2Connector(DatabaseConnector):
     def __init__(self, config_parser, source_or_target):
@@ -215,13 +216,13 @@ class IBMDB2Connector(DatabaseConnector):
 
                     # Convert records to a list of dictionaries
                     records = [
-                        {column['name']: value for column, value in zip(source_columns.values(), record)}
+                        {column['column_name']: value for column, value in zip(source_columns.values(), record)}
                         for record in records
                     ]
                     for record in records:
                         for order_num, column in source_columns.items():
-                            column_name = column['name']
-                            column_type = column['type']
+                            column_name = column['column_name']
+                            column_type = column['data_type']
                             if column_type.lower() in ['binary', 'varbinary', 'image']:
                                 record[column_name] = bytes(record[column_name]) if record[column_name] is not None else None
                             elif column_type.lower() in ['datetime', 'smalldatetime', 'date', 'time', 'timestamp']:
@@ -241,6 +242,8 @@ class IBMDB2Connector(DatabaseConnector):
                 return target_table_rows
         except Exception as e:
             self.logger.error(f"Worker {worker_id}: Error during {part_name} -> {e}")
+            self.logger.error("Full stack trace:")
+            self.logger.error(traceback.format_exc())
             raise e
 
     def fetch_indexes(self, settings):

@@ -228,7 +228,7 @@ def fetch_table_data(logger, connection, schema, table_name, columns, primary_ke
 
         part_name = 'fetch data'
         data = cursor.fetchall()
-        records = [dict(zip([column['name'] for column in columns.values()], row)) for row in data]
+        records = [dict(zip([column['column_name'] for column in columns.values()], row)) for row in data]
 
         logger.logger.info(f"Fetched {len(records)} rows from table {schema}.{table_name} ({connection}).")
 
@@ -240,8 +240,8 @@ def fetch_table_data(logger, connection, schema, table_name, columns, primary_ke
             part_name = 'convert data types'
             # Adjust binary or bytea types
             for column in columns.values():
-                column_name = column['name']
-                column_type = column['type']
+                column_name = column['column_name']
+                column_type = column['data_type']
                 # logger.logger.debug(f"Column: {column_name}, Type: {column_type}")
 
                 # Normalize NULL values for comparability

@@ -1,6 +1,7 @@
 from database_connector import DatabaseConnector
 from migrator_logging import MigratorLogger
 import mysql.connector
+import traceback
 
 class MySQLConnector(DatabaseConnector):
     def __init__(self, config_parser, source_or_target):
@@ -170,14 +171,14 @@ class MySQLConnector(DatabaseConnector):
                         self.logger.debug(f"Worker {worker_id}: Fetched {len(records)} rows from source table {source_table}.")
 
                     records = [
-                        {column['name']: value for column, value in zip(source_columns.values(), record)}
+                        {column['column_name']: value for column, value in zip(source_columns.values(), record)}
                         for record in records
                     ]
 
                     for record in records:
                         for order_num, column in source_columns.items():
-                            column_name = column['name']
-                            column_type = column['type']
+                            column_name = column['column_name']
+                            column_type = column['data_type']
                             target_column_type = target_columns[order_num]['type']
                             # if column_type.lower() in ['binary', 'bytea']:
                             if column_type.lower() in ['blob']:
@@ -206,6 +207,8 @@ class MySQLConnector(DatabaseConnector):
                 return target_table_rows
         except mysql.connector.Error as e:
             self.logger.error(f"Worker {worker_id}: Error during {part_name} -> {e}")
+            self.logger.error("Full stack trace:")
+            self.logger.error(traceback.format_exc())
             raise e
 
     def fetch_indexes(self, settings):
@@ -254,8 +257,8 @@ class MySQLConnector(DatabaseConnector):
                 table_indexes[index_name]['columns'].append(column_name)
 
                 for col_num, column_info in target_columns.items():
-                    if column_info['name'] == column_name:
-                        table_indexes[index_name]['columns_data_types'].append(column_info['type'])
+                    if column_info['column_name'] == column_name:
+                        table_indexes[index_name]['columns_data_types'].append(column_info['data_type'])
 
             cursor.close()
             self.disconnect()

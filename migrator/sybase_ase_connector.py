@@ -177,7 +177,6 @@ class SybaseASEConnector(DatabaseConnector):
 
                 query_custom_types = f"""
                     SELECT
-                        ut.name AS user_data_type_name,
                         bt.name AS source_data_type,
                         CASE
                             WHEN bt.name in ('univarchar', 'unichar', 'varchar', 'char')
@@ -197,21 +196,34 @@ class SybaseASEConnector(DatabaseConnector):
                             THEN '(' + convert('varchar', ut.prec) + ',' + convert('varchar', ut.scale) + ')'
                         WHEN bt.name in ('float', 'binary') THEN '(' + convert('varchar', ut.length) + ')'
                         ELSE ''
-                        END as source_data_type_length
+                        END as source_data_type_length,
+                        ut.length as length,
+                        ut.prec as data_type_precision,
+                        ut.scale as data_type_scale
                     FROM systypes ut
                     JOIN (SELECT * FROM systypes t JOIN (SELECT type, min(usertype) as usertype FROM systypes GROUP BY type) bt0
                         ON t.type = bt0.type AND t.usertype = bt0.usertype) bt
                         ON ut.type = bt.type AND ut.hierarchy = bt.hierarchy
                     WHERE ut.name <> bt.name AND LOWER(ut.name) not in ('timestamp')
-                    AND ut.name = '{row[2]}'
+                    AND ut.name = '{data_type}'
                     ORDER BY ut.name
                 """
                 cursor.execute(query_custom_types)
-                custom_types = cursor.fetchall()
-                if custom_types:
-                    custom_type = custom_types[0]
-                    result[ordinal_position]['basic_data_type'] = custom_type[1]
-                    result[ordinal_position]['basic_column_type'] = custom_type[2]
+                custom_type = cursor.fetchone()
+                if custom_type:
+                    source_data_type = custom_type[0]
+                    length_precision = custom_type[1]
+                    type_has_identity_property = custom_type[2]
+                    type_nullable = custom_type[3]
+                    source_data_type_length = custom_type[4]
+                    length = custom_type[5]
+                    data_type_precision = custom_type[6]
+                    data_type_scale = custom_type[7]
+                    result[ordinal_position]['basic_data_type'] = source_data_type
+                    result[ordinal_position]['basic_character_maximum_length'] = length if self.is_string_type(source_data_type) else None
+                    result[ordinal_position]['basic_numeric_precision'] = data_type_precision if self.is_numeric_type(source_data_type) else None
+                    result[ordinal_position]['basic_numeric_scale'] = data_type_scale if self.is_numeric_type(source_data_type) else None
+                    result[ordinal_position]['basic_column_type'] = source_data_type_length
                     if custom_type[3] == 1:
                         result[ordinal_position]['is_identity'] = 'YES'
 
@@ -252,19 +264,18 @@ class SybaseASEConnector(DatabaseConnector):
                 'BINARY': 'BYTEA',
                 'VARBINARY': 'BYTEA',
                 'IMAGE': 'BYTEA',
-                'CHAR': 'TEXT',
-                'NCHAR': 'TEXT',
-                'UNICHAR': 'TEXT',
-                'NVARCHAR': 'TEXT',
+                'CHAR': 'CHAR',
+                'NCHAR': 'CHAR',
+                'UNICHAR': 'CHAR',
+                'NVARCHAR': 'VARCHAR',
                 'TEXT': 'TEXT',
                 'SYSNAME': 'TEXT',
                 'LONGSYSNAME': 'TEXT',
                 'LONG VARCHAR': 'TEXT',
                 'LONG NVARCHAR': 'TEXT',
-                'UNICHAR': 'TEXT',
                 'UNITEXT': 'TEXT',
-                'UNIVARCHAR': 'TEXT',
-                'VARCHAR': 'TEXT',
+                'UNIVARCHAR': 'VARCHAR',
+                'VARCHAR': 'VARCHAR',
 
                 'CLOB': 'TEXT',
                 'DECIMAL': 'DECIMAL',
@@ -860,7 +871,15 @@ class SybaseASEConnector(DatabaseConnector):
                     # Insert batch into target table
                     if self.config_parser.get_log_level() == 'DEBUG':
                         self.logger.debug(f"Worker {worker_id}: Starting insert of {len(records)} rows from source table {source_table}")
-                    inserted_rows = migrate_target_connection.insert_batch(target_schema, target_table, target_columns, records)
+                    settings = {
+                        'target_schema': target_schema,
+                        'target_table': target_table,
+                        'target_columns': target_columns,
+                        'data': records,
+                        'worker_id': worker_id,
+                        'migrator_tables': migrator_tables,
+                    }
+                    inserted_rows = migrate_target_connection.insert_batch(settings)
                     total_inserted_rows += inserted_rows
                     self.logger.info(f"Worker {worker_id}: Inserted {inserted_rows} (total: {total_inserted_rows} from: {source_table_rows} ({round(total_inserted_rows/source_table_rows*100, 2)}%)) rows into target table '{target_table}'")
 

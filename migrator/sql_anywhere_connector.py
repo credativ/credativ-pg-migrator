@@ -202,7 +202,15 @@ class SQLAnywhereConnector(DatabaseConnector):
 
                     if self.config_parser.get_log_level() == 'DEBUG':
                         self.logger.debug(f"Worker {worker_id}: Starting insert of {len(records)} rows from source table {source_table}")
-                    inserted_rows = migrate_target_connection.insert_batch(target_schema, target_table, target_columns, records)
+                    settings = {
+                        'target_schema': target_schema,
+                        'target_table': target_table,
+                        'target_columns': target_columns,
+                        'data': records,
+                        'worker_id': worker_id,
+                        'migrator_tables': migrator_tables,
+                    }
+                    inserted_rows = migrate_target_connection.insert_batch(settings)
                     total_inserted_rows += inserted_rows
                     self.logger.info(f"Worker {worker_id}: Inserted {inserted_rows} (total: {total_inserted_rows} from: {source_table_rows} ({round(total_inserted_rows/source_table_rows*100, 2)}%)) rows into target table {target_table}")
 

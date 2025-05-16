@@ -101,16 +101,11 @@ class OracleConnector(DatabaseConnector):
             self.logger.error(e)
             raise
 
-    def convert_table_columns(self, settings):
+    def get_types_mapping(self, settings):
         target_db_type = settings['target_db_type']
-        target_schema = settings['target_schema']
-        target_table_name = settings['target_table_name']
-        source_columns = settings['source_columns']
-        converted_columns = {}
-        create_table_sql = ""
-
+        types_mapping = {}
         if target_db_type == 'postgresql':
-            type_mapping = {
+            types_mapping = {
                 'VARCHAR': 'VARCHAR',
                 'VARCHAR2': 'VARCHAR',
                 'NUMBER': 'NUMERIC',
@@ -133,59 +128,10 @@ class OracleConnector(DatabaseConnector):
                 'DECIMAL': 'DECIMAL',
                 'NUMBER': 'NUMERIC',
             }
-
-            for order_num, column in source_columns.items():
-                column_name = column['name']
-                column_type = column['type']
-                column_length = column['character_maximum_length']
-                column_nullable = column['is_nullable']
-                column_default = column['column_default']
-                column_comment = column['comment']
-
-                if column_type in type_mapping:
-                    converted_type = type_mapping[column_type]
-                    if converted_type == 'VARCHAR' and column_length:
-                        if column_length > 254:
-                            converted_type = 'TEXT'
-                        else:
-                            converted_type += f"({column_length})"
-                else:
-                    converted_type = 'TEXT'
-
-                converted_columns[order_num] = {
-                    'name': column_name,
-                    'type': converted_type,
-                    'character_maximum_length': column_length,
-                    'is_nullable': column_nullable,
-                    'column_default': column_default,
-                    'comment': column_comment
-                }
-
-            create_table_sql_parts = []
-            for _, info in converted_columns.items():
-                create_table_sql_column = ""
-                column_name = info['name']
-                column_type = info['type']
-                column_nullable = info['is_nullable']
-                column_default = info['column_default']
-                column_comment = info['comment']
-
-                create_table_sql_column = f'''"{column_name}" {column_type} {column_nullable}'''
-
-                if column_default:
-                    create_table_sql_column +=(f" DEFAULT {column_default}")
-
-                if column_comment:
-                    create_table_sql_column +=(f" COMMENT '{column_comment}'")
-
-                create_table_sql_parts.append(create_table_sql_column)
-
-            create_table_sql = ", ".join(create_table_sql_parts)
-            create_table_sql = f'''CREATE TABLE "{target_schema}"."{target_table_name}" ({create_table_sql})'''
         else:
             raise ValueError(f"Unsupported target database type: {target_db_type}")
 
-        return converted_columns
+        return types_mapping
 
     def get_create_table_sql(self, settings):
         return ""

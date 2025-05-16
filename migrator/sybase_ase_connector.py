@@ -138,6 +138,8 @@ class SybaseASEConnector(DatabaseConnector):
                 self.logger.debug(f"Sybase ASE: Reading columns for {table_schema}.{table_name}")
             cursor.execute(query)
             for row in cursor.fetchall():
+                if self.config_parser.get_log_level() == 'DEBUG':
+                    self.logger.debug(f"Processing column: {row}")
                 ordinal_position = row[0]
                 column_name = row[1].strip()
                 data_type = row[2].strip()
@@ -159,7 +161,7 @@ class SybaseASEConnector(DatabaseConnector):
                     'column_name': column_name,
                     'data_type': data_type,
                     'column_type': full_data_type_length,
-                    'character_maximum_length': length if self.is_string_type(row[3].strip()) else None,
+                    'character_maximum_length': length if self.is_string_type(data_type) else None,
                     'is_nullable': 'NO' if column_nullable == 0 else 'YES',
                     'column_default': column_default_value,
                     'column_comment': '',
@@ -221,13 +223,11 @@ class SybaseASEConnector(DatabaseConnector):
             self.logger.error(e)
             raise
 
-    def convert_table_columns(self, settings):
+    def get_types_mapping(self, settings):
         target_db_type = settings['target_db_type']
-        source_columns = settings['source_columns']
-        type_mapping = {}
-        converted = {}
+        types_mapping = {}
         if target_db_type == 'postgresql':
-            type_mapping = {
+            types_mapping = {
                 'BIGDATETIME': 'TIMESTAMP',
                 'DATE': 'DATE',
                 'DATETIME': 'TIMESTAMP',
@@ -278,40 +278,10 @@ class SybaseASEConnector(DatabaseConnector):
                 'SERIAL': 'SERIAL',
                 'SMALLFLOAT': 'REAL',
             }
-
-            for order_num, column_info in source_columns.items():
-                coltype = column_info['data_type'].upper()
-                character_maximum_length = column_info['character_maximum_length']
-                if type_mapping.get(coltype, 'UNKNOWN').startswith('UNKNOWN'):
-                    self.logger.info(f"Column {column_info['column_name']} - unknown data type: {column_info['data_type']}")
-                    # coltype = 'TEXT' ## default to TEXT may not be the best option -> let the table creation fail
-                else:
-                    coltype = type_mapping.get(coltype, 'TEXT')
-                if coltype == 'VARCHAR' and int(column_info['character_maximum_length']) >= 254:
-                    coltype = 'TEXT'
-                    character_maximum_length = ''
-
-                converted[order_num] = {
-                    'column_name': column_info['column_name'],
-                    'is_nullable': column_info['is_nullable'],
-                    'column_default': column_info['column_default'],
-                    'replaced_column_default': column_info['replaced_column_default'] if 'replaced_column_default' in column_info else '',
-                    'data_type': coltype,
-                    'replaced_data_type': column_info['replaced_data_type'] if 'replaced_data_type' in column_info else '',
-                    'character_maximum_length': character_maximum_length,
-                    'numeric_precision': column_info['numeric_precision'] if 'numeric_precision' in column_info else '',
-                    'numeric_scale': column_info['numeric_scale'] if 'numeric_scale' in column_info else '',
-                    'basic_data_type': column_info['basic_data_type'] if 'basic_data_type' in column_info else '',
-                    'basic_column_type': column_info['basic_column_type'] if 'basic_column_type' in column_info else '',
-                    'is_identity': column_info['is_identity'],
-                    'column_comment': column_info['column_comment'],
-                    'is_generated': column_info['is_generated'] if 'is_generated' in column_info else '',
-                    'generation_expression': column_info['generation_expression'] if 'generation_expression' in column_info else '',
-                }
         else:
             raise ValueError(f"Unsupported target database type: {target_db_type}")
 
-        return converted
+        return types_mapping
 
     def get_create_table_sql(self, settings):
         return ""

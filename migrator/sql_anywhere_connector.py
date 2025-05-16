@@ -105,42 +105,21 @@ class SQLAnywhereConnector(DatabaseConnector):
             self.logger.error(e)
             raise
 
-    def convert_table_columns(self, settings):
+    def get_types_mapping(self, settings):
         target_db_type = settings['target_db_type']
-        target_schema = settings['target_schema']
-        target_table_name = settings['target_table_name']
-        source_columns = settings['source_columns']
-        # Basic implementation for converting table columns
-        type_mapping = {
-            'INTEGER': 'INTEGER',
-            'VARCHAR': 'TEXT',
-            'CHAR': 'TEXT',
-            'DATE': 'DATE',
-            'TIMESTAMP': 'TIMESTAMP',
-            'DECIMAL': 'DECIMAL'
-        }
-        converted = {}
-        create_table_sql_parts = []
-
-        for order_num, column_info in source_columns.items():
-            coltype = type_mapping.get(column_info['type'].upper(), 'TEXT')
-            length = column_info['character_maximum_length']
-            converted[order_num] = {
-                'name': column_info['name'],
-                'type': coltype,
-                'character_maximum_length': length,
-                'is_nullable': column_info['is_nullable'],
-                'column_default': column_info['column_default'],
-                'comment': column_info['comment'],
+        types_mapping = {}
+        if target_db_type == 'postgresql':
+            types_mapping = {
+                'INTEGER': 'INTEGER',
+                'VARCHAR': 'TEXT',
+                'CHAR': 'TEXT',
+                'DATE': 'DATE',
+                'TIMESTAMP': 'TIMESTAMP',
+                'DECIMAL': 'DECIMAL'
             }
-
-            if coltype in ('CHAR', 'VARCHAR') and length:
-                create_table_sql_parts.append(f"\"{column_info['name']}\" {coltype}({length}) {column_info['is_nullable']}")
-            else:
-                create_table_sql_parts.append(f"\"{column_info['name']}\" {coltype} {column_info['is_nullable']}")
-
-        create_table_sql = f"CREATE TABLE \"{target_schema}\".\"{target_table_name}\" ({', '.join(create_table_sql_parts)})"
-        return converted
+        else:
+            raise ValueError(f"Unsupported target database type: {target_db_type}")
+        return types_mapping
 
     def get_create_table_sql(self, settings):
         return ""

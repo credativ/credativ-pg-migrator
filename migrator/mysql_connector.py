@@ -73,16 +73,11 @@ class MySQLConnector(DatabaseConnector):
             self.logger.error(f"Error fetching table columns: {e}")
             raise
 
-    def convert_table_columns(self, settings):
+    def get_types_mapping(self, settings):
         target_db_type = settings['target_db_type']
-        target_schema = settings['target_schema']
-        target_table_name = settings['target_table_name']
-        source_columns = settings['source_columns']
-        type_mapping = {}
-        converted_columns = {}
-        create_table_sql = ''
+        types_mapping = {}
         if target_db_type == 'postgresql':
-            type_mapping = {
+            types_mapping = {
                 'INT': 'INTEGER',
                 'VARCHAR': 'VARCHAR',
                 'TEXT': 'TEXT',
@@ -108,47 +103,10 @@ class MySQLConnector(DatabaseConnector):
                 'POINT': 'POINT',
                 # Add more type mappings as needed
             }
-            for order_num, column_info in source_columns.items():
-                coltype = column_info['type'].upper()
-                length = column_info['character_maximum_length']
-
-                if type_mapping.get(coltype, 'UNKNOWN').startswith('UNKNOWN'):
-                    self.logger.info(f"Column {column_info['name']} - unknown data type: {column_info['type']}")
-                    # coltype = 'TEXT' ## default to TEXT may not be the best option -> let the table creation fail
-                else:
-                    coltype = type_mapping.get(coltype, 'TEXT')
-                if coltype == 'VARCHAR' and column_info['character_maximum_length'] >= 254:
-                    coltype = 'TEXT'
-                    length = ''
-
-                converted_columns[order_num] = {
-                    'name': column_info['name'],
-                    'type': coltype,
-                    'character_maximum_length': length,
-                    'is_nullable': column_info['is_nullable'],
-                    'column_default': column_info['column_default'],
-                    'comment': column_info['comment']
-                }
-
-            create_table_sql_parts = []
-            for _, info in converted_columns.items():
-                create_table_sql_column = ''
-                if 'character_maximum_length' in info and info['type'] in ('CHAR', 'VARCHAR'):
-                    create_table_sql_column = f""""{info['name']}" {info['type']}({info['character_maximum_length']}) {info['is_nullable']}"""
-                else:
-                    create_table_sql_column = f""""{info['name']}" {info['type']} {info['is_nullable']}"""
-                if info['column_default'] != '':
-                    if info['type'] in ('CHAR', 'VARCHAR', 'TEXT'):
-                        create_table_sql_column += f" DEFAULT '{info['column_default']}'".replace("''", "'")
-                    else:
-                        create_table_sql_column += f" DEFAULT {info['column_default']}"
-                create_table_sql_parts.append(create_table_sql_column)
-            create_table_sql = ", ".join(create_table_sql_parts)
-            create_table_sql = f"""CREATE TABLE "{target_schema}"."{target_table_name}" ({create_table_sql})"""
         else:
             raise ValueError(f"Unsupported target database type: {target_db_type}")
 
-        return converted_columns
+        return types_mapping
 
     def get_create_table_sql(self, settings):
         return ""

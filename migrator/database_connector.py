@@ -91,17 +91,12 @@ class DatabaseConnector(ABC):
         pass
 
     @abstractmethod
-    def convert_table_columns(self, settings):
+    def get_types_mapping(self, settings):
         """
         settings - dictionary with the following keys
             - target_db_type: str - target database type
-            - target_schema: str - schema name of the table in the target database
-            - target_table_name: str - table name in the source database
-            - source_columns: dict - dictionary of columns to be converted
         Converts the columns of one source table to the target database type and SQL syntax.
-        Returns:
-          - dictionary of converted columns - the same as dictionaly returned by fetch_table_columns, but with all conversion -> necessary for data migration
-          - SQL statement to create the table in the target database - used for table creation
+        Returns dictionary of types mapping between source and target database.
         """
         pass
 

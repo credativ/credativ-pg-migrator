@@ -146,15 +146,15 @@ class Planner:
 
                     if self.config_parser.get_log_level() == 'DEBUG':
                         self.logger.debug(f"Checking for data types / default values substitutions for column {column_info}...")
-                    substitution = self.migrator_tables.check_data_types_substitution(column_info['type'])
+                    substitution = self.migrator_tables.check_data_types_substitution(column_info['data_type'])
                     if substitution and substitution != (None, None):
-                        column_info['type'], column_info['character_maximum_length'] = self.migrator_tables.check_data_types_substitution(column_info['column_default'])
+                        column_info['data_type'], column_info['character_maximum_length'] = self.migrator_tables.check_data_types_substitution(column_info['column_default'])
                         if self.config_parser.get_log_level() == 'DEBUG':
-                            self.logger.debug(f"Substituted data type: {column_info['type']}, length: {column_info['character_maximum_length']}")
+                            self.logger.debug(f"Substituted data type: {column_info['data_type']}, length: {column_info['character_maximum_length']}")
 
                     # checking for default values substitution with the new data type
                     if column_info['column_default'] != '':
-                        substitution = self.migrator_tables.check_default_values_substitution(column_info['name'], column_info['type'], column_info['column_default'])
+                        substitution = self.migrator_tables.check_default_values_substitution(column_info['column_name'], column_info['data_type'], column_info['column_default'])
                         if substitution and substitution != None:
                             column_info['column_default'] = substitution
                             if self.config_parser.get_log_level() == 'DEBUG':
@@ -182,12 +182,14 @@ class Planner:
                             ## internal subtitution of this type breaks foreign key constraints
 
                 settings = {
+                    'source_db_type': self.config_parser.get_source_db_type(),
                     'target_db_type': self.config_parser.get_target_db_type(),
                     'target_schema': self.target_schema,
                     'target_table_name': table_info['table_name'],
                     'source_columns': source_columns,
                 }
-                target_columns, target_table_sql = self.source_connection.convert_table_columns(settings)
+                target_columns = self.convert_table_columns(settings)
+                target_table_sql = self.source_connection.get_create_table_sql(settings)
                 if self.config_parser.get_log_level() == 'DEBUG':
                     self.logger.debug(f"Target columns: {target_columns}")
                     self.logger.debug(f"Target table SQL: {target_table_sql}")
@@ -399,6 +401,52 @@ class Planner:
             self.logger.info(f"Table {table_info['table_name']} processed successfully.")
         self.logger.info("Planner - Tables processed successfully.")
 
+    def convert_table_columns(self, settings):
+        target_db_type = settings['target_db_type']
+        source_db_type = settings['source_db_type']
+        source_columns = settings['source_columns']
+        types_mapping = {}
+        converted = {}
+        if target_db_type == 'postgresql':
+            if source_db_type != 'postgresql':
+                types_mapping = self.source_connection.get_types_mapping(settings)
+
+            for order_num, column_info in source_columns.items():
+                coltype = column_info['data_type'].upper()
+                if types_mapping.get(coltype, 'UNKNOWN').startswith('UNKNOWN'):
+                    self.logger.info(f"Column {column_info['column_name']} - unknown data type: {column_info['data_type']}")
+                    # coltype = 'TEXT' ## default to TEXT may not be the best option -> let the table creation fail
+                else:
+                    if source_db_type != 'postgresql':
+                        coltype = types_mapping.get(coltype, 'TEXT')
+
+                if self.source_connection.is_string_type(coltype) and int(column_info['character_maximum_length']) >= 254:
+                    coltype = 'TEXT'
+
+                converted[order_num] = {
+                    'column_name': column_info['column_name'],
+                    'is_nullable': column_info['is_nullable'],
+                    'column_default': column_info['column_default'],
+                    'replaced_column_default': column_info['replaced_column_default'] if 'replaced_column_default' in column_info else '',
+                    'data_type': coltype,
+                    'replaced_data_type': column_info['replaced_data_type'] if 'replaced_data_type' in column_info else '',
+                    'column_type': column_info['column_type'] if 'column_type' in column_info else '',
+                    'replaced_column_type': column_info['replaced_column_type'] if 'replaced_column_type' in column_info else '',
+                    'character_maximum_length': column_info['character_maximum_length'] if column_info['character_maximum_length'] is not None else '',
+                    'numeric_precision': column_info['numeric_precision'] if 'numeric_precision' in column_info else '',
+                    'numeric_scale': column_info['numeric_scale'] if 'numeric_scale' in column_info else '',
+                    'basic_data_type': column_info['basic_data_type'] if 'basic_data_type' in column_info else '',
+                    'basic_column_type': column_info['basic_column_type'] if 'basic_column_type' in column_info else '',
+                    'is_identity': column_info['is_identity'],
+                    'column_comment': column_info['column_comment'] if 'column_comment' in column_info else '',
+                    'is_generated': column_info['is_generated'] if 'is_generated' in column_info else '',
+                    'generation_expression': column_info['generation_expression'] if 'generation_expression' in column_info else '',
+                }
+        else:
+            raise ValueError(f"Unsupported target database type: {target_db_type}")
+
+        return converted
+
     def run_prepare_views(self):
         self.logger.info("Planner - Preparing views...")
         if self.config_parser.should_migrate_views():
@@ -515,7 +563,9 @@ class Planner:
             cursor.close()
             connector.disconnect()
         except Exception as e:
-            raise ConnectionError(f"Failed to connect to {db_name}: {e}")
+            self.logger.error(f"Failed to connect to {db_name}: {e}")
+            self.logger.error(traceback.format_exc())
+            exit(1)
 
     def handle_error(self, e, description=None):
         self.logger.error(f"An error in {self.__class__.__name__} ({description}): {e}")

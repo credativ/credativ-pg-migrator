@@ -114,45 +114,121 @@ class PostgreSQLConnector(DatabaseConnector):
             self.logger.error(e)
             raise
 
-    def convert_table_columns(self, settings):
+    def get_types_mapping(self, settings):
         target_db_type = settings['target_db_type']
-        target_schema = settings['target_schema']
-        target_table_name = settings['target_table_name']
-        source_columns = settings['source_columns']
-        # type_mapping = {}
-        create_table_sql = ""
-        converted_schema = {}
-
-        if target_db_type == 'postgresql':
-            for col, info in source_columns.items():
-                converted_schema[col] = {
-                    'name': info['name'],
-                    'is_nullable': info['is_nullable'],
-                    'column_default': info['column_default'],
-                    'comment': info['comment'],
-                }
-                if (info['character_maximum_length'] is not None
-                    and info['type'].upper() in ('CHAR', 'VARCHAR', 'CHARACTER VARYING')):
-                    converted_schema[col]['type'] = f"{info['type']}({info['character_maximum_length']})"
-                else:
-                    converted_schema[col]['type'] = info['type']
-
-            create_table_sql = ', '.join([(f'''"{info["name"]}" {info["type"]} {info["nullable"]} {'DEFAULT ' + info['column_default'] if info['column_default'] else ''}''').strip()
-                                          for _, info in converted_schema.items()])
-            create_table_sql = f"""CREATE TABLE "{target_schema}"."{target_table_name}" ({create_table_sql})"""
-        else:
+        types_mapping = {}
+        if target_db_type != 'postgresql':
             raise ValueError(f"Unsupported target database type: {target_db_type}")
-
-        return converted_schema, create_table_sql
+        return types_mapping
 
     def get_create_table_sql(self, settings):
         target_schema = settings['target_schema']
         target_table_name = settings['target_table']
         # source_columns = settings['source_columns']
         converted_columns = settings['converted_columns']
-
+        converted = settings['converted_columns']
         create_table_sql = ""
         create_table_sql_parts = []
+
+        ## IBM DB2 LUW
+        create_table_sql_parts = []
+        for _, info in converted.items():
+            if 'character_maximum_length' in info and info['type'] in ('CHAR', 'VARCHAR'):
+                create_table_sql_parts.append(f""""{info['name']}" {info['type']}({info['character_maximum_length']}) {info['is_nullable']}""")
+            else:
+                create_table_sql_parts.append(f""""{info['name']}" {info['type']} {info['is_nullable']}""")
+            if info['column_default']:
+                if info['type'] in ('CHAR', 'VARCHAR', 'TEXT') and ('||' in info['column_default'] or '(' in info['column_default'] or ')' in info['column_default']):
+                    create_table_sql_parts[-1] += f""" DEFAULT {info['column_default']}""".replace("''", "'")
+                elif info['type'] in ('CHAR', 'VARCHAR', 'TEXT'):
+                    create_table_sql_parts[-1] += f""" DEFAULT '{info['column_default']}'""".replace("''", "'")
+                elif info['type'] in ('BOOLEAN', 'BIT'):
+                    create_table_sql_parts[-1] += f""" DEFAULT {info['column_default']}::BOOLEAN"""
+                else:
+                    create_table_sql_parts[-1] += f" DEFAULT {info['column_default']}"
+        create_table_sql = ", ".join(create_table_sql_parts)
+        create_table_sql = f"""CREATE TABLE "{target_schema}"."{target_table_name}" ({create_table_sql})"""
+
+        ## Informix
+        create_table_sql_parts = []
+        for _, info in converted.items():
+            create_table_sql_column = ''
+            if 'character_maximum_length' in info and info['data_type'] in ('CHAR', 'VARCHAR'):
+                create_table_sql_column = f""""{info['name']}" {info['type']}({info['character_maximum_length']}) {info['is_nullable']}"""
+            else:
+                create_table_sql_column = f""""{info['name']}" {info['type']} {info['is_nullable']}"""
+            if info['column_default'] != '':
+                if info['type'] in ('CHAR', 'VARCHAR', 'TEXT'):
+                    create_table_sql_column += f" DEFAULT '{info['column_default']}'".replace("''", "'")
+                else:
+                    create_table_sql_column += f" DEFAULT {info['column_default']}"
+            create_table_sql_parts.append(create_table_sql_column)
+        create_table_sql = ", ".join(create_table_sql_parts)
+        create_table_sql = f"""CREATE TABLE "{target_schema}"."{target_table_name}" ({create_table_sql})"""
+
+        ## MSSQL
+        create_table_sql_parts = []
+        for _, info in converted.items():
+            if 'character_maximum_length' in info and info['type'] in ('CHAR', 'VARCHAR'):
+                create_table_sql_parts.append(f""""{info['name']}" {info['type']}({info['character_maximum_length']}) {info['is_nullable']}""")
+            else:
+                create_table_sql_parts.append(f""""{info['name']}" {info['type']} {info['is_nullable']}""")
+            if info['column_default']:
+                if info['type'] in ('CHAR', 'VARCHAR', 'TEXT') and ('||' in info['column_default'] or '(' in info['column_default'] or ')' in info['column_default']):
+                    create_table_sql_parts[-1] += f""" DEFAULT {info['column_default']}""".replace("''", "'")
+                elif info['type'] in ('CHAR', 'VARCHAR', 'TEXT'):
+                    create_table_sql_parts[-1] += f""" DEFAULT '{info['column_default']}'""".replace("''", "'")
+                elif info['type'] in ('BOOLEAN', 'BIT'):
+                    create_table_sql_parts[-1] += f""" DEFAULT {info['column_default']}::BOOLEAN"""
+                else:
+                    create_table_sql_parts[-1] += f" DEFAULT {info['column_default']}"
+        create_table_sql = ", ".join(create_table_sql_parts)
+        create_table_sql = f"""CREATE TABLE "{target_schema}"."{target_table_name}" ({create_table_sql})"""
+
+        ## MySQL
+        create_table_sql_parts = []
+        for _, info in converted_columns.items():
+            create_table_sql_column = ''
+            if 'character_maximum_length' in info and info['type'] in ('CHAR', 'VARCHAR'):
+                create_table_sql_column = f""""{info['name']}" {info['type']}({info['character_maximum_length']}) {info['is_nullable']}"""
+            else:
+                create_table_sql_column = f""""{info['name']}" {info['type']} {info['is_nullable']}"""
+            if info['column_default'] != '':
+                if info['type'] in ('CHAR', 'VARCHAR', 'TEXT'):
+                    create_table_sql_column += f" DEFAULT '{info['column_default']}'".replace("''", "'")
+                else:
+                    create_table_sql_column += f" DEFAULT {info['column_default']}"
+            create_table_sql_parts.append(create_table_sql_column)
+        create_table_sql = ", ".join(create_table_sql_parts)
+        create_table_sql = f"""CREATE TABLE "{target_schema}"."{target_table_name}" ({create_table_sql})"""
+
+        ## Oracle
+        create_table_sql_parts = []
+        for _, info in converted_columns.items():
+            create_table_sql_column = ""
+            column_name = info['name']
+            column_type = info['type']
+            column_nullable = info['is_nullable']
+            column_default = info['column_default']
+            column_comment = info['comment']
+
+            create_table_sql_column = f'''"{column_name}" {column_type} {column_nullable}'''
+
+            if column_default:
+                create_table_sql_column +=(f" DEFAULT {column_default}")
+
+            if column_comment:
+                create_table_sql_column +=(f" COMMENT '{column_comment}'")
+
+            create_table_sql_parts.append(create_table_sql_column)
+
+        create_table_sql = ", ".join(create_table_sql_parts)
+        create_table_sql = f'''CREATE TABLE "{target_schema}"."{target_table_name}" ({create_table_sql})'''
+
+        ## PostgreSQL
+        create_table_sql = ', '.join([(f'''"{info["name"]}" {info["type"]} {info["nullable"]} {'DEFAULT ' + info['column_default'] if info['column_default'] else ''}''').strip()
+                                        for _, info in converted.items()])
+        create_table_sql = f"""CREATE TABLE "{target_schema}"."{target_table_name}" ({create_table_sql})"""
 
         ## Sybase ASE
         for _, info in converted_columns.items():

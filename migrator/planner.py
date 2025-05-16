@@ -283,11 +283,11 @@ class Planner:
             except Exception as e:
                 settings = {
                     'source_schema': self.source_schema,
-                    'source_table_name': table_info['table_name'],
+                    'source_table': table_info['table_name'],
                     'source_table_id': table_info['id'],
                     'source_columns': source_columns,
                     'target_schema': self.target_schema,
-                    'target_table_name': table_info['table_name'],
+                    'target_table': table_info['table_name'],
                     'target_columns': target_columns,
                     'target_table_sql': target_table_sql,
                     'table_comment': table_info['comment'],
@@ -417,15 +417,15 @@ class Planner:
 
             for order_num, column_info in source_columns.items():
                 coltype = column_info['data_type'].upper()
-                if types_mapping.get(coltype, 'UNKNOWN').startswith('UNKNOWN'):
-                    self.logger.info(f"Column {column_info['column_name']} - unknown data type: {column_info['data_type']}")
-                    # coltype = 'TEXT' ## default to TEXT may not be the best option -> let the table creation fail
-                else:
-                    if source_db_type != 'postgresql':
+                if source_db_type != 'postgresql':
+                    if types_mapping.get(coltype, 'UNKNOWN').startswith('UNKNOWN'):
+                        self.logger.info(f"Column {column_info['column_name']} - unknown data type: {column_info['data_type']}")
+                        # coltype = 'TEXT' ## default to TEXT may not be the best option -> let the table creation fail
+                    else:
                         coltype = types_mapping.get(coltype, 'TEXT')
 
-                if self.source_connection.is_string_type(coltype) and int(column_info['character_maximum_length']) >= 254:
-                    coltype = 'TEXT'
+                    if self.source_connection.is_string_type(coltype) and int(column_info['character_maximum_length']) >= 254:
+                        coltype = 'TEXT'
 
                 converted[order_num] = {
                     'column_name': column_info['column_name'],

@@ -71,12 +71,11 @@ class PostgreSQLConnector(DatabaseConnector):
                         c.ordinal_position,
                         c.column_name,
                         c.data_type,
-                        CASE WHEN c.character_maximum_length IS NOT NULL
-                            THEN c.character_maximum_length
-                        ELSE c.numeric_precision END as length,
-                        CASE WHEN upper(c.is_nullable)='YES'
-                            THEN ''
-                        ELSE 'NOT NULL' END AS nullable,
+                        c.character_maximum_length,
+                        c.numeric_precision,
+                        c.numeric_scale,
+                        c.is_identity,
+                        c.is_nullable,
                         c.column_default,
                         u.udt_schema||'.'||u.udt_name as full_udt_name,
                         col_description((c.table_schema||'.'||c.table_name)::regclass::oid, c.ordinal_position) as column_comment
@@ -93,17 +92,28 @@ class PostgreSQLConnector(DatabaseConnector):
                 self.logger.debug(f"PostgreSQL: Reading columns for {table_schema}.{table_name}")
             cursor.execute(query)
             for row in cursor.fetchall():
-                data_type = row[2].upper()
-                if data_type == 'USER-DEFINED':
-                    data_type = row[6].upper()
-                    other = 'USER-DEFINED'
-                result[row[0]] = {
-                    'name': row[1],
-                    'type': data_type,
-                    'character_maximum_length': row[3],
-                    'is_nullable': row[4],
-                    'column_default': row[5],
-                    'comment': row[7],
+                ordinal_position = row[0]
+                column_name = row[1]
+                data_type = row[2]
+                character_maximum_length = row[3]
+                numeric_precision = row[4]
+                numeric_scale = row[5]
+                is_identity = row[6]
+                is_nullable = row[7]
+                column_default = row[8]
+                full_udt_name = row[9] if data_type == 'USER-DEFINED' else None
+                column_comment = row[10]
+                result[ordinal_position] = {
+                    'column_name': column_name,
+                    'data_type': data_type if full_udt_name is None else full_udt_name,
+                    'basic_data_type': data_type if full_udt_name is None else '',
+                    'is_identity': is_identity,
+                    'character_maximum_length': character_maximum_length,
+                    'numeric_precision': numeric_precision,
+                    'numeric_scale': numeric_scale,
+                    'is_nullable': is_nullable,
+                    'column_default': column_default,
+                    'column_comment': column_comment,
                 }
             cursor.close()
             self.disconnect()

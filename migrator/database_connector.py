@@ -65,7 +65,8 @@ class DatabaseConnector(ABC):
             'basic_column_type': basic column type for user defined types with all parameters,
             'is_identity': 'YES' or 'NO',
             'column_comment': comment for the column,
-            'is_generated': 'YES' or 'NO',
+            'is_generated_virtual': 'YES' or 'NO',
+            'is_generated_stored': 'YES' or 'NO',
             'generation_expression': expression for generated column,
             }
         }

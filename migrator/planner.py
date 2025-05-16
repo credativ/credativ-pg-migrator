@@ -426,7 +426,8 @@ class Planner:
                     'basic_column_type': column_info['basic_column_type'] if 'basic_column_type' in column_info else '',
                     'is_identity': column_info['is_identity'],
                     'column_comment': column_info['column_comment'] if 'column_comment' in column_info else '',
-                    'is_generated': column_info['is_generated'] if 'is_generated' in column_info else '',
+                    'is_generated_virtual': column_info['is_generated_virtual'] if 'is_generated_virtual' in column_info else '',
+                    'is_generated_stored': column_info['is_generated_stored'] if 'is_generated_stored' in column_info else '',
                     'generation_expression': column_info['generation_expression'] if 'generation_expression' in column_info else '',
                 }
         else:

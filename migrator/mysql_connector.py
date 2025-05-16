@@ -48,30 +48,68 @@ class MySQLConnector(DatabaseConnector):
             raise
 
     def fetch_table_columns(self, table_schema: str, table_name: str, migrator_tables) -> dict:
+        columns = {}
         query = f"""
-            SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, IS_NULLABLE, COLUMN_DEFAULT
+            SELECT
+                ORDINAL_POSITION,
+                COLUMN_NAME,
+                DATA_TYPE,
+                CHARACTER_MAXIMUM_LENGTH,
+                NUMERIC_PRECISION,
+                NUMERIC_SCALE,
+                IS_NULLABLE,
+                COLUMN_TYPE,
+                COLUMN_DEFAULT,
+                CASE WHEN upper(EXTRA) = 'AUTO_INCREMENT' THEN 'YES'
+                ELSE 'NO' END AS IS_IDENTITY,
+                CASE WHEN upper(EXTRA) = 'STORED GENERATED' THEN 'YES'
+                ELSE 'NO' END AS IS_GENERATED_STORED,
+                CASE WHEN upper(EXTRA) = 'VIRTUAL GENERATED' THEN 'YES'
+                ELSE 'NO' END AS IS_GENERATED_VIRTUAL,
+                GENERATION_EXPRESSION
             FROM INFORMATION_SCHEMA.COLUMNS
             WHERE TABLE_SCHEMA = '{table_schema}' AND TABLE_NAME = '{table_name}'
+            ORDER BY ORDINAL_POSITION
         """
         try:
             self.connect()
             cursor = self.connection.cursor()
             cursor.execute(query)
-            columns = {
-                i + 1: {
-                    'name': row[0],
-                    'type': row[1],
-                    'character_maximum_length': row[2],
-                    'is_nullable': 'NOT NULL' if row[3] == 'NO' else '',
-                    'column_default': row[4] if row[4] is not None else '',
-                    'comment': '',
-                } for i, row in enumerate(cursor.fetchall())
-            }
+            for row in cursor.fetchall():
+                ordinal_position = row[0]
+                column_name = row[1]
+                data_type = row[2]
+                character_maximum_length = row[3]
+                numeric_precision = row[4]
+                numeric_scale = row[5]
+                is_nullable = row[6]
+                column_type = row[7]
+                column_default = row[8]
+                is_identity = row[9]
+                is_generated_stored = row[10]
+                is_generated_virtual = row[11]
+                generation_expression = row[12]
+                columns[ordinal_position] = {
+                    'column_name': column_name,
+                    'data_type': data_type,
+                    'character_maximum_length': character_maximum_length,
+                    'numeric_precision': numeric_precision,
+                    'numeric_scale': numeric_scale,
+                    'is_nullable': is_nullable,
+                    'column_type': column_type,
+                    'column_default': column_default,
+                    'is_identity': is_identity,
+                    'is_generated_stored': is_generated_stored,
+                    'is_generated_virtual': is_generated_virtual,
+                    'generation_expression': generation_expression
+                }
             cursor.close()
             self.disconnect()
             return columns
         except mysql.connector.Error as e:
             self.logger.error(f"Error fetching table columns: {e}")
+            self.logger.error("Full stack trace:")
+            self.logger.error(traceback.format_exc())
             raise
 
     def get_types_mapping(self, settings):
@@ -146,7 +184,7 @@ class MySQLConnector(DatabaseConnector):
                 protocol_id = migrator_tables.insert_data_migration(source_schema, source_table, source_table_id, source_table_rows, worker_id, target_schema, target_table, 0)
 
                 # Open a cursor and fetch rows in batches
-                query = f'''SELECT * FROM {source_schema.upper()}."{source_table}"'''
+                query = f'''SELECT * FROM {source_schema}.{source_table}'''
                 if migration_limitation:
                     query += f" WHERE {migration_limitation}"
 
@@ -156,6 +194,7 @@ class MySQLConnector(DatabaseConnector):
                 # offset = 0
                 total_inserted_rows = 0
                 cursor = self.connection.cursor()
+                cursor.execute(query)
                 while True:
                     # part_name = 'fetch_data: {source_table} - {offset}'
                     # if primary_key_columns:
@@ -179,7 +218,7 @@ class MySQLConnector(DatabaseConnector):
                         for order_num, column in source_columns.items():
                             column_name = column['column_name']
                             column_type = column['data_type']
-                            target_column_type = target_columns[order_num]['type']
+                            target_column_type = target_columns[order_num]['data_type']
                             # if column_type.lower() in ['binary', 'bytea']:
                             if column_type.lower() in ['blob']:
                                 record[column_name] = bytes(record[column_name].getBytes(1, int(record[column_name].length())))  # Convert 'com.informix.jdbc.IfxCblob' to bytes
@@ -209,7 +248,7 @@ class MySQLConnector(DatabaseConnector):
                     # offset += batch_size
 
                 target_table_rows = migrate_target_connection.get_rows_count(target_schema, target_table)
-                self.logger.info(f"Worker {worker_id}: Finished migrating data for table {source_table}.")
+                self.logger.info(f"Worker {worker_id}: Finished migrating data for table {target_table} - migrated {target_table_rows} rows.")
                 migrator_tables.update_data_migration_status(protocol_id, True, 'OK', target_table_rows)
                 cursor.close()
                 return target_table_rows

@@ -483,6 +483,9 @@ class InformixConnector(DatabaseConnector):
         self.disconnect()
         return table_constraints
 
+    def get_create_constraint_sql(self, settings):
+        return ""
+
     def fetch_funcproc_names(self, schema: str):
         funcproc_data = {}
         order_num = 1

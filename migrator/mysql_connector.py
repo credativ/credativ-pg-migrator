@@ -406,6 +406,8 @@ class MySQLConnector(DatabaseConnector):
             self.logger.error(f"Error fetching constraints: {e}")
             raise
 
+    def get_create_constraint_sql(self, settings):
+        return ""
 
     def fetch_triggers(self, table_id: int, table_schema: str, table_name: str):
         # Implement trigger fetching logic

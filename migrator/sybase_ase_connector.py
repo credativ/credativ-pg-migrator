@@ -413,7 +413,7 @@ class SybaseASEConnector(DatabaseConnector):
         self.connect()
         cursor = self.connection.cursor()
         if self.config_parser.get_log_level() == 'DEBUG':
-            self.logger.debug(f"Reading constraints for {target_table_name}")
+            self.logger.debug(f"Reading constraints for {source_table_name}")
         cursor.execute(index_query)
         constraints = cursor.fetchall()
 
@@ -423,22 +423,23 @@ class SybaseASEConnector(DatabaseConnector):
             ref_table_name = constraint[2]
             ref_column = constraint[3].strip()
 
-            create_fk_query = f"""ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{fk_name}" FOREIGN KEY ({fk_column}) REFERENCES "{target_schema}"."{ref_table_name}" ({ref_column});"""
-
-            if create_fk_query:
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"SQL: {create_fk_query}")
-                table_constraints[order_num] = {
-                    'name': fk_name,
-                    'type': 'FOREIGN KEY',
-                    'sql': create_fk_query,
-                    'comment': ''
-                }
-                order_num += 1
+            table_constraints[order_num] = {
+                'constraint_name': fk_name,
+                'constraint_type': 'FOREIGN KEY',
+                'constraint_columns': fk_column,
+                'referenced_table_name': ref_table_name,
+                'referenced_columns': ref_column,
+                'constraint_sql': '',
+                'constraint_comment': ''
+            }
+            order_num += 1
 
         cursor.close()
         self.disconnect()
         return table_constraints
+
+    def get_create_constraint_sql(self, settings):
+        return ""
 
     def fetch_funcproc_names(self, schema: str):
         funcproc_data = {}

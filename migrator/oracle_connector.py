@@ -369,20 +369,19 @@ class OracleConnector(DatabaseConnector):
 
                 if constraint_name not in table_constraints:
                     table_constraints[order_num] = {
-                        'id': None,
-                        'name': constraint_name,
-                        'type': constraint_type,
-                        'sql': '',
-                        'comment': '',
+                        'constraint_name': constraint_name,
+                        'constraint_type': constraint_type,
+                        'constraint_owner': source_table_schema,
+                        'referenced_table_name': pk_table_name,
+                        'referenced_table_schema': pk_owner,
+                        'referenced_columns': pk_columns,
+                        'constraint_columns': fk_columns,
+                        'constraint_sql': '',
+                        'constraint_comment': '',
+                        'delete_rule': delete_rule,
+                        'constraint_status': status,
                     }
 
-                create_constraint_query = None
-                table_constraints[order_num]['sql'] = create_constraint_query
-                if delete_rule == 'CASCADE':
-                    create_constraint_query = f"""ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{constraint_name}" FOREIGN KEY ({fk_columns}) REFERENCES "{target_schema}"."{pk_table_name}" ({pk_columns}) ON DELETE CASCADE"""
-                else:
-                    create_constraint_query = f"""ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{constraint_name}" FOREIGN KEY ({fk_columns}) REFERENCES "{target_schema}"."{pk_table_name}" ({pk_columns})"""
-                table_constraints[order_num]['sql'] = create_constraint_query
                 order_num += 1
 
             cursor.close()
@@ -392,6 +391,9 @@ class OracleConnector(DatabaseConnector):
             self.logger.error(f"Error executing query: {constraints_query}")
             self.logger.error(e)
             raise
+
+    def get_create_constraint_sql(self, settings):
+        return ""
 
     def fetch_triggers(self, table_id: int, table_schema: str, table_name: str):
         try:

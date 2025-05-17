@@ -378,6 +378,9 @@ class MsSQLConnector(DatabaseConnector):
             self.logger.error(e)
             raise
 
+    def get_create_constraint_sql(self, settings):
+        return ""
+
     def fetch_funcproc_names(self, schema: str):
         query = f"""
             SELECT

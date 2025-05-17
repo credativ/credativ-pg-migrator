@@ -233,7 +233,16 @@ class DatabaseConnector(ABC):
                     - in case of foreigh key it might containg full DDL for the constrain from the source database
                     - if available for FK, it is returned for debugging purposes
                     - in case of check constraint in contains check expression
+                'delete_rule':
+                    - delete rule for foreign key - CASCADE / SET NULL / NO ACTION
+                    - available only for some databases
+                'update_rule':
+                    - update rule for foreign key - CASCADE / SET NULL / NO ACTION
+                    - available only for some databases
                 'constraint_comment': constraint_comment
+                'constraint_status':
+                    - status of the constraint - ENABLED / DISABLED
+                    - available only for some databases
                 }
             }
         """

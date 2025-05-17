@@ -339,17 +339,20 @@ class PostgreSQLConnector(DatabaseConnector):
             for row in cursor.fetchall():
                 constraint_name = row[1]
                 constraint_type = row[2]
-                constraint_sql = f'ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{constraint_name}" {row[3]}'
+                constraint_sql = row[3]
+                constraint_comment = row[4]
+
                 if constraint_type in ('PRIMARY KEY', 'p', 'P'):
                     continue # Primary key is handled in fetch_indexes
+
                 constraints[order_num] = {
-                    'id': row[0],
-                    'name': constraint_name,
-                    'type': constraint_type,
-                    'sql': constraint_sql,
-                    'comment': row[4]
+                    'constraint_name': constraint_name,
+                    'constraint_type': constraint_type,
+                    'constraint_sql': constraint_sql,
+                    'constraint_comment': constraint_comment
                 }
                 order_num += 1
+
             cursor.close()
             self.disconnect()
             return constraints
@@ -375,7 +378,22 @@ class PostgreSQLConnector(DatabaseConnector):
 
         ## MySQL
         constraint_info['sql'] = f"""ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{target_table_name}_{constraint_info['name']}" FOREIGN KEY ({constraint_info['columns']})
-                                    REFERENCES {constraint_info['referenced_table']} ({constraint_info['referenced_columns']})"""
+                        REFERENCES {constraint_info['referenced_table']} ({constraint_info['referenced_columns']})"""
+
+        ## Oracle
+        create_constraint_query = None
+        table_constraints[order_num]['sql'] = create_constraint_query
+        if delete_rule == 'CASCADE':
+            create_constraint_query = f"""ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{constraint_name}" FOREIGN KEY ({fk_columns}) REFERENCES "{target_schema}"."{pk_table_name}" ({pk_columns}) ON DELETE CASCADE"""
+        else:
+            create_constraint_query = f"""ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{constraint_name}" FOREIGN KEY ({fk_columns}) REFERENCES "{target_schema}"."{pk_table_name}" ({pk_columns})"""
+        table_constraints[order_num]['sql'] = create_constraint_query
+
+        ## PostgreSQL
+        constraint_sql = f'ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{constraint_name}" {row[3]}'
+
+        ## Sybase
+        create_fk_query = f"""ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{fk_name}" FOREIGN KEY ({fk_column}) REFERENCES "{target_schema}"."{ref_table_name}" ({ref_column});"""
 
     def fetch_triggers(self, table_id: int, table_schema: str, table_name: str):
         pass

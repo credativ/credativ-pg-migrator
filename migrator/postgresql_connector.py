@@ -362,38 +362,35 @@ class PostgreSQLConnector(DatabaseConnector):
             raise
 
     def get_create_constraint_sql(self, settings):
+        create_constraint_query = ''
+        target_schema = settings['target_schema']
+        target_table_name = settings['target_table']
 
-        ## ibm db2
-        create_constraint_query = f"""ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{constraint_name}" FOREIGN KEY ({fk_columns}) REFERENCES "{target_schema}"."{ref_table_name}" ({pk_columns});"""
-        ## Informix
-        create_constr_query = f"""ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{fk_name}" FOREIGN KEY ("{fk_column}") REFERENCES "{target_schema}"."{ref_table_name}" ("{ref_column}");"""
-        ck_name = f"ck_{target_table_name}_{constr_name}"
-        create_constr_query = f"""ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{ck_name}" CHECK ({ck_sql});"""
+        constraint_name = settings['constraint_name']
+        constraint_type = settings['constraint_type']
+        constraint_owner = settings['constraint_owner']
+        constraint_columns = settings['constraint_columns']
+        referenced_table_schema = settings['referenced_table_schema']
+        referenced_table_name = settings['referenced_table_name']
+        referenced_columns = settings['referenced_columns']
+        delete_rule = settings['delete_rule'] if 'delete_rule' in settings else 'NO ACTION'
+        update_rule = settings['update_rule'] if 'update_rule' in settings else 'NO ACTION'
+        constraint_comment = settings['constraint_comment']
+        constraint_sql = settings['constraint_sql'] if 'constraint_sql' in settings else ''
+        constraint_status = settings['constraint_status'] if 'constraint_status' in settings else 'ENABLED'
 
-        ##MS SQL Server
         if constraint_type == 'FOREIGN KEY':
-            create_constraint_query = f"""ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{constraint_name}" {constraint_type} ({constraint_columns}) REFERENCES "{target_schema}"."{constraint[3]}" ({constraint[4]});"""
-        else:
-            create_constraint_query = f"""ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{constraint_name}" {constraint_type} ({constraint_columns});"""
+            create_constraint_query = f"""ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "fk_{target_table_name}_{constraint_name}" FOREIGN KEY ({constraint_columns}) REFERENCES "{target_schema}"."{referenced_table_name}" ({referenced_columns})"""
+            if delete_rule == 'CASCADE':
+                create_constraint_query += " ON DELETE CASCADE"
+            if update_rule == 'CASCADE':
+                create_constraint_query += " ON UPDATE CASCADE"
+            if constraint_comment:
+                create_constraint_query += f" COMMENT '{constraint_comment}'"
+        elif constraint_type == 'CHECK':
+            create_constraint_query = f"""ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "ck_{target_table_name}_{constraint_name}" CHECK ({constraint_sql})"""
 
-        ## MySQL
-        constraint_info['sql'] = f"""ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{target_table_name}_{constraint_info['name']}" FOREIGN KEY ({constraint_info['columns']})
-                        REFERENCES {constraint_info['referenced_table']} ({constraint_info['referenced_columns']})"""
-
-        ## Oracle
-        create_constraint_query = None
-        table_constraints[order_num]['sql'] = create_constraint_query
-        if delete_rule == 'CASCADE':
-            create_constraint_query = f"""ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{constraint_name}" FOREIGN KEY ({fk_columns}) REFERENCES "{target_schema}"."{pk_table_name}" ({pk_columns}) ON DELETE CASCADE"""
-        else:
-            create_constraint_query = f"""ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{constraint_name}" FOREIGN KEY ({fk_columns}) REFERENCES "{target_schema}"."{pk_table_name}" ({pk_columns})"""
-        table_constraints[order_num]['sql'] = create_constraint_query
-
-        ## PostgreSQL
-        constraint_sql = f'ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{constraint_name}" {row[3]}'
-
-        ## Sybase
-        create_fk_query = f"""ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{fk_name}" FOREIGN KEY ({fk_column}) REFERENCES "{target_schema}"."{ref_table_name}" ({ref_column});"""
+        return create_constraint_query
 
     def fetch_triggers(self, table_id: int, table_schema: str, table_name: str):
         pass

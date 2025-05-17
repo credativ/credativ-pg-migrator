@@ -324,13 +324,11 @@ class MySQLConnector(DatabaseConnector):
 
     def fetch_constraints(self, settings):
         source_table_id = settings['source_table_id']
-        source_schema = settings['source_schema']
+        source_table_schema = settings['source_table_schema']
         source_table_name = settings['source_table_name']
-        target_schema = settings['target_schema']
-        target_table_name = settings['target_table_name']
+
         order_num = 1
         table_constraints = {}
-        create_constr_query = ""
         returned_constraints = {}
         query = f"""
             SELECT
@@ -347,7 +345,7 @@ class MySQLConnector(DatabaseConnector):
                 INFORMATION_SCHEMA.KEY_COLUMN_USAGE
             WHERE
                 REFERENCED_TABLE_NAME IS NOT NULL
-                AND TABLE_SCHEMA = '{source_schema}'
+                AND TABLE_SCHEMA = '{source_table_schema}'
                 AND TABLE_NAME = '{source_table_name}'
             ORDER BY foreign_key_name, ordinal_position
         """
@@ -368,32 +366,37 @@ class MySQLConnector(DatabaseConnector):
 
                 if foreign_key_name not in table_constraints:
                     table_constraints[foreign_key_name] = {
-                        'name': foreign_key_name,
-                        'columns': [],
-                        'referenced_table': f"{target_schema}.{referenced_table_name}",
+                        'constraint_name': foreign_key_name,
+                        'constraint_owner': schema_name,
+                        'constraint_type': 'FOREIGN KEY',
+                        'constraint_columns': [],
+                        'referenced_table': referenced_table_name,
+                        'referenced_schema': referenced_schema_name,
                         'referenced_columns': [],
-                        'sql': '',
-                        'comment': '',
-                        'columns_count': 0
+                        'constraint_sql': '',
+                        'constraint_comment': '',
                     }
 
-                table_constraints[foreign_key_name]['columns'].append(column_name)
+                table_constraints[foreign_key_name]['constraint_columns'].append(column_name)
                 table_constraints[foreign_key_name]['referenced_columns'].append(referenced_column_name)
 
             cursor.close()
             self.disconnect()
-            for constraint, constraint_info in table_constraints.items():
+            for constraint_name, constraint_info in table_constraints.items():
                 constraint_info['columns_count'] = len(constraint_info['columns'])
                 constraint_info['columns'] = ', '.join(constraint_info['columns'])
                 constraint_info['referenced_columns'] = ', '.join(constraint_info['referenced_columns'])
-                constraint_info['sql'] = f"""ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{target_table_name}_{constraint_info['name']}" FOREIGN KEY ({constraint_info['columns']})
-                                            REFERENCES {constraint_info['referenced_table']} ({constraint_info['referenced_columns']})"""
 
                 returned_constraints[order_num] = {
-                    'name': f"{target_table_name}_{constraint_info['name']}",
-                    'type': 'FOREIGN KEY',
-                    'sql': constraint_info['sql'],
-                    'comment': constraint_info['comment'],
+                    'constraint_name': constraint_info['constraint_name'],
+                    'constraint_owner': constraint_info['constraint_owner'],
+                    'constraint_columns': constraint_info['constraint_columns'],
+                    'referenced_table': constraint_info['referenced_table'],
+                    'referenced_schema': constraint_info['referenced_schema'],
+                    'referenced_columns': constraint_info['referenced_columns'],
+                    'constraint_type': constraint_info['constraint_type'],
+                    'constraint_sql': constraint_info['constraint_sql'],
+                    'constraint_comment': constraint_info['constraint_comment'],
                 }
                 order_num += 1
 

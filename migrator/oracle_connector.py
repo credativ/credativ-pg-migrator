@@ -309,10 +309,9 @@ class OracleConnector(DatabaseConnector):
 
     def fetch_constraints(self, settings):
         source_table_id = settings['source_table_id']
-        source_schema = settings['source_schema']
+        source_table_schema = settings['source_table_schema']
         source_table_name = settings['source_table_name']
-        target_schema = settings['target_schema']
-        target_table_name = settings['target_table_name']
+
         order_num = 1
         table_constraints = {}
         constraints_query = f"""
@@ -341,7 +340,7 @@ class OracleConnector(DatabaseConnector):
                                         AND fk_col.position = pk_col.position -- Ensures correct order for composite keys
             WHERE
                 fk_cons.constraint_type = 'R'
-                AND fk_cons.owner = '{source_schema.upper()}'
+                AND fk_cons.owner = '{source_table_schema.upper()}'
                 AND fk_cons.table_name = '{source_table_name.upper()}'
             GROUP BY
                 fk_cons.constraint_name,

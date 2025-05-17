@@ -312,16 +312,15 @@ class SQLAnywhereConnector(DatabaseConnector):
 
     def fetch_constraints(self, settings):
         source_table_id = settings['source_table_id']
-        source_schema = settings['source_schema']
+        source_table_schema = settings['source_table_schema']
         source_table_name = settings['source_table_name']
-        target_schema = settings['target_schema']
-        target_table_name = settings['target_table_name']
+
         order_num = 1
         table_constraints = {}
         query = f"""
             SELECT "role" as fk_name, primary_creator, primary_tname, foreign_creator, foreign_tname, columns
             FROM SYS.SYSFOREIGNKEYS s
-            WHERE (primary_creator = '{source_schema}' or foreign_creator = '{source_schema}')
+            WHERE (primary_creator = '{source_table_schema}' or foreign_creator = '{source_table_schema}')
             AND primary_tname = '{source_table_name}'
             ORDER BY "role"
         """

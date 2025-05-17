@@ -299,10 +299,9 @@ class MsSQLConnector(DatabaseConnector):
         sys.default_constraints - default constraints
         """
         source_table_id = settings['source_table_id']
-        source_schema = settings['source_schema']
+        source_table_schema = settings['source_table_schema']
         source_table_name = settings['source_table_name']
-        target_schema = settings['target_schema']
-        target_table_name = settings['target_table_name']
+
         order_num = 1
         table_constraints = {}
         query = f"""
@@ -354,20 +353,22 @@ class MsSQLConnector(DatabaseConnector):
                 constraint_name = constraint[0].strip()
                 constraint_type = constraint[1].strip()
                 constraint_columns = constraint[2].strip()
+                referenced_table = constraint[3].strip()
+                referenced_columns = constraint[4].strip()
                 constraint_owner = ''
 
-                if create_constraint_query:
-                    if self.config_parser.get_log_level() == 'DEBUG':
-                        self.logger.debug(f"SQL: {create_constraint_query}")
-                    table_constraints[order_num] = {
-                        'name': constraint_name,
-                        'type': constraint_type,
-                        'owner': constraint_owner,
-                        'columns': constraint_columns,
-                        'sql': create_constraint_query,
-                        'comment': ''
-                    }
-                    order_num += 1
+                table_constraints[order_num] = {
+                    'constraint_name': constraint_name,
+                    'constraint_type': constraint_type,
+                    'constraint_owner': constraint_owner,
+                    'constraint_columns': constraint_columns,
+                    'referenced_table_schema': '',
+                    'referenced_table': referenced_table,
+                    'referenced_columns': referenced_columns,
+                    'constraint_sql': '',
+                    'constraint_comment': ''
+                }
+                order_num += 1
 
             cursor.close()
             self.disconnect()

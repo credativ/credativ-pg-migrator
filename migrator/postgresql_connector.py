@@ -301,7 +301,7 @@ class PostgreSQLConnector(DatabaseConnector):
 
     def fetch_constraints(self, settings):
         source_table_id = settings['source_table_id']
-        source_schema = settings['source_schema']
+        source_table_schema = settings['source_table_schema']
         source_table_name = settings['source_table_name']
 
         order_num = 1
@@ -372,6 +372,10 @@ class PostgreSQLConnector(DatabaseConnector):
             create_constraint_query = f"""ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{constraint_name}" {constraint_type} ({constraint_columns}) REFERENCES "{target_schema}"."{constraint[3]}" ({constraint[4]});"""
         else:
             create_constraint_query = f"""ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{constraint_name}" {constraint_type} ({constraint_columns});"""
+
+        ## MySQL
+        constraint_info['sql'] = f"""ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{target_table_name}_{constraint_info['name']}" FOREIGN KEY ({constraint_info['columns']})
+                                    REFERENCES {constraint_info['referenced_table']} ({constraint_info['referenced_columns']})"""
 
     def fetch_triggers(self, table_id: int, table_schema: str, table_name: str):
         pass

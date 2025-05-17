@@ -356,11 +356,6 @@ class MsSQLConnector(DatabaseConnector):
                 constraint_columns = constraint[2].strip()
                 constraint_owner = ''
 
-                if constraint_type == 'FOREIGN KEY':
-                    create_constraint_query = f"""ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{constraint_name}" {constraint_type} ({constraint_columns}) REFERENCES "{target_schema}"."{constraint[3]}" ({constraint[4]});"""
-                else:
-                    create_constraint_query = f"""ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{constraint_name}" {constraint_type} ({constraint_columns});"""
-
                 if create_constraint_query:
                     if self.config_parser.get_log_level() == 'DEBUG':
                         self.logger.debug(f"SQL: {create_constraint_query}")
@@ -492,9 +487,9 @@ class MsSQLConnector(DatabaseConnector):
             target_schema = settings['target_schema']
             target_table = settings['target_table']
             target_columns = settings['target_columns']
-            primary_key_columns = settings['primary_key_columns']
-            primary_key_columns_count = settings['primary_key_columns_count']
-            primary_key_columns_types = settings['primary_key_columns_types']
+            # primary_key_columns = settings['primary_key_columns']
+            # primary_key_columns_count = settings['primary_key_columns_count']
+            # primary_key_columns_types = settings['primary_key_columns_types']
             batch_size = settings['batch_size']
             migrator_tables = settings['migrator_tables']
             source_table_rows = self.get_rows_count(source_schema, source_table)

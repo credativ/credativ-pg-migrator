@@ -759,8 +759,6 @@ class MigratorTables:
             target_table TEXT,
             index_sql TEXT,
             index_columns TEXT,
-            index_columns_count INTEGER,
-            index_columns_data_types TEXT,
             index_comment TEXT,
             task_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             task_started TIMESTAMP,
@@ -1130,14 +1128,14 @@ class MigratorTables:
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
             (source_schema, source_table, source_table_id, index_owner, index_name, index_type,
-            target_schema, target_table, index_sql, index_columns, index_columns_count, index_columns_data_types, index_comment)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            target_schema, target_table, index_sql, index_columns, index_comment)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
         params = (values['source_schema'], values['source_table'], values['source_table_id'], values['index_owner'],
                   values['index_name'], values['index_type'], values['target_schema'],
                   values['target_table'], values['index_sql'], values['index_columns'],
-                  values['index_columns_count'], values['index_columns_data_types'], values['index_comment'])
+                  values['index_comment'])
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -1491,35 +1489,33 @@ class MigratorTables:
             self.logger.error(e)
             raise
 
-    def select_primary_key(self, target_schema, target_table):
-        tables_table = self.config_parser.get_protocol_name_tables()
-        indexes_table = self.config_parser.get_protocol_name_indexes()
-        query = f"""
-            SELECT
-                i.index_columns,
-                i.index_columns_count,
-                i.index_columns_data_types
-            FROM "{self.protocol_schema}"."{tables_table}" t
-            JOIN "{self.protocol_schema}"."{indexes_table}" i ON i.source_table_id = t.source_table_id
-            WHERE t.target_schema = '{target_schema}' AND
-                t.target_table = '{target_table}' AND
-                index_type in ('PRIMARY KEY', 'UNIQUE')
-            ORDER BY CASE WHEN i.index_type = 'PRIMARY KEY' THEN 1 ELSE 2 END
-            LIMIT 1
-        """
-        try:
-            cursor = self.protocol_connection.connection.cursor()
-            cursor.execute(query)
-            index_columns = cursor.fetchone()
-            cursor.close()
-            if index_columns:
-                return index_columns[0], index_columns[1], index_columns[2]
-            else:
-                return None, None, None
-        except Exception as e:
-            self.logger.error(f"Error selecting primary key for {target_schema}.{target_table}.")
-            self.logger.error(e)
-            return None, None, None
+    # def select_primary_key(self, target_schema, target_table):
+    #     tables_table = self.config_parser.get_protocol_name_tables()
+    #     indexes_table = self.config_parser.get_protocol_name_indexes()
+    #     query = f"""
+    #         SELECT
+    #             i.index_columns
+    #         FROM "{self.protocol_schema}"."{tables_table}" t
+    #         JOIN "{self.protocol_schema}"."{indexes_table}" i ON i.source_table_id = t.source_table_id
+    #         WHERE t.target_schema = '{target_schema}' AND
+    #             t.target_table = '{target_table}' AND
+    #             index_type in ('PRIMARY KEY', 'UNIQUE')
+    #         ORDER BY CASE WHEN i.index_type = 'PRIMARY KEY' THEN 1 ELSE 2 END
+    #         LIMIT 1
+    #     """
+    #     try:
+    #         cursor = self.protocol_connection.connection.cursor()
+    #         cursor.execute(query)
+    #         index_columns = cursor.fetchone()
+    #         cursor.close()
+    #         if index_columns:
+    #             return index_columns[0]
+    #         else:
+    #             return None
+    #     except Exception as e:
+    #         self.logger.error(f"Error selecting primary key for {target_schema}.{target_table}.")
+    #         self.logger.error(e)
+    #         return None
 
     def print_summary(self, objects, migrator_table_name, additional_columns=None):
         try:

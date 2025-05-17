@@ -212,19 +212,40 @@ class DatabaseConnector(ABC):
         """
         settings - dictionary with the following keys
             - source_table_id: id of the table in the source database (does not exist in MySQL)
-            - source_schema: schema name of the table in the source database
+            - source_table_schema: schema name of the table in the source database
             - source_table_name: table name in the source database
-            - target_schema: target schema name
-            - target_table_name: target table name
+
         Fetch constraints for a table.
         Returns a dictionary:
             { ordinary_number: {
-                'name': constraint_name:
-                'type': constraint_type,
-                'sql': create_constraint_sql,
-                'comment': constraint_comment
+                'constraint_name': constraint_name:
+                'constraint_type': constraint_type,
+                'constraint_owner': constraint_owner,
+                'constraint_columns':
+                    - comma separated, ordered list of columns "column_name1, column_name2, ..."
+                'referenced_table_schema':
+                    - referenced_table_schema,
+                    - might be empty for some databases
+                'referenced_table_name': referenced_table_name,
+                'referenced_columns':
+                    - comma separated, ordered list of columns "column_name1, column_name2, ..."
+                'constraint_sql':
+                    - in case of foreigh key it might containg full DDL for the constrain from the source database
+                    - if available for FK, it is returned for debugging purposes
+                    - in case of check constraint in contains check expression
+                'constraint_comment': constraint_comment
                 }
             }
+        """
+        pass
+
+    @abstractmethod
+    def get_create_constraint_sql(self, settings):
+        """
+        This function is currently relevant only for target database
+        Centralizes creation of SQL DDL statement for constraints
+        settings:
+            -
         """
         pass
 

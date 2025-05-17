@@ -207,9 +207,9 @@ class IBMDB2Connector(DatabaseConnector):
             target_schema = settings['target_schema']
             target_table = settings['target_table']
             target_columns = settings['target_columns']
-            primary_key_columns = settings['primary_key_columns']
-            primary_key_columns_count = settings['primary_key_columns_count']
-            primary_key_columns_types = settings['primary_key_columns_types']
+            # primary_key_columns = settings['primary_key_columns']
+            # primary_key_columns_count = settings['primary_key_columns_count']
+            # primary_key_columns_types = settings['primary_key_columns_types']
             batch_size = settings['batch_size']
             migrator_tables = settings['migrator_tables']
             source_table_rows = self.get_rows_count(source_schema, source_table)
@@ -348,17 +348,18 @@ class IBMDB2Connector(DatabaseConnector):
 
     def fetch_constraints(self, settings):
         source_table_id = settings['source_table_id']
-        source_schema = settings['source_schema']
+        source_table_schema = settings['source_table_schema']
         source_table_name = settings['source_table_name']
-        target_schema = settings['target_schema']
-        target_table_name = settings['target_table_name']
+
         order_num = 1
         table_constraints = {}
         create_constraint_query = None
         query = f"""
-            SELECT CONSTNAME, TYPE
+            SELECT
+                CONSTNAME,
+                TYPE
             FROM SYSCAT.TABCONST
-            WHERE TABSCHEMA = '{source_schema.upper()}'
+            WHERE TABSCHEMA = '{source_table_schema.upper()}'
             AND TABNAME = '{source_table_name}'
             AND TYPE NOT IN ('P')
             ORDER BY CONSTNAME;"""
@@ -373,9 +374,12 @@ class IBMDB2Connector(DatabaseConnector):
                 if constraint_type == 'F':
                     constraint_type = 'FOREIGN KEY'
                     query_fk = f"""
-                        SELECT PK_COLNAMES, REFTABNAME, FK_COLNAMES
+                        SELECT
+                            PK_COLNAMES,
+                            REFTABNAME,
+                            FK_COLNAMES
                         FROM SYSCAT.REFERENCES
-                        WHERE TABSCHEMA = '{source_schema.upper()}'
+                        WHERE TABSCHEMA = '{source_table_schema.upper()}'
                         AND TABNAME = '{source_table_name}'
                         AND CONSTNAME = '{constraint_name}'
                     """
@@ -387,18 +391,17 @@ class IBMDB2Connector(DatabaseConnector):
                         ref_table_name = fk_row[1]
                         fk_columns = fk_row[2].strip().lstrip('+').split('+')
                         fk_columns = ', '.join(f'"{col}"' for col in fk_columns)
-                        create_constraint_query = f"""ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{constraint_name}" FOREIGN KEY ({fk_columns}) REFERENCES "{target_schema}"."{ref_table_name}" ({pk_columns});"""
-                else:
-                    pass
 
-                if create_constraint_query:
                     table_constraints[order_num] = {
-                        'name': constraint_name,
-                        'type': constraint_type,
-                        'owner': source_schema,
-                        'columns': [],
-                        'sql': create_constraint_query,
-                        'comment': '',
+                        'constraint_name': constraint_name,
+                        'constraint_type': constraint_type,
+                        'constraint_owner': source_table_schema,
+                        'constraint_columns': fk_columns,
+                        'referenced_table_schema': '',
+                        'referenced_table_name': ref_table_name,
+                        'referenced_colunns': pk_columns,
+                        'constraint_sql': '',
+                        'constraint_comment': '',
                     }
                     order_num += 1
 
@@ -409,6 +412,9 @@ class IBMDB2Connector(DatabaseConnector):
             self.logger.error(f"Error executing query: {query}")
             self.logger.error(e)
             raise
+
+    def get_create_constraint_sql(self, settings):
+        return ""
 
     def fetch_triggers(self, table_id: int, table_schema: str, table_name: str):
         # Placeholder for fetching triggers

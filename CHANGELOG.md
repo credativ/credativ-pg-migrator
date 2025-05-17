@@ -5,16 +5,18 @@
 - 2025.05.17:
 
   - Refactored function fetch_indexes in all connectors
-  - Rationale: Source database should return only info about indexes, not generate DDL statements
-  - DDL statements are generated in the planner, which allows to modify indexes if needed
-  - Modification of PRIMARY KEY in planner is necessary for PostgreSQL partitioning, because it must contain partitioning column(s)
+    - Rationale: Source database should return only info about indexes, not generate DDL statements
+    - DDL statements are generated in the planner, which allows to modify indexes if needed
+    - Modification of PRIMARY KEY in planner is necessary for PostgreSQL partitioning, because it must contain partitioning column(s)
 
 - 2025.05.16:
 
   - Serial and Serial8 data types in Informix migration are now replaced with INTEGER / BIGINT IDENTITY
   - Identity columns are now supported for all connectors
-  - Added configurable system catalog for MS SQL Server and IBM DB2 LUW
+  - Added basic support for configurable system catalog for MS SQL Server and IBM DB2 LUW
     - Rationale: newest versions support INFORMATION_SCHEMA so we can use it instead of system catalog, but older versions still need to use old system tables
+    - Getting values directly from INFORMATION_SCHEMA is easier, cleaner and more readable because we internally work with values used in from INFORMATION_SCHEMA objects
+    - Not fully implemented yet, in all parts of the code
   - Preparations for support of generated columns - MySQL allows both virtual and stored generated columns, PostgreSQL 17 has stored generated columns, PG 18 should add virtual generated columns
   - Full refactoring of the function convert_table_columns - redundant code removed from connectors, function replaced with a database specific function get_types_mapping, conversion of types moved to the planner
     - Rationale: previous solution was repeating the same code in all connectors and complicated custom replacements and handling of IDENTITY columns

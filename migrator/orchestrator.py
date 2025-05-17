@@ -107,9 +107,9 @@ class Orchestrator:
                 futures = {}
                 for table_row in migrate_tables:
                     table_data = self.migrator_tables.decode_table_row(table_row)
-                    (table_data['primary_key_columns'],
-                    table_data['primary_key_columns_count'],
-                    table_data['primary_key_columns_types']) = self.migrator_tables.select_primary_key(table_data['target_schema'], table_data['target_table'])
+                    # (table_data['primary_key_columns'],
+                    # table_data['primary_key_columns_count'],
+                    # table_data['primary_key_columns_types']) = self.migrator_tables.select_primary_key(table_data['target_schema'], table_data['target_table'])
                     if len(futures) >= workers_requested:
                         done, _ = concurrent.futures.wait(futures, return_when=concurrent.futures.FIRST_COMPLETED)
                         for future in done:

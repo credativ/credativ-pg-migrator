@@ -551,156 +551,162 @@ class SybaseASEConnector(DatabaseConnector):
         cursor.close()
         return count
 
-    def analyze_pk_distribution_batches(self, values):
-        migrator_tables = values['migrator_tables']
-        schema_name = values['source_schema']
-        table_name = values['source_table']
-        primary_key_columns = values['primary_key_columns']
-        primary_key_columns_count = values['primary_key_columns_count']
-        primary_key_columns_types = values['primary_key_columns_types']
-        worker_id = values['worker_id']
-        analyze_batch_size = self.config_parser.get_batch_size()
+    ## function to analyze primary key distribution
+    ## looks like python handels cursors differently than PostgreSQL from FDW
+    ## so currently this function is not used
+    ##
+    # def analyze_pk_distribution_batches(self, values):
+    #     migrator_tables = values['migrator_tables']
+    #     schema_name = values['source_schema']
+    #     table_name = values['source_table']
+    #     primary_key_columns = values['primary_key_columns']
+    #     primary_key_columns_count = values['primary_key_columns_count']
+    #     primary_key_columns_types = values['primary_key_columns_types']
+    #     worker_id = values['worker_id']
+    #     analyze_batch_size = self.config_parser.get_batch_size()
 
-        if primary_key_columns_count == 1 and primary_key_columns_types in ('BIGINT', 'INTEGER', 'NUMERIC', 'REAL', 'FLOAT', 'DOUBLE PRECISION', 'DECIMAL', 'SMALLINT', 'TINYINT'):
-            # primary key is one column of numeric type - analysis with min/max values is much quicker
-            if self.config_parser.get_log_level() == 'DEBUG':
-                self.logger.debug(f"Worker: {worker_id}: PK analysis: {primary_key_columns} ({primary_key_columns_types}): min/max analysis")
+    #     if primary_key_columns_count == 1 and primary_key_columns_types in ('BIGINT', 'INTEGER', 'NUMERIC', 'REAL', 'FLOAT', 'DOUBLE PRECISION', 'DECIMAL', 'SMALLINT', 'TINYINT'):
+    #         # primary key is one column of numeric type - analysis with min/max values is much quicker
+    #         if self.config_parser.get_log_level() == 'DEBUG':
+    #             self.logger.debug(f"Worker: {worker_id}: PK analysis: {primary_key_columns} ({primary_key_columns_types}): min/max analysis")
 
-            current_batch_percent = 20
+    #         current_batch_percent = 20
 
-            sybase_cursor = self.connection.cursor()
-            temp_table = f"temp_id_ranges_{str(worker_id).replace('-', '_')}"
-            migrator_tables.protocol_connection.execute_query(f"""DROP TABLE IF EXISTS "{temp_table}" """)
-            migrator_tables.protocol_connection.execute_query(f"""CREATE TEMP TABLE IF NOT EXISTS "{temp_table}" (batch_start BIGINT, batch_end BIGINT, row_count BIGINT)""")
+    #         sybase_cursor = self.connection.cursor()
+    #         temp_table = f"temp_id_ranges_{str(worker_id).replace('-', '_')}"
+    #         migrator_tables.protocol_connection.execute_query(f"""DROP TABLE IF EXISTS "{temp_table}" """)
+    #         migrator_tables.protocol_connection.execute_query(f"""CREATE TEMP TABLE IF NOT EXISTS "{temp_table}" (batch_start BIGINT, batch_end BIGINT, row_count BIGINT)""")
 
-            pk_range_table = self.config_parser.get_protocol_name_pk_ranges()
-            sybase_cursor.execute(f"SELECT MIN({primary_key_columns}) FROM {schema_name}.{table_name}")
-            min_id = sybase_cursor.fetchone()[0]
+    #         pk_range_table = self.config_parser.get_protocol_name_pk_ranges()
+    #         sybase_cursor.execute(f"SELECT MIN({primary_key_columns}) FROM {schema_name}.{table_name}")
+    #         min_id = sybase_cursor.fetchone()[0]
 
-            sybase_cursor.execute(f"SELECT MAX({primary_key_columns}) FROM {schema_name}.{table_name}")
-            max_id = sybase_cursor.fetchone()[0]
+    #         sybase_cursor.execute(f"SELECT MAX({primary_key_columns}) FROM {schema_name}.{table_name}")
+    #         max_id = sybase_cursor.fetchone()[0]
 
-            if self.config_parser.get_log_level() == 'DEBUG':
-                self.logger.debug(f"Worker: {worker_id}: PK analysis: {primary_key_columns}: min_id: {min_id}, max_id: {max_id}")
+    #         if self.config_parser.get_log_level() == 'DEBUG':
+    #             self.logger.debug(f"Worker: {worker_id}: PK analysis: {primary_key_columns}: min_id: {min_id}, max_id: {max_id}")
 
-            total_range = int(max_id) - int(min_id)
-            current_start = min_id
-            loop_counter = 0
-            previous_row_count = 0
-            same_previous_row_count = 0
-            current_decrease_ratio = 2
+    #         total_range = int(max_id) - int(min_id)
+    #         current_start = min_id
+    #         loop_counter = 0
+    #         previous_row_count = 0
+    #         same_previous_row_count = 0
+    #         current_decrease_ratio = 2
 
-            while current_start <= max_id:
-                current_batch_size = int(total_range / 100 * current_batch_percent)
-                if current_batch_size < analyze_batch_size:
-                    current_batch_size = analyze_batch_size
-                    current_decrease_ratio = 2
-                    if self.config_parser.get_log_level() == 'DEBUG':
-                        self.logger.debug(f"Worker: {worker_id}: PK analysis: {loop_counter}: resetting current_decrease_ratio to {current_decrease_ratio}")
+    #         while current_start <= max_id:
+    #             current_batch_size = int(total_range / 100 * current_batch_percent)
+    #             if current_batch_size < analyze_batch_size:
+    #                 current_batch_size = analyze_batch_size
+    #                 current_decrease_ratio = 2
+    #                 if self.config_parser.get_log_level() == 'DEBUG':
+    #                     self.logger.debug(f"Worker: {worker_id}: PK analysis: {loop_counter}: resetting current_decrease_ratio to {current_decrease_ratio}")
 
-                current_end = current_start + current_batch_size
+    #             current_end = current_start + current_batch_size
 
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"Worker: {worker_id}: PK analysis: {loop_counter}: Loop counter: {loop_counter}, current_batch_percent: {round(current_batch_percent, 8)}, current_batch_size: {current_batch_size}, current_start: {current_start} (min: {min_id}), current_end: {current_end} (max: {max_id}), perc: {round(current_start / max_id * 100, 4)}")
+    #             if self.config_parser.get_log_level() == 'DEBUG':
+    #                 self.logger.debug(f"Worker: {worker_id}: PK analysis: {loop_counter}: Loop counter: {loop_counter}, current_batch_percent: {round(current_batch_percent, 8)}, current_batch_size: {current_batch_size}, current_start: {current_start} (min: {min_id}), current_end: {current_end} (max: {max_id}), perc: {round(current_start / max_id * 100, 4)}")
 
-                if current_end > max_id:
-                    current_end = max_id
+    #             if current_end > max_id:
+    #                 current_end = max_id
 
-                loop_counter += 1
-                sybase_cursor.execute(f"""SELECT COUNT(*) FROM {schema_name}.{table_name} WHERE {primary_key_columns} BETWEEN %s AND %s""", (current_start, current_end))
-                testing_row_count = sybase_cursor.fetchone()[0]
+    #             loop_counter += 1
+    #             sybase_cursor.execute(f"""SELECT COUNT(*) FROM {schema_name}.{table_name} WHERE {primary_key_columns} BETWEEN %s AND %s""", (current_start, current_end))
+    #             testing_row_count = sybase_cursor.fetchone()[0]
 
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"Worker: {worker_id}: PK analysis: {loop_counter}: Testing row count: {testing_row_count}")
+    #             if self.config_parser.get_log_level() == 'DEBUG':
+    #                 self.logger.debug(f"Worker: {worker_id}: PK analysis: {loop_counter}: Testing row count: {testing_row_count}")
 
-                if testing_row_count == previous_row_count:
-                    same_previous_row_count += 1
-                    if same_previous_row_count >= 2:
-                        current_decrease_ratio *= 2
-                        if self.config_parser.get_log_level() == 'DEBUG':
-                            self.logger.debug(f"Worker: {worker_id}: PK analysis: {loop_counter}: changing current_decrease_ratio to {current_decrease_ratio}")
-                        same_previous_row_count = 0
-                else:
-                    same_previous_row_count = 0
+    #             if testing_row_count == previous_row_count:
+    #                 same_previous_row_count += 1
+    #                 if same_previous_row_count >= 2:
+    #                     current_decrease_ratio *= 2
+    #                     if self.config_parser.get_log_level() == 'DEBUG':
+    #                         self.logger.debug(f"Worker: {worker_id}: PK analysis: {loop_counter}: changing current_decrease_ratio to {current_decrease_ratio}")
+    #                     same_previous_row_count = 0
+    #             else:
+    #                 same_previous_row_count = 0
 
-                previous_row_count = testing_row_count
+    #             previous_row_count = testing_row_count
 
-                if testing_row_count > analyze_batch_size:
-                    current_batch_percent /= current_decrease_ratio
-                    if self.config_parser.get_log_level() == 'DEBUG':
-                        self.logger.debug(f"Worker: {worker_id}: PK analysis: {loop_counter}: Decreasing analyze_batch_percent to {round(current_batch_percent, 8)}")
-                    continue
+    #             if testing_row_count > analyze_batch_size:
+    #                 current_batch_percent /= current_decrease_ratio
+    #                 if self.config_parser.get_log_level() == 'DEBUG':
+    #                     self.logger.debug(f"Worker: {worker_id}: PK analysis: {loop_counter}: Decreasing analyze_batch_percent to {round(current_batch_percent, 8)}")
+    #                 continue
 
-                if testing_row_count == 0:
-                    current_batch_percent *= 1.5
-                    if self.config_parser.get_log_level() == 'DEBUG':
-                        self.logger.debug(f"Worker: {worker_id}: PK analysis: {loop_counter}: Increasing analyze_batch_percent to {round(current_batch_percent, 8)} without restarting loop")
+    #             if testing_row_count == 0:
+    #                 current_batch_percent *= 1.5
+    #                 if self.config_parser.get_log_level() == 'DEBUG':
+    #                     self.logger.debug(f"Worker: {worker_id}: PK analysis: {loop_counter}: Increasing analyze_batch_percent to {round(current_batch_percent, 8)} without restarting loop")
 
-                sybase_cursor.execute(f"""SELECT
-                            %s::bigint AS batch_start,
-                            %s::bigint AS batch_end,
-                            COUNT(*) AS row_count
-                            FROM {schema_name}.{table_name}
-                            WHERE {primary_key_columns  } BETWEEN %s AND %s""",
-                            (current_start, current_end, current_start, current_end))
+    #             sybase_cursor.execute(f"""SELECT
+    #                         %s::bigint AS batch_start,
+    #                         %s::bigint AS batch_end,
+    #                         COUNT(*) AS row_count
+    #                         FROM {schema_name}.{table_name}
+    #                         WHERE {primary_key_columns  } BETWEEN %s AND %s""",
+    #                         (current_start, current_end, current_start, current_end))
 
-                result = sybase_cursor.fetchone()
-                if result:
-                    insert_batch_start = result[0]
-                    insert_batch_end = result[1]
-                    insert_row_count = result[2]
-                    if self.config_parser.get_log_level() == 'DEBUG':
-                        self.logger.debug(f"Worker: {worker_id}: PK analysis: {loop_counter}: Insert batch into temp table: start: {insert_batch_start}, end: {insert_batch_end}, row count: {insert_row_count}")
-                    migrator_tables.protocol_connection.execute_query(f"""INSERT INTO "{temp_table}" (batch_start, batch_end, row_count) VALUES (%s, %s, %s)""", (insert_batch_start, insert_batch_end, insert_row_count))
+    #             result = sybase_cursor.fetchone()
+    #             if result:
+    #                 insert_batch_start = result[0]
+    #                 insert_batch_end = result[1]
+    #                 insert_row_count = result[2]
+    #                 if self.config_parser.get_log_level() == 'DEBUG':
+    #                     self.logger.debug(f"Worker: {worker_id}: PK analysis: {loop_counter}: Insert batch into temp table: start: {insert_batch_start}, end: {insert_batch_end}, row count: {insert_row_count}")
+    #                 migrator_tables.protocol_connection.execute_query(f"""INSERT INTO "{temp_table}" (batch_start, batch_end, row_count) VALUES (%s, %s, %s)""", (insert_batch_start, insert_batch_end, insert_row_count))
 
-                current_start = current_end + 1
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"Worker: {worker_id}: PK analysis: {loop_counter}: loop end - new current_start: {current_start}")
+    #             current_start = current_end + 1
+    #             if self.config_parser.get_log_level() == 'DEBUG':
+    #                 self.logger.debug(f"Worker: {worker_id}: PK analysis: {loop_counter}: loop end - new current_start: {current_start}")
 
-            if self.config_parser.get_log_level() == 'DEBUG':
-                self.logger.debug(f"Worker: {worker_id}: PK analysis: {loop_counter}: second loop")
+    #         if self.config_parser.get_log_level() == 'DEBUG':
+    #             self.logger.debug(f"Worker: {worker_id}: PK analysis: {loop_counter}: second loop")
 
-            current_start = min_id
-            while current_start <= max_id:
-                migrator_tables.protocol_connection.execute_query("""
-                    SELECT
-                        min(batch_start) as batch_start,
-                        max(batch_end) as batch_end,
-                        max(cumulative_row_count) as row_count
-                    FROM (
-                        SELECT
-                            batch_start,
-                            batch_end,
-                            sum(row_count) over (order by batch_start) as cumulative_row_count
-                        FROM "{temp_table}"
-                        WHERE batch_start >= %s::bigint
-                        ORDER BY batch_start
-                    ) subquery
-                    WHERE cumulative_row_count <= %s::bigint
-                """, (current_start, analyze_batch_size))
-                result = migrator_tables.fetchone()
-                if result:
-                    insert_batch_start = result[0]
-                    insert_batch_end = result[1]
-                    insert_row_count = result[2]
-                    if self.config_parser.get_log_level() == 'DEBUG':
-                        self.logger.debug(f"Worker: {worker_id}: PK analysis: {loop_counter}: Insert batch into protocol table: start: {insert_batch_start}, end: {insert_batch_end}, row count: {insert_row_count}")
+    #         current_start = min_id
+    #         while current_start <= max_id:
+    #             migrator_tables.protocol_connection.execute_query("""
+    #                 SELECT
+    #                     min(batch_start) as batch_start,
+    #                     max(batch_end) as batch_end,
+    #                     max(cumulative_row_count) as row_count
+    #                 FROM (
+    #                     SELECT
+    #                         batch_start,
+    #                         batch_end,
+    #                         sum(row_count) over (order by batch_start) as cumulative_row_count
+    #                     FROM "{temp_table}"
+    #                     WHERE batch_start >= %s::bigint
+    #                     ORDER BY batch_start
+    #                 ) subquery
+    #                 WHERE cumulative_row_count <= %s::bigint
+    #             """, (current_start, analyze_batch_size))
+    #             result = migrator_tables.fetchone()
+    #             if result:
+    #                 insert_batch_start = result[0]
+    #                 insert_batch_end = result[1]
+    #                 insert_row_count = result[2]
+    #                 if self.config_parser.get_log_level() == 'DEBUG':
+    #                     self.logger.debug(f"Worker: {worker_id}: PK analysis: {loop_counter}: Insert batch into protocol table: start: {insert_batch_start}, end: {insert_batch_end}, row count: {insert_row_count}")
 
-                values = {}
-                values['source_schema'] = schema_name
-                values['source_table'] = table_name
-                values['source_table_id'] = 0
-                values['worker_id'] = worker_id
-                values['pk_columns'] = primary_key_columns
-                values['batch_start'] = insert_batch_start
-                values['batch_end'] = insert_batch_end
-                values['row_count'] = insert_row_count
-                migrator_tables.insert_pk_ranges(values)
-                current_start = insert_batch_end
+    #             values = {}
+    #             values['source_schema'] = schema_name
+    #             values['source_table'] = table_name
+    #             values['source_table_id'] = 0
+    #             values['worker_id'] = worker_id
+    #             values['pk_columns'] = primary_key_columns
+    #             values['batch_start'] = insert_batch_start
+    #             values['batch_end'] = insert_batch_end
+    #             values['row_count'] = insert_row_count
+    #             migrator_tables.insert_pk_ranges(values)
+    #             current_start = insert_batch_end
 
-            migrator_tables.protocol_connection.execute_query(f"""DROP TABLE IF EXISTS "{temp_table}" """)
-            self.connection.commit()
-            self.logger.info(f"Worker: {worker_id}: PK analysis: {loop_counter}: Finished analyzing PK distribution for table {table_name}.")
+    #         migrator_tables.protocol_connection.execute_query(f"""DROP TABLE IF EXISTS "{temp_table}" """)
+    #         self.connection.commit()
+    #         self.logger.info(f"Worker: {worker_id}: PK analysis: {loop_counter}: Finished analyzing PK distribution for table {table_name}.")
+    #         ## end of function
+
 
         # unfortunately, the following code is not working as expected - Sybase does not support BETWEEN for multiple columns as PostgreSQL does
         # this solution worked for foreign data wrapper but not for native connection
@@ -794,9 +800,9 @@ class SybaseASEConnector(DatabaseConnector):
             target_schema = settings['target_schema']
             target_table = settings['target_table']
             target_columns = settings['target_columns']
-            primary_key_columns = settings['primary_key_columns']
-            primary_key_columns_count = settings['primary_key_columns_count']
-            primary_key_columns_types = settings['primary_key_columns_types']
+            # primary_key_columns = settings['primary_key_columns']
+            # primary_key_columns_count = settings['primary_key_columns_count']
+            # primary_key_columns_types = settings['primary_key_columns_types']
             batch_size = settings['batch_size']
             migrator_tables = settings['migrator_tables']
             source_table_rows = self.get_rows_count(source_schema, source_table)

@@ -300,18 +300,17 @@ class Planner:
                         values['source_schema'] = self.source_schema
                         values['source_table'] = table_info['table_name']
                         values['source_table_id'] = table_info['id']
-                        values['index_owner'] = index_details['owner']
-                        values['index_name'] = index_details['name']
-                        values['index_type'] = index_details['type']
+                        values['index_owner'] = index_details['index_owner']
+                        values['index_name'] = index_details['index_name']
+                        values['index_type'] = index_details['index_type']
                         values['target_schema'] = self.target_schema
                         values['target_table'] = table_info['table_name']
-                        values['index_sql'] = index_details['sql']
                         values['index_columns'] = index_details['columns']
-                        values['index_columns_count'] = index_details['columns_count']
-                        values['index_columns_data_types'] = index_details['columns_data_types']
                         values['index_comment'] = index_details['comment']
+                        values['index_sql'] = self.target_connection.get_create_index_sql(values)
                         self.migrator_tables.insert_indexes( values )
-                    self.logger.info(f"Index {index_details['name']} for table {table_info['table_name']}")
+                        if self.config_parser.get_log_level() == 'DEBUG':
+                            self.logger.debug(f"Processed index: {values}")
                 else:
                     self.logger.info(f"No indexes found for table {table_info['table_name']}.")
             else:
@@ -320,10 +319,8 @@ class Planner:
             if self.config_parser.should_migrate_constraints():
                 settings = {
                     'source_table_id': table_info['id'],
-                    'source_schema': self.source_schema,
+                    'source_table_schema': self.source_schema,
                     'source_table_name': table_info['table_name'],
-                    'target_schema': self.target_schema,
-                    'target_table_name': table_info['table_name'],
                 }
                 constraints = self.source_connection.fetch_constraints(settings)
                 if self.config_parser.get_log_level() == 'DEBUG':

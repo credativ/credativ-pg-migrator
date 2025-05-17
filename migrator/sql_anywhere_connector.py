@@ -68,7 +68,9 @@ class SQLAnywhereConnector(DatabaseConnector):
             self.logger.error(e)
             raise
 
-    def fetch_table_columns(self, table_schema: str, table_name: str, migrator_tables) -> dict:
+    def fetch_table_columns(self, settings) -> dict:
+        table_schema = settings['table_schema']
+        table_name = settings['table_name']
         query = f"""
             SELECT
                 c.column_id,
@@ -260,18 +262,18 @@ class SQLAnywhereConnector(DatabaseConnector):
 
     def fetch_indexes(self, settings):
         source_table_id = settings['source_table_id']
-        source_schema = settings['source_schema']
+        source_table_schema = settings['source_table_schema']
         source_table_name = settings['source_table_name']
-        target_schema = settings['target_schema']
-        target_table_name = settings['target_table_name']
-        target_columns = settings['target_columns']
 
         table_indexes = {}
         order_num = 1
         query = f"""
-            SELECT iname, indextype, colnames
+            SELECT
+                iname,
+                indextype,
+                colnames
             FROM SYS.SYSINDEXES
-            WHERE creator = '{source_schema}'
+            WHERE creator = '{source_table_schema}'
             AND tname = '{source_table_name}'
             ORDER BY iname
         """
@@ -284,31 +286,16 @@ class SQLAnywhereConnector(DatabaseConnector):
                 index_type = row[1].upper()
                 index_columns = row[2]
 
-                columns = []
-                for col in index_columns.split(","):
-                    col = col.strip().replace(" ASC", "").replace(" DESC", "")
-                    if col not in columns:
-                        columns.append('"'+col+'"')
-                index_columns = ','.join(columns)
-
                 if index_type == 'NON-UNIQUE':
                     index_type = 'INDEX'
 
-                if index_type == 'PRIMARY KEY':
-                    index_sql = f'''ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{target_table_name}_{index_name}" PRIMARY KEY ({index_columns})'''
-                else:
-                    index_sql = f'''CREATE {"UNIQUE" if index_type == "UNIQUE" else ""} INDEX "{target_table_name}_{index_name}" ON "{target_schema}"."{target_table_name}" ({index_columns})'''
-
                 if index_type != 'FOREIGN KEY':
                     table_indexes[order_num] = {
-                        'name': index_name,
-                        'owner': source_schema,
-                        'type': index_type,
-                        'columns': index_columns,
-                        'columns_count': len(index_columns.split(',')),
-                        'columns_data_types': '',
-                        'sql': index_sql,
-                        'comment': '',
+                        'index_name': index_name,
+                        'index_owner': source_table_schema,
+                        'index_type': index_type,
+                        'index_columns': index_columns,
+                        'index_comment': '',
                     }
                     order_num += 1
             cursor.close()
@@ -319,6 +306,9 @@ class SQLAnywhereConnector(DatabaseConnector):
             self.logger.error(f"Error executing query: {query}")
             self.logger.error(e)
             raise
+
+    def get_create_index_sql(self, settings):
+        return ""
 
     def fetch_constraints(self, settings):
         source_table_id = settings['source_table_id']

@@ -81,7 +81,9 @@ class SybaseASEConnector(DatabaseConnector):
             self.logger.error(e)
             raise
 
-    def fetch_table_columns(self, table_schema: str, table_name: str, migrator_tables) -> dict:
+    def fetch_table_columns(self, settings) -> dict:
+        table_schema = settings['table_schema']
+        table_name = settings['table_name']
         result = {}
         query = f"""
             SELECT
@@ -307,11 +309,9 @@ class SybaseASEConnector(DatabaseConnector):
 
     def fetch_indexes(self, settings):
         source_table_id = settings['source_table_id']
-        source_schema = settings['source_schema']
+        source_table_schema = settings['source_table_schema']
         source_table_name = settings['source_table_name']
-        target_schema = settings['target_schema']
-        target_table_name = settings['target_table_name']
-        target_columns = settings['target_columns']
+
         table_indexes = {}
         order_num = 1
         query = f"""
@@ -357,41 +357,14 @@ class SybaseASEConnector(DatabaseConnector):
                 index_primary_key = index[3]
                 index_owner = ''
 
-                index_columns_count = 0
-                index_columns_data_types = []
-                for column_name in index_columns.split(','):
-                    column_name = column_name.strip().strip('"')
-                    for col_order_num, column_info in target_columns.items():
-                        if column_name == column_info['column_name']:
-                            index_columns_count += 1
-                            column_data_type = column_info['data_type']
-                            if self.config_parser.get_log_level() == 'DEBUG':
-                                self.logger.debug(f"Table: {target_schema}.{target_table_name}, index: {index_name}, column: {column_name} has data type {column_data_type}")
-                            index_columns_data_types.append(column_data_type)
-                            index_columns_data_types_str = ', '.join(index_columns_data_types)
-
-                create_index_query = None
-                if index_primary_key == 1:
-                    create_index_query = f"""ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{index_name}" PRIMARY KEY ({index_columns});"""
-                elif index_unique == 1 and index_primary_key == 0:
-                    create_index_query = f"""CREATE UNIQUE INDEX "{index_name}" ON "{target_schema}"."{target_table_name}" ({index_columns});"""
-                else:
-                    create_index_query = f"""CREATE INDEX "{index_name}" ON "{target_schema}"."{target_table_name}" ({index_columns});"""
-
-                if create_index_query:
-                    if self.config_parser.get_log_level() == 'DEBUG':
-                        self.logger.debug(f"SQL: {create_index_query}")
-                    table_indexes[order_num] = {
-                        'name': index_name,
-                        'type': "PRIMARY KEY" if index_primary_key == 1 else "UNIQUE" if index_unique == 1 and index_primary_key == 0 else "INDEX",
-                        'owner': index_owner,
-                        'columns': index_columns,
-                        'columns_count': index_columns_count,
-                        'columns_data_types': index_columns_data_types_str,
-                        'sql': create_index_query,
-                        'comment': ''
-                    }
-                    order_num += 1
+                table_indexes[order_num] = {
+                    'index_name': index_name,
+                    'index_type': "PRIMARY KEY" if index_primary_key == 1 else "UNIQUE" if index_unique == 1 and index_primary_key == 0 else "INDEX",
+                    'index_owner': index_owner,
+                    'index_columns': index_columns,
+                    'index_comment': ''
+                }
+                order_num += 1
 
             cursor.close()
             self.disconnect()
@@ -401,6 +374,9 @@ class SybaseASEConnector(DatabaseConnector):
             self.logger.error(f"Error executing query: {query}")
             self.logger.error(e)
             raise
+
+    def get_create_index_sql(self, settings):
+        return ""
 
     def fetch_constraints(self, settings):
         source_table_id = settings['source_table_id']

@@ -274,6 +274,9 @@ class ConfigParser:
     def get_post_migration_script(self):
         return self.config.get('migration', {}).get('post_migration_script', None)
 
+    def get_names_case_handling(self):
+        return self.config.get('migration', {}).get('names_case_handling', 'keep')
+
     def get_include_tables(self):
         include_tables = self.config['include_tables']
         if type(include_tables) is str:

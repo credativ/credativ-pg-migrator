@@ -63,7 +63,9 @@ class PostgreSQLConnector(DatabaseConnector):
             self.logger.error(e)
             raise
 
-    def fetch_table_columns(self, table_schema: str, table_name: str, migrator_tables=None) -> dict:
+    def fetch_table_columns(self, settings) -> dict:
+        table_schema = settings['table_schema']
+        table_name = settings['table_name']
         result = {}
         try:
             query =f"""
@@ -77,7 +79,8 @@ class PostgreSQLConnector(DatabaseConnector):
                         c.is_identity,
                         c.is_nullable,
                         c.column_default,
-                        u.udt_schema||'.'||u.udt_name as full_udt_name,
+                        u.udt_schema,
+                        u.udt_name,
                         col_description((c.table_schema||'.'||c.table_name)::regclass::oid, c.ordinal_position) as column_comment
                     FROM information_schema.columns c
                     LEFT JOIN information_schema.column_udt_usage u ON c.table_schema = u.table_schema
@@ -101,17 +104,20 @@ class PostgreSQLConnector(DatabaseConnector):
                 is_identity = row[6]
                 is_nullable = row[7]
                 column_default = row[8]
-                full_udt_name = row[9] if data_type == 'USER-DEFINED' else None
-                column_comment = row[10]
+                udt_schema = row[9]
+                udt_name = row[10]
+                column_comment = row[11]
                 result[ordinal_position] = {
                     'column_name': column_name,
-                    'data_type': data_type if full_udt_name is None else full_udt_name,
-                    'basic_data_type': data_type if full_udt_name is None else '',
+                    'data_type': data_type,
+                    'basic_data_type': data_type,
                     'is_identity': is_identity,
                     'character_maximum_length': character_maximum_length,
                     'numeric_precision': numeric_precision,
                     'numeric_scale': numeric_scale,
                     'is_nullable': is_nullable,
+                    'udt_schema': udt_schema,
+                    'udt_name': udt_name,
                     'column_default': column_default,
                     'column_comment': column_comment,
                 }
@@ -201,11 +207,9 @@ class PostgreSQLConnector(DatabaseConnector):
 
     def fetch_indexes(self, settings):
         source_table_id = settings['source_table_id']
-        source_schema = settings['source_schema']
+        source_table_schema = settings['source_table_schema']
         source_table_name = settings['source_table_name']
-        target_schema = settings['target_schema']
-        target_table_name = settings['target_table_name']
-        target_columns = settings['target_columns']
+
         table_indexes = {}
         order_num = 1
         query = f"""
@@ -224,9 +228,6 @@ class PostgreSQLConnector(DatabaseConnector):
                 and i.indexname = c.constraint_name
             WHERE t.oid = {source_table_id}
         """
-        # if self.config_parser.get_log_level() == 'DEBUG':
-        #     self.logger.debug(f"Reading indexes for {table_name}")
-        #     self.logger.debug(f"Query: {query}")
         try:
             self.connect()
             cursor = self.connection.cursor()
@@ -238,30 +239,13 @@ class PostgreSQLConnector(DatabaseConnector):
                 index_type = row[2]
                 index_sql = row[1]
 
-                index_columns_count = 0
-                index_columns_data_types = []
-                for column_name in index_columns.split(','):
-                    column_name = column_name.strip().strip('"')
-                    for order_num, column_info in target_columns.items():
-                        if column_name == column_info['column_name']:
-                            index_columns_count += 1
-                            column_data_type = column_info['data_type']
-                            if self.config_parser.get_log_level() == 'DEBUG':
-                                self.logger.debug(f"Table: {target_schema}.{target_table_name}, index: {index_name}, column: {column_name} has data type {column_data_type}")
-                            index_columns_data_types.append(column_data_type)
-                            index_columns_data_types_str = ', '.join(index_columns_data_types)
-
-                if index_type == 'PRIMARY KEY':
-                    index_sql = f'ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{index_name}" PRIMARY KEY ({index_columns});'
                 table_indexes[order_num] = {
-                    'name': index_name,
-                    'type': index_type,
-                    'owner': '',
-                    'columns': index_columns,
-                    'columns_count': index_columns_count,
-                    'columns_data_types': index_columns_data_types_str,
-                    'sql': index_sql,
-                    'comment': row[3]
+                    'index_name': index_name,
+                    'index_type': index_type,
+                    'index_owner': source_table_schema,
+                    'index_columns': index_columns,
+                    'index_sql': index_sql,
+                    'index_comment': row[3]
                 }
                 order_num += 1
             cursor.close()
@@ -271,6 +255,135 @@ class PostgreSQLConnector(DatabaseConnector):
             self.logger.error(f"Error executing query: {query}")
             self.logger.error(e)
             raise
+
+    def get_create_index_sql(self, settings):
+
+        ## IBM DB2
+        # index_columns = ', '.join(f'"{col}"' for col in index_columns)
+        # index_columns_count = row[2]
+        create_index_query = None
+        if index_type == 'P':
+            create_index_query = f"""ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{index_name}" PRIMARY KEY ({index_columns});"""
+        else:
+            create_index_query = f"""CREATE {'UNIQUE' if index_type == 'U' else ''} INDEX "{index_name}" ON "{target_schema}"."{target_table_name}" ({index_columns});"""
+
+        ## Informix
+        index_columns_count = 0
+        index_columns_data_types = []
+        for column_name in index_columns.split(','):
+            column_name = column_name.strip().strip('"')
+            for col_order_num, column_info in target_columns.items():
+                if column_name == column_info['column_name']:
+                    index_columns_count += 1
+                    column_data_type = column_info['data_type']
+                    if self.config_parser.get_log_level() == 'DEBUG':
+                        self.logger.debug(f"Table: {target_schema}.{target_table_name}, index: {index_name}, column: {column_name} has data type {column_data_type}")
+                    index_columns_data_types.append(column_data_type)
+                    index_columns_data_types_str = ', '.join(index_columns_data_types)
+
+        create_index_query = None
+        if index_type == 'U':
+            create_index_query = f"""CREATE UNIQUE INDEX "{index_name.strip()}" ON "{target_schema}"."{target_table_name}" ({index_columns});"""
+        elif index_type == 'P':
+            create_index_query = f"""ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{index_name}" PRIMARY KEY ({index_columns});"""
+        else:
+            if index_type != 'R':
+                create_index_query = f"""CREATE INDEX "{index_name.strip()}" ON "{target_schema}"."{target_table_name}" ({index_columns});"""
+            else:
+                pass
+                # Skipping Foreign key
+
+        ## MS SQL Server
+        index_columns_count = 0
+        index_columns_data_types = []
+        for column_name in index_columns.split(','):
+            column_name = column_name.strip().strip('"')
+            for col_order_num, column_info in target_columns.items():
+                if column_name == column_info['column_name']:
+                    index_columns_count += 1
+                    column_data_type = column_info['data_type']
+                    if self.config_parser.get_log_level() == 'DEBUG':
+                        self.logger.debug(f"Table: {target_schema}.{target_table_name}, index: {index_name}, column: {column_name} has data type {column_data_type}")
+                    index_columns_data_types.append(column_data_type)
+                    index_columns_data_types_str = ', '.join(index_columns_data_types)
+
+        create_index_query = None
+        if index_primary_key == 1:
+            create_index_query = f"""ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{index_name}" PRIMARY KEY ({index_columns});"""
+        elif index_unique == 1 and index_primary_key == 0:
+            create_index_query = f"""CREATE UNIQUE INDEX "{index_name}" ON "{target_schema}"."{target_table_name}" ({index_columns});"""
+        else:
+            create_index_query = f"""CREATE INDEX "{index_name}" ON "{target_schema}"."{target_table_name}" ({index_columns});"""
+
+        ## MySQL
+        if index_info['type'] == 'PRIMARY KEY':
+            index_info['sql'] = f"""ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{target_table_name}_{index_info['name']}" PRIMARY KEY ({index_info['columns']})"""
+        else:
+            index_info['sql'] = f"""CREATE {'UNIQUE' if index_info['type'] == 'UNIQUE' else ''} INDEX "{target_table_name}_{index_info['name']}" ON "{target_schema}"."{target_table_name}" ({index_info['columns']})"""
+
+        ## Oracle
+        create_index_query = None
+        if constraint_type == 'P':
+            create_index_query = f"""ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{index_name}" PRIMARY KEY ({columns_list})"""
+        elif uniqueness == 'UNIQUE':
+            create_index_query = f"""CREATE UNIQUE INDEX "{index_name}" on "{target_schema}"."{target_table_name}" ({columns_list_orders})"""
+        else:
+            create_index_query = f"""CREATE INDEX "{index_name}" on "{target_schema}"."{target_table_name}" ({columns_list_orders})"""
+        table_indexes[order_num]['sql'] = create_index_query
+
+        ## PostgreSQL
+        index_columns_count = 0
+        index_columns_data_types = []
+        for column_name in index_columns.split(','):
+            column_name = column_name.strip().strip('"')
+            for order_num, column_info in target_columns.items():
+                if column_name == column_info['column_name']:
+                    index_columns_count += 1
+                    column_data_type = column_info['data_type']
+                    if self.config_parser.get_log_level() == 'DEBUG':
+                        self.logger.debug(f"Table: {target_schema}.{target_table_name}, index: {index_name}, column: {column_name} has data type {column_data_type}")
+                    index_columns_data_types.append(column_data_type)
+                    index_columns_data_types_str = ', '.join(index_columns_data_types)
+
+        if index_type == 'PRIMARY KEY':
+            index_sql = f'ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{index_name}" PRIMARY KEY ({index_columns});'
+
+        ## SQL Anywhere
+        columns = []
+        for col in index_columns.split(","):
+            col = col.strip().replace(" ASC", "").replace(" DESC", "")
+            if col not in columns:
+                columns.append('"'+col+'"')
+        index_columns = ','.join(columns)
+
+        if index_type == 'PRIMARY KEY':
+            index_sql = f'''ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{target_table_name}_{index_name}" PRIMARY KEY ({index_columns})'''
+        else:
+            index_sql = f'''CREATE {"UNIQUE" if index_type == "UNIQUE" else ""} INDEX "{target_table_name}_{index_name}" ON "{target_schema}"."{target_table_name}" ({index_columns})'''
+
+        ## Sybase ASE
+        index_columns_count = 0
+        index_columns_data_types = []
+        for column_name in index_columns.split(','):
+            column_name = column_name.strip().strip('"')
+            for col_order_num, column_info in target_columns.items():
+                if column_name == column_info['column_name']:
+                    index_columns_count += 1
+                    column_data_type = column_info['data_type']
+                    if self.config_parser.get_log_level() == 'DEBUG':
+                        self.logger.debug(f"Table: {target_schema}.{target_table_name}, index: {index_name}, column: {column_name} has data type {column_data_type}")
+                    index_columns_data_types.append(column_data_type)
+                    index_columns_data_types_str = ', '.join(index_columns_data_types)
+
+        create_index_query = None
+        if index_primary_key == 1:
+            create_index_query = f"""ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{index_name}" PRIMARY KEY ({index_columns});"""
+        elif index_unique == 1 and index_primary_key == 0:
+            create_index_query = f"""CREATE UNIQUE INDEX "{index_name}" ON "{target_schema}"."{target_table_name}" ({index_columns});"""
+        else:
+            create_index_query = f"""CREATE INDEX "{index_name}" ON "{target_schema}"."{target_table_name}" ({index_columns});"""
+
+
 
     def fetch_constraints(self, settings):
         source_table_id = settings['source_table_id']

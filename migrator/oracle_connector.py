@@ -75,7 +75,9 @@ class OracleConnector(DatabaseConnector):
             self.logger.error(e)
             raise
 
-    def fetch_table_columns(self, table_schema: str, table_name: str, migrator_tables) -> dict:
+    def fetch_table_columns(self, settings) -> dict:
+        table_schema = settings['table_schema']
+        table_name = settings['table_name']
         query = f"""
             SELECT
                 column_id,
@@ -228,11 +230,9 @@ class OracleConnector(DatabaseConnector):
 
     def fetch_indexes(self, settings):
         source_table_id = settings['source_table_id']
-        source_schema = settings['source_schema']
+        source_table_schema = settings['source_table_schema']
         source_table_name = settings['source_table_name']
-        target_schema = settings['target_schema']
-        target_table_name = settings['target_table_name']
-        target_columns = settings['target_columns']
+
         table_indexes = {}
         order_num = 1
 
@@ -244,33 +244,35 @@ class OracleConnector(DatabaseConnector):
         # 'TABLE', 'INDEX', 'VIEW', 'SEQUENCE', 'PACKAGE', 'FUNCTION', 'PROCEDURE', 'CONSTRAINT', 'TRIGGER', 'SYNONYM'
 
         index_query = f"""
-                        SELECT
-                            ai.index_name,
-                            c.constraint_type,
-                            ai.index_type,
-                            ai.uniqueness,
-                            listagg('"'||aic.column_name||'"', ', ') WITHIN GROUP (ORDER BY aic.column_position) AS indexed_columns,
-                            listagg('"'||aic.column_name||'" '|| aic.descend, ', ') WITHIN GROUP (ORDER BY aic.column_position) AS indexed_columns_orders
-                        FROM all_indexes ai
-                        JOIN all_ind_columns aic
-                        ON ai.owner = aic.index_owner AND ai.index_name = aic.index_name
-                        AND ai.table_owner = aic.table_owner AND ai.table_name = aic.table_name
-                        LEFT JOIN dba_constraints c
-                        ON c.owner = ai.owner AND c.table_name = ai.table_name AND c.constraint_name = ai.index_name
-                        WHERE
-                            ai.table_owner = '{source_schema.upper()}'
-                        	AND ai.table_name = '{source_table_name.upper()}'
-                        GROUP BY
-                            ai.owner,
-                            ai.index_name,
-                            c.constraint_type,
-                            ai.table_owner,
-                            ai.table_name,
-                            ai.index_type,
-                            ai.uniqueness
-                        ORDER BY
-                            ai.index_name
-            """
+            SELECT
+                ai.index_name,
+                c.constraint_type,
+                ai.index_type,
+                ai.uniqueness,
+                listagg('"'||aic.column_name||'"', ', ')
+                    WITHIN GROUP (ORDER BY aic.column_position) AS indexed_columns,
+                listagg('"'||aic.column_name||'" '|| aic.descend, ', ')
+                    WITHIN GROUP (ORDER BY aic.column_position) AS indexed_columns_orders
+            FROM all_indexes ai
+            JOIN all_ind_columns aic
+            ON ai.owner = aic.index_owner AND ai.index_name = aic.index_name
+            AND ai.table_owner = aic.table_owner AND ai.table_name = aic.table_name
+            LEFT JOIN dba_constraints c
+            ON c.owner = ai.owner AND c.table_name = ai.table_name AND c.constraint_name = ai.index_name
+            WHERE
+                ai.table_owner = '{source_table_schema.upper()}'
+                AND ai.table_name = '{source_table_name.upper()}'
+            GROUP BY
+                ai.owner,
+                ai.index_name,
+                c.constraint_type,
+                ai.table_owner,
+                ai.table_name,
+                ai.index_type,
+                ai.uniqueness
+            ORDER BY
+                ai.index_name
+        """
         try:
             self.connect()
             cursor = self.connection.cursor()
@@ -285,24 +287,12 @@ class OracleConnector(DatabaseConnector):
 
                 if index_name not in table_indexes:
                     table_indexes[order_num] = {
-                        'name': index_name,
-                        'type': 'PRIMARY KEY' if constraint_type == 'P' else 'UNIQUE' if uniqueness == 'UNIQUE' else 'INDEX',
-                        'owner': source_schema,
-                        'columns': columns_list,
-                        'columns_count': len(columns_list.split(',')),
-                        'columns_data_types': [],
-                        'sql': '',
-                        'comment': '',
+                        'index_name': index_name,
+                        'index_type': 'PRIMARY KEY' if constraint_type == 'P' else 'UNIQUE' if uniqueness == 'UNIQUE' else 'INDEX',
+                        'index_owner': source_table_schema,
+                        'index_columns': columns_list_orders,
+                        'index_comment': '',
                     }
-
-                create_index_query = None
-                if constraint_type == 'P':
-                    create_index_query = f"""ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{index_name}" PRIMARY KEY ({columns_list})"""
-                elif uniqueness == 'UNIQUE':
-                    create_index_query = f"""CREATE UNIQUE INDEX "{index_name}" on "{target_schema}"."{target_table_name}" ({columns_list_orders})"""
-                else:
-                    create_index_query = f"""CREATE INDEX "{index_name}" on "{target_schema}"."{target_table_name}" ({columns_list_orders})"""
-                table_indexes[order_num]['sql'] = create_index_query
                 order_num += 1
 
             cursor.close()
@@ -313,6 +303,9 @@ class OracleConnector(DatabaseConnector):
             self.logger.error(f"Error executing query: {index_query}")
             self.logger.error(e)
             raise
+
+    def get_create_index_sql(self, settings):
+        return ""
 
     def fetch_constraints(self, settings):
         source_table_id = settings['source_table_id']

@@ -138,7 +138,11 @@ class Planner:
             table_partitioned_by = ''
             create_partitions_sql = ''
             try:
-                source_columns = self.source_connection.fetch_table_columns(self.source_schema, table_info['table_name'], self.migrator_tables)
+                settings = {
+                    'table_schema': self.source_schema,
+                    'table_name': table_info['table_name'],
+                }
+                source_columns = self.source_connection.fetch_table_columns(settings)
                 if self.config_parser.get_log_level() == 'DEBUG':
                     self.logger.debug(f"Fetched source columns: {source_columns}")
 
@@ -146,11 +150,11 @@ class Planner:
 
                     if self.config_parser.get_log_level() == 'DEBUG':
                         self.logger.debug(f"Checking for data types / default values substitutions for column {column_info}...")
-                    substitution = self.migrator_tables.check_data_types_substitution(column_info['data_type'])
-                    if substitution and substitution != (None, None):
-                        column_info['data_type'], column_info['character_maximum_length'] = self.migrator_tables.check_data_types_substitution(column_info['column_default'])
+                    substitution = self.migrator_tables.check_data_types_substitution(column_info['column_type'])
+                    if substitution and substitution != {}:
                         if self.config_parser.get_log_level() == 'DEBUG':
-                            self.logger.debug(f"Substituted data type: {column_info['data_type']}, length: {column_info['character_maximum_length']}")
+                            self.logger.debug(f"Substitution for source data type: {substitution}")
+                        column_info['column_type_substitution'] = substitution
 
                     # checking for default values substitution with the new data type
                     if column_info['column_default'] != '':
@@ -413,9 +417,8 @@ class Planner:
                     'column_default': column_info['column_default'],
                     'replaced_column_default': column_info['replaced_column_default'] if 'replaced_column_default' in column_info else '',
                     'data_type': coltype,
-                    'replaced_data_type': column_info['replaced_data_type'] if 'replaced_data_type' in column_info else '',
                     'column_type': column_info['column_type'] if 'column_type' in column_info else '',
-                    'replaced_column_type': column_info['replaced_column_type'] if 'replaced_column_type' in column_info else '',
+                    'column_type_substitution': column_info['column_type_substitution'] if 'column_type_substitution' in column_info else '',
                     'character_maximum_length': '' if coltype == 'TEXT' else column_info['character_maximum_length'] if column_info['character_maximum_length'] is not None else '',
                     'numeric_precision': column_info['numeric_precision'] if 'numeric_precision' in column_info else '',
                     'numeric_scale': column_info['numeric_scale'] if 'numeric_scale' in column_info else '',
@@ -429,6 +432,8 @@ class Planner:
                     'is_generated_virtual': column_info['is_generated_virtual'] if 'is_generated_virtual' in column_info else '',
                     'is_generated_stored': column_info['is_generated_stored'] if 'is_generated_stored' in column_info else '',
                     'generation_expression': column_info['generation_expression'] if 'generation_expression' in column_info else '',
+                    'udt_schema': column_info['udt_schema'] if 'udt_schema' in column_info else '',
+                    'udt_name': column_info['udt_name'] if 'udt_name' in column_info else '',
                 }
         else:
             raise ValueError(f"Unsupported target database type: {target_db_type}")

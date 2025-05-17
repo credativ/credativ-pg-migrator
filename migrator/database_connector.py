@@ -37,8 +37,11 @@ class DatabaseConnector(ABC):
         pass
 
     @abstractmethod
-    def fetch_table_columns(self, table_schema: str, table_name: str, migrator_tables) -> dict:
+    def fetch_table_columns(self, settings) -> dict:
         """
+        settings - dictionary with the following keys
+            - table_schema: str,
+            - table_name: str,
         Returns a dictionary describing the schema of the specific table
         Items names and values correspond with INFORMATION_SCHEMA.COLUMNS table
         In case of legacy databases, content is suplied from system tables
@@ -47,27 +50,39 @@ class DatabaseConnector(ABC):
         Not all columns are used in all connectors
 
         { column_ordinary_number: {
-            'column_name': column_name,
-            'is_nullable': 'YES' or 'NO',
-            'column_default': column_default_value,
-            'replaced_column_default': custom replacement value,
-            'data_type': data type from table definition,
-            'replaced_data_type': custom replacement value,
-            'column_type': full description of data type from table definition with all parameters,
-            'replaced_column_type': custom replacement value,
+            'column_name':
+                - full column name, in the format taken from system tables
+                - can contain mix of upper and lower case letters as they are stored in system tables
+            'is_nullable':
+                - 'YES' / 'NO' -> 'NO' = constraint NOT NULL
+            'column_default':
+                - original default value from the system tables
+            'replaced_column_default':
+                - custom replacement value
+            'data_type':
+                - data type without size/length/precision/scale,
+            'column_type':
+                - full description of data type from table definition with all parameters,
+                - like VARCHAR(255) / CHAR(11) / NUMBER(11,2)
+                - this value is checked for custom replacements of data types
+            'column_type_substitution':
+                - custom replacement for column_type - based on the configuration file
+                - contains JSON object with key-value pairs based on the configuration file
             'character_maximum_length': length of the column,
-            'numeric_precision': precision of the column,
-            'numeric_scale': scale of the column,
+            'numeric_precision': numeric precision of the column,
+            'numeric_scale': numeric scale of the column,
             'basic_data_type': basic data type for user defined types,
             'basic_character_maximum_length': basic length for user defined types,
             'basic_numeric_precision': basic precision for user defined types,
             'basic_numeric_scale': basic scale for user defined types,
             'basic_column_type': basic column type for user defined types with all parameters,
-            'is_identity': 'YES' or 'NO',
+            'is_identity': 'YES' / 'NO' - automatically generated column from sequence
             'column_comment': comment for the column,
-            'is_generated_virtual': 'YES' or 'NO',
-            'is_generated_stored': 'YES' or 'NO',
+            'is_generated_virtual': 'YES' / 'NO',
+            'is_generated_stored': 'YES' / 'NO',
             'generation_expression': expression for generated column,
+            'udt_schema': schema name of the user defined type,
+            'udt_name': name of the user defined type
             }
         }
 
@@ -101,13 +116,21 @@ class DatabaseConnector(ABC):
             - target_db_type: str - target database type
         Converts the columns of one source table to the target database type and SQL syntax.
         Returns dictionary of types mapping between source and target database.
+        Example:
+        { 'INT': 'INTEGER',
+          'VARCHAR2': 'VARCHAR',
+          'DATETIME': 'TIMESTAMP',
+          'CLOB': 'TEXT',
+          'BLOB': 'BYTEA',
+          ...
+        }
         """
         pass
 
     @abstractmethod
     def get_create_table_sql(self, settings):
         """
-        This function is relevant only for target database
+        This function is currently relevant only for target database
         Centralizes creation of SQL DDL statement
         settings - dictionary with the following keys
             - target_db_type: str - target database type
@@ -116,7 +139,7 @@ class DatabaseConnector(ABC):
             - source_columns: dict - dictionary of columns to be converted
             - converted_columns: dict - dictionary of converted columns
         Returns:
-          - SQL statement to create the table in the target database - used for table creation
+          - SQL statement to create the table in the database - used for table creation
         """
         pass
 
@@ -133,34 +156,56 @@ class DatabaseConnector(ABC):
     def fetch_indexes(self, settings):
         """
         Fetch indexes for a table.
+        Information_schema on some databases does not contain specific table/view for indexes.
+        Therefore columns names in returned dictionary are arbitrary
         settings - dictionary with the following keys
-            - source_table_id: id of the table in the source database (does not exist in MySQL)
-            - source_schema: schema name of the table in the source database
-            - source_table_name: table name in the source database
-            - target_schema: target schema name
-            - target_table_name: target table name
-            - target_columns: list of target columns
-        Returned SQL for index creation must be compatible with the target database.
-        But this is usually not a big problem, syntax is usually the same for most databases.
+            - source_table_id:
+                - internal ID of the table in the source database - if it is available
+                - public internal ID does not exist for example in MySQL
+            - source_table_schema:
+                - schema name of the table in the source database
+            - source_table_name:
+                - table name in the source database
+        Some databases use table_id for finding indexes, some need table_name and schema_name.
+
+        Returned dictionary contains all indexes for the table - both primary and secondary indexes.
+        PRIMARY KEYs are usually listed both in the indexes and constraints.
+        For our purposes, we include them into indexes, because they should be created before
+        references to them are used.
+
         Returns a dictionary:
             { ordinary_number: {
-                'name': index_name,
-                'type': index_type,   # INDEX, UNIQUE, PRIMARY KEY
-                'owner': index_owner,  ## might be useful for some source databases
-                'columns': "column_name1, column_name2, ..."
-                'columns_count': index_columns_count,
-                'columns_data_types': [data_type1, data_type2, ...],
-                'sql': create_index_sql,
-                'comment': index_comment
+                'index_name': index_name,
+                'index_type': index_type,   # INDEX, UNIQUE, PRIMARY KEY
+                'index_owner': index_owner,  ## might be useful for some source databases
+                'index_columns':
+                    - comma separated, ordered list of columns "column_name1, column_name2, ..."
+                    - from some databases like Oracle it might contain also ASC / DESC information for each column
+                'index_comment': index_comment
+                'index_sql':
+                    - Some databases offer directly SQL statement to create the index
+                    - if available, it is returned for debugging purposes
                 }
             }
-        Note to 'owner' value: some source databases like Informix have a concept of system indexes,
-        which are automatically created by the database engine. For example missing primary key index
-        on a table if Foreign Key constraint is defined on that column.
-        In this case, the owner of the index is set to 'informix' and these indexes might be confusing
-        for the user because they are not defined in his data model.
+
+        Notes:
+        - 'index_owner':
+            some source databases like Informix have a concept of system indexes,
+            which are automatically created by the database engine. For example missing primary key index
+            on a table if Foreign Key constraint is defined on that column.
+            In this case, the owner of the index is set to 'informix' and these indexes might be confusing
+            for the user because they are not defined in his data model.
         """
         pass
+
+    @abstractmethod
+    def get_create_index_sql(self, settings):
+        """
+        This function is currently relevant only for target database
+        Centralizes creation of SQL DDL statement for indexes
+        settings:
+            -
+        """
 
     @abstractmethod
     def fetch_constraints(self, settings):

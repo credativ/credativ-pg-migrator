@@ -53,6 +53,14 @@ class MigratorTables:
             """, (source_type, target_type, target_type_length))
 
     def check_data_types_substitution(self, check_type):
+        """
+        Check if replacement for the data type exists in the data_types_substitution table
+        result = {
+            'source_data_type': ...,
+            'target_data_type': ...,
+            'target_data_type_length': ...
+        }
+        """
         query = f"""
         SELECT target_type, target_type_length
         FROM "{self.protocol_schema}".data_types_substitution
@@ -75,9 +83,13 @@ class MigratorTables:
             result = cursor.fetchone()
             cursor.close()
             if result:
-                return result[0], result[1]
+                return {
+                'source_data_type': check_type,
+                'target_data_type': result[0],
+                'target_data_type_length': result[1]
+                }
             else:
-                return None, None
+                return {}
 
     def prepare_data_migration_limitation(self):
         # Drop table if exists

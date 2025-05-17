@@ -55,7 +55,9 @@ class IBMDB2Connector(DatabaseConnector):
             self.logger.error(e)
             raise
 
-    def fetch_table_columns(self, table_schema: str, table_name: str, migrator_tables) -> dict:
+    def fetch_table_columns(self, settings) -> dict:
+        table_schema = settings['table_schema']
+        table_name = settings['table_name']
         result = {}
         try:
             if self.config_parser.get_system_catalog() in ('SYSCAT','NONE'):
@@ -72,7 +74,7 @@ class IBMDB2Connector(DatabaseConnector):
                     FROM SYSCAT.COLUMNS
                     WHERE TABSCHEMA = upper('{table_schema}') AND tabname = '{table_name}' ORDER BY COLNO
                 """
-            elif self.config_parser.get_system_catalog() == 'SYSIBM':
+            elif self.config_parser.get_system_catalog() in ('SYSIBM'):
                 query = f"""
                     SELECT
                         ORDINAL_POSITION,
@@ -293,20 +295,22 @@ class IBMDB2Connector(DatabaseConnector):
 
     def fetch_indexes(self, settings):
         source_table_id = settings['source_table_id']
-        source_schema = settings['source_schema']
+        source_table_schema = settings['source_table_schema']
         source_table_name = settings['source_table_name']
-        target_schema = settings['target_schema']
-        target_table_name = settings['target_table_name']
-        target_columns = settings['target_columns']
 
         table_indexes = {}
         order_num = 1
         index_columns_data_types_str = ''
         query = f"""
-            SELECT INDNAME, COLNAMES, COLCOUNT, UNIQUERULE, MADE_UNIQUE
+            SELECT
+                INDNAME,
+                COLNAMES,
+                COLCOUNT,
+                UNIQUERULE,
+                MADE_UNIQUE
             FROM SYSCAT.INDEXES I
-            WHERE I.TABSCHEMA = upper('{settings['source_schema']}')
-            AND I.TABNAME = '{settings['source_table_name']}'
+            WHERE I.TABSCHEMA = upper('{source_table_schema}')
+            AND I.TABNAME = '{source_table_name}'
             ORDER BY INDNAME
         """
         try:
@@ -316,30 +320,17 @@ class IBMDB2Connector(DatabaseConnector):
             for row in cursor.fetchall():
                 index_name = row[0]
                 index_columns = row[1].lstrip('+').split('+')
-                index_columns = ', '.join(f'"{col}"' for col in index_columns)
-                index_columns_count = row[2]
-                index_unique = row[2]
+                # index_unique = row[2]
                 index_type = row[3]
-                table_id = row[4]
-
-                create_index_query = None
-
-                if index_type == 'P':
-                    create_index_query = f"""ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{index_name}" PRIMARY KEY ({index_columns});"""
-                else:
-                    create_index_query = f"""CREATE {'UNIQUE' if index_type == 'U' else ''} INDEX "{index_name}" ON "{target_schema}"."{target_table_name}" ({index_columns});"""
+                # table_id = row[4]
 
                 table_indexes[order_num] = {
-                    'name': index_name,
-                    'type': 'PRIMARY KEY' if index_type == 'P' else 'UNIQUE' if index_type == 'U' else 'INDEX',
-                    'owner': settings['source_schema'],
-                    'columns': index_columns,
-                    'columns_count': index_columns_count,
-                    'columns_data_types': [],
-                    'sql': create_index_query,
-                    'comment': '',
+                    'index_name': index_name,
+                    'index_type': 'PRIMARY KEY' if index_type == 'P' else 'UNIQUE' if index_type == 'U' else 'INDEX',
+                    'index_owner': settings['source_schema'],
+                    'index_columns': index_columns,
+                    'index_comment': '',
                 }
-
                 order_num += 1
 
             cursor.close()
@@ -351,6 +342,9 @@ class IBMDB2Connector(DatabaseConnector):
             self.logger.error(f"Error executing query: {query}")
             self.logger.error(e)
             raise
+
+    def get_create_index_sql(self, settings):
+        return ""
 
     def fetch_constraints(self, settings):
         source_table_id = settings['source_table_id']

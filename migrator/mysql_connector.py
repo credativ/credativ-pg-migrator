@@ -47,7 +47,9 @@ class MySQLConnector(DatabaseConnector):
             self.logger.error(f"Error fetching table names: {e}")
             raise
 
-    def fetch_table_columns(self, table_schema: str, table_name: str, migrator_tables) -> dict:
+    def fetch_table_columns(self, settings) -> dict:
+        table_schema = settings['table_schema']
+        table_name = settings['table_name']
         columns = {}
         query = f"""
             SELECT
@@ -260,11 +262,8 @@ class MySQLConnector(DatabaseConnector):
 
     def fetch_indexes(self, settings):
         source_table_id = settings['source_table_id']
-        source_schema = settings['source_schema']
+        source_table_schema = settings['source_table_schema']
         source_table_name = settings['source_table_name']
-        target_schema = settings['target_schema']
-        target_table_name = settings['target_table_name']
-        target_columns = settings['target_columns']
         table_indexes = {}
         order_num = 1
         query = f"""
@@ -275,7 +274,8 @@ class MySQLConnector(DatabaseConnector):
             LEFT JOIN INFORMATION_SCHEMA.TABLE_CONSTRAINTS tC
             ON S.TABLE_SCHEMA = tC.TABLE_SCHEMA AND S.TABLE_NAME = tC.TABLE_NAME
             AND S.INDEX_NAME = tC.CONSTRAINT_NAME
-            WHERE S.TABLE_SCHEMA = '{source_schema}' AND S.TABLE_NAME = '{source_table_name}'
+            WHERE S.TABLE_SCHEMA = '{source_table_schema}'
+            AND S.TABLE_NAME = '{source_table_name}'
             ORDER BY INDEX_NAME, SEQ_IN_INDEX
         """
         try:
@@ -291,50 +291,36 @@ class MySQLConnector(DatabaseConnector):
 
                 if index_name not in table_indexes:
                     table_indexes[index_name] = {
-                        'name': index_name,
-                        'owner': target_schema,
-                        'columns': [],
-                        'type': constraint_type,
-                        'sql': '',
-                        'comment': '',
-                        'columns_data_types': [],
-                        'columns_count': 0
+                        'index_name': index_name,
+                        'index_owner': source_table_schema,
+                        'index_columns': [],
+                        'index_type': constraint_type,
+                        'index_comment': '',
                     }
 
                 table_indexes[index_name]['columns'].append(column_name)
-
-                for col_num, column_info in target_columns.items():
-                    if column_info['column_name'] == column_name:
-                        table_indexes[index_name]['columns_data_types'].append(column_info['data_type'])
 
             cursor.close()
             self.disconnect()
             returned_indexes = {}
             for index_name, index_info in table_indexes.items():
-                index_info['columns_count'] = len(index_info['columns'])
                 index_info['columns'] = ', '.join(index_info['columns'])
-                index_info['columns_data_types'] = ', '.join(index_info['columns_data_types'])
-
-                if index_info['type'] == 'PRIMARY KEY':
-                    index_info['sql'] = f"""ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{target_table_name}_{index_info['name']}" PRIMARY KEY ({index_info['columns']})"""
-                else:
-                    index_info['sql'] = f"""CREATE {'UNIQUE' if index_info['type'] == 'UNIQUE' else ''} INDEX "{target_table_name}_{index_info['name']}" ON "{target_schema}"."{target_table_name}" ({index_info['columns']})"""
 
                 returned_indexes[order_num] = {
-                    'name': index_info['name'],
-                    'owner': index_info['owner'],
-                    'columns': index_info['columns'],
-                    'type': index_info['type'],
-                    'sql': index_info['sql'],
-                    'comment': index_info['comment'],
-                    'columns_data_types': index_info['columns_data_types'],
-                    'columns_count': index_info['columns_count']
+                    'index_name': index_info['index_name'],
+                    'index_owner': index_info['index_owner'],
+                    'index_columns': index_info['index_columns'],
+                    'index_type': index_info['index_type'],
+                    'index_comment': index_info['index_comment'],
                 }
                 order_num += 1
             return returned_indexes
         except mysql.connector.Error as e:
             self.logger.error(f"Error fetching indexes: {e}")
             raise
+
+    def get_create_index_sql(self, settings):
+        return ""
 
     def fetch_constraints(self, settings):
         source_table_id = settings['source_table_id']

@@ -10,6 +10,7 @@ Different features and differently supported across various database connectors.
 |---------------------------|---------|----------|--------|-------|--------|------------|----------|--------|
 | Migration of data         | YES     | YES      | YES    | YES   | YES    | YES        | YES      | YES    |
 | NOT NULL constraints      | YES     | YES      | YES    | YES   | YES    | YES        | YES      | YES    |
+| IDENTITY columns          | NO      | NO       | NO     | NO    | YES(1) | NO         | NO       | YES    |
 | Primary Keys              | YES     | YES      | YES    | YES   | YES    | YES        | YES      | YES    |
 | Foreign Keys              | YES     | YES      | YES    | YES   | YES    | YES        | YES      | YES    |
 | FK on delete action       | NO      | NO       | NO     | NO    | YES    | NO         | NO       | NO     |
@@ -21,3 +22,6 @@ Different features and differently supported across various database connectors.
 | ....                      | NO      | NO       | NO     | NO    | NO     | NO         | NO       | NO     |
 
 ```
+
+Notes:
+(1): IDENTITY columns are recognized based on sequence used as the default value. But there is still an issue with data types. Oracle allows PRIMARY KEY on NUMBER with sequence. But IDENTITY column in PostgresSQL must be INT or BIGINT.

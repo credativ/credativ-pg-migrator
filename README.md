@@ -3,6 +3,7 @@
 - Repository contains python solution for migration of the whole database from legacy systems to PostgreSQL.
 - Testing examples are in the [tests directory](./tests/) - see [README](./tests/README.md) for more information and READMEs in each subdirectory.
 - See fixes and updates in [CHANGELOG.md](./CHANGELOG.md).
+- See feature matrix in [FEATURE_MATRIX.md](./FEATURE_MATRIX.md) for supported features in different database connectors.
 
 ## Architecture
 

@@ -1,6 +1,6 @@
 # Feature Matrix
 
-// TODO - talbe is not complete
+// TODO - table is NOT complete
 
 Different features and differently supported across various database connectors. This file provides overview of the supported features and their status.
 
@@ -12,9 +12,12 @@ Different features and differently supported across various database connectors.
 | NOT NULL constraints      | YES     | YES      | YES    | YES   | YES    | YES        | YES      | YES    |
 | Primary Keys              | YES     | YES      | YES    | YES   | YES    | YES        | YES      | YES    |
 | Foreign Keys              | YES     | YES      | YES    | YES   | YES    | YES        | YES      | YES    |
-| Check Constraints         | No      | YES      | No     | No    | No     | No         | No       | No     |
-| Comments on columns       | No      | NO       | No     | No    | No     | No         | No       | No     |
-| Comments on tables        | No      | NO       | No     | No    | No     | No         | No       | No     |
-| Conversion of funcs/procs | No      | YES      | No     | No    | No     | YES        | No       | No     |
-| Conversion of triggers    | No      | YES      | No     | No    | No     | YES        | No       | No     |
+| FK on delete action       | NO      | NO       | NO     | NO    | YES    | NO         | NO       | NO     |
+| Check Constraints         | NO      | YES      | NO     | NO    | NO     | NO         | NO       | NO     |
+| Comments on columns       | NO      | NO       | NO     | NO    | NO     | NO         | NO       | NO     |
+| Comments on tables        | NO      | NO       | NO     | NO    | NO     | NO         | NO       | NO     |
+| Conversion of funcs/procs | NO      | YES      | NO     | NO    | NO     | YES        | NO       | NO     |
+| Conversion of triggers    | NO      | YES      | NO     | NO    | NO     | YES        | NO       | NO     |
+| ....                      | NO      | NO       | NO     | NO    | NO     | NO         | NO       | NO     |
+
 ```

@@ -2,6 +2,10 @@
 
 ## (not released yet) 0.7.2 - 2025.05.xx
 
+- 2025.05.18:
+
+  - Added new testing databases for Sybase ASE, improved desctriptions for Sybase ASE
+
 - 2025.05.17:
 
   - Refactored function fetch_indexes in all connectors

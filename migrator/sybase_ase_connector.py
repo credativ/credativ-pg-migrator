@@ -152,7 +152,7 @@ class SybaseASEConnector(DatabaseConnector):
                 full_data_type_length = row[7].strip()
                 column_domain = row[8]
                 column_default_name = row[9]
-                column_default_value = row[10].replace('column_default', '').strip().strip('"') if row[10] and row[10].replace('column_default', '').strip().startswith('"') and row[10].replace('column_default', '').strip().endswith('"') else (row[10].replace('column_default', '').strip() if row[10] else '')
+                column_default_value = row[10].replace('DEFAULT ', '').strip().strip('"') if row[10] and row[10].replace('DEFAULT ', '').strip().startswith('"') and row[10].replace('DEFAULT ', '').strip().endswith('"') else (row[10].replace('DEFAULT ', '').strip() if row[10] else '')
                 status = row[11]
                 variable_length = row[12]
                 data_type_precision = row[13]
@@ -226,8 +226,6 @@ class SybaseASEConnector(DatabaseConnector):
                     result[ordinal_position]['basic_numeric_precision'] = data_type_precision if self.is_numeric_type(source_data_type) else None
                     result[ordinal_position]['basic_numeric_scale'] = data_type_scale if self.is_numeric_type(source_data_type) else None
                     result[ordinal_position]['basic_column_type'] = source_data_type_length
-                    if custom_type[3] == 1:
-                        result[ordinal_position]['is_identity'] = 'YES'
 
             cursor.close()
             self.disconnect()
@@ -245,6 +243,7 @@ class SybaseASEConnector(DatabaseConnector):
                 'BIGDATETIME': 'TIMESTAMP',
                 'DATE': 'DATE',
                 'DATETIME': 'TIMESTAMP',
+                'BIGTIME': 'TIMESTAMP',
                 'SMALLDATETIME': 'TIMESTAMP',
                 'TIME': 'TIME',
                 'TIMESTAMP': 'TIMESTAMP',
@@ -285,6 +284,7 @@ class SybaseASEConnector(DatabaseConnector):
                 'FLOAT': 'FLOAT',
                 'INTERVAL': 'INTERVAL',
                 'MONEY': 'MONEY',
+                'SMALLMONEY': 'MONEY',
                 'NUMERIC': 'NUMERIC',
                 'REAL': 'REAL',
                 'SERIAL8': 'BIGSERIAL',

@@ -284,13 +284,14 @@ class Planner:
                 continue
 
             if self.config_parser.should_migrate_indexes():
-                settings['source_table_id'] = table_info['id']
-                settings['source_table_name'] = table_info['table_name']
-                settings['source_schema'] = self.source_schema
-                settings['target_schema'] = self.target_schema
-                settings['target_table_name'] = table_info['table_name']
-                settings['target_columns'] = target_columns
-
+                settings = {
+                    'source_table_id': table_info['id'],
+                    'source_table_name': table_info['table_name'],
+                    'source_table_schema': self.source_schema,
+                    'target_table_schema': self.target_schema,
+                    'target_table_name': table_info['table_name'],
+                    'target_columns': target_columns,
+                }
                 indexes = self.source_connection.fetch_indexes(settings)
                 if self.config_parser.get_log_level() == 'DEBUG':
                     self.logger.debug(f"Indexes: {indexes}")
@@ -305,8 +306,8 @@ class Planner:
                         values['index_type'] = index_details['index_type']
                         values['target_schema'] = self.target_schema
                         values['target_table'] = table_info['table_name']
-                        values['index_columns'] = index_details['columns']
-                        values['index_comment'] = index_details['comment']
+                        values['index_columns'] = index_details['index_columns']
+                        values['index_comment'] = index_details['index_comment']
                         values['index_sql'] = self.target_connection.get_create_index_sql(values)
                         self.migrator_tables.insert_indexes( values )
                         if self.config_parser.get_log_level() == 'DEBUG':
@@ -331,14 +332,14 @@ class Planner:
                             self.source_schema,
                             table_info['table_name'],
                             table_info['id'],
-                            constraint_details['name'],
-                            constraint_details['type'],
+                            constraint_details['constraint_name'],
+                            constraint_details['constraint_type'],
                             self.target_schema,
                             table_info['table_name'],
-                            constraint_details['sql'],
-                            constraint_details['comment']
+                            constraint_details['constraint_sql'],
+                            constraint_details['constraint_comment']
                         )
-                    self.logger.info(f"Constraint {constraint_details['name']} for table {table_info['table_name']}")
+                    self.logger.info(f"Constraint {constraint_details['constraint_name']} for table {table_info['table_name']}")
                 else:
                     self.logger.info(f"No constraints found for table {table_info['table_name']}.")
             else:

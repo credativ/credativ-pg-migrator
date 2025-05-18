@@ -349,15 +349,15 @@ class SQLAnywhereConnector(DatabaseConnector):
                         columns.append('"'+col+'"')
                 pk_columns = ','.join(columns)
 
-                constraint_sql = f'''ALTER TABLE "{target_schema}"."{foreign_table_name}" ADD CONSTRAINT "{target_table_name}_{constraint_name}_fk{order_num}"
-                FOREIGN KEY ({ref_columns}) REFERENCES "{target_schema}"."{primary_table_name}" ({pk_columns})'''
-
                 table_constraints[order_num] = {
-                    'id': None,
-                    'name': constraint_name,
-                    'type': constraint_type,
-                    'sql': constraint_sql,
-                    'comment': '',
+                    'constraint_name': constraint_name,
+                    'constraint_type': constraint_type,
+                    'constraint_owner': source_table_schema,
+                    'constraint_columns': ref_columns,
+                    'referenced_table_name': foreign_table_name,
+                    'referenced_columns': pk_columns,
+                    'constraint_sql': '',
+                    'constraint_comment': '',
                 }
                 order_num += 1
             cursor.close()

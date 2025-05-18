@@ -334,6 +334,7 @@ class Planner:
                             'source_table': table_info['table_name'],
                             'target_schema': self.target_schema,
                             'target_table': table_info['table_name'],
+                            'target_columns': target_columns,
                             'constraint_name': constraint_details['constraint_name'] if 'constraint_name' in constraint_details else '',
                             'constraint_type': constraint_details['constraint_type'] if 'constraint_type' in constraint_details else '',
                             'constraint_columns': constraint_details['constraint_columns'] if 'constraint_columns' in constraint_details else '',

@@ -283,8 +283,10 @@ class SybaseASEConnector(DatabaseConnector):
                 'DOUBLE PRECISION': 'DOUBLE PRECISION',
                 'FLOAT': 'FLOAT',
                 'INTERVAL': 'INTERVAL',
-                'MONEY': 'MONEY',
-                'SMALLMONEY': 'MONEY',
+                # 'MONEY': 'MONEY',
+                # 'SMALLMONEY': 'MONEY',
+                'MONEY': 'INTEGER',
+                'SMALLMONEY': 'INTEGER',
                 'NUMERIC': 'NUMERIC',
                 'REAL': 'REAL',
                 'SERIAL8': 'BIGSERIAL',
@@ -407,9 +409,10 @@ class SybaseASEConnector(DatabaseConnector):
         JOIN dbo.sysobjects ot on c.tableid = ot.id
         JOIN dbo.sysobjects oc on r.reftabid = oc.id
         WHERE c.tableid = {source_table_id}
+        AND c.status & 64 = 64
         ORDER BY constraint_name
         """
-
+        ## status & 64 = 64 - foreign key constraint (0x0040)
         self.connect()
         cursor = self.connection.cursor()
         if self.config_parser.get_log_level() == 'DEBUG':
@@ -430,6 +433,35 @@ class SybaseASEConnector(DatabaseConnector):
                 'referenced_table_name': ref_table_name,
                 'referenced_columns': ref_column,
                 'constraint_sql': '',
+                'constraint_comment': ''
+            }
+            order_num += 1
+
+        # get check constraints
+        check_query = f"""
+            SELECT
+                o.name AS ConstraintName,
+                s_check.text AS CheckConstraintDefinition -- For check constraints
+            FROM
+                sysconstraints c
+            JOIN
+                sysobjects o ON c.constrid = o.id
+            LEFT JOIN
+                syscomments s_check ON o.id = s_check.id
+            WHERE c.status & 128 = 128
+            AND c.tableid = {source_table_id}
+        """
+        ## status & 128 = 128 - check constraint (0x0080)
+        cursor.execute(check_query)
+        check_constraints = cursor.fetchall()
+        for check_constraint in check_constraints:
+            check_name = check_constraint[0]
+            check_expression = check_constraint[1].strip()
+            check_expression = check_expression.replace('CONSTRAINT', '').replace(check_name, '').replace('CHECK','').strip()
+            table_constraints[order_num] = {
+                'constraint_name': check_name,
+                'constraint_type': 'CHECK',
+                'constraint_sql': check_expression,
                 'constraint_comment': ''
             }
             order_num += 1

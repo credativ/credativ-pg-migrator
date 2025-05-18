@@ -5,6 +5,7 @@
 - 2025.05.18:
 
   - Added new testing databases for Sybase ASE, improved desctriptions for Sybase ASE
+  - Properly implemented migration of CHECK constraints for Sybase ASE
 
 - 2025.05.17:
 

@@ -365,7 +365,7 @@ class PostgreSQLConnector(DatabaseConnector):
         create_constraint_query = ''
         target_schema = settings['target_schema']
         target_table_name = settings['target_table']
-
+        target_columns = settings['target_columns']
         constraint_name = settings['constraint_name']
         constraint_type = settings['constraint_type']
         constraint_owner = settings['constraint_owner']
@@ -388,6 +388,14 @@ class PostgreSQLConnector(DatabaseConnector):
             if constraint_comment:
                 create_constraint_query += f" COMMENT '{constraint_comment}'"
         elif constraint_type == 'CHECK':
+            # Replace column names in constraint_sql with double-quoted names using precise match
+
+            if constraint_sql and target_columns:
+                for col_info in target_columns.values():
+                    col_name = col_info['column_name']
+                    # Use word boundary for precise match, preserve case
+                    pattern = r'\b{}\b'.format(re.escape(col_name))
+                    constraint_sql = re.sub(pattern, f'"{col_name}"', constraint_sql)
             create_constraint_query = f"""ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "ck_{target_table_name}_{constraint_name}" CHECK ({constraint_sql})"""
 
         return create_constraint_query

@@ -7,7 +7,7 @@ Different features and differently supported across various database connectors.
 Legend:
 
 - YES - feature is supported
-- NO - feature is not supported
+- NO - feature is not supported / or we are not sure (must be tested)
 - N/A - feature is not supported by the specific database (? = need to be checked)
 
 ```
@@ -21,7 +21,7 @@ Legend:
 | Secondary Indexes         | YES     | YES      | YES    | YES   | YES    | YES        | YES      | YES    |
 | Foreign Keys              | YES     | YES      | YES    | YES   | YES    | YES        | YES      | YES    |
 | FK on delete action       | NO      | NO       | NO     | NO    | YES    | NO         | NO       | N/A?   |
-| Check Constraints         | NO      | YES      | NO     | NO    | NO     | NO         | NO       | NO     |
+| Check Constraints         | NO      | YES      | NO     | NO    | NO     | NO         | NO       | YES    |
 | Comments on columns       | NO      | NO       | NO     | NO    | NO     | NO         | NO       | N/A?   |
 | Comments on tables        | NO      | NO       | NO     | NO    | NO     | NO         | NO       | N/A?   |
 | Conversion of funcs/procs | NO      | YES      | NO     | NO    | NO     | YES        | NO       | NO     |

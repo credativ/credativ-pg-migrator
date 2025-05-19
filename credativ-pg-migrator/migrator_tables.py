@@ -592,6 +592,27 @@ class MigratorTables:
             'domain_comment': row[9]
         }
 
+    def create_table_for_default_values(self):
+        table_name = self.config_parser.get_protocol_name_default_values()
+        self.protocol_connection.execute_query(self.drop_table_sql.format(protocol_schema=self.protocol_schema, table_name=table_name))
+        self.protocol_connection.execute_query(f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."{table_name}"
+            (id SERIAL PRIMARY KEY,
+            source_default_name TEXT,
+            source_default_sql TEXT,
+            source_default_value TEXT,
+            source_column_data_type TEXT,
+            target_default_value TEXT,
+            task_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            task_completed TIMESTAMP,
+            success BOOLEAN,
+            message TEXT
+            )
+        """)
+        # if self.config_parser.get_log_level() == 'DEBUG':
+        #     self.logger.debug(f"Default values table {table_name} created.")
+
+
     def create_table_for_data_migration(self):
         table_name = self.config_parser.get_protocol_name_data_migration()
         self.protocol_connection.execute_query(self.drop_table_sql.format(protocol_schema=self.protocol_schema, table_name=table_name))
@@ -615,92 +636,6 @@ class MigratorTables:
         """)
         # if self.config_parser.get_log_level() == 'DEBUG':
         #     self.logger.debug(f"Data migration table {table_name} created.")
-
-    def create_table_for_internal_data_types_substitutions(self):
-        table_name = self.config_parser.get_protocol_name_internal_data_types_substitutions()
-        self.protocol_connection.execute_query(self.drop_table_sql.format(protocol_schema=self.protocol_schema, table_name=table_name))
-        self.protocol_connection.execute_query(f"""
-            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."{table_name}"
-            (id SERIAL PRIMARY KEY,
-            source_schema TEXT,
-            source_table TEXT,
-            source_type TEXT,
-            substitution_type TEXT,
-            substitution_sql TEXT,
-            task_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            task_completed TIMESTAMP,
-            success BOOLEAN,
-            message TEXT
-            )
-        """)
-        # if self.config_parser.get_log_level() == 'DEBUG':
-        #     self.logger.debug(f"Internal data types substitutions table {table_name} created.")
-
-    def insert_internal_data_types_substitutions(self, settings):
-        table_name = self.config_parser.get_protocol_name_internal_data_types_substitutions()
-        query = f"""
-            INSERT INTO "{self.protocol_schema}"."{table_name}"
-            (source_schema, source_table, source_type, substitution_type, substitution_sql)
-            VALUES (%s, %s, %s, %s, %s)
-            RETURNING *
-        """
-        params = (settings['source_schema'], settings['source_table'], settings['source_type'], settings['substitution_type'], settings['substitution_sql'])
-        try:
-            cursor = self.protocol_connection.connection.cursor()
-            cursor.execute(query, params)
-            row = cursor.fetchone()
-            cursor.close()
-
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Returned row: {row}")
-            internal_data_types_substitution_row = self.decode_internal_data_types_substitution_row(row)
-            self.insert_protocol('internal_data_types_substitution', settings['source_table'], 'create', None, None, None, None, 'info', None, internal_data_types_substitution_row['id'])
-            return internal_data_types_substitution_row['id']
-        except Exception as e:
-            self.logger.error(f"Error inserting internal data types substitutions {settings['source_table']} into {table_name}.")
-            self.logger.error(e)
-            raise
-
-    def decode_internal_data_types_substitutions_row(self, row):
-        return {
-            'id': row[0],
-            'source_schema': row[1],
-            'source_table': row[2],
-            'source_type': row[3],
-            'substitution_type': row[4],
-            'substitution_sql': row[5]
-        }
-
-    def update_internal_data_types_substitutions_status(self, row_id, success, message):
-        table_name = self.config_parser.get_protocol_name_internal_data_types_substitutions()
-        query = f"""
-            UPDATE "{self.protocol_schema}"."{table_name}"
-            SET task_completed = CURRENT_TIMESTAMP,
-            success = %s,
-            message = %s
-            WHERE id = %s
-            RETURNING *
-        """
-        params = ('TRUE' if success else 'FALSE', message, row_id)
-        try:
-            cursor = self.protocol_connection.connection.cursor()
-            cursor.execute(query, params)
-            row = cursor.fetchone()
-            cursor.close()
-
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Returned row: {row}")
-            if row:
-                internal_data_types_substitution_row = self.decode_internal_data_types_substitutions_row(row)
-                self.update_protocol('internal_data_types_substitution', internal_data_types_substitution_row['id'], success, message, None)
-            else:
-                self.logger.error(f"Error updating status for internal data types substitutions {row_id} in {table_name}.")
-                self.logger.error(f"Error: No protocol row returned.")
-        except Exception as e:
-            self.logger.error(f"Error updating status for internal data types substitutions {row_id} in {table_name}.")
-            self.logger.error(f"Query: {query}")
-            self.logger.error(e)
-            raise
 
     def insert_data_migration(self, settings):
         ## source_schema, source_table, source_table_id, source_table_rows, worker_id, target_schema, target_table, target_table_rows

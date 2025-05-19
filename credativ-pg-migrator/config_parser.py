@@ -184,14 +184,15 @@ class ConfigParser:
     def get_protocol_name_domains(self):
         return f"{self.get_protocol_name()}_domains"
 
+    def get_protocol_name_default_values(self):
+        return f"{self.get_protocol_name()}_defaults"
+
     def get_protocol_name_new_objects(self):
         return f"{self.get_protocol_name()}_new_objects"
 
     def get_protocol_name_tables(self):
         return f"{self.get_protocol_name()}_tables"
 
-    def get_protocol_name_internal_data_types_substitutions(self):
-        return f"{self.get_protocol_name()}_internal_data_types_substitutions"
     def get_protocol_name_pk_ranges(self):
         return f"{self.get_protocol_name()}_pk_ranges"
 

@@ -1,4 +1,4 @@
-# Backlog
+# Changelog
 
 ## (not released yet) 0.7.2 - 2025.05.xx
 

@@ -845,8 +845,15 @@ class PostgreSQLConnector(DatabaseConnector):
         return {}
 
     def get_create_domain_sql(self, settings):
-        # Placeholder for generating CREATE DOMAIN SQL
-        return ""
+        create_domain_sql = ""
+        domain_name = settings['domain_name']
+        target_schema = settings['target_schema']
+        standardized_domain_sql = settings['standardized_domain_sql']
+        domain_comment = settings['domain_comment']
+        create_domain_sql = f"""CREATE DOMAIN "{target_schema}"."{domain_name}" {standardized_domain_sql}"""
+        if domain_comment:
+            create_domain_sql += f" COMMENT '{domain_comment}'"
+        return create_domain_sql
 
     def testing_select(self):
         return "SELECT 1"

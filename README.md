@@ -33,7 +33,7 @@
   - PostgreSQL (mainly for special use cases)
   - SQL Anywhere
   - Sybase ASE
-- Source database connector must implement DatabaseConnector class from the [migrator.database_connector](./migrator/database_connector.py) module
+- Source database connector must implement DatabaseConnector class from the [migrator.database_connector](./credativ-pg-migrator/database_connector.py) module
 - Methods of this class contain descriptions of actions and return values that are expected by the migrator tool
 - Supported databases should be accessed via ODBC, JDBC or native python libraries. Not all options are available for all databases.
 

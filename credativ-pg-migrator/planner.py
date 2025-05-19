@@ -27,6 +27,7 @@ class Planner:
             self.pre_planning()
 
             self.run_prepare_user_defined_types()
+            self.run_prepare_domains()
             self.run_prepare_tables()
             self.run_prepare_views()
 
@@ -562,10 +563,9 @@ class Planner:
             self.logger.debug(f"Domains found in source database: {domains}")
         if domains:
             for order_num, domain_info in domains.items():
-                domain_sql = domain_info['sql']
                 if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"Source domain SQL: {domain_sql}")
-
+                    self.logger.debug(f"Processing domain: {domain_info}")
+                domain_info['target_schema'] = self.target_schema
                 converted_domain_sql = self.target_connection.get_create_domain_sql(domain_info)
                 if self.config_parser.get_log_level() == 'DEBUG':
                     self.logger.debug(f"Converted domain SQL: {converted_domain_sql}")
@@ -573,11 +573,11 @@ class Planner:
                 settings = {
                     'source_schema_name': domain_info['domain_schema'] if 'domain_schema' in domain_info and domain_info['domain_schema'] is not None else self.source_schema,
                     'source_domain_name': domain_info['domain_name'],
-                    'source_domain_sql': domain_sql,
+                    'source_domain_sql': domain_info['source_domain_sql'],
                     'target_schema_name': self.target_schema,
                     'target_domain_name': domain_info['domain_name'],
                     'target_domain_sql': converted_domain_sql,
-                    'domain_comment':  domain_info['comment'],
+                    'domain_comment':  domain_info['domain_comment'],
                 }
                 self.migrator_tables.insert_domain(settings)
                 self.logger.info(f"Domain {domain_info['domain_name']} processed successfully.")

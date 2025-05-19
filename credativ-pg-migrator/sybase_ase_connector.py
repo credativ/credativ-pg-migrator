@@ -1037,9 +1037,9 @@ class SybaseASEConnector(DatabaseConnector):
             JOIN
                 syscomments sc ON r.id = sc.id
             WHERE
-                r.type = 'R' {schema_condition} -- 'R' signifies a Rule object
+                r.type = 'R' {schema_condition}
             ORDER BY
-                RuleName, DefinitionLineNumber;
+                RuleName, DefinitionLineNumber
         """
         self.connect()
         cursor = self.connection.cursor()
@@ -1063,12 +1063,12 @@ class SybaseASEConnector(DatabaseConnector):
             order_num += 1
 
         for order_name, domain_info in domains.items():
-            domains[order_name]['source_domain_sql'] = domains[rule_name]['source_domain_sql'].replace('\n', ' ')
+            domains[order_name]['source_domain_sql'] = domains[order_name]['source_domain_sql'].replace('\n', ' ')
 
             standardized_domain_sql = domains[order_name]['source_domain_sql']
             standardized_domain_sql = re.sub(r'@\w+', 'VALUE', standardized_domain_sql)
             standardized_domain_sql = re.sub(r'create rule', '', standardized_domain_sql, flags=re.IGNORECASE)
-            standardized_domain_sql = standardized_domain_sql.replace(rule_name, '')
+            standardized_domain_sql = standardized_domain_sql.replace(domains[order_name]['domain_name'], '')
             domains[order_name]['standardized_domain_sql'] = standardized_domain_sql.strip()
 
         cursor.close()

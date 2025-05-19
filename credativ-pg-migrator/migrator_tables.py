@@ -17,6 +17,7 @@ class MigratorTables:
         self.create_protocol()
         self.create_table_for_main()
         self.create_table_for_user_defined_types()
+        self.create_table_for_domains()
         self.create_table_for_new_objects()
         self.create_table_for_tables()
         self.create_table_for_data_migration()

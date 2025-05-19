@@ -217,7 +217,7 @@ class IBMDB2Connector(DatabaseConnector):
             source_table_rows = self.get_rows_count(source_schema, source_table)
 
             ## source_schema, source_table, source_table_id, source_table_rows, worker_id, target_schema, target_table, target_table_rows
-            migrator_tables_settings = {
+            protocol_id = migrator_tables.insert_data_migration({
                 'worker_id': worker_id,
                 'source_table_id': source_table_id,
                 'source_schema': source_schema,
@@ -226,8 +226,7 @@ class IBMDB2Connector(DatabaseConnector):
                 'target_table': target_table,
                 'source_table_rows': source_table_rows,
                 'target_table_rows': target_table_rows,
-            }
-            protocol_id = migrator_tables.insert_data_migration(migrator_tables_settings)
+            })
 
             if source_table_rows == 0:
                 self.logger.info(f"Worker {worker_id}: Table {source_table} is empty - skipping data migration.")
@@ -282,15 +281,14 @@ class IBMDB2Connector(DatabaseConnector):
                     # Insert batch into target table
                     if self.config_parser.get_log_level() == 'DEBUG':
                         self.logger.debug(f"Worker {worker_id}: Starting insert of {len(records)} rows from source table {source_table}")
-                    settings = {
+                    inserted_rows = migrate_target_connection.insert_batch({
                         'target_schema': target_schema,
                         'target_table': target_table,
                         'target_columns': target_columns,
                         'data': records,
                         'worker_id': worker_id,
                         'migrator_tables': migrator_tables,
-                    }
-                    inserted_rows = migrate_target_connection.insert_batch(settings)
+                    })
                     total_inserted_rows += inserted_rows
                     self.logger.info(f"Worker {worker_id}: Inserted {inserted_rows} (total: {total_inserted_rows} from: {source_table_rows} ({round(total_inserted_rows/source_table_rows*100, 2)}%)) rows into target table '{target_table}'")
 

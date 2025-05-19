@@ -23,7 +23,7 @@ Legend:
 | Foreign Keys              | yes     | yes      | yes    | yes   | yes    | yes        | yes      | yes    |
 | FK on delete action       | --      | --       | --     | --    | yes    | --         | --       | N/A?   |
 | Check Constraints         | --      | yes      | --     | --    | --     | --         | --       | yes    |
-| Check Rules/Domains[3]    | --      | --       | --     | --    | --     | --         | --       | WIP    |
+| Check Rules/Domains[3]    | --      | --       | --     | --    | --     | --         | --       | yes    |
 | Comments on columns       | --      | --       | --     | --    | --     | --         | --       | N/A?   |
 | Comments on tables        | --      | --       | --     | --    | --     | --         | --       | N/A?   |
 | Conversion of funcs/procs | --      | yes      | --     | --    | --     | yes        | --       | --     |

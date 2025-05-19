@@ -1086,14 +1086,14 @@ class SybaseASEConnector(DatabaseConnector):
 
             domains[rule_name]['source_domain_sql'] = domains[rule_name]['source_domain_sql'].replace('\n', ' ')
 
-            standardized_domain_sql = domains[rule_name]['source_domain_sql']
-            standardized_domain_sql = re.sub(r'@\w+', 'VALUE', standardized_domain_sql)
-            standardized_domain_sql = re.sub(r'create rule', '', standardized_domain_sql, flags=re.IGNORECASE)
-            standardized_domain_sql = re.sub(rf"{re.escape(domains[rule_name]['domain_name'])}\s+AS", '', standardized_domain_sql, flags=re.IGNORECASE)
-            standardized_domain_sql = standardized_domain_sql.replace('"', "'")
+            domain_check_sql = domains[rule_name]['source_domain_sql']
+            domain_check_sql = re.sub(r'@\w+', 'VALUE', domain_check_sql)
+            domain_check_sql = re.sub(r'create rule', '', domain_check_sql, flags=re.IGNORECASE)
+            domain_check_sql = re.sub(rf"{re.escape(domains[rule_name]['domain_name'])}\s+AS", '', domain_check_sql, flags=re.IGNORECASE)
+            domain_check_sql = domain_check_sql.replace('"', "'")
             # Remove all comments starting with /* and ending with */
-            standardized_domain_sql = re.sub(r'/\*.*?\*/', '', standardized_domain_sql, flags=re.DOTALL)
-            domains[rule_name]['standardized_domain_sql'] = standardized_domain_sql.strip()
+            domain_check_sql = re.sub(r'/\*.*?\*/', '', domain_check_sql, flags=re.DOTALL)
+            domains[rule_name]['source_domain_check_sql'] = domain_check_sql.strip()
 
         cursor.close()
         self.disconnect()

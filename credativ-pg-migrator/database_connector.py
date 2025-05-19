@@ -467,9 +467,10 @@ class DatabaseConnector(ABC):
                 - Contains all the specific syntax of the source database
             'domain_data_type':
                 - data type of the column /data type of the domain
-            'standardized_domain_sql':
+            'source_domain_check_sql':
                 - SQL statement to create the domain stript of all the specific syntax of the source database
-                - Should contains only the standard SQL syntax and only the conditions
+                - Should contains only the check expression
+                - This is used for creating corresponding object in the target database (in PostgreSQL it is additional CHECK constraint)
             'domain_comment': domain_comment
             }
         }

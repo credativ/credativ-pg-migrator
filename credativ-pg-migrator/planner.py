@@ -159,12 +159,11 @@ class Planner:
 
                     # checking for default values substitution with the new data type
                     if column_info['column_default'] != '':
-                        settings = {
+                        substitution = self.migrator_tables.check_default_values_substitution({
                             'check_column_name': column_info['column_name'],
                             'check_column_data_type': column_info['data_type'],
                             'check_default_value': column_info['column_default'],
-                        }
-                        substitution = self.migrator_tables.check_default_values_substitution(settings)
+                        })
                         if substitution and substitution != None and column_info['column_default'] != substitution:
                             column_info['replaced_column_default'] = substitution
                             if self.config_parser.get_log_level() == 'DEBUG':
@@ -179,6 +178,7 @@ class Planner:
                     'target_schema': self.target_schema,
                     'target_table': table_info['table_name'],
                     'source_columns': source_columns,
+                    'migrator_tables': self.migrator_tables,
                 }
                 target_columns = self.convert_table_columns(settings)
                 settings['target_columns'] = target_columns
@@ -356,7 +356,7 @@ class Planner:
                         }
                         target_db_constraint_sql = self.target_connection.get_create_constraint_sql(settings)
 
-                        self.migrator_tables.insert_constraints(
+                        self.migrator_tables.insert_constraint(
                             self.source_schema,
                             table_info['table_name'],
                             table_info['id'],
@@ -558,6 +558,7 @@ class Planner:
 
     def run_prepare_domains(self):
         self.logger.info("Planner - Preparing domains...")
+        migrated_as = 'CHECK CONSTRAINT'
         domains = self.source_connection.fetch_domains(self.source_schema)
         if self.config_parser.get_log_level() == 'DEBUG':
             self.logger.debug(f"Domains found in source database: {domains}")
@@ -566,17 +567,21 @@ class Planner:
                 if self.config_parser.get_log_level() == 'DEBUG':
                     self.logger.debug(f"Processing domain: {domain_info}")
                 domain_info['target_schema'] = self.target_schema
+                domain_info['migrated_as'] = migrated_as
                 converted_domain_sql = self.target_connection.get_create_domain_sql(domain_info)
                 if self.config_parser.get_log_level() == 'DEBUG':
                     self.logger.debug(f"Converted domain SQL: {converted_domain_sql}")
 
+                # If the source domain SQL contains 'CREATE RULE', set 'migrated_as' accordingly
                 settings = {
                     'source_schema_name': domain_info['domain_schema'] if 'domain_schema' in domain_info and domain_info['domain_schema'] is not None else self.source_schema,
                     'source_domain_name': domain_info['domain_name'],
                     'source_domain_sql': domain_info['source_domain_sql'],
+                    'source_domain_check_sql': domain_info['source_domain_check_sql'] if 'source_domain_check_sql' in domain_info and domain_info['source_domain_check_sql'] is not None else '',
                     'target_schema_name': self.target_schema,
                     'target_domain_name': domain_info['domain_name'],
                     'target_domain_sql': converted_domain_sql,
+                    'migrated_as': migrated_as,
                     'domain_comment':  domain_info['domain_comment'],
                 }
                 self.migrator_tables.insert_domain(settings)

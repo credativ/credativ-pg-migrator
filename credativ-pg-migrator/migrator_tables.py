@@ -468,9 +468,11 @@ class MigratorTables:
             source_schema_name TEXT,
             source_domain_name TEXT,
             source_domain_sql TEXT,
+            source_domain_check_sql TEXT,
             target_schema_name TEXT,
             target_domain_name TEXT,
             target_domain_sql TEXT,
+            migrated_as TEXT,
             domain_comment TEXT,
             task_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             task_started TIMESTAMP,
@@ -487,21 +489,23 @@ class MigratorTables:
         source_schema_name = settings['source_schema_name']
         source_domain_name = settings['source_domain_name']
         source_domain_sql = settings['source_domain_sql']
+        source_domain_check_sql = settings['source_domain_check_sql'] if 'source_domain_check_sql' in settings else ''
         target_schema_name = settings['target_schema_name']
         target_domain_name = settings['target_domain_name']
         target_domain_sql = settings['target_domain_sql']
+        migrated_as = settings['migrated_as'] if 'migrated_as' in settings else ''
         domain_comment = settings['domain_comment']
 
         table_name = self.config_parser.get_protocol_name_domains()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
-            (source_schema_name, source_domain_name, source_domain_sql,
-            target_schema_name, target_domain_name, target_domain_sql, domain_comment)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            (source_schema_name, source_domain_name, source_domain_sql, source_domain_check_sql,
+            target_schema_name, target_domain_name, target_domain_sql, migrated_as, domain_comment)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (source_schema_name, source_domain_name, source_domain_sql,
-                  target_schema_name, target_domain_name, target_domain_sql, domain_comment)
+        params = (source_schema_name, source_domain_name, source_domain_sql, source_domain_check_sql,
+                  target_schema_name, target_domain_name, target_domain_sql, migrated_as, domain_comment)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -527,6 +531,8 @@ class MigratorTables:
             WHERE id = %s
             RETURNING *
         """
+        if self.config_parser.get_log_level() == 'DEBUG':
+            self.logger.debug(f"Query: {query}")
         params = ('TRUE' if success else 'FALSE', message, row_id)
         try:
             cursor = self.protocol_connection.connection.cursor()
@@ -534,10 +540,10 @@ class MigratorTables:
             row = cursor.fetchone()
             cursor.close()
 
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Returned row: {row}")
+            if self.config_parser.get_log_level() == 'DEBUG':
+                self.logger.debug(f"Returned row: {row}")
             if row:
-                domain_row = self.decode_user_defined_type_row(row)
+                domain_row = self.decode_domain_row(row)
                 self.update_protocol('domain', domain_row['id'], success, message, None)
             else:
                 self.logger.error(f"Error updating status for domain {row_id} in {table_name}.")
@@ -548,9 +554,17 @@ class MigratorTables:
             self.logger.error(e)
             raise
 
-    def fetch_all_domains(self):
+    def fetch_all_domains(self, domain_owner=None, domain_name=None):
         table_name = self.config_parser.get_protocol_name_domains()
-        query = f"""SELECT * FROM "{self.protocol_schema}"."{table_name}" ORDER BY id"""
+        where_clause = ""
+        if domain_owner:
+            where_clause += f" WHERE source_schema_name = '{domain_owner}'"
+        if domain_name:
+            if where_clause:
+                where_clause += f" AND source_domain_name = '{domain_name}'"
+            else:
+                where_clause += f" WHERE source_domain_name = '{domain_name}'"
+        query = f"""SELECT * FROM "{self.protocol_schema}"."{table_name}" {where_clause} ORDER BY id"""
         cursor = self.protocol_connection.connection.cursor()
         cursor.execute(query)
         rows = cursor.fetchall()
@@ -559,16 +573,23 @@ class MigratorTables:
         #     self.logger.debug(f"Fetched rows: {rows}")
         return rows
 
+    def get_domain_details(self, domain_owner=None, domain_name=None):
+        domain_row = self.fetch_all_domains(domain_owner, domain_name)
+        result = self.decode_domain_row(domain_row[0]) if domain_row else {}
+        return result
+
     def decode_domain_row(self, row):
         return {
             'id': row[0],
             'source_schema_name': row[1],
             'source_domain_name': row[2],
             'source_domain_sql': row[3],
-            'target_schema_name': row[4],
-            'target_domain_name': row[5],
-            'target_domain_sql': row[6],
-            'domain_comment': row[7]
+            'source_domain_check_sql': row[4],
+            'target_schema_name': row[5],
+            'target_domain_name': row[6],
+            'target_domain_sql': row[7],
+            'migrated_as': row[8],
+            'domain_comment': row[9]
         }
 
     def create_table_for_data_migration(self):
@@ -1319,7 +1340,18 @@ class MigratorTables:
             self.logger.error(e)
             raise
 
-    def insert_constraints(self, source_schema, source_table, source_table_id, constraint_name, constraint_type, target_schema, target_table, constraint_sql, constraint_comment):
+    def insert_constraint(self, settings):
+        ## source_schema, source_table, source_table_id, constraint_name, constraint_type, target_schema, target_table, constraint_sql, constraint_comment
+        source_schema = settings['source_schema']
+        source_table = settings['source_table']
+        source_table_id = settings['source_table_id']
+        constraint_name = settings['constraint_name']
+        constraint_type = settings['constraint_type']
+        target_schema = settings['target_schema']
+        target_table = settings['target_table']
+        constraint_sql = settings['constraint_sql']
+        constraint_comment = settings['constraint_comment']
+
         table_name = self.config_parser.get_protocol_name_constraints()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
@@ -1683,7 +1715,7 @@ class MigratorTables:
                 success_description = "successfully set"
             for row in rows:
                 status = success_description if row[0] else "error" if row[0] is False else "unknown status"
-                row_success = row[0]
+                row_success = row[0] if row[0] is not None else 'NULL'
                 self.logger.info(f"    {status}: {row[1]}")
                 if additional_columns:
                     query = f"""SELECT COUNT(*), {additional_columns} FROM "{self.protocol_schema}"."{migrator_table_name}" WHERE success = {row_success} GROUP BY {columns_numbers} ORDER BY {columns_numbers}"""
@@ -1815,6 +1847,7 @@ class MigratorTables:
         self.print_summary('Sequences', self.config_parser.get_protocol_name_sequences())
         self.print_summary('Indexes', self.config_parser.get_protocol_name_indexes(), 'index_type, index_owner')
         self.print_summary('Constraints', self.config_parser.get_protocol_name_constraints(), 'constraint_type')
+        self.print_summary('Domains', self.config_parser.get_protocol_name_domains(), 'migrated_as')
         self.print_summary('Functions / procedures', self.config_parser.get_protocol_name_funcprocs())
         self.print_summary('Triggers', self.config_parser.get_protocol_name_triggers())
         self.print_summary('Views', self.config_parser.get_protocol_name_views())
@@ -1849,3 +1882,4 @@ class MigratorTables:
         cursor.execute(query)
         constraints = cursor.fetchall()
         return constraints
+

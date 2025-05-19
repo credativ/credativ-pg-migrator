@@ -138,10 +138,14 @@ class PostgreSQLConnector(DatabaseConnector):
         return types_mapping
 
     def get_create_table_sql(self, settings):
+        source_schema = settings['source_schema']
+        source_table = settings['source_table']
+        source_table_id = settings['source_table_id']
         target_schema = settings['target_schema']
         target_table_name = settings['target_table']
         # source_columns = settings['source_columns']
         converted = settings['target_columns']
+        migrator_tables = settings['migrator_tables']
         create_table_sql = ""
         create_table_sql_parts = []
 
@@ -157,6 +161,7 @@ class PostgreSQLConnector(DatabaseConnector):
             if column_info['basic_character_maximum_length'] != '':
                 character_maximum_length = column_info['basic_character_maximum_length']
 
+            domain_name = column_info['domain_name']
             column_comment = column_info['column_comment']
             nullable_string = ''
             if column_info['is_nullable'] == 'NO':
@@ -187,6 +192,32 @@ class PostgreSQLConnector(DatabaseConnector):
                     create_column_sql += f""" DEFAULT '{column_default}'::BYTEA"""
                 else:
                     create_column_sql += f" DEFAULT {column_default}"
+
+            if domain_name:
+                domain_details = migrator_tables.get_domain_details(domain_name=domain_name)
+                if domain_details:
+                    domain_row_id = domain_details['id']
+                    domain_name = domain_details['source_domain_name']
+                    migrated_as = domain_details['migrated_as']
+                    source_domain_check_sql = domain_details['source_domain_check_sql']
+                    if source_domain_check_sql:
+                        # Replace exact word VALUE with the column name, case-sensitive, word boundary
+                        pattern = r'\bVALUE\b'
+                        source_domain_check_sql = re.sub(pattern, f'"{column_info["column_name"]}"', source_domain_check_sql)
+                    if migrated_as == 'CHECK CONSTRAINT':
+                        constraint_name = f"ck_{target_table_name}_{domain_name}"
+                        create_constraint_sql = f"""ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{constraint_name}" CHECK({source_domain_check_sql})"""
+                        migrator_tables.insert_constraint({
+                            'source_schema': source_schema,
+                            'source_table': source_table,
+                            'source_table_id': source_table_id,
+                            'target_schema': target_schema,
+                            'target_table': target_table_name,
+                            'constraint_name': constraint_name,
+                            'constraint_type': 'CHECK (from domain)',
+                            'constraint_sql': create_constraint_sql,
+                            'constraint_comment': ('added from domains ' + column_comment).strip(),
+                        })
 
             if column_comment:
                 create_table_sql_column +=(f" COMMENT '{column_comment}'")
@@ -848,12 +879,18 @@ class PostgreSQLConnector(DatabaseConnector):
         create_domain_sql = ""
         domain_name = settings['domain_name']
         target_schema = settings['target_schema']
-        standardized_domain_sql = settings['standardized_domain_sql']
+        domain_check_sql = settings['source_domain_check_sql']
         domain_data_type = settings['domain_data_type']
         domain_comment = settings['domain_comment']
-        create_domain_sql = f"""CREATE DOMAIN "{target_schema}"."{domain_name}" AS {domain_data_type} CHECK({standardized_domain_sql})"""
-        if domain_comment:
-            create_domain_sql += f" COMMENT '{domain_comment}'"
+        migrated_as = settings['migrated_as'] if 'migrated_as' in settings else 'CHECK CONSTRAINT'
+
+        if migrated_as == 'CHECK CONSTRAINT':
+            create_domain_sql = f"""CHECK({domain_check_sql})"""
+        else:
+            create_domain_sql = f"""CREATE DOMAIN "{target_schema}"."{domain_name}" AS {domain_data_type} CHECK({domain_check_sql})"""
+
+        # if domain_comment:
+        #     create_domain_sql += f" COMMENT '{domain_comment}'"
         return create_domain_sql
 
     def testing_select(self):

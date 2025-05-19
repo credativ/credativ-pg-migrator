@@ -5,7 +5,8 @@
 - 2025.05.19:
 
   - Updates in Sybase ASE testing databases
-  - Added initial support for check rules/domains in Sybase ASE
+  - Added migration of check rules/domains in Sybase ASE. Definitions are read from Sybase rules and are migrated as additinal check constraints to PostgreSQL.
+    - These constraints are created only after data are migrated, because in some cases they need manual adjustments in syntax and could block migration of data.
 
 - 2025.05.18:
 

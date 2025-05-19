@@ -20,6 +20,7 @@ def main():
 
     # Check if the version flag is set
     if args.version:
+        print(f"{constants.MIGRATOR_FULL_NAME}")
         print(f"Version: {constants.MIGRATOR_VERSION}")
         sys.exit(0)
 
@@ -32,7 +33,7 @@ def main():
     logger = MigratorLogger(args.log_file)
 
     try:
-        logger.logger.info("Database Migration Tool")
+        logger.logger.info(f"""{constants.MIGRATOR_FULL_NAME}, version: {constants.MIGRATOR_VERSION}""")
 
         cmd.print_all(logger.logger)
 

@@ -3,7 +3,7 @@ import constants
 
 class CommandLine:
     def __init__(self):
-        self.parser = argparse.ArgumentParser(description="""Data Migration Tool "credativ-pg-migrator", version: {}""".format(constants.MIGRATOR_VERSION))
+        self.parser = argparse.ArgumentParser(description=f"""{constants.MIGRATOR_FULL_NAME}, version: {constants.MIGRATOR_VERSION}""")
         self.args = None
         self.setup_arguments()
 
@@ -22,8 +22,8 @@ class CommandLine:
         self.parser.add_argument(
             '--config',
             type=str,
-            help='Path/name of the configuration file',
-            required=True)
+            help='Path/name of the configuration file')
+            # required=True)
 
         self.parser.add_argument(
             '--log-file',
@@ -38,6 +38,9 @@ class CommandLine:
 
     def parse_arguments(self):
         self.args = self.parser.parse_args()
+        # If --version is not set, check for required arguments manually
+        if not self.args.version and not self.args.config:
+            self.parser.error("--config is required")
         return self.args
 
     def print_all(self, logger):

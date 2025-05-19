@@ -144,7 +144,7 @@ class MsSQLConnector(DatabaseConnector):
                     'numeric_scale': numeric_scale,
                     'is_nullable': is_nullable,
                     'is_identity': is_identity,
-                    'column_default': column_default,
+                    'column_default_value': column_default,
                     'comment': ''
                 }
 

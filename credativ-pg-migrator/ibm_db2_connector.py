@@ -111,7 +111,7 @@ class IBMDB2Connector(DatabaseConnector):
                     'numeric_precision': numeric_precision,
                     'numeric_scale': numeric_scale,
                     'is_nullable': is_nullable,
-                    'column_default': column_default,
+                    'column_default_value': column_default,
                     'column_comment': '',
                     'is_identity': 'NO',
                 }

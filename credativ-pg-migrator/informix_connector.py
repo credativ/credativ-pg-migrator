@@ -151,7 +151,7 @@ class InformixConnector(DatabaseConnector):
                     'numeric_scale': None,
                     'is_nullable': row[4],
                     'is_identity': 'YES' if row[2] == 'SERIAL' or row[2] == 'SERIAL8' else 'NO',
-                    'column_default': re.sub(r'[^\x20-\x7E]', ' ', row[5]).strip() if row[5] else '',
+                    'column_default_value': re.sub(r'[^\x20-\x7E]', ' ', row[5]).strip() if row[5] else '',
                     'column_comment': ''
                 }
 

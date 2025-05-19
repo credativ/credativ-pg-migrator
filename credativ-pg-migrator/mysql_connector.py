@@ -99,7 +99,7 @@ class MySQLConnector(DatabaseConnector):
                     'numeric_scale': numeric_scale,
                     'is_nullable': is_nullable,
                     'column_type': column_type,
-                    'column_default': column_default,
+                    'column_default_value': column_default,
                     'is_identity': is_identity,
                     'is_generated_stored': is_generated_stored,
                     'is_generated_virtual': is_generated_virtual,

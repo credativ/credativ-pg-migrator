@@ -55,10 +55,13 @@ class DatabaseConnector(ABC):
                 - can contain mix of upper and lower case letters as they are stored in system tables
             'is_nullable':
                 - 'YES' / 'NO' -> 'NO' = constraint NOT NULL
-            'column_default':
+            'column_default_name':
+                - name of the default value from the system tables
+                - relevant only for some databases, like Sybase ASE
+            'column_default_value':
                 - original default value from the system tables
-            'replaced_column_default':
-                - custom replacement value
+            'replaced_column_default_value':
+                - custom replacement for default value
             'data_type':
                 - data type without size/length/precision/scale,
             'column_type':

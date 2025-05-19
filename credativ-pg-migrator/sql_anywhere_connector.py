@@ -107,7 +107,7 @@ class SQLAnywhereConnector(DatabaseConnector):
                     'numeric_scale': row[4],
                     'is_nullable': 'NO' if row[6] == 'N' else 'YES',
                     'is_identity': 'YES' if row[7] is not None and row[7].upper() == 'AUTOINCREMENT' else 'NO',
-                    'column_default': row[7] if row[7] is not None and row[7].upper() != 'AUTOINCREMENT' else None,
+                    'column_default_value': row[7] if row[7] is not None and row[7].upper() != 'AUTOINCREMENT' else None,
                     'column_comment': '',
                 }
             cursor.close()

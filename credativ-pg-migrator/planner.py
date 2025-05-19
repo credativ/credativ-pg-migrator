@@ -158,16 +158,16 @@ class Planner:
                         column_info['column_type_substitution'] = substitution
 
                     # checking for default values substitution with the new data type
-                    if column_info['column_default'] != '':
+                    if column_info['column_default_value'] != '':
                         substitution = self.migrator_tables.check_default_values_substitution({
                             'check_column_name': column_info['column_name'],
                             'check_column_data_type': column_info['data_type'],
-                            'check_default_value': column_info['column_default'],
+                            'check_default_value': column_info['column_default_value'],
                         })
-                        if substitution and substitution != None and column_info['column_default'] != substitution:
-                            column_info['replaced_column_default'] = substitution
+                        if substitution and substitution != None and column_info['column_default_value'] != substitution:
+                            column_info['replaced_column_default_value'] = substitution
                             if self.config_parser.get_log_level() == 'DEBUG':
-                                self.logger.debug(f"Substituted default value: {column_info['column_default']} -> {substitution}")
+                                self.logger.debug(f"Substituted default value: {column_info['column_default_value']} -> {substitution}")
 
                 settings = {
                     'source_db_type': self.config_parser.get_source_db_type(),
@@ -440,8 +440,8 @@ class Planner:
                 converted[order_num] = {
                     'column_name': column_info['column_name'],
                     'is_nullable': column_info['is_nullable'],
-                    'column_default': column_info['column_default'],
-                    'replaced_column_default': column_info['replaced_column_default'] if 'replaced_column_default' in column_info else '',
+                    'column_default_value': column_info['column_default_value'],
+                    'replaced_column_default_value': column_info['replaced_column_default_value'] if 'replaced_column_default_value' in column_info else '',
                     'data_type': coltype,
                     'column_type': column_info['column_type'] if 'column_type' in column_info else '',
                     'column_type_substitution': column_info['column_type_substitution'] if 'column_type_substitution' in column_info else '',

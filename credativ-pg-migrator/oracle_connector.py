@@ -110,7 +110,7 @@ class OracleConnector(DatabaseConnector):
                     'numeric_scale': None,
                     'is_nullable': 'NO' if column_nullable == 'N' else 'YES',
                     'is_identity': 'NO',
-                    'column_default': column_default,
+                    'column_default_value': column_default,
                     'comment': '',
                 }
 
@@ -125,7 +125,7 @@ class OracleConnector(DatabaseConnector):
                         if sequence_details:
                             if self.config_parser.get_log_level() == 'DEBUG':
                                 self.logger.debug(f"Substituting default value containing sequence: {column_default}")
-                            result[column_id]['column_default'] = ""
+                            result[column_id]['column_default_value'] = ""
                             result[column_id]['is_identity'] = 'YES'
                             if column_type in ('NUMBER'):
                                 result[column_id]['data_type'] = 'BIGINT'

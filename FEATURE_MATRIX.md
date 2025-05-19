@@ -17,6 +17,7 @@ Legend:
 |---------------------------|---------|----------|--------|-------|--------|------------|----------|--------|
 | Migration of data         | yes     | yes      | yes    | yes   | yes    | yes        | yes      | yes    |
 | NOT NULL constraints      | yes     | yes      | yes    | yes   | yes    | yes        | yes      | yes    |
+| Default values on columns | WIP     | WIP      | WIP    | WIP   | WIP    | WIP        | WIP      | WIP[4] |
 | IDENTITY columns          | --      | --       | --     | --    | yes[1] | --         | --       | yes    |
 | Primary Keys              | yes     | yes      | yes    | yes   | yes    | yes        | yes      | yes    |
 | Secondary Indexes         | yes     | yes      | yes    | yes   | yes    | yes        | yes      | yes    |
@@ -38,6 +39,7 @@ Notes:
 - [1]: IDENTITY columns are recognized based on sequence used as the default value. But there is still an issue with data types. Oracle allows PRIMARY KEY on NUMBER with sequence. But IDENTITY column in PostgresSQL must be INT or BIGINT.
 - [2]: Sequences are not explicitly migrated (presuming source database implements them). But SERIAL/BIGSERIAL and IDENTITY columns and columns with a sequence as default value are migrated into PostgreSQL as IDENTITY columns. Which means the sequence is created in PostgreSQL automatically. The current value of the sequence is set to the last value found in migrated data after the data migration is finished.
 - [3]: Check rules/domains are addiional checks externally defined and bound to specific column or data type. In PostgreSQL they are implemented as [domains](https://www.postgresql.org/docs/current/sql-createdomain.html), in some other databases as rules bind to columns/data types. Currently we work on implementing this feature for Sybase ASE migration.
+- [4]: Sybase ASE has command CREATE DEFAULT which creates independent named default value and this can be attached to a multiple columns using its name. PostgreSQL does not support this, therefore we attach corresponding underlying default value directly to the target column.
 
 ## Tested versions of databases
 

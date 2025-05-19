@@ -828,5 +828,9 @@ class PostgreSQLConnector(DatabaseConnector):
             self.logger.error(f"Error preparing session settings: {e}")
             raise
 
+    def fetch_domains(self, schema: str):
+        # Placeholder for fetching domains
+        return {}
+
     def testing_select(self):
         return "SELECT 1"

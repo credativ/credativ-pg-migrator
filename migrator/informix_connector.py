@@ -1578,5 +1578,9 @@ class InformixConnector(DatabaseConnector):
     def fetch_user_defined_types(self, schema: str):
         pass
 
+    def fetch_domains(self, schema: str):
+        # Placeholder for fetching domains
+        return {}
+
     def testing_select(self):
         return "SELECT 1"

@@ -454,6 +454,8 @@ class Planner:
                     'generation_expression': column_info['generation_expression'] if 'generation_expression' in column_info else '',
                     'udt_schema': column_info['udt_schema'] if 'udt_schema' in column_info else '',
                     'udt_name': column_info['udt_name'] if 'udt_name' in column_info else '',
+                    'domain_schema': column_info['domain_schema'] if 'domain_schema' in column_info else '',
+                    'domain_name': column_info['domain_name'] if 'domain_name' in column_info else '',
                 }
         else:
             raise ValueError(f"Unsupported target database type: {target_db_type}")

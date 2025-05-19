@@ -124,7 +124,7 @@ class SybaseASEConnector(DatabaseConnector):
                 c.scale as data_type_scale,
                 t.allownulls as type_nullable,
                 t.ident as type_has_identity_property,
-                object_name(c.domain) as rule_name
+                object_name(c.domain) as domain_name
             FROM syscolumns c
             JOIN sysobjects tab ON c.id = tab.id
             JOIN systypes t ON c.usertype = t.usertype
@@ -160,6 +160,7 @@ class SybaseASEConnector(DatabaseConnector):
                 data_type_scale = row[14]
                 type_nullable = row[15]
                 type_has_identity_property = row[16]
+                domain_name = row[17]
                 result[ordinal_position] = {
                     'column_name': column_name,
                     'data_type': data_type,
@@ -169,6 +170,7 @@ class SybaseASEConnector(DatabaseConnector):
                     'column_default': column_default_value,
                     'column_comment': '',
                     'is_identity': 'YES' if identity_column == 1 else 'NO',
+                    'domain_name': domain_name,
                 }
 
                 # # if self.config_parser.get_log_level() == 'DEBUG':
@@ -1015,6 +1017,10 @@ class SybaseASEConnector(DatabaseConnector):
         cursor.close()
         # self.disconnect()
         return row[0]
+
+    def fetch_domains(self, schema: str):
+        # Placeholder for fetching domains
+        return {}
 
     def testing_select(self):
         return 'SELECT 1'

@@ -665,5 +665,9 @@ class MsSQLConnector(DatabaseConnector):
     def get_sequence_current_value(self, sequence_name: str):
         pass
 
+    def fetch_domains(self, schema: str):
+        # Placeholder for fetching domains
+        return {}
+
     def testing_select(self):
         return "SELECT 1"

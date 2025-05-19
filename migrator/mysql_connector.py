@@ -557,5 +557,9 @@ class MySQLConnector(DatabaseConnector):
         # Implement user-defined type fetching logic
         pass
 
+    def fetch_domains(self, schema: str):
+        # Placeholder for fetching domains
+        return {}
+
     def testing_select(self):
         return "SELECT 1"

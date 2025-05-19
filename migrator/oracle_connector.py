@@ -582,5 +582,9 @@ class OracleConnector(DatabaseConnector):
         # Placeholder for fetching user-defined types
         return {}
 
+    def fetch_domains(self, schema: str):
+        # Placeholder for fetching domains
+        return {}
+
     def testing_select(self):
         return "SELECT 1 FROM DUAL"

@@ -82,7 +82,12 @@ class DatabaseConnector(ABC):
             'is_generated_stored': 'YES' / 'NO',
             'generation_expression': expression for generated column,
             'udt_schema': schema name of the user defined type,
-            'udt_name': name of the user defined type
+            'udt_name': name of the user defined type,
+            'domain_schema':
+                - schema name of the domain
+                - domains are additional checks on columns
+            'domain_name':
+                - name of the domain
             }
         }
 
@@ -442,6 +447,23 @@ class DatabaseConnector(ABC):
             'type_name': type_name,
             'sql': type_sql,
             'comment': type_comment
+            }
+        }
+        """
+        pass
+
+    @abstractmethod
+    def fetch_domains(self, schema: str):
+        """
+        Returns domains in the specified schema / all schemas - depending on the database.
+        If schema is empty, all schemas are searched.
+
+        Returns: dict
+        { ordinary_number: {
+            'domain_schema': schema_name,
+            'domain_name': domain_name,
+            'domain_sql': domain_sql,
+            'domain_comment': domain_comment
             }
         }
         """

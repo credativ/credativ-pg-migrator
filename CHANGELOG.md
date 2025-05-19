@@ -2,6 +2,11 @@
 
 ## (not released yet) 0.7.2 - 2025.05.xx
 
+- 2025.05.19:
+
+  - Updates in Sybase ASE testing databases
+  - Added initial support for CHECK rules in Sybase ASE
+
 - 2025.05.18:
 
   - Added new testing databases for Sybase ASE, improved desctriptions for Sybase ASE

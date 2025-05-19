@@ -6,34 +6,37 @@ Different features and differently supported across various database connectors.
 
 Legend:
 
-- YES - feature is supported
-- NO - feature is not supported / or we are not sure (must be tested)
-- N/A - feature is not supported by the specific database (? = need to be checked)
+- WIP = work in progress, feature is not yet supported but is being worked on
+- yes = feature is supported and was successfully tested
+- -- = status unclear, must be checked in code and tested
+- N/A - feature is not supported by the specific database (? = requires deeper checking in sources)
 
 ```
 | Feature                   | IBM DB2 | Informix | MSSQL  | MySQL | Oracle | PostgreSQL | SQL      | Sybase |
 | description               | LUW     |          | Server |       |        |            | Anywhere | ASE    |
 |---------------------------|---------|----------|--------|-------|--------|------------|----------|--------|
-| Migration of data         | YES     | YES      | YES    | YES   | YES    | YES        | YES      | YES    |
-| NOT NULL constraints      | YES     | YES      | YES    | YES   | YES    | YES        | YES      | YES    |
-| IDENTITY columns          | NO      | NO       | NO     | NO    | YES[1] | NO         | NO       | YES    |
-| Primary Keys              | YES     | YES      | YES    | YES   | YES    | YES        | YES      | YES    |
-| Secondary Indexes         | YES     | YES      | YES    | YES   | YES    | YES        | YES      | YES    |
-| Foreign Keys              | YES     | YES      | YES    | YES   | YES    | YES        | YES      | YES    |
-| FK on delete action       | NO      | NO       | NO     | NO    | YES    | NO         | NO       | N/A?   |
-| Check Constraints         | NO      | YES      | NO     | NO    | NO     | NO         | NO       | YES    |
-| Comments on columns       | NO      | NO       | NO     | NO    | NO     | NO         | NO       | N/A?   |
-| Comments on tables        | NO      | NO       | NO     | NO    | NO     | NO         | NO       | N/A?   |
-| Conversion of funcs/procs | NO      | YES      | NO     | NO    | NO     | YES        | NO       | NO     |
-| Conversion of triggers    | NO      | YES      | NO     | NO    | NO     | YES        | NO       | NO     |
-| Sequences[2]              | --      | --       | --     | --    | --     | YES        | --       | N/A?   |
-| ....                      | NO      | NO       | NO     | NO    | NO     | NO         | NO       | NO     |
+| Migration of data         | yes     | yes      | yes    | yes   | yes    | yes        | yes      | yes    |
+| NOT NULL constraints      | yes     | yes      | yes    | yes   | yes    | yes        | yes      | yes    |
+| IDENTITY columns          | --      | --       | --     | --    | yes[1] | --         | --       | yes    |
+| Primary Keys              | yes     | yes      | yes    | yes   | yes    | yes        | yes      | yes    |
+| Secondary Indexes         | yes     | yes      | yes    | yes   | yes    | yes        | yes      | yes    |
+| Foreign Keys              | yes     | yes      | yes    | yes   | yes    | yes        | yes      | yes    |
+| FK on delete action       | --      | --       | --     | --    | yes    | --         | --       | N/A?   |
+| Check Constraints         | --      | yes      | --     | --    | --     | --         | --       | yes    |
+| Check Rules[3]            | --      | --       | --     | --    | --     | --         | --       | WIP    |
+| Comments on columns       | --      | --       | --     | --    | --     | --         | --       | N/A?   |
+| Comments on tables        | --      | --       | --     | --    | --     | --         | --       | N/A?   |
+| Conversion of funcs/procs | --      | yes      | --     | --    | --     | yes        | --       | --     |
+| Conversion of triggers    | --      | yes      | --     | --    | --     | yes        | --       | --     |
+| Sequences[2]              | --      | --       | --     | --    | --     | --         | --       | N/A?   |
+| ....                      | --      | --       | --     | --    | --     | --         | --       | --     |
 
 ```
 
 Notes:
 [1]: IDENTITY columns are recognized based on sequence used as the default value. But there is still an issue with data types. Oracle allows PRIMARY KEY on NUMBER with sequence. But IDENTITY column in PostgresSQL must be INT or BIGINT.
 [2]: Sequences are not explicitly migrated (presuming source database implements them). But SERIAL/BIGSERIAL and IDENTITY columns are migrated as IDENTITY columns into PostgreSQL which means that the sequence is created in PostgreSQL automatically. The current value of the sequence is set to the last value found in migrated data after the data migration is finished.
+[3]: Check rules are addiional checks externally defined and bound to specific column or data type. Currently we work on implementing this feature for Sybase ASE.
 
 ## Tested versions of databases
 

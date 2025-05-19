@@ -123,7 +123,8 @@ class SybaseASEConnector(DatabaseConnector):
                 c.prec as data_type_precision,
                 c.scale as data_type_scale,
                 t.allownulls as type_nullable,
-                t.ident as type_has_identity_property
+                t.ident as type_has_identity_property,
+                object_name(c.domain) as rule_name
             FROM syscolumns c
             JOIN sysobjects tab ON c.id = tab.id
             JOIN systypes t ON c.usertype = t.usertype
@@ -514,6 +515,14 @@ class SybaseASEConnector(DatabaseConnector):
         return funcproc_data
 
     def fetch_funcproc_code(self, funcproc_id: int):
+        """
+        Fetches the code of a function or procedure by its ID. General query:
+
+            SELECT u.name as owner, o.name as proc_name, c.colid as line_num, c.text as source_code
+            FROM sysusers u, syscomments c, sysobjects o
+            WHERE o.type = 'P' AND o.id = c.id AND o.uid = u.uid
+            ORDER BY o.id, c.colid
+        """
         query = f"""
             SELECT c.text
             FROM syscomments c, sysobjects o

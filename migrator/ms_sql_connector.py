@@ -147,9 +147,7 @@ class MsSQLConnector(DatabaseConnector):
                     'column_default': column_default,
                     'comment': ''
                 }
-                # # checking for default values substitution with the original data type
-                # if result[row[0]]['column_default'] != '':
-                #     result[row[0]]['column_default'] = migrator_tables.check_default_values_substitution(result[row[0]]['name'], result[row[0]]['type'], result[row[0]]['column_default'])
+
             cursor.close()
             self.disconnect()
             return result
@@ -482,6 +480,7 @@ class MsSQLConnector(DatabaseConnector):
     def migrate_table(self, migrate_target_connection, settings):
         part_name = 'migrate_table initialize'
         inserted_rows = 0
+        target_table_rows = 0
         try:
             worker_id = settings['worker_id']
             source_schema = settings['source_schema']
@@ -496,17 +495,29 @@ class MsSQLConnector(DatabaseConnector):
             # primary_key_columns_types = settings['primary_key_columns_types']
             batch_size = settings['batch_size']
             migrator_tables = settings['migrator_tables']
-            source_table_rows = self.get_rows_count(source_schema, source_table)
             migration_limitation = settings['migration_limitation']
+
+            source_table_rows = self.get_rows_count(source_schema, source_table)
+
+            ## source_schema, source_table, source_table_id, source_table_rows, worker_id, target_schema, target_table, target_table_rows
+            migrator_tables_settings = {
+                'worker_id': worker_id,
+                'source_table_id': source_table_id,
+                'source_schema': source_schema,
+                'source_table': source_table,
+                'target_schema': target_schema,
+                'target_table': target_table,
+                'source_table_rows': source_table_rows,
+                'target_table_rows': target_table_rows,
+            }
+            protocol_id = migrator_tables.insert_data_migration(migrator_tables_settings)
 
             if source_table_rows == 0:
                 self.logger.info(f"Worker {worker_id}: Table {source_table} is empty - skipping data migration.")
-                migrator_tables.insert_data_migration(source_schema, source_table, source_table_id, source_table_rows, worker_id, target_schema, target_table, 0)
                 return 0
             else:
                 part_name = 'migrate_table in batches using cursor'
                 self.logger.info(f"Worker {worker_id}: Table {source_table} has {source_table_rows} rows - starting data migration.")
-                protocol_id = migrator_tables.insert_data_migration(source_schema, source_table, source_table_id, source_table_rows, worker_id, target_schema, target_table, 0)
 
                 # Open a cursor and fetch rows in batches
                 query = f"SELECT * FROM {source_schema}.{source_table}"
@@ -668,6 +679,10 @@ class MsSQLConnector(DatabaseConnector):
     def fetch_domains(self, schema: str):
         # Placeholder for fetching domains
         return {}
+
+    def get_create_domain_sql(self, settings):
+        # Placeholder for generating CREATE DOMAIN SQL
+        return ""
 
     def testing_select(self):
         return "SELECT 1"

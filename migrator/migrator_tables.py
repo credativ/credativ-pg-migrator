@@ -189,7 +189,12 @@ class MigratorTables:
             VALUES (%s, %s, %s, %s)
             """, (column_name, source_column_data_type, source_default_value, target_default_value))
 
-    def check_default_values_substitution(self, check_column_name, check_column_data_type, check_default_value):
+    def check_default_values_substitution(self, settings):
+        ## check_column_name, check_column_data_type, check_default_value
+        check_column_name = settings['check_column_name']
+        check_column_data_type = settings['check_column_data_type']
+        check_default_value = settings['check_default_value']
+
         target_default_value = check_default_value
         query = f"""
             SELECT target_default_value
@@ -368,7 +373,16 @@ class MigratorTables:
         # if self.config_parser.get_log_level() == 'DEBUG':
         #     self.logger.debug(f"User defined types table {table_name} created.")
 
-    def insert_user_defined_type(self, source_schema_name, source_type_name, source_type_sql, target_schema_name, target_type_name, target_type_sql, type_comment):
+    def insert_user_defined_type(self, settings):
+        ## source_schema_name, source_type_name, source_type_sql, target_schema_name, target_type_name, target_type_sql, type_comment
+        source_schema_name = settings['source_schema_name']
+        source_type_name = settings['source_type_name']
+        source_type_sql = settings['source_type_sql']
+        target_schema_name = settings['target_schema_name']
+        target_type_name = settings['target_type_name']
+        target_type_sql = settings['target_type_sql']
+        type_comment = settings['type_comment']
+
         table_name = self.config_parser.get_protocol_name_user_defined_types()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
@@ -423,6 +437,15 @@ class MigratorTables:
             self.logger.error(e)
             raise
 
+    def fetch_all_user_defined_types(self):
+        table_name = self.config_parser.get_protocol_name_user_defined_types()
+        query = f"""SELECT * FROM "{self.protocol_schema}"."{table_name}" ORDER BY id"""
+        cursor = self.protocol_connection.connection.cursor()
+        cursor.execute(query)
+        rows = cursor.fetchall()
+        cursor.close()
+        return rows
+
     def decode_user_defined_type_row(self, row):
         return {
             'id': row[0],
@@ -435,14 +458,117 @@ class MigratorTables:
             'type_comment': row[7]
         }
 
-    def fetch_all_user_defined_types(self):
-        table_name = self.config_parser.get_protocol_name_user_defined_types()
+    def create_table_for_domains(self):
+        table_name = self.config_parser.get_protocol_name_domains()
+        self.protocol_connection.execute_query(self.drop_table_sql.format(protocol_schema=self.protocol_schema, table_name=table_name))
+        self.protocol_connection.execute_query(f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."{table_name}"
+            (id SERIAL PRIMARY KEY,
+            source_schema_name TEXT,
+            source_domain_name TEXT,
+            source_domain_sql TEXT,
+            target_schema_name TEXT,
+            target_domain_name TEXT,
+            target_domain_sql TEXT,
+            domain_comment TEXT,
+            task_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            task_started TIMESTAMP,
+            task_completed TIMESTAMP,
+            success BOOLEAN,
+            message TEXT
+            )
+        """)
+        # if self.config_parser.get_log_level() == 'DEBUG':
+        #     self.logger.debug(f"Domains table {table_name} created.")
+
+    def insert_domain(self, settings):
+        ## source_schema_name, source_domain_name, source_domain_sql, target_schema_name, target_domain_name, target_domain_sql, domain_comment
+        source_schema_name = settings['source_schema_name']
+        source_domain_name = settings['source_domain_name']
+        source_domain_sql = settings['source_domain_sql']
+        target_schema_name = settings['target_schema_name']
+        target_domain_name = settings['target_domain_name']
+        target_domain_sql = settings['target_domain_sql']
+        domain_comment = settings['domain_comment']
+
+        table_name = self.config_parser.get_protocol_name_domains()
+        query = f"""
+            INSERT INTO "{self.protocol_schema}"."{table_name}"
+            (source_schema_name, source_domain_name, source_domain_sql,
+            target_schema_name, target_domain_name, target_domain_sql, domain_comment)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            RETURNING *
+        """
+        params = (source_schema_name, source_domain_name, source_domain_sql,
+                  target_schema_name, target_domain_name, target_domain_sql, domain_comment)
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+
+            # if self.config_parser.get_log_level() == 'DEBUG':
+            #     self.logger.debug(f"Returned row: {row}")
+            domain_row = self.decode_user_defined_type_row(row)
+            self.insert_protocol('domain', target_domain_name, 'create', target_domain_sql, None, None, None, 'info', None, domain_row['id'])
+        except Exception as e:
+            self.logger.error(f"Error inserting domain {target_domain_name} into {table_name}.")
+            self.logger.error(e)
+            raise
+
+    def update_domain_status(self, row_id, success, message):
+        table_name = self.config_parser.get_protocol_name_domains()
+        query = f"""
+            UPDATE "{self.protocol_schema}"."{table_name}"
+            SET task_completed = CURRENT_TIMESTAMP,
+            success = %s,
+            message = %s
+            WHERE id = %s
+            RETURNING *
+        """
+        params = ('TRUE' if success else 'FALSE', message, row_id)
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+
+            # if self.config_parser.get_log_level() == 'DEBUG':
+            #     self.logger.debug(f"Returned row: {row}")
+            if row:
+                domain_row = self.decode_user_defined_type_row(row)
+                self.update_protocol('domain', domain_row['id'], success, message, None)
+            else:
+                self.logger.error(f"Error updating status for domain {row_id} in {table_name}.")
+                self.logger.error(f"Error: No protocol row returned.")
+        except Exception as e:
+            self.logger.error(f"Error updating status for domain {row_id} in {table_name}.")
+            self.logger.error(f"Query: {query}")
+            self.logger.error(e)
+            raise
+
+    def fetch_all_domains(self):
+        table_name = self.config_parser.get_protocol_name_domains()
         query = f"""SELECT * FROM "{self.protocol_schema}"."{table_name}" ORDER BY id"""
         cursor = self.protocol_connection.connection.cursor()
         cursor.execute(query)
         rows = cursor.fetchall()
         cursor.close()
+        # if self.config_parser.get_log_level() == 'DEBUG':
+        #     self.logger.debug(f"Fetched rows: {rows}")
         return rows
+
+    def decode_domain_row(self, row):
+        return {
+            'id': row[0],
+            'source_schema_name': row[1],
+            'source_domain_name': row[2],
+            'source_domain_sql': row[3],
+            'target_schema_name': row[4],
+            'target_domain_name': row[5],
+            'target_domain_sql': row[6],
+            'domain_comment': row[7]
+        }
 
     def create_table_for_data_migration(self):
         table_name = self.config_parser.get_protocol_name_data_migration()
@@ -554,7 +680,17 @@ class MigratorTables:
             self.logger.error(e)
             raise
 
-    def insert_data_migration(self, source_schema, source_table, source_table_id, source_table_rows, worker_id, target_schema, target_table, target_table_rows):
+    def insert_data_migration(self, settings):
+        ## source_schema, source_table, source_table_id, source_table_rows, worker_id, target_schema, target_table, target_table_rows
+        source_schema = settings['source_schema']
+        source_table = settings['source_table']
+        source_table_id = settings['source_table_id']
+        source_table_rows = settings['source_table_rows']
+        worker_id = settings['worker_id']
+        target_schema = settings['target_schema']
+        target_table = settings['target_table']
+        target_table_rows = settings['target_table_rows']
+
         table_name = self.config_parser.get_protocol_name_data_migration()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"

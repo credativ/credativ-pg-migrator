@@ -182,13 +182,24 @@ class SQLAnywhereConnector(DatabaseConnector):
             source_table_rows = self.get_rows_count(source_schema, source_table)
             migration_limitation = settings['migration_limitation']
 
+            ## source_schema, source_table, source_table_id, source_table_rows, worker_id, target_schema, target_table, target_table_rows
+            migrator_tables_settings = {
+                'worker_id': worker_id,
+                'source_table_id': source_table_id,
+                'source_schema': source_schema,
+                'source_table': source_table,
+                'target_schema': target_schema,
+                'target_table': target_table,
+                'source_table_rows': source_table_rows,
+                'target_table_rows': target_table_rows,
+            }
+            protocol_id = migrator_tables.insert_data_migration(migrator_tables_settings)
+
             if source_table_rows == 0:
                 self.logger.info(f"Worker {worker_id}: Table {source_table} is empty - skipping data migration.")
-                migrator_tables.insert_data_migration(source_schema, source_table, source_table_id, source_table_rows, worker_id, target_schema, target_table, 0)
                 return 0
             else:
                 self.logger.info(f"Worker {worker_id}: Table {source_table} has {source_table_rows} rows - starting data migration.")
-                protocol_id = migrator_tables.insert_data_migration(source_schema, source_table, source_table_id, source_table_rows, worker_id, target_schema, target_table, 0)
                 offset = 0
                 total_inserted_rows = 0
                 cursor = self.connection.cursor()
@@ -491,6 +502,10 @@ class SQLAnywhereConnector(DatabaseConnector):
     def fetch_domains(self, schema: str):
         # Placeholder for fetching domains
         return {}
+
+    def get_create_domain_sql(self, settings):
+        # Placeholder for generating CREATE DOMAIN SQL
+        return ""
 
     def testing_select(self):
         return "SELECT 1"

@@ -158,7 +158,12 @@ class Planner:
 
                     # checking for default values substitution with the new data type
                     if column_info['column_default'] != '':
-                        substitution = self.migrator_tables.check_default_values_substitution(column_info['column_name'], column_info['data_type'], column_info['column_default'])
+                        settings = {
+                            'check_column_name': column_info['column_name'],
+                            'check_column_data_type': column_info['data_type'],
+                            'check_default_value': column_info['column_default'],
+                        }
+                        substitution = self.migrator_tables.check_default_values_substitution(settings)
                         if substitution and substitution != None and column_info['column_default'] != substitution:
                             column_info['replaced_column_default'] = substitution
                             if self.config_parser.get_log_level() == 'DEBUG':
@@ -534,12 +539,51 @@ class Planner:
                 converted_type_sql = type_sql.replace(f'{self.source_schema}.', f'{self.target_schema}.')
                 if self.config_parser.get_log_level() == 'DEBUG':
                     self.logger.debug(f"Converted type SQL: {converted_type_sql}")
-                self.migrator_tables.insert_user_defined_type(self.source_schema, type_info['type_name'], type_sql,
-                                                            self.target_schema, type_info['type_name'], converted_type_sql, type_info['comment'])
+
+                settings = {
+                    'source_schema_name': self.source_schema,
+                    'source_type_name': type_info['type_name'],
+                    'source_type_sql': type_sql,
+                    'target_schema_name': self.target_schema,
+                    'target_type_name': type_info['type_name'],
+                    'target_type_sql': converted_type_sql,
+                    'type_comment':  type_info['comment'],
+                }
+                self.migrator_tables.insert_user_defined_type(settings)
                 self.logger.info(f"User defined type {type_info['type_name']} processed successfully.")
             self.logger.info("Planner - User defined types processed successfully.")
         else:
             self.logger.info("No user defined types found.")
+
+    def run_prepare_domains(self):
+        self.logger.info("Planner - Preparing domains...")
+        domains = self.source_connection.fetch_domains(self.source_schema)
+        if self.config_parser.get_log_level() == 'DEBUG':
+            self.logger.debug(f"Domains found in source database: {domains}")
+        if domains:
+            for order_num, domain_info in domains.items():
+                domain_sql = domain_info['sql']
+                if self.config_parser.get_log_level() == 'DEBUG':
+                    self.logger.debug(f"Source domain SQL: {domain_sql}")
+
+                converted_domain_sql = self.target_connection.get_create_domain_sql(domain_info)
+                if self.config_parser.get_log_level() == 'DEBUG':
+                    self.logger.debug(f"Converted domain SQL: {converted_domain_sql}")
+
+                settings = {
+                    'source_schema_name': domain_info['domain_schema'] if 'domain_schema' in domain_info and domain_info['domain_schema'] is not None else self.source_schema,
+                    'source_domain_name': domain_info['domain_name'],
+                    'source_domain_sql': domain_sql,
+                    'target_schema_name': self.target_schema,
+                    'target_domain_name': domain_info['domain_name'],
+                    'target_domain_sql': converted_domain_sql,
+                    'domain_comment':  domain_info['comment'],
+                }
+                self.migrator_tables.insert_domain(settings)
+                self.logger.info(f"Domain {domain_info['domain_name']} processed successfully.")
+            self.logger.info("Planner - Domains processed successfully.")
+        else:
+            self.logger.info("No domains found.")
 
     def run_pre_migration_script(self):
         pre_migration_script = self.config_parser.get_pre_migration_script()

@@ -5,7 +5,7 @@
 - 2025.05.19:
 
   - Updates in Sybase ASE testing databases
-  - Added initial support for CHECK rules in Sybase ASE
+  - Added initial support for check rules/domains in Sybase ASE
 
 - 2025.05.18:
 

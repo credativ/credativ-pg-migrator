@@ -586,5 +586,9 @@ class OracleConnector(DatabaseConnector):
         # Placeholder for fetching domains
         return {}
 
+    def get_create_domain_sql(self, settings):
+        # Placeholder for generating CREATE DOMAIN SQL
+        return ""
+
     def testing_select(self):
         return "SELECT 1 FROM DUAL"

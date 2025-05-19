@@ -173,13 +173,6 @@ class SybaseASEConnector(DatabaseConnector):
                     'domain_name': domain_name,
                 }
 
-                # # if self.config_parser.get_log_level() == 'DEBUG':
-                # #     self.logger.debug(f"0 default: {result[row[0]]['column_default']}")
-                # # checking for default values substitution with the origingal data type
-                # if migrator_tables is not None:
-                #     if result[row[0]]['column_default'] != '':
-                #         result[row[0]]['column_default'] = migrator_tables.check_default_values_substitution(result[row[0]]['name'], result[row[0]]['type'], result[row[0]]['column_default'])
-
                 query_custom_types = f"""
                     SELECT
                         bt.name AS source_data_type,
@@ -851,14 +844,25 @@ class SybaseASEConnector(DatabaseConnector):
             source_table_rows = self.get_rows_count(source_schema, source_table)
             migration_limitation = settings['migration_limitation']
 
+            ## source_schema, source_table, source_table_id, source_table_rows, worker_id, target_schema, target_table, target_table_rows
+            migrator_tables_settings = {
+                'worker_id': worker_id,
+                'source_table_id': source_table_id,
+                'source_schema': source_schema,
+                'source_table': source_table,
+                'target_schema': target_schema,
+                'target_table': target_table,
+                'source_table_rows': source_table_rows,
+                'target_table_rows': target_table_rows,
+            }
+            protocol_id = migrator_tables.insert_data_migration(migrator_tables_settings)
+
             if source_table_rows == 0:
                 self.logger.info(f"Worker {worker_id}: Table {source_table} is empty - skipping data migration.")
-                migrator_tables.insert_data_migration(source_schema, source_table, source_table_id, source_table_rows, worker_id, target_schema, target_table, 0)
                 return 0
             else:
                 part_name = 'migrate_table in batches using cursor'
                 self.logger.info(f"Worker {worker_id}: Table {source_table} has {source_table_rows} rows - starting data migration.")
-                protocol_id = migrator_tables.insert_data_migration(source_schema, source_table, source_table_id, source_table_rows, worker_id, target_schema, target_table, 0)
 
                 # Open a cursor and fetch rows in batches
                 query = f"SELECT * FROM {source_schema}.{source_table}"
@@ -1019,8 +1023,63 @@ class SybaseASEConnector(DatabaseConnector):
         return row[0]
 
     def fetch_domains(self, schema: str):
-        # Placeholder for fetching domains
-        return {}
+        order_num = 1
+        domains = {}
+        schema_condition = f"AND r.uid = USER_ID('{schema}')" if schema else ""
+        query = f"""
+            SELECT
+                r.name AS RuleName,
+                USER_NAME(r.uid) AS RuleOwner,
+                sc.colid AS DefinitionLineNumber,
+                sc.text AS RuleDefinitionPart
+            FROM
+                sysobjects r
+            JOIN
+                syscomments sc ON r.id = sc.id
+            WHERE
+                r.type = 'R' {schema_condition} -- 'R' signifies a Rule object
+            ORDER BY
+                RuleName, DefinitionLineNumber;
+        """
+        self.connect()
+        cursor = self.connection.cursor()
+        cursor.execute(query)
+        rows = cursor.fetchall()
+        domains = {}
+        for row in rows:
+            rule_name = row[0]
+            rule_owner = row[1]
+            rule_definition_part = row[3].strip()
+            if rule_name not in domains:
+                domains[order_num] = {
+                    'domain_schema': schema,
+                    'domain_name': rule_name,
+                    'domain_owner': rule_owner,
+                    'source_domain_sql': rule_definition_part,
+                    'domain_comment': '',
+                }
+            else:
+                domains[rule_name]['source_domain_sql'] += '' + rule_definition_part
+            order_num += 1
+
+        for order_name, domain_info in domains.items():
+            domains[order_name]['source_domain_sql'] = domains[rule_name]['source_domain_sql'].replace('\n', ' ')
+
+            standardized_domain_sql = domains[order_name]['source_domain_sql']
+            standardized_domain_sql = re.sub(r'@\w+', 'VALUE', standardized_domain_sql)
+            standardized_domain_sql = re.sub(r'create rule', '', standardized_domain_sql, flags=re.IGNORECASE)
+            standardized_domain_sql = standardized_domain_sql.replace(rule_name, '')
+            domains[order_name]['standardized_domain_sql'] = standardized_domain_sql.strip()
+
+        cursor.close()
+        self.disconnect()
+        if self.config_parser.get_log_level() == 'DEBUG':
+            self.logger.debug(f"Found domains: {domains}")
+        return domains
+
+    def get_create_domain_sql(self, settings):
+        # Placeholder for generating CREATE DOMAIN SQL
+        return ""
 
     def testing_select(self):
         return 'SELECT 1'

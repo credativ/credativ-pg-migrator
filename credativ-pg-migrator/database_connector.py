@@ -459,12 +459,14 @@ class DatabaseConnector(ABC):
         If schema is empty, all schemas are searched.
 
         Returns: dict
-        { ordinary_number: {
+        { ordinal_identifier: {
             'domain_schema': schema_name,
             'domain_name': domain_name,
             'source_domain_sql':
                 - Original SQL statement to create the domain from the source database
                 - Contains all the specific syntax of the source database
+            'domain_data_type':
+                - data type of the column /data type of the domain
             'standardized_domain_sql':
                 - SQL statement to create the domain stript of all the specific syntax of the source database
                 - Should contains only the standard SQL syntax and only the conditions

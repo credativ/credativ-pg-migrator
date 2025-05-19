@@ -849,8 +849,9 @@ class PostgreSQLConnector(DatabaseConnector):
         domain_name = settings['domain_name']
         target_schema = settings['target_schema']
         standardized_domain_sql = settings['standardized_domain_sql']
+        domain_data_type = settings['domain_data_type']
         domain_comment = settings['domain_comment']
-        create_domain_sql = f"""CREATE DOMAIN "{target_schema}"."{domain_name}" {standardized_domain_sql}"""
+        create_domain_sql = f"""CREATE DOMAIN "{target_schema}"."{domain_name}" AS {domain_data_type} CHECK({standardized_domain_sql})"""
         if domain_comment:
             create_domain_sql += f" COMMENT '{domain_comment}'"
         return create_domain_sql

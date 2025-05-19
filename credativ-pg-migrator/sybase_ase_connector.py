@@ -1051,7 +1051,7 @@ class SybaseASEConnector(DatabaseConnector):
             rule_owner = row[1]
             rule_definition_part = row[3].strip()
             if rule_name not in domains:
-                domains[order_num] = {
+                domains[rule_name] = {
                     'domain_schema': schema,
                     'domain_name': rule_name,
                     'domain_owner': rule_owner,
@@ -1060,16 +1060,40 @@ class SybaseASEConnector(DatabaseConnector):
                 }
             else:
                 domains[rule_name]['source_domain_sql'] += '' + rule_definition_part
-            order_num += 1
 
-        for order_name, domain_info in domains.items():
-            domains[order_name]['source_domain_sql'] = domains[order_name]['source_domain_sql'].replace('\n', ' ')
+        for rule_name, domain_info in domains.items():
+            query = f"""
+                SELECT DISTINCT
+                    bt.name as basic_data_type
+                FROM sysobjects r
+                LEFT JOIN syscolumns c ON c.domain = r.id
+                LEFT JOIN sysobjects o ON c.id = o.id
+                LEFT JOIN systypes ut ON c.usertype = ut.usertype
+                LEFT JOIN (
+                    SELECT * FROM systypes t
+                    JOIN (SELECT type, min(usertype) as usertype FROM systypes GROUP BY type) bt0
+                    ON t.type = bt0.type AND t.usertype = bt0.usertype) bt
+                ON ut.type = bt.type AND ut.hierarchy = bt.hierarchy
+                WHERE r.type = 'R' AND r.name = '{domain_info['domain_name']}'
+            """
+            cursor.execute(query)
+            row = cursor.fetchone()
+            if row:
+                basic_data_type = row[0]
+                domains[rule_name]['domain_data_type'] = basic_data_type
+            else:
+                domains[rule_name]['domain_data_type'] = None
 
-            standardized_domain_sql = domains[order_name]['source_domain_sql']
+            domains[rule_name]['source_domain_sql'] = domains[rule_name]['source_domain_sql'].replace('\n', ' ')
+
+            standardized_domain_sql = domains[rule_name]['source_domain_sql']
             standardized_domain_sql = re.sub(r'@\w+', 'VALUE', standardized_domain_sql)
             standardized_domain_sql = re.sub(r'create rule', '', standardized_domain_sql, flags=re.IGNORECASE)
-            standardized_domain_sql = standardized_domain_sql.replace(domains[order_name]['domain_name'], '')
-            domains[order_name]['standardized_domain_sql'] = standardized_domain_sql.strip()
+            standardized_domain_sql = re.sub(rf"{re.escape(domains[rule_name]['domain_name'])}\s+AS", '', standardized_domain_sql, flags=re.IGNORECASE)
+            standardized_domain_sql = standardized_domain_sql.replace('"', "'")
+            # Remove all comments starting with /* and ending with */
+            standardized_domain_sql = re.sub(r'/\*.*?\*/', '', standardized_domain_sql, flags=re.DOTALL)
+            domains[rule_name]['standardized_domain_sql'] = standardized_domain_sql.strip()
 
         cursor.close()
         self.disconnect()

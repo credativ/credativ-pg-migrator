@@ -27,6 +27,7 @@ class Orchestrator:
             self.logger.info("Starting orchestration...")
 
             self.run_create_user_defined_types()
+            self.run_create_domains()
             self.run_migrate_tables()
             self.run_migrate_indexes()
             self.run_migrate_constraints()
@@ -163,6 +164,28 @@ class Orchestrator:
         else:
             self.logger.info("No user defined types found to migrate.")
         self.migrator_tables.update_main_status('Orchestrator', 'user defined types migration', True, 'finished OK')
+
+    def run_create_domains(self):
+        self.migrator_tables.insert_main('Orchestrator', 'domains migration')
+        self.logger.info("Migrating domains.")
+        domains = self.migrator_tables.fetch_all_domains()
+        if len(domains) > 0:
+            for domain_row in domains:
+                domain_data = self.migrator_tables.decode_domain_row(domain_row)
+                self.logger.info(f"Creating domain {domain_data['target_domain_name']} in target database.")
+                try:
+                    self.target_connection.connect()
+                    self.target_connection.execute_query(domain_data['target_domain_sql'])
+                    self.migrator_tables.update_domain_status(domain_data['id'], True, 'migrated OK')
+                    self.logger.info(f"Domain {domain_data['target_domain_name']} created successfully.")
+                    self.target_connection.disconnect()
+                except Exception as e:
+                    self.migrator_tables.update_domain_status(domain_data['id'], False, f'ERROR: {e}')
+                    self.handle_error(e, f"create_domain {domain_data['target_domain_name']}")
+            self.logger.info("Domains migrated successfully.")
+        else:
+            self.logger.info("No domains found to migrate.")
+        self.migrator_tables.update_main_status('Orchestrator', 'domains migration', True, 'finished OK')
 
     def run_migrate_indexes(self):
         self.migrator_tables.insert_main('Orchestrator', 'indexes migration')

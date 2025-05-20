@@ -2,13 +2,18 @@
 
 ## (not released yet) 0.7.2 - 2025.05.xx
 
+- 2025.05.20:
+
+  - Implemented proper handlig of Sybase ASE named default values created explicitly using CREATE DEFAULT command vs custom defined replacements for default values on columns.
+    - Code extracts default value from CREATE DEFAULT command and uses it for migration unless there is a custom defined replacement for the default value in the config file. Custom replacement has higher priority.
+  - Added initial support for migration of Sybase ASE computed columns. These are currently migrated into PostgreSQL as stored generated columns.
+    - Remaining issues: adjustments of functional indexes which use computed hidden columns
+
 - 2025.05.19:
 
   - Updates in Sybase ASE testing databases
   - Added migration of check rules/domains in Sybase ASE. Definitions are read from Sybase rules and are migrated as additinal check constraints to PostgreSQL.
     - These constraints are created only after data are migrated, because in some cases they need manual adjustments in syntax and could block migration of data.
-  - Implemented proper handlig of Sybase ASE named default values created explicitly using CREATE DEFAULT command vs custom defined replacements for default values on columns.
-    - Code extracts default value from CREATE DEFAULT command and uses it for migration unless there is a custom defined replacement for the default value in the config file. Custom replacement has higher priority.
 
 - 2025.05.18:
 

@@ -357,16 +357,16 @@ class Planner:
                         }
                         target_db_constraint_sql = self.target_connection.get_create_constraint_sql(settings)
 
-                        self.migrator_tables.insert_constraint(
-                            self.source_schema,
-                            table_info['table_name'],
-                            table_info['id'],
-                            constraint_details['constraint_name'],
-                            constraint_details['constraint_type'],
-                            self.target_schema,
-                            table_info['table_name'],
-                            target_db_constraint_sql,
-                            constraint_details['constraint_comment']
+                        self.migrator_tables.insert_constraint( {
+                            'source_schema': self.source_schema,
+                            'source_table': table_info['table_name'],
+                            'source_table_id': table_info['id'],
+                            'constraint_name': constraint_details['constraint_name'],
+                            'constraint_type': constraint_details['constraint_type'],
+                            'target_schema': self.target_schema,
+                            'target_table': table_info['table_name'],
+                            'constraint_sql': target_db_constraint_sql,
+                            'constraint_comment': constraint_details['constraint_comment'] }
                         )
                     self.logger.info(f"Constraint {constraint_details['constraint_name']} for table {table_info['table_name']}")
                 else:
@@ -464,6 +464,8 @@ class Planner:
                     'udt_name': column_info['udt_name'] if 'udt_name' in column_info else '',
                     'domain_schema': column_info['domain_schema'] if 'domain_schema' in column_info else '',
                     'domain_name': column_info['domain_name'] if 'domain_name' in column_info else '',
+                    'is_hidden_column': column_info['is_hidden_column'] if 'is_hidden_column' in column_info else '',
+                    'stripped_generation_expression': column_info['stripped_generation_expression'] if 'stripped_generation_expression' in column_info else '',
                 }
         else:
             raise ValueError(f"Unsupported target database type: {target_db_type}")

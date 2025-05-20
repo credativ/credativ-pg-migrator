@@ -84,6 +84,8 @@ class DatabaseConnector(ABC):
             'is_generated_virtual': 'YES' / 'NO',
             'is_generated_stored': 'YES' / 'NO',
             'generation_expression': expression for generated column,
+            'stripped_generation_expression':
+                - expression for generated column stripped of all the specific syntax of the source database
             'udt_schema': schema name of the user defined type,
             'udt_name': name of the user defined type,
             'domain_schema':
@@ -91,6 +93,10 @@ class DatabaseConnector(ABC):
                 - domains are additional checks on columns
             'domain_name':
                 - name of the domain
+            'is_hidden_column':
+                - 'YES' / 'NO' - hidden column
+                - for example hidden calculated stored column in Sybase ASE used for functional indexes
+                - it is up to the target database to decide if it is relevant for migration or not
             }
         }
 

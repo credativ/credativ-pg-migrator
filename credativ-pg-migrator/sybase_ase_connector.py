@@ -124,11 +124,16 @@ class SybaseASEConnector(DatabaseConnector):
                 c.scale as data_type_scale,
                 t.allownulls as type_nullable,
                 t.ident as type_has_identity_property,
-                object_name(c.domain) as domain_name
+                object_name(c.domain) as domain_name,
+                case when c.status2 & 16 = 16 then 1 else 0 end is_generated_virtual,
+                case when c.status2 & 32 = 32 then 1 else 0 end is_genreated_stored,
+                com.text as computed_column_expression,
+                case when c.status3 & 1 = 1 then 1 else 0 end as is_hidden_column
             FROM syscolumns c
             JOIN sysobjects tab ON c.id = tab.id
             JOIN systypes t ON c.usertype = t.usertype
             LEFT JOIN syscomments co ON c.cdefault = co.id
+            LEFT JOIN syscomments com ON c.computedcol = com.id
             WHERE user_name(tab.uid) = '{table_schema}'
                 AND tab.name = '{table_name}'
                 AND tab.type = 'U'
@@ -161,6 +166,11 @@ class SybaseASEConnector(DatabaseConnector):
                 type_nullable = row[15]
                 type_has_identity_property = row[16]
                 domain_name = row[17]
+                is_generated_virtual = row[18]
+                is_generated_stored = row[19]
+                generation_expression = row[20]
+                is_hidden_column = row[21]
+                stripped_generation_expression = generation_expression.replace('AS ', '').replace('MATERIALIZED', '').strip() if generation_expression else ''
                 result[ordinal_position] = {
                     'column_name': column_name,
                     'data_type': data_type,
@@ -172,6 +182,11 @@ class SybaseASEConnector(DatabaseConnector):
                     'column_comment': '',
                     'is_identity': 'YES' if identity_column == 1 else 'NO',
                     'domain_name': domain_name,
+                    'is_generated_virtual': 'YES' if is_generated_virtual == 1 else 'NO',
+                    'is_generated_stored': 'YES' if is_generated_stored == 1 else 'NO',
+                    'generation_expression': generation_expression,
+                    'stripped_generation_expression': stripped_generation_expression,
+                    'is_hidden_column': 'YES' if is_hidden_column == 1 else 'NO',
                 }
 
                 query_custom_types = f"""
@@ -277,13 +292,10 @@ class SybaseASEConnector(DatabaseConnector):
             # default_value['default_value_sql'] = re.sub(r'\"', '', default_value['default_value_sql'])
             # default_value['default_value_sql'] = re.sub(r'`', '', default_value['default_value_sql'])
             extracted_default_value = default_value['default_value_sql']
-            extracted_default_value = re.sub(
-                rf'create\s+default\s+{re.escape(default_value["default_value_name"])}\s+as',
-                '',
-                extracted_default_value,
-                flags=re.IGNORECASE
-            ).strip()
+            extracted_default_value = re.sub(rf'create\s+default\s+{re.escape(default_value["default_value_name"])}\s+as', '', extracted_default_value, flags=re.IGNORECASE).strip()
+            extracted_default_value = re.sub(rf'default\s+', '', extracted_default_value, flags=re.IGNORECASE).strip()
             extracted_default_value = extracted_default_value.replace('"', '')
+            extracted_default_value = extracted_default_value.replace("'", '')
             default_value['extracted_default_value'] = extracted_default_value.strip()
         return default_values
 

@@ -11,6 +11,7 @@
   - Implemented migration of Sybase ASE computed columns. These are currently migrated into PostgreSQL as stored generated columns.
     - Remaining issues: adjustments of functional indexes which use computed hidden columns
   - Fix in data type alterations for IDENTITY columns - if altered column is used in FK, migrator must change also dependent columns for FKs to work properly
+    - Remaining issue: improved reporting of altered columns in the summary
 
 - 2025.05.19:
 

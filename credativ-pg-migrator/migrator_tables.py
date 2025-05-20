@@ -1988,6 +1988,7 @@ class MigratorTables:
         self.print_summary('User Defined Types', self.config_parser.get_protocol_name_user_defined_types())
         self.print_summary('Tables', self.config_parser.get_protocol_name_tables())
         self.print_data_migration_summary()
+        self.print_summary('Altered columns', self.config_parser.get_protocol_name_target_columns_alterations(), 'reason')
         self.print_summary('Sequences', self.config_parser.get_protocol_name_sequences())
         self.print_summary('Indexes', self.config_parser.get_protocol_name_indexes(), 'index_type, index_owner')
         self.print_summary('Constraints', self.config_parser.get_protocol_name_constraints(), 'constraint_type')

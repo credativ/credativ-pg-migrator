@@ -1,4 +1,4 @@
-MIGRATOR_VERSION = '0.7.1'
+MIGRATOR_VERSION = '0.7.5'
 MIGRATOR_FULL_NAME = 'Database Migration Tool credativ-pg-migrator'
 
 ## Internal defaults used by the migrator

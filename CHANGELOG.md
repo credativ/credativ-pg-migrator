@@ -1,6 +1,8 @@
 # Changelog
 
-## (not released yet) 0.7.2 - 2025.05.xx
+## 0.7.5 - 2025.05.21
+
+- cumulative release of changes from 0.7.1 to 0.7.4
 
 - 2025.05.20:
 

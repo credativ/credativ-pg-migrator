@@ -187,6 +187,9 @@ class ConfigParser:
     def get_protocol_name_default_values(self):
         return f"{self.get_protocol_name()}_defaults"
 
+    def get_protocol_name_target_columns_alterations(self):
+        return f"{self.get_protocol_name()}_target_cols_alt"
+
     def get_protocol_name_new_objects(self):
         return f"{self.get_protocol_name()}_new_objects"
 

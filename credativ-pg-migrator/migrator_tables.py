@@ -21,6 +21,7 @@ class MigratorTables:
         self.create_table_for_domains()
         self.create_table_for_new_objects()
         self.create_table_for_tables()
+        self.create_table_for_target_columns_alterations()
         self.create_table_for_data_migration()
         # self.create_table_for_pk_ranges()
         self.create_table_for_indexes()
@@ -696,6 +697,73 @@ class MigratorTables:
         # if self.config_parser.get_log_level() == 'DEBUG':
         #     self.logger.debug(f"Fetched rows: {row}")
         return self.decode_default_value_row(row) if row else {}
+
+    def create_table_for_target_columns_alterations(self):
+        table_name = self.config_parser.get_protocol_name_target_columns_alterations()
+        self.protocol_connection.execute_query(self.drop_table_sql.format(protocol_schema=self.protocol_schema, table_name=table_name))
+        self.protocol_connection.execute_query(f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."{table_name}"
+            (id SERIAL PRIMARY KEY,
+            target_schema TEXT,
+            target_table TEXT,
+            target_column TEXT,
+            reason TEXT,
+            original_data_type TEXT,
+            altered_data_type TEXT,
+            task_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            task_completed TIMESTAMP,
+            success BOOLEAN,
+            message TEXT
+            )
+        """)
+        # if self.config_parser.get_log_level() == 'DEBUG':
+        #     self.logger.debug(f"Target columns alterations table {table_name} created.")
+
+    def insert_target_column_alteration(self, settings):
+        ## target_schema, target_table, target_column, original_data_type, altered_data_type
+        target_schema = settings['target_schema']
+        target_table = settings['target_table']
+        target_column = settings['target_column']
+        reason = settings['reason'] if 'reason' in settings else ''
+        original_data_type = settings['original_data_type']
+        altered_data_type = settings['altered_data_type']
+
+        table_name = self.config_parser.get_protocol_name_target_columns_alterations()
+        query = f"""
+            INSERT INTO "{self.protocol_schema}"."{table_name}"
+            (target_schema, target_table, target_column, reason, original_data_type, altered_data_type)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            RETURNING *
+        """
+        params = (target_schema, target_table, target_column, reason, original_data_type, altered_data_type)
+        # if self.config_parser.get_log_level() == 'DEBUG':
+        #     self.logger.debug(f"Target column alteration insert query: {query}")
+        #     self.logger.debug(f"Target column alteration insert params: {params}")
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+
+            # if self.config_parser.get_log_level() == 'DEBUG':
+            #     self.logger.debug(f"Returned row: {row}")
+            target_column_alteration_row = self.decode_target_column_alteration_row(row)
+            self.insert_protocol('target_column_alteration', target_table + '.' + target_column, 'alter', None, None, None, None, 'info', None, target_column_alteration_row['id'])
+            return target_column_alteration_row['id']
+        except Exception as e:
+            self.logger.error(f"Error inserting target column alteration {target_table}.{target_column} into {table_name}.")
+            self.logger.error(e)
+            raise
+
+    def decode_target_column_alteration_row(self, row):
+        return {
+            'id': row[0],
+            'target_schema': row[1],
+            'target_table': row[2],
+            'target_column': row[3],
+            'original_data_type': row[4],
+            'altered_data_type': row[5]
+        }
 
     def create_table_for_data_migration(self):
         table_name = self.config_parser.get_protocol_name_data_migration()

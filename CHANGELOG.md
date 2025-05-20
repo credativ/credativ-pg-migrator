@@ -6,22 +6,22 @@
 
 - 2025.05.20:
 
-  - Implemented proper handlig of Sybase ASE named default values created explicitly using CREATE DEFAULT command vs custom defined replacements for default values on columns.
+  - Implemented proper handling of Sybase ASE named default values created explicitly using CREATE DEFAULT command vs custom defined replacements for default values on columns.
     - Code extracts default value from CREATE DEFAULT command and uses it for migration unless there is a custom defined replacement for the default value in the config file. Custom replacement has higher priority.
   - Implemented migration of Sybase ASE computed columns. These are currently migrated into PostgreSQL as stored generated columns.
     - Remaining issues: adjustments of functional indexes which use computed hidden columns
-  - Fix in data type alterations for IDENTITY columns - if altered column is used in FK, migrator must change also dependent columns for FKs to work properly
+  - Fix in data type alterations for IDENTITY columns, NUMERIC must be changed to BIGINT for PostgreSQL to allow IDENTITY attribute - if altered column is used in FK, migrator must change also dependent columns for FKs to work properly
     - Remaining issue: improved reporting of altered columns in the summary
 
 - 2025.05.19:
 
   - Updates in Sybase ASE testing databases
-  - Added migration of check rules/domains in Sybase ASE. Definitions are read from Sybase rules and are migrated as additinal check constraints to PostgreSQL.
+  - Added migration of check rules/domains in Sybase ASE. Definitions are read from Sybase rules and are migrated as additional check constraints to PostgreSQL.
     - These constraints are created only after data are migrated, because in some cases they need manual adjustments in syntax and could block migration of data.
 
 - 2025.05.18:
 
-  - Added new testing databases for Sybase ASE, improved desctriptions for Sybase ASE
+  - Added new testing databases for Sybase ASE, improved descriptions for Sybase ASE
   - Properly implemented migration of CHECK constraints for Sybase ASE
 
 - 2025.05.17:
@@ -32,7 +32,7 @@
     - Modification of PRIMARY KEY in planner is necessary for PostgreSQL partitioning, because it must contain partitioning column(s)
   - Refactored function fetch_constraints in all connectors
     - Rationale: The same as for indexes
-  - Created corresponing functions in PostgreSQL connector for creation of indexes and constraints DDL statements
+  - Created corresponding functions in PostgreSQL connector for creation of indexes and constraints DDL statements
   - Started feature matrix file as overview of supported features in all connectors
 
 - 2025.05.16:
@@ -47,7 +47,7 @@
   - Full refactoring of the function convert_table_columns - redundant code removed from connectors, function replaced with a database specific function get_types_mapping, conversion of types moved to the planner
     - Reason: code was redundant in all connectors, there were issues with custom replacements and IDENTITY columns
     - Rationale: previous solution was repeating the same code in all connectors and complicated custom replacements and handling of IDENTITY columns
-    - This change will also simplify the replacement of data types for Forein Key columns
+    - This change will also simplify the replacement of data types for Foreign Key columns
 
 - 2025.05.15:
 

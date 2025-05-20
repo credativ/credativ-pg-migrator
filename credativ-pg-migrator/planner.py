@@ -28,6 +28,7 @@ class Planner:
 
             self.run_prepare_user_defined_types()
             self.run_prepare_domains()
+            self.run_prepare_defaults()
             self.run_prepare_tables()
             self.run_prepare_views()
 
@@ -440,6 +441,7 @@ class Planner:
                 converted[order_num] = {
                     'column_name': column_info['column_name'],
                     'is_nullable': column_info['is_nullable'],
+                    'column_default_name': column_info['column_default_name'] if 'column_default_name' in column_info else '',
                     'column_default_value': column_info['column_default_value'],
                     'replaced_column_default_value': column_info['replaced_column_default_value'] if 'replaced_column_default_value' in column_info else '',
                     'data_type': coltype,
@@ -589,6 +591,30 @@ class Planner:
             self.logger.info("Planner - Domains processed successfully.")
         else:
             self.logger.info("No domains found.")
+
+    def run_prepare_defaults(self):
+        self.logger.info("Planner - Preparing defaults...")
+        defaults = self.source_connection.fetch_default_values({ 'source_schema': self.source_schema})
+        if defaults:
+            if self.config_parser.get_log_level() == 'DEBUG':
+                self.logger.debug(f"Defaults found in source database: {defaults}")
+            for order_num, default_info in defaults.items():
+                if self.config_parser.get_log_level() == 'DEBUG':
+                    self.logger.debug(f"Processing default: {default_info}")
+
+                settings = {
+                    'default_value_schema': default_info['default_value_schema'],
+                    'default_value_name': default_info['default_value_name'],
+                    'default_value_sql': default_info['default_value_sql'],
+                    'extracted_default_value': default_info['extracted_default_value'],
+                    'default_value_data_type': default_info['default_value_data_type'] if 'default_value_data_type' in default_info else '',
+                    'default_value_comment':  default_info['default_value_comment'] if 'default_value_comment' in default_info else '',
+                }
+                self.migrator_tables.insert_default_value(settings)
+                self.logger.info(f"Default {default_info['default_value_name']} processed successfully.")
+            self.logger.info("Planner - Defaults processed successfully.")
+        else:
+            self.logger.info("No defaults found.")
 
     def run_pre_migration_script(self):
         pre_migration_script = self.config_parser.get_pre_migration_script()

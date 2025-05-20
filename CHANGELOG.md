@@ -7,7 +7,8 @@
   - Updates in Sybase ASE testing databases
   - Added migration of check rules/domains in Sybase ASE. Definitions are read from Sybase rules and are migrated as additinal check constraints to PostgreSQL.
     - These constraints are created only after data are migrated, because in some cases they need manual adjustments in syntax and could block migration of data.
-  - Updates for handling Sybase ASE named default values created explicitly using CREATE DEFAULT command
+  - Implemented proper handlig of Sybase ASE named default values created explicitly using CREATE DEFAULT command vs custom defined replacements for default values on columns.
+    - Code extracts default value from CREATE DEFAULT command and uses it for migration unless there is a custom defined replacement for the default value in the config file. Custom replacement has higher priority.
 
 - 2025.05.18:
 

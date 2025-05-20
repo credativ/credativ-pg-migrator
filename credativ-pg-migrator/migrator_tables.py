@@ -17,11 +17,11 @@ class MigratorTables:
         self.create_protocol()
         self.create_table_for_main()
         self.create_table_for_user_defined_types()
+        self.create_table_for_default_values()
         self.create_table_for_domains()
         self.create_table_for_new_objects()
         self.create_table_for_tables()
         self.create_table_for_data_migration()
-        self.create_table_for_internal_data_types_substitutions()
         # self.create_table_for_pk_ranges()
         self.create_table_for_indexes()
         self.create_table_for_constraints()
@@ -176,19 +176,19 @@ class MigratorTables:
         CREATE TABLE IF NOT EXISTS "{self.protocol_schema}".default_values_substitution (
         column_name TEXT,
         source_column_data_type TEXT,
-        source_default_value TEXT,
+        default_value_value TEXT,
         target_default_value TEXT,
         inserted TIMESTAMP DEFAULT clock_timestamp()
         )
         """)
 
         # Insert data into the table
-        for column_name, source_column_data_type, source_default_value, target_default_value in self.config_parser.get_default_values_substitution():
+        for column_name, source_column_data_type, default_value_value, target_default_value in self.config_parser.get_default_values_substitution():
             self.protocol_connection.execute_query(f"""
             INSERT INTO "{self.protocol_schema}".default_values_substitution
-            (column_name, source_column_data_type, source_default_value, target_default_value)
+            (column_name, source_column_data_type, default_value_value, target_default_value)
             VALUES (%s, %s, %s, %s)
-            """, (column_name, source_column_data_type, source_default_value, target_default_value))
+            """, (column_name, source_column_data_type, default_value_value, target_default_value))
 
     def check_default_values_substitution(self, settings):
         ## check_column_name, check_column_data_type, check_default_value
@@ -202,7 +202,7 @@ class MigratorTables:
             FROM "{self.protocol_schema}".default_values_substitution
             WHERE upper(trim(%s)) LIKE upper(trim(column_name))
             AND upper(trim(%s)) LIKE upper(trim(source_column_data_type))
-            AND upper(trim(%s::TEXT)) LIKE upper(trim(source_default_value::TEXT))
+            AND upper(trim(%s::TEXT)) LIKE upper(trim(default_value_value::TEXT))
         """
         cursor = self.protocol_connection.connection.cursor()
         cursor.execute(query, (check_column_name, check_column_data_type, check_default_value))
@@ -217,7 +217,7 @@ class MigratorTables:
                 FROM "{self.protocol_schema}".default_values_substitution
                 WHERE upper(trim(column_name)) = ''
                 AND upper(trim(%s)) LIKE upper(trim(source_column_data_type))
-                AND upper(trim(%s::TEXT)) LIKE upper(trim(source_default_value::TEXT))
+                AND upper(trim(%s::TEXT)) LIKE upper(trim(default_value_value::TEXT))
             """
             cursor.execute(query, (check_column_data_type, check_default_value))
             result = cursor.fetchone()
@@ -231,7 +231,7 @@ class MigratorTables:
                     FROM "{self.protocol_schema}".default_values_substitution
                     WHERE upper(trim(column_name)) = ''
                     AND upper(trim(source_column_data_type)) = ''
-                    AND upper(trim(%s::TEXT)) LIKE upper(trim(source_default_value::TEXT))
+                    AND upper(trim(%s::TEXT)) LIKE upper(trim(default_value_value::TEXT))
                 """
                 cursor.execute(query, (check_default_value,))
                 result = cursor.fetchone()
@@ -598,11 +598,12 @@ class MigratorTables:
         self.protocol_connection.execute_query(f"""
             CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."{table_name}"
             (id SERIAL PRIMARY KEY,
-            source_default_name TEXT,
-            source_default_sql TEXT,
-            source_default_value TEXT,
-            source_column_data_type TEXT,
-            target_default_value TEXT,
+            default_value_schema TEXT,
+            default_value_name TEXT,
+            default_value_sql TEXT,
+            extracted_default_value TEXT,
+            default_value_data_type TEXT,
+            default_value_comment TEXT,
             task_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             task_completed TIMESTAMP,
             success BOOLEAN,
@@ -612,6 +613,89 @@ class MigratorTables:
         # if self.config_parser.get_log_level() == 'DEBUG':
         #     self.logger.debug(f"Default values table {table_name} created.")
 
+    def insert_default_value(self, settings):
+        default_value_schema = settings['default_value_schema']
+        default_value_name = settings['default_value_name']
+        default_value_sql = settings['default_value_sql']
+        extracted_default_value = settings['extracted_default_value']
+        default_value_data_type = settings['default_value_data_type']
+
+        table_name = self.config_parser.get_protocol_name_default_values()
+        query = f"""
+            INSERT INTO "{self.protocol_schema}"."{table_name}"
+            (default_value_schema, default_value_name, default_value_sql,
+            extracted_default_value, default_value_data_type)
+            VALUES (%s, %s, %s, %s, %s)
+            RETURNING *
+        """
+        params = (default_value_schema, default_value_name, default_value_sql,
+                  extracted_default_value, default_value_data_type)
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+
+            # if self.config_parser.get_log_level() == 'DEBUG':
+            #     self.logger.debug(f"Returned row: {row}")
+            default_value_row = self.decode_user_defined_type_row(row)
+            self.insert_protocol('default_value', default_value_name, 'create', None, None, None, None, 'info', None, default_value_row['id'])
+        except Exception as e:
+            self.logger.error(f"Error inserting default value {default_value_name} into {table_name}.")
+            self.logger.error(e)
+            raise
+
+    def update_default_value_status(self, row_id, success, message):
+        table_name = self.config_parser.get_protocol_name_default_values()
+        query = f"""
+            UPDATE "{self.protocol_schema}"."{table_name}"
+            SET task_completed = CURRENT_TIMESTAMP,
+            success = %s,
+            message = %s
+            WHERE id = %s
+            RETURNING *
+        """
+        params = ('TRUE' if success else 'FALSE', message, row_id)
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+
+            # if self.config_parser.get_log_level() == 'DEBUG':
+            #     self.logger.debug(f"Returned row: {row}")
+            if row:
+                default_value_row = self.decode_default_value_row(row)
+                self.update_protocol('default_value', default_value_row['id'], success, message, None)
+            else:
+                self.logger.error(f"Error updating status for default value {row_id} in {table_name}.")
+                self.logger.error(f"Error: No protocol row returned.")
+        except Exception as e:
+            self.logger.error(f"Error updating status for default value {row_id} in {table_name}.")
+            self.logger.error(f"Query: {query}")
+            self.logger.error(e)
+            raise
+
+    def decode_default_value_row(self, row):
+        return {
+            'id': row[0],
+            'default_value_schema': row[1],
+            'default_value_name': row[2],
+            'default_value_sql': row[3],
+            'extracted_default_value': row[4],
+            'default_value_data_type': row[5],
+        }
+
+    def get_default_value_details(self, default_value_name):
+        table_name = self.config_parser.get_protocol_name_default_values()
+        query = f"""SELECT * FROM "{self.protocol_schema}"."{table_name}" WHERE default_value_name = '{default_value_name}'"""
+        cursor = self.protocol_connection.connection.cursor()
+        cursor.execute(query)
+        row = cursor.fetchone()
+        cursor.close()
+        # if self.config_parser.get_log_level() == 'DEBUG':
+        #     self.logger.debug(f"Fetched rows: {row}")
+        return self.decode_default_value_row(row) if row else {}
 
     def create_table_for_data_migration(self):
         table_name = self.config_parser.get_protocol_name_data_migration()

@@ -100,6 +100,29 @@ class DatabaseConnector(ABC):
         pass
 
     @abstractmethod
+    def fetch_default_values(self, settings) -> dict:
+        """
+        Relevant only for database that support independently created named default values
+        settings - dictionary with the following keys
+            - table_schema: str,
+        Returns a dictionary describing the default values
+        { ordinary_value: {
+            - 'default_value_schema':
+                - schema name / owner name of the default value
+            - 'default_value_name'
+            - 'default_value_sql'
+                - original source SQL statement to create the default value in the source database
+            - 'extracted_default_value':
+                - plain default value extracted from the SQL statement
+            - 'default_value_data_type':
+                - data type of the default value - if possible to easily extract
+            - 'default_value_comment'
+            }
+        }
+        """
+        pass
+
+    @abstractmethod
     def is_string_type(self, column_type: str) -> bool:
         """
         Check if the column type is a string type.

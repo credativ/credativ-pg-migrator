@@ -232,6 +232,62 @@ class SybaseASEConnector(DatabaseConnector):
             self.logger.error(e)
             raise
 
+    def fetch_default_values(self, settings) -> dict:
+        source_schema = settings['source_schema']
+        query = f"""
+            SELECT
+                USER_NAME(def_obj.uid) AS DefaultOwner,
+                def_obj.name AS DefaultObjectName,
+                sc.colid AS DefinitionLineNumber,
+                sc.text AS DefaultDefinitionPart
+            FROM
+                sysobjects def_obj
+            JOIN
+                syscomments sc ON def_obj.id = sc.id
+            WHERE
+                def_obj.type = 'D'  -- 'D' signifies a Default object created with CREATE DEFAULT
+            ORDER BY
+                DefaultObjectName, DefinitionLineNumber
+        """
+        self.connect()
+        cursor = self.connection.cursor()
+        cursor.execute(query)
+        default_values = {}
+        for row in cursor.fetchall():
+            default_owner = row[0]
+            default_object_name = row[1]
+            definition_line_number = row[2]
+            default_definition_part = row[3].strip()
+            if default_object_name not in default_values:
+                default_values[default_object_name] = {
+                    'default_value_schema': default_owner,
+                    'default_value_name': default_object_name,
+                    'default_value_sql': default_definition_part,
+                    'extracted_default_value': '',
+                    'default_value_comment': '',
+                }
+            else:
+                default_values[default_object_name]['default_value_sql'] += f" {default_definition_part}"
+        cursor.close()
+        self.disconnect()
+
+        for default_object_name, default_value in default_values.items():
+            default_value['default_value_sql'] = re.sub(r'\s+', ' ', default_value['default_value_sql']).strip()
+            default_value['default_value_sql'] = re.sub(r'\n', '', default_value['default_value_sql'])
+            # default_value['default_value_sql'] = re.sub(r'\"', '', default_value['default_value_sql'])
+            # default_value['default_value_sql'] = re.sub(r'`', '', default_value['default_value_sql'])
+            extracted_default_value = default_value['default_value_sql']
+            extracted_default_value = re.sub(
+                rf'create\s+default\s+{re.escape(default_value["default_value_name"])}\s+as',
+                '',
+                extracted_default_value,
+                flags=re.IGNORECASE
+            ).strip()
+            extracted_default_value = extracted_default_value.replace('"', '')
+            default_value['extracted_default_value'] = extracted_default_value.strip()
+        return default_values
+
+
     def get_types_mapping(self, settings):
         target_db_type = settings['target_db_type']
         types_mapping = {}

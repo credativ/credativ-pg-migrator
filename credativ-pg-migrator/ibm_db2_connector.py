@@ -539,5 +539,9 @@ class IBMDB2Connector(DatabaseConnector):
         # Placeholder for generating CREATE DOMAIN SQL
         return ""
 
+    def fetch_default_values(self, settings) -> dict:
+        # Placeholder for fetching default values
+        return {}
+
     def testing_select(self):
         return "SELECT 1 FROM SYSIBM.SYSDUMMY1"

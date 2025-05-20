@@ -290,6 +290,7 @@ class Orchestrator:
             target_schema = table_data['target_schema']
             target_table = table_data['target_table']
             create_table_sql = table_data['target_table_sql']
+            migrator_tables = settings['migrator_tables']
 
             if create_table_sql is None:
                 self.logger.info(f"Table {target_table} does not have a CREATE TABLE statement - skipping.")
@@ -345,6 +346,22 @@ class Orchestrator:
                             self.logger.debug(f"Worker {worker_id}: Creating partition for table {target_table}: {partition_sql}")
                         worker_target_connection.execute_query(partition_sql)
                         self.logger.info(f"""Worker {worker_id}: Partition of "{target_table}" created successfully [{partition_sql}].""")
+
+                ## now check alterations of columns due to FK IDENTITY dependency
+                for result in migrator_tables.fk_find_dependent_columns_to_alter({
+                    'target_schema': target_schema,
+                    'target_table': target_table,
+                }):
+                    if self.config_parser.get_log_level() == 'DEBUG':
+                        self.logger.debug(f"Worker {worker_id}: Found dependency for column alteration: {result}")
+                    alter_column_sql = f"""
+                        ALTER TABLE "{target_schema}"."{target_table}"
+                        ALTER COLUMN "{result['target_column'].replace('"','')}"
+                        TYPE {result['altered_data_type']}"""
+                    if self.config_parser.get_log_level() == 'DEBUG':
+                        self.logger.debug(f"Worker {worker_id}: Altering column with SQL: {alter_column_sql}")
+                    worker_target_connection.execute_query(alter_column_sql)
+                    self.logger.info(f"""Worker {worker_id}: Column "{result['target_column']}" altered successfully.""")
 
             if settings['migrate_data']:
                 # data migration

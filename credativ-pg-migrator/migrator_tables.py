@@ -765,6 +765,37 @@ class MigratorTables:
             'altered_data_type': row[5]
         }
 
+    def fk_find_dependent_columns_to_alter(self, settings):
+        """
+        Find the dependent column to alter in the target table based on the foreign key constraints.
+        Yields each matching row as a dict.
+        """
+        table_name_constraints = self.config_parser.get_protocol_name_constraints()
+        table_name_target_columns_alterations = self.config_parser.get_protocol_name_target_columns_alterations()
+        query = f"""SELECT
+                        replace(c.constraint_columns,'"','') AS target_column,
+                        a.reason,
+                        a.original_data_type,
+                        a.altered_data_type
+                    FROM "{self.protocol_schema}".{table_name_constraints} c
+                    JOIN "{self.protocol_schema}".{table_name_target_columns_alterations} a
+                    ON c.referenced_table_name = a.target_table
+                    AND replace(c.referenced_columns,'"','') = a.target_column
+                    WHERE c.constraint_type = 'FOREIGN KEY'
+                    AND c.target_schema = '{settings['target_schema']}'
+                    AND c.target_table = '{settings['target_table']}'
+                """
+        cursor = self.protocol_connection.connection.cursor()
+        cursor.execute(query)
+        for row in cursor:
+            yield {
+                'target_column': row[0],
+                'reason': row[1],
+                'original_data_type': row[2],
+                'altered_data_type': row[3]
+            }
+        cursor.close()
+
     def create_table_for_data_migration(self):
         table_name = self.config_parser.get_protocol_name_data_migration()
         self.protocol_connection.execute_query(self.drop_table_sql.format(protocol_schema=self.protocol_schema, table_name=table_name))
@@ -1015,31 +1046,6 @@ class MigratorTables:
         # if self.config_parser.get_log_level() == 'DEBUG':
         #     self.logger.debug(f"Indexes table {table_name} created.")
 
-    def create_table_for_constraints(self):
-        table_name = self.config_parser.get_protocol_name_constraints()
-        self.protocol_connection.execute_query(self.drop_table_sql.format(protocol_schema=self.protocol_schema, table_name=table_name))
-        self.protocol_connection.execute_query(f"""
-            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."{table_name}"
-            (id SERIAL PRIMARY KEY,
-            source_schema TEXT,
-            source_table TEXT,
-            source_table_id INTEGER,
-            constraint_name TEXT,
-            constraint_type TEXT,
-            target_schema TEXT,
-            target_table TEXT,
-            constraint_sql TEXT,
-            constraint_comment TEXT,
-            task_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            task_started TIMESTAMP,
-            task_completed TIMESTAMP,
-            success BOOLEAN,
-            message TEXT
-            )
-        """)
-        # if self.config_parser.get_log_level() == 'DEBUG':
-        #     self.logger.debug(f"Constraints table {table_name} created.")
-
     def create_table_for_funcprocs(self):
         table_name = self.config_parser.get_protocol_name_funcprocs()
         self.protocol_connection.execute_query(self.drop_table_sql.format(protocol_schema=self.protocol_schema, table_name=table_name))
@@ -1182,20 +1188,6 @@ class MigratorTables:
             'index_columns_count': row[11],
             'index_columns_data_types': row[12],
             'index_comment': row[13]
-        }
-
-    def decode_constraint_row(self, row):
-        return {
-            'id': row[0],
-            'source_schema': row[1],
-            'source_table': row[2],
-            'source_table_id': row[3],
-            'constraint_name': row[4],
-            'constraint_type': row[5],
-            'target_schema': row[6],
-            'target_table': row[7],
-            'constraint_sql': row[8],
-            'constraint_comment': row[9]
         }
 
     def decode_funcproc_row(self, row):
@@ -1427,26 +1419,90 @@ class MigratorTables:
             self.logger.error(e)
             raise
 
-    def insert_constraint(self, settings):
-        ## source_schema, source_table, source_table_id, constraint_name, constraint_type, target_schema, target_table, constraint_sql, constraint_comment
-        source_schema = settings['source_schema']
-        source_table = settings['source_table']
-        source_table_id = settings['source_table_id']
-        constraint_name = settings['constraint_name']
-        constraint_type = settings['constraint_type']
-        target_schema = settings['target_schema']
-        target_table = settings['target_table']
-        constraint_sql = settings['constraint_sql']
-        constraint_comment = settings['constraint_comment']
+    def create_table_for_constraints(self):
+        table_name = self.config_parser.get_protocol_name_constraints()
+        self.protocol_connection.execute_query(self.drop_table_sql.format(protocol_schema=self.protocol_schema, table_name=table_name))
+        self.protocol_connection.execute_query(f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."{table_name}"
+            (id SERIAL PRIMARY KEY,
+            source_table_id INTEGER,
+            source_schema TEXT,
+            source_table TEXT,
+            target_schema TEXT,
+            target_table TEXT,
+            constraint_name TEXT,
+            constraint_type TEXT,
+            constraint_owner TEXT,
+            constraint_columns TEXT,
+            referenced_table_schema TEXT,
+            referenced_table_name TEXT,
+            referenced_columns TEXT,
+            constraint_sql TEXT,
+            delete_rule TEXT,
+            update_rule TEXT,
+            constraint_comment TEXT,
+            constraint_status TEXT,
+            task_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            task_started TIMESTAMP,
+            task_completed TIMESTAMP,
+            success BOOLEAN,
+            message TEXT
+            )
+        """)
+        # if self.config_parser.get_log_level() == 'DEBUG':
+        #     self.logger.debug(f"Constraints table {table_name} created.")
 
+    def decode_constraint_row(self, row):
+        return {
+            'id': row[0],
+            'source_table_id': row[1],
+            'source_schema': row[2],
+            'source_table': row[3],
+            'target_schema': row[4],
+            'target_table': row[5],
+            'constraint_name': row[6],
+            'constraint_type': row[7],
+            'constraint_owner': row[8],
+            'constraint_columns': row[9],
+            'referenced_table_schema': row[10],
+            'referenced_table_name': row[11],
+            'referenced_columns': row[12],
+            'constraint_sql': row[13],
+            'delete_rule': row[14],
+            'update_rule': row[15],
+            'constraint_comment': row[16],
+            'constraint_status': row[17],
+            'task_created': row[18],
+            'task_started': row[19],
+            'task_completed': row[20],
+            'success': row[21],
+            'message': row[22]
+        }
+
+    def insert_constraint(self, settings):
         table_name = self.config_parser.get_protocol_name_constraints()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
-            (source_schema, source_table, source_table_id, constraint_name, constraint_type, target_schema, target_table, constraint_sql, constraint_comment)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (source_table_id, source_schema, source_table,
+            target_schema, target_table, constraint_name,
+            constraint_type,
+            constraint_owner, constraint_columns,
+            referenced_table_schema, referenced_table_name,
+            referenced_columns, constraint_sql,
+            delete_rule, update_rule, constraint_comment,
+            constraint_status)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (source_schema, source_table, source_table_id, constraint_name, constraint_type, target_schema, target_table, constraint_sql, constraint_comment)
+        params = (settings['source_table_id'], settings['source_schema'], settings['source_table'],
+                    settings['target_schema'], settings['target_table'], settings['constraint_name'],
+                    settings['constraint_type'],
+                    settings['constraint_owner'], settings['constraint_columns'],
+                    settings['referenced_table_schema'], settings['referenced_table_name'],
+                    settings['referenced_columns'], settings['constraint_sql'],
+                    settings['delete_rule'], settings['update_rule'], settings['constraint_comment'],
+                    settings['constraint_status'])
+
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -1456,9 +1512,10 @@ class MigratorTables:
             # if self.config_parser.get_log_level() == 'DEBUG':
             #     self.logger.debug(f"Returned row: {row}")
             constraint_row = self.decode_constraint_row(row)
-            self.insert_protocol('constraint', constraint_name, 'create', constraint_sql, None, None, None, 'info', None, constraint_row['id'])
+            self.insert_protocol('constraint', settings['constraint_name'], 'create',
+                                 settings['constraint_sql'], None, None, None, 'info', None, constraint_row['id'])
         except Exception as e:
-            self.logger.error(f"Error inserting constraint info {constraint_name} into {table_name}.")
+            self.logger.error(f"Error inserting constraint info {settings['constraint_name']} into {table_name}.")
             self.logger.error(f"Query: {query}")
             self.logger.error(e)
             raise

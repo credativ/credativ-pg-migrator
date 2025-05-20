@@ -10,6 +10,7 @@
     - Code extracts default value from CREATE DEFAULT command and uses it for migration unless there is a custom defined replacement for the default value in the config file. Custom replacement has higher priority.
   - Implemented migration of Sybase ASE computed columns. These are currently migrated into PostgreSQL as stored generated columns.
     - Remaining issues: adjustments of functional indexes which use computed hidden columns
+  - Fix in data type alterations for IDENTITY columns - if altered column is used in FK, migrator must change also dependent columns for FKs to work properly
 
 - 2025.05.19:
 
@@ -51,8 +52,7 @@
 
   - Added experimental support for target table partitioning by range for date/timestamp columns
     - Remaining issue: PRIMARY KEY on PostgreSQL must contain partitioning column
-  - Replacement of NUMBER primary keys with sequence as default value in Oracle connector with BIGINT IDENTITY column
-    - Remaining issue: if used in FK, migrator must change also dependent columns to BIGINT
+  - Replacement of NUMBER primary keys with sequence as default value with BIGINT IDENTITY column
   - Updates in Oracle connector - implemented migration of the full data model
 
 - 2025.05.14:

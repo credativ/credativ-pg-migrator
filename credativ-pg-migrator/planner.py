@@ -353,15 +353,24 @@ class Planner:
                         })
 
                         self.migrator_tables.insert_constraint( {
+                            'source_table_id': table_info['id'],
                             'source_schema': self.source_schema,
                             'source_table': table_info['table_name'],
-                            'source_table_id': table_info['id'],
-                            'constraint_name': constraint_details['constraint_name'],
-                            'constraint_type': constraint_details['constraint_type'],
                             'target_schema': self.target_schema,
                             'target_table': table_info['table_name'],
+                            'constraint_name': constraint_details['constraint_name'],
+                            'constraint_type': constraint_details['constraint_type'],
+                            'constraint_owner': constraint_details['constraint_owner'] if 'constraint_owner' in constraint_details else '',
+                            'constraint_columns': constraint_details['constraint_columns'] if 'constraint_columns' in constraint_details else '',
+                            'referenced_table_schema': constraint_details['referenced_table_schema'] if 'referenced_table_schema' in constraint_details else '',
+                            'referenced_table_name': constraint_details['referenced_table_name'] if 'referenced_table_name' in constraint_details else '',
+                            'referenced_columns': constraint_details['referenced_columns'] if 'referenced_columns' in constraint_details else '',
+                            'delete_rule': constraint_details['delete_rule'] if 'delete_rule' in constraint_details else '',
+                            'update_rule': constraint_details['update_rule'] if 'update_rule' in constraint_details else '',
                             'constraint_sql': target_db_constraint_sql,
-                            'constraint_comment': constraint_details['constraint_comment'] }
+                            'constraint_comment': constraint_details['constraint_comment'],
+                            'constraint_status': constraint_details['constraint_status'] if 'constraint_status' in constraint_details else '',
+                            }
                         )
                     self.logger.info(f"Constraint {constraint_details['constraint_name']} for table {table_info['table_name']}")
                 else:

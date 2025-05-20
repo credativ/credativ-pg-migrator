@@ -253,7 +253,7 @@ class Planner:
                                             if self.config_parser.get_log_level() == 'DEBUG':
                                                 self.logger.debug(f"Create partitions SQL: {create_partitions_sql}")
 
-                settings = {
+                self.migrator_tables.insert_tables({
                     'source_schema': self.source_schema,
                     'source_table': table_info['table_name'],
                     'source_table_id': table_info['id'],
@@ -267,11 +267,10 @@ class Planner:
                     'partitioned_by': table_partitioned_by,
                     'partitioning_columns': table_partitioning_columns,
                     'create_partitions_sql': create_partitions_sql,
-                }
-                self.migrator_tables.insert_tables(settings)
+                })
 
             except Exception as e:
-                settings = {
+                self.migrator_tables.insert_tables({
                     'source_schema': self.source_schema,
                     'source_table': table_info['table_name'],
                     'source_table_id': table_info['id'],
@@ -285,21 +284,19 @@ class Planner:
                     'partitioned_by': '',
                     'partitioning_columns': '',
                     'create_partitions_sql': '',
-                }
-                self.migrator_tables.insert_tables(settings)
+                })
                 self.handle_error(e, f"Table {table_info['table_name']}")
                 continue
 
             if self.config_parser.should_migrate_indexes():
-                settings = {
+                indexes = self.source_connection.fetch_indexes({
                     'source_table_id': table_info['id'],
                     'source_table_name': table_info['table_name'],
                     'source_table_schema': self.source_schema,
                     'target_table_schema': self.target_schema,
                     'target_table_name': table_info['table_name'],
                     'target_columns': target_columns,
-                }
-                indexes = self.source_connection.fetch_indexes(settings)
+                })
                 if self.config_parser.get_log_level() == 'DEBUG':
                     self.logger.debug(f"Indexes: {indexes}")
                 if indexes:
@@ -325,18 +322,17 @@ class Planner:
                 self.logger.info("Skipping index migration.")
 
             if self.config_parser.should_migrate_constraints():
-                settings = {
+                constraints = self.source_connection.fetch_constraints({
                     'source_table_id': table_info['id'],
                     'source_table_schema': self.source_schema,
                     'source_table_name': table_info['table_name'],
-                }
-                constraints = self.source_connection.fetch_constraints(settings)
+                })
                 if self.config_parser.get_log_level() == 'DEBUG':
                     self.logger.debug(f"Constraints: {constraints}")
                 if constraints:
                     for _, constraint_details in constraints.items():
 
-                        settings = {
+                        target_db_constraint_sql = self.target_connection.get_create_constraint_sql({
                             'source_schema': self.source_schema,
                             'source_table': table_info['table_name'],
                             'target_schema': self.target_schema,
@@ -354,8 +350,7 @@ class Planner:
                             'delete_rule': constraint_details['delete_rule'] if 'delete_rule' in constraint_details else '',
                             'update_rule': constraint_details['update_rule'] if 'update_rule' in constraint_details else '',
                             'constraint_status': constraint_details['constraint_status'] if 'constraint_status' in constraint_details else '',
-                        }
-                        target_db_constraint_sql = self.target_connection.get_create_constraint_sql(settings)
+                        })
 
                         self.migrator_tables.insert_constraint( {
                             'source_schema': self.source_schema,
@@ -381,11 +376,10 @@ class Planner:
                 if triggers:
                     for _, trigger_details in triggers.items():
 
-                        settings = {
-                            'source_schema': self.config_parser.get_source_schema(),
-                            'target_schema': self.config_parser.get_target_schema(),
-                        }
-                        converted_code = self.source_connection.convert_trigger(trigger_details['sql'], settings)
+                        converted_code = self.source_connection.convert_trigger(trigger_details['sql'], {
+                                'source_schema': self.config_parser.get_source_schema(),
+                                'target_schema': self.config_parser.get_target_schema(),
+                            })
 
                         if self.config_parser.get_log_level() == 'DEBUG':
                             self.logger.debug(f"Source trigger code: {trigger_details['sql']}")
@@ -495,22 +489,20 @@ class Planner:
                     self.logger.info(f"View {view_info['view_name']} is excluded from migration.")
                     continue
                 self.logger.info(f"View {view_info['view_name']} is included for migration.")
-                settings = {
+                view_sql = self.source_connection.fetch_view_code({
                     'view_id': view_info['id'],
                     'source_schema': self.config_parser.get_source_schema(),
                     'source_view_name': view_info['view_name'],
                     'target_schema': self.config_parser.get_target_schema(),
                     'target_view_name': view_info['view_name'],
-                }
-                view_sql = self.source_connection.fetch_view_code(settings)
+                })
                 if self.config_parser.get_log_level() == 'DEBUG':
                     self.logger.debug(f"Source view SQL: {view_sql}")
-                settings = {
+                converted_view_sql = self.source_connection.convert_view_code(view_sql, {
                     'source_database': self.config_parser.get_source_db_name(),
                     'source_schema': self.config_parser.get_source_schema(),
                     'target_schema': self.config_parser.get_target_schema(),
-                }
-                converted_view_sql = self.source_connection.convert_view_code(view_sql, settings)
+                })
 
                 if self.config_parser.get_log_level() == 'DEBUG':
                     self.logger.debug("Checking for remote objects substitution in view SQL...")
@@ -545,7 +537,7 @@ class Planner:
                 if self.config_parser.get_log_level() == 'DEBUG':
                     self.logger.debug(f"Converted type SQL: {converted_type_sql}")
 
-                settings = {
+                self.migrator_tables.insert_user_defined_type({
                     'source_schema_name': self.source_schema,
                     'source_type_name': type_info['type_name'],
                     'source_type_sql': type_sql,
@@ -553,8 +545,7 @@ class Planner:
                     'target_type_name': type_info['type_name'],
                     'target_type_sql': converted_type_sql,
                     'type_comment':  type_info['comment'],
-                }
-                self.migrator_tables.insert_user_defined_type(settings)
+                })
                 self.logger.info(f"User defined type {type_info['type_name']} processed successfully.")
             self.logger.info("Planner - User defined types processed successfully.")
         else:
@@ -577,7 +568,7 @@ class Planner:
                     self.logger.debug(f"Converted domain SQL: {converted_domain_sql}")
 
                 # If the source domain SQL contains 'CREATE RULE', set 'migrated_as' accordingly
-                settings = {
+                self.migrator_tables.insert_domain({
                     'source_schema_name': domain_info['domain_schema'] if 'domain_schema' in domain_info and domain_info['domain_schema'] is not None else self.source_schema,
                     'source_domain_name': domain_info['domain_name'],
                     'source_domain_sql': domain_info['source_domain_sql'],
@@ -587,8 +578,7 @@ class Planner:
                     'target_domain_sql': converted_domain_sql,
                     'migrated_as': migrated_as,
                     'domain_comment':  domain_info['domain_comment'],
-                }
-                self.migrator_tables.insert_domain(settings)
+                })
                 self.logger.info(f"Domain {domain_info['domain_name']} processed successfully.")
             self.logger.info("Planner - Domains processed successfully.")
         else:
@@ -604,15 +594,14 @@ class Planner:
                 if self.config_parser.get_log_level() == 'DEBUG':
                     self.logger.debug(f"Processing default: {default_info}")
 
-                settings = {
+                self.migrator_tables.insert_default_value({
                     'default_value_schema': default_info['default_value_schema'],
                     'default_value_name': default_info['default_value_name'],
                     'default_value_sql': default_info['default_value_sql'],
                     'extracted_default_value': default_info['extracted_default_value'],
                     'default_value_data_type': default_info['default_value_data_type'] if 'default_value_data_type' in default_info else '',
                     'default_value_comment':  default_info['default_value_comment'] if 'default_value_comment' in default_info else '',
-                }
-                self.migrator_tables.insert_default_value(settings)
+                })
                 self.logger.info(f"Default {default_info['default_value_name']} processed successfully.")
             self.logger.info("Planner - Defaults processed successfully.")
         else:

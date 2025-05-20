@@ -20,7 +20,7 @@ Legend:
 | NOT NULL constraints             | yes     | yes      | yes    | yes   | yes    | yes        | yes      | yes    |
 | Default values on columns        | WIP     | WIP      | WIP    | WIP   | WIP    | WIP        | WIP      | yes[4] |
 | IDENTITY columns                 | --      | --       | --     | --    | yes[1] | --         | --       | yes    |
-| Computed columns                 | --      | --       | --     | --    | --     | --         | --       | WIP[5] |
+| Computed(generated) columns      | --      | --       | --     | --    | --     | --         | --       | WIP[5] |
 | Custom replacement of data types | yes     | yes      | yes    | yes   | yes    | yes        | yes      | yes    |
 | Custom repl. of default values   | yes     | yes      | yes    | yes   | yes    | yes        | yes      | yes    |
 | Primary Keys                     | yes     | yes      | yes    | yes   | yes    | yes        | yes      | yes    |

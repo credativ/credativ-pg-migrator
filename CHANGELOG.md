@@ -6,7 +6,7 @@
 
   - Implemented proper handlig of Sybase ASE named default values created explicitly using CREATE DEFAULT command vs custom defined replacements for default values on columns.
     - Code extracts default value from CREATE DEFAULT command and uses it for migration unless there is a custom defined replacement for the default value in the config file. Custom replacement has higher priority.
-  - Added initial support for migration of Sybase ASE computed columns. These are currently migrated into PostgreSQL as stored generated columns.
+  - Implemented migration of Sybase ASE computed columns. These are currently migrated into PostgreSQL as stored generated columns.
     - Remaining issues: adjustments of functional indexes which use computed hidden columns
 
 - 2025.05.19:

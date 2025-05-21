@@ -1,24 +1,20 @@
 # credativ-pg-migrator
 
 This directory contains the main codebase for the migrator tool. The tool is written in Python in multiple classes and modules. The main entry point is the `main.py` file.
+For practical usage and examples refer to the [tests](../tests/) directory. There you can find working examples of the migration process for different databases.
 
 ## Run
 
-cd migrator
-
+```
 . ../migrator_venv/bin/activate
+echo ""> ../logs/test_database_20250306.log; python3 main.py --config=../config/test_database.yaml --log-file=../logs/test_database_20250306.log --log-level=DEBUG
+```
 
-echo ""> ../logs/informix_iwadb_20250306.log; python3 main.py --config=../config/informix_iwadb.yaml --log-file=../logs/informix_iwadb_20250306.log --log-level=DEBUG
+For repeated tests recreate target PostgreSQL database and empty the log file.
 
-echo "" > ../logs/informix_sinter_20250310.log; python3 main.py --config=../config/informix_sinter.yaml --log-file=../logs/informix_sinter_20250310.log --log-level=DEBUG
+## Build
 
-## OMDB
-
-echo "" > ../logs/omdb_20250326.log; python3 main.py --config=../tests/omdb/omdb.yaml --log-level=DEBUG --log-file=../logs/omdb_20250326.log
-
-## Data check
-
-echo ""> ../logs/informix_iwadb_20250306_check.log; python3 data_check.py --config=../config/informix_iwadb.yaml --log-file=../logs/informix_iwadb_20250306_check.log --log-level=DEBUG
+../migrator_venv/bin/pyinstaller --name credativ-pg-migrator main.py
 
 ## Manual test of code conversion
 

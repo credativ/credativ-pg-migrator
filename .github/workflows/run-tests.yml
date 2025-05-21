@@ -57,7 +57,7 @@ jobs:
             for dir in $workdir/tests/*/; do
             if [ -f "$dir/run_full_test.sh" ]; then
               echo "Running tests in $dir"
-              cd $workdir/test/$dir
+              cd $dir
               bash "./run_full_test.sh"
               if [ "$MODE" = "exit" ] && [ $? -ne 0 ]; then
                 echo "Test failed in $dir, exiting."

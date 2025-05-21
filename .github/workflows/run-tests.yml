@@ -11,8 +11,6 @@ jobs:
     # Only run this job if commit message contains one of the trigger phrases
     if: >-
       contains(github.event.head_commit.message, '[run-tests]')
-    #   contains(github.event.head_commit.message, 'run tests, on error exit') ||
-    #   contains(github.event.head_commit.message, 'run tests, on error continue')
     runs-on: ubuntu-latest
     steps:
       # Check out the code
@@ -27,6 +25,12 @@ jobs:
             sudo apt-get update
             sudo apt-get install -y docker-compose-plugin
           fi
+          if [ -f "./requirements.txt" ]; then
+            python3 -m venv "./migrator_venv"
+            source "./migrator_venv/bin/activate"
+            pip install --upgrade pip
+            pip install -r "./requirements.txt"
+          fi
 
       # Configure error-handling mode based on commit message
       - name: Configure error mode = exit on first error
@@ -38,37 +42,50 @@ jobs:
       #   run: echo "MODE=continue" >> $GITHUB_ENV
 
       # Run all tests in the tests directory, each in its own subdirectory
-      - name: Run all tests in subdirectories
+      - name: Run Oracle tests
+        if: contains(github.event.head_commit.message, '[oracle]') || contains(github.event.head_commit.message, '[all]')
         run: |
+          echo "Oracle tests are not implemented yet"
+      - name: Run PostgreSQL tests
+        if: contains(github.event.head_commit.message, '[postgresql]') || contains(github.event.head_commit.message, '[all]')
+        run: |
+          dir="postgresql"
           set -e
-
-          workdir=$(pwd)
-          echo "Current working directory: $workdir"
-
-          if [ -f "./requirements.txt" ]; then
-            python3 -m venv "./migrator_venv"
-            source "./migrator_venv/bin/activate"
-            pip install --upgrade pip
-            pip install -r "./requirements.txt"
+          homedir=$(pwd)
+          cd "$homedir/tests/$dir"
+          echo "Running tests in $dir"
+          bash "./run_full_test.sh"
+          if [ "$MODE" = "exit" ] && [ $? -ne 0 ]; then
+            echo "Test failed in $dir, exiting."
+            exit 1
           fi
+          echo "Test completed in $dir"
+          cd $homedir
 
-          cd "$workdir/tests"
-          echo "Current working directory: $(pwd)"
-            for dir in $workdir/tests/*/; do
-            if [ -f "$dir/run_full_test.sh" ]; then
-              echo "Running tests in $dir"
-              cd $dir
-              bash "./run_full_test.sh"
-              if [ "$MODE" = "exit" ] && [ $? -ne 0 ]; then
-                echo "Test failed in $dir, exiting."
-                exit 1
-              fi
-              echo "Test completed in $dir"
-              cd $workdir/tests
-            else
-              echo "No run_full_test.sh in $dir, skipping."
-            fi
-          done
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ${{ env.ARTIFACT_PATH }}
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: Run Sybase ASE tests
+        if: contains(github.event.head_commit.message, '[sybase_ase]')
+        run: |
+          dir="sybase_ase"
+          set -e
+          homedir=$(pwd)
+          cd "$homedir/tests/$dir"
+          echo "Running tests in $dir"
+          bash "./run_full_test.sh"
+          if [ "$MODE" = "exit" ] && [ $? -ne 0 ]; then
+            echo "Test failed in $dir, exiting."
+            exit 1
+          fi
+          echo "Test completed in $dir"
+          cd $homedir
 
       - name: Upload test results
         if: always()

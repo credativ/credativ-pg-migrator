@@ -526,3 +526,6 @@ class DatabaseConnector(ABC):
         Some databases require special form of statement
         """
         pass
+
+if __name__ == "__main__":
+    print("This script is not meant to be run directly")

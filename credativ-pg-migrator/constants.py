@@ -23,3 +23,6 @@ MIGRATOR_MODULES = {
 					'sql_anywhere': 'sql_anywhere_connector:SQLAnywhereConnector',
 					'sybase_ase': 'sybase_ase_connector:SybaseASEConnector'
 					}
+
+if __name__ == "__main__":
+    print("This script is not meant to be run directly")

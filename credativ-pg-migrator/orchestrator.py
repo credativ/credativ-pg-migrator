@@ -772,3 +772,6 @@ class Orchestrator:
         if self.on_error_action == 'stop':
             self.logger.error("Stopping due to error.")
             exit(1)
+
+if __name__ == "__main__":
+    print("This script is not meant to be run directly")

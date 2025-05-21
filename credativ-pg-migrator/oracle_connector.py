@@ -596,3 +596,6 @@ class OracleConnector(DatabaseConnector):
 
     def testing_select(self):
         return "SELECT 1 FROM DUAL"
+
+if __name__ == "__main__":
+    print("This script is not meant to be run directly")

@@ -1,5 +1,10 @@
 # Changelog
 
+## (not released yet) 0.7.x - 2025.05.xx
+
+- 2025.05.21
+  - Adjustments for providing credativ-pg-migrator as executable in a package
+
 ## 0.7.5 - 2025.05.21
 
 - cumulative release of changes from 0.7.1 to 0.7.4

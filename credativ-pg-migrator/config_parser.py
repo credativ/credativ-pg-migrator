@@ -337,3 +337,6 @@ class ConfigParser:
 
     def get_target_partitioning(self):
         return self.config.get('target_partitioning', {})
+
+if __name__ == "__main__":
+    print("This script is not meant to be run directly")

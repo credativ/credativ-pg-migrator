@@ -42,6 +42,9 @@ jobs:
         run: |
           set -e
 
+          workdir=$(pwd)
+          echo "Current working directory: $workdir"
+
           if [ -f "./requirements.txt" ]; then
             python3 -m venv "./migrator_venv"
             source "./migrator_venv/bin/activate"
@@ -49,10 +52,11 @@ jobs:
             pip install -r "./requirements.txt"
           fi
 
-            for dir in tests/*/; do
+          cd "$workdir/tests"
+            for dir in ./*/; do
             if [ -f "$dir/run_full_test.sh" ]; then
               echo "Running tests in $dir"
-              bash "$dir/run_full_test.sh"
+              bash "cd $workdir/test; cd ./$dir; ./run_full_test.sh; cd $workdir/tests"
               if [ "$MODE" = "exit" ] && [ $? -ne 0 ]; then
               echo "Test failed in $dir, exiting."
               exit 1

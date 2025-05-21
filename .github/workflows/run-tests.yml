@@ -69,3 +69,12 @@ jobs:
               echo "No run_full_test.sh in $dir, skipping."
             fi
           done
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ${{ env.ARTIFACT_PATH }}
+          retention-days: 7
+          if-no-files-found: warn

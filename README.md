@@ -54,6 +54,12 @@
 - Configuration file is a YAML file
 - Settings available in the config file are described in [config_sample.yaml](./config_sample.yaml) file
 
+## Automated GitHub tests
+
+- Testing examples in the [tests directory](./tests/) can automatically run on GitHub using GitHub Actions
+- Directory must have "run_full_test.sh" script, which must be executable and must be able to run full test automatically
+- To activate GitHub tests you must add text [run-tests] in the commit message
+
 ## TODO
 
 - In Informix we currently do not support ROW data type (corresponds with PostgreSQL composite type)

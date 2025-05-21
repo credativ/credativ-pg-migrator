@@ -43,8 +43,8 @@ jobs:
           set -e
 
           if [ -f "./requirements.txt" ]; then
-            python3 -m venv "$dir/migrator_venv"
-            source "$dir/migrator_venv/bin/activate"
+            python3 -m venv "./migrator_venv"
+            source "./migrator_venv/bin/activate"
             pip install --upgrade pip
             pip install -r "./requirements.txt"
           fi

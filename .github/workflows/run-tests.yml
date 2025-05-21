@@ -1,0 +1,50 @@
+# .github/workflows/run-tests.yml
+name: "Conditional Test Suite"
+
+on:
+  push:
+    # (Optional) specify branches if needed, e.g., main:
+    # branches: [ main ]
+
+jobs:
+  run-tests:
+    # Only run this job if commit message contains one of the trigger phrases
+    # if: >-
+    #   contains(github.event.head_commit.message, 'run tests, on error exit') ||
+    #   contains(github.event.head_commit.message, 'run tests, on error continue')
+    runs-on: ubuntu-latest
+    steps:
+      # Check out the code
+      - name: Check out repository
+        uses: actions/checkout@v3
+
+      # (Optional) Set up any dependencies (e.g. install docker-compose if needed)
+      - name: Ensure Docker Compose V2
+        run: |
+          echo "Ensuring Docker Compose V2 (docker compose) is available"
+          if ! docker compose version &> /dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y docker-compose-plugin
+          fi
+
+      # Configure error-handling mode based on commit message
+      - name: Configure error mode = exit on first error
+        # if: contains(github.event.head_commit.message, 'run tests, on error exit')
+        run: echo "MODE=exit" >> $GITHUB_ENV
+
+      # - name: Configure error mode = continue on errors
+      #   if: contains(github.event.head_commit.message, 'run tests, on error continue')
+      #   run: echo "MODE=continue" >> $GITHUB_ENV
+
+      # Run all tests in the tests directory, each in its own subdirectory
+      - name: Run all tests in subdirectories
+        run: |
+          set -e
+          for dir in tests/*/; do
+            echo "Running tests in $dir"
+            bash "$dir/init_test.sh"
+            if [ "$MODE" = "exit" ] && [ $? -ne 0 ]; then
+              echo "Test failed in $dir, exiting."
+              exit 1
+            fi
+          done

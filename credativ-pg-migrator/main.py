@@ -12,7 +12,6 @@ import sys
 import os
 import traceback
 import signal
-import sys
 
 def main():
     cmd = CommandLine()

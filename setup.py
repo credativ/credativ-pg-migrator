@@ -9,5 +9,5 @@ setup(
     description='Description of my package',
     packages=find_packages(),
     install_requires=['psycopg2', 'jaydebeapi', 'pyyaml', 'pandas', 'pyodbc', 'importlib'],
-    entry_points={'console_scripts': ['credativ-pg-migrator = migrator:main']},
+    entry_points={'console_scripts': ['credativ-pg-migrator = credativ-pg-migrator:main']},
 )

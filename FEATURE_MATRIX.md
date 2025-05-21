@@ -8,8 +8,11 @@ Legend:
 
 - WIP = work in progress, feature is not yet supported but is being worked on
 - yes = feature is supported and was successfully tested
-- -- = status unclear, must be checked in code and tested
-- N/A - feature is not supported by the specific database (? = requires deeper checking in sources)
+- ? = status unclear, feature is generally implemented, must be better tested for the specific database
+- -- = feature is not implemented yet
+- N/A = feature is not supported by the specific database ("\*" = requires deeper checking in documentation)
+
+Note to the unclear status - the biggest issue is to find reasonable testing database with the features properly used.
 
 ```
 | Feature                          | IBM DB2 | Informix | MSSQL  | MySQL | Oracle | PostgreSQL | SQL      | Sybase |
@@ -19,22 +22,22 @@ Legend:
 | Migration of data                | yes     | yes      | yes    | yes   | yes    | yes        | yes      | yes    |
 | NOT NULL constraints             | yes     | yes      | yes    | yes   | yes    | yes        | yes      | yes    |
 | Default values on columns        | WIP     | WIP      | WIP    | WIP   | WIP    | WIP        | WIP      | yes[4] |
-| IDENTITY columns                 | --      | --       | --     | --    | yes[1] | --         | --       | yes    |
-| Computed(generated) columns      | --      | --       | --     | --    | --     | --         | --       | WIP[5] |
+| IDENTITY columns                 | --      | yes      | ?      | ?     | yes[1] | WIP        | ?        | yes    |
+| Computed(generated) columns      | --      | --       | --     | --    | --     | WIP        | --       | yes[5] |
 | Custom replacement of data types | yes     | yes      | yes    | yes   | yes    | yes        | yes      | yes    |
 | Custom repl. of default values   | yes     | yes      | yes    | yes   | yes    | yes        | yes      | yes    |
 | Primary Keys                     | yes     | yes      | yes    | yes   | yes    | yes        | yes      | yes    |
 | Secondary Indexes                | yes     | yes      | yes    | yes   | yes    | yes        | yes      | yes    |
 | Foreign Keys                     | yes     | yes      | yes    | yes   | yes    | yes        | yes      | yes    |
-| FK on delete action              | --      | --       | --     | --    | yes    | --         | --       | N/A?   |
-| Check Constraints                | --      | yes      | --     | --    | --     | --         | --       | yes    |
+| FK on delete action              | --      | --       | --     | --    | yes    | WIP        | --       | N/A*   |
+| Check Constraints                | --      | yes      | --     | --    | --     | WIP        | --       | yes    |
 | Check Rules/Domains[3]           | --      | --       | --     | --    | --     | --         | --       | yes    |
-| Comments on columns              | --      | --       | --     | --    | --     | --         | --       | N/A?   |
-| Comments on tables               | --      | --       | --     | --    | --     | --         | --       | N/A?   |
+| Comments on columns              | --      | --       | --     | --    | --     | WIP        | --       | N/A*   |
+| Comments on tables               | --      | --       | --     | --    | --     | WIP        | --       | N/A*   |
 | Migration of views               | WIP     | WIP      | WIP    | WIP   | WIP    | WIP        | WIP      | WIP    |
 | Conversion of funcs/procs        | --      | yes      | --     | --    | --     | yes        | --       | --     |
 | Conversion of triggers           | --      | yes      | --     | --    | --     | yes        | --       | --     |
-| Sequences[2]                     | --      | --       | --     | --    | --     | --         | --       | N/A?   |
+| Sequences[2]                     | --      | --       | --     | --    | --     | --         | --       | N/A*   |
 | ....                             | --      | --       | --     | --    | --     | --         | --       | --     |
 
 ```

@@ -10,7 +10,7 @@ jobs:
   run-tests:
     # Only run this job if commit message contains one of the trigger phrases
     if: >-
-      contains(github.event.head_commit.message, '>perform tests<')
+      contains(github.event.head_commit.message, '[run-tests]')
     #   contains(github.event.head_commit.message, 'run tests, on error exit') ||
     #   contains(github.event.head_commit.message, 'run tests, on error continue')
     runs-on: ubuntu-latest
@@ -49,11 +49,15 @@ jobs:
             pip install -r "./requirements.txt"
           fi
 
-          for dir in tests/postg*/; do
-            echo "Running tests in $dir"
-            bash "$dir/run_full_test.sh"
-            if [ "$MODE" = "exit" ] && [ $? -ne 0 ]; then
+            for dir in tests/*/; do
+            if [ -f "$dir/run_full_test.sh" ]; then
+              echo "Running tests in $dir"
+              bash "$dir/run_full_test.sh"
+              if [ "$MODE" = "exit" ] && [ $? -ne 0 ]; then
               echo "Test failed in $dir, exiting."
               exit 1
+              fi
+            else
+              echo "No run_full_test.sh in $dir, skipping."
             fi
           done

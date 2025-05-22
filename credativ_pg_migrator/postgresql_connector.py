@@ -13,7 +13,6 @@ class PostgreSQLConnector(DatabaseConnector):
         self.source_or_target = source_or_target
         self.logger = MigratorLogger(self.config_parser.get_log_file()).logger
         self.session_settings = self.prepare_session_settings()
-        self.logger.info(f"Session settings prepared: {self.session_settings}")
 
     def connect(self):
         connection_string = self.config_parser.get_connect_string(self.source_or_target)
@@ -914,7 +913,8 @@ class PostgreSQLConnector(DatabaseConnector):
             # self.logger.info(f"Preparing session settings: {settings} / {settings.keys()} / {tuple(settings.keys())}")
             self.connect()
             cursor = self.connection.cursor()
-            cursor.execute("SELECT name FROM pg_settings WHERE name IN %s", (tuple(settings.keys()),))
+            lower_keys = tuple(k.lower() for k in settings.keys())
+            cursor.execute("SELECT name FROM (SELECT name FROM pg_settings UNION ALL SELECT name FROM (VALUES('role')) as t(name) ) a WHERE lower(a.name) IN %s", (lower_keys,))
             matching_settings = cursor.fetchall()
             cursor.close()
             self.disconnect()

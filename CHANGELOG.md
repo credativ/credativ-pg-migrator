@@ -5,6 +5,8 @@
 - 2025.05.21
   - Adjustments for providing credativ-pg-migrator as executable in a package
   - Created GitHub workflow for automated tests of database migrations - see details in the main README file
+  - Python directory credativ-pg-migrator renamed to credativ_pg_migrator - dashes made issues with packaging
+  - Repaired "SET ROLE" setting for the target PostgreSQL database
 
 ## 0.7.5 - 2025.05.21
 

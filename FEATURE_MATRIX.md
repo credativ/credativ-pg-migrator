@@ -60,3 +60,24 @@ Notes:
 - PostgreSQL: 14, 17
 - SQL Anywhere: 17
 - Sybase ASE: 16.0
+
+## Strange findings during testing
+
+### Informix to PostgreSQL - iwadb
+
+#### PostgreSQL does not allow to create foreign key constraint on column which is part of composite primary key?
+
+2025-05-22 12:40:33,060: [DEBUG] Target table SQL: CREATE TABLE "iwadb"."inventory" ("i_artid" BIGSERIAL , "i_suppid" INTEGER , "i_quantity" INTEGER , "i_descr" VARCHAR )
+
+2025-05-22 12:40:33,094: [DEBUG] Processed index: {'source_schema': 'dwa', 'source_table': 'inventory', 'source_table_id': 108, 'index_owner': 'informix', 'index_name': 'f10', 'index_type': 'INDEX', 'target_schema': 'iwadb', 'target_table': 'inventory', 'index_columns': '"i_suppid"', 'index_comment': '', 'index_sql': 'CREATE INDEX "f10_tab_inventory" ON "iwadb"."inventory" ("i_suppid");'}
+2025-05-22 12:40:33,098: [DEBUG] Processed index: {'source_schema': 'dwa', 'source_table': 'inventory', 'source_table_id': 108, 'index_owner': 'informix', 'index_name': 'p11', 'index_type': 'PRIMARY KEY', 'target_schema': 'iwadb', 'target_table': 'inventory', 'index_columns': '"i_artid", "i_suppid"', 'index_comment': '', 'index_sql': 'ALTER TABLE "iwadb"."inventory" ADD CONSTRAINT "p11_tab_inventory" PRIMARY KEY ("i_artid", "i_suppid");'}
+
+2025-05-22 12:40:44,093: [DEBUG] Worker 92b76014-c1fe-41ae-a9db-6e7aaab0cc9f: Creating constraint with SQL: ALTER TABLE "iwadb"."partlist" ADD CONSTRAINT "f15_tab_partlist" FOREIGN KEY (p_artid) REFERENCES "iwadb"."inventory" (i_artid)
+2025-05-22 12:40:44,127: [ERROR] An error in Orchestrator (constraint_worker 92b76014-c1fe-41ae-a9db-6e7aaab0cc9f f15): there is no unique constraint matching given keys for referenced table "inventory"
+
+2025-05-22 12:40:44,129: [ERROR] Traceback (most recent call last):
+File "/home/josef/github.com/credativ/credativ-pg-migrator-dev/credativ_pg_migrator/orchestrator.py", line 520, in constraint_worker
+worker_target_connection.execute_query(create_constraint_sql)
+File "/home/josef/github.com/credativ/credativ-pg-migrator-dev/credativ_pg_migrator/postgresql_connector.py", line 502, in execute_query
+cursor.execute(query, params)
+psycopg2.errors.InvalidForeignKey: there is no unique constraint matching given keys for referenced table "inventory"

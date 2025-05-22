@@ -114,6 +114,7 @@ class InformixConnector(DatabaseConnector):
                             WHEN 24 THEN 'ROWREF'
                             WHEN 25 THEN 'LVARCHAR'
                             WHEN 26 THEN 'BOOLEAN'
+
                             when 53 THEN 'BIGSERIAL'
                             ELSE 'UNKNOWN-'||cast(c.coltype as varchar(10))
                         END
@@ -167,7 +168,7 @@ class InformixConnector(DatabaseConnector):
                     'numeric_precision': maximum_length if self.is_numeric_type(data_type) else None,
                     'numeric_scale': numeric_scale,
                     'is_nullable': is_nullable,
-                    'is_identity': 'YES' if data_type == 'SERIAL' or data_type == 'SERIAL8' else 'NO',
+                    'is_identity': 'YES' if data_type in ('SERIAL', 'SERIAL8', 'BIGSERIAL') else 'NO',
                     'column_default_value': column_default_value,
                     'column_comment': ''
                 }
@@ -406,7 +407,7 @@ class InformixConnector(DatabaseConnector):
             referenced_columns = ''
             create_constraint_query = ''
 
-            if constraint[0] in ('C', 'N', 'R'):
+            if constraint[0] in ('C', 'R'):
                 constraint_type = constraint[0]
                 constraint_name = constraint[1]
                 index_name = constraint[2]

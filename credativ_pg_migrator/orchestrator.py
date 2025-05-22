@@ -307,6 +307,11 @@ class Orchestrator:
             part_name = 'connect target'
             worker_target_connection.connect()
 
+            if worker_target_connection.session_settings:
+                if self.config_parser.get_log_level() == 'DEBUG':
+                    self.logger.info(f"Worker {worker_id}: Executing session settings: {worker_target_connection.session_settings}")
+                worker_target_connection.execute_query(worker_target_connection.session_settings)
+
             if settings['drop_tables']:
                 if self.config_parser.get_log_level() == 'DEBUG':
                     self.logger.debug(f"Worker {worker_id}: Dropping tabe {target_table}...")
@@ -492,33 +497,36 @@ class Orchestrator:
         worker_id = uuid.uuid4()
         try:
             constraint_name = constraint_data['constraint_name']
+            self.logger.info(f"Worker {worker_id}: Creating constraint {constraint_name} in target database.")
             create_constraint_sql = constraint_data['constraint_sql']
 
-            self.logger.info(f"Worker {worker_id}: Creating constraint {constraint_name} in target database.")
+            if create_constraint_sql:
+                # Each worker uses its own separate connection to the target database
+                worker_target_connection = self.load_connector('target')
 
-            # Each worker uses its own separate connection to the target database
-            worker_target_connection = self.load_connector('target')
-
-            if self.config_parser.get_log_level() == 'DEBUG':
-                self.logger.debug(f"Worker {worker_id}: Creating constraint with SQL: {create_constraint_sql}")
-
-            worker_target_connection.connect()
-
-            query = f'''SET SESSION search_path TO {constraint_data['target_schema']};'''
-            worker_target_connection.execute_query(query)
-
-            if worker_target_connection.session_settings:
                 if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.info(f"Worker {worker_id}: Executing session settings: {worker_target_connection.session_settings}")
-                worker_target_connection.execute_query(worker_target_connection.session_settings)
+                    self.logger.debug(f"Worker {worker_id}: Creating constraint with SQL: {create_constraint_sql}")
 
-            worker_target_connection.execute_query(create_constraint_sql)
-            query = 'RESET search_path;'
-            worker_target_connection.execute_query(query)
-            self.logger.info(f"""Worker {worker_id}: Constraint "{constraint_name}" created successfully.""")
+                worker_target_connection.connect()
 
-            worker_target_connection.disconnect()
-            return True
+                query = f'''SET SESSION search_path TO {constraint_data['target_schema']};'''
+                worker_target_connection.execute_query(query)
+
+                if worker_target_connection.session_settings:
+                    if self.config_parser.get_log_level() == 'DEBUG':
+                        self.logger.info(f"Worker {worker_id}: Executing session settings: {worker_target_connection.session_settings}")
+                    worker_target_connection.execute_query(worker_target_connection.session_settings)
+
+                worker_target_connection.execute_query(create_constraint_sql)
+                query = 'RESET search_path;'
+                worker_target_connection.execute_query(query)
+                self.logger.info(f"""Worker {worker_id}: Constraint "{constraint_name}" created successfully.""")
+                worker_target_connection.disconnect()
+                return True
+            else:
+                self.logger.info(f"Worker {worker_id}: Constraint {constraint_name} does not have a SQL statement - skipping.")
+                return False
+
         except Exception as e:
             self.migrator_tables.update_constraint_status(constraint_data['id'], False, f'ERROR: {e}')
             self.handle_error(e, f"constraint_worker {worker_id} {constraint_name}")

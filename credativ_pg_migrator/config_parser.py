@@ -231,7 +231,27 @@ class ConfigParser:
         return self.config.get('data_types_substitution', {})
 
     def get_default_values_substitution(self):
-        return self.config.get('default_values_substitution', {})
+        implicit_substitutions = []
+        from_config_file = self.config.get('default_values_substitution', {})
+        if self.get_source_db_type() == 'sybase_ase':
+            implicit_substitutions = [
+                # Use regex patterns for matching default values
+                ["", "", r'(?i)(?:"getdate"|getdate)\s*\(\s*\)', "statement_timestamp()"],
+                ["", "", r'(?i)(?:"db_name"|db_name)\s*\(\s*\)', "current_database()"],
+                ["", "", r'(?i)(?:"user_name"|user_name)\s*\(\s*\)', "session_user"],
+                ["", "BIT", r"^0$", "false"],
+                ["", "BIT", r"^1$", "true"],
+                ["", r"(?i).*datetime.*", r"^0$", "current_timestamp"],
+            ]
+        # Merge substitutions as a list of lists
+        merged_substitutions = []
+        if isinstance(from_config_file, list):
+            merged_substitutions.extend(from_config_file)
+        elif isinstance(from_config_file, dict):
+            # If from_config_file is a dict, convert its items to list of lists
+            merged_substitutions.extend([list(item) for item in from_config_file.items()])
+        merged_substitutions.extend(implicit_substitutions)
+        return merged_substitutions
 
     def get_data_migration_limitation(self):
         return self.config.get('data_migration_limitation', {})

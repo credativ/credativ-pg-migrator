@@ -7,6 +7,9 @@
   - Created GitHub workflow for automated tests of database migrations - see details in the main README file
   - Python directory credativ-pg-migrator renamed to credativ_pg_migrator - dashes made issues with packaging
   - Repaired "SET ROLE" setting for the target PostgreSQL database
+  - Added implicit embedded default values substitution for Sybase ASE - getdate, db_name, suser_name, datetime, BIT 0/1
+  - Started implementation of SQL functions mapping - Sybase ASE to PostgreSQL currently in progress
+    - Rationale: This is needed for migration of views and stored procedures/functions/triggers, it is most versatile solution similar to the one used for data types
 
 ## 0.7.5 - 2025.05.21
 

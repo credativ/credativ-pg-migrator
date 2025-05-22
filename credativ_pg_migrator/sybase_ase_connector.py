@@ -39,13 +39,25 @@ class SybaseASEConnector(DatabaseConnector):
             raise ValueError(f"Unsupported connectivity type: {self.config_parser.get_connectivity(self.source_or_target)}")
         self.connection.autocommit = True
 
-
     def disconnect(self):
         try:
             if self.connection:
                 self.connection.close()
         except AttributeError:
             pass
+
+    def get_sql_functions_mapping(self, settings):
+        """ Returns a dictionary of SQL functions mapping for the target database """
+        target_db_type = settings['target_db_type']
+        if target_db_type == 'postgresql':
+            return {
+                'getdate': 'current_timestamp',
+                'db_name': 'current_database()',
+                'suser_name': 'current_user',
+                'datetime': 'current_timestamp',
+            }
+        else:
+            self.logger.error(f"Unsupported target database type: {target_db_type}")
 
     def fetch_table_names(self, table_schema: str):
         # 2048 = proxy table referencing remote table

@@ -46,6 +46,14 @@ class OracleConnector(DatabaseConnector):
         except AttributeError:
             pass
 
+    def get_sql_functions_mapping(self, settings):
+        """ Returns a dictionary of SQL functions mapping for the target database """
+        target_db_type = settings['target_db_type']
+        if target_db_type == 'postgresql':
+            return {}
+        else:
+            self.logger.error(f"Unsupported target database type: {target_db_type}")
+
     def fetch_table_names(self, table_schema: str):
         query = f"""
             SELECT table_name

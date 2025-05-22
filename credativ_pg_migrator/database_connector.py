@@ -22,6 +22,23 @@ class DatabaseConnector(ABC):
         pass
 
     @abstractmethod
+    def get_sql_functions_mapping(self, settings):
+        """
+        settings - dictionary with the following keys
+            - target_db_type: str - target database type
+        Maps SQL functions from the source database to the corresponding SQL functions in the target database.
+        Example:
+        { 'suser_name': 'current_user',
+          'getdate': 'current_timestamp',
+          '@@nestlevel': None,
+          ...
+        }
+        If the function is not supported in the target database, it is mapped to None.
+        If some function is not included in the mapping, it is understood as "function is the same in both databases"
+        """
+        pass
+
+    @abstractmethod
     def fetch_table_names(self, table_schema: str):
         """
         Fetch a list of table names in the specified schema.

@@ -114,6 +114,7 @@ class InformixConnector(DatabaseConnector):
                             WHEN 24 THEN 'ROWREF'
                             WHEN 25 THEN 'LVARCHAR'
                             WHEN 26 THEN 'BOOLEAN'
+                            when 53 THEN 'BIGSERIAL'
                             ELSE 'UNKNOWN-'||cast(c.coltype as varchar(10))
                         END
                     ELSE

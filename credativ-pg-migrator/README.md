@@ -14,7 +14,7 @@ For repeated tests recreate target PostgreSQL database and empty the log file.
 
 ## Build
 
-../migrator_venv/bin/pyinstaller --name credativ-pg-migrator main.py
+../migrator_venv/bin/pyinstaller --onefile --name credativ-pg-migrator main.py
 
 ## Manual test of code conversion
 

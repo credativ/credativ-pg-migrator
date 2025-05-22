@@ -32,19 +32,19 @@ jobs:
             pip install -r "./requirements.txt"
           fi
 
-      - name: Add FreeTDS for Sybase ASE/MS SQL
-        if: |
-          contains(github.event.head_commit.message, '[sybase_ase]') ||
-          contains(github.event.head_commit.message, '[mssql]') ||
-          contains(github.event.head_commit.message, '[all]')
-        run: |
-          echo "Adding FreeTDS for Sybase ASE"
-          sudo apt-get update
-          sudo apt-get install -y freetds-bin freetds-dev freetds-common
-          sudo apt-get install -y unixodbc unixodbc-common unixodbc-dev
-          odbcinst -j
+      # - name: Add FreeTDS for Sybase ASE/MS SQL
+      #   if: |
+      #     contains(github.event.head_commit.message, '[sybase_ase]') ||
+      #     contains(github.event.head_commit.message, '[mssql]') ||
+      #     contains(github.event.head_commit.message, '[all]')
+      #   run: |
+      #     echo "Adding FreeTDS for Sybase ASE"
+      #     sudo apt-get update
+      #     sudo apt-get install -y freetds-bin freetds-dev freetds-common
+      #     sudo apt-get install -y unixodbc unixodbc-common unixodbc-dev
+      #     odbcinst -j
 
-        # Configure error-handling mode based on commit message
+      # Configure error-handling mode based on commit message
       - name: Configure error mode = exit on first error
         # if: contains(github.event.head_commit.message, 'run tests, on error exit')
         run: echo "MODE=exit" >> $GITHUB_ENV
@@ -58,7 +58,40 @@ jobs:
         if: contains(github.event.head_commit.message, '[oracle]') || contains(github.event.head_commit.message, '[all]')
         run: |
           echo "Oracle tests are not implemented yet"
-      - name: Run PostgreSQL tests
+
+      - name: Run Informix tests
+        if: contains(github.event.head_commit.message, '[informix]') || contains(github.event.head_commit.message, '[all]')
+        run: |
+          dir="informix"
+          set -e
+          homedir=$(pwd)
+          cd "$homedir/tests/$dir"
+          echo "Running tests in $dir"
+          bash "./run_full_test.sh"
+          if [ "$MODE" = "exit" ] && [ $? -ne 0 ]; then
+            echo "Test failed in $dir, exiting."
+            exit 1
+          fi
+          echo "Test completed in $dir"
+          cd $homedir
+
+      - name: Upload test results from Informix tests
+        if: contains(github.event.head_commit.message, '[informix]') || contains(github.event.head_commit.message, '[all]')
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ${{ env.ARTIFACT_PATH }}/${{ env.ARTIFACT_NAME }}
+          retention-days: 7
+          overwrite: true
+          if-no-files-found: warn
+
+      - name: Unset artifact environment variables after Informix tests
+        if: contains(github.event.head_commit.message, '[informix]') || contains(github.event.head_commit.message, '[all]')
+        run: |
+          unset ARTIFACT_NAME
+          unset ARTIFACT_PATH
+
+          - name: Run PostgreSQL tests
         if: contains(github.event.head_commit.message, '[postgresql]') || contains(github.event.head_commit.message, '[all]')
         run: |
           dir="postgresql"
@@ -79,8 +112,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.ARTIFACT_NAME }}
-          path: ${{ env.ARTIFACT_PATH }}
+          path: ${{ env.ARTIFACT_PATH }}/${{ env.ARTIFACT_NAME }}
           retention-days: 7
+          overwrite: true
           if-no-files-found: warn
 
       - name: Unset artifact environment variables after PostgreSQL tests
@@ -109,8 +143,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.ARTIFACT_NAME }}
-          path: ${{ env.ARTIFACT_PATH }}
+          path: ${{ env.ARTIFACT_PATH }}/${{ env.ARTIFACT_NAME }}
           retention-days: 7
+          overwrite: true
           if-no-files-found: warn
 
       - name: Unset artifact environment variables after Sybase ASE tests

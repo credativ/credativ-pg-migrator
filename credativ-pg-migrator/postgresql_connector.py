@@ -81,7 +81,8 @@ class PostgreSQLConnector(DatabaseConnector):
                         c.column_default,
                         u.udt_schema,
                         u.udt_name,
-                        col_description((c.table_schema||'.'||c.table_name)::regclass::oid, c.ordinal_position) as column_comment
+                        col_description((c.table_schema||'.'||c.table_name)::regclass::oid, c.ordinal_position) as column_comment,
+                        is_generated
                     FROM information_schema.columns c
                     LEFT JOIN information_schema.column_udt_usage u ON c.table_schema = u.table_schema
                         AND c.table_name = u.table_name
@@ -107,19 +108,31 @@ class PostgreSQLConnector(DatabaseConnector):
                 udt_schema = row[9]
                 udt_name = row[10]
                 column_comment = row[11]
+                is_generated = row[12]
+                column_type = data_type
+                if self.is_string_type(data_type) and character_maximum_length:
+                    column_type = f"{data_type}({character_maximum_length})"
+                elif self.is_numeric_type(data_type) and numeric_precision and numeric_scale:
+                    column_type = f"{data_type}({numeric_precision},{numeric_scale})"
+                elif self.is_numeric_type(data_type) and numeric_precision and not numeric_scale:
+                    column_type = f"{data_type}({numeric_precision})"
                 result[ordinal_position] = {
                     'column_name': column_name,
+                    'is_nullable': is_nullable,
+                    'column_default_name': '',
+                    'column_default_value': column_default,
                     'data_type': data_type,
-                    'basic_data_type': data_type,
+                    'column_type': column_type,
+                    'basic_data_type': data_type if data_type not in ('USER-DEFINED', 'DOMAIN') else '',
                     'is_identity': is_identity,
                     'character_maximum_length': character_maximum_length,
                     'numeric_precision': numeric_precision,
                     'numeric_scale': numeric_scale,
-                    'is_nullable': is_nullable,
                     'udt_schema': udt_schema,
                     'udt_name': udt_name,
-                    'column_default_value': column_default,
                     'column_comment': column_comment,
+                    'is_generated_virtual': 'NO',
+                    'is_generated_stored': is_generated,
                 }
             cursor.close()
             self.disconnect()
@@ -160,6 +173,8 @@ class PostgreSQLConnector(DatabaseConnector):
             is_identity = column_info['is_identity']
             if column_info['basic_data_type'] != '':
                 column_data_type = column_info['basic_data_type'].upper()
+            elif column_info['data_type'] == 'USER-DEFINED' and column_info['udt_schema'] != '' and column_info['udt_name'] != '':
+                column_data_type = f'''"{column_info['udt_schema']}"."{column_info['udt_name']}"'''
 
             character_maximum_length = ''
             if 'character_maximum_length' in column_info and column_info['character_maximum_length'] != '':
@@ -440,6 +455,7 @@ class PostgreSQLConnector(DatabaseConnector):
 
     def get_create_constraint_sql(self, settings):
         create_constraint_query = ''
+        source_db_type = settings['source_db_type']
         target_schema = settings['target_schema']
         target_table_name = settings['target_table']
         target_columns = settings['target_columns']
@@ -456,25 +472,27 @@ class PostgreSQLConnector(DatabaseConnector):
         constraint_sql = settings['constraint_sql'] if 'constraint_sql' in settings else ''
         constraint_status = settings['constraint_status'] if 'constraint_status' in settings else 'ENABLED'
 
-        if constraint_type == 'FOREIGN KEY':
-            create_constraint_query = f"""ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{constraint_name}_tab_{target_table_name}" FOREIGN KEY ({constraint_columns}) REFERENCES "{target_schema}"."{referenced_table_name}" ({referenced_columns})"""
-            if delete_rule == 'CASCADE':
-                create_constraint_query += " ON DELETE CASCADE"
-            if update_rule == 'CASCADE':
-                create_constraint_query += " ON UPDATE CASCADE"
-            if constraint_comment:
-                create_constraint_query += f" COMMENT '{constraint_comment}'"
-        elif constraint_type == 'CHECK':
-            # Replace column names in constraint_sql with double-quoted names using precise match
+        if source_db_type != 'postgresql':
+            if constraint_type == 'FOREIGN KEY':
+                create_constraint_query = f"""ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{constraint_name}_tab_{target_table_name}" FOREIGN KEY ({constraint_columns}) REFERENCES "{target_schema}"."{referenced_table_name}" ({referenced_columns})"""
+                if delete_rule == 'CASCADE':
+                    create_constraint_query += " ON DELETE CASCADE"
+                if update_rule == 'CASCADE':
+                    create_constraint_query += " ON UPDATE CASCADE"
+                if constraint_comment:
+                    create_constraint_query += f" COMMENT '{constraint_comment}'"
+            elif constraint_type == 'CHECK':
+                # Replace column names in constraint_sql with double-quoted names using precise match
 
-            if constraint_sql and target_columns:
-                for col_info in target_columns.values():
-                    col_name = col_info['column_name']
-                    # Use word boundary for precise match, preserve case
-                    pattern = r'\b{}\b'.format(re.escape(col_name))
-                    constraint_sql = re.sub(pattern, f'"{col_name}"', constraint_sql)
-            create_constraint_query = f"""ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{constraint_name}_tab_{target_table_name}" CHECK ({constraint_sql})"""
-
+                if constraint_sql and target_columns:
+                    for col_info in target_columns.values():
+                        col_name = col_info['column_name']
+                        # Use word boundary for precise match, preserve case
+                        pattern = r'\b{}\b'.format(re.escape(col_name))
+                        constraint_sql = re.sub(pattern, f'"{col_name}"', constraint_sql)
+                create_constraint_query = f"""ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{constraint_name}_tab_{target_table_name}" CHECK ({constraint_sql})"""
+        else:
+            create_constraint_query = f"""ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{constraint_name}" {constraint_sql}"""
         return create_constraint_query
 
     def fetch_triggers(self, table_id: int, table_schema: str, table_name: str):
@@ -521,13 +539,14 @@ class PostgreSQLConnector(DatabaseConnector):
             target_schema = settings['target_schema']
             target_table = settings['target_table']
             target_columns = settings['target_columns']
-            primary_key_columns = settings['primary_key_columns']
+            # primary_key_columns = settings['primary_key_columns']
             batch_size = settings['batch_size']
             migrator_tables = settings['migrator_tables']
             batch_size = settings['batch_size']
             migration_limitation = settings['migration_limitation']
 
             source_table_rows = self.get_rows_count(source_schema, source_table)
+            target_table_rows = 0
 
             ## source_schema, source_table, source_table_id, source_table_rows, worker_id, target_schema, target_table, target_table_rows
             protocol_id = migrator_tables.insert_data_migration({
@@ -613,8 +632,8 @@ class PostgreSQLConnector(DatabaseConnector):
                 return target_table_rows
         except Exception as e:
             self.logger.error(f"Woker {worker_id}: Error in {part_name}: {e}")
-            self.logger.logger.error("Full stack trace:")
-            self.logger.logger.error(traceback.format_exc())
+            self.logger.error("Full stack trace:")
+            self.logger.error(traceback.format_exc())
             raise e
 
     def insert_batch(self, settings):

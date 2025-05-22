@@ -333,6 +333,7 @@ class Planner:
                     for _, constraint_details in constraints.items():
 
                         target_db_constraint_sql = self.target_connection.get_create_constraint_sql({
+                            'source_db_type': self.config_parser.get_source_db_type(),
                             'source_schema': self.source_schema,
                             'source_table': table_info['table_name'],
                             'target_schema': self.target_schema,

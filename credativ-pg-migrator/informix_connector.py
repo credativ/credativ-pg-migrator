@@ -123,9 +123,7 @@ class InformixConnector(DatabaseConnector):
                 c.collength,
                 CASE WHEN c.coltype >= 256 THEN 'NOT NULL' ELSE '' END AS nullable,
                 CASE WHEN d.type = 'L' THEN
-                    CASE WHEN d.default LIKE 'AAAAAA%' THEN replace(d.default, 'AAAAAA ', '')
-                    WHEN d.default LIKE 'AAAD6A%' THEN replace(d.default, 'AAAD6A ', '')
-                    ELSE d.default END
+                    d.default
                 ELSE NULL
                 END AS default_value
             FROM syscolumns c LEFT join sysxtdtypes x ON c.extended_id = x.extended_id
@@ -136,6 +134,10 @@ class InformixConnector(DatabaseConnector):
                             AND t.owner = '{table_schema}')
             ORDER BY colno
         """
+                    # CASE WHEN d.default LIKE 'AAAAAA%' THEN replace(d.default, 'AAAAAA ', '')
+                    # WHEN d.default LIKE 'AAAD6A%' THEN replace(d.default, 'AAAD6A ', '')
+                    # ELSE d.default END
+                    # re.sub(r'[^\x20-\x7E]', ' ', row[5]).strip() if row[5] else '',
         try:
             self.connect()
             cursor = self.connection.cursor()
@@ -143,15 +145,29 @@ class InformixConnector(DatabaseConnector):
                 self.logger.debug(f"Informix: Reading columns for {table_schema}.{table_name}")
             cursor.execute(query)
             for row in cursor.fetchall():
-                result[row[0]] = {
-                    'column_name': row[1],
-                    'data_type': row[2],
-                    'character_maximum_length': row[3],
-                    'numeric_precision': None,
-                    'numeric_scale': None,
-                    'is_nullable': row[4],
-                    'is_identity': 'YES' if row[2] == 'SERIAL' or row[2] == 'SERIAL8' else 'NO',
-                    'column_default_value': re.sub(r'[^\x20-\x7E]', ' ', row[5]).strip() if row[5] else '',
+                column_number = row[0]
+                column_name = row[1]
+                data_type = row[2].strip().upper()
+                maximum_length = row[3]
+                is_nullable = row[4]
+                column_default_value = row[5]
+                numeric_scale = 0
+
+                column_type = data_type
+                if self.is_string_type(data_type):
+                    column_type = f"{data_type}({maximum_length})"
+                elif self.is_numeric_type(data_type):
+                    column_type = f"{data_type}({maximum_length},{numeric_scale})"
+                result[column_number] = {
+                    'column_name': column_name,
+                    'data_type': data_type,
+                    'column_type': '',
+                    'character_maximum_length': maximum_length if self.is_string_type(data_type) else None,
+                    'numeric_precision': maximum_length if self.is_numeric_type(data_type) else None,
+                    'numeric_scale': numeric_scale,
+                    'is_nullable': is_nullable,
+                    'is_identity': 'YES' if data_type == 'SERIAL' or data_type == 'SERIAL8' else 'NO',
+                    'column_default_value': column_default_value,
                     'column_comment': ''
                 }
 

@@ -37,7 +37,7 @@ def main():
         cmd.print_all(logger.logger)
 
         logger.logger.info('Starting configuration parser...')
-        config_parser = ConfigParser(args)
+        config_parser = ConfigParser(args, logger.logger)
 
         # Print the parsed configuration
         if args.log_level == 'DEBUG':

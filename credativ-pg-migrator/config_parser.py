@@ -2,9 +2,10 @@ import yaml
 import constants
 
 class ConfigParser:
-    def __init__(self, args):
+    def __init__(self, args, logger):
         self.args = args
         self.config = self.load_config(args.config)
+        self.logger = logger
         self.validate_config()
 
     def load_config(self, config_file):
@@ -19,6 +20,12 @@ class ConfigParser:
         include_tables = self.config['include_tables']
         exclude_tables = self.config['exclude_tables']
 
+        if self.args.log_level == 'DEBUG':
+            self.logger.debug(f"type(include_tables): {type(include_tables)} - {include_tables}")
+            self.logger.debug(f"type(exclude_tables): {type(exclude_tables)} - {exclude_tables}")
+
+        if include_tables is None and exclude_tables is None:
+            self.config['include_tables'] = 'all'
         if type(include_tables) is str and include_tables == '.*' and exclude_tables is None:
             self.logger.info("Check of include_tables and exclude_tables passed - all tables will be included")
         elif type(include_tables) is list and exclude_tables is None:
@@ -29,7 +36,7 @@ class ConfigParser:
             if set(include_tables) & set(exclude_tables):
                 raise ValueError("Configuration error: There are tables specified in both 'include_tables.specific_tables' and 'exclude_tables.specific_tables'.")
 
-        if self.config.get('log_level') == 'DEBUG':
+        if self.args.log_level == 'DEBUG':
             self.logger.debug(f"Configuration validated: {self.config}")
 
     ## Databases

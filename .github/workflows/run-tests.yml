@@ -32,7 +32,19 @@ jobs:
             pip install -r "./requirements.txt"
           fi
 
-      # Configure error-handling mode based on commit message
+      - name: Add FreeTDS for Sybase ASE/MS SQL
+        if: |
+          contains(github.event.head_commit.message, '[sybase_ase]') ||
+          contains(github.event.head_commit.message, '[mssql]') ||
+          contains(github.event.head_commit.message, '[all]')
+        run: |
+          echo "Adding FreeTDS for Sybase ASE"
+          sudo apt-get update
+          sudo apt-get install -y freetds-bin freetds-dev freetds-common
+          sudo apt-get install -y unixodbc unixodbc-common unixodbc-dev
+          odbcinst -j
+
+        # Configure error-handling mode based on commit message
       - name: Configure error mode = exit on first error
         # if: contains(github.event.head_commit.message, 'run tests, on error exit')
         run: echo "MODE=exit" >> $GITHUB_ENV

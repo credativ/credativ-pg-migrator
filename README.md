@@ -58,7 +58,7 @@
 
 - Testing examples in the [tests directory](./tests/) can automatically run on GitHub using GitHub Actions
 - Directory must have "run_full_test.sh" script, which must be executable and must be able to run full test automatically
-- To activate GitHub tests you must add text [run-tests] in the commit message
+- To activate GitHub tests you must add text `[run-tests]` in the commit message and specify either `[all]` or specific database like `[mysql]`, `[oracle]`, etc.
 
 ## TODO
 

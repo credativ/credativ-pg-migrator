@@ -39,6 +39,7 @@ Note to the unclear status - the biggest issue is to find reasonable testing dat
 | Conversion of user defined funcs/procs    | --      | yes      | --     | --    | --     | yes        | --       | --     |
 | Conversion of user defined triggers       | --      | yes      | --     | --    | --     | yes        | --       | --     |
 | Sequences[2]                              | --      | --       | --     | --    | --     | --         | --       | N/A*   |
+| SQL functions mapping                     | WIP     | WIP      | WIP    | WIP   | WIP    | WIP        | WIP      | WIP    |
 | ....                                      | --      | --       | --     | --    | --     | --         | --       | --     |
 
 ```

@@ -493,6 +493,7 @@ class SybaseASEConnector(DatabaseConnector):
 
             table_constraints[order_num] = {
                 'constraint_name': fk_name,
+                'constraint_owner': source_table_schema,
                 'constraint_type': 'FOREIGN KEY',
                 'constraint_columns': fk_column,
                 'referenced_table_name': ref_table_name,
@@ -912,6 +913,7 @@ class SybaseASEConnector(DatabaseConnector):
             migrator_tables = settings['migrator_tables']
             source_table_rows = self.get_rows_count(source_schema, source_table)
             migration_limitation = settings['migration_limitation']
+            target_table_rows = 0
 
             ## source_schema, source_table, source_table_id, source_table_rows, worker_id, target_schema, target_table, target_table_rows
             protocol_id = migrator_tables.insert_data_migration({
@@ -997,7 +999,7 @@ class SybaseASEConnector(DatabaseConnector):
     def convert_trigger(self, trigger_name, trigger_code, source_schema, target_schema, table_list):
         return None
 
-    def fetch_triggers(self, schema_name, table_name):
+    def fetch_triggers(self, table_id, schema_name, table_name):
         pass
 
     def fetch_views_names(self, owner_name):

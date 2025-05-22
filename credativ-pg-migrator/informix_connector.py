@@ -1054,6 +1054,7 @@ class InformixConnector(DatabaseConnector):
             migration_limitation = settings['migration_limitation']
 
             source_table_rows = self.get_rows_count(source_schema, source_table)
+            target_table_rows = 0
 
             ## source_schema, source_table, source_table_id, source_table_rows, worker_id, target_schema, target_table, target_table_rows
             protocol_id = migrator_tables.insert_data_migration({

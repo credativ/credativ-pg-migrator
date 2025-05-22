@@ -1496,12 +1496,18 @@ class MigratorTables:
         """
         params = (settings['source_table_id'], settings['source_schema'], settings['source_table'],
                     settings['target_schema'], settings['target_table'], settings['constraint_name'],
-                    settings['constraint_type'],
-                    settings['constraint_owner'], settings['constraint_columns'],
-                    settings['referenced_table_schema'], settings['referenced_table_name'],
-                    settings['referenced_columns'], settings['constraint_sql'],
-                    settings['delete_rule'], settings['update_rule'], settings['constraint_comment'],
-                    settings['constraint_status'])
+                    settings['constraint_type'] if 'constraint_type' in settings else '',
+                    settings['constraint_owner'] if 'constraint_owner' in settings else '',
+                    settings['constraint_columns'] if 'constraint_columns' in settings else '',
+                    settings['referenced_table_schema'] if 'referenced_table_schema' in settings else '',
+                    settings['referenced_table_name'] if 'referenced_table_name' in settings else '',
+                    settings['referenced_columns'] if 'referenced_columns' in settings else '',
+                    settings['constraint_sql'] if 'constraint_sql' in settings else '',
+                    settings['delete_rule'] if 'delete_rule' in settings else '',
+                    settings['update_rule'] if 'update_rule' in settings else '',
+                    settings['constraint_comment'] if 'constraint_comment' in settings else '',
+                    settings['constraint_status'] if 'constraint_status' in settings else ''
+                    )
 
         try:
             cursor = self.protocol_connection.connection.cursor()

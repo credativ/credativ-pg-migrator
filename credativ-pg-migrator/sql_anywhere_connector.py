@@ -180,6 +180,7 @@ class SQLAnywhereConnector(DatabaseConnector):
             batch_size = settings['batch_size']
             migrator_tables = settings['migrator_tables']
             source_table_rows = self.get_rows_count(source_schema, source_table)
+            target_table_rows = 0
             migration_limitation = settings['migration_limitation']
 
             ## source_schema, source_table, source_table_id, source_table_rows, worker_id, target_schema, target_table, target_table_rows

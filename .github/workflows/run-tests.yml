@@ -91,7 +91,7 @@ jobs:
           unset ARTIFACT_NAME
           unset ARTIFACT_PATH
 
-          - name: Run PostgreSQL tests
+      - name: Run PostgreSQL tests
         if: contains(github.event.head_commit.message, '[postgresql]') || contains(github.event.head_commit.message, '[all]')
         run: |
           dir="postgresql"

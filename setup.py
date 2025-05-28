@@ -2,11 +2,11 @@ from setuptools import setup, find_packages
 
 setup(
     name='credativ-pg-migrator-dev',
-    version='0.0',
+    version='0.7.6dev',
     url='https://github.com/credativ/credativ-pg-migrator-dev.git',
     author='Josef Machytka',
     author_email='josef.machytka@credativ.de',
-    description='Description of my package',
+    description='Migrator from proprietary and legacy databases into PostgreSQL',
     packages=find_packages(),
     install_requires=['psycopg2', 'jaydebeapi', 'pyyaml', 'pandas', 'pyodbc', 'importlib'],
     entry_points={'console_scripts': ['credativ_pg_migrator = credativ_pg_migrator:main']},

@@ -79,3 +79,8 @@ The repository is structured as follows:
 - scripts - different bash scripts for the migrator tool
 - sql - SQL scripts different purposes like for creating tables and inserting data into the source database
 - tests - test cases for the migrator tool for different source databases
+
+## License
+
+`credativ-pg-migrator` is released under the GNU General Public License, version 3 (or any later version).
+See the file `COPYING` in the distribution for details.

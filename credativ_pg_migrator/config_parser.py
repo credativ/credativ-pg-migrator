@@ -262,12 +262,12 @@ class ConfigParser:
         if self.get_source_db_type() == 'sybase_ase':
             implicit_substitutions = [
                 # Use regex patterns for matching default values
-                ["", "", r'(?i)(?:"getdate"|getdate)\s*\(\s*\)', "statement_timestamp()"],
-                ["", "", r'(?i)(?:"db_name"|db_name)\s*\(\s*\)', "current_database()"],
-                ["", "", r'(?i)(?:"user_name"|user_name)\s*\(\s*\)', "session_user"],
+                # ["", "", r'(?i)(?:"getdate"|getdate)\s*\(\s*\)', "statement_timestamp()"],
+                # ["", "", r'(?i)(?:"db_name"|db_name)\s*\(\s*\)', "current_database()"],
+                # ["", "", r'(?i)(?:"user_name"|user_name)\s*\(\s*\)', "session_user"],
                 ["", "BIT", r"^0$", "false"],
                 ["", "BIT", r"^1$", "true"],
-                ["", r"(?i).*datetime.*", r"^0$", "current_timestamp"],
+                # ["", r"(?i).*datetime.*", r"^0$", "current_timestamp"],
             ]
         # Merge substitutions as a list of lists
         merged_substitutions = []

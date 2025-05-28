@@ -1,6 +1,6 @@
 # Changelog
 
-## (not released yet) 0.7.x - 2025.05.xx
+## (not released yet) 0.7.6 - 2025.05.28
 
 - 2025.05.28
 
@@ -10,6 +10,8 @@
   - Rewrite of custom data types substitution - can use direct match, LIKE format or regexp, simplified format, 3rd value in config file is now taken only as a comment
     - Substitution is now checked for data_type, column_type or basic_data_type (if exists)
   - Fix in casting of default values for type TEXT
+  - Fix in Planner - added execution of session settings before attempting to create schema in the target database
+  - Implemented SQL function replacement for Sybase ASE views - takes mapping from the function mentioned above
 
 - 2025.05.21
 

@@ -205,11 +205,19 @@ class MigratorTables:
 
         # Insert data into the table
         for column_name, source_column_data_type, default_value_value, target_default_value in self.config_parser.get_default_values_substitution():
-            self.protocol_connection.execute_query(f"""
-            INSERT INTO "{self.protocol_schema}".default_values_substitution
-            (column_name, source_column_data_type, default_value_value, target_default_value)
-            VALUES (%s, %s, %s, %s)
-            """, (column_name, source_column_data_type, default_value_value, target_default_value))
+            self.insert_default_values_substitution({
+                'column_name': column_name,
+                'source_column_data_type': source_column_data_type,
+                'default_value_value': default_value_value,
+                'target_default_value': target_default_value
+            })
+
+    def insert_default_values_substitution(self, settings):
+        self.protocol_connection.execute_query(f"""
+        INSERT INTO "{self.protocol_schema}".default_values_substitution
+        (column_name, source_column_data_type, default_value_value, target_default_value)
+        VALUES (%s, %s, %s, %s)
+        """, (settings['column_name'], settings['source_column_data_type'], settings['default_value_value'], settings['target_default_value']))
 
     def check_default_values_substitution(self, settings):
         ## check_column_name, check_column_data_type, check_default_value
@@ -219,46 +227,33 @@ class MigratorTables:
 
         target_default_value = check_default_value
 
-        query = f"""
-            SELECT target_default_value
-            FROM "{self.protocol_schema}".default_values_substitution
-            WHERE trim(%s) ~ trim(column_name)
-            AND trim(%s) ~ trim(source_column_data_type)
-            AND trim(%s::TEXT) ~ trim(default_value_value::TEXT)
-        """
-        cursor = self.protocol_connection.connection.cursor()
-        cursor.execute(query, (check_column_name, check_column_data_type, check_default_value))
-        result = cursor.fetchone()
-
-        if result:
-            target_default_value = result[0]
-        else:
+        try:
             query = f"""
                 SELECT target_default_value
                 FROM "{self.protocol_schema}".default_values_substitution
-                WHERE upper(trim(%s)) LIKE upper(trim(column_name))
-                AND upper(trim(%s)) LIKE upper(trim(source_column_data_type))
-                AND upper(trim(%s::TEXT)) LIKE upper(trim(default_value_value::TEXT))
+                WHERE trim(%s) ~ trim(column_name)
+                AND trim(%s) ~ trim(source_column_data_type)
+                AND trim(%s::TEXT) ~ trim(default_value_value::TEXT)
             """
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, (check_column_name, check_column_data_type, check_default_value))
             result = cursor.fetchone()
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"1 check_default_values_substitution {check_column_name}, {check_column_data_type}, {check_default_value} query: {query} - {result}")
+
             if result:
                 target_default_value = result[0]
             else:
                 query = f"""
                     SELECT target_default_value
                     FROM "{self.protocol_schema}".default_values_substitution
-                    WHERE upper(trim(column_name)) = ''
+                    WHERE upper(trim(%s)) LIKE upper(trim(column_name))
                     AND upper(trim(%s)) LIKE upper(trim(source_column_data_type))
                     AND upper(trim(%s::TEXT)) LIKE upper(trim(default_value_value::TEXT))
                 """
-                cursor.execute(query, (check_column_data_type, check_default_value))
+                cursor = self.protocol_connection.connection.cursor()
+                cursor.execute(query, (check_column_name, check_column_data_type, check_default_value))
                 result = cursor.fetchone()
                 # if self.config_parser.get_log_level() == 'DEBUG':
-                #     self.logger.debug(f"2 check_default_values_substitution {check_column_name}, {check_column_data_type}, {check_default_value} query: {query} - {result}")
+                #     self.logger.debug(f"1 check_default_values_substitution {check_column_name}, {check_column_data_type}, {check_default_value} query: {query} - {result}")
                 if result:
                     target_default_value = result[0]
                 else:
@@ -266,16 +261,34 @@ class MigratorTables:
                         SELECT target_default_value
                         FROM "{self.protocol_schema}".default_values_substitution
                         WHERE upper(trim(column_name)) = ''
-                        AND upper(trim(source_column_data_type)) = ''
+                        AND upper(trim(%s)) LIKE upper(trim(source_column_data_type))
                         AND upper(trim(%s::TEXT)) LIKE upper(trim(default_value_value::TEXT))
                     """
-                    cursor.execute(query, (check_default_value,))
+                    cursor.execute(query, (check_column_data_type, check_default_value))
                     result = cursor.fetchone()
                     # if self.config_parser.get_log_level() == 'DEBUG':
-                    #     self.logger.debug(f"3 check_default_values_substitution {check_column_name}, {check_column_data_type}, {check_default_value} query: {query} - {result}")
+                    #     self.logger.debug(f"2 check_default_values_substitution {check_column_name}, {check_column_data_type}, {check_default_value} query: {query} - {result}")
                     if result:
                         target_default_value = result[0]
-        cursor.close()
+                    else:
+                        query = f"""
+                            SELECT target_default_value
+                            FROM "{self.protocol_schema}".default_values_substitution
+                            WHERE upper(trim(column_name)) = ''
+                            AND upper(trim(source_column_data_type)) = ''
+                            AND upper(trim(%s::TEXT)) LIKE upper(trim(default_value_value::TEXT))
+                        """
+                        cursor.execute(query, (check_default_value,))
+                        result = cursor.fetchone()
+                        # if self.config_parser.get_log_level() == 'DEBUG':
+                        #     self.logger.debug(f"3 check_default_values_substitution {check_column_name}, {check_column_data_type}, {check_default_value} query: {query} - {result}")
+                        if result:
+                            target_default_value = result[0]
+            cursor.close()
+        except Exception as e:
+            self.logger.error(f"Error checking default values substitution for {check_column_name}, {check_column_data_type}, {check_default_value}.")
+            self.logger.error(e)
+
         return target_default_value
 
     def create_protocol(self):

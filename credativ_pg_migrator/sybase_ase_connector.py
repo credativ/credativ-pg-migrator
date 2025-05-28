@@ -1091,9 +1091,21 @@ class SybaseASEConnector(DatabaseConnector):
         if self.config_parser.get_log_level() == 'DEBUG':
             self.logger.debug(f"settings in convert_view_code: {settings}")
         converted_code = view_code
-        converted_code = converted_code.replace(f"{settings['source_database']}..", f"{settings['target_schema']}.")
-        converted_code = converted_code.replace(f"{settings['source_database']}.{settings['source_schema']}.", f"{settings['target_schema']}.")
-        converted_code = converted_code.replace(f"{settings['source_schema']}.", f"{settings['target_schema']}.")
+        if settings['target_db_type'] == 'postgresql':
+            sql_functions_mapping = self.get_sql_functions_mapping({ 'target_db_type': settings['target_db_type'] })
+
+            if sql_functions_mapping:
+                for src_func, tgt_func in sql_functions_mapping.items():
+                    escaped_src_func = re.escape(src_func)
+                    converted_code = re.sub(rf"(?i){escaped_src_func}", tgt_func, converted_code, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
+                    if self.config_parser.get_log_level() == 'DEBUG':
+                        self.logger.debug(f"Checking convertion of function {src_func} to {tgt_func} in view code")
+
+            converted_code = converted_code.replace(f"{settings['source_database']}..", f"{settings['target_schema']}.")
+            converted_code = converted_code.replace(f"{settings['source_database']}.{settings['source_schema']}.", f"{settings['target_schema']}.")
+            converted_code = converted_code.replace(f"{settings['source_schema']}.", f"{settings['target_schema']}.")
+        else:
+            self.logger.error(f"Unsupported target database type: {settings['target_db_type']}")
         return converted_code
 
     def get_sequence_current_value(self, sequence_name):

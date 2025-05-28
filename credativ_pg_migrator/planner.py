@@ -37,6 +37,9 @@ class Planner:
         self.pre_script = self.config_parser.get_pre_migration_script()
         self.post_script = self.config_parser.get_post_migration_script()
         self.user_defined_types = {}
+        self.sql_functions_mapping = self.source_connection.get_sql_functions_mapping({
+            'target_db_type': self.config_parser.get_target_db_type()
+        })
 
     def create_plan(self):
         try:
@@ -106,10 +109,17 @@ class Planner:
             self.check_script_accessibility(self.post_script)
 
             self.target_connection.connect()
+            if self.target_connection.session_settings:
+                if self.config_parser.get_log_level() == 'DEBUG':
+                    self.logger.info(f"Planner CREATE SCHEMA - Executing session settings for target database: {self.target_connection.session_settings}")
+                self.target_connection.execute_query(self.target_connection.session_settings)
+
             if self.config_parser.should_drop_schema():
                 self.logger.info(f"Dropping target schema '{self.target_schema}'...")
                 self.target_connection.execute_query(f"DROP SCHEMA IF EXISTS {self.target_schema} CASCADE")
 
+            if self.config_parser.get_log_level() == 'DEBUG':
+                self.logger.debug(f"Creating target schema '{self.target_schema}' if it does not exist...")
             self.target_connection.execute_query(f"CREATE SCHEMA IF NOT EXISTS {self.target_schema}")
             self.target_connection.disconnect()
 
@@ -120,6 +130,18 @@ class Planner:
             self.migrator_tables.insert_main('Planner', '')
             self.migrator_tables.prepare_data_types_substitution()
             self.migrator_tables.prepare_default_values_substitution()
+
+            if self.sql_functions_mapping:
+                for src_func, tgt_func in self.sql_functions_mapping.items():
+                    # Escape parentheses in src_func for regex usage
+                    escaped_src_func = re.escape(src_func)
+                    self.migrator_tables.insert_default_values_substitution({
+                        'column_name': '',
+                        'source_column_data_type': '',
+                        'default_value_value': rf"(?i){escaped_src_func}",
+                        'target_default_value': tgt_func
+                    })
+
             self.migrator_tables.prepare_data_migration_limitation()
             self.migrator_tables.prepare_remote_objects_substitution()
 
@@ -562,6 +584,7 @@ class Planner:
                     'source_database': self.config_parser.get_source_db_name(),
                     'source_schema': self.config_parser.get_source_schema(),
                     'target_schema': self.config_parser.get_target_schema(),
+                    'target_db_type': self.config_parser.get_target_db_type(),
                 })
 
                 if self.config_parser.get_log_level() == 'DEBUG':

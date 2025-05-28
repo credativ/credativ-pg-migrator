@@ -194,10 +194,12 @@ class PostgreSQLConnector(DatabaseConnector):
             create_column_sql = ""
             column_data_type = column_info['data_type'].upper()
             is_identity = column_info['is_identity']
-            if column_info['basic_data_type'] != '':
-                column_data_type = column_info['basic_data_type'].upper()
-            elif column_info['data_type'] == 'USER-DEFINED' and column_info['udt_schema'] != '' and column_info['udt_name'] != '':
+            # if column_info['column_type_substitution'] != '':
+            #     column_data_type = column_info['column_type_substitution'].upper()
+            if column_info['data_type'] == 'USER-DEFINED' and column_info['udt_schema'] != '' and column_info['udt_name'] != '':
                 column_data_type = f'''"{column_info['udt_schema']}"."{column_info['udt_name']}"'''
+            # elif column_info['basic_data_type'] != '':
+            #     column_data_type = column_info['basic_data_type'].upper()
 
             character_maximum_length = ''
             if 'character_maximum_length' in column_info and column_info['character_maximum_length'] != '':
@@ -254,7 +256,7 @@ class PostgreSQLConnector(DatabaseConnector):
             if column_info['column_default_name'] != '' and column_info['replaced_column_default_value'] == '':
                 default_value_info = migrator_tables.get_default_value_details(default_value_name=column_info['column_default_name'])
                 if default_value_info:
-                    if self.is_string_type(column_data_type) and character_maximum_length != '':
+                    if self.is_string_type(column_data_type) and character_maximum_length != '' and column_data_type not in ('TEXT', 'BYTEA'):
                         create_column_sql += f""" DEFAULT '{default_value_info['extracted_default_value']}'::{column_data_type}({character_maximum_length})"""
                     elif self.is_string_type(column_data_type):
                         create_column_sql += f""" DEFAULT '{default_value_info['extracted_default_value']}'::{column_data_type}"""

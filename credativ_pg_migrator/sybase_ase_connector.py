@@ -67,10 +67,11 @@ class SybaseASEConnector(DatabaseConnector):
         target_db_type = settings['target_db_type']
         if target_db_type == 'postgresql':
             return {
-                'getdate': 'current_timestamp',
-                'db_name': 'current_database()',
-                'suser_name': 'current_user',
+                'getdate()': 'current_timestamp',
+                'db_name()': 'current_database()',
+                'suser_name()': 'current_user',
                 'datetime': 'current_timestamp',
+                'len(': 'length(',
             }
         else:
             self.logger.error(f"Unsupported target database type: {target_db_type}")
@@ -257,7 +258,7 @@ class SybaseASEConnector(DatabaseConnector):
                     length_precision = custom_type[1]
                     type_has_identity_property = custom_type[2]
                     type_nullable = custom_type[3]
-                    source_data_type_length = custom_type[4]
+                    source_data_type_length = custom_type[4].strip()
                     length = custom_type[5]
                     data_type_precision = custom_type[6]
                     data_type_scale = custom_type[7]

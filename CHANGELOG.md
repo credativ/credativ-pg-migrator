@@ -2,14 +2,22 @@
 
 ## (not released yet) 0.7.x - 2025.05.xx
 
+- 2025.05.28
+
+  - Started implementation of SQL functions mapping between source database and PostgreSQL
+    - Rationale: This is needed for migration of views and stored procedures/functions/triggers, it is most versatile solution similar to the one used for data types
+    - currently added only for Sybase ASE, used in this step for default values of columns
+  - Rewrite of custom data types substitution - can use direct match, LIKE format or regexp, simplified format, 3rd value in config file is now taken only as a comment
+    - Substitution is now checked for data_type, column_type or basic_data_type (if exists)
+  - Fix in casting of default values for type TEXT
+
 - 2025.05.21
+
   - Adjustments for providing credativ-pg-migrator as executable in a package
   - Created GitHub workflow for automated tests of database migrations - see details in the main README file
   - Python directory credativ-pg-migrator renamed to credativ_pg_migrator - dashes made issues with packaging
   - Repaired "SET ROLE" setting for the target PostgreSQL database
   - Added implicit embedded default values substitution for Sybase ASE - getdate, db_name, suser_name, datetime, BIT 0/1
-  - Started implementation of SQL functions mapping - Sybase ASE to PostgreSQL currently in progress
-    - Rationale: This is needed for migration of views and stored procedures/functions/triggers, it is most versatile solution similar to the one used for data types
 
 ## 0.7.5 - 2025.05.21
 

@@ -57,57 +57,61 @@ class MigratorTables:
         CREATE TABLE IF NOT EXISTS "{self.protocol_schema}".data_types_substitution (
         source_type TEXT,
         target_type TEXT,
-        target_type_length TEXT,
+        comment TEXT,
         inserted TIMESTAMP DEFAULT clock_timestamp()
         )
         """)
 
         # Insert data into the table
-        for source_type, target_type, target_type_length in self.config_parser.get_data_types_substitution():
+        for source_type, target_type, comment in self.config_parser.get_data_types_substitution():
             self.protocol_connection.execute_query(f"""
             INSERT INTO "{self.protocol_schema}".data_types_substitution
-            (source_type, target_type, target_type_length)
+            (source_type, target_type, comment)
             VALUES (%s, %s, %s)
-            """, (source_type, target_type, target_type_length))
+            """, (source_type, target_type, comment))
 
     def check_data_types_substitution(self, check_type):
         """
         Check if replacement for the data type exists in the data_types_substitution table
-        result = {
-            'source_data_type': ...,
-            'target_data_type': ...,
-            'target_data_type_length': ...
-        }
+        Returns target_data_type
         """
         query = f"""
-        SELECT target_type, target_type_length
+        SELECT target_type
         FROM "{self.protocol_schema}".data_types_substitution
-        WHERE trim($escape${check_type}$escape$) = trim(source_type)
+        WHERE lower(trim($escape${check_type}$escape$)) = lower(trim(source_type))
         """
         cursor = self.protocol_connection.connection.cursor()
         cursor.execute(query)
         result = cursor.fetchone()
         cursor.close()
         if result:
-            return result[0], result[1]
+            return result[0]
         else:
             query = f"""
-            SELECT target_type, target_type_length
+            SELECT target_type
             FROM "{self.protocol_schema}".data_types_substitution
-            WHERE trim($escape${check_type}$escape$) LIKE trim(source_type)
+            WHERE trim($escape${check_type}$escape$) ILIKE trim(source_type)
             """
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query)
             result = cursor.fetchone()
             cursor.close()
             if result:
-                return {
-                'source_data_type': check_type,
-                'target_data_type': result[0],
-                'target_data_type_length': result[1]
-                }
+                return result[0]
             else:
-                return {}
+                query = f"""
+                SELECT target_type
+                FROM "{self.protocol_schema}".data_types_substitution
+                WHERE lower(trim($escape${check_type}$escape$)) ~ lower(trim(source_type))
+                """
+                cursor = self.protocol_connection.connection.cursor()
+                cursor.execute(query)
+                result = cursor.fetchone()
+                cursor.close()
+                if result:
+                    return result[0]
+                else:
+                    return None
 
     def prepare_data_migration_limitation(self):
         # Drop table if exists

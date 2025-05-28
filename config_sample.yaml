@@ -77,14 +77,15 @@ migration:
   after_migration_script: scripts/informix_post_migration.sql
   names_case_handling: lower # lower, upper, keep - if names of the objects should be converted to lower or upper case or kept as is
 
-# Specify tables to include in the migration
-# Either one value "all" or list of specific table names or regular expressions
-include_tables: all
+# Specify tables to include in the migration - list of table names or regular expressions
+# Empty list means all tables will be included
+# One string value added without putting it into list, will raise an parsing error
+include_tables:
   # - "table1"
   # - "table_prefix_*"
 
-# Specify tables to exclude from the migration
-# Either empty (no tables excluded) or list of specific table names or regular expressions
+# Specify tables to exclude from the migration - list of table names or regular expressions
+# Empty list means no tables will be excluded
 exclude_tables:
   # - "z_skins"
   # - "z_skins_er*"
@@ -105,11 +106,15 @@ exclude_funcprocs:
 
 
 # Data types substitution
-# source data type, target data type, target data type length
+# source data type (eventually including length), target data type (eventually including length), comment
+# Source data type can be specified as precise match, pattern for LIKE operator or regular expression - checked in this order
+# Matching is case-insensitive
 data_types_substitution:
-  - ["TypMacAdresse", "TEXT", '']
-  - ["TypID", "BIGINT", '']
-  - ["Numeric(2_,0)", "NUMERIC", '']
+  - ["TypMacAdresse", "TEXT", 'Does not have direct equivalent in PostgreSQL, using TEXT']
+  - ["TypID", "BIGINT", 'Numeric PK is not supported in PostgreSQL, using BIGINT']
+  - ["numeric(_,0)", "INTEGER", 'Sybase numeric type with no decimal places, using INTEGER']
+  - ["numeric(1_,0)", "BIGINT", 'Sybase numeric type with no decimal places, using BIGINT']
+  - ["numeric(2_,0)", "NUMERIC", 'Sybase Integer bigger than 32 bits, using NUMERIC - will probably need to change to BIGINT later']
 
 # Default values substitution
 # column_name, source_column_data_type, source_default_value, target_default_value

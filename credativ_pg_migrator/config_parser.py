@@ -1,16 +1,16 @@
 # credativ-pg-migrator
 # Copyright (C) 2025 credativ GmbH
-# 
+#
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
 # the Free Software Foundation, either version 3 of the License, or
 # (at your option) any later version.
-# 
+#
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 # GNU General Public License for more details.
-# 
+#
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
@@ -34,26 +34,36 @@ class ConfigParser:
         ## //TODO source.schema or source.owner is required - not both
 
         include_tables = self.config['include_tables']
-        exclude_tables = self.config['exclude_tables']
+        if (include_tables is not None and type(include_tables) is str and include_tables.lower() != 'all'):
+            # and type(include_tables) is not list):
+            raise ValueError("When include_tables is used, it must be a list of names or regex patterns")
 
-        if self.args.log_level == 'DEBUG':
-            self.logger.debug(f"type(include_tables): {type(include_tables)} - {include_tables}")
-            self.logger.debug(f"type(exclude_tables): {type(exclude_tables)} - {exclude_tables}")
+        ## This whole logic is an overkill right now
+        ## we need more practical experiences from migrations to see if something like this is really needed
+        ##
+        # include_tables = self.config['include_tables']
+        # exclude_tables = self.config['exclude_tables']
 
-        if include_tables is None and exclude_tables is None:
-            self.config['include_tables'] = 'all'
-        if type(include_tables) is str and include_tables == '.*' and exclude_tables is None:
-            self.logger.info("Check of include_tables and exclude_tables passed - all tables will be included")
-        elif type(include_tables) is list and exclude_tables is None:
-            self.logger.info("Check of include_tables and exclude_tables passed - selected tables will be included")
-        elif type(include_tables) is str and include_tables == '.*' and type(exclude_tables) is list:
-            self.logger.info("Check of include_tables and exclude_tables passed - all tables will be included except for the ones specified")
-        elif type(include_tables) is list and type(exclude_tables) is list:
-            if set(include_tables) & set(exclude_tables):
-                raise ValueError("Configuration error: There are tables specified in both 'include_tables.specific_tables' and 'exclude_tables.specific_tables'.")
+        # if self.args.log_level == 'DEBUG':
+        #     self.logger.debug(f"type(include_tables): {type(include_tables)} - {include_tables}")
+        #     self.logger.debug(f"type(exclude_tables): {type(exclude_tables)} - {exclude_tables}")
 
-        if self.args.log_level == 'DEBUG':
-            self.logger.debug(f"Configuration validated: {self.config}")
+        # if include_tables is None and exclude_tables is None:
+        #     self.config['include_tables'] = ['.*']  # Default to include all tables
+
+        # if type(include_tables) is str and include_tables == '.*' and exclude_tables is None:
+        #     self.logger.info("Check of include_tables and exclude_tables passed - all tables will be included")
+        # elif type(include_tables) is list and exclude_tables is None:
+        #     self.logger.info("Check of include_tables and exclude_tables passed - selected tables will be included")
+        # elif type(include_tables) is str and include_tables == '.*' and type(exclude_tables) is list:
+        #     self.logger.info("Check of include_tables and exclude_tables passed - all tables will be included except for the ones specified")
+        # elif type(include_tables) is list and type(exclude_tables) is list:
+        #     if set(include_tables) & set(exclude_tables):
+        #         raise ValueError("Configuration error: There are tables specified in both 'include_tables.specific_tables' and 'exclude_tables.specific_tables'.")
+
+        # if self.args.log_level == 'DEBUG':
+        #     self.logger.debug(f"Configuration validated: {self.config}")
+        return True
 
     ## Databases
     def get_db_config(self, source_or_target):
@@ -329,8 +339,8 @@ class ConfigParser:
 
     def get_include_tables(self):
         include_tables = self.config['include_tables']
-        if type(include_tables) is str:
-            return '.*'  # Pattern matching all table names
+        if (include_tables is None or (type(include_tables) is str and include_tables.lower() == 'all')):
+            return ['.*']  # Pattern matching all table names
         elif type(include_tables) is list:
             return include_tables
         else:

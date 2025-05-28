@@ -141,7 +141,11 @@ class Planner:
 
         for order_num, table_info in source_tables.items():
             self.logger.info(f"Processing table ({order_num}/{len(source_tables)}): {table_info['table_name']}")
-            if not any(fnmatch.fnmatch(table_info['table_name'], pattern) for pattern in include_tables):
+            # If include_tables is empty, include all tables
+            # If include_tables is ['.*'] or contains '.*', include all tables
+            if include_tables == ['.*'] or '.*' in include_tables:
+                pass
+            elif include_tables and not any(fnmatch.fnmatch(table_info['table_name'], pattern) for pattern in include_tables):
                 continue
             if any(fnmatch.fnmatch(table_info['table_name'], pattern) for pattern in exclude_tables):
                 self.logger.info(f"Table {table_info['table_name']} is excluded from migration.")
@@ -164,15 +168,27 @@ class Planner:
                 if self.config_parser.get_log_level() == 'DEBUG':
                     self.logger.debug(f"Fetched source columns: {source_columns}")
 
-                for col_order_num, column_info in source_columns.items():
-
+                for _, column_info in source_columns.items():
                     if self.config_parser.get_log_level() == 'DEBUG':
                         self.logger.debug(f"Checking for data types / default values substitutions for column {column_info}...")
-                    substitution = self.migrator_tables.check_data_types_substitution(column_info['column_type'])
-                    if substitution and substitution != {}:
+                    substitution = self.migrator_tables.check_data_types_substitution(column_info['data_type'])
+                    if substitution:
                         if self.config_parser.get_log_level() == 'DEBUG':
-                            self.logger.debug(f"Substitution for source data type: {substitution}")
+                            self.logger.debug(f"Substitution based on data_type ({column_info['data_type']}): {substitution}")
                         column_info['column_type_substitution'] = substitution
+                    else:
+                        substitution = self.migrator_tables.check_data_types_substitution(column_info['column_type'])
+                        if substitution:
+                            if self.config_parser.get_log_level() == 'DEBUG':
+                                self.logger.debug(f"Substitution based on column_type ({column_info['column_type']}): {substitution}")
+                            column_info['column_type_substitution'] = substitution
+                        else:
+                            if 'basic_data_type' in column_info and column_info['basic_data_type'] != '':
+                                substitution = self.migrator_tables.check_data_types_substitution(column_info['basic_data_type'])
+                                if substitution:
+                                    if self.config_parser.get_log_level() == 'DEBUG':
+                                        self.logger.debug(f"Substitution based on basic_data_type ({column_info['basic_data_type']}): {substitution}")
+                                    column_info['column_type_substitution'] = substitution
 
                     # checking for default values substitution with the new data type
                     if column_info['column_default_value'] != '':
@@ -446,17 +462,35 @@ class Planner:
                 types_mapping = self.source_connection.get_types_mapping(settings)
 
             for order_num, column_info in source_columns.items():
-                coltype = column_info['data_type'].upper()
-                character_maximum_length = column_info['character_maximum_length'] if column_info['character_maximum_length'] is not None else 0
-                if source_db_type != 'postgresql':
-                    if types_mapping.get(coltype, 'UNKNOWN').startswith('UNKNOWN'):
-                        self.logger.info(f"Column {column_info['column_name']} - unknown data type: {column_info['data_type']}")
-                        # coltype = 'TEXT' ## default to TEXT may not be the best option -> let the table creation fail
-                    else:
-                        coltype = types_mapping.get(coltype, 'TEXT')
+                if 'column_type_substitution' in column_info and column_info['column_type_substitution'] != '':
+                    coltype = column_info['column_type_substitution'].upper()
+                    character_maximum_length = 0
+                    ## we presume substitution contains also length/ precision, scale
+                    ## and proper data type, so we can use it directly
+                    if self.config_parser.get_log_level() == 'DEBUG':
+                        self.logger.debug(f"Column {column_info['column_name']} - using substitution: {coltype}")
+                else:
+                    coltype = column_info['data_type'].upper()
+                    character_maximum_length = column_info['character_maximum_length'] if column_info['character_maximum_length'] is not None else 0
+                    if source_db_type != 'postgresql':
+                        if types_mapping.get(coltype, 'UNKNOWN').startswith('UNKNOWN'):
+                            self.logger.info(f"Column {column_info['column_name']} - unknown data type: {column_info['data_type']} - checking column_type...")
+                            if 'column_type' in column_info and column_info['column_type']:
+                                coltype = column_info['column_type'].upper()
+                                if types_mapping.get(coltype, 'UNKNOWN').startswith('UNKNOWN'):
+                                    self.logger.info(f"Column {column_info['column_name']} - unknown column type: {column_info['column_type']} - checking basic_data_type...")
+                                    if 'basic_data_type' in column_info and column_info['basic_data_type']:
+                                        coltype = column_info['basic_data_type'].upper()
+                                        if types_mapping.get(coltype, 'UNKNOWN').startswith('UNKNOWN'):
+                                            self.logger.info(f"Column {column_info['column_name']} - unknown basic data type: {column_info['basic_data_type']} - mapping missing, using TEXT...")
+
+                    coltype = types_mapping.get(coltype, 'TEXT').upper()
 
                     if self.source_connection.is_string_type(coltype) and character_maximum_length >= 254:
                         coltype = 'TEXT'
+
+                if self.config_parser.get_log_level() == 'DEBUG':
+                    self.logger.debug(f"Column {column_info['column_name']} - using data type: {coltype}")
 
                 converted[order_num] = {
                     'column_name': column_info['column_name'],
@@ -474,7 +508,7 @@ class Planner:
                     'basic_character_maximum_length': column_info['basic_character_maximum_length'] if 'basic_character_maximum_length' in column_info else '',
                     'basic_numeric_precision': column_info['basic_numeric_precision'] if 'basic_numeric_precision' in column_info else '',
                     'basic_numeric_scale': column_info['basic_numeric_scale'] if 'basic_numeric_scale' in column_info else '',
-                    'basic_column_type': column_info['basic_column_type'] if 'basic_column_type' in column_info else '',
+                    'basic_column_type': column_info['basic_column_type'].strip() if 'basic_column_type' in column_info else '',
                     'is_identity': column_info['is_identity'],
                     'column_comment': column_info['column_comment'] if 'column_comment' in column_info else '',
                     'is_generated_virtual': column_info['is_generated_virtual'] if 'is_generated_virtual' in column_info else '',

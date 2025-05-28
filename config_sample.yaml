@@ -51,8 +51,8 @@ target:
   settings:
     work_mem: '32MB'
     maintenance_work_mem: '512MB'
-    # role: 'sybase_owner'
-    search_path: "migraene, public"
+    role: 'target_owner'
+    search_path: "target_schema, public"
 
 # recipe for the migration process
 migration:
@@ -65,7 +65,7 @@ migration:
   migrate_indexes: true
   migrate_constraints: true
   migrate_funcprocs: true
-  migrate_triggers: false
+  migrate_triggers: true
   migrate_views: true
   set_sequnces: true
   on_error: continue # stop, continue

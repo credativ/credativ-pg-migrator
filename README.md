@@ -1,5 +1,7 @@
 # Development of credativ-pg-migrator
 
+<img src="docs/images/credativ-pg-migrator.png" alt="Logo" width="200"/>
+
 - Repository contains python solution for migration of the whole database from legacy systems to PostgreSQL.
 - Testing examples are in the [tests directory](./tests/) - see [README](./tests/README.md) for more information and READMEs in each subdirectory.
 - See fixes and updates in [CHANGE LOG](./CHANGELOG.md).

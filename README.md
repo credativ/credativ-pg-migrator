@@ -4,7 +4,7 @@
 
 `credativ-pg-migrator` is a solution for the migration of databases from legacy systems to PostgreSQL.
 It is is written in Python in multiple classes and modules.
-For practical usage and examples refer to the [tests](../tests/) directory. There you can find working examples of the migration process for different databases.
+For practical usage and examples refer to the [tests](./tests/) directory. There you can find working examples of the migration process for different databases.
 
 ## Main features
 

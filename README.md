@@ -82,6 +82,10 @@ The repository is structured as follows:
 - sql - SQL scripts different purposes like for creating tables and inserting data into the source database
 - tests - test cases for the migrator tool for different source databases
 
+## Authors
+
+`credativ-pg-migrator` has been primarily developped and is maintained by Josef Machytka, see `AUTHORS.md`.
+
 ## License
 
 `credativ-pg-migrator` is released under the GNU General Public License, version 3 (or any later version).

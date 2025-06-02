@@ -1,9 +1,9 @@
 from setuptools import setup, find_packages
 
 setup(
-    name='credativ-pg-migrator-dev',
+    name='credativ-pg-migrator',
     version='0.7.7dev',
-    url='https://github.com/credativ/credativ-pg-migrator-dev.git',
+    url='https://github.com/credativ/credativ-pg-migrator.git',
     author='Josef Machytka',
     author_email='josef.machytka@credativ.de',
     description='Migrator from proprietary and legacy databases into PostgreSQL',

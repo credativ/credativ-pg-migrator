@@ -174,3 +174,16 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# legacy directories
+archive
+config
+data
+lib
+logs
+notes
+poc
+scripts
+sql
+tests
+utils

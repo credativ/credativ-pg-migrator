@@ -49,7 +49,7 @@ credativ-pg-migrator --config=./test_database.yaml --log-file=./test_database_$(
 
 ## Architecture
 
-![Architecture](./docs/images/migrator-talk.jpg)
+![Architecture](./docs/images/architecture.jpg)
 
 ## Source databases
 

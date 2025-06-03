@@ -15,7 +15,7 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import json
-from postgresql_connector import PostgreSQLConnector
+from connectors.postgresql_connector import PostgreSQLConnector
 class MigratorTables:
     def __init__(self, logger, config_parser):
         self.logger = logger

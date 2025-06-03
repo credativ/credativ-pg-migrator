@@ -30,14 +30,14 @@ MIGRATOR_INTERNAL_CONFIGURATION = {
 
 ## Modules of database connectors
 MIGRATOR_MODULES = {
-					'postgresql': 'postgresql_connector:PostgreSQLConnector',
-					'ibm_db2': 'ibm_db2_connector:IBMDB2Connector',
-					'informix': 'informix_connector:InformixConnector',
-					'mssql': 'ms_sql_connector:MsSQLConnector',
-					'mysql': 'mysql_connector:MySQLConnector',
-					'oracle': 'oracle_connector:OracleConnector',
-					'sql_anywhere': 'sql_anywhere_connector:SQLAnywhereConnector',
-					'sybase_ase': 'sybase_ase_connector:SybaseASEConnector'
+					'postgresql': 'connectors.postgresql_connector:PostgreSQLConnector',
+					'ibm_db2': 'connectors.ibm_db2_connector:IBMDB2Connector',
+					'informix': 'connectors.informix_connector:InformixConnector',
+					'mssql': 'connectors.ms_sql_connector:MsSQLConnector',
+					'mysql': 'connectors.mysql_connector:MySQLConnector',
+					'oracle': 'connectors.oracle_connector:OracleConnector',
+					'sql_anywhere': 'connectors.sql_anywhere_connector:SQLAnywhereConnector',
+					'sybase_ase': 'connectors.sybase_ase_connector:SybaseASEConnector'
 					}
 
 if __name__ == "__main__":

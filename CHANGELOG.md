@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.8.0 - 2025.06.03
+
+- 2025.06.03
+
+  - Public release
+  - Move connectors into their own module/sub directory (@mbanck-cd)
+
 ## 0.7.6 - 2025.05.30
 
 - 2025.05.28

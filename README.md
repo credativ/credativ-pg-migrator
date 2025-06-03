@@ -33,7 +33,7 @@ For practical usage and examples refer to the [tests](./tests/) directory. There
 In a python venv:
 ```
 . ../migrator_venv/bin/activate
-echo ""> ../logs/test_database_20250306.log; python3 main.py --config=../config/test_database.yaml --log-file=../logs/test_database_$(date +%Y%m%d).log --log-level=DEBUG
+python3 main.py --config=../config/test_database.yaml --log-file=../logs/test_database_$(date +%Y%m%d).log --log-level=DEBUG
 ```
 
 From packages:
@@ -79,27 +79,6 @@ See [CHANGELOG](./CHANGELOG.md).
 - In Informix we currently do not support ROW data type (corresponds with PostgreSQL composite type)
 - Not all types of default values are currently supported simply because we do not know all possible values/functions. Every database is somehow unique, so these will be added on demand.
 - Support for partitioning of target tables is only in the experimental stage.
-
-## Automated GitHub tests
-
-- Testing examples in the [tests directory](./tests/) can automatically run on GitHub using GitHub Actions
-- Directory must have "run_full_test.sh" script, which must be executable and must be able to run full test automatically
-- To activate GitHub tests you must add text `[run-tests]` in the commit message and specify either `[all]` or specific database like `[mysql]`, `[oracle]`, etc.
-
-## Build
-
-```
-../migrator_venv/bin/pyinstaller --onefile --name credativ-pg-migrator main.py
-```
-
-## Manual test of code conversion
-
-```
-../migrator_venv/bin/python3 test_code_conversion.py
-```
-
-- Repository contains python solution for migration of the whole database from legacy systems to PostgreSQL.
-- Testing examples are in the [tests directory](./tests/) - see [README](./tests/README.md) for more information and READMEs in each subdirectory.
 
 ## Authors
 

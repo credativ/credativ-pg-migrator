@@ -216,6 +216,21 @@ class PostgreSQLConnector(DatabaseConnector):
 
             if (character_maximum_length != '' and 'CHAR' in column_data_type):
                 create_column_sql = f""""{column_info['column_name']}" {column_data_type}({character_maximum_length})"""
+            elif self.is_numeric_type(column_data_type) and column_data_type in ('DECIMAL', 'NUMERIC'):
+                numeric_precision = column_info.get('numeric_precision')
+                numeric_scale = column_info.get('numeric_scale')
+                basic_numeric_precision = column_info.get('basic_numeric_precision')
+                basic_numeric_scale = column_info.get('basic_numeric_scale')
+                if numeric_precision not in (None, '') and numeric_scale not in (None, ''):
+                    create_column_sql = f""""{column_info['column_name']}" {column_data_type}({numeric_precision},{numeric_scale})"""
+                elif numeric_precision not in (None, ''):
+                    create_column_sql = f""""{column_info['column_name']}" {column_data_type}({numeric_precision})"""
+                elif basic_numeric_precision not in (None, '') and basic_numeric_scale not in (None, ''):
+                    create_column_sql = f""""{column_info['column_name']}" {column_data_type}({basic_numeric_precision},{basic_numeric_scale})"""
+                elif basic_numeric_precision not in (None, ''):
+                    create_column_sql = f""""{column_info['column_name']}" {column_data_type}({basic_numeric_precision})"""
+                else:
+                    create_column_sql = f""""{column_info['column_name']}" {column_data_type}"""
             else:
                 if is_identity == 'YES' and column_data_type not in ('BIGINT', 'INTEGER', 'SMALLINT'):
                     altered_data_type = 'BIGINT'

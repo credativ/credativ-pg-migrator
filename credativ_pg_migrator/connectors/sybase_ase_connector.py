@@ -205,6 +205,8 @@ class SybaseASEConnector(DatabaseConnector):
                     'data_type': data_type,
                     'column_type': full_data_type_length,
                     'character_maximum_length': length if self.is_string_type(data_type) else None,
+                    'numeric_precision': data_type_precision if self.is_numeric_type(data_type) else None,
+                    'numeric_scale': data_type_scale if self.is_numeric_type(data_type) else None,
                     'is_nullable': 'NO' if column_nullable == 0 else 'YES',
                     'column_default_name': column_default_name,
                     'column_default_value': column_default_value,

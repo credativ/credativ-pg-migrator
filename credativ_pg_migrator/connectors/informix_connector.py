@@ -1,16 +1,16 @@
 # credativ-pg-migrator
 # Copyright (C) 2025 credativ GmbH
-# 
+#
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
 # the Free Software Foundation, either version 3 of the License, or
 # (at your option) any later version.
-# 
+#
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 # GNU General Public License for more details.
-# 
+#
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
@@ -151,7 +151,9 @@ class InformixConnector(DatabaseConnector):
                 CASE WHEN d.type = 'L' THEN
                     d.default
                 ELSE NULL
-                END AS default_value
+                END AS default_value,
+                ifx_bit_rightshift(c.collength, 8) as numeric_precision,
+                bitand(c.collength, "0xff") as numeric_scale
             FROM syscolumns c LEFT join sysxtdtypes x ON c.extended_id = x.extended_id
             LEFT JOIN sysdefaults d ON c.tabid = d.tabid AND c.colno = d.colno and d.class = 'T'
             WHERE c.tabid = (SELECT t.tabid
@@ -177,7 +179,8 @@ class InformixConnector(DatabaseConnector):
                 maximum_length = row[3]
                 is_nullable = row[4]
                 column_default_value = row[5]
-                numeric_scale = 0
+                numeric_precision = row[6]
+                numeric_scale = row[7]
 
                 column_type = data_type
                 if self.is_string_type(data_type):
@@ -189,8 +192,8 @@ class InformixConnector(DatabaseConnector):
                     'data_type': data_type,
                     'column_type': '',
                     'character_maximum_length': maximum_length if self.is_string_type(data_type) else None,
-                    'numeric_precision': maximum_length if self.is_numeric_type(data_type) else None,
-                    'numeric_scale': numeric_scale,
+                    'numeric_precision': numeric_precision if self.is_numeric_type(data_type) else None,
+                    'numeric_scale': numeric_scale if self.is_numeric_type(data_type) else None,
                     'is_nullable': is_nullable,
                     'is_identity': 'YES' if data_type in ('SERIAL', 'SERIAL8', 'BIGSERIAL') else 'NO',
                     'column_default_value': column_default_value,

@@ -129,9 +129,6 @@ default_values_substitution:
 remote_objects_substitution:
   - ["remotedb:dbo.table1", "remote_db.table1"]
 
-# functions_substitution:
-#   - ["dbo.func1", "func1"]
-
 # Limitations for data migration
 # "Table name (or pattern)", "condition for limiting data (without WHERE)", "column name (or pattern) - use condition when column is present in the table"
 data_migration_limitation:

@@ -1,10 +1,12 @@
 # Changelog
 
-## 0.8.1 - 2025.06.04
+## 0.8.1 - 2025.06.05
 
-- Fixed numeric precision and scale in Sybase ASE connector
-- Fixed issue with using numeric precision and scale in PostgreSQL connector
-- Fixed wrongly interpreted numeric precision and scale in Informix connector
+- 2025.06.04
+
+  - Fixed numeric precision and scale in Sybase ASE connector
+  - Fixed issue with using numeric precision and scale in PostgreSQL connector
+  - Fixed wrongly interpreted numeric precision and scale in Informix connector
 
 ## 0.8.0 - 2025.06.03
 

@@ -325,7 +325,7 @@ class Orchestrator:
 
             if worker_target_connection.session_settings:
                 if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.info(f"Worker {worker_id}: Executing session settings: {worker_target_connection.session_settings}")
+                    self.logger.debug(f"Worker {worker_id}: Executing session settings: {worker_target_connection.session_settings}")
                 worker_target_connection.execute_query(worker_target_connection.session_settings)
 
             if settings['drop_tables']:
@@ -496,7 +496,7 @@ class Orchestrator:
 
             if worker_target_connection.session_settings:
                 if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.info(f"Worker {worker_id}: Executing session settings: {worker_target_connection.session_settings}")
+                    self.logger.debug(f"Worker {worker_id}: Executing session settings: {worker_target_connection.session_settings}")
                 worker_target_connection.execute_query(worker_target_connection.session_settings)
 
             worker_target_connection.execute_query(create_index_sql)
@@ -530,7 +530,7 @@ class Orchestrator:
 
                 if worker_target_connection.session_settings:
                     if self.config_parser.get_log_level() == 'DEBUG':
-                        self.logger.info(f"Worker {worker_id}: Executing session settings: {worker_target_connection.session_settings}")
+                        self.logger.debug(f"Worker {worker_id}: Executing session settings: {worker_target_connection.session_settings}")
                     worker_target_connection.execute_query(worker_target_connection.session_settings)
 
                 worker_target_connection.execute_query(create_constraint_sql)

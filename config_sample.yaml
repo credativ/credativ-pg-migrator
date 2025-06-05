@@ -73,8 +73,8 @@ migration:
   batch_size: 100000
   # PostgreSQL scripts for the migration process
   # Both run on the target database, before and after the migration
-  before_migration_script: scripts/informix_pre_migration.sql
-  after_migration_script: scripts/informix_post_migration.sql
+  # pre_migration_script: pre_migration.sql
+  # post_migration_script: post_migration.sql
   names_case_handling: lower # lower, upper, keep - if names of the objects should be converted to lower or upper case or kept as is
 
 # Specify tables to include in the migration - list of table names or regular expressions

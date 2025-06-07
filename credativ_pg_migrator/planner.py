@@ -591,10 +591,15 @@ class Planner:
                     self.logger.debug("Checking for remote objects substitution in view SQL...")
                 rows = self.migrator_tables.get_records_remote_objects_substitution()
                 if rows:
-                    for row in rows:
+                    # for row in rows:
+                    #     if self.config_parser.get_log_level() == 'DEBUG':
+                    #         self.logger.debug(f"Views - remote objects substituting {row[0]} with {row[1]}")
+                    #     converted_view_sql = re.sub(re.escape(row[0]), row[1], converted_view_sql, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
+                    for src_obj, tgt_obj in rows.items():
+                        escaped_src_obj = re.escape(src_obj)
+                        converted_code = re.sub(rf"(?i){escaped_src_obj}", tgt_obj, converted_code, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
                         if self.config_parser.get_log_level() == 'DEBUG':
-                            self.logger.debug(f"Views - remote objects substituting {row[0]} with {row[1]}")
-                        converted_view_sql = re.sub(re.escape(row[0]), row[1], converted_view_sql, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
+                            self.logger.debug(f"Checking conversion of remote object {src_obj} to {tgt_obj} in view code")
 
                 if self.config_parser.get_log_level() == 'DEBUG':
                     self.logger.debug(f"Converted view SQL: {converted_view_sql}")

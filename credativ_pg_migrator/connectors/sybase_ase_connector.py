@@ -114,65 +114,53 @@ class SybaseASEConnector(DatabaseConnector):
         table_schema = settings['table_schema']
         table_name = settings['table_name']
         result = {}
-        query = f"""
-            SELECT
-                c.colid as ordinal_position,
-                c.name as column_name,
-                t.name as data_type,
-                CASE
-                    WHEN t.name in ('univarchar', 'unichar', 'varchar', 'char')
-                        THEN convert('varchar', c.length )
-                    WHEN t.name in ('numeric', 'double precision', 'decimal')
-                        THEN convert('varchar', c.prec) + ',' + convert('varchar', c.scale)
-                    WHEN t.name in ('float', 'binary') THEN convert('varchar', c.length)
-                    ELSE ''
-                END as data_type_length,
-                c.length as length,
-                CASE
-                    WHEN c.status&8=8 and t.name <> 'bit' THEN 1
-                ELSE 0 END AS column_nullable,
-                CASE
-                    WHEN c.status&128=128 and t.name <> 'bit' THEN 1
-                ELSE 0 END AS identity_column,
-                t.name +
-                CASE
-                    WHEN t.name in ('univarchar', 'unichar', 'varchar', 'char')
-                        THEN '(' + convert('varchar', c.length ) + ')'
-                    WHEN t.name in ('numeric', 'double precision', 'decimal')
-                        THEN '(' + convert('varchar', c.prec) + ',' + convert('varchar', c.scale) + ')'
-                    WHEN t.name in ('float', 'binary')
-                        THEN '(' + convert('varchar', c.length) + ')'
-                    ELSE ''
-                END as full_data_type_length,
-                object_name(c.domain) as column_domain,
-                object_name(c.cdefault) as column_default_name,
-                ltrim(rtrim(str_replace(co.text, char(10),''))) as column_default_value,
-                c.status,
-                t.variable as variable_length,
-                c.prec as data_type_precision,
-                c.scale as data_type_scale,
-                t.allownulls as type_nullable,
-                t.ident as type_has_identity_property,
-                object_name(c.domain) as domain_name,
-                case when c.status2 & 16 = 16 then 1 else 0 end is_generated_virtual,
-                case when c.status2 & 32 = 32 then 1 else 0 end is_genreated_stored,
-                com.text as computed_column_expression,
-                case when c.status3 & 1 = 1 then 1 else 0 end as is_hidden_column
-            FROM syscolumns c
-            JOIN sysobjects tab ON c.id = tab.id
-            JOIN systypes t ON c.usertype = t.usertype
-            LEFT JOIN syscomments co ON c.cdefault = co.id
-            LEFT JOIN syscomments com ON c.computedcol = com.id
-            WHERE user_name(tab.uid) = '{table_schema}'
-                AND tab.name = '{table_name}'
-                AND tab.type = 'U'
-            ORDER BY c.colid
-        """
         try:
             self.connect()
             cursor = self.connection.cursor()
             if self.config_parser.get_log_level() == 'DEBUG':
                 self.logger.debug(f"Sybase ASE: Reading columns for {table_schema}.{table_name}")
+            cursor.execute("SELECT @@unicharsize, @@ncharsize")
+            unichar_size, nchar_size = cursor.fetchone()
+            if self.config_parser.get_log_level() == 'DEBUG':
+                self.logger.debug(f"Sybase ASE: unichar size: {unichar_size}, nchar size: {nchar_size}")
+            query = f"""
+                SELECT
+                    c.colid as ordinal_position,
+                    c.name as column_name,
+                    t.name as data_type,
+                    '' as data_type_length,
+                    c.length,
+                    CASE
+                        WHEN c.status&8=8 and t.name <> 'bit' THEN 1
+                    ELSE 0 END AS column_nullable,
+                    CASE
+                        WHEN c.status&128=128 and t.name <> 'bit' THEN 1
+                    ELSE 0 END AS identity_column,
+                    '' as full_data_type_length,
+                    object_name(c.domain) as column_domain,
+                    object_name(c.cdefault) as column_default_name,
+                    ltrim(rtrim(str_replace(co.text, char(10),''))) as column_default_value,
+                    c.status,
+                    t.variable as variable_length,
+                    c.prec as data_type_precision,
+                    c.scale as data_type_scale,
+                    t.allownulls as type_nullable,
+                    t.ident as type_has_identity_property,
+                    object_name(c.domain) as domain_name,
+                    case when c.status2 & 16 = 16 then 1 else 0 end is_generated_virtual,
+                    case when c.status2 & 32 = 32 then 1 else 0 end is_genreated_stored,
+                    com.text as computed_column_expression,
+                    case when c.status3 & 1 = 1 then 1 else 0 end as is_hidden_column
+                FROM syscolumns c
+                JOIN sysobjects tab ON c.id = tab.id
+                JOIN systypes t ON c.usertype = t.usertype
+                LEFT JOIN syscomments co ON c.cdefault = co.id
+                LEFT JOIN syscomments com ON c.computedcol = com.id
+                WHERE user_name(tab.uid) = '{table_schema}'
+                    AND tab.name = '{table_name}'
+                    AND tab.type = 'U'
+                ORDER BY c.colid
+            """
             cursor.execute(query)
             for row in cursor.fetchall():
                 if self.config_parser.get_log_level() == 'DEBUG':
@@ -180,11 +168,11 @@ class SybaseASEConnector(DatabaseConnector):
                 ordinal_position = row[0]
                 column_name = row[1].strip()
                 data_type = row[2].strip()
-                data_type_length = row[3].strip()
+                # data_type_length = row[3].strip()
                 length = row[4]
                 column_nullable = row[5]
                 identity_column = row[6]
-                full_data_type_length = row[7].strip()
+                # full_data_type_length = row[7].strip()
                 column_domain = row[8]
                 column_default_name = row[9]
                 column_default_value = row[10].replace('DEFAULT ', '').strip().strip('"') if row[10] and row[10].replace('DEFAULT ', '').strip().startswith('"') and row[10].replace('DEFAULT ', '').strip().endswith('"') else (row[10].replace('DEFAULT ', '').strip() if row[10] else '')
@@ -200,11 +188,27 @@ class SybaseASEConnector(DatabaseConnector):
                 generation_expression = row[20]
                 is_hidden_column = row[21]
                 stripped_generation_expression = generation_expression.replace('AS ', '').replace('MATERIALIZED', '').strip() if generation_expression else ''
+
+                if data_type.lower() in ('univarchar', 'unichar'):
+                    data_type_length = str(int(length / unichar_size))
+                    character_maximum_length = int(length / unichar_size)
+                elif data_type.lower() in ('nvarchar', 'nchar'):
+                    data_type_length = str(int(length / nchar_size))
+                    character_maximum_length = int(length / nchar_size)
+                elif data_type.lower() in ('numeric', 'double precision', 'decimal'):
+                    data_type_length = f"{data_type_precision},{data_type_scale}"
+                    character_maximum_length = None
+                else:
+                    data_type_length = length
+                    character_maximum_length = length if self.is_string_type(data_type) else None
+
+                full_data_type_length = f"{data_type}({data_type_length})" if data_type_length else data_type
+
                 result[ordinal_position] = {
                     'column_name': column_name,
                     'data_type': data_type,
                     'column_type': full_data_type_length,
-                    'character_maximum_length': length if self.is_string_type(data_type) else None,
+                    'character_maximum_length': character_maximum_length,
                     'numeric_precision': data_type_precision if self.is_numeric_type(data_type) else None,
                     'numeric_scale': data_type_scale if self.is_numeric_type(data_type) else None,
                     'is_nullable': 'NO' if column_nullable == 0 else 'YES',
@@ -223,25 +227,8 @@ class SybaseASEConnector(DatabaseConnector):
                 query_custom_types = f"""
                     SELECT
                         bt.name AS source_data_type,
-                        CASE
-                            WHEN bt.name in ('univarchar', 'unichar', 'varchar', 'char')
-                                THEN convert('varchar', ut.length )
-                            WHEN bt.name in ('numeric', 'double precision', 'decimal')
-                                THEN convert('varchar', ut.prec) + ',' + convert('varchar', ut.scale)
-                            WHEN bt.name in ('float', 'binary')
-                                THEN convert('varchar', ut.length)
-                            ELSE ''
-                        END as length_precision,
                         ut.ident as type_has_identity_property,
                         ut.allownulls as type_nullable,
-                        bt.name + CASE
-                        WHEN bt.name in ('univarchar', 'unichar', 'varchar', 'char')
-                            THEN '(' + convert('varchar', ut.length ) + ')'
-                        WHEN bt.name in ('numeric', 'double precision', 'decimal')
-                            THEN '(' + convert('varchar', ut.prec) + ',' + convert('varchar', ut.scale) + ')'
-                        WHEN bt.name in ('float', 'binary') THEN '(' + convert('varchar', ut.length) + ')'
-                        ELSE ''
-                        END as source_data_type_length,
                         ut.length as length,
                         ut.prec as data_type_precision,
                         ut.scale as data_type_scale
@@ -257,15 +244,28 @@ class SybaseASEConnector(DatabaseConnector):
                 custom_type = cursor.fetchone()
                 if custom_type:
                     source_data_type = custom_type[0]
-                    length_precision = custom_type[1]
-                    type_has_identity_property = custom_type[2]
-                    type_nullable = custom_type[3]
-                    source_data_type_length = custom_type[4].strip()
-                    length = custom_type[5]
-                    data_type_precision = custom_type[6]
-                    data_type_scale = custom_type[7]
+                    type_has_identity_property = custom_type[1]
+                    type_nullable = custom_type[2]
+                    length = custom_type[3]
+                    data_type_precision = custom_type[4]
+                    data_type_scale = custom_type[5]
+
+                    if source_data_type in ('univarchar', 'unichar'):
+                        source_length = str(int(length / unichar_size))
+                        basic_character_maximum_length = int(length / unichar_size)
+                    elif source_data_type in ('nvarchar', 'nchar'):
+                        source_length = str(int(length / nchar_size))
+                        basic_character_maximum_length = int(length / nchar_size)
+                    elif source_data_type in ('numeric', 'double precision', 'decimal'):
+                        source_length = f"{data_type_precision},{data_type_scale}"
+                    else:
+                        source_length = str(length)
+                        basic_character_maximum_length = length
+
+                    source_data_type_length = f"{source_data_type}({source_length})" if source_length else source_data_type
+
                     result[ordinal_position]['basic_data_type'] = source_data_type
-                    result[ordinal_position]['basic_character_maximum_length'] = length if self.is_string_type(source_data_type) else None
+                    result[ordinal_position]['basic_character_maximum_length'] = basic_character_maximum_length
                     result[ordinal_position]['basic_numeric_precision'] = data_type_precision if self.is_numeric_type(source_data_type) else None
                     result[ordinal_position]['basic_numeric_scale'] = data_type_scale if self.is_numeric_type(source_data_type) else None
                     result[ordinal_position]['basic_column_type'] = source_data_type_length

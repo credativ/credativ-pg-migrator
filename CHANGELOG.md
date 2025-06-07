@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.2 - 2025.06.xx
+
+- Fixed size of UNIVARCHAR/UNICHAR and NVARCHAR/NCHAR columns in Sybase ASE connector - added proper usage of global variables @@unicharsize, @@ncharsize for calculation of sizes
+
 ## 0.8.1 - 2025.06.05
 
 - 2025.06.04

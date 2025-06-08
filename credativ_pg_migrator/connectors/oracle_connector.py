@@ -166,8 +166,8 @@ class OracleConnector(DatabaseConnector):
                                 self.logger.debug(f"Substituting default value containing sequence: {column_default}")
                             result[column_id]['column_default_value'] = ""
                             result[column_id]['is_identity'] = 'YES'
-                            if data_type in ('NUMBER'):
-                                result[column_id]['data_type'] = 'BIGINT'
+                            # if data_type in ('NUMBER'):
+                            #     result[column_id]['data_type'] = 'BIGINT'
                     ## TODO: insert_internal_data_types_substitutions
                     ## internal subtitution of this type breaks foreign key constraints
 
@@ -330,7 +330,7 @@ class OracleConnector(DatabaseConnector):
                         'index_name': index_name,
                         'index_type': 'PRIMARY KEY' if constraint_type == 'P' else 'UNIQUE' if uniqueness == 'UNIQUE' else 'INDEX',
                         'index_owner': source_table_schema,
-                        'index_columns': columns_list_orders,
+                        'index_columns': columns_list if constraint_type == 'P' else columns_list_orders,
                         'index_comment': '',
                     }
                 order_num += 1

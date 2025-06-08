@@ -186,6 +186,10 @@ class Planner:
                     'table_schema': self.source_schema,
                     'table_name': table_info['table_name'],
                 }
+                table_description = self.source_connection.get_table_description(settings)
+                table_description = table_description['table_description'] if 'table_description' in table_description else ''
+                if self.config_parser.get_log_level() == 'DEBUG':
+                    self.logger.debug(f"Table description: {table_description}")
                 source_columns = self.source_connection.fetch_table_columns(settings)
                 if self.config_parser.get_log_level() == 'DEBUG':
                     self.logger.debug(f"Fetched source columns: {source_columns}")
@@ -312,6 +316,7 @@ class Planner:
                     'source_table': table_info['table_name'],
                     'source_table_id': table_info['id'],
                     'source_columns': source_columns,
+                    'source_table_description': table_description,
                     'target_schema': self.target_schema,
                     'target_table': table_info['table_name'],
                     'target_columns': target_columns,
@@ -329,6 +334,7 @@ class Planner:
                     'source_table': table_info['table_name'],
                     'source_table_id': table_info['id'],
                     'source_columns': source_columns,
+                    'source_table_description': table_description,
                     'target_schema': self.target_schema,
                     'target_table': table_info['table_name'],
                     'target_columns': target_columns,

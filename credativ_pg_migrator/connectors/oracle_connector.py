@@ -618,6 +618,10 @@ class OracleConnector(DatabaseConnector):
         # Placeholder for fetching default values
         return {}
 
+    def get_table_description(self, settings) -> dict:
+        # Placeholder for fetching table description
+        return { 'table_description': '' }
+
     def testing_select(self):
         return "SELECT 1 FROM DUAL"
 

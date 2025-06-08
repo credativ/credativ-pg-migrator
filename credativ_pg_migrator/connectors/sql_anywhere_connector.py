@@ -200,7 +200,7 @@ class SQLAnywhereConnector(DatabaseConnector):
             target_schema = settings['target_schema']
             target_table = settings['target_table']
             target_columns = settings['target_columns']
-            primary_key_columns = settings['primary_key_columns']
+            # primary_key_columns = settings['primary_key_columns']
             batch_size = settings['batch_size']
             migrator_tables = settings['migrator_tables']
             source_table_rows = self.get_rows_count(source_schema, source_table)

@@ -11,7 +11,7 @@
     - Added for Oracle - function DBMS_METADATA.GET_DDL
   - Fixes in MySQL connector after previous refactoring changes in 0.7.x releases
   - Created fully automated test for MySQL connector (dev repository)
-  - Fixes in Oracle connector after previous refactoring changes in 0.7.x releases
+  - Fixes in Oracle connector after previous refactoring changes in 0.7.x releases, fix in primary key migration, fix in data type alterations due to IDENTITY columns
   - Created fully automated test for Oracle connector (dev repository)
 
 - 2025.06.07:

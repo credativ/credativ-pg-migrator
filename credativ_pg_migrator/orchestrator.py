@@ -701,6 +701,11 @@ class Orchestrator:
                     try:
                         self.target_connection.connect()
 
+                        if self.target_connection.session_settings:
+                            if self.config_parser.get_log_level() == 'DEBUG':
+                                self.logger.debug(f"Executing session settings: {self.target_connection.session_settings}")
+                            self.target_connection.execute_query(self.target_connection.session_settings)
+
                         query = f'''SET SESSION search_path TO {view_detail['target_schema']};'''
                         self.target_connection.execute_query(query)
 

@@ -22,6 +22,7 @@ from database_connector import DatabaseConnector
 from migrator_logging import MigratorLogger
 import re
 import traceback
+from tabulate import tabulate
 #import polars as pl
 
 class SybaseASEConnector(DatabaseConnector):
@@ -1216,6 +1217,37 @@ class SybaseASEConnector(DatabaseConnector):
     def get_create_domain_sql(self, settings):
         # Placeholder for generating CREATE DOMAIN SQL
         return ""
+
+    def get_table_description(self, settings) -> dict:
+        table_schema = settings['table_schema']
+        table_name = settings['table_name']
+        output = ""
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(f"exec sp_help '{table_schema}.{table_name}'")
+
+            set_num = 1
+            while True:
+                if cursor.description is not None:
+                    rows = cursor.fetchall()
+                    if rows:
+                        output += f"Result set {set_num}:\n"
+                        columns = [column[0] for column in cursor.description]
+                        table = tabulate(rows, headers=columns, tablefmt="github")
+                        output += table + "\n\n"
+                        set_num += 1
+                if not cursor.nextset():
+                    break
+
+            cursor.close()
+            self.disconnect()
+        except Error as e:
+            self.logger.error(f"Error fetching table description for {table_schema}.{table_name}: {e}")
+            raise
+
+        return { 'table_description': output.strip() }
+
 
     def testing_select(self):
         return 'SELECT 1'

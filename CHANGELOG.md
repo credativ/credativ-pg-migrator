@@ -3,6 +3,8 @@
 ## 0.8.2 - 2025.06.xx
 
 - Fixed size of UNIVARCHAR/UNICHAR and NVARCHAR/NCHAR columns in Sybase ASE connector - added proper usage of global variables @@unicharsize, @@ncharsize for calculation of sizes
+- Started implementation of get_table_description function - currently added only for Sybase ASE connector
+  - Rationale: Added for better observability of the migration process and as simplification for the post migration checks
 
 ## 0.8.1 - 2025.06.05
 

@@ -2,7 +2,25 @@
 
 ## 0.8.2 - 2025.06.xx
 
-- Fixed size of UNIVARCHAR/UNICHAR and NVARCHAR/NCHAR columns in Sybase ASE connector - added proper usage of global variables @@unicharsize, @@ncharsize for calculation of sizes
+- 2025.06.08:
+
+  - Started implementation of get_table_description function - description of table structure and eventually other properties, using native source database functions
+    - Rationale: Added for better observability of the migration process and as simplification for the post migration checks
+    - Added for Sybase ASE - function sp_help
+    - Added for MySQL - function DESCRIBE table_name
+    - Added for Oracle - function DBMS_METADATA.GET_DDL
+    - Added for SQL Anywhere - function sa_get_table_definition
+  - Fixes in MySQL connector after previous refactoring changes in 0.7.x releases
+  - Created fully automated test for MySQL connector (dev repository)
+  - Fixes in Oracle connector after previous refactoring changes in 0.7.x releases, fix in primary key migration, fix in data type alterations due to IDENTITY columns
+  - Created fully automated test for Oracle connector (dev repository)
+  - Fixes in SQL Anywhere connector after previous refactoring changes in 0.7.x releases, fix in primary key migration, fix in foreign key migration
+    - Remaining issue: Some Foreign keys fail because of missing primary key / unique indexes - requires further investigation
+  - Created fully automated test for SQL Anywhere connector (dev repository)
+
+- 2025.06.07:
+
+  - Fixed size of UNIVARCHAR/UNICHAR and NVARCHAR/NCHAR columns in Sybase ASE connector - added proper usage of global variables @@unicharsize, @@ncharsize for calculation of sizes
 
 ## 0.8.1 - 2025.06.05
 

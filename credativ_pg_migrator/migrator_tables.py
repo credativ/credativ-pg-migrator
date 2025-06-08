@@ -1048,6 +1048,7 @@ class MigratorTables:
             source_table TEXT,
             source_table_id INTEGER,
             source_columns TEXT,
+            source_table_description TEXT,
             target_schema TEXT,
             target_table TEXT,
             target_columns TEXT,
@@ -1209,15 +1210,16 @@ class MigratorTables:
             'source_table': row[2],
             'source_table_id': row[3],
             'source_columns': json.loads(row[4]),
-            'target_schema': row[5],
-            'target_table': row[6],
-            'target_columns': json.loads(row[7]),
-            'target_table_sql': row[8],
-            'table_comment': row[9],
-            'partitioned': row[10],
-            'partitioned_by': row[11],
-            'partitioning_columns': row[12],
-            'create_partitions_sql': row[13]
+            'source_table_description': row[5],
+            'target_schema': row[6],
+            'target_table': row[7],
+            'target_columns': json.loads(row[8]),
+            'target_table_sql': row[9],
+            'table_comment': row[10],
+            'partitioned': row[11],
+            'partitioned_by': row[12],
+            'partitioning_columns': row[13],
+            'create_partitions_sql': row[14]
         }
 
     def decode_index_row(self, row):
@@ -1336,6 +1338,7 @@ class MigratorTables:
         source_table = settings['source_table']
         source_table_id = settings['source_table_id']
         source_columns = settings['source_columns']
+        source_table_description = settings['source_table_description']
         target_schema = settings['target_schema']
         target_table = settings['target_table']
         target_columns = settings['target_columns']
@@ -1351,13 +1354,13 @@ class MigratorTables:
         target_columns_str = json.dumps(target_columns)
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
-            (source_schema, source_table, source_table_id, source_columns,
+            (source_schema, source_table, source_table_id, source_columns, source_table_description,
             target_schema, target_table, target_columns, target_table_sql, table_comment,
             partitioned, partitioned_by, partitioning_columns, create_partitions_sql)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (source_schema, source_table, source_table_id, source_columns_str,
+        params = (source_schema, source_table, source_table_id, source_columns_str, source_table_description,
                   target_schema, target_table, target_columns_str, target_table_sql, table_comment,
                   partitioned, partitioned_by, partitioning_columns, create_partitions_sql)
         try:
@@ -1372,8 +1375,7 @@ class MigratorTables:
             self.insert_protocol('table', target_table, 'create', target_table_sql, None, None, None, 'info', None, table_row['id'])
         except Exception as e:
             self.logger.error(f"Error inserting table info {source_table} into {table_name}.")
-            self.logger.error(f"Source columns: {source_columns}")
-            self.logger.error(f"Target columns: {target_columns}")
+            self.logger.error(f"Settings: {settings}")
             self.logger.error(e)
             raise
 

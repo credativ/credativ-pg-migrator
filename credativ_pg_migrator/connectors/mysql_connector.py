@@ -18,6 +18,7 @@ from database_connector import DatabaseConnector
 from migrator_logging import MigratorLogger
 import mysql.connector
 import traceback
+from tabulate import tabulate
 
 class MySQLConnector(DatabaseConnector):
     def __init__(self, config_parser, source_or_target):
@@ -197,7 +198,7 @@ class MySQLConnector(DatabaseConnector):
             target_schema = settings['target_schema']
             target_table = settings['target_table']
             target_columns = settings['target_columns']
-            primary_key_columns = settings['primary_key_columns']
+            # primary_key_columns = settings['primary_key_columns']
             batch_size = settings['batch_size']
             migrator_tables = settings['migrator_tables']
             migration_limitation = settings['migration_limitation']
@@ -335,13 +336,13 @@ class MySQLConnector(DatabaseConnector):
                         'index_comment': '',
                     }
 
-                table_indexes[index_name]['columns'].append(column_name)
+                table_indexes[index_name]['index_columns'].append(column_name)
 
             cursor.close()
             self.disconnect()
             returned_indexes = {}
             for index_name, index_info in table_indexes.items():
-                index_info['columns'] = ', '.join(index_info['columns'])
+                index_info['index_columns'] = ', '.join(index_info['index_columns'])
 
                 returned_indexes[order_num] = {
                     'index_name': index_info['index_name'],
@@ -407,8 +408,8 @@ class MySQLConnector(DatabaseConnector):
                         'constraint_owner': schema_name,
                         'constraint_type': 'FOREIGN KEY',
                         'constraint_columns': [],
-                        'referenced_table': referenced_table_name,
-                        'referenced_schema': referenced_schema_name,
+                        'referenced_table_name': referenced_table_name,
+                        'referenced_table_schema': referenced_schema_name,
                         'referenced_columns': [],
                         'constraint_sql': '',
                         'constraint_comment': '',
@@ -420,16 +421,15 @@ class MySQLConnector(DatabaseConnector):
             cursor.close()
             self.disconnect()
             for constraint_name, constraint_info in table_constraints.items():
-                constraint_info['columns_count'] = len(constraint_info['columns'])
-                constraint_info['columns'] = ', '.join(constraint_info['columns'])
+                constraint_info['constraint_columns'] = ', '.join(constraint_info['constraint_columns'])
                 constraint_info['referenced_columns'] = ', '.join(constraint_info['referenced_columns'])
 
                 returned_constraints[order_num] = {
                     'constraint_name': constraint_info['constraint_name'],
                     'constraint_owner': constraint_info['constraint_owner'],
                     'constraint_columns': constraint_info['constraint_columns'],
-                    'referenced_table': constraint_info['referenced_table'],
-                    'referenced_schema': constraint_info['referenced_schema'],
+                    'referenced_table_name': constraint_info['referenced_table_name'],
+                    'referenced_table_schema': constraint_info['referenced_table_schema'],
                     'referenced_columns': constraint_info['referenced_columns'],
                     'constraint_type': constraint_info['constraint_type'],
                     'constraint_sql': constraint_info['constraint_sql'],
@@ -605,6 +605,36 @@ class MySQLConnector(DatabaseConnector):
     def fetch_default_values(self, settings) -> dict:
         # Placeholder for fetching default values
         return {}
+
+    def get_table_description(self, settings) -> dict:
+        table_schema = settings['table_schema']
+        table_name = settings['table_name']
+        output = ""
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(f"describe {table_schema}.{table_name}")
+
+            set_num = 1
+            while True:
+                if cursor.description is not None:
+                    rows = cursor.fetchall()
+                    if rows:
+                        output += f"Result set {set_num}:\n"
+                        columns = [column[0] for column in cursor.description]
+                        table = tabulate(rows, headers=columns, tablefmt="github")
+                        output += table + "\n\n"
+                        set_num += 1
+                if not cursor.nextset():
+                    break
+
+            cursor.close()
+            self.disconnect()
+        except Error as e:
+            self.logger.error(f"Error fetching table description for {table_schema}.{table_name}: {e}")
+            raise
+
+        return { 'table_description': output.strip() }
 
     def testing_select(self):
         return "SELECT 1"

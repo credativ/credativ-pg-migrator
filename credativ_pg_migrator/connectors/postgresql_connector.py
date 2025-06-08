@@ -214,35 +214,35 @@ class PostgreSQLConnector(DatabaseConnector):
             if column_info['is_nullable'] == 'NO':
                 nullable_string = 'NOT NULL'
 
-            if (character_maximum_length != '' and 'CHAR' in column_data_type):
-                create_column_sql = f""""{column_info['column_name']}" {column_data_type}({character_maximum_length})"""
-            elif self.is_numeric_type(column_data_type) and column_data_type in ('DECIMAL', 'NUMERIC'):
-                numeric_precision = column_info.get('numeric_precision')
-                numeric_scale = column_info.get('numeric_scale')
-                basic_numeric_precision = column_info.get('basic_numeric_precision')
-                basic_numeric_scale = column_info.get('basic_numeric_scale')
-                if numeric_precision not in (None, '') and numeric_scale not in (None, ''):
-                    create_column_sql = f""""{column_info['column_name']}" {column_data_type}({numeric_precision},{numeric_scale})"""
-                elif numeric_precision not in (None, ''):
-                    create_column_sql = f""""{column_info['column_name']}" {column_data_type}({numeric_precision})"""
-                elif basic_numeric_precision not in (None, '') and basic_numeric_scale not in (None, ''):
-                    create_column_sql = f""""{column_info['column_name']}" {column_data_type}({basic_numeric_precision},{basic_numeric_scale})"""
-                elif basic_numeric_precision not in (None, ''):
-                    create_column_sql = f""""{column_info['column_name']}" {column_data_type}({basic_numeric_precision})"""
-                else:
-                    create_column_sql = f""""{column_info['column_name']}" {column_data_type}"""
+            if is_identity == 'YES' and column_data_type not in ('BIGINT', 'INTEGER', 'SMALLINT'):
+                altered_data_type = 'BIGINT'
+                migrator_tables.insert_target_column_alteration({
+                    'target_schema': target_schema,
+                    'target_table': target_table_name,
+                    'target_column': column_info['column_name'],
+                    'reason': 'IDENTITY',
+                    'original_data_type': column_data_type,
+                    'altered_data_type': altered_data_type,
+                })
+                create_column_sql = f""""{column_info['column_name']}" {altered_data_type}"""
             else:
-                if is_identity == 'YES' and column_data_type not in ('BIGINT', 'INTEGER', 'SMALLINT'):
-                    altered_data_type = 'BIGINT'
-                    migrator_tables.insert_target_column_alteration({
-                        'target_schema': target_schema,
-                        'target_table': target_table_name,
-                        'target_column': column_info['column_name'],
-                        'reason': 'IDENTITY',
-                        'original_data_type': column_data_type,
-                        'altered_data_type': altered_data_type,
-                    })
-                    create_column_sql = f""""{column_info['column_name']}" {altered_data_type}"""
+                if (character_maximum_length != '' and 'CHAR' in column_data_type):
+                    create_column_sql = f""""{column_info['column_name']}" {column_data_type}({character_maximum_length})"""
+                elif self.is_numeric_type(column_data_type) and column_data_type in ('DECIMAL', 'NUMERIC'):
+                    numeric_precision = column_info.get('numeric_precision')
+                    numeric_scale = column_info.get('numeric_scale')
+                    basic_numeric_precision = column_info.get('basic_numeric_precision')
+                    basic_numeric_scale = column_info.get('basic_numeric_scale')
+                    if numeric_precision not in (None, '') and numeric_scale not in (None, ''):
+                        create_column_sql = f""""{column_info['column_name']}" {column_data_type}({numeric_precision},{numeric_scale})"""
+                    elif numeric_precision not in (None, ''):
+                        create_column_sql = f""""{column_info['column_name']}" {column_data_type}({numeric_precision})"""
+                    elif basic_numeric_precision not in (None, '') and basic_numeric_scale not in (None, ''):
+                        create_column_sql = f""""{column_info['column_name']}" {column_data_type}({basic_numeric_precision},{basic_numeric_scale})"""
+                    elif basic_numeric_precision not in (None, ''):
+                        create_column_sql = f""""{column_info['column_name']}" {column_data_type}({basic_numeric_precision})"""
+                    else:
+                        create_column_sql = f""""{column_info['column_name']}" {column_data_type}"""
                 else:
                     create_column_sql = f""""{column_info['column_name']}" {column_data_type}"""
 
@@ -1000,6 +1000,10 @@ class PostgreSQLConnector(DatabaseConnector):
     def fetch_default_values(self, settings) -> dict:
         # Placeholder for fetching default values
         return {}
+
+    def get_table_description(self, settings) -> dict:
+        # Placeholder for fetching table description
+        return { 'table_description': '' }
 
     def testing_select(self):
         return "SELECT 1"

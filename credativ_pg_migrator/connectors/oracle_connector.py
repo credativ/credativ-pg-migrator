@@ -18,6 +18,7 @@ from database_connector import DatabaseConnector
 from migrator_logging import MigratorLogger
 import cx_Oracle
 import traceback
+from tabulate import tabulate
 
 class OracleConnector(DatabaseConnector):
     def __init__(self, config_parser, source_or_target):
@@ -51,8 +52,8 @@ class OracleConnector(DatabaseConnector):
             raise e
         except cx_Oracle.DatabaseError as e:
             self.logger.error(f"Error connecting to Oracle database: {e}")
-            self.logger.logger.error("Full stack trace:")
-            self.logger.logger.error(traceback.format_exc())
+            self.logger.error("Full stack trace:")
+            self.logger.error(traceback.format_exc())
             raise e
 
     def disconnect(self):
@@ -107,7 +108,9 @@ class OracleConnector(DatabaseConnector):
                 column_id,
                 column_name,
                 data_type,
-                data_length,
+                char_length,
+                data_precision,
+                data_scale,
                 nullable,
                 data_default
             FROM all_tab_columns
@@ -122,16 +125,28 @@ class OracleConnector(DatabaseConnector):
             for row in cursor.fetchall():
                 column_id = row[0]
                 column_name = row[1]
-                column_type = row[2]
-                column_length = row[3]
-                column_nullable = row[4]
-                column_default = row[5]
+                data_type = row[2]
+                character_maximum_length = row[3]
+                data_precision = row[4]
+                data_scale = row[5]
+                column_nullable = row[6]
+                column_default = row[7]
+                column_type = data_type.upper()
+                if self.is_string_type(column_type) and character_maximum_length is not None:
+                    column_type += f"({character_maximum_length})"
+                elif self.is_numeric_type(column_type) and data_precision is not None:
+                    if data_scale is not None:
+                        column_type += f"({data_precision}, {data_scale})"
+                    else:
+                        column_type += f"({data_precision})"
+
                 result[column_id] = {
                     'column_name': column_name,
-                    'data_type': column_type,
-                    'character_maximum_length': column_length if self.is_string_type(column_type) else None,
-                    'numeric_precision': column_length if self.is_numeric_type(column_type) else None,
-                    'numeric_scale': None,
+                    'data_type': data_type,
+                    'column_type': column_type,
+                    'character_maximum_length': character_maximum_length if self.is_string_type(data_type) else None,
+                    'numeric_precision': data_precision if self.is_numeric_type(data_type) else None,
+                    'numeric_scale': data_scale if self.is_numeric_type(data_type) else None,
                     'is_nullable': 'NO' if column_nullable == 'N' else 'YES',
                     'is_identity': 'NO',
                     'column_default_value': column_default,
@@ -151,8 +166,8 @@ class OracleConnector(DatabaseConnector):
                                 self.logger.debug(f"Substituting default value containing sequence: {column_default}")
                             result[column_id]['column_default_value'] = ""
                             result[column_id]['is_identity'] = 'YES'
-                            if column_type in ('NUMBER'):
-                                result[column_id]['data_type'] = 'BIGINT'
+                            # if data_type in ('NUMBER'):
+                            #     result[column_id]['data_type'] = 'BIGINT'
                     ## TODO: insert_internal_data_types_substitutions
                     ## internal subtitution of this type breaks foreign key constraints
 
@@ -191,6 +206,7 @@ class OracleConnector(DatabaseConnector):
                 'REAL': 'REAL',
                 'DECIMAL': 'DECIMAL',
                 'NUMBER': 'NUMERIC',
+                'TIMESTAMP(6)': 'TIMESTAMP',
             }
         else:
             raise ValueError(f"Unsupported target database type: {target_db_type}")
@@ -314,7 +330,7 @@ class OracleConnector(DatabaseConnector):
                         'index_name': index_name,
                         'index_type': 'PRIMARY KEY' if constraint_type == 'P' else 'UNIQUE' if uniqueness == 'UNIQUE' else 'INDEX',
                         'index_owner': source_table_schema,
-                        'index_columns': columns_list_orders,
+                        'index_columns': columns_list if constraint_type == 'P' else columns_list_orders,
                         'index_comment': '',
                     }
                 order_num += 1
@@ -617,6 +633,34 @@ class OracleConnector(DatabaseConnector):
     def fetch_default_values(self, settings) -> dict:
         # Placeholder for fetching default values
         return {}
+
+    def get_table_description(self, settings) -> dict:
+        table_schema = settings['table_schema']
+        table_name = settings['table_name']
+        output = ""
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(f"SELECT dbms_metadata.get_ddl('TABLE', '{table_name}', '{table_schema}') FROM dual")
+
+            set_num = 1
+            if cursor.description is not None:
+                rows = cursor.fetchall()
+                if rows:
+                    output += f"Result set {set_num}:\n"
+                    columns = [column[0] for column in cursor.description]
+                    table = tabulate(rows, headers=columns, tablefmt="github")
+                    output += table + "\n\n"
+                    set_num += 1
+
+            cursor.close()
+            self.disconnect()
+        except Exception as e:
+            self.logger.error(f"Error fetching table description for {table_schema}.{table_name}: {e}")
+            raise
+
+        return { 'table_description': output.strip() }
+
 
     def testing_select(self):
         return "SELECT 1 FROM DUAL"

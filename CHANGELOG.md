@@ -8,8 +8,11 @@
     - Rationale: Added for better observability of the migration process and as simplification for the post migration checks
     - Added for Sybase ASE - function sp_help
     - Added for MySQL - function DESCRIBE table_name
+    - Added for Oracle - function DBMS_METADATA.GET_DDL
   - Fixes in MySQL connector after previous refactoring changes in 0.7.x releases
   - Created fully automated test for MySQL connector (dev repository)
+  - Fixes in Oracle connector after previous refactoring changes in 0.7.x releases
+  - Created fully automated test for Oracle connector (dev repository)
 
 - 2025.06.07:
 

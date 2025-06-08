@@ -9,10 +9,14 @@
     - Added for Sybase ASE - function sp_help
     - Added for MySQL - function DESCRIBE table_name
     - Added for Oracle - function DBMS_METADATA.GET_DDL
+    - Added for SQL Anywhere - function sa_get_table_definition
   - Fixes in MySQL connector after previous refactoring changes in 0.7.x releases
   - Created fully automated test for MySQL connector (dev repository)
   - Fixes in Oracle connector after previous refactoring changes in 0.7.x releases, fix in primary key migration, fix in data type alterations due to IDENTITY columns
   - Created fully automated test for Oracle connector (dev repository)
+  - Fixes in SQL Anywhere connector after previous refactoring changes in 0.7.x releases, fix in primary key migration, fix in foreign key migration
+    - Remaining issue: Some Foreign keys fail because of missing primary key / unique indexes - requires further investigation
+  - Created fully automated test for SQL Anywhere connector (dev repository)
 
 - 2025.06.07:
 

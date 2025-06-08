@@ -19,6 +19,7 @@ from migrator_logging import MigratorLogger
 import sqlanydb
 import pyodbc
 import traceback
+from tabulate import tabulate
 
 class SQLAnywhereConnector(DatabaseConnector):
     def __init__(self, config_parser, source_or_target):
@@ -102,7 +103,6 @@ class SQLAnywhereConnector(DatabaseConnector):
                 d.domain_name,
                 c.width,
                 c.scale,
-                c.column_type,
                 c."nulls",
                 c."default"
             FROM sys.syscolumn c
@@ -123,15 +123,30 @@ class SQLAnywhereConnector(DatabaseConnector):
             cursor = self.connection.cursor()
             cursor.execute(query)
             for row in cursor.fetchall():
-                result[row[0]] = {
-                    'column_name': row[1],
-                    'data_type': row[2],
-                    'character_maximum_length': row[3] if self.is_string_type(row[2]) else None,
-                    'numeric_precision': row[3] if self.is_numeric_type(row[2]) else None,
-                    'numeric_scale': row[4],
-                    'is_nullable': 'NO' if row[6] == 'N' else 'YES',
-                    'is_identity': 'YES' if row[7] is not None and row[7].upper() == 'AUTOINCREMENT' else 'NO',
-                    'column_default_value': row[7] if row[7] is not None and row[7].upper() != 'AUTOINCREMENT' else None,
+                column_id = row[0]
+                column_name = row[1]
+                domain_name = row[2]
+                width = row[3]
+                scale = row[4]
+                nulls = row[5]
+                default_value = row[6]
+                column_type = domain_name
+                if self.is_string_type(column_type) and width is not None and width > 0:
+                    column_type += f"({width})"
+                elif self.is_numeric_type(column_type) and width is not None and scale is not None:
+                    column_type += f"({width}, {scale})"
+                elif self.is_numeric_type(column_type) and width is not None:
+                    column_type += f"({width})"
+                result[column_id] = {
+                    'column_name': column_name,
+                    'data_type': domain_name,
+                    'column_type': column_type,
+                    'character_maximum_length': width if self.is_string_type(row[2]) else None,
+                    'numeric_precision': width if self.is_numeric_type(row[2]) else None,
+                    'numeric_scale': scale,
+                    'is_nullable': 'NO' if nulls == 'N' else 'YES',
+                    'is_identity': 'YES' if default_value is not None and default_value.upper() == 'AUTOINCREMENT' else 'NO',
+                    'column_default_value': default_value if default_value is not None and default_value.upper() != 'AUTOINCREMENT' else None,
                     'column_comment': '',
                 }
             cursor.close()
@@ -323,6 +338,21 @@ class SQLAnywhereConnector(DatabaseConnector):
                 if index_type == 'NON-UNIQUE':
                     index_type = 'INDEX'
 
+                if index_type == 'PRIMARY KEY':
+                    index_columns = index_columns.replace(" ASC", "").replace(" DESC", "")
+
+                columns = []
+                for col in index_columns.split(","):
+                    col = col.strip()
+                    if col.upper().endswith(" ASC"):
+                        col_name = col[:-4].strip()
+                        columns.append(f'"{col_name}" ASC')
+                    elif col.upper().endswith(" DESC"):
+                        col_name = col[:-5].strip()
+                        columns.append(f'"{col_name}" DESC')
+                    else:
+                        columns.append(f'"{col}"')
+                index_columns = ', '.join(columns)
                 if index_type != 'FOREIGN KEY':
                     table_indexes[order_num] = {
                         'index_name': index_name,
@@ -352,7 +382,13 @@ class SQLAnywhereConnector(DatabaseConnector):
         order_num = 1
         table_constraints = {}
         query = f"""
-            SELECT "role" as fk_name, primary_creator, primary_tname, foreign_creator, foreign_tname, columns
+            SELECT
+                "role" as fk_name,
+                primary_creator,
+                primary_tname,
+                foreign_creator,
+                foreign_tname,
+                columns
             FROM SYS.SYSFOREIGNKEYS s
             WHERE (primary_creator = '{source_table_schema}' or foreign_creator = '{source_table_schema}')
             AND primary_tname = '{source_table_name}'
@@ -368,7 +404,7 @@ class SQLAnywhereConnector(DatabaseConnector):
                 primary_table_name = row[2]
                 foreign_table_name = row[4]
                 sa_columns = row[5]
-                ref_columns, pk_columns = sa_columns.split(" IS ")
+                pk_columns, ref_columns = sa_columns.split(" IS ")
                 columns = []
                 for col in ref_columns.split(","):
                     col = col.strip().replace(" ASC", "").replace(" DESC", "")
@@ -535,8 +571,32 @@ class SQLAnywhereConnector(DatabaseConnector):
         return {}
 
     def get_table_description(self, settings) -> dict:
-        # Placeholder for fetching table description
-        return { 'table_description': '' }
+        table_schema = settings['table_schema']
+        table_name = settings['table_name']
+        output = ""
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(f"SELECT sa_get_table_definition('{table_schema}', '{table_name}')")
+
+            set_num = 1
+            if cursor.description is not None:
+                rows = cursor.fetchall()
+                if rows:
+                    output += f"Result set {set_num}:\n"
+                    columns = [column[0] for column in cursor.description]
+                    table = tabulate(rows, headers=columns, tablefmt="github")
+                    output += table + "\n\n"
+                    set_num += 1
+
+            cursor.close()
+            self.disconnect()
+        except Exception as e:
+            self.logger.error(f"Error fetching table description for {table_schema}.{table_name}: {e}")
+            raise
+
+        return { 'table_description': output.strip() }
+
 
     def testing_select(self):
         return "SELECT 1"

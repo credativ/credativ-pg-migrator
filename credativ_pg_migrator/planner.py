@@ -570,7 +570,9 @@ class Planner:
 
             for order_num, view_info in views.items():
                 self.logger.info(f"Processing view ({order_num}): {view_info}")
-                if not any(fnmatch.fnmatch(view_info['view_name'], pattern) for pattern in include_views):
+                if include_views == ['.*'] or '.*' in include_views:
+                    pass
+                elif not any(fnmatch.fnmatch(view_info['view_name'], pattern) for pattern in include_views):
                     self.logger.info(f"View {view_info['view_name']} does not match patterns for migration.")
                     continue
                 if any(fnmatch.fnmatch(view_info['view_name'], pattern) for pattern in exclude_views):

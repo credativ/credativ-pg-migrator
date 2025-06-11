@@ -569,7 +569,13 @@ class InformixConnector(DatabaseConnector):
         procbody_str = ''.join([body[0] for body in procbody])
         return procbody_str
 
-    def convert_funcproc_code(self, funcproc_code: str, target_db_type: str, source_schema: str, target_schema: str, table_list: list):
+    def convert_funcproc_code(self, settings):
+        funcproc_code = settings['funcproc_code']
+        target_db_type = settings['target_db_type']
+        source_schema = settings['source_schema']
+        target_schema = settings['target_schema']
+        table_list = settings['table_list']
+        view_list = settings['view_list']
 
         def indent_code(code):
             lines = code.split('\n')
@@ -893,6 +899,17 @@ class InformixConnector(DatabaseConnector):
 
                 source_table_pattern = re.compile(rf'\b{table}\b')
                 postgresql_code = source_table_pattern.sub(target_table, postgresql_code)
+
+            for view in view_list:
+                # if self.config_parser.get_log_level() == 'DEBUG':
+                #     self.logger.debug(f'Replacing view {view} from schema {source_schema} to {target_schema}')
+
+                source_view_pattern = re.compile(rf'("{source_schema}"\.)?"{view}"')
+                target_view = f'"{target_schema}"."{view}"'
+                postgresql_code = source_view_pattern.sub(target_view, postgresql_code)
+
+                source_view_pattern = re.compile(rf'\b{view}\b')
+                postgresql_code = source_view_pattern.sub(target_view, postgresql_code)
 
             # Remove second occurrence of "target_schema" in %TYPE declarations
             postgresql_code = re.sub(

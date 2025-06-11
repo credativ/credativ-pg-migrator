@@ -2069,6 +2069,22 @@ class MigratorTables:
             table_names.append(values['target_table'])
         return table_names
 
+    def fetch_all_views(self):
+        query = f"""SELECT * FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_views()}" ORDER BY id"""
+        # self.protocol_connection.connect()
+        cursor = self.protocol_connection.connection.cursor()
+        cursor.execute(query)
+        views = cursor.fetchall()
+        return views
+
+    def fetch_all_target_view_names(self):
+        views = self.fetch_all_views()
+        view_names = []
+        for view in views:
+            values = self.decode_view_row(view)
+            view_names.append(values['target_view_name'])
+        return view_names
+
     def fetch_all_indexes(self):
         query = f"""SELECT * FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_indexes()}" ORDER BY id"""
         # self.protocol_connection.connect()

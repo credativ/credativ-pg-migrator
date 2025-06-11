@@ -740,7 +740,14 @@ class PostgreSQLConnector(DatabaseConnector):
     def fetch_funcproc_code(self, funcproc_id: int):
         pass
 
-    def convert_funcproc_code(self, funcproc_id: int, target_db_type: str, target_schema: str):
+    def convert_funcproc_code(self, settings):
+        funcproc_code = settings['funcproc_code']
+        target_db_type = settings['target_db_type']
+        source_schema = settings['source_schema']
+        target_schema = settings['target_schema']
+        table_list = settings['table_list']
+        view_list = settings['view_list']
+        # Placeholder for converting function/procedure code
         pass
 
     def handle_error(self, e, description=None):

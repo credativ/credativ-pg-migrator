@@ -3,3 +3,5 @@ jaydebeapi
 pyyaml
 pandas
 pyodbc
+importlib
+tabulate

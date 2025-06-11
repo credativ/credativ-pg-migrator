@@ -339,7 +339,9 @@ class ConfigParser:
 
     def get_varchar_to_text_length(self):
         varchar_to_text_length = self.config.get('migration', {}).get('varchar_to_text_length', None)
-        if varchar_to_text_length is None:
+        if varchar_to_text_length is not None:
+            return int(varchar_to_text_length)
+        else:
             return -1 # migrate varchars as they are
 
     def get_include_tables(self):

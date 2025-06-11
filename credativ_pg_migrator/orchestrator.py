@@ -52,9 +52,9 @@ class Orchestrator:
             self.run_migrate_tables()
             self.run_migrate_indexes()
             self.run_migrate_constraints()
+            self.run_migrate_views()
             self.run_migrate_funcprocs()
             self.run_migrate_triggers()
-            self.run_migrate_views()
             self.run_migrate_comments()
 
             self.run_post_migration_script()
@@ -565,7 +565,7 @@ class Orchestrator:
                     if not any(fnmatch.fnmatch(funcproc_data['name'], pattern) for pattern in include_funcprocs):
                         continue
                     if any(fnmatch.fnmatch(funcproc_data['name'], pattern) for pattern in exclude_funcprocs):
-                        self.logger.info(f"Table {funcproc_data['name']} is excluded from migration.")
+                        self.logger.info(f"Func/proc {funcproc_data['name']} is excluded from migration.")
                         continue
 
                     funcproc_id = funcproc_data['id']
@@ -574,19 +574,28 @@ class Orchestrator:
                     funcproc_code = self.source_connection.fetch_funcproc_code(funcproc_id)
 
                     table_names = []
+                    view_names = []
                     converted_code = ''
                     try:
                         table_names = self.migrator_tables.fetch_all_target_table_names()
                     except Exception as e:
                         self.handle_error(e, 'fetching table names')
+                    try:
+                        view_names = self.migrator_tables.fetch_all_target_view_names()
+                    except Exception as e:
+                        self.handle_error(e, 'fetching view names')
 
                     try:
-                        converted_code = self.source_connection.convert_funcproc_code(
-                                            funcproc_code,
-                                            self.config_parser.get_target_db_type(),
-                                            self.config_parser.get_source_schema(),
-                                            self.config_parser.get_target_schema(),
-                                            table_names)
+                        if self.config_parser.get_log_level() == 'DEBUG':
+                            self.logger.debug(f"Converting {funcproc_type} {funcproc_data['name']} code...")
+                        converted_code = self.source_connection.convert_funcproc_code({
+                            'funcproc_code': funcproc_code,
+                            'target_db_type': self.config_parser.get_target_db_type(),
+                            'source_schema': self.config_parser.get_source_schema(),
+                            'target_schema': self.config_parser.get_target_schema(),
+                            'table_list': table_names,
+                            'view_list': view_names,
+                            })
 
                         if self.config_parser.get_log_level() == 'DEBUG':
                             self.logger.debug("Checking for remote objects substitution in functions/procedures...")
@@ -602,6 +611,12 @@ class Orchestrator:
                         if converted_code is not None:
                             self.logger.info(f"Creating {funcproc_type} {funcproc_data['name']} in target database.")
                             self.target_connection.connect()
+
+                            if self.target_connection.session_settings:
+                                if self.config_parser.get_log_level() == 'DEBUG':
+                                    self.logger.debug(f"Executing session settings: {self.target_connection.session_settings}")
+                                self.target_connection.execute_query(self.target_connection.session_settings)
+
                             self.target_connection.execute_query(converted_code)
                             if self.config_parser.get_log_level() == 'DEBUG':
                                 self.logger.debug(f"[OK] Source code for {funcproc_data['name']}: {funcproc_code}")

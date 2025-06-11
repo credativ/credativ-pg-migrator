@@ -462,7 +462,13 @@ class MySQLConnector(DatabaseConnector):
         # Implement function/procedure code fetching logic
         pass
 
-    def convert_funcproc_code(self, funcproc_code: str, target_db_type: str, source_schema: str, target_schema: str, table_list: list):
+    def convert_funcproc_code(self, settings):
+        funcproc_code = settings['funcproc_code']
+        target_db_type = settings['target_db_type']
+        source_schema = settings['source_schema']
+        target_schema = settings['target_schema']
+        table_list = settings['table_list']
+        view_list = settings['view_list']
         # Implement function/procedure code conversion logic
         pass
 

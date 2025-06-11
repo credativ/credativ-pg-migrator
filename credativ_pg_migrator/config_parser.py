@@ -338,7 +338,7 @@ class ConfigParser:
         return self.config.get('migration', {}).get('names_case_handling', 'keep')
 
     def get_include_tables(self):
-        include_tables = self.config['include_tables']
+        include_tables = self.config.get('include_tables', None)
         if (include_tables is None or (type(include_tables) is str and include_tables.lower() == 'all')):
             return ['.*']  # Pattern matching all table names
         elif type(include_tables) is list:
@@ -350,9 +350,10 @@ class ConfigParser:
         return self.config['exclude_tables']
 
     def get_include_views(self):
-        include_views = self.config.get('include_views', [])
-        if type(include_views) is str:
-            return '.*'
+        include_views = self.config.get('include_views', None)
+        if include_views is None or (type(include_views) is str and include_views.lower() == 'all'):
+            # Pattern matching all view names
+            return ['.*']
         elif type(include_views) is list:
             return include_views
         else:

@@ -56,7 +56,14 @@ class IBMDB2Connector(DatabaseConnector):
             self.logger.error(f"Unsupported target database type: {target_db_type}")
 
     def fetch_table_names(self, table_schema: str):
-        query = f"""SELECT TABLEID, TABNAME FROM SYSCAT.TABLES WHERE TABSCHEMA = upper('{table_schema}') ORDER BY TABNAME"""
+        query = f"""
+            SELECT
+                TABLEID,
+                TABNAME,
+                REMARKS
+            FROM SYSCAT.TABLES
+            WHERE TABSCHEMA = upper('{table_schema}')
+            ORDER BY TABNAME"""
         try:
             tables = {}
             order_num = 1
@@ -68,7 +75,7 @@ class IBMDB2Connector(DatabaseConnector):
                     'id': row[0],
                     'schema_name': table_schema,
                     'table_name': row[1],
-                    'comment': ''
+                    'comment': row[2]
                 }
                 order_num += 1
             cursor.close()
@@ -94,7 +101,8 @@ class IBMDB2Connector(DatabaseConnector):
                         "LENGTH",
                         "SCALE",
                         "NULLS",
-                        "DEFAULT"
+                        "DEFAULT",
+                        "REMARKS"
                     FROM SYSCAT.COLUMNS
                     WHERE TABSCHEMA = upper('{table_schema}') AND tabname = '{table_name}' ORDER BY COLNO
                 """
@@ -128,6 +136,7 @@ class IBMDB2Connector(DatabaseConnector):
                 if self.config_parser.get_system_catalog() == 'SYSCAT':
                     is_nullable = 'NO' if is_nullable == 'N' else 'YES'
                 column_default = row[7]
+                column_comment = row[8] if len(row) > 8 else ''
 
                 column_type = data_type
                 if self.is_string_type(data_type) and character_maximum_length is not None:
@@ -146,7 +155,7 @@ class IBMDB2Connector(DatabaseConnector):
                     'numeric_scale': numeric_scale,
                     'is_nullable': is_nullable,
                     'column_default_value': column_default,
-                    'column_comment': '',
+                    'column_comment': column_comment,
                     'is_identity': 'NO',
                 }
             cursor.close()

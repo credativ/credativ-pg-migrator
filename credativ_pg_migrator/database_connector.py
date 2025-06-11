@@ -388,8 +388,16 @@ class DatabaseConnector(ABC):
         pass
 
     @abstractmethod
-    def convert_funcproc_code(self, funcproc_code: str, target_db_type: str, source_schema: str, target_schema: str, table_list: list):
+    def convert_funcproc_code(self, settings):
         """
+        settings - dictionary with the following keys:
+            - funcproc_code: str - code of the function or procedure in the source database
+            - target_db_type: str - target database type
+            - source_schema: str - schema name of the function or procedure in the source database
+            - target_schema: str - schema name of the function or procedure in the target database
+            - table_list: list - list of all tables in the migrated schema
+            - view_list: list - list of all views in the migrated schema
+
         Convert function or procedure to the target database type.
         table_list - contains the list of all tables in the target schema - used for adding target_schema prefix to table names in the function code.
         """

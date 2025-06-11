@@ -5,6 +5,9 @@
 - 2025.06.11:
 
   - Fix in Informix funcs/procs migration - fetch of table names for replacements of schemas was broken due to previous changes in the migrator protocol table
+  - Fix in include views logic - migrator in some cases excluded all views from migration
+  - Changed call of convert_funcproc_code function in all connectors - list of parameters replaced with JSON object
+  - Implemented replacement of schemas for views in the function convert_funcproc_code of Informix connector - creation some functions failed in the target database because they did not find views referenced in the code
 
 - 2025.06.08:
 

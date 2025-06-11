@@ -565,7 +565,7 @@ class Orchestrator:
                     if not any(fnmatch.fnmatch(funcproc_data['name'], pattern) for pattern in include_funcprocs):
                         continue
                     if any(fnmatch.fnmatch(funcproc_data['name'], pattern) for pattern in exclude_funcprocs):
-                        self.logger.info(f"Table {funcproc_data['name']} is excluded from migration.")
+                        self.logger.info(f"Func/proc {funcproc_data['name']} is excluded from migration.")
                         continue
 
                     funcproc_id = funcproc_data['id']
@@ -581,6 +581,8 @@ class Orchestrator:
                         self.handle_error(e, 'fetching table names')
 
                     try:
+                        if self.config_parser.get_log_level() == 'DEBUG':
+                            self.logger.debug(f"Converting {funcproc_type} {funcproc_data['name']} code...")
                         converted_code = self.source_connection.convert_funcproc_code(
                                             funcproc_code,
                                             self.config_parser.get_target_db_type(),

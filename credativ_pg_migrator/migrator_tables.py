@@ -2065,7 +2065,8 @@ class MigratorTables:
         tables = self.fetch_all_tables()
         table_names = []
         for table in tables:
-            table_names.append(table[6])
+            values = self.decode_table_row(table)
+            table_names.append(values['target_table'])
         return table_names
 
     def fetch_all_indexes(self):

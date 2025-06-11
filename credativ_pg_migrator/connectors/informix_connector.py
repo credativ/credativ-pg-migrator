@@ -606,6 +606,9 @@ class InformixConnector(DatabaseConnector):
             commands = [command.strip() for command in postgresql_code.split('\n') if command.strip()]
             postgresql_code = ''
             line_number = 0
+            # if self.config_parser.get_log_level() == 'DEBUG':
+            #     self.logger.debug(f'Processing step 1: Splitting code into commands and replacing keywords')
+
             for command in commands:
                 if command.startswith('--'):
                     command = command.replace(command, f"\n/* {command.strip()} */;")
@@ -649,6 +652,9 @@ class InformixConnector(DatabaseConnector):
                 line_number += 1
 
             # Split the code based on ";"
+            # if self.config_parser.get_log_level() == 'DEBUG':
+            #     self.logger.debug(f'Processing step 2: Splitting code into commands based on ";", reformating code and removing unnecessary spaces')
+
             commands = postgresql_code.split(';')
             postgresql_code = ''
             for command in commands:
@@ -713,6 +719,9 @@ class InformixConnector(DatabaseConnector):
             # if self.config_parser.get_log_level() == 'DEBUG':
             #     self.logger.debug(f'[00] def_lines: {def_lines}')
 
+            # if self.config_parser.get_log_level() == 'DEBUG':
+            #     self.logger.debug(f'Processing step 3: Converting DEFINE lines to DECLARE and BEGIN block')
+
             if def_lines:
                 last_def_line = def_lines[-1].strip()
                 # print(f'last_def_line: {last_def_line}')
@@ -756,6 +765,8 @@ class InformixConnector(DatabaseConnector):
                 if self.config_parser.get_log_level() == 'DEBUG':
                     self.logger.debug(f'code contains WITH HOLD but no COMMIT or ROLLBACK')
 
+            # if self.config_parser.get_log_level() == 'DEBUG':
+            #     self.logger.debug(f'Processing step 4: Converting FOREACH cursor FOR loop to FOR loop')
             # convert FOREACH cursor FOR loop to FOR loop
             foreach_cursor_matches = re.finditer(
                 # r'FOREACH\s+\w+\s+FOR\s+SELECT\s+(.*?)\s+INTO\s+(.*?)\s+FROM\s+(.*?)\s+WHERE\s+(.*?)(?=;\s*FOREACH|;\s*END|;\s*IF|;\s*UPDATE|;\s*LET|;\s*SELECT|;|$)',
@@ -778,6 +789,8 @@ class InformixConnector(DatabaseConnector):
                 for_sql = f'FOR {match.group(2).strip()} IN (SELECT {match.group(1).strip()} FROM {match.group(3).strip()} \n)\nLOOP'
                 postgresql_code = postgresql_code.replace(foreach_cursor_sql, for_sql)
 
+            # if self.config_parser.get_log_level() == 'DEBUG':
+            #     self.logger.debug(f'Processing step 5: Header for Procedures, Adding AS $$ and BEGIN to the code')
             # header for procedures
             header_match = re.search(r'CREATE PROCEDURE.*?\);', postgresql_code, flags=re.DOTALL | re.IGNORECASE)
             if header_match:
@@ -797,6 +810,8 @@ class InformixConnector(DatabaseConnector):
                     # if self.config_parser.get_log_level() == 'DEBUG':
                     #     self.logger.debug(f"[1b] postgresql_code: {postgresql_code[:header_end+10]}")
 
+            # if self.config_parser.get_log_level() == 'DEBUG':
+            #     self.logger.debug(f'Processing step 6: Header for Functions, replacing RETURNING with RETURNS and adding AS $$')
             # header for functions
             header_match = re.search(r'CREATE FUNCTION.*?RETURNING\s+\w+\s+;?', postgresql_code, flags=re.DOTALL | re.IGNORECASE)
             if header_match:
@@ -865,7 +880,13 @@ class InformixConnector(DatabaseConnector):
             postgresql_code = re.sub(r';;', ';', postgresql_code, flags=re.IGNORECASE )
             postgresql_code = re.sub(r'\*/;', '*/', postgresql_code, flags=re.IGNORECASE)
 
+            # if self.config_parser.get_log_level() == 'DEBUG':
+            #     self.logger.debug(f'Processing step 7: Replacing source schema and table names with target schema and table names ({len(table_list)} tables)')
+
             for table in table_list:
+                # if self.config_parser.get_log_level() == 'DEBUG':
+                #     self.logger.debug(f'Replacing table {table} from schema {source_schema} to {target_schema}')
+
                 source_table_pattern = re.compile(rf'("{source_schema}"\.)?"{table}"')
                 target_table = f'"{target_schema}"."{table}"'
                 postgresql_code = source_table_pattern.sub(target_table, postgresql_code)
@@ -900,6 +921,8 @@ class InformixConnector(DatabaseConnector):
                 return_type = match.group(2)
                 postgresql_code = postgresql_code.replace(match.group(0), f'{header_part} RETURNS {return_type} AS $$\n')
 
+            # if self.config_parser.get_log_level() == 'DEBUG':
+            #     self.logger.debug(f'Starting processing ON EXCEPTION blocks in the code')
             # some procs /funcs have ON EXCEPTION block, some of them several times
             if "ON EXCEPTION" in postgresql_code:
                 exception_lines = [line for line in postgresql_code.split('\n') if 'ON EXCEPTION' in line]
@@ -910,6 +933,8 @@ class InformixConnector(DatabaseConnector):
                         commentedout_exception_occurences += 1
 
                 live_exception_occurences = len(exception_lines) - commentedout_exception_occurences
+                # if self.config_parser.get_log_level() == 'DEBUG':
+                #     self.logger.debug(f'Found {len(exception_lines)} ON EXCEPTION occurences, {commentedout_exception_occurences} commented out, {live_exception_occurences} live')
                 if live_exception_occurences > 0:
 
                     for i in range(live_exception_occurences):
@@ -1054,6 +1079,8 @@ class InformixConnector(DatabaseConnector):
 
                                 # Join the lines back into a single string
                                 postgresql_code = '\n'.join(lines)
+            # if self.config_parser.get_log_level() == 'DEBUG':
+            #     self.logger.debug(f'Finished processing ON EXCEPTION blocks in the code')
 
             postgresql_code = re.sub(r';;', ';', postgresql_code, flags=re.IGNORECASE)
             # Indent the code

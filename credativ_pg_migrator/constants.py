@@ -14,7 +14,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-MIGRATOR_VERSION = '0.8.1'
+MIGRATOR_VERSION = '0.8.2'
 MIGRATOR_FULL_NAME = 'Database Migration Tool credativ-pg-migrator'
 
 ## Internal defaults used by the migrator

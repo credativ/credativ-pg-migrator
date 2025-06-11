@@ -120,7 +120,7 @@ class IBMDB2Connector(DatabaseConnector):
             for row in cursor.fetchall():
                 ordinal_position = row[0]
                 column_name = row[1]
-                column_type = row[2]
+                data_type = row[2]
                 character_maximum_length = row[3]
                 numeric_precision = row[4]
                 numeric_scale = row[5]
@@ -128,9 +128,19 @@ class IBMDB2Connector(DatabaseConnector):
                 if self.config_parser.get_system_catalog() == 'SYSCAT':
                     is_nullable = 'NO' if is_nullable == 'N' else 'YES'
                 column_default = row[7]
+
+                column_type = data_type
+                if self.is_string_type(data_type) and character_maximum_length is not None:
+                    column_type = f"{data_type}({character_maximum_length})"
+                elif self.is_numeric_type(data_type) and numeric_precision is not None and numeric_scale is not None:
+                    column_type = f"{data_type}({numeric_precision},{numeric_scale})"
+                elif self.is_numeric_type(data_type) and numeric_precision is not None:
+                    column_type = f"{data_type}({numeric_precision})"
+
                 result[ordinal_position] = {
                     'column_name': column_name,
-                    'data_type': column_type,
+                    'data_type': data_type,
+                    'column_type': column_type,
                     'character_maximum_length': character_maximum_length,
                     'numeric_precision': numeric_precision,
                     'numeric_scale': numeric_scale,
@@ -176,19 +186,19 @@ class IBMDB2Connector(DatabaseConnector):
                 'BINARY': 'BYTEA',
                 'VARBINARY': 'BYTEA',
                 'IMAGE': 'BYTEA',
-                'CHAR': 'TEXT',
-                'NCHAR': 'TEXT',
-                'UNICHAR': 'TEXT',
-                'NVARCHAR': 'TEXT',
+                'CHAR': 'CHAR',
+                'NCHAR': 'CHAR',
+                'UNICHAR': 'CHAR',
+                'NVARCHAR': 'VARCHAR',
                 'TEXT': 'TEXT',
                 'SYSNAME': 'TEXT',
                 'LONGSYSNAME': 'TEXT',
-                'LONG VARCHAR': 'TEXT',
-                'LONG NVARCHAR': 'TEXT',
-                'UNICHAR': 'TEXT',
+                'LONG VARCHAR': 'VARCHAR',
+                'LONG NVARCHAR': 'VARCHAR',
+                'UNICHAR': 'CHAR',
                 'UNITEXT': 'TEXT',
-                'UNIVARCHAR': 'TEXT',
-                'VARCHAR': 'TEXT',
+                'UNIVARCHAR': 'VARCHAR',
+                'VARCHAR': 'VARCHAR',
 
                 'CLOB': 'TEXT',
                 'DECIMAL': 'DECIMAL',
@@ -354,7 +364,7 @@ class IBMDB2Connector(DatabaseConnector):
             cursor.execute(query)
             for row in cursor.fetchall():
                 index_name = row[0]
-                index_columns = row[1].lstrip('+').split('+')
+                index_columns = ', '.join(f'"{col}"' for col in row[1].lstrip('+').split('+') if col)
                 # index_unique = row[2]
                 index_type = row[3]
                 # table_id = row[4]
@@ -362,7 +372,7 @@ class IBMDB2Connector(DatabaseConnector):
                 table_indexes[order_num] = {
                     'index_name': index_name,
                     'index_type': 'PRIMARY KEY' if index_type == 'P' else 'UNIQUE' if index_type == 'U' else 'INDEX',
-                    'index_owner': settings['source_schema'],
+                    'index_owner': source_table_schema,
                     'index_columns': index_columns,
                     'index_comment': '',
                 }
@@ -371,7 +381,7 @@ class IBMDB2Connector(DatabaseConnector):
             cursor.close()
             self.disconnect()
             if self.config_parser.get_log_level() == 'DEBUG':
-                self.logger.debug(f"Indexes for table {settings['source_table_name']} ({settings['source_schema']}): {index_columns_data_types_str}")
+                self.logger.debug(f"Indexes for table {source_table_name} ({source_table_schema}): {index_columns_data_types_str}")
             return table_indexes
         except Exception as e:
             self.logger.error(f"Error executing query: {query}")
@@ -434,7 +444,7 @@ class IBMDB2Connector(DatabaseConnector):
                         'constraint_columns': fk_columns,
                         'referenced_table_schema': '',
                         'referenced_table_name': ref_table_name,
-                        'referenced_colunns': pk_columns,
+                        'referenced_columns': pk_columns,
                         'constraint_sql': '',
                         'constraint_comment': '',
                     }

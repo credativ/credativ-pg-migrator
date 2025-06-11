@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.8.3 - 2025.06.xx
+
+- 2025.06.11:
+
+  - Created automated test for IBM DB2 LUW connector (dev repository)
+  - Fixes in IBM DB2 LUW connector after previous refactoring changes in 0.7.x releases - fix in column types conversion, fix in primary key migrations, fix in foreign key migrations, fix in VARCHAR to TEXT conversion
+
 ## 0.8.2 - 2025.06.11
 
 - 2025.06.11:

@@ -514,8 +514,9 @@ class Planner:
 
                     coltype = types_mapping.get(coltype, 'TEXT').upper()
 
-                    if self.source_connection.is_string_type(coltype) and character_maximum_length >= 254:
-                        coltype = 'TEXT'
+                    if self.config_parser.get_varchar_to_text_length() >= 0:
+                        if self.source_connection.is_string_type(coltype) and character_maximum_length >= self.config_parser.get_varchar_to_text_length():
+                            coltype = 'TEXT'
 
                 if self.config_parser.get_log_level() == 'DEBUG':
                     self.logger.debug(f"Column {column_info['column_name']} - using data type: {coltype}")

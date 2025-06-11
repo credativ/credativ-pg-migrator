@@ -11,6 +11,9 @@
     - creation some functions failed in the target database because they did not find views referenced in the code
   - Changed order of actions in the Orchestrator - views must be migrated before functions/procedures/triggers, because these objects can reference views
     - View can be created with errors, if it uses some user defined functions/procedures which are not yet migrated - PostgreSQL validates them once missing objects are created
+  - Fix in the migration of VARCHAR columns - added new parameter migration.varchar_to_text_length to the config file
+    - Rationale: different use cases might require different handling on how to migrate VARCHAR columns, either as TEXT or as VARCHAR based on length or always or never
+    - Usage - see config file example
 
 - 2025.06.08:
 

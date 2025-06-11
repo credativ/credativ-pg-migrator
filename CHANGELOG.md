@@ -2,6 +2,10 @@
 
 ## 0.8.2 - 2025.06.xx
 
+- 2025.06.11:
+
+  - Fix in Informix funcs/procs migration - fetch of table names for replacements of schemas was broken due to previous changes in the migrator protocol table
+
 - 2025.06.08:
 
   - Started implementation of get_table_description function - description of table structure and eventually other properties, using native source database functions

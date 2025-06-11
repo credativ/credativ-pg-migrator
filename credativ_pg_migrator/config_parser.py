@@ -337,6 +337,11 @@ class ConfigParser:
     def get_names_case_handling(self):
         return self.config.get('migration', {}).get('names_case_handling', 'keep')
 
+    def get_varchar_to_text_length(self):
+        varchar_to_text_length = self.config.get('migration', {}).get('varchar_to_text_length', None)
+        if varchar_to_text_length is None:
+            return -1 # migrate varchars as they are
+
     def get_include_tables(self):
         include_tables = self.config.get('include_tables', None)
         if (include_tables is None or (type(include_tables) is str and include_tables.lower() == 'all')):

@@ -1235,9 +1235,7 @@ class MigratorTables:
             'target_table': row[8],
             'index_sql': row[9],
             'index_columns': row[10],
-            'index_columns_count': row[11],
-            'index_columns_data_types': row[12],
-            'index_comment': row[13]
+            'index_comment': row[11],
         }
 
     def decode_funcproc_row(self, row):

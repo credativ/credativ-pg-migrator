@@ -752,21 +752,28 @@ class Orchestrator:
                 if table_data['table_comment']:
                     query = f"""COMMENT ON TABLE "{table_data['target_schema']}"."{table_data['target_table']}" IS '{table_data['table_comment']}'"""
                     self.logger.info(f"Setting comment for table {table_data['target_table']} in target database.")
+                    if self.config_parser.get_log_level() == 'DEBUG':
+                        self.logger.debug(f"Executing comment query: {query}")
                     self.target_connection.execute_query(query)
 
                 for col in table_data['target_columns'].keys():
                     column_comment = table_data['target_columns'][col]['column_comment']
                     if column_comment:
-                        query = f"""COMMENT ON COLUMN "{table_data['target_columns'][col]['target_schema']}"."{table_data['target_columns'][col]['target_table']}"."{table_data['target_columns'][col]['target_column']}" IS '{column_comment}'"""
-                        self.logger.info(f"Setting comment for column {table_data['target_columns'][col]['target_column']} in target database.")
+                        query = f"""COMMENT ON COLUMN "{table_data['target_schema']}"."{table_data['target_table']}"."{table_data['target_columns'][col]['column_name']}" IS '{column_comment}'"""
+                        self.logger.info(f"Setting comment for column {table_data['target_columns'][col]['column_name']} in target database.")
+                        if self.config_parser.get_log_level() == 'DEBUG':
+                            self.logger.debug(f"Executing comment query: {query}")
                         self.target_connection.execute_query(query)
 
             all_indexes = self.migrator_tables.fetch_all_indexes()
             for index_detail in all_indexes:
                 index_data = self.migrator_tables.decode_index_row(index_detail)
                 if index_data['index_comment']:
-                    query = f"""COMMENT ON INDEX "{index_data['target_schema']}"."{index_data['target_index']}" IS '{index_data['index_comment']}'"""
-                    self.logger.info(f"Setting comment for index {index_data['target_index']} in target database.")
+                    index_name = f"{index_data['index_name']}_tab_{index_data['target_table']}"
+                    query = f"""COMMENT ON INDEX "{index_data['target_schema']}"."{index_name}" IS '{index_data['index_comment']}'"""
+                    self.logger.info(f"Setting comment for index {index_name} in target database.")
+                    if self.config_parser.get_log_level() == 'DEBUG':
+                        self.logger.debug(f"Executing comment query: {query}")
                     self.target_connection.execute_query(query)
 
             all_constraints = self.migrator_tables.fetch_all_constraints()
@@ -775,30 +782,38 @@ class Orchestrator:
                 if constraint_data['constraint_comment']:
                     query = f"""COMMENT ON CONSTRAINT "{constraint_data['constraint_name']}" ON "{constraint_data['target_schema']}"."{constraint_data['target_table']}" IS '{constraint_data['constraint_comment']}'"""
                     self.logger.info(f"Setting comment for constraint {constraint_data['constraint_name']} in target database.")
+                    if self.config_parser.get_log_level() == 'DEBUG':
+                        self.logger.debug(f"Executing comment query: {query}")
                     self.target_connection.execute_query(query)
 
             all_triggers = self.migrator_tables.fetch_all_triggers()
             for trigger_detail in all_triggers:
                 trigger_data = self.migrator_tables.decode_trigger_row(trigger_detail)
                 if trigger_data['trigger_comment']:
-                    query = f"""COMMENT ON TRIGGER "{trigger_data['target_schema']}"."{trigger_data['target_trigger']}" IS '{trigger_data['trigger_comment']}'"""
-                    self.logger.info(f"Setting comment for trigger {trigger_data['target_trigger']} in target database.")
+                    query = f"""COMMENT ON TRIGGER "{trigger_data['target_schema']}"."{trigger_data['trigger_name']}" IS '{trigger_data['trigger_comment']}'"""
+                    self.logger.info(f"Setting comment for trigger {trigger_data['trigger_name']} in target database.")
+                    if self.config_parser.get_log_level() == 'DEBUG':
+                        self.logger.debug(f"Executing comment query: {query}")
                     self.target_connection.execute_query(query)
 
             all_views = self.migrator_tables.fetch_all_views()
             for view_detail in all_views:
                 view_data = self.migrator_tables.decode_view_row(view_detail)
                 if view_data['view_comment']:
-                    query = f"""COMMENT ON VIEW "{view_data['target_schema']}"."{view_data['target_view']}" IS '{view_data['view_comment']}'"""
-                    self.logger.info(f"Setting comment for view {view_data['target_view']} in target database.")
+                    query = f"""COMMENT ON VIEW "{view_data['target_schema']}"."{view_data['view_name']}" IS '{view_data['view_comment']}'"""
+                    self.logger.info(f"Setting comment for view {view_data['view_name']} in target database.")
+                    if self.config_parser.get_log_level() == 'DEBUG':
+                        self.logger.debug(f"Executing comment query: {query}")
                     self.target_connection.execute_query(query)
 
             all_user_defined_types = self.migrator_tables.fetch_all_user_defined_types()
             for type_detail in all_user_defined_types:
                 type_data = self.migrator_tables.decode_user_defined_type_row(type_detail)
                 if type_data['type_comment']:
-                    query = f"""COMMENT ON TYPE "{type_data['target_schema']}"."{type_data['target_type']}" IS '{type_data['type_comment']}'"""
-                    self.logger.info(f"Setting comment for user defined type {type_data['target_type']} in target database.")
+                    query = f"""COMMENT ON TYPE "{type_data['target_schema']}"."{type_data['type_name']}" IS '{type_data['type_comment']}'"""
+                    self.logger.info(f"Setting comment for user defined type {type_data['type_name']} in target database.")
+                    if self.config_parser.get_log_level() == 'DEBUG':
+                        self.logger.debug(f"Executing comment query: {query}")
                     self.target_connection.execute_query(query)
 
             self.target_connection.disconnect()

@@ -290,9 +290,9 @@ class OracleConnector(DatabaseConnector):
                 c.constraint_type,
                 ai.index_type,
                 ai.uniqueness,
-                listagg(CASE WHEN coalesce(cols.HIDDEN_COLUMN, 'NO') = 'YES' THEN aic.column_name ELSE '"'|| aic.column_name ||'"' END, ', ')
+                listagg(CASE WHEN coalesce(cols.HIDDEN_COLUMN, 'NO') = 'YES' THEN '('|| aic.column_name ||')' ELSE '"'|| aic.column_name ||'"' END, ', ')
                     WITHIN GROUP (ORDER BY aic.column_position) AS indexed_columns,
-                listagg(CASE WHEN coalesce(cols.HIDDEN_COLUMN, 'NO') = 'YES' THEN aic.column_name ||' '|| aic.descend ELSE '"'|| aic.column_name ||'" '|| aic.descend END, ', ')
+                listagg(CASE WHEN coalesce(cols.HIDDEN_COLUMN, 'NO') = 'YES' THEN '('|| aic.column_name ||') '|| aic.descend ELSE '"'|| aic.column_name ||'" '|| aic.descend END, ', ')
                     WITHIN GROUP (ORDER BY aic.column_position) AS indexed_columns_orders,
                 sum(CASE WHEN coalesce(cols.HIDDEN_COLUMN, 'NO') = 'YES' THEN 1 ELSE 0 END) AS hidden_columns_count
             FROM all_indexes ai

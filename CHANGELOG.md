@@ -8,6 +8,7 @@
   - Fixes in MS SQL Server connector after previous refactoring changes in 0.7.x releases - fix in column types conversion, fix in foreign key migrations, fix in VARCHAR to TEXT conversion
   - Proper implementation of handling of names casing - parameter migration.names_case_handling (lower, upper, preserve) is now used when CREATE DDL statements are generated
     - Rationale: legacy and proprietary databases have different rules for names casing, users might want to preserve original casing or convert names to lower or upper case based on their use cases
+  - Fix in Oracle connector - migration of indexes - function based indexes contain in system tables hidden columns SYS_N% which must be replaced with their values in the DDL statements
 
 - 2025.06.11:
 

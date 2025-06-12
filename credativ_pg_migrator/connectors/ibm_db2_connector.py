@@ -56,7 +56,14 @@ class IBMDB2Connector(DatabaseConnector):
             self.logger.error(f"Unsupported target database type: {target_db_type}")
 
     def fetch_table_names(self, table_schema: str):
-        query = f"""SELECT TABLEID, TABNAME FROM SYSCAT.TABLES WHERE TABSCHEMA = upper('{table_schema}') ORDER BY TABNAME"""
+        query = f"""
+            SELECT
+                TABLEID,
+                TABNAME,
+                REMARKS
+            FROM SYSCAT.TABLES
+            WHERE TABSCHEMA = upper('{table_schema}')
+            ORDER BY TABNAME"""
         try:
             tables = {}
             order_num = 1
@@ -68,7 +75,7 @@ class IBMDB2Connector(DatabaseConnector):
                     'id': row[0],
                     'schema_name': table_schema,
                     'table_name': row[1],
-                    'comment': ''
+                    'comment': row[2]
                 }
                 order_num += 1
             cursor.close()
@@ -94,7 +101,8 @@ class IBMDB2Connector(DatabaseConnector):
                         "LENGTH",
                         "SCALE",
                         "NULLS",
-                        "DEFAULT"
+                        "DEFAULT",
+                        "REMARKS"
                     FROM SYSCAT.COLUMNS
                     WHERE TABSCHEMA = upper('{table_schema}') AND tabname = '{table_name}' ORDER BY COLNO
                 """
@@ -120,7 +128,7 @@ class IBMDB2Connector(DatabaseConnector):
             for row in cursor.fetchall():
                 ordinal_position = row[0]
                 column_name = row[1]
-                column_type = row[2]
+                data_type = row[2]
                 character_maximum_length = row[3]
                 numeric_precision = row[4]
                 numeric_scale = row[5]
@@ -128,15 +136,26 @@ class IBMDB2Connector(DatabaseConnector):
                 if self.config_parser.get_system_catalog() == 'SYSCAT':
                     is_nullable = 'NO' if is_nullable == 'N' else 'YES'
                 column_default = row[7]
+                column_comment = row[8] if len(row) > 8 else ''
+
+                column_type = data_type
+                if self.is_string_type(data_type) and character_maximum_length is not None:
+                    column_type = f"{data_type}({character_maximum_length})"
+                elif self.is_numeric_type(data_type) and numeric_precision is not None and numeric_scale is not None:
+                    column_type = f"{data_type}({numeric_precision},{numeric_scale})"
+                elif self.is_numeric_type(data_type) and numeric_precision is not None:
+                    column_type = f"{data_type}({numeric_precision})"
+
                 result[ordinal_position] = {
                     'column_name': column_name,
-                    'data_type': column_type,
+                    'data_type': data_type,
+                    'column_type': column_type,
                     'character_maximum_length': character_maximum_length,
                     'numeric_precision': numeric_precision,
                     'numeric_scale': numeric_scale,
                     'is_nullable': is_nullable,
                     'column_default_value': column_default,
-                    'column_comment': '',
+                    'column_comment': column_comment,
                     'is_identity': 'NO',
                 }
             cursor.close()
@@ -176,19 +195,19 @@ class IBMDB2Connector(DatabaseConnector):
                 'BINARY': 'BYTEA',
                 'VARBINARY': 'BYTEA',
                 'IMAGE': 'BYTEA',
-                'CHAR': 'TEXT',
-                'NCHAR': 'TEXT',
-                'UNICHAR': 'TEXT',
-                'NVARCHAR': 'TEXT',
+                'CHAR': 'CHAR',
+                'NCHAR': 'CHAR',
+                'UNICHAR': 'CHAR',
+                'NVARCHAR': 'VARCHAR',
                 'TEXT': 'TEXT',
                 'SYSNAME': 'TEXT',
                 'LONGSYSNAME': 'TEXT',
-                'LONG VARCHAR': 'TEXT',
-                'LONG NVARCHAR': 'TEXT',
-                'UNICHAR': 'TEXT',
+                'LONG VARCHAR': 'VARCHAR',
+                'LONG NVARCHAR': 'VARCHAR',
+                'UNICHAR': 'CHAR',
                 'UNITEXT': 'TEXT',
-                'UNIVARCHAR': 'TEXT',
-                'VARCHAR': 'TEXT',
+                'UNIVARCHAR': 'VARCHAR',
+                'VARCHAR': 'VARCHAR',
 
                 'CLOB': 'TEXT',
                 'DECIMAL': 'DECIMAL',
@@ -335,14 +354,14 @@ class IBMDB2Connector(DatabaseConnector):
 
         table_indexes = {}
         order_num = 1
-        index_columns_data_types_str = ''
+        # index_columns_data_types_str = ''
         query = f"""
             SELECT
                 INDNAME,
                 COLNAMES,
                 COLCOUNT,
                 UNIQUERULE,
-                MADE_UNIQUE
+                REMARKS
             FROM SYSCAT.INDEXES I
             WHERE I.TABSCHEMA = upper('{source_table_schema}')
             AND I.TABNAME = '{source_table_name}'
@@ -354,24 +373,24 @@ class IBMDB2Connector(DatabaseConnector):
             cursor.execute(query)
             for row in cursor.fetchall():
                 index_name = row[0]
-                index_columns = row[1].lstrip('+').split('+')
-                # index_unique = row[2]
+                index_columns = ', '.join(f'"{col}"' for col in row[1].lstrip('+').split('+') if col)
+                columns_count = row[2]
                 index_type = row[3]
-                # table_id = row[4]
+                index_comment = row[4]
 
                 table_indexes[order_num] = {
                     'index_name': index_name,
                     'index_type': 'PRIMARY KEY' if index_type == 'P' else 'UNIQUE' if index_type == 'U' else 'INDEX',
-                    'index_owner': settings['source_schema'],
+                    'index_owner': source_table_schema,
                     'index_columns': index_columns,
-                    'index_comment': '',
+                    'index_comment': index_comment,
                 }
                 order_num += 1
 
             cursor.close()
             self.disconnect()
-            if self.config_parser.get_log_level() == 'DEBUG':
-                self.logger.debug(f"Indexes for table {settings['source_table_name']} ({settings['source_schema']}): {index_columns_data_types_str}")
+            # if self.config_parser.get_log_level() == 'DEBUG':
+            #     self.logger.debug(f"Indexes for table {source_table_name} ({source_table_schema}): {index_columns_data_types_str}")
             return table_indexes
         except Exception as e:
             self.logger.error(f"Error executing query: {query}")
@@ -434,7 +453,7 @@ class IBMDB2Connector(DatabaseConnector):
                         'constraint_columns': fk_columns,
                         'referenced_table_schema': '',
                         'referenced_table_name': ref_table_name,
-                        'referenced_colunns': pk_columns,
+                        'referenced_columns': pk_columns,
                         'constraint_sql': '',
                         'constraint_comment': '',
                     }

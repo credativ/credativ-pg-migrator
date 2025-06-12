@@ -320,9 +320,6 @@ class PostgreSQLConnector(DatabaseConnector):
                             'constraint_comment': ('added from domains ' + column_comment).strip(),
                         })
 
-            if column_comment:
-                create_table_sql_column +=(f" COMMENT '{column_comment}'")
-
             create_table_sql_parts.append(create_column_sql)
 
         create_table_sql = ", ".join(create_table_sql_parts)

@@ -33,6 +33,10 @@ class ConfigParser:
 
         ## //TODO source.schema or source.owner is required - not both
 
+        names_case_handling = self.get_names_case_handling().lower()
+        if names_case_handling not in ['lower', 'upper', 'keep']:
+            raise ValueError(f"Invalid names_case_handling in the config file: {names_case_handling}. Must be one of 'lower', 'upper', or 'keep'.")
+
         include_tables = self.config['include_tables']
         if (include_tables is not None and type(include_tables) is str and include_tables.lower() != 'all'):
             # and type(include_tables) is not list):
@@ -336,6 +340,17 @@ class ConfigParser:
 
     def get_names_case_handling(self):
         return self.config.get('migration', {}).get('names_case_handling', 'keep')
+
+    def convert_names_case(self, name):
+        case_handling = self.get_names_case_handling().lower()
+        if case_handling == 'lower':
+            return name.lower()
+        elif case_handling == 'upper':
+            return name.upper()
+        elif case_handling == 'keep':
+            return name
+        else:
+            raise ValueError(f"Invalid names_case_handling: {case_handling}")
 
     def get_varchar_to_text_length(self):
         varchar_to_text_length = self.config.get('migration', {}).get('varchar_to_text_length', None)

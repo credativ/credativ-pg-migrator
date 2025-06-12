@@ -115,8 +115,11 @@ class Planner:
                 self.target_connection.execute_query(self.target_connection.session_settings)
 
             if self.config_parser.should_drop_schema():
-                self.logger.info(f"Dropping target schema '{self.target_schema}'...")
-                self.target_connection.execute_query(f"DROP SCHEMA IF EXISTS {self.target_schema} CASCADE")
+                if self.target_schema.lower() == 'public':
+                    self.logger.info("Cannot drop the 'public' schema - skipping drop of schema.")
+                else:
+                    self.logger.info(f"Dropping target schema '{self.target_schema}'...")
+                    self.target_connection.execute_query(f"DROP SCHEMA IF EXISTS {self.target_schema} CASCADE")
 
             if self.config_parser.get_log_level() == 'DEBUG':
                 self.logger.debug(f"Creating target schema '{self.target_schema}' if it does not exist...")

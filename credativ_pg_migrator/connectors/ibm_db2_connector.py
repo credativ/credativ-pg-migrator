@@ -354,14 +354,14 @@ class IBMDB2Connector(DatabaseConnector):
 
         table_indexes = {}
         order_num = 1
-        index_columns_data_types_str = ''
+        # index_columns_data_types_str = ''
         query = f"""
             SELECT
                 INDNAME,
                 COLNAMES,
                 COLCOUNT,
                 UNIQUERULE,
-                MADE_UNIQUE
+                REMARKS
             FROM SYSCAT.INDEXES I
             WHERE I.TABSCHEMA = upper('{source_table_schema}')
             AND I.TABNAME = '{source_table_name}'
@@ -374,23 +374,23 @@ class IBMDB2Connector(DatabaseConnector):
             for row in cursor.fetchall():
                 index_name = row[0]
                 index_columns = ', '.join(f'"{col}"' for col in row[1].lstrip('+').split('+') if col)
-                # index_unique = row[2]
+                columns_count = row[2]
                 index_type = row[3]
-                # table_id = row[4]
+                index_comment = row[4]
 
                 table_indexes[order_num] = {
                     'index_name': index_name,
                     'index_type': 'PRIMARY KEY' if index_type == 'P' else 'UNIQUE' if index_type == 'U' else 'INDEX',
                     'index_owner': source_table_schema,
                     'index_columns': index_columns,
-                    'index_comment': '',
+                    'index_comment': index_comment,
                 }
                 order_num += 1
 
             cursor.close()
             self.disconnect()
-            if self.config_parser.get_log_level() == 'DEBUG':
-                self.logger.debug(f"Indexes for table {source_table_name} ({source_table_schema}): {index_columns_data_types_str}")
+            # if self.config_parser.get_log_level() == 'DEBUG':
+            #     self.logger.debug(f"Indexes for table {source_table_name} ({source_table_schema}): {index_columns_data_types_str}")
             return table_indexes
         except Exception as e:
             self.logger.error(f"Error executing query: {query}")

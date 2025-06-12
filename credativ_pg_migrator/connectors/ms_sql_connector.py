@@ -160,9 +160,19 @@ class MsSQLConnector(DatabaseConnector):
                 is_nullable = row[6]
                 is_identity = row[7]
                 column_default = row[8]
+
+                column_type = data_type.upper()
+                if self.is_string_type(column_type) and character_maximum_length is not None:
+                    column_type += f"({character_maximum_length})"
+                elif self.is_numeric_type(column_type) and numeric_precision is not None and numeric_scale is not None:
+                    column_type += f"({numeric_precision}, {numeric_scale})"
+                elif self.is_numeric_type(column_type) and numeric_precision is not None:
+                    column_type += f"({numeric_precision})"
+
                 result[ordinal_position] = {
                     'column_name': column_name,
                     'data_type': data_type,
+                    'column_type': column_type,
                     'character_maximum_length': character_maximum_length,
                     'numeric_precision': numeric_precision,
                     'numeric_scale': numeric_scale,
@@ -213,19 +223,19 @@ class MsSQLConnector(DatabaseConnector):
                 'BINARY': 'BYTEA',
                 'VARBINARY': 'BYTEA',
                 'IMAGE': 'BYTEA',
-                'CHAR': 'TEXT',
-                'NCHAR': 'TEXT',
-                'UNICHAR': 'TEXT',
-                'NVARCHAR': 'TEXT',
+                'CHAR': 'CHAR',
+                'NCHAR': 'CHAR',
+                'UNICHAR': 'CHAR',
+                'NVARCHAR': 'VARCHAR',
                 'TEXT': 'TEXT',
                 'SYSNAME': 'TEXT',
                 'LONGSYSNAME': 'TEXT',
-                'LONG VARCHAR': 'TEXT',
-                'LONG NVARCHAR': 'TEXT',
-                'UNICHAR': 'TEXT',
+                'LONG VARCHAR': 'VARCHAR',
+                'LONG NVARCHAR': 'VARCHAR',
+                'UNICHAR': 'CHAR',
                 'UNITEXT': 'TEXT',
-                'UNIVARCHAR': 'TEXT',
-                'VARCHAR': 'TEXT',
+                'UNIVARCHAR': 'VARCHAR',
+                'VARCHAR': 'VARCHAR',
 
                 'CLOB': 'TEXT',
                 'DECIMAL': 'DECIMAL',
@@ -385,7 +395,7 @@ class MsSQLConnector(DatabaseConnector):
                     'constraint_owner': constraint_owner,
                     'constraint_columns': constraint_columns,
                     'referenced_table_schema': '',
-                    'referenced_table': referenced_table,
+                    'referenced_table_name': referenced_table,
                     'referenced_columns': referenced_columns,
                     'constraint_sql': '',
                     'constraint_comment': ''

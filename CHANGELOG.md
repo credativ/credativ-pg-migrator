@@ -2,6 +2,11 @@
 
 ## 0.8.3 - 2025.06.xx
 
+- 2025.06.12:
+
+  - Created fully automated test for MS SQL Server connector (dev repository)
+  - Fixes in MS SQL Server connector after previous refactoring changes in 0.7.x releases - fix in column types conversion, fix in foreign key migrations, fix in VARCHAR to TEXT conversion
+
 - 2025.06.11:
 
   - Created automated test for IBM DB2 LUW connector (dev repository)

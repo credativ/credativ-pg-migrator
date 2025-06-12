@@ -376,8 +376,8 @@ class Orchestrator:
                     if self.config_parser.get_log_level() == 'DEBUG':
                         self.logger.debug(f"Worker {worker_id}: Found dependency for column alteration: {result}")
                     alter_column_sql = f"""
-                        ALTER TABLE "{target_schema}"."{target_table}"
-                        ALTER COLUMN "{result['target_column'].replace('"','')}"
+                        ALTER TABLE "{self.config_parser.convert_names_case(target_schema)}"."{self.config_parser.convert_names_case(target_table)}"
+                        ALTER COLUMN "{self.config_parser.convert_names_case(result['target_column'].replace('"',''))}"
                         TYPE {result['altered_data_type']}"""
                     if self.config_parser.get_log_level() == 'DEBUG':
                         self.logger.debug(f"Worker {worker_id}: Altering column with SQL: {alter_column_sql}")

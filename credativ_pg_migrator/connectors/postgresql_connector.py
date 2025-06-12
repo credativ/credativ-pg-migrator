@@ -177,18 +177,24 @@ class PostgreSQLConnector(DatabaseConnector):
         source_schema = settings['source_schema']
         source_table = settings['source_table']
         source_table_id = settings['source_table_id']
-        target_schema = settings['target_schema']
-        target_table_name = settings['target_table']
+        target_schema = self.config_parser.convert_names_case(settings['target_schema'])
+        target_table_name = self.config_parser.convert_names_case(settings['target_table'])
         # source_columns = settings['source_columns']
         converted = settings['target_columns']
         migrator_tables = settings['migrator_tables']
         create_table_sql = ""
         create_table_sql_parts = []
 
+        if self.config_parser.get_log_level() == 'DEBUG':
+            self.logger.debug(f"Creating DDL for table {target_schema}.{target_table_name}, case handling: {self.config_parser.get_names_case_handling()}")
+
         for _, column_info in converted.items():
+
+            column_name = self.config_parser.convert_names_case(column_info['column_name'])
+
             if column_info['is_hidden_column'] == 'YES':
                 if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"Skipping hidden column {column_info['column_name']}: {column_info}")
+                    self.logger.debug(f"Skipping hidden column {column_name}: {column_info}")
                 continue
 
             create_column_sql = ""
@@ -217,34 +223,36 @@ class PostgreSQLConnector(DatabaseConnector):
             if is_identity == 'YES' and column_data_type not in ('BIGINT', 'INTEGER', 'SMALLINT'):
                 altered_data_type = 'BIGINT'
                 migrator_tables.insert_target_column_alteration({
-                    'target_schema': target_schema,
-                    'target_table': target_table_name,
+                    'target_schema': settings['target_schema'],
+                    'target_table': settings['target_table'],
                     'target_column': column_info['column_name'],
                     'reason': 'IDENTITY',
                     'original_data_type': column_data_type,
                     'altered_data_type': altered_data_type,
                 })
-                create_column_sql = f""""{column_info['column_name']}" {altered_data_type}"""
+                create_column_sql = f""""{column_name}" {altered_data_type}"""
+                if self.config_parser.get_log_level() == 'DEBUG':
+                    self.logger.debug(f"Column {column_name} is identity, altered data type to {altered_data_type}")
             else:
                 if (character_maximum_length != '' and 'CHAR' in column_data_type):
-                    create_column_sql = f""""{column_info['column_name']}" {column_data_type}({character_maximum_length})"""
+                    create_column_sql = f""""{column_name}" {column_data_type}({character_maximum_length})"""
                 elif self.is_numeric_type(column_data_type) and column_data_type in ('DECIMAL', 'NUMERIC'):
                     numeric_precision = column_info.get('numeric_precision')
                     numeric_scale = column_info.get('numeric_scale')
                     basic_numeric_precision = column_info.get('basic_numeric_precision')
                     basic_numeric_scale = column_info.get('basic_numeric_scale')
                     if numeric_precision not in (None, '') and numeric_scale not in (None, ''):
-                        create_column_sql = f""""{column_info['column_name']}" {column_data_type}({numeric_precision},{numeric_scale})"""
+                        create_column_sql = f""""{column_name}" {column_data_type}({numeric_precision},{numeric_scale})"""
                     elif numeric_precision not in (None, ''):
-                        create_column_sql = f""""{column_info['column_name']}" {column_data_type}({numeric_precision})"""
+                        create_column_sql = f""""{column_name}" {column_data_type}({numeric_precision})"""
                     elif basic_numeric_precision not in (None, '') and basic_numeric_scale not in (None, ''):
-                        create_column_sql = f""""{column_info['column_name']}" {column_data_type}({basic_numeric_precision},{basic_numeric_scale})"""
+                        create_column_sql = f""""{column_name}" {column_data_type}({basic_numeric_precision},{basic_numeric_scale})"""
                     elif basic_numeric_precision not in (None, ''):
-                        create_column_sql = f""""{column_info['column_name']}" {column_data_type}({basic_numeric_precision})"""
+                        create_column_sql = f""""{column_name}" {column_data_type}({basic_numeric_precision})"""
                     else:
-                        create_column_sql = f""""{column_info['column_name']}" {column_data_type}"""
+                        create_column_sql = f""""{column_name}" {column_data_type}"""
                 else:
-                    create_column_sql = f""""{column_info['column_name']}" {column_data_type}"""
+                    create_column_sql = f""""{column_name}" {column_data_type}"""
 
             create_column_sql += f""" {nullable_string} """
 
@@ -391,11 +399,11 @@ class PostgreSQLConnector(DatabaseConnector):
         # source_table = settings['source_table']
         # source_table_id = settings['source_table_id']
         # index_owner = settings['index_owner']
-        index_name = settings['index_name']
+        index_name = self.config_parser.convert_names_case(settings['index_name'])
         index_type = settings['index_type']
-        target_schema = settings['target_schema']
-        target_table = settings['target_table']
-        index_columns = settings['index_columns']
+        target_schema = self.config_parser.convert_names_case(settings['target_schema'])
+        target_table = self.config_parser.convert_names_case(settings['target_table'])
+        index_columns = self.config_parser.convert_names_case(settings['index_columns'])
         # index_comment = settings['index_comment']
 
         # index_columns = ', '.join(f'"{col}"' for col in index_columns)
@@ -493,20 +501,20 @@ class PostgreSQLConnector(DatabaseConnector):
     def get_create_constraint_sql(self, settings):
         create_constraint_query = ''
         source_db_type = settings['source_db_type']
-        target_schema = settings['target_schema']
-        target_table_name = settings['target_table']
+        target_schema = self.config_parser.convert_names_case(settings['target_schema'])
+        target_table_name = self.config_parser.convert_names_case(settings['target_table'])
         target_columns = settings['target_columns']
-        constraint_name = settings['constraint_name']
+        constraint_name = self.config_parser.convert_names_case(settings['constraint_name'])
         constraint_type = settings['constraint_type']
-        constraint_owner = settings['constraint_owner']
-        constraint_columns = settings['constraint_columns']
-        referenced_table_schema = settings['referenced_table_schema']
-        referenced_table_name = settings['referenced_table_name']
-        referenced_columns = settings['referenced_columns']
+        constraint_owner = self.config_parser.convert_names_case(settings['constraint_owner'])
+        constraint_columns = self.config_parser.convert_names_case(settings['constraint_columns'])
+        referenced_table_schema = self.config_parser.convert_names_case(settings['referenced_table_schema'])
+        referenced_table_name = self.config_parser.convert_names_case(settings['referenced_table_name'])
+        referenced_columns = self.config_parser.convert_names_case(settings['referenced_columns'])
         delete_rule = settings['delete_rule'] if 'delete_rule' in settings else 'NO ACTION'
         update_rule = settings['update_rule'] if 'update_rule' in settings else 'NO ACTION'
         constraint_comment = settings['constraint_comment']
-        constraint_sql = settings['constraint_sql'] if 'constraint_sql' in settings else ''
+        constraint_sql = self.config_parser.convert_names_case(settings['constraint_sql']) if 'constraint_sql' in settings else ''
         constraint_status = settings['constraint_status'] if 'constraint_status' in settings else 'ENABLED'
 
         if source_db_type != 'postgresql':

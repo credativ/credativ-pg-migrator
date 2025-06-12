@@ -275,6 +275,7 @@ class OracleConnector(DatabaseConnector):
 
         table_indexes = {}
         order_num = 1
+        hidden_columns_count = 0
 
         ## for the future reference - oracle function to get DDL
         # SELECT DBMS_METADATA.GET_DDL('INDEX', index_name, table_owner) AS ddl
@@ -289,13 +290,16 @@ class OracleConnector(DatabaseConnector):
                 c.constraint_type,
                 ai.index_type,
                 ai.uniqueness,
-                listagg('"'||aic.column_name||'"', ', ')
+                listagg(CASE WHEN coalesce(cols.HIDDEN_COLUMN, 'NO') = 'YES' THEN '('|| aic.column_name ||')' ELSE '"'|| aic.column_name ||'"' END, ', ')
                     WITHIN GROUP (ORDER BY aic.column_position) AS indexed_columns,
-                listagg('"'||aic.column_name||'" '|| aic.descend, ', ')
-                    WITHIN GROUP (ORDER BY aic.column_position) AS indexed_columns_orders
+                listagg(CASE WHEN coalesce(cols.HIDDEN_COLUMN, 'NO') = 'YES' THEN '('|| aic.column_name ||') '|| aic.descend ELSE '"'|| aic.column_name ||'" '|| aic.descend END, ', ')
+                    WITHIN GROUP (ORDER BY aic.column_position) AS indexed_columns_orders,
+                sum(CASE WHEN coalesce(cols.HIDDEN_COLUMN, 'NO') = 'YES' THEN 1 ELSE 0 END) AS hidden_columns_count
             FROM all_indexes ai
             JOIN all_ind_columns aic
             ON ai.owner = aic.index_owner AND ai.index_name = aic.index_name
+            LEFT JOIN all_tab_cols cols
+            ON cols.owner = ai.table_owner AND cols.table_name = ai.table_name AND cols.column_name = aic.column_name
             AND ai.table_owner = aic.table_owner AND ai.table_name = aic.table_name
             LEFT JOIN dba_constraints c
             ON c.owner = ai.owner AND c.table_name = ai.table_name AND c.constraint_name = ai.index_name
@@ -324,6 +328,7 @@ class OracleConnector(DatabaseConnector):
                 uniqueness = row[3]
                 columns_list = row[4]
                 columns_list_orders = row[5]
+                hidden_columns_count += int(row[6])
 
                 if index_name not in table_indexes:
                     table_indexes[order_num] = {
@@ -332,8 +337,46 @@ class OracleConnector(DatabaseConnector):
                         'index_owner': source_table_schema,
                         'index_columns': columns_list if constraint_type == 'P' else columns_list_orders,
                         'index_comment': '',
+                        'index_sql': '',
+                        'index_hidden_columns_count': int(row[6]),
                     }
                 order_num += 1
+
+            for order_num, index_info in table_indexes.items():
+                # Fetch the DDL for each index
+                try:
+                    query = f"""SELECT DBMS_METADATA.GET_DDL('INDEX', '{index_info['index_name'].upper()}', '{source_table_schema.upper()}') FROM dual"""
+                    cursor.execute(query)
+                    ddl = cursor.fetchone()[0]
+                    if ddl:
+                        ddl = ddl.decode('utf-8') if isinstance(ddl, bytes) else ddl
+                        table_indexes[order_num]['index_sql'] = f"{ddl}"
+                        if self.config_parser.get_log_level() == 'DEBUG':
+                            self.logger.debug(f"Fetched DDL for index {index_info['index_name']}: {ddl}")
+                except cx_Oracle.DatabaseError as e:
+                    self.logger.error(f"Error fetching DDL for index {index_info['index_name']}: {e}")
+                    table_indexes[order_num]['index_sql'] = f"Error fetching DDL: {e}"
+
+            if hidden_columns_count > 0:
+                self.logger.warning(f"Table {source_table_schema}.{source_table_name} has {hidden_columns_count} hidden columns in indexes.")
+                try:
+                    query = f"""SELECT COLUMN_NAME, DATA_DEFAULT FROM all_tab_cols WHERE owner = '{source_table_schema.upper()}' AND table_name = '{source_table_name.upper()}' AND hidden_column = 'YES'"""
+                    cursor.execute(query)
+                    hidden_columns = cursor.fetchall()
+                    for col in hidden_columns:
+                        col_name = col[0]
+                        col_default = col[1] if col[1] else 'NULL'
+                        if self.config_parser.get_log_level() == 'DEBUG':
+                            self.logger.debug(f"Hidden column: {col_name}, Default value: {col_default}")
+
+                        for order_num, index_info in table_indexes.items():
+                            if index_info['index_hidden_columns_count'] > 0:
+                                if col_name in index_info['index_columns']:
+                                    index_info['index_columns'] = index_info['index_columns'].replace(col_name, f"{col_default}")
+                                    if self.config_parser.get_log_level() == 'DEBUG':
+                                        self.logger.debug(f"Updated index {index_info['index_name']} with hidden column {col_name} and default value {col_default}")
+                except cx_Oracle.DatabaseError as e:
+                    self.logger.error(f"Error fetching hidden columns for table {source_table_schema}.{source_table_name}: {e}")
 
             cursor.close()
             self.disconnect()

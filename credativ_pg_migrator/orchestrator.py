@@ -608,7 +608,7 @@ class Orchestrator:
 
                         self.migrator_tables.insert_funcprocs(self.source_schema, funcproc_data['name'], funcproc_id, funcproc_code, self.target_schema, funcproc_data['name'], converted_code, funcproc_data['comment'])
 
-                        if converted_code is not None:
+                        if converted_code is not None and converted_code.strip():
                             self.logger.info(f"Creating {funcproc_type} {funcproc_data['name']} in target database.")
                             self.target_connection.connect()
 
@@ -623,7 +623,7 @@ class Orchestrator:
                                 self.logger.debug(f"[OK] Converted code for {funcproc_data['name']}: {converted_code}")
                             self.migrator_tables.update_funcproc_status(funcproc_id, True, 'migrated OK')
                         else:
-                            self.logger.info(f"Skipping {funcproc_type} {funcproc_data['name']} - no conversion.")
+                            self.logger.info(f"Skipping {funcproc_type} {funcproc_data['name']} - no conversion done")
                             self.migrator_tables.update_funcproc_status(funcproc_id, False, 'no conversion')
                         self.target_connection.disconnect()
                     except Exception as e:

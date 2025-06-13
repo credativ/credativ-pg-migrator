@@ -385,9 +385,10 @@ class ConfigParser:
         return self.config.get('exclude_views', [])
 
     def get_include_funcprocs(self):
-        include_funcprocs = self.config.get('include_funcprocs', [])
-        if type(include_funcprocs) is str:
-            return '.*'
+        include_funcprocs = self.config.get('include_funcprocs', None)
+        if include_funcprocs is None or (type(include_funcprocs) is str and include_funcprocs.lower() == 'all'):
+            # Pattern matching all function/procedure names
+            return ['.*']
         elif type(include_funcprocs) is list:
             return include_funcprocs
         else:
@@ -413,6 +414,33 @@ class ConfigParser:
 
     def get_target_partitioning(self):
         return self.config.get('target_partitioning', {})
+
+    # another service functions
+
+    def indent_code(self, code):
+        lines = code.split('\n')
+        indent_level = 0
+        indented_lines = []
+        for line in lines:
+            stripped_line = line.strip()
+            if (stripped_line.upper().startswith('END')
+                or stripped_line.upper().startswith('ELSE')
+                or stripped_line.upper().startswith('ELSIF')
+                or stripped_line.upper().startswith('EXCEPTION')
+                or stripped_line.upper().startswith('BEGIN')):
+                indent_level -= 1
+                if indent_level < 0:
+                    indent_level = 0
+            indented_lines.append(f"{self.get_indent() * indent_level}{stripped_line}")
+            if (stripped_line.upper().endswith('LOOP')
+                or stripped_line.upper().startswith('BEGIN')
+                or stripped_line.upper().startswith('IF')
+                or stripped_line.upper().startswith('ELSIF')
+                or stripped_line.upper().startswith('EXCEPTION')
+                or stripped_line.upper().startswith('DECLARE')):
+                indent_level += 1
+        return '\n'.join(indented_lines)
+
 
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

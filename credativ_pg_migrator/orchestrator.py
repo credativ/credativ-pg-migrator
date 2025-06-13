@@ -574,7 +574,7 @@ class Orchestrator:
 
     def run_migrate_funcprocs(self):
         self.migrator_tables.insert_main('Orchestrator', 'functions/procedures migration')
-        include_funcprocs = self.config_parser.get_include_funcprocs() or []
+        include_funcprocs = self.config_parser.get_include_funcprocs()
         exclude_funcprocs = self.config_parser.get_exclude_funcprocs() or []
 
         if self.config_parser.should_migrate_funcprocs():
@@ -586,7 +586,9 @@ class Orchestrator:
             if funcproc_names:
                 for order_num, funcproc_data in funcproc_names.items():
                     self.logger.info(f"Processing func/proc {order_num}/{len(funcproc_names)}: {funcproc_data['name']}")
-                    if not any(fnmatch.fnmatch(funcproc_data['name'], pattern) for pattern in include_funcprocs):
+                    if include_funcprocs == ['.*'] or '.*' in include_funcprocs:
+                        pass
+                    elif not any(fnmatch.fnmatch(funcproc_data['name'], pattern) for pattern in include_funcprocs):
                         continue
                     if any(fnmatch.fnmatch(funcproc_data['name'], pattern) for pattern in exclude_funcprocs):
                         self.logger.info(f"Func/proc {funcproc_data['name']} is excluded from migration.")
@@ -692,7 +694,7 @@ class Orchestrator:
                                 converted_code = re.sub(re.escape(row[0]), row[1], converted_code, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
 
                         try:
-                            if converted_code is not None:
+                            if converted_code is not None and converted_code.strip():
                                 self.logger.info(f"Creating trigger {trigger_detail['trigger_name']} in target database.")
                                 self.target_connection.connect()
                                 self.target_connection.execute_query(converted_code)

@@ -597,15 +597,14 @@ class SybaseASEConnector(DatabaseConnector):
                 CASE
                     WHEN o.type = 'P' THEN 'Procedure'
                     WHEN o.type = 'F' THEN 'Function'
-                    WHEN o.type = 'TR' THEN 'Trigger'
                     WHEN o.type = 'XP' THEN 'Extended Procedure'
                 END AS type,
-                o.sysstat, o.sysstat2
+                o.sysstat
             FROM syscomments c, sysobjects o
             WHERE o.id=c.id
                 AND user_name(o.uid) = '{schema}'
-                AND type in ('F', 'P', 'TR', 'XP')
-                AND (o.sysstat & 4 = 4 or o.sysstat & 8 = 8 or o.sysstat & 12 = 12)
+                AND type in ('F', 'P', 'XP')
+                AND (o.sysstat & 4 = 4 or o.sysstat & 10 = 10 or o.sysstat & 12 = 12)
             ORDER BY o.name
         """
         # if self.config_parser.get_log_level() == 'DEBUG':
@@ -619,6 +618,7 @@ class SybaseASEConnector(DatabaseConnector):
                 'name': row[0],
                 'id': row[1],
                 'type': row[2],
+                'sysstat': row[3],
                 'comment': ''
             }
             order_num += 1
@@ -657,9 +657,71 @@ class SybaseASEConnector(DatabaseConnector):
         target_schema = settings['target_schema']
         table_list = settings['table_list']
         view_list = settings['view_list']
-        converted_code = ''
-        # placeholder for actual conversion logic
-        return converted_code
+
+        function_immutable = ''
+
+        if target_db_type == 'postgresql':
+            postgresql_code = funcproc_code
+
+            # Replace empty lines with ";"
+            postgresql_code = re.sub(r'^\s*$', ';\n', postgresql_code, flags=re.MULTILINE)
+            # Split the code based on "\n
+            commands = [command.strip() for command in postgresql_code.split('\n') if command.strip()]
+            postgresql_code = ''
+            line_number = 0
+
+            for command in commands:
+                command = command.strip().upper()
+                if self.config_parser.get_log_level() == 'DEBUG':
+                    self.logger.debug(f"Processing command: '{command}'")
+
+                if command.startswith('--'):
+                    command = command.replace(command, f"\n/* {command.strip()} */;")
+
+                if command.startswith('IF'):
+                    command = command.replace(command, f";{command.strip()}")
+
+                if command == 'AS':
+                    command = command.replace(command, "AS $$\nBEGIN\n")
+
+                # Add ";" before specific keywords (case insensitive)
+                keywords = ["LET", "END FOREACH", "EXIT FOREACH", "RETURN", "DEFINE", "ON EXCEPTION", "END EXCEPTION",
+                            "ELSE", "ELIF", "END IF", "END LOOP", "END WHILE", "END FOR", "END FUNCTION", "END PROCEDURE",
+                            "UPDATE", "INSERT", "DELETE FROM"]
+                for keyword in keywords:
+                    command = re.sub(r'(?i)\b' + re.escape(keyword) + r'\b', ";" + keyword, command, flags=re.IGNORECASE)
+
+                    # Comment out lines starting with FOR followed by a single word within the first 5 lines
+                if re.match(r'^\s*FOR\s+\w+\s*$', command, flags=re.IGNORECASE) and line_number <= 5:
+                    command = f"/* {command} */"
+
+                # Add ";" after specific keywords (case insensitive)
+                keywords = ["ELSE", "END IF", "END LOOP", "END WHILE", "END FOR", "END FUNCTION", "END PROCEDURE", "THEN", "END EXCEPTION",
+                            "EXIT FOREACH", "END FOREACH", "CONTINUE FOREACH", "EXIT WHILE", "EXIT FOR", "EXIT LOOP"]
+                for keyword in keywords:
+                    command = re.sub(r'(?i)\b' + re.escape(keyword) + r'\b', keyword + ";", command, flags=re.IGNORECASE)
+
+                postgresql_code += ' ' + command + ' '
+                line_number += 1
+
+            commands = postgresql_code.split(';')
+            postgresql_code = ''
+            for command in commands:
+                command = command.strip().replace('\n', ' ')
+                command = re.sub(r'\s+', ' ', command)
+                # command = command.strip()
+                if command:
+                    command = command + ';\n'
+                    command = re.sub(r'THEN;', 'THEN', command, flags=re.IGNORECASE)
+                    command = re.sub(r' \*/;', ' */', command, flags=re.IGNORECASE)
+                    command = re.sub(r'--;\n', '--', command, flags=re.IGNORECASE)
+
+                postgresql_code += command
+
+            postgresql_code = re.sub(r'(\S)\s*(/\*)', r'\1\n\2', postgresql_code, flags=re.IGNORECASE)
+            postgresql_code = re.sub(r'\n\*/;', ' */', postgresql_code, flags=re.IGNORECASE)
+
+        return postgresql_code
 
     def fetch_sequences(self, table_schema: str, table_name: str):
         pass
@@ -1051,11 +1113,51 @@ class SybaseASEConnector(DatabaseConnector):
                 self.logger.debug(f"Worker {worker_id}: Finished processing table {source_table}.")
             return target_table_rows
 
-    def convert_trigger(self, trigger_name, trigger_code, source_schema, target_schema, table_list):
-        return None
+    def convert_trigger(self, settings):
+        trigger_name = settings['trigger_name']
+        trigger_code = settings['trigger_sql']
+        source_schema = settings['source_schema']
+        target_schema = settings['target_schema']
+        table_list = settings['table_list']
+        return ''
 
     def fetch_triggers(self, table_id, schema_name, table_name):
-        pass
+        trigger_data = {}
+        order_num = 1
+        query = f"""
+            SELECT
+                DISTINCT
+                o.name,
+                o.id,
+                o.sysstat
+            FROM syscomments c, sysobjects o
+            WHERE o.id=c.id
+                AND user_name(o.uid) = '{schema_name}'
+                AND type in ('TR')
+                AND (o.sysstat & 8 = 8)
+            ORDER BY o.name
+        """
+        # if self.config_parser.get_log_level() == 'DEBUG':
+        #     self.logger.debug(f"Fetching function/procedure names for schema {schema}")
+        #     self.logger.debug(f"Query: {query}")
+        self.connect()
+        cursor = self.connection.cursor()
+        cursor.execute(query)
+        for row in cursor.fetchall():
+            trigger_data[order_num] = {
+                'name': row[0],
+                'id': row[1],
+                'sysstat': row[2],
+                'event': '',
+                'new': '',
+                'old': '',
+                'sql': '',
+                'comment': ''
+            }
+            order_num += 1
+        cursor.close()
+        self.disconnect()
+        return trigger_data
 
     def fetch_views_names(self, owner_name):
         views = {}

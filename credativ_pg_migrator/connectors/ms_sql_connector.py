@@ -446,8 +446,9 @@ class MsSQLConnector(DatabaseConnector):
         target_schema = settings['target_schema']
         table_list = settings['table_list']
         view_list = settings['view_list']
-        # placeholder for converting function/procedure code
-        pass
+        converted_code = ''
+        # placeholder for actual conversion logic
+        return converted_code
 
     def fetch_views_names(self, owner_name):
         views = {}

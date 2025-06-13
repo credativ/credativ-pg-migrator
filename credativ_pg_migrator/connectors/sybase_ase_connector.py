@@ -69,10 +69,25 @@ class SybaseASEConnector(DatabaseConnector):
         if target_db_type == 'postgresql':
             return {
                 'getdate()': 'current_timestamp',
-                'db_name()': 'current_database()',
-                'suser_name()': 'current_user',
+                'getutcdate()': "timezone('UTC', now())",
                 'datetime': 'current_timestamp',
+                'year(': 'extract(year from ',
+                'month(': 'extract(month from ',
+                'day(': 'extract(day from ',
+
+                'db_name()': 'current_database()',
+                'dbo.suser_name()': 'current_user',
+                'dbo.user_sname()': 'current_user',
+                'suser_name()': 'current_user',
+                'user_name()': 'current_user',
                 'len(': 'length(',
+                'isnull(': 'coalesce(',
+
+                'str_replace(': 'replace(',
+                'convert(': 'cast(',
+                'stuff(': 'overlay(',
+                'replicate(': 'repeat(',
+                'charindex(': 'position(',
             }
         else:
             self.logger.error(f"Unsupported target database type: {target_db_type}")
@@ -642,8 +657,9 @@ class SybaseASEConnector(DatabaseConnector):
         target_schema = settings['target_schema']
         table_list = settings['table_list']
         view_list = settings['view_list']
+        converted_code = ''
         # placeholder for actual conversion logic
-        return None
+        return converted_code
 
     def fetch_sequences(self, table_schema: str, table_name: str):
         pass

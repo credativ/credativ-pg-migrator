@@ -238,7 +238,7 @@ class PostgreSQLConnector(DatabaseConnector):
                 create_column_sql = f""""{column_name}" {altered_data_type}"""
                 if self.config_parser.get_log_level() == 'DEBUG':
                     self.logger.debug(f"Column {column_name} is identity, altered data type to {altered_data_type}")
-            elif column_data_type in ('NUMBER', 'NUMERIC') and numeric_precision is None and numeric_scale is not None:
+            elif column_data_type in ('NUMBER', 'NUMERIC') and numeric_precision is None and numeric_scale == 0:
                 altered_data_type = 'INTEGER'
                 migrator_tables.insert_target_column_alteration({
                     'target_schema': settings['target_schema'],
@@ -251,6 +251,45 @@ class PostgreSQLConnector(DatabaseConnector):
                 create_column_sql = f""""{column_name}" {altered_data_type}"""
                 if self.config_parser.get_log_level() == 'DEBUG':
                     self.logger.debug(f"Column {column_name} is NUMBER without precision, scale {numeric_scale}, altered data type to {altered_data_type}")
+            elif column_data_type in ('NUMBER', 'NUMERIC') and numeric_precision is None and numeric_scale == 10:
+                altered_data_type = 'DOUBLE PRECISION'
+                migrator_tables.insert_target_column_alteration({
+                    'target_schema': settings['target_schema'],
+                    'target_table': settings['target_table'],
+                    'target_column': column_info['column_name'],
+                    'reason': 'NUMBER without precision, scale ' + str(numeric_scale),
+                    'original_data_type': column_data_type,
+                    'altered_data_type': altered_data_type,
+                })
+                create_column_sql = f""""{column_name}" {altered_data_type}"""
+                if self.config_parser.get_log_level() == 'DEBUG':
+                    self.logger.debug(f"Column {column_name} is NUMBER without precision, scale {numeric_scale}, altered data type to {altered_data_type}")
+            elif column_data_type in ('NUMBER', 'NUMERIC') and numeric_precision == 1 and numeric_scale == 0:
+                altered_data_type = 'BOOLEAN'
+                migrator_tables.insert_target_column_alteration({
+                    'target_schema': settings['target_schema'],
+                    'target_table': settings['target_table'],
+                    'target_column': column_info['column_name'],
+                    'reason': 'NUMBER with precision 1, scale 0',
+                    'original_data_type': column_data_type,
+                    'altered_data_type': altered_data_type,
+                })
+                create_column_sql = f""""{column_name}" {altered_data_type}"""
+                if self.config_parser.get_log_level() == 'DEBUG':
+                    self.logger.debug(f"Column {column_name} is NUMBER with precision 1, scale 0, altered data type to {altered_data_type}")
+            elif column_data_type in ('NUMBER', 'NUMERIC') and numeric_precision == 19 and numeric_scale == 0:
+                altered_data_type = 'BIGINT'
+                migrator_tables.insert_target_column_alteration({
+                    'target_schema': settings['target_schema'],
+                    'target_table': settings['target_table'],
+                    'target_column': column_info['column_name'],
+                    'reason': 'NUMBER with precision 19, scale 0',
+                    'original_data_type': column_data_type,
+                    'altered_data_type': altered_data_type,
+                })
+                create_column_sql = f""""{column_name}" {altered_data_type}"""
+                if self.config_parser.get_log_level() == 'DEBUG':
+                    self.logger.debug(f"Column {column_name} is NUMBER with precision 19, scale 0, altered data type to {altered_data_type}")
             else:
                 if (character_maximum_length != '' and 'CHAR' in column_data_type):
                     create_column_sql = f""""{column_name}" {column_data_type}({character_maximum_length})"""

@@ -752,8 +752,9 @@ class PostgreSQLConnector(DatabaseConnector):
         target_schema = settings['target_schema']
         table_list = settings['table_list']
         view_list = settings['view_list']
-        # Placeholder for converting function/procedure code
-        pass
+        converted_code = ''
+        # placeholder for actual conversion logic
+        return converted_code
 
     def handle_error(self, e, description=None):
         self.logger.error(f"An error in {self.__class__.__name__} ({description}): {e}")

@@ -2,6 +2,11 @@
 
 ## 0.8.3 - 2025.06.xx
 
+- 2025.06.13:
+
+  - Sybase ASE connector - added new functions into SQL functions mapping (solves issues in migration of views like replacement of isNull etc)
+  - Function convert_funcproc_code in any connector cannot return None - it causes issues in Orchestrator
+
 - 2025.06.12:
 
   - Created fully automated test for MS SQL Server connector (dev repository)

@@ -239,7 +239,7 @@ class PostgreSQLConnector(DatabaseConnector):
                 create_column_sql = f""""{column_name}" {altered_data_type}"""
                 if self.config_parser.get_log_level() == 'DEBUG':
                     self.logger.debug(f"Column {column_name} is identity, altered data type to {altered_data_type}")
-            elif column_data_type in ('NUMBER', 'NUMERIC') and numeric_precision is None and numeric_scale == 0:
+            elif column_data_type in ('NUMBER', 'NUMERIC') and (numeric_precision is None or numeric_precision == 10) and numeric_scale == 0:
                 altered_data_type = 'INTEGER'
                 migrator_tables.insert_target_column_alteration({
                     'target_schema': settings['target_schema'],

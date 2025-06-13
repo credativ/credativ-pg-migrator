@@ -200,7 +200,7 @@ class OracleConnector(DatabaseConnector):
                 'FLOAT': 'FLOAT',
                 'DOUBLE PRECISION': 'DOUBLE PRECISION',
 
-                'DATE': 'TIMESTAMP',
+                'DATE': 'DATE',
                 'TIMESTAMP': 'TIMESTAMP',
                 'TIMESTAMP(6)': 'TIMESTAMP',
 

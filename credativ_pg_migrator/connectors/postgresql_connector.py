@@ -224,6 +224,7 @@ class PostgreSQLConnector(DatabaseConnector):
             numeric_scale = column_info.get('numeric_scale')
             basic_numeric_precision = column_info.get('basic_numeric_precision')
             basic_numeric_scale = column_info.get('basic_numeric_scale')
+            altered_data_type = ''
 
             if is_identity == 'YES' and column_data_type not in ('BIGINT', 'INTEGER', 'SMALLINT'):
                 altered_data_type = 'BIGINT'
@@ -306,6 +307,9 @@ class PostgreSQLConnector(DatabaseConnector):
                         create_column_sql = f""""{column_name}" {column_data_type}"""
                 else:
                     create_column_sql = f""""{column_name}" {column_data_type}"""
+
+            if altered_data_type != '':
+                column_data_type = altered_data_type
 
             if nullable_string != '':
                 create_column_sql += f""" {nullable_string}"""

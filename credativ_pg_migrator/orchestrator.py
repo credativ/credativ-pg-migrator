@@ -117,6 +117,7 @@ class Orchestrator:
             'target_db_type': self.config_parser.get_target_db_type(),
             'create_tables': self.config_parser.should_create_tables(),
             'drop_tables': self.config_parser.should_drop_tables(),
+            'truncate_tables': self.config_parser.should_truncate_tables(),
             'migrate_data': self.config_parser.should_migrate_data(),
             'batch_size': self.config_parser.get_batch_size(),
             'migrator_tables': self.migrator_tables,
@@ -312,7 +313,7 @@ class Orchestrator:
                 self.logger.info(f"Table {target_table} does not have a CREATE TABLE statement - skipping.")
                 return False
 
-            self.logger.info(f"Worker {worker_id}: Creating table {target_table} in target database ({settings['source_db_type']}:{settings['target_db_type']}-{settings['drop_tables']}/{settings['create_tables']}/{settings['migrate_data']}).")
+            self.logger.info(f"Worker {worker_id}: Creating table {target_table} in target database ({settings['source_db_type']}:{settings['target_db_type']}-{settings['drop_tables']}/{settings['truncate_tables']}/{settings['create_tables']}/{settings['migrate_data']}).")
 
             # Each worker uses its own separate connection to the target database
             if settings['target_db_type'] == 'postgresql':
@@ -330,7 +331,7 @@ class Orchestrator:
 
             if settings['drop_tables']:
                 if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"Worker {worker_id}: Dropping tabe {target_table}...")
+                    self.logger.debug(f"Worker {worker_id}: Dropping table {target_table}...")
                 part_name = 'drop table'
                 repeat_count = 0
                 ## Retry dropping the table if it fails due to locks or other issues
@@ -383,6 +384,29 @@ class Orchestrator:
                         self.logger.debug(f"Worker {worker_id}: Altering column with SQL: {alter_column_sql}")
                     worker_target_connection.execute_query(alter_column_sql)
                     self.logger.info(f"""Worker {worker_id}: Column "{result['target_column']}" altered successfully.""")
+
+            if settings['truncate_tables']:
+                if self.config_parser.get_log_level() == 'DEBUG':
+                    self.logger.debug(f"Worker {worker_id}: Truncating table {target_table}...")
+                part_name = 'truncate table'
+                repeat_count = 0
+                ## Retry truncating the table if it fails due to locks or other issues
+                while True:
+                    try:
+                        worker_target_connection.execute_query(f"TRUNCATE TABLE {target_schema}.{target_table} CASCADE")
+                        break
+                    except Exception as e:
+                        if repeat_count > 5:
+                            self.logger.error(f"Worker {worker_id}: Error truncating table {target_table}: {e}")
+                            self.migrator_tables.update_table_status(table_data['id'], False, f'ERROR: {e}')
+                            return False
+                        else:
+                            repeat_count += 1
+                            self.logger.error(f"Worker {worker_id}: Error in {repeat_count} attempt to truncate table {target_table}: {e}")
+                            self.logger.info(f"Worker {worker_id}: Retrying to truncate table {target_table} ({repeat_count})...")
+                            part_name = f'retry truncate table ({repeat_count})'
+                            time.sleep(10)
+                self.logger.info(f"""Worker {worker_id}: Table "{target_table}" truncated successfully.""")
 
             if settings['migrate_data']:
                 # data migration

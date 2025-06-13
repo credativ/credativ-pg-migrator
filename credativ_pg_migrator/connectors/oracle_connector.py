@@ -187,16 +187,30 @@ class OracleConnector(DatabaseConnector):
             types_mapping = {
                 'VARCHAR': 'VARCHAR',
                 'VARCHAR2': 'VARCHAR',
-                'NUMBER': 'NUMERIC',
-                'DATE': 'TIMESTAMP',
-                'CLOB': 'TEXT',
-                'BLOB': 'BYTEA',
-                'BOOLEAN': 'BOOLEAN',
+                'NVARCHAR': 'VARCHAR',
+                'NVARCHAR2': 'VARCHAR',
+                'CHARACTER VARYING': 'VARCHAR',
                 'CHAR': 'CHAR',
+                'LONG VARCHAR': 'TEXT',
+                'LONG NVARCHAR': 'TEXT',
+                'NCHAR': 'CHAR',
+                'LONG': 'TEXT',
+
+                'NUMBER': 'NUMERIC',
                 'FLOAT': 'FLOAT',
                 'DOUBLE PRECISION': 'DOUBLE PRECISION',
-                'INTERVAL': 'INTERVAL',
+
+                'DATE': 'DATE',
                 'TIMESTAMP': 'TIMESTAMP',
+                'TIMESTAMP(6)': 'TIMESTAMP',
+
+                'CLOB': 'TEXT',
+                'BLOB': 'BYTEA',
+                'LONG RAW': 'BYTEA',
+
+                'BOOLEAN': 'BOOLEAN',
+                'INTERVAL': 'INTERVAL',
+
                 'SERIAL': 'SERIAL',
                 'BIGSERIAL': 'BIGSERIAL',
                 'INT': 'INTEGER',
@@ -206,7 +220,6 @@ class OracleConnector(DatabaseConnector):
                 'REAL': 'REAL',
                 'DECIMAL': 'DECIMAL',
                 'NUMBER': 'NUMERIC',
-                'TIMESTAMP(6)': 'TIMESTAMP',
             }
         else:
             raise ValueError(f"Unsupported target database type: {target_db_type}")
@@ -217,11 +230,11 @@ class OracleConnector(DatabaseConnector):
         return ""
 
     def is_string_type(self, column_type: str) -> bool:
-        string_types = ['CHAR', 'VARCHAR', 'NCHAR', 'NVARCHAR', 'TEXT', 'LONG VARCHAR', 'LONG NVARCHAR', 'UNICHAR', 'UNIVARCHAR']
-        return column_type.upper() in string_types
+        column_type_upper = column_type.upper()
+        return 'CHAR' in column_type_upper or 'VARCHAR' in column_type_upper or 'LONG' in column_type_upper or 'TEXT' in column_type_upper or 'CLOB' in column_type_upper
 
     def is_numeric_type(self, column_type: str) -> bool:
-        numeric_types = ['BIGINT', 'INTEGER', 'INT', 'TINYINT', 'SMALLINT', 'FLOAT', 'DOUBLE PRECISION', 'DECIMAL', 'NUMERIC']
+        numeric_types = ['BIGINT', 'INTEGER', 'INT', 'TINYINT', 'SMALLINT', 'FLOAT', 'DOUBLE PRECISION', 'DECIMAL', 'NUMERIC', 'REAL', 'NUMBER', 'SERIAL', 'BIGSERIAL']
         return column_type.upper() in numeric_types
 
     def get_sequence_details(self, sequence_owner, sequence_name):

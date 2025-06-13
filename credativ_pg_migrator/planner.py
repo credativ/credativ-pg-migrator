@@ -449,9 +449,12 @@ class Planner:
                 if triggers:
                     for _, trigger_details in triggers.items():
 
-                        converted_code = self.source_connection.convert_trigger(trigger_details['sql'], {
+                        converted_code = self.source_connection.convert_trigger({
                                 'source_schema': self.config_parser.get_source_schema(),
                                 'target_schema': self.config_parser.get_target_schema(),
+                                'trigger_name': trigger_details['name'],
+                                'trigger_sql': trigger_details['sql'],
+                                'table_list': []
                             })
 
                         if self.config_parser.get_log_level() == 'DEBUG':

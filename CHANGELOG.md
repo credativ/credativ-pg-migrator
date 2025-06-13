@@ -9,6 +9,7 @@
   - Fixed not working setting for truncation of tables in the target database - parameter migration.truncate_tables
     - Truncation now works, but migration of data into existing data model might fail due to foreign key constraints
   - Fixed automatic boolean cast of integer source default values like 0::boolean or 1::boolean - replaced with proper TRUE or FALSE
+  - Improvements in Oracle connector - added missing data types, added conversion of NUMBER(\*,0) to INTEGER
 
 - 2025.06.12:
 

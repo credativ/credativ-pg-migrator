@@ -220,6 +220,11 @@ class PostgreSQLConnector(DatabaseConnector):
             if column_info['is_nullable'] == 'NO':
                 nullable_string = 'NOT NULL'
 
+            numeric_precision = column_info.get('numeric_precision')
+            numeric_scale = column_info.get('numeric_scale')
+            basic_numeric_precision = column_info.get('basic_numeric_precision')
+            basic_numeric_scale = column_info.get('basic_numeric_scale')
+
             if is_identity == 'YES' and column_data_type not in ('BIGINT', 'INTEGER', 'SMALLINT'):
                 altered_data_type = 'BIGINT'
                 migrator_tables.insert_target_column_alteration({
@@ -233,14 +238,23 @@ class PostgreSQLConnector(DatabaseConnector):
                 create_column_sql = f""""{column_name}" {altered_data_type}"""
                 if self.config_parser.get_log_level() == 'DEBUG':
                     self.logger.debug(f"Column {column_name} is identity, altered data type to {altered_data_type}")
+            elif column_data_type in ('NUMBER', 'NUMERIC') and numeric_precision is None and numeric_scale is not None:
+                altered_data_type = 'INTEGER'
+                migrator_tables.insert_target_column_alteration({
+                    'target_schema': settings['target_schema'],
+                    'target_table': settings['target_table'],
+                    'target_column': column_info['column_name'],
+                    'reason': 'NUMBER without precision, scale ' + str(numeric_scale),
+                    'original_data_type': column_data_type,
+                    'altered_data_type': altered_data_type,
+                })
+                create_column_sql = f""""{column_name}" {altered_data_type}"""
+                if self.config_parser.get_log_level() == 'DEBUG':
+                    self.logger.debug(f"Column {column_name} is NUMBER without precision, scale {numeric_scale}, altered data type to {altered_data_type}")
             else:
                 if (character_maximum_length != '' and 'CHAR' in column_data_type):
                     create_column_sql = f""""{column_name}" {column_data_type}({character_maximum_length})"""
                 elif self.is_numeric_type(column_data_type) and column_data_type in ('DECIMAL', 'NUMERIC'):
-                    numeric_precision = column_info.get('numeric_precision')
-                    numeric_scale = column_info.get('numeric_scale')
-                    basic_numeric_precision = column_info.get('basic_numeric_precision')
-                    basic_numeric_scale = column_info.get('basic_numeric_scale')
                     if numeric_precision not in (None, '') and numeric_scale not in (None, ''):
                         create_column_sql = f""""{column_name}" {column_data_type}({numeric_precision},{numeric_scale})"""
                     elif numeric_precision not in (None, ''):

@@ -4,7 +4,8 @@
 
 - 2025.06.14
 
-  - Fixes in MySQL data model migration - added missing migration of comments for columns, tables, indexes
+  - Fixes in MySQL data model migration - added missing migration of comments for columns, tables, indexes, repairs in migration of special data types
+  - Multiple improvements in MySQL tests, added Sakila testing database (dev repository)
 
 - 2025.06.13:
 

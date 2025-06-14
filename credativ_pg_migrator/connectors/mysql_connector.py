@@ -157,25 +157,29 @@ class MySQLConnector(DatabaseConnector):
         if target_db_type == 'postgresql':
             types_mapping = {
                 'INT': 'INTEGER',
-                'VARCHAR': 'VARCHAR',
-                'TEXT': 'TEXT',
-                'CHAR': 'CHAR',
+                'INTEGER': 'INTEGER',
                 'FLOAT': 'REAL',
                 'DOUBLE': 'DOUBLE PRECISION',
                 'DECIMAL': 'NUMERIC',
-                'DATETIME': 'DATETIME',
-                'TIMESTAMP': 'TIMESTAMP',
-                'DATE': 'DATE',
-                'TIME': 'TIME',
-                'BOOLEAN': 'BOOLEAN',
-                'BLOB': 'BYTEA',
-                'JSON': 'JSON',
-                'ENUM': 'VARCHAR',
-                'SET': 'VARCHAR',
                 'TINYINT': 'SMALLINT',
                 'SMALLINT': 'SMALLINT',
                 'MEDIUMINT': 'INTEGER',
                 'BIGINT': 'BIGINT',
+
+                'VARCHAR': 'VARCHAR',
+                'TEXT': 'TEXT',
+                'CHAR': 'CHAR',
+                'JSON': 'JSONB',
+                'ENUM': 'VARCHAR',
+                'SET': 'TEXT[]',  # PostgreSQL does not have a direct SET type, using TEXT array instead
+
+                'DATETIME': 'TIMESTAMP',
+                'TIMESTAMP': 'TIMESTAMP',
+                'DATE': 'DATE',
+                'TIME': 'TIME',
+
+                'BOOLEAN': 'BOOLEAN',
+                'BLOB': 'BYTEA',
                 'BIT': 'BOOLEAN',
                 'YEAR': 'INTEGER',
                 'POINT': 'POINT',
@@ -274,12 +278,25 @@ class MySQLConnector(DatabaseConnector):
                             target_column_type = target_columns[order_num]['data_type']
                             # if column_type.lower() in ['binary', 'bytea']:
                             if column_type.lower() in ['blob']:
-                                record[column_name] = bytes(record[column_name].getBytes(1, int(record[column_name].length())))  # Convert 'com.informix.jdbc.IfxCblob' to bytes
+                                # For MySQL, BLOB columns are already bytes, so assign directly
+                                record[column_name] = record[column_name]
                             elif column_type.lower() in ['clob']:
                                 # elif isinstance(record[column_name], IfxCblob):
                                 record[column_name] = record[column_name].getSubString(1, int(record[column_name].length()))  # Convert IfxCblob to string
                                 # record[column_name] = bytes(record[column_name].getBytes(1, int(record[column_name].length())))  # Convert IfxBblob to bytes
                                 # record[column_name] = record[column_name].read()  # Convert IfxBblob to bytes
+                            elif column_type.lower() == 'set':
+                                # Convert SET to PostgreSQL text[] (array of text)
+                                if isinstance(record[column_name], str):
+                                    # MySQL returns comma-separated string for SET, convert to Python list
+                                    items = [item.strip() for item in record[column_name].split(',')] if record[column_name] else []
+                                elif isinstance(record[column_name], list):
+                                    items = record[column_name]
+                                else:
+                                    self.logger.warning(f"Worker {worker_id}: Unexpected type for SET column {column_name}: {type(record[column_name])}")
+                                    items = []
+                                # Convert Python list to PostgreSQL array literal
+                                record[column_name] = '{' + ','.join('"%s"' % item.replace('"', '\\"') for item in items if item) + '}'
                             elif column_type.lower() in ['integer', 'smallint', 'tinyint', 'bit', 'boolean'] and target_column_type.lower() in ['boolean']:
                                 # Convert integer to boolean
                                 record[column_name] = bool(record[column_name])

@@ -54,8 +54,11 @@ class MySQLConnector(DatabaseConnector):
             self.logger.error(f"Unsupported target database type: {target_db_type}")
 
     def fetch_table_names(self, table_schema: str):
+        tables = {}
         query = f"""
-            SELECT TABLE_NAME
+            SELECT
+                TABLE_NAME,
+                TABLE_COMMENT
             FROM INFORMATION_SCHEMA.TABLES
             WHERE TABLE_SCHEMA = '{table_schema}'
             AND TABLE_TYPE not in ('VIEW', 'SYSTEM VIEW')
@@ -64,7 +67,13 @@ class MySQLConnector(DatabaseConnector):
             self.connect()
             cursor = self.connection.cursor()
             cursor.execute(query)
-            tables = {i + 1: {'id': None, 'schema_name': table_schema, 'table_name': row[0], 'comment': ''} for i, row in enumerate(cursor.fetchall())}
+            for i, row in enumerate(cursor.fetchall()):
+                tables[i + 1] = {
+                    'id': None,
+                    'schema_name': table_schema,
+                    'table_name': row[0],
+                    'comment': row[1]
+                }
             cursor.close()
             self.disconnect()
             return tables
@@ -93,7 +102,8 @@ class MySQLConnector(DatabaseConnector):
                 ELSE 'NO' END AS IS_GENERATED_STORED,
                 CASE WHEN upper(EXTRA) = 'VIRTUAL GENERATED' THEN 'YES'
                 ELSE 'NO' END AS IS_GENERATED_VIRTUAL,
-                GENERATION_EXPRESSION
+                GENERATION_EXPRESSION,
+                COLUMN_COMMENT
             FROM INFORMATION_SCHEMA.COLUMNS
             WHERE TABLE_SCHEMA = '{table_schema}' AND TABLE_NAME = '{table_name}'
             ORDER BY ORDINAL_POSITION
@@ -116,19 +126,21 @@ class MySQLConnector(DatabaseConnector):
                 is_generated_stored = row[10]
                 is_generated_virtual = row[11]
                 generation_expression = row[12]
+                column_comment = row[13]
                 columns[ordinal_position] = {
                     'column_name': column_name,
                     'data_type': data_type,
+                    'column_type': column_type,
                     'character_maximum_length': character_maximum_length,
                     'numeric_precision': numeric_precision,
                     'numeric_scale': numeric_scale,
                     'is_nullable': is_nullable,
-                    'column_type': column_type,
                     'column_default_value': column_default,
                     'is_identity': is_identity,
                     'is_generated_stored': is_generated_stored,
                     'is_generated_virtual': is_generated_virtual,
-                    'generation_expression': generation_expression
+                    'generation_expression': generation_expression,
+                    'column_comment': column_comment,
                 }
             cursor.close()
             self.disconnect()
@@ -147,7 +159,7 @@ class MySQLConnector(DatabaseConnector):
                 'INT': 'INTEGER',
                 'VARCHAR': 'VARCHAR',
                 'TEXT': 'TEXT',
-                'CHAR': 'TEXT',
+                'CHAR': 'CHAR',
                 'FLOAT': 'REAL',
                 'DOUBLE': 'DOUBLE PRECISION',
                 'DECIMAL': 'NUMERIC',
@@ -306,14 +318,19 @@ class MySQLConnector(DatabaseConnector):
         order_num = 1
         query = f"""
             SELECT
-                DISTINCT INDEX_NAME, COLUMN_NAME, SEQ_IN_INDEX,
-                NON_UNIQUE, coalesce(CONSTRAINT_TYPE,'INDEX') as CONSTRAINT_TYPE
+                DISTINCT
+                INDEX_NAME,
+                COLUMN_NAME,
+                SEQ_IN_INDEX,
+                NON_UNIQUE,
+                coalesce(CONSTRAINT_TYPE,'INDEX') as CONSTRAINT_TYPE,
+                INDEX_COMMENT
             FROM INFORMATION_SCHEMA.STATISTICS S
             LEFT JOIN INFORMATION_SCHEMA.TABLE_CONSTRAINTS tC
             ON S.TABLE_SCHEMA = tC.TABLE_SCHEMA AND S.TABLE_NAME = tC.TABLE_NAME
-            AND S.INDEX_NAME = tC.CONSTRAINT_NAME
+                AND S.INDEX_NAME = tC.CONSTRAINT_NAME
             WHERE S.TABLE_SCHEMA = '{source_table_schema}'
-            AND S.TABLE_NAME = '{source_table_name}'
+                AND S.TABLE_NAME = '{source_table_name}'
             ORDER BY INDEX_NAME, SEQ_IN_INDEX
         """
         try:
@@ -326,14 +343,14 @@ class MySQLConnector(DatabaseConnector):
                 seq_in_index = row[2]
                 non_unique = row[3]
                 constraint_type = row[4]
-
+                index_comment = row[5]
                 if index_name not in table_indexes:
                     table_indexes[index_name] = {
                         'index_name': index_name,
                         'index_owner': source_table_schema,
                         'index_columns': [],
                         'index_type': constraint_type,
-                        'index_comment': '',
+                        'index_comment': index_comment,
                     }
 
                 table_indexes[index_name]['index_columns'].append(column_name)
@@ -484,7 +501,11 @@ class MySQLConnector(DatabaseConnector):
     def fetch_views_names(self, source_schema: str):
         views = {}
         order_num = 1
-        query = f"""SELECT TABLE_NAME FROM INFORMATION_SCHEMA.VIEWS WHERE TABLE_SCHEMA = '{source_schema}'"""
+        query = f"""
+            SELECT
+                TABLE_NAME
+            FROM INFORMATION_SCHEMA.VIEWS
+            WHERE TABLE_SCHEMA = '{source_schema}'"""
         try:
             self.connect()
             cursor = self.connection.cursor()
@@ -512,9 +533,11 @@ class MySQLConnector(DatabaseConnector):
         # target_schema = settings['target_schema']
         # target_view_name = settings['target_view_name']
         query = f"""
-            SELECT VIEW_DEFINITION
+            SELECT
+                VIEW_DEFINITION
             FROM INFORMATION_SCHEMA.VIEWS
-            WHERE TABLE_SCHEMA = '{source_schema}' AND TABLE_NAME = '{source_view_name}'
+            WHERE TABLE_SCHEMA = '{source_schema}'
+            AND TABLE_NAME = '{source_view_name}'
         """
         try:
             self.connect()
@@ -532,6 +555,8 @@ class MySQLConnector(DatabaseConnector):
         converted_view_code = view_code
         converted_view_code = converted_view_code.replace('`', '"')
         converted_view_code = converted_view_code.replace(f'''"{settings['source_schema']}".''', f'''"{settings['target_schema']}".''')
+        converted_view_code = converted_view_code.replace(f'''{settings['source_schema']}.''', f'''"{settings['target_schema']}".''')
+        converted_view_code = converted_view_code.replace('""', '"')
         return converted_view_code
 
     def get_sequence_current_value(self, sequence_id: int):
@@ -635,9 +660,24 @@ class MySQLConnector(DatabaseConnector):
                 if not cursor.nextset():
                     break
 
+            cursor.execute(f"show create table {table_schema}.{table_name}")
+
+            set_num = 1
+            while True:
+                if cursor.description is not None:
+                    rows = cursor.fetchall()
+                    if rows:
+                        output += f"Result set {set_num}:\n"
+                        columns = [column[0] for column in cursor.description]
+                        table = tabulate(rows, headers=columns, tablefmt="github")
+                        output += table + "\n\n"
+                        set_num += 1
+                if not cursor.nextset():
+                    break
+
             cursor.close()
             self.disconnect()
-        except Error as e:
+        except mysql.connector.Error as e:
             self.logger.error(f"Error fetching table description for {table_schema}.{table_name}: {e}")
             raise
 

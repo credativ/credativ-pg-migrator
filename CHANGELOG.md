@@ -2,6 +2,10 @@
 
 ## 0.8.3 - 2025.06.xx
 
+- 2025.06.14
+
+  - Fixes in MySQL data model migration - added missing migration of comments for columns, tables, indexes
+
 - 2025.06.13:
 
   - Sybase ASE connector - added new functions into SQL functions mapping (solves issues in migration of views like replacement of isNull etc)

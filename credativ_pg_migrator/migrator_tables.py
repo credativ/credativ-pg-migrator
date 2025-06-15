@@ -143,8 +143,7 @@ class MigratorTables:
         WHERE trim('{source_table_name}') = trim(source_table_name)
         OR trim('{source_table_name}') ~ trim(source_table_name)
         """
-        # if self.config_parser.get_log_level() == 'DEBUG':
-        #     self.logger.debug(f"get_records_data_migration_limitation query: {query}")
+        self.config_parser.print_log_message( 'DEBUG3', f"get_records_data_migration_limitation query: {query}")
         cursor = self.protocol_connection.connection.cursor()
         cursor.execute(query)
         result = cursor.fetchall()
@@ -252,8 +251,7 @@ class MigratorTables:
                 cursor = self.protocol_connection.connection.cursor()
                 cursor.execute(query, (check_column_name, check_column_data_type, check_default_value))
                 result = cursor.fetchone()
-                # if self.config_parser.get_log_level() == 'DEBUG':
-                #     self.logger.debug(f"1 check_default_values_substitution {check_column_name}, {check_column_data_type}, {check_default_value} query: {query} - {result}")
+                self.config_parser.print_log_message( 'DEBUG3', f"1 check_default_values_substitution {check_column_name}, {check_column_data_type}, {check_default_value} query: {query} - {result}")
                 if result:
                     target_default_value = result[0]
                 else:
@@ -266,8 +264,7 @@ class MigratorTables:
                     """
                     cursor.execute(query, (check_column_data_type, check_default_value))
                     result = cursor.fetchone()
-                    # if self.config_parser.get_log_level() == 'DEBUG':
-                    #     self.logger.debug(f"2 check_default_values_substitution {check_column_name}, {check_column_data_type}, {check_default_value} query: {query} - {result}")
+                    self.config_parser.print_log_message( 'DEBUG3', f"2 check_default_values_substitution {check_column_name}, {check_column_data_type}, {check_default_value} query: {query} - {result}")
                     if result:
                         target_default_value = result[0]
                     else:
@@ -280,8 +277,7 @@ class MigratorTables:
                         """
                         cursor.execute(query, (check_default_value,))
                         result = cursor.fetchone()
-                        # if self.config_parser.get_log_level() == 'DEBUG':
-                        #     self.logger.debug(f"3 check_default_values_substitution {check_column_name}, {check_column_data_type}, {check_default_value} query: {query} - {result}")
+                        self.config_parser.print_log_message( 'DEBUG3', f"3 check_default_values_substitution {check_column_name}, {check_column_data_type}, {check_default_value} query: {query} - {result}")
                         if result:
                             target_default_value = result[0]
             cursor.close()
@@ -317,8 +313,6 @@ class MigratorTables:
         );
         """
         self.protocol_connection.execute_query(query)
-        # if self.config_parser.get_log_level() == 'DEBUG':
-        #     self.logger.debug(f"Protocol table {table_name} created.")
 
     def create_table_for_main(self):
         table_name = self.config_parser.get_protocol_name_main()
@@ -334,8 +328,6 @@ class MigratorTables:
             message TEXT
             )
         """)
-        # if self.config_parser.get_log_level() == 'DEBUG':
-        #     self.logger.debug(f"Tasks table {table_name} created.")
 
     def insert_main(self, task_name, subtask_name):
         table_name = self.config_parser.get_protocol_name_main()
@@ -349,8 +341,7 @@ class MigratorTables:
             cursor.execute(query)
             row = cursor.fetchone()
             cursor.close()
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Returned row: {row}")
+            self.config_parser.print_log_message( 'DEBUG3', f"Returned row: {row}")
             main_row = self.decode_main_row(row)
             self.insert_protocol('main', task_name + ': ' + subtask_name, 'start', None, None, None, None, 'info', None, main_row['id'])
         except Exception as e:
@@ -375,8 +366,7 @@ class MigratorTables:
             cursor.execute(query, params)
             row = cursor.fetchone()
             cursor.close()
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Returned row: {row}")
+            self.config_parser.print_log_message( 'DEBUG3', f"Returned row: {row}")
             if row:
                 main_row = self.decode_main_row(row)
                 self.update_protocol('main', main_row['id'], success, message, None)
@@ -420,8 +410,6 @@ class MigratorTables:
             message TEXT
             )
         """)
-        # if self.config_parser.get_log_level() == 'DEBUG':
-        #     self.logger.debug(f"User defined types table {table_name} created.")
 
     def insert_user_defined_type(self, settings):
         ## source_schema_name, source_type_name, source_type_sql, target_schema_name, target_type_name, target_type_sql, type_comment
@@ -447,8 +435,7 @@ class MigratorTables:
             row = cursor.fetchone()
             cursor.close()
 
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Returned row: {row}")
+            self.config_parser.print_log_message( 'DEBUG3', f"Returned row: {row}")
             user_defined_type_row = self.decode_user_defined_type_row(row)
             self.insert_protocol('user_defined_type', target_type_name, 'create', target_type_sql, None, None, None, 'info', None, user_defined_type_row['id'])
         except Exception as e:
@@ -473,8 +460,6 @@ class MigratorTables:
             row = cursor.fetchone()
             cursor.close()
 
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Returned row: {row}")
             if row:
                 user_defined_type_row = self.decode_user_defined_type_row(row)
                 self.update_protocol('user_defined_type', user_defined_type_row['id'], success, message, None)
@@ -530,8 +515,6 @@ class MigratorTables:
             message TEXT
             )
         """)
-        # if self.config_parser.get_log_level() == 'DEBUG':
-        #     self.logger.debug(f"Domains table {table_name} created.")
 
     def insert_domain(self, settings):
         ## source_schema_name, source_domain_name, source_domain_sql, target_schema_name, target_domain_name, target_domain_sql, domain_comment
@@ -561,8 +544,6 @@ class MigratorTables:
             row = cursor.fetchone()
             cursor.close()
 
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Returned row: {row}")
             domain_row = self.decode_user_defined_type_row(row)
             self.insert_protocol('domain', target_domain_name, 'create', target_domain_sql, None, None, None, 'info', None, domain_row['id'])
         except Exception as e:
@@ -580,8 +561,7 @@ class MigratorTables:
             WHERE id = %s
             RETURNING *
         """
-        if self.config_parser.get_log_level() == 'DEBUG':
-            self.logger.debug(f"Query: {query}")
+        self.config_parser.print_log_message( 'DEBUG3', f"Query: {query}")
         params = ('TRUE' if success else 'FALSE', message, row_id)
         try:
             cursor = self.protocol_connection.connection.cursor()
@@ -589,8 +569,6 @@ class MigratorTables:
             row = cursor.fetchone()
             cursor.close()
 
-            if self.config_parser.get_log_level() == 'DEBUG':
-                self.logger.debug(f"Returned row: {row}")
             if row:
                 domain_row = self.decode_domain_row(row)
                 self.update_protocol('domain', domain_row['id'], success, message, None)
@@ -618,8 +596,6 @@ class MigratorTables:
         cursor.execute(query)
         rows = cursor.fetchall()
         cursor.close()
-        # if self.config_parser.get_log_level() == 'DEBUG':
-        #     self.logger.debug(f"Fetched rows: {rows}")
         return rows
 
     def get_domain_details(self, domain_owner=None, domain_name=None):
@@ -659,8 +635,6 @@ class MigratorTables:
             message TEXT
             )
         """)
-        # if self.config_parser.get_log_level() == 'DEBUG':
-        #     self.logger.debug(f"Default values table {table_name} created.")
 
     def insert_default_value(self, settings):
         default_value_schema = settings['default_value_schema']
@@ -685,8 +659,6 @@ class MigratorTables:
             row = cursor.fetchone()
             cursor.close()
 
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Returned row: {row}")
             default_value_row = self.decode_user_defined_type_row(row)
             self.insert_protocol('default_value', default_value_name, 'create', None, None, None, None, 'info', None, default_value_row['id'])
         except Exception as e:
@@ -711,8 +683,6 @@ class MigratorTables:
             row = cursor.fetchone()
             cursor.close()
 
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Returned row: {row}")
             if row:
                 default_value_row = self.decode_default_value_row(row)
                 self.update_protocol('default_value', default_value_row['id'], success, message, None)
@@ -742,8 +712,6 @@ class MigratorTables:
         cursor.execute(query)
         row = cursor.fetchone()
         cursor.close()
-        # if self.config_parser.get_log_level() == 'DEBUG':
-        #     self.logger.debug(f"Fetched rows: {row}")
         return self.decode_default_value_row(row) if row else {}
 
     def create_table_for_target_columns_alterations(self):
@@ -764,8 +732,6 @@ class MigratorTables:
             message TEXT
             )
         """)
-        # if self.config_parser.get_log_level() == 'DEBUG':
-        #     self.logger.debug(f"Target columns alterations table {table_name} created.")
 
     def insert_target_column_alteration(self, settings):
         ## target_schema, target_table, target_column, original_data_type, altered_data_type
@@ -784,17 +750,12 @@ class MigratorTables:
             RETURNING *
         """
         params = (target_schema, target_table, target_column, reason, original_data_type, altered_data_type)
-        # if self.config_parser.get_log_level() == 'DEBUG':
-        #     self.logger.debug(f"Target column alteration insert query: {query}")
-        #     self.logger.debug(f"Target column alteration insert params: {params}")
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
             row = cursor.fetchone()
             cursor.close()
 
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Returned row: {row}")
             target_column_alteration_row = self.decode_target_column_alteration_row(row)
             self.insert_protocol('target_column_alteration', target_table + '.' + target_column, 'alter', None, None, None, None, 'info', None, target_column_alteration_row['id'])
             return target_column_alteration_row['id']
@@ -865,8 +826,6 @@ class MigratorTables:
             message TEXT
             )
         """)
-        # if self.config_parser.get_log_level() == 'DEBUG':
-        #     self.logger.debug(f"Data migration table {table_name} created.")
 
     def insert_data_migration(self, settings):
         ## source_schema, source_table, source_table_id, source_table_rows, worker_id, target_schema, target_table, target_table_rows
@@ -887,17 +846,12 @@ class MigratorTables:
             RETURNING *
         """
         params = (source_schema, source_table, source_table_id, source_table_rows, str(worker_id), target_schema, target_table, target_table_rows)
-        # if self.config_parser.get_log_level() == 'DEBUG':
-        #     self.logger.debug(f"Data migration insert query: {query}")
-        #     self.logger.debug(f"Data migration insert params: {params}")
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
             row = cursor.fetchone()
             cursor.close()
 
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Returned row: {row}")
             data_migration_row = self.decode_data_migration_row(row)
             self.insert_protocol('data_migration', target_table, 'create', None, None, None, None, 'info', None, data_migration_row['id'])
             return data_migration_row['id']
@@ -924,8 +878,6 @@ class MigratorTables:
             row = cursor.fetchone()
             cursor.close()
 
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Returned row: {row}")
             if row:
                 data_migration_row = self.decode_data_migration_row(row)
                 self.update_protocol('data_migration', data_migration_row['id'], success, message, 'source rows: ' + str(data_migration_row['source_table_rows']) + ', target rows: ' + str(target_table_rows))
@@ -967,8 +919,6 @@ class MigratorTables:
             row_count BIGINT
             )
         """)
-        # if self.config_parser.get_log_level() == 'DEBUG':
-        #     self.logger.debug(f"PK ranges table {table_name} created.")
 
     def insert_pk_ranges(self, values):
         table_name = self.config_parser.get_protocol_name_pk_ranges()
@@ -987,8 +937,6 @@ class MigratorTables:
             row = cursor.fetchone()
             cursor.close()
 
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Returned row: {row}")
             data_migration_row = self.decode_pk_ranges_row(row)
             self.insert_protocol('data_migration', values['source_table'], 'pk_range',
                                  f'''PK range: {values['batch_start']} - {values['batch_end']} / {values['row_count']}''',
@@ -1035,8 +983,6 @@ class MigratorTables:
             message TEXT
             )
         """)
-        # if self.config_parser.get_log_level() == 'DEBUG':
-        #     self.logger.debug(f"New objects table {table_name} created.")
 
     def create_table_for_tables(self):
         table_name = self.config_parser.get_protocol_name_tables()
@@ -1065,8 +1011,6 @@ class MigratorTables:
             message TEXT
             )
         """)
-        # if self.config_parser.get_log_level() == 'DEBUG':
-        #     self.logger.debug(f"Tasks table {table_name} created.")
 
     def create_table_for_indexes(self):
         table_name = self.config_parser.get_protocol_name_indexes()
@@ -1092,8 +1036,6 @@ class MigratorTables:
             message TEXT
             )
         """)
-        # if self.config_parser.get_log_level() == 'DEBUG':
-        #     self.logger.debug(f"Indexes table {table_name} created.")
 
     def create_table_for_funcprocs(self):
         table_name = self.config_parser.get_protocol_name_funcprocs()
@@ -1116,8 +1058,6 @@ class MigratorTables:
             message TEXT
             )
         """)
-        # if self.config_parser.get_log_level() == 'DEBUG':
-        #     self.logger.debug(f"Funcprocs table {table_name} created.")
 
     def create_table_for_sequences(self):
         table_name = self.config_parser.get_protocol_name_sequences()
@@ -1303,8 +1243,6 @@ class MigratorTables:
         params = (object_type, object_name, object_action, object_ddl, execution_timestamp, execution_success, execution_error_message, row_type, execution_results, object_protocol_id)
         try:
             self.protocol_connection.execute_query(query, params)
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Info for {object_name} inserted into {table_name}.")
         except Exception as e:
             self.logger.error(f"Error inserting info {object_name} into {table_name}.")
             self.logger.error(e)
@@ -1324,8 +1262,6 @@ class MigratorTables:
         params = ('TRUE' if execution_success else 'FALSE', execution_error_message, execution_results, object_protocol_id, object_type)
         try:
             self.protocol_connection.execute_query(query, params)
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Info for {object_protocol_id} updated in {table_name}.")
         except Exception as e:
             self.logger.error(f"Error updating info {object_protocol_id} in {table_name}.")
             self.logger.error(e)
@@ -1367,8 +1303,6 @@ class MigratorTables:
             row = cursor.fetchone()
             cursor.close()
 
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"(insert_tables) returned row: {row}")
             table_row = self.decode_table_row(row)
             self.insert_protocol('table', target_table, 'create', target_table_sql, None, None, None, 'info', None, table_row['id'])
         except Exception as e:
@@ -1394,8 +1328,6 @@ class MigratorTables:
             row = cursor.fetchone()
             cursor.close()
 
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"(update_table_status) returned row: {row}")
             if row:
                 table_row = self.decode_table_row(row)
                 self.update_protocol('table', table_row['id'], success, message, None)
@@ -1427,8 +1359,6 @@ class MigratorTables:
             row = cursor.fetchone()
             cursor.close()
 
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Returned row: {row}")
             index_row = self.decode_index_row(row)
             self.insert_protocol('index', values['index_name'], 'create', values['index_sql'], None, None, None, 'info', None, index_row['id'])
         except Exception as e:
@@ -1453,8 +1383,6 @@ class MigratorTables:
             row = cursor.fetchone()
             cursor.close()
 
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Returned row: {row}")
             if row:
                 index_row = self.decode_index_row(row)
                 self.update_protocol('index', index_row['id'], success, message, None)
@@ -1497,8 +1425,6 @@ class MigratorTables:
             message TEXT
             )
         """)
-        # if self.config_parser.get_log_level() == 'DEBUG':
-        #     self.logger.debug(f"Constraints table {table_name} created.")
 
     def decode_constraint_row(self, row):
         return {
@@ -1563,8 +1489,6 @@ class MigratorTables:
             row = cursor.fetchone()
             cursor.close()
 
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Returned row: {row}")
             constraint_row = self.decode_constraint_row(row)
             self.insert_protocol('constraint', settings['constraint_name'], 'create',
                                  settings['constraint_sql'], None, None, None, 'info', None, constraint_row['id'])
@@ -1591,8 +1515,6 @@ class MigratorTables:
             row = cursor.fetchone()
             cursor.close()
 
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Returned row: {row}")
             if row:
                 constraint_row = self.decode_constraint_row(row)
                 self.update_protocol('constraint', constraint_row['id'], success, message, None)
@@ -1620,8 +1542,6 @@ class MigratorTables:
             row = cursor.fetchone()
             cursor.close()
 
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Returned row: {row}")
             funcproc_row = self.decode_funcproc_row(row)
             self.insert_protocol('funcproc', source_funcproc_name, 'create', target_funcproc_sql, None, None, None, 'info', None, funcproc_row['id'])
         except Exception as e:
@@ -1646,9 +1566,6 @@ class MigratorTables:
             row = cursor.fetchone()
             cursor.close()
 
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Parameters: {params}")
-            #     self.logger.debug(f"Returned row: {row}")
             if row:
                 funcproc_row = self.decode_funcproc_row(row)
                 self.update_protocol('funcproc', funcproc_row['id'], success, message, None)
@@ -1676,8 +1593,6 @@ class MigratorTables:
             row = cursor.fetchone()
             cursor.close()
 
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Returned row: {row}")
             sequence_row = self.decode_sequence_row(row)
             self.insert_protocol('sequence', sequence_name, 'create', set_sequence_sql, None, None, None, 'info', None, sequence_row['sequence_id'])
         except Exception as e:
@@ -1702,8 +1617,6 @@ class MigratorTables:
             row = cursor.fetchone()
             cursor.close()
 
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Returned row: {row}")
             if row:
                 sequence_row = self.decode_sequence_row(row)
                 self.update_protocol('sequence', sequence_row['sequence_id'], success, message, None)
@@ -1731,8 +1644,6 @@ class MigratorTables:
             row = cursor.fetchone()
             cursor.close()
 
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Returned row: {row}")
             trigger_row = self.decode_trigger_row(row)
             self.insert_protocol('trigger', trigger_name, 'create', trigger_target_sql, None, None, None, 'info', None, trigger_row['id'])
         except Exception as e:
@@ -1757,8 +1668,6 @@ class MigratorTables:
             row = cursor.fetchone()
             cursor.close()
 
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Returned row: {row}")
             if row:
                 trigger_row = self.decode_trigger_row(row)
                 self.update_protocol('trigger', trigger_row['id'], success, message, None)
@@ -1802,8 +1711,6 @@ class MigratorTables:
             row = cursor.fetchone()
             cursor.close()
 
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Returned row: {row}")
             view_row = self.decode_view_row(row)
             self.insert_protocol('view', source_view_name, 'create', target_view_sql, None, None, None, 'info', None, view_row['id'])
         except Exception as e:
@@ -1842,8 +1749,6 @@ class MigratorTables:
             row = cursor.fetchone()
             cursor.close()
 
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Returned row: {row}")
             if row:
                 view_row = self.decode_view_row(row)
                 self.update_protocol('view', view_row['id'], success, message, None)

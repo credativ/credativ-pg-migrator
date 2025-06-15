@@ -190,18 +190,30 @@ class Planner:
 
                 for _, column_info in source_columns.items():
                     self.config_parser.print_log_message( 'DEBUG', f"Checking for data types / default values substitutions for column {column_info}...")
-                    substitution = self.migrator_tables.check_data_types_substitution(column_info['data_type'])
+                    substitution = self.migrator_tables.check_data_types_substitution({
+                                                                'table_name': table_info['table_name'],
+                                                                'column_name': column_info['column_name'],
+                                                                'check_type': column_info['data_type'],
+                                                            })
                     if substitution:
                         self.config_parser.print_log_message( 'DEBUG', f"Substitution based on data_type ({column_info['data_type']}): {substitution}")
                         column_info['column_type_substitution'] = substitution
                     else:
-                        substitution = self.migrator_tables.check_data_types_substitution(column_info['column_type'])
+                        substitution = self.migrator_tables.check_data_types_substitution({
+                                                                'table_name': table_info['table_name'],
+                                                                'column_name': column_info['column_name'],
+                                                                'check_type': column_info['column_type'],
+                                                            })
                         if substitution:
                             self.config_parser.print_log_message( 'DEBUG', f"Substitution based on column_type ({column_info['column_type']}): {substitution}")
                             column_info['column_type_substitution'] = substitution
                         else:
                             if 'basic_data_type' in column_info and column_info['basic_data_type'] != '':
-                                substitution = self.migrator_tables.check_data_types_substitution(column_info['basic_data_type'])
+                                substitution = self.migrator_tables.check_data_types_substitution({
+                                                                'table_name': table_info['table_name'],
+                                                                'column_name': column_info['column_name'],
+                                                                'check_type': column_info['basic_data_type']
+                                                            })
                                 if substitution:
                                     self.config_parser.print_log_message( 'DEBUG', f"Substitution based on basic_data_type ({column_info['basic_data_type']}): {substitution}")
                                     column_info['column_type_substitution'] = substitution

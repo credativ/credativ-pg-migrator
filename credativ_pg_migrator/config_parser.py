@@ -42,6 +42,12 @@ class ConfigParser:
             # and type(include_tables) is not list):
             raise ValueError("When include_tables is used, it must be a list of names or regex patterns")
 
+        data_types_substitution = self.get_data_types_substitution()
+        if isinstance(data_types_substitution, list):
+            for entry in data_types_substitution:
+                if not isinstance(entry, (list, tuple)) or len(entry) != 5:
+                    raise ValueError("Please update your config file. Each entry in data_types_substitution must have 5 elements - [table_name, column_name, source_type, target_type, comment].")
+
         return True
 
     ## Databases

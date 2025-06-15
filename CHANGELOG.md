@@ -6,8 +6,8 @@
 
   - Fixes in MySQL data model migration - added missing migration of comments for columns, tables, indexes, repairs in migration of special data types, fixed migration of geometry data type and set data type
   - Multiple improvements in MySQL tests, added Sakila testing database (dev repository)
-    - Note: Tests with Sakila database showed one issue - migration of encoded passwords - in the table staff column password is varchar(40) but migrated value exceeds this length
-    - Remaining issue: Repair will require add table name / column name into custom replacement for data types in the config file - current version targets very specifically only user defined data types
+  - Breaking change: custom replacements for data types in the config file now require table name and column name to be specified
+    - Rational: Tests with Sakila database showed issue with migration of encoded passwords - in the table staff column password is varchar(40) but migrated value exceeds this length -> we need to be able to specify replacements for specific columns, existing solution was not flexible enough
   - Refactoring of exception handling in connectors - too specific exceptions masked some errors, generic "Exception" is now used in most cases
   - Refactoring of log levels for different messages in the migrator - added deeper DEBUG levels DEBUG2 and DEBUG3 for better granularity, old calls replaced with new function
 

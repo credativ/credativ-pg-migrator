@@ -47,10 +47,10 @@ class OracleConnector(DatabaseConnector):
                                                     dsn=connection_string,
                                                     encoding="UTF-8")
 
-        except ImportError as e:
+        except Exception as e:
             self.logger.error("cx_Oracle module is not installed.")
             raise e
-        except cx_Oracle.DatabaseError as e:
+        except Exception as e:
             self.logger.error(f"Error connecting to Oracle database: {e}")
             self.logger.error("Full stack trace:")
             self.logger.error(traceback.format_exc())
@@ -60,7 +60,7 @@ class OracleConnector(DatabaseConnector):
         try:
             if self.connection:
                 self.connection.close()
-        except AttributeError:
+        except Exception as e:
             pass
 
     def get_sql_functions_mapping(self, settings):
@@ -363,7 +363,7 @@ class OracleConnector(DatabaseConnector):
                         ddl = ddl.decode('utf-8') if isinstance(ddl, bytes) else ddl
                         table_indexes[order_num]['index_sql'] = f"{ddl}"
                         self.config_parser.print_log_message('DEBUG', f"Fetched DDL for index {index_info['index_name']}: {ddl}")
-                except cx_Oracle.DatabaseError as e:
+                except Exception as e:
                     self.logger.error(f"Error fetching DDL for index {index_info['index_name']}: {e}")
                     table_indexes[order_num]['index_sql'] = f"Error fetching DDL: {e}"
 
@@ -383,7 +383,7 @@ class OracleConnector(DatabaseConnector):
                                 if col_name in index_info['index_columns']:
                                     index_info['index_columns'] = index_info['index_columns'].replace(col_name, f"{col_default}")
                                     self.config_parser.print_log_message('DEBUG', f"Updated index {index_info['index_name']} with hidden column {col_name} and default value {col_default}")
-                except cx_Oracle.DatabaseError as e:
+                except Exception as e:
                     self.logger.error(f"Error fetching hidden columns for table {source_table_schema}.{source_table_name}: {e}")
 
             cursor.close()

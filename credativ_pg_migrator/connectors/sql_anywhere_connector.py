@@ -50,7 +50,7 @@ class SQLAnywhereConnector(DatabaseConnector):
         try:
             if self.connection:
                 self.connection.close()
-        except AttributeError:
+        except Exception as e:
             pass
 
     def get_sql_functions_mapping(self, settings):
@@ -87,7 +87,7 @@ class SQLAnywhereConnector(DatabaseConnector):
             cursor.close()
             self.disconnect()
             return tables
-        except pyodbc.Error as e:
+        except Exception as e:
             self.logger.error(f"Error executing query: {query}")
             self.logger.error(e)
             raise
@@ -151,7 +151,7 @@ class SQLAnywhereConnector(DatabaseConnector):
             cursor.close()
             self.disconnect()
             return result
-        except pyodbc.Error as e:
+        except Exception as e:
             self.logger.error(f"Error executing query: {query}")
             self.logger.error(e)
             raise
@@ -362,7 +362,7 @@ class SQLAnywhereConnector(DatabaseConnector):
             self.disconnect()
 
             return table_indexes
-        except pyodbc.Error as e:
+        except Exception as e:
             self.logger.error(f"Error executing query: {query}")
             self.logger.error(e)
             raise
@@ -430,7 +430,7 @@ class SQLAnywhereConnector(DatabaseConnector):
             self.disconnect()
 
             return table_constraints
-        except pyodbc.Error as e:
+        except Exception as e:
             self.logger.error(f"Error executing query: {query}")
             self.logger.error(e)
             raise
@@ -487,7 +487,7 @@ class SQLAnywhereConnector(DatabaseConnector):
             cursor.close()
             self.disconnect()
             return views
-        except pyodbc.Error as e:
+        except Exception as e:
             self.logger.error(f"Error executing query: {query}")
             self.logger.error(e)
             raise
@@ -512,7 +512,7 @@ class SQLAnywhereConnector(DatabaseConnector):
             cursor.close()
             self.disconnect()
             return view_code
-        except pyodbc.Error as e:
+        except Exception as e:
             self.logger.error(f"Error executing query: {query}")
             self.logger.error(e)
             raise

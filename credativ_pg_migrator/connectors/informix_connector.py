@@ -60,7 +60,7 @@ class InformixConnector(DatabaseConnector):
         try:
             if self.connection:
                 self.connection.close()
-        except AttributeError:
+        except Exception as e:
             pass
 
     def get_sql_functions_mapping(self, settings):
@@ -95,7 +95,7 @@ class InformixConnector(DatabaseConnector):
             cursor.close()
             self.disconnect()
             return tables
-        except jaydebeapi.Error as e:
+        except Exception as e:
             self.logger.error(f"Error executing query: {query}")
             self.logger.error(e)
             raise
@@ -202,7 +202,7 @@ class InformixConnector(DatabaseConnector):
             cursor.close()
             self.disconnect()
             return result
-        except jaydebeapi.Error as e:
+        except Exception as e:
             self.logger.error(f"Error executing query: {query}")
             self.logger.error(e)
             raise
@@ -232,7 +232,7 @@ class InformixConnector(DatabaseConnector):
             cursor.close()
             self.disconnect()
             return views
-        except jaydebeapi.Error as e:
+        except Exception as e:
             self.logger.error(f"Error executing query: {query}")
             self.logger.error(e)
             raise
@@ -379,7 +379,7 @@ class InformixConnector(DatabaseConnector):
             self.disconnect()
             return table_indexes
 
-        except jaydebeapi.Error as e:
+        except Exception as e:
             self.logger.error(f"Error executing query: {query}")
             self.logger.error(e)
             raise

@@ -42,31 +42,6 @@ class ConfigParser:
             # and type(include_tables) is not list):
             raise ValueError("When include_tables is used, it must be a list of names or regex patterns")
 
-        ## This whole logic is an overkill right now
-        ## we need more practical experiences from migrations to see if something like this is really needed
-        ##
-        # include_tables = self.config['include_tables']
-        # exclude_tables = self.config['exclude_tables']
-
-        # if self.args.log_level == 'DEBUG':
-        #     self.logger.debug(f"type(include_tables): {type(include_tables)} - {include_tables}")
-        #     self.logger.debug(f"type(exclude_tables): {type(exclude_tables)} - {exclude_tables}")
-
-        # if include_tables is None and exclude_tables is None:
-        #     self.config['include_tables'] = ['.*']  # Default to include all tables
-
-        # if type(include_tables) is str and include_tables == '.*' and exclude_tables is None:
-        #     self.logger.info("Check of include_tables and exclude_tables passed - all tables will be included")
-        # elif type(include_tables) is list and exclude_tables is None:
-        #     self.logger.info("Check of include_tables and exclude_tables passed - selected tables will be included")
-        # elif type(include_tables) is str and include_tables == '.*' and type(exclude_tables) is list:
-        #     self.logger.info("Check of include_tables and exclude_tables passed - all tables will be included except for the ones specified")
-        # elif type(include_tables) is list and type(exclude_tables) is list:
-        #     if set(include_tables) & set(exclude_tables):
-        #         raise ValueError("Configuration error: There are tables specified in both 'include_tables.specific_tables' and 'exclude_tables.specific_tables'.")
-
-        # if self.args.log_level == 'DEBUG':
-        #     self.logger.debug(f"Configuration validated: {self.config}")
         return True
 
     ## Databases

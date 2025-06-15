@@ -16,6 +16,7 @@
 
 MIGRATOR_VERSION = '0.8.3'
 MIGRATOR_FULL_NAME = 'Database Migration Tool credativ-pg-migrator'
+MIGRATOR_MESSAGE_LEVELS = ['INFO', 'DEBUG', 'DEBUG2', 'DEBUG3']
 
 ## Internal defaults used by the migrator
 ## Do not change these values unless !

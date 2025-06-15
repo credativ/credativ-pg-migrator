@@ -61,9 +61,8 @@ class PostgreSQLConnector(DatabaseConnector):
             AND relkind in ('r', 'p')
             ORDER BY relname
         """
-        # if self.config_parser.get_log_level() == 'DEBUG':
-        #     self.logger.debug(f"Reading table names for {schema}")
-        #     self.logger.debug(f"Query: {query}")
+        self.config_parser.print_log_message('DEBUG3', f"Reading table names for {schema}")
+        self.config_parser.print_log_message('DEBUG3', f"Query: {query}")
         try:
             tables = {}
             order_num = 1
@@ -81,7 +80,7 @@ class PostgreSQLConnector(DatabaseConnector):
             cursor.close()
             self.disconnect()
             return tables
-        except psycopg2.Error as e:
+        except Exception as e:
             self.logger.error(f"Error executing query: {query}")
             self.logger.error(e)
             raise
@@ -115,8 +114,7 @@ class PostgreSQLConnector(DatabaseConnector):
                 """
             self.connect()
             cursor = self.connection.cursor()
-            if self.config_parser.get_log_level() == 'DEBUG':
-                self.logger.debug(f"PostgreSQL: Reading columns for {table_schema}.{table_name}")
+            self.config_parser.print_log_message('DEBUG2', f"PostgreSQL: Reading columns for {table_schema}.{table_name}")
             cursor.execute(query)
             for row in cursor.fetchall():
                 ordinal_position = row[0]
@@ -161,7 +159,7 @@ class PostgreSQLConnector(DatabaseConnector):
             self.disconnect()
             return result
 
-        except psycopg2.Error as e:
+        except Exception as e:
             self.logger.error(f"Error executing query: {query}")
             self.logger.error(e)
             raise
@@ -185,16 +183,14 @@ class PostgreSQLConnector(DatabaseConnector):
         create_table_sql = ""
         create_table_sql_parts = []
 
-        if self.config_parser.get_log_level() == 'DEBUG':
-            self.logger.debug(f"Creating DDL for table {target_schema}.{target_table_name}, case handling: {self.config_parser.get_names_case_handling()}")
+        self.config_parser.print_log_message('DEBUG', f"Creating DDL for table {target_schema}.{target_table_name}, case handling: {self.config_parser.get_names_case_handling()}")
 
         for _, column_info in converted.items():
 
             column_name = self.config_parser.convert_names_case(column_info['column_name'])
 
             if column_info['is_hidden_column'] == 'YES':
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"Skipping hidden column {column_name}: {column_info}")
+                self.config_parser.print_log_message('DEBUG', f"Skipping hidden column {column_name}: {column_info}")
                 continue
 
             create_column_sql = ""
@@ -237,8 +233,7 @@ class PostgreSQLConnector(DatabaseConnector):
                     'altered_data_type': altered_data_type,
                 })
                 create_column_sql = f""""{column_name}" {altered_data_type}"""
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"Column {column_name} is identity, altered data type to {altered_data_type}")
+                self.config_parser.print_log_message('DEBUG', f"Column {column_name} is identity, altered data type to {altered_data_type}")
             elif column_data_type in ('NUMBER', 'NUMERIC') and (numeric_precision is None or numeric_precision == 10) and numeric_scale == 0:
                 altered_data_type = 'INTEGER'
                 migrator_tables.insert_target_column_alteration({
@@ -250,8 +245,7 @@ class PostgreSQLConnector(DatabaseConnector):
                     'altered_data_type': altered_data_type,
                 })
                 create_column_sql = f""""{column_name}" {altered_data_type}"""
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"Column {column_name} is NUMBER without precision, scale {numeric_scale}, altered data type to {altered_data_type}")
+                self.config_parser.print_log_message('DEBUG', f"Column {column_name} is NUMBER without precision, scale {numeric_scale}, altered data type to {altered_data_type}")
             elif column_data_type in ('NUMBER', 'NUMERIC') and numeric_precision is None and numeric_scale == 10:
                 altered_data_type = 'DOUBLE PRECISION'
                 migrator_tables.insert_target_column_alteration({
@@ -263,8 +257,7 @@ class PostgreSQLConnector(DatabaseConnector):
                     'altered_data_type': altered_data_type,
                 })
                 create_column_sql = f""""{column_name}" {altered_data_type}"""
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"Column {column_name} is NUMBER without precision, scale {numeric_scale}, altered data type to {altered_data_type}")
+                self.config_parser.print_log_message('DEBUG', f"Column {column_name} is NUMBER without precision, scale {numeric_scale}, altered data type to {altered_data_type}")
             elif column_data_type in ('NUMBER', 'NUMERIC') and numeric_precision == 1 and numeric_scale == 0:
                 altered_data_type = 'BOOLEAN'
                 migrator_tables.insert_target_column_alteration({
@@ -276,8 +269,7 @@ class PostgreSQLConnector(DatabaseConnector):
                     'altered_data_type': altered_data_type,
                 })
                 create_column_sql = f""""{column_name}" {altered_data_type}"""
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"Column {column_name} is NUMBER with precision 1, scale 0, altered data type to {altered_data_type}")
+                self.config_parser.print_log_message('DEBUG', f"Column {column_name} is NUMBER with precision 1, scale 0, altered data type to {altered_data_type}")
             elif column_data_type in ('NUMBER', 'NUMERIC') and numeric_precision == 19 and numeric_scale == 0:
                 altered_data_type = 'BIGINT'
                 migrator_tables.insert_target_column_alteration({
@@ -289,8 +281,7 @@ class PostgreSQLConnector(DatabaseConnector):
                     'altered_data_type': altered_data_type,
                 })
                 create_column_sql = f""""{column_name}" {altered_data_type}"""
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"Column {column_name} is NUMBER with precision 19, scale 0, altered data type to {altered_data_type}")
+                self.config_parser.print_log_message('DEBUG', f"Column {column_name} is NUMBER with precision 19, scale 0, altered data type to {altered_data_type}")
             else:
                 if (character_maximum_length != '' and 'CHAR' in column_data_type):
                     create_column_sql = f""""{column_name}" {column_data_type}({character_maximum_length})"""
@@ -451,7 +442,7 @@ class PostgreSQLConnector(DatabaseConnector):
             cursor.close()
             self.disconnect()
             return table_indexes
-        except psycopg2.Error as e:
+        except Exception as e:
             self.logger.error(f"Error executing query: {query}")
             self.logger.error(e)
             raise
@@ -487,8 +478,7 @@ class PostgreSQLConnector(DatabaseConnector):
         #         if column_name == column_info['column_name']:
         #             index_columns_count += 1
         #             column_data_type = column_info['data_type']
-        #             if self.config_parser.get_log_level() == 'DEBUG':
-        #                 self.logger.debug(f"Table: {target_schema}.{target_table_name}, index: {index_name}, column: {column_name} has data type {column_data_type}")
+        #             self.config_parser.print_log_message('DEBUG', f"Table: {target_schema}.{target_table_name}, index: {index_name}, column: {column_name} has data type {column_data_type}")
         #             index_columns_data_types.append(column_data_type)
         #             index_columns_data_types_str = ', '.join(index_columns_data_types)
 
@@ -556,7 +546,7 @@ class PostgreSQLConnector(DatabaseConnector):
             cursor.close()
             self.disconnect()
             return constraints
-        except psycopg2.Error as e:
+        except Exception as e:
             self.logger.error(f"Error executing query: {query}")
             self.logger.error(e)
             raise
@@ -619,7 +609,7 @@ class PostgreSQLConnector(DatabaseConnector):
                 cursor.execute(script)
                 for notice in cursor.connection.notices:
                     self.logger.info(notice)
-            except psycopg2.Error as e:
+            except Exception as e:
                 for notice in cursor.connection.notices:
                     self.logger.info(notice)
                 self.logger.error(f"Error executing script: {e}")
@@ -680,8 +670,7 @@ class PostgreSQLConnector(DatabaseConnector):
                 if migration_limitation:
                     query += f" WHERE {migration_limitation}"
 
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"Worker {worker_id}: Fetching data with cursor using query: {query}")
+                self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Fetching data with cursor using query: {query}")
 
                 # offset = 0
                 cursor = self.connection.cursor()
@@ -693,8 +682,7 @@ class PostgreSQLConnector(DatabaseConnector):
                     #     query = f"""SELECT * FROM "{source_schema}"."{source_table}" ORDER BY {primary_key_columns} LIMIT {batch_size} OFFSET {offset}"""
                     # else:
                     #     query = f"""SELECT * FROM "{source_schema}"."{source_table}" ORDER BY ctid LIMIT {batch_size} OFFSET {offset}"""
-                    # if self.config_parser.get_log_level() == 'DEBUG':
-                    #     self.logger.debug(f"Worker {worker_id}: Fetching data with query: {query}")
+                    # self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Fetching data with query: {query}")
 
                     # part_name = f'do fetch data: {source_table} - {offset}'
 
@@ -705,8 +693,7 @@ class PostgreSQLConnector(DatabaseConnector):
                     records = cursor.fetchmany(batch_size)
                     if not records:
                         break
-                    if self.config_parser.get_log_level() == 'DEBUG':
-                        self.logger.debug(f"Worker {worker_id}: Fetched {len(records)} rows from source table '{source_table}' using cursor")
+                    self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Fetched {len(records)} rows from source table '{source_table}' using cursor")
 
                     records = [
                         {column['column_name']: value for column, value in zip(source_columns.values(), record)}
@@ -720,8 +707,7 @@ class PostgreSQLConnector(DatabaseConnector):
                                 record[column_name] = record[column_name].tobytes()
 
                     # Insert batch into target table
-                    if self.config_parser.get_log_level() == 'DEBUG':
-                        self.logger.debug(f"Worker {worker_id}: Starting insert of {len(records)} rows from source table {source_table}")
+                    self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Starting insert of {len(records)} rows from source table {source_table}")
                     inserted_rows = migrate_target_connection.insert_batch({
                         'target_schema': target_schema,
                         'target_table': target_table,
@@ -750,37 +736,43 @@ class PostgreSQLConnector(DatabaseConnector):
         columns = settings['target_columns']
         data = settings['data']
         worker_id = settings['worker_id']
+        insert_columns = settings.get('insert_columns', None)
+
+        if not insert_columns:
+            insert_columns = [f'"{columns[col]["column_name"]}"' for col in sorted(columns.keys())]
+
         inserted_rows = 0
+        self.config_parser.print_log_message('DEBUG2', f"Worker {worker_id}: insert_batch into {target_schema}.{target_table} with {len(data)} rows, columns: {insert_columns}, data type: {type(data)}")
         try:
             # Ensure data is a list of tuples
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Worker {worker_id}: Started insert batch into {table_schema}.{target_table} with {len(data)} rows")
+            self.config_parser.print_log_message('DEBUG2', f"Worker {worker_id}: Started insert batch into {target_schema}.{target_table} with {len(data)} rows")
             if isinstance(data, list) and all(isinstance(item, dict) for item in data):
                 formatted_data = []
                 for item in data:
                     row = []
-                    for col in sorted(columns.keys()):
+                    for col in columns.keys():
                         col_name = columns[col]['column_name']
                         row.append(item.get(col_name))
                     formatted_data.append(tuple(row))
                 data = formatted_data
+            else:
+                self.logger.error(f"Worker {worker_id}: Data for insert_batch must be a list of dictionaries, got {type(data)}")
+                return 0
+
+            self.config_parser.print_log_message('DEBUG2', f"Worker {worker_id}: insert_batch [2] into {target_schema}.{target_table} with {len(data)} rows, columns: |{insert_columns}| data type: {type(data)}")
 
             with self.connection.cursor() as cursor:
-                column_names = [f'"{columns[col]["column_name"]}"' for col in sorted(columns.keys())]
-                insert_query = sql.SQL(f"""INSERT INTO "{target_schema}"."{target_table}" ({', '.join(column_names)}) VALUES ({', '.join(['%s' for _ in column_names])})""")
-                # if self.config_parser.get_log_level() == 'DEBUG':
-                #     self.logger.debug(f"Worker {worker_id}: Insert query: {insert_query}")
+                insert_query = sql.SQL(f"""INSERT INTO "{target_schema}"."{target_table}" ({insert_columns}) VALUES ({', '.join(['%s' for _ in columns.keys()])})""")
+                self.config_parser.print_log_message('DEBUG3', f"Worker {worker_id}: Insert query: {insert_query}")
                 self.connection.autocommit = False
                 try:
                     if self.session_settings:
-                        if self.config_parser.get_log_level() == 'DEBUG':
-                            self.logger.info(f"Worker {worker_id}: Insert into {target_table}: Executing session settings: {self.session_settings}")
                         cursor.execute(self.session_settings)
-                    # if self.config_parser.get_log_level() == 'DEBUG':
-                    #     self.logger.debug(f"Worker {worker_id}: Starting psycopg2.extras.execute_batch into {target_table} with {len(data)} rows")
+                    self.config_parser.print_log_message('DEBUG3', f"Worker {worker_id}: Starting psycopg2.extras.execute_batch into {target_table} with {len(data)} rows")
+
                     psycopg2.extras.execute_batch(cursor, insert_query, data)
                     inserted_rows = len(data)
-                except psycopg2.Error as e:
+                except Exception as e:
                     self.logger.error(f"Worker {worker_id}: Error inserting batch data into {target_table}: {e}")
                     self.logger.error(f"Worker {worker_id}: Trying to insert row by row.")
                     self.connection.rollback()
@@ -789,12 +781,12 @@ class PostgreSQLConnector(DatabaseConnector):
                             cursor.execute(insert_query, row)
                             inserted_rows += 1
                             self.connection.commit()
-                        except psycopg2.Error as e:
+                        except Exception as e:
                             self.connection.rollback()
                             self.logger.error(f"Worker {worker_id}: Error inserting row into {target_table}: {row}")
                             self.logger.error(e)
 
-        except psycopg2.Error as e:
+        except Exception as e:
             self.logger.error(f"Worker {worker_id}: Error before inserting batch data: {e}")
             raise
         finally:
@@ -865,7 +857,7 @@ class PostgreSQLConnector(DatabaseConnector):
             cursor.close()
             # self.disconnect()
             return sequence_data
-        except psycopg2.Error as e:
+        except Exception as e:
             self.logger.error(f"Error executing sequence query: {query}")
             self.logger.error(e)
 
@@ -892,7 +884,7 @@ class PostgreSQLConnector(DatabaseConnector):
             cursor.close()
             self.disconnect()
             return cur_value
-        except psycopg2.Error as e:
+        except Exception as e:
             self.logger.error(f"Error executing query: {query}")
             self.logger.error(e)
             raise
@@ -950,7 +942,7 @@ class PostgreSQLConnector(DatabaseConnector):
             cursor.close()
             self.disconnect()
             return views
-        except psycopg2.Error as e:
+        except Exception as e:
             self.logger.error(f"Error executing query: {query}")
             self.logger.error(e)
             raise
@@ -974,7 +966,7 @@ class PostgreSQLConnector(DatabaseConnector):
             cursor.close()
             self.disconnect()
             return view_code
-        except psycopg2.Error as e:
+        except Exception as e:
             self.logger.error(f"Error executing query: {query}")
             self.logger.error(e)
             raise
@@ -1012,7 +1004,7 @@ class PostgreSQLConnector(DatabaseConnector):
             cursor.close()
             self.disconnect()
             return user_defined_types
-        except psycopg2.Error as e:
+        except Exception as e:
             self.logger.error(f"Error executing query: {query}")
             self.logger.error(e)
             raise
@@ -1047,7 +1039,7 @@ class PostgreSQLConnector(DatabaseConnector):
                     filtered_settings += f"SET {setting_name} = '{settings[setting_name]}';"
             self.logger.info(f"Session settings: {filtered_settings}")
             return filtered_settings
-        except psycopg2.Error as e:
+        except Exception as e:
             self.logger.error(f"Error preparing session settings: {e}")
             raise
 

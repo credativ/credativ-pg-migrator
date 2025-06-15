@@ -80,8 +80,7 @@ class Orchestrator:
         """Dynamically load the database connector."""
         # Get the database type from the config
         database_type = self.config_parser.get_db_type(source_or_target)
-        if self.config_parser.get_log_level() == 'DEBUG':
-            self.logger.debug(f"Loading connector for {source_or_target} with database type: {database_type}")
+        self.config_parser.print_log_message( 'DEBUG', f"Loading connector for {source_or_target} with database type: {database_type}")
         if source_or_target == 'target' and database_type != 'postgresql':
             raise ValueError("Target database type must be 'postgresql'")
         # Check if the database type is supported
@@ -325,13 +324,11 @@ class Orchestrator:
             worker_target_connection.connect()
 
             if worker_target_connection.session_settings:
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"Worker {worker_id}: Executing session settings: {worker_target_connection.session_settings}")
+                self.config_parser.print_log_message( 'DEBUG', f"Worker {worker_id}: Executing session settings: {worker_target_connection.session_settings}")
                 worker_target_connection.execute_query(worker_target_connection.session_settings)
 
             if settings['drop_tables']:
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"Worker {worker_id}: Dropping table {target_table}...")
+                self.config_parser.print_log_message( 'DEBUG', f"Worker {worker_id}: Dropping table {target_table}...")
                 part_name = 'drop table'
                 repeat_count = 0
                 ## Retry dropping the table if it fails due to locks or other issues
@@ -352,8 +349,7 @@ class Orchestrator:
                 self.logger.info(f"""Worker {worker_id}: Table "{target_table}" dropped successfully.""")
 
             if settings['create_tables']:
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"Worker {worker_id}: Creating table with SQL: {create_table_sql}")
+                self.config_parser.print_log_message( 'DEBUG', f"Worker {worker_id}: Creating table with SQL: {create_table_sql}")
                 part_name = 'create table'
                 worker_target_connection.execute_query(create_table_sql)
                 self.logger.info(f"""Worker {worker_id}: Table "{target_table}" created successfully.""")
@@ -364,8 +360,7 @@ class Orchestrator:
 
                     table_create_partitions_sql = json.loads(table_data['create_partitions_sql'])
                     for partition_sql in table_create_partitions_sql:
-                        if self.config_parser.get_log_level() == 'DEBUG':
-                            self.logger.debug(f"Worker {worker_id}: Creating partition for table {target_table}: {partition_sql}")
+                        self.config_parser.print_log_message( 'DEBUG', f"Worker {worker_id}: Creating partition for table {target_table}: {partition_sql}")
                         worker_target_connection.execute_query(partition_sql)
                         self.logger.info(f"""Worker {worker_id}: Partition of "{target_table}" created successfully [{partition_sql}].""")
 
@@ -374,20 +369,17 @@ class Orchestrator:
                     'target_schema': target_schema,
                     'target_table': target_table,
                 }):
-                    if self.config_parser.get_log_level() == 'DEBUG':
-                        self.logger.debug(f"Worker {worker_id}: Found dependency for column alteration: {result}")
+                    self.config_parser.print_log_message( 'DEBUG', f"Worker {worker_id}: Found dependency for column alteration: {result}")
                     alter_column_sql = f"""
                         ALTER TABLE "{self.config_parser.convert_names_case(target_schema)}"."{self.config_parser.convert_names_case(target_table)}"
                         ALTER COLUMN "{self.config_parser.convert_names_case(result['target_column'].replace('"',''))}"
                         TYPE {result['altered_data_type']}"""
-                    if self.config_parser.get_log_level() == 'DEBUG':
-                        self.logger.debug(f"Worker {worker_id}: Altering column with SQL: {alter_column_sql}")
+                    self.config_parser.print_log_message( 'DEBUG', f"Worker {worker_id}: Altering column with SQL: {alter_column_sql}")
                     worker_target_connection.execute_query(alter_column_sql)
                     self.logger.info(f"""Worker {worker_id}: Column "{result['target_column']}" altered successfully.""")
 
             if settings['truncate_tables']:
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"Worker {worker_id}: Truncating table {target_table}...")
+                self.config_parser.print_log_message( 'DEBUG', f"Worker {worker_id}: Truncating table {target_table}...")
                 part_name = 'truncate table'
                 repeat_count = 0
                 ## Retry truncating the table if it fails due to locks or other issues
@@ -466,8 +458,7 @@ class Orchestrator:
                             column_name = sequence_details['column_name']
                             sequence_sql = sequence_details['set_sequence_sql']
                             self.migrator_tables.insert_sequence(sequence_id, target_schema, target_table, column_name, sequence_name, sequence_sql)
-                            if self.config_parser.get_log_level() == 'DEBUG':
-                                self.logger.debug(f"Worker {worker_id}: Setting sequence with SQL: {sequence_sql}")
+                            self.config_parser.print_log_message( 'DEBUG', f"Worker {worker_id}: Setting sequence with SQL: {sequence_sql}")
                             try:
                                 worker_target_connection.execute_query(sequence_sql)
                                 self.logger.info(f"Worker {worker_id}: Sequence ({order_num}) {sequence_name} set successfully for table {target_table}.")
@@ -513,14 +504,12 @@ class Orchestrator:
             # Each worker uses its own separate connection to the target database
             worker_target_connection = self.load_connector('target')
 
-            if self.config_parser.get_log_level() == 'DEBUG':
-                self.logger.debug(f"Worker {worker_id}: Creating index with SQL: {create_index_sql}")
+            self.config_parser.print_log_message( 'DEBUG', f"Worker {worker_id}: Creating index with SQL: {create_index_sql}")
 
             worker_target_connection.connect()
 
             if worker_target_connection.session_settings:
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"Worker {worker_id}: Executing session settings: {worker_target_connection.session_settings}")
+                self.config_parser.print_log_message( 'DEBUG', f"Worker {worker_id}: Executing session settings: {worker_target_connection.session_settings}")
                 worker_target_connection.execute_query(worker_target_connection.session_settings)
 
             worker_target_connection.execute_query(create_index_sql)
@@ -544,8 +533,7 @@ class Orchestrator:
                 # Each worker uses its own separate connection to the target database
                 worker_target_connection = self.load_connector('target')
 
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"Worker {worker_id}: Creating constraint with SQL: {create_constraint_sql}")
+                self.config_parser.print_log_message( 'DEBUG', f"Worker {worker_id}: Creating constraint with SQL: {create_constraint_sql}")
 
                 worker_target_connection.connect()
 
@@ -553,8 +541,7 @@ class Orchestrator:
                 worker_target_connection.execute_query(query)
 
                 if worker_target_connection.session_settings:
-                    if self.config_parser.get_log_level() == 'DEBUG':
-                        self.logger.debug(f"Worker {worker_id}: Executing session settings: {worker_target_connection.session_settings}")
+                    self.config_parser.print_log_message( 'DEBUG', f"Worker {worker_id}: Executing session settings: {worker_target_connection.session_settings}")
                     worker_target_connection.execute_query(worker_target_connection.session_settings)
 
                 worker_target_connection.execute_query(create_constraint_sql)
@@ -580,8 +567,7 @@ class Orchestrator:
         if self.config_parser.should_migrate_funcprocs():
             self.logger.info("Migrating functions and procedures.")
             funcproc_names = self.source_connection.fetch_funcproc_names(self.config_parser.get_source_schema())
-            if self.config_parser.get_log_level() == 'DEBUG':
-                self.logger.debug(f"Function/procedure names: {funcproc_names}")
+            self.config_parser.print_log_message( 'DEBUG', f"Function/procedure names: {funcproc_names}")
 
             if funcproc_names:
                 for order_num, funcproc_data in funcproc_names.items():
@@ -612,8 +598,7 @@ class Orchestrator:
                         self.handle_error(e, 'fetching view names')
 
                     try:
-                        if self.config_parser.get_log_level() == 'DEBUG':
-                            self.logger.debug(f"Converting {funcproc_type} {funcproc_data['name']} code...")
+                        self.config_parser.print_log_message( 'DEBUG', f"Converting {funcproc_type} {funcproc_data['name']} code...")
                         converted_code = self.source_connection.convert_funcproc_code({
                             'funcproc_code': funcproc_code,
                             'target_db_type': self.config_parser.get_target_db_type(),
@@ -623,13 +608,11 @@ class Orchestrator:
                             'view_list': view_names,
                             })
 
-                        if self.config_parser.get_log_level() == 'DEBUG':
-                            self.logger.debug("Checking for remote objects substitution in functions/procedures...")
+                        self.config_parser.print_log_message( 'DEBUG', "Checking for remote objects substitution in functions/procedures...")
                         rows = self.migrator_tables.get_records_remote_objects_substitution()
                         if rows:
                             for row in rows:
-                                if self.config_parser.get_log_level() == 'DEBUG':
-                                    self.logger.debug(f"Funcs/Procs - remote objects substituting {row[0]} with {row[1]}")
+                                self.config_parser.print_log_message( 'DEBUG', f"Funcs/Procs - remote objects substituting {row[0]} with {row[1]}")
                                 converted_code = re.sub(re.escape(row[0]), row[1], converted_code, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
 
                         self.migrator_tables.insert_funcprocs(self.source_schema, funcproc_data['name'], funcproc_id, funcproc_code, self.target_schema, funcproc_data['name'], converted_code, funcproc_data['comment'])
@@ -639,24 +622,21 @@ class Orchestrator:
                             self.target_connection.connect()
 
                             if self.target_connection.session_settings:
-                                if self.config_parser.get_log_level() == 'DEBUG':
-                                    self.logger.debug(f"Executing session settings: {self.target_connection.session_settings}")
+                                self.config_parser.print_log_message( 'DEBUG', f"Executing session settings: {self.target_connection.session_settings}")
                                 self.target_connection.execute_query(self.target_connection.session_settings)
 
                             self.target_connection.execute_query(converted_code)
-                            if self.config_parser.get_log_level() == 'DEBUG':
-                                self.logger.debug(f"[OK] Source code for {funcproc_data['name']}: {funcproc_code}")
-                                self.logger.debug(f"[OK] Converted code for {funcproc_data['name']}: {converted_code}")
+                            self.config_parser.print_log_message( 'DEBUG', f"[OK] Source code for {funcproc_data['name']}: {funcproc_code}")
+                            self.config_parser.print_log_message( 'DEBUG', f"[OK] Converted code for {funcproc_data['name']}: {converted_code}")
                             self.migrator_tables.update_funcproc_status(funcproc_id, True, 'migrated OK')
                         else:
                             self.logger.info(f"Skipping {funcproc_type} {funcproc_data['name']} - no conversion done")
                             self.migrator_tables.update_funcproc_status(funcproc_id, False, 'no conversion')
                         self.target_connection.disconnect()
                     except Exception as e:
-                        if self.config_parser.get_log_level() == 'DEBUG':
-                            self.logger.debug(f"[ERROR] Migrating {funcproc_type} {funcproc_data['name']}.")
-                            self.logger.debug(f"[ERROR] Source code for {funcproc_data['name']}: {funcproc_code}")
-                            self.logger.debug(f"[ERROR] Converted code for {funcproc_data['name']}: {converted_code}")
+                        self.config_parser.print_log_message( 'DEBUG', f"[ERROR] Migrating {funcproc_type} {funcproc_data['name']}.")
+                        self.config_parser.print_log_message( 'DEBUG', f"[ERROR] Source code for {funcproc_data['name']}: {funcproc_code}")
+                        self.config_parser.print_log_message( 'DEBUG', f"[ERROR] Converted code for {funcproc_data['name']}: {converted_code}")
                         self.migrator_tables.update_funcproc_status(funcproc_id, False, f'ERROR: {e}')
                         self.handle_error(e, f"migrate_funcproc {funcproc_type} {funcproc_data['name']}")
 
@@ -679,18 +659,15 @@ class Orchestrator:
                     for one_trigger in all_triggers:
                         trigger_detail = self.migrator_tables.decode_trigger_row(one_trigger)
                         self.logger.info(f"Processing trigger {trigger_detail['trigger_name']}")
-                        if self.config_parser.get_log_level() == 'DEBUG':
-                            self.logger.debug(f"Trigger details: {trigger_detail}")
+                        self.config_parser.print_log_message( 'DEBUG', f"Trigger details: {trigger_detail}")
 
                         converted_code = trigger_detail['trigger_target_sql']
 
-                        if self.config_parser.get_log_level() == 'DEBUG':
-                            self.logger.debug("Checking for remote objects substitution in triggers...")
+                        self.config_parser.print_log_message( 'DEBUG', "Checking for remote objects substitution in triggers...")
                         rows = self.migrator_tables.get_records_remote_objects_substitution()
                         if rows:
                             for row in rows:
-                                if self.config_parser.get_log_level() == 'DEBUG':
-                                    self.logger.debug(f"Triggers - remote objects substituting {row[0]} with {row[1]}")
+                                self.config_parser.print_log_message( 'DEBUG', f"Triggers - remote objects substituting {row[0]} with {row[1]}")
                                 converted_code = re.sub(re.escape(row[0]), row[1], converted_code, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
 
                         try:
@@ -698,19 +675,17 @@ class Orchestrator:
                                 self.logger.info(f"Creating trigger {trigger_detail['trigger_name']} in target database.")
                                 self.target_connection.connect()
                                 self.target_connection.execute_query(converted_code)
-                                if self.config_parser.get_log_level() == 'DEBUG':
-                                    self.logger.debug(f"[OK] Source code for {trigger_detail['trigger_name']}: {trigger_detail['trigger_source_sql']}")
-                                    self.logger.debug(f"[OK] Converted code for {trigger_detail['trigger_name']}: {converted_code}")
+                                self.config_parser.print_log_message( 'DEBUG', f"[OK] Source code for {trigger_detail['trigger_name']}: {trigger_detail['trigger_source_sql']}")
+                                self.config_parser.print_log_message( 'DEBUG', f"[OK] Converted code for {trigger_detail['trigger_name']}: {converted_code}")
                                 self.migrator_tables.update_trigger_status(trigger_detail['id'], True, 'migrated OK')
                             else:
                                 self.logger.info(f"Skipping trigger {trigger_detail['trigger_name']} - no conversion.")
                                 self.migrator_tables.update_trigger_status(trigger_detail['id'], False, 'no conversion')
                             self.target_connection.disconnect()
                         except Exception as e:
-                            if self.config_parser.get_log_level() == 'DEBUG':
-                                self.logger.debug(f"[ERROR] Migrating trigger {trigger_detail['trigger_name']}.")
-                                self.logger.debug(f"[ERROR] Source code for {trigger_detail['trigger_name']}: {trigger_detail['trigger_source_sql']}")
-                                self.logger.debug(f"[ERROR] Converted code for {trigger_detail['trigger_name']}: {converted_code}")
+                            self.config_parser.print_log_message( 'DEBUG', f"[ERROR] Migrating trigger {trigger_detail['trigger_name']}.")
+                            self.config_parser.print_log_message( 'DEBUG', f"[ERROR] Source code for {trigger_detail['trigger_name']}: {trigger_detail['trigger_source_sql']}")
+                            self.config_parser.print_log_message( 'DEBUG', f"[ERROR] Converted code for {trigger_detail['trigger_name']}: {converted_code}")
                             self.migrator_tables.update_trigger_status(trigger_detail['id'], False, f'ERROR: {e}')
                             self.handle_error(e, f"migrate_trigger {trigger_detail['trigger_name']}")
 
@@ -736,15 +711,13 @@ class Orchestrator:
                 for one_view in all_views:
                     view_detail = self.migrator_tables.decode_view_row(one_view)
                     self.logger.info(f"Processing view {view_detail['source_view_name']}")
-                    if self.config_parser.get_log_level() == 'DEBUG':
-                        self.logger.debug(f"View details: {view_detail}")
+                    self.config_parser.print_log_message( 'DEBUG', f"View details: {view_detail}")
 
                     try:
                         self.target_connection.connect()
 
                         if self.target_connection.session_settings:
-                            if self.config_parser.get_log_level() == 'DEBUG':
-                                self.logger.debug(f"Executing session settings: {self.target_connection.session_settings}")
+                            self.config_parser.print_log_message( 'DEBUG', f"Executing session settings: {self.target_connection.session_settings}")
                             self.target_connection.execute_query(self.target_connection.session_settings)
 
                         query = f'''SET SESSION search_path TO {view_detail['target_schema']};'''
@@ -778,8 +751,7 @@ class Orchestrator:
                 if table_data['table_comment']:
                     query = f"""COMMENT ON TABLE "{table_data['target_schema']}"."{table_data['target_table']}" IS '{table_data['table_comment']}'"""
                     self.logger.info(f"Setting comment for table {table_data['target_table']} in target database.")
-                    if self.config_parser.get_log_level() == 'DEBUG':
-                        self.logger.debug(f"Executing comment query: {query}")
+                    self.config_parser.print_log_message( 'DEBUG', f"Executing comment query: {query}")
                     self.target_connection.execute_query(query)
 
                 for col in table_data['target_columns'].keys():
@@ -787,8 +759,7 @@ class Orchestrator:
                     if column_comment:
                         query = f"""COMMENT ON COLUMN "{table_data['target_schema']}"."{table_data['target_table']}"."{table_data['target_columns'][col]['column_name']}" IS '{column_comment}'"""
                         self.logger.info(f"Setting comment for column {table_data['target_columns'][col]['column_name']} in target database.")
-                        if self.config_parser.get_log_level() == 'DEBUG':
-                            self.logger.debug(f"Executing comment query: {query}")
+                        self.config_parser.print_log_message( 'DEBUG', f"Executing comment query: {query}")
                         self.target_connection.execute_query(query)
 
             all_indexes = self.migrator_tables.fetch_all_indexes()
@@ -798,8 +769,7 @@ class Orchestrator:
                     index_name = f"{index_data['index_name']}_tab_{index_data['target_table']}"
                     query = f"""COMMENT ON INDEX "{index_data['target_schema']}"."{index_name}" IS '{index_data['index_comment']}'"""
                     self.logger.info(f"Setting comment for index {index_name} in target database.")
-                    if self.config_parser.get_log_level() == 'DEBUG':
-                        self.logger.debug(f"Executing comment query: {query}")
+                    self.config_parser.print_log_message( 'DEBUG', f"Executing comment query: {query}")
                     self.target_connection.execute_query(query)
 
             all_constraints = self.migrator_tables.fetch_all_constraints()
@@ -808,8 +778,7 @@ class Orchestrator:
                 if constraint_data['constraint_comment']:
                     query = f"""COMMENT ON CONSTRAINT "{constraint_data['constraint_name']}" ON "{constraint_data['target_schema']}"."{constraint_data['target_table']}" IS '{constraint_data['constraint_comment']}'"""
                     self.logger.info(f"Setting comment for constraint {constraint_data['constraint_name']} in target database.")
-                    if self.config_parser.get_log_level() == 'DEBUG':
-                        self.logger.debug(f"Executing comment query: {query}")
+                    self.config_parser.print_log_message( 'DEBUG', f"Executing comment query: {query}")
                     self.target_connection.execute_query(query)
 
             all_triggers = self.migrator_tables.fetch_all_triggers()
@@ -818,8 +787,7 @@ class Orchestrator:
                 if trigger_data['trigger_comment']:
                     query = f"""COMMENT ON TRIGGER "{trigger_data['target_schema']}"."{trigger_data['trigger_name']}" IS '{trigger_data['trigger_comment']}'"""
                     self.logger.info(f"Setting comment for trigger {trigger_data['trigger_name']} in target database.")
-                    if self.config_parser.get_log_level() == 'DEBUG':
-                        self.logger.debug(f"Executing comment query: {query}")
+                    self.config_parser.print_log_message( 'DEBUG', f"Executing comment query: {query}")
                     self.target_connection.execute_query(query)
 
             all_views = self.migrator_tables.fetch_all_views()
@@ -828,8 +796,7 @@ class Orchestrator:
                 if view_data['view_comment']:
                     query = f"""COMMENT ON VIEW "{view_data['target_schema']}"."{view_data['view_name']}" IS '{view_data['view_comment']}'"""
                     self.logger.info(f"Setting comment for view {view_data['view_name']} in target database.")
-                    if self.config_parser.get_log_level() == 'DEBUG':
-                        self.logger.debug(f"Executing comment query: {query}")
+                    self.config_parser.print_log_message( 'DEBUG', f"Executing comment query: {query}")
                     self.target_connection.execute_query(query)
 
             all_user_defined_types = self.migrator_tables.fetch_all_user_defined_types()
@@ -838,8 +805,7 @@ class Orchestrator:
                 if type_data['type_comment']:
                     query = f"""COMMENT ON TYPE "{type_data['target_schema']}"."{type_data['type_name']}" IS '{type_data['type_comment']}'"""
                     self.logger.info(f"Setting comment for user defined type {type_data['type_name']} in target database.")
-                    if self.config_parser.get_log_level() == 'DEBUG':
-                        self.logger.debug(f"Executing comment query: {query}")
+                    self.config_parser.print_log_message( 'DEBUG', f"Executing comment query: {query}")
                     self.target_connection.execute_query(query)
 
             self.target_connection.disconnect()

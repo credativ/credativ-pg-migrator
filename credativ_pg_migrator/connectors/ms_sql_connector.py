@@ -58,7 +58,7 @@ class MsSQLConnector(DatabaseConnector):
         try:
             if self.connection:
                 self.connection.close()
-        except AttributeError:
+        except Exception as e:
             pass
 
     def get_sql_functions_mapping(self, settings):
@@ -97,7 +97,7 @@ class MsSQLConnector(DatabaseConnector):
             cursor.close()
             self.disconnect()
             return tables
-        except Error as e:
+        except Exception as e:
             self.logger.error(f"Error executing query: {query}")
             self.logger.error(e)
             raise
@@ -184,7 +184,7 @@ class MsSQLConnector(DatabaseConnector):
             cursor.close()
             self.disconnect()
             return result
-        except Error as e:
+        except Exception as e:
             self.logger.error(f"Error executing query: {query}")
             self.logger.error(e)
             raise
@@ -311,7 +311,7 @@ class MsSQLConnector(DatabaseConnector):
             self.disconnect()
             return table_indexes
 
-        except Error as e:
+        except Exception as e:
             self.logger.error(f"Error executing query: {query}")
             self.logger.error(e)
             raise
@@ -402,7 +402,7 @@ class MsSQLConnector(DatabaseConnector):
             cursor.close()
             self.disconnect()
             return table_constraints
-        except Error as e:
+        except Exception as e:
             self.logger.error(f"Error executing query: {query}")
             self.logger.error(e)
             raise
@@ -476,7 +476,7 @@ class MsSQLConnector(DatabaseConnector):
             cursor.close()
             self.disconnect()
             return views
-        except Error as e:
+        except Exception as e:
             self.logger.error(f"Error executing query: {query}")
             self.logger.error(e)
             raise
@@ -505,7 +505,7 @@ class MsSQLConnector(DatabaseConnector):
             cursor.close()
             self.disconnect()
             return view_code
-        except Error as e:
+        except Exception as e:
             self.logger.error(f"Error executing query: {query}")
             self.logger.error(e)
             raise

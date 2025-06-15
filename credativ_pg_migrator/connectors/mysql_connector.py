@@ -305,7 +305,7 @@ class MySQLConnector(DatabaseConnector):
                                 # else:
                                 #     try:
                                 #         record[column_name] = memoryview(record[column_name])
-                                #     except Exception:
+                                #     except Exception as e:
                                 #         record[column_name] = memoryview(bytes(record[column_name]))
                             elif column_type.lower() in ['clob']:
                                 # elif isinstance(record[column_name], IfxCblob):
@@ -328,7 +328,7 @@ class MySQLConnector(DatabaseConnector):
                                 #     try:
                                 #         # Try to decode as UTF-8 string (may work for some geometry types)
                                 #         record[column_name] = record[column_name].decode('utf-8', errors='replace')
-                                #     except Exception:
+                                #     except Exception as e:
                                 #         # Fallback: represent as string of bytes
                                 #         record[column_name] = str(record[column_name])
                                 # else:

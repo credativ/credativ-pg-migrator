@@ -44,7 +44,7 @@ class IBMDB2Connector(DatabaseConnector):
         try:
             if self.connection:
                 self.connection.close()
-        except AttributeError:
+        except Exception as e:
             pass
 
     def get_sql_functions_mapping(self, settings):

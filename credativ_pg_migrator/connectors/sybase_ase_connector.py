@@ -60,7 +60,7 @@ class SybaseASEConnector(DatabaseConnector):
         try:
             if self.connection:
                 self.connection.close()
-        except AttributeError:
+        except Exception as e:
             pass
 
     def get_sql_functions_mapping(self, settings):
@@ -121,7 +121,7 @@ class SybaseASEConnector(DatabaseConnector):
             cursor.close()
             self.disconnect()
             return tables
-        except Error as e:
+        except Exception as e:
             self.logger.error(f"Error executing query: {query}")
             self.logger.error(e)
             raise
@@ -286,7 +286,7 @@ class SybaseASEConnector(DatabaseConnector):
             cursor.close()
             self.disconnect()
             return result
-        except Error as e:
+        except Exception as e:
             self.logger.error(f"Error executing query: {query}")
             self.logger.error(e)
             raise
@@ -480,7 +480,7 @@ class SybaseASEConnector(DatabaseConnector):
             self.disconnect()
             return table_indexes
 
-        except Error as e:
+        except Exception as e:
             self.logger.error(f"Error executing query: {query}")
             self.logger.error(e)
             raise
@@ -1157,7 +1157,7 @@ class SybaseASEConnector(DatabaseConnector):
             cursor.close()
             self.disconnect()
             return views
-        except Error as e:
+        except Exception as e:
             self.logger.error(f"Error executing query: {query}")
             self.logger.error(e)
             raise
@@ -1334,7 +1334,7 @@ class SybaseASEConnector(DatabaseConnector):
 
             cursor.close()
             self.disconnect()
-        except Error as e:
+        except Exception as e:
             self.logger.error(f"Error fetching table description for {table_schema}.{table_name}: {e}")
             raise
 

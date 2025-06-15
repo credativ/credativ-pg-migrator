@@ -43,8 +43,7 @@ class SQLAnywhereConnector(DatabaseConnector):
             # self.connection = sqlanydb.connect(connection_string)
         elif self.config_parser.get_connectivity(self.source_or_target) == 'odbc':
             connection_string = self.config_parser.get_connect_string(self.source_or_target)
-            if self.config_parser.get_log_level() == 'DEBUG':
-                self.logger.debug(f"SQL Anywhere ODBC connection string: {connection_string}")
+            self.config_parser.print_log_message('DEBUG', f"SQL Anywhere ODBC connection string: {connection_string}")
             self.connection = pyodbc.connect(connection_string)
 
     def disconnect(self):
@@ -235,10 +234,10 @@ class SQLAnywhereConnector(DatabaseConnector):
             })
 
             if source_table_rows == 0:
-                self.logger.info(f"Worker {worker_id}: Table {source_table} is empty - skipping data migration.")
+                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {source_table} is empty - skipping data migration.")
                 return 0
             else:
-                self.logger.info(f"Worker {worker_id}: Table {source_table} has {source_table_rows} rows - starting data migration.")
+                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {source_table} has {source_table_rows} rows - starting data migration.")
                 offset = 0
                 total_inserted_rows = 0
                 cursor = self.connection.cursor()
@@ -246,8 +245,7 @@ class SQLAnywhereConnector(DatabaseConnector):
                 if migration_limitation:
                     query += f" WHERE {migration_limitation}"
 
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"Worker {worker_id}: Fetching data with cursor using query: {query}")
+                self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Fetching data with cursor using query: {query}")
 
                 # Fetch the data in batches
                 cursor.execute(query)
@@ -256,8 +254,7 @@ class SQLAnywhereConnector(DatabaseConnector):
                     records = cursor.fetchmany(batch_size)
                     if not records:
                         break
-                    if self.config_parser.get_log_level() == 'DEBUG':
-                        self.logger.debug(f"Worker {worker_id}: Fetched {len(records)} rows from source table '{source_table}' using cursor")
+                    self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Fetched {len(records)} rows from source table '{source_table}' using cursor")
 
                     records = [
                         {column['column_name']: value for column, value in zip(source_columns.values(), record)}
@@ -282,8 +279,7 @@ class SQLAnywhereConnector(DatabaseConnector):
                                 # Convert integer to boolean
                                 record[column_name] = bool(record[column_name])
 
-                    if self.config_parser.get_log_level() == 'DEBUG':
-                        self.logger.debug(f"Worker {worker_id}: Starting insert of {len(records)} rows from source table {source_table}")
+                    self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Starting insert of {len(records)} rows from source table {source_table}")
                     inserted_rows = migrate_target_connection.insert_batch({
                         'target_schema': target_schema,
                         'target_table': target_table,
@@ -293,12 +289,12 @@ class SQLAnywhereConnector(DatabaseConnector):
                         'migrator_tables': migrator_tables,
                     })
                     total_inserted_rows += inserted_rows
-                    self.logger.info(f"Worker {worker_id}: Inserted {inserted_rows} (total: {total_inserted_rows} from: {source_table_rows} ({round(total_inserted_rows/source_table_rows*100, 2)}%)) rows into target table {target_table}")
+                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Inserted {inserted_rows} (total: {total_inserted_rows} from: {source_table_rows} ({round(total_inserted_rows/source_table_rows*100, 2)}%)) rows into target table {target_table}")
 
                     # offset += batch_size
 
                 target_table_rows = migrate_target_connection.get_rows_count(target_schema, target_table)
-                self.logger.info(f"Worker {worker_id}: Target table {target_schema}.{target_table} has {target_table_rows} rows")
+                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Target table {target_schema}.{target_table} has {target_table_rows} rows")
                 migrator_tables.update_data_migration_status(protocol_id, True, 'OK', target_table_rows)
                 cursor.close()
                 return target_table_rows

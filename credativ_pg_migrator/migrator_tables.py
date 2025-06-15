@@ -55,66 +55,65 @@ class MigratorTables:
         # Create table if not exists
         self.protocol_connection.execute_query(f"""
         CREATE TABLE IF NOT EXISTS "{self.protocol_schema}".data_types_substitution (
-        source_type TEXT,
-        target_type TEXT,
-        comment TEXT,
-        inserted TIMESTAMP DEFAULT clock_timestamp()
+            table_name TEXT,
+            column_name TEXT,
+            source_type TEXT,
+            target_type TEXT,
+            comment TEXT,
+            inserted TIMESTAMP DEFAULT clock_timestamp()
         )
         """)
 
         # Insert data into the table
-        for source_type, target_type, comment in self.config_parser.get_data_types_substitution():
+        for table_name, column_name, source_type, target_type, comment in self.config_parser.get_data_types_substitution():
             self.protocol_connection.execute_query(f"""
             INSERT INTO "{self.protocol_schema}".data_types_substitution
-            (source_type, target_type, comment)
-            VALUES (%s, %s, %s)
-            """, (source_type, target_type, comment))
+            (table_name, column_name, source_type, target_type, comment)
+            VALUES (%s, %s, %s, %s, %s)
+            """, (table_name, column_name, source_type, target_type, comment))
 
-    def check_data_types_substitution(self, check_type):
+    def check_data_types_substitution(self, settings):
         """
-        Check if replacement for the data type exists in the data_types_substitution table
-        Returns target_data_type
+        Check if replacement for the data type exists in the data_types_substitution table.
+        Returns target_data_type or None.
         """
+        table_name = settings.get('table_name', '')
+        column_name = settings.get('column_name', '')
+        check_type = settings['check_type']
+        where_clauses = []
+        params = []
+
+        if table_name != '':
+            where_clauses.append(f'trim(%s) = trim(table_name)')
+            params.append(table_name)
+
+        if column_name != '':
+            where_clauses.append(f'trim(%s) = trim(column_name)')
+            params.append(column_name)
+
+        where_clauses.append("""
+            (
+            lower(trim(%s)) = lower(trim(source_type))
+            OR trim(%s) ILIKE trim(source_type)
+            OR lower(trim(%s)) ~ lower(trim(source_type))
+            )
+        """)
+        params.extend([check_type, check_type, check_type])
+
+        where_sql = " AND ".join(where_clauses)
         query = f"""
         SELECT target_type
         FROM "{self.protocol_schema}".data_types_substitution
-        WHERE lower(trim($escape${check_type}$escape$)) = lower(trim(source_type))
+        WHERE {where_sql}
+        LIMIT 1
         """
+        self.config_parser.print_log_message('DEBUG2', f"check_data_types_substitution query: {query} - params: {params}")
         cursor = self.protocol_connection.connection.cursor()
-        cursor.execute(query)
+        cursor.execute(query, params)
         result = cursor.fetchone()
         cursor.close()
-        self.config_parser.print_log_message( 'DEBUG2', f"check_data_types_substitution query: {query} - result: {result}")
-        if result:
-            return result[0]
-        else:
-            query = f"""
-            SELECT target_type
-            FROM "{self.protocol_schema}".data_types_substitution
-            WHERE trim($escape${check_type}$escape$) ILIKE trim(source_type)
-            """
-            cursor = self.protocol_connection.connection.cursor()
-            cursor.execute(query)
-            result = cursor.fetchone()
-            cursor.close()
-            self.config_parser.print_log_message( 'DEBUG2', f"check_data_types_substitution query: {query} - result: {result}")
-            if result:
-                return result[0]
-            else:
-                query = f"""
-                SELECT target_type
-                FROM "{self.protocol_schema}".data_types_substitution
-                WHERE lower(trim($escape${check_type}$escape$)) ~ lower(trim(source_type))
-                """
-                cursor = self.protocol_connection.connection.cursor()
-                cursor.execute(query)
-                result = cursor.fetchone()
-                cursor.close()
-                self.config_parser.print_log_message( 'DEBUG2', f"check_data_types_substitution query: {query} - result: {result}")
-                if result:
-                    return result[0]
-                else:
-                    return None
+        self.config_parser.print_log_message('DEBUG2', f"check_data_types_substitution result: {result}")
+        return result[0] if result else None
 
     def prepare_data_migration_limitation(self):
         # Drop table if exists

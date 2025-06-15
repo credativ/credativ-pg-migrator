@@ -110,15 +110,16 @@ exclude_funcprocs:
 
 
 # Data types substitution
-# source data type (eventually including length), target data type (eventually including length), comment
+# table name, column name, source data type (eventually including length), target data type (eventually including length), comment
 # Source data type can be specified as precise match, pattern for LIKE operator or regular expression - checked in this order
 # Matching is case-insensitive
 data_types_substitution:
-  - ["TypMacAdresse", "TEXT", 'Does not have direct equivalent in PostgreSQL, using TEXT']
-  - ["TypID", "BIGINT", 'Numeric PK is not supported in PostgreSQL, using BIGINT']
-  - ["numeric(_,0)", "INTEGER", 'Sybase numeric type with no decimal places, using INTEGER']
-  - ["numeric(1_,0)", "BIGINT", 'Sybase numeric type with no decimal places, using BIGINT']
-  - ["numeric(2_,0)", "NUMERIC", 'Sybase Integer bigger than 32 bits, using NUMERIC - will probably need to change to BIGINT later']
+  - ["", "", "TypMacAdresse", "TEXT", 'Does not have direct equivalent in PostgreSQL, using TEXT']
+  - ["", "", "TypID", "BIGINT", 'Numeric PK is not supported in PostgreSQL, using BIGINT']
+  - ["", "", "numeric(_,0)", "INTEGER", 'Sybase numeric type with no decimal places, using INTEGER']
+  - ["", "", "numeric(1_,0)", "BIGINT", 'Sybase numeric type with no decimal places, using BIGINT']
+  - ["", "", "numeric(2_,0)", "NUMERIC", 'Sybase Integer bigger than 32 bits, using NUMERIC - will probably need to change to BIGINT later']
+  - ["staff", "password", "varchar(40)", "TEXT", 'Password in the staff table is varchar(40) but migrated value exceeds this length, using TEXT']
 
 # Default values substitution
 # column_name, source_column_data_type, source_default_value, target_default_value

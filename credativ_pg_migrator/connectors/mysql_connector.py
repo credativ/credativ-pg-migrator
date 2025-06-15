@@ -295,20 +295,7 @@ class MySQLConnector(DatabaseConnector):
                             if column_type.lower() in ['blob']:
                                 if record[column_name] is not None:
                                     record[column_name] = bytes(record[column_name])
-                                # # Ensure BLOB is bytes, wrap as memoryview for binary
-                                # if record[column_name] is None:
-                                #     record[column_name] = memoryview(b'')
-                                # elif isinstance(record[column_name], (bytes, bytearray)):
-                                #     record[column_name] = memoryview(record[column_name])
-                                # elif isinstance(record[column_name], str):
-                                #     record[column_name] = memoryview(record[column_name].encode('utf-8'))
-                                # else:
-                                #     try:
-                                #         record[column_name] = memoryview(record[column_name])
-                                #     except Exception as e:
-                                #         record[column_name] = memoryview(bytes(record[column_name]))
                             elif column_type.lower() in ['clob']:
-                                # elif isinstance(record[column_name], IfxCblob):
                                 record[column_name] = record[column_name].getSubString(1, int(record[column_name].length()))  # Convert IfxCblob to string
                                 # record[column_name] = bytes(record[column_name].getBytes(1, int(record[column_name].length())))  # Convert IfxBblob to bytes
                                 # record[column_name] = record[column_name].read()  # Convert IfxBblob to bytes

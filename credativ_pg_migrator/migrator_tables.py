@@ -84,6 +84,7 @@ class MigratorTables:
         cursor.execute(query)
         result = cursor.fetchone()
         cursor.close()
+        self.config_parser.print_log_message( 'DEBUG2', f"check_data_types_substitution query: {query} - result: {result}")
         if result:
             return result[0]
         else:
@@ -96,6 +97,7 @@ class MigratorTables:
             cursor.execute(query)
             result = cursor.fetchone()
             cursor.close()
+            self.config_parser.print_log_message( 'DEBUG2', f"check_data_types_substitution query: {query} - result: {result}")
             if result:
                 return result[0]
             else:
@@ -108,6 +110,7 @@ class MigratorTables:
                 cursor.execute(query)
                 result = cursor.fetchone()
                 cursor.close()
+                self.config_parser.print_log_message( 'DEBUG2', f"check_data_types_substitution query: {query} - result: {result}")
                 if result:
                     return result[0]
                 else:

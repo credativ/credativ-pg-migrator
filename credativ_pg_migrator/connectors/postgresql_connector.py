@@ -751,8 +751,15 @@ class PostgreSQLConnector(DatabaseConnector):
                 for item in data:
                     row = []
                     for col in columns.keys():
-                        col_name = columns[col]['column_name']
-                        row.append(item.get(col_name))
+                        column_name = columns[col]['column_name']
+                        # column_type = columns[col]['data_type'].lower()
+                        # if column_type in ['bytea', 'blob']:
+                        #     if item.get(column_name) is not None:
+                        #         row.append(psycopg2.Binary(item.get(column_name)))
+                        #     else:
+                        #         row.append(None)
+                        # else:
+                        row.append(item.get(column_name))
                     formatted_data.append(tuple(row))
                 data = formatted_data
             else:

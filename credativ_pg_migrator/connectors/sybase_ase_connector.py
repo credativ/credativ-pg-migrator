@@ -133,12 +133,10 @@ class SybaseASEConnector(DatabaseConnector):
         try:
             self.connect()
             cursor = self.connection.cursor()
-            if self.config_parser.get_log_level() == 'DEBUG':
-                self.logger.debug(f"Sybase ASE: Reading columns for {table_schema}.{table_name}")
+            self.config_parser.print_log_message('DEBUG', f"Sybase ASE: Reading columns for {table_schema}.{table_name}")
             cursor.execute("SELECT @@unicharsize, @@ncharsize")
             unichar_size, nchar_size = cursor.fetchone()
-            if self.config_parser.get_log_level() == 'DEBUG':
-                self.logger.debug(f"Sybase ASE: unichar size: {unichar_size}, nchar size: {nchar_size}")
+            self.config_parser.print_log_message('DEBUG', f"Sybase ASE: unichar size: {unichar_size}, nchar size: {nchar_size}")
             query = f"""
                 SELECT
                     c.colid as ordinal_position,
@@ -179,8 +177,7 @@ class SybaseASEConnector(DatabaseConnector):
             """
             cursor.execute(query)
             for row in cursor.fetchall():
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"Processing column: {row}")
+                self.config_parser.print_log_message('DEBUG', f"Processing column: {row}")
                 ordinal_position = row[0]
                 column_name = row[1].strip()
                 data_type = row[2].strip()
@@ -463,8 +460,7 @@ class SybaseASEConnector(DatabaseConnector):
             indexes = cursor.fetchall()
 
             for index in indexes:
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"Processing index: {index}")
+                self.config_parser.print_log_message('DEBUG', f"Processing index: {index}")
                 index_name = index[0].strip()
                 index_unique = index[1]  ## integer 0 or 1
                 index_columns = index[2].strip()
@@ -527,8 +523,7 @@ class SybaseASEConnector(DatabaseConnector):
         ## status & 64 = 64 - foreign key constraint (0x0040)
         self.connect()
         cursor = self.connection.cursor()
-        if self.config_parser.get_log_level() == 'DEBUG':
-            self.logger.debug(f"Reading constraints for {source_table_name}")
+        self.config_parser.print_log_message('DEBUG', f"Reading constraints for {source_table_name}")
         cursor.execute(index_query)
         constraints = cursor.fetchall()
 
@@ -607,9 +602,8 @@ class SybaseASEConnector(DatabaseConnector):
                 AND (o.sysstat & 4 = 4 or o.sysstat & 10 = 10 or o.sysstat & 12 = 12)
             ORDER BY o.name
         """
-        # if self.config_parser.get_log_level() == 'DEBUG':
-        #     self.logger.debug(f"Fetching function/procedure names for schema {schema}")
-        #     self.logger.debug(f"Query: {query}")
+        self.config_parser.print_log_message('DEBUG3', f"Fetching function/procedure names for schema {schema}")
+        self.config_parser.print_log_message('DEBUG3', f"Query: {query}")
         self.connect()
         cursor = self.connection.cursor()
         cursor.execute(query)
@@ -672,8 +666,7 @@ class SybaseASEConnector(DatabaseConnector):
 
             for command in commands:
                 command = command.strip().upper()
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"Processing command: '{command}'")
+                self.config_parser.print_log_message('DEBUG3', f"Processing command: '{command}'")
 
                 if command.startswith('--'):
                     command = command.replace(command, f"\n/* {command.strip()} */;")
@@ -766,8 +759,7 @@ class SybaseASEConnector(DatabaseConnector):
 
     def get_rows_count(self, table_schema: str, table_name: str):
         query = f"""SELECT COUNT(*) FROM {table_schema}.{table_name} """
-        if self.config_parser.get_log_level() == 'DEBUG':
-            self.logger.debug(f"get_rows_count query: {query}")
+        self.config_parser.print_log_message('DEBUG3',f"get_rows_count query: {query}")
         cursor = self.connection.cursor()
         cursor.execute(query)
         count = cursor.fetchone()[0]
@@ -790,8 +782,7 @@ class SybaseASEConnector(DatabaseConnector):
 
     #     if primary_key_columns_count == 1 and primary_key_columns_types in ('BIGINT', 'INTEGER', 'NUMERIC', 'REAL', 'FLOAT', 'DOUBLE PRECISION', 'DECIMAL', 'SMALLINT', 'TINYINT'):
     #         # primary key is one column of numeric type - analysis with min/max values is much quicker
-    #         if self.config_parser.get_log_level() == 'DEBUG':
-    #             self.logger.debug(f"Worker: {worker_id}: PK analysis: {primary_key_columns} ({primary_key_columns_types}): min/max analysis")
+    #         self.config_parser.print_log_message('DEBUG', f"Worker: {worker_id}: PK analysis: {primary_key_columns} ({primary_key_columns_types}): min/max analysis")
 
     #         current_batch_percent = 20
 
@@ -807,8 +798,7 @@ class SybaseASEConnector(DatabaseConnector):
     #         sybase_cursor.execute(f"SELECT MAX({primary_key_columns}) FROM {schema_name}.{table_name}")
     #         max_id = sybase_cursor.fetchone()[0]
 
-    #         if self.config_parser.get_log_level() == 'DEBUG':
-    #             self.logger.debug(f"Worker: {worker_id}: PK analysis: {primary_key_columns}: min_id: {min_id}, max_id: {max_id}")
+    #         self.config_parser.print_log_message('DEBUG', f"Worker: {worker_id}: PK analysis: {primary_key_columns}: min_id: {min_id}, max_id: {max_id}")
 
     #         total_range = int(max_id) - int(min_id)
     #         current_start = min_id
@@ -822,13 +812,11 @@ class SybaseASEConnector(DatabaseConnector):
     #             if current_batch_size < analyze_batch_size:
     #                 current_batch_size = analyze_batch_size
     #                 current_decrease_ratio = 2
-    #                 if self.config_parser.get_log_level() == 'DEBUG':
-    #                     self.logger.debug(f"Worker: {worker_id}: PK analysis: {loop_counter}: resetting current_decrease_ratio to {current_decrease_ratio}")
+    #                 self.config_parser.print_log_message('DEBUG', f"Worker: {worker_id}: PK analysis: {loop_counter}: resetting current_decrease_ratio to {current_decrease_ratio}")
 
     #             current_end = current_start + current_batch_size
 
-    #             if self.config_parser.get_log_level() == 'DEBUG':
-    #                 self.logger.debug(f"Worker: {worker_id}: PK analysis: {loop_counter}: Loop counter: {loop_counter}, current_batch_percent: {round(current_batch_percent, 8)}, current_batch_size: {current_batch_size}, current_start: {current_start} (min: {min_id}), current_end: {current_end} (max: {max_id}), perc: {round(current_start / max_id * 100, 4)}")
+    #             self.config_parser.print_log_message('DEBUG', f"Worker: {worker_id}: PK analysis: {loop_counter}: Loop counter: {loop_counter}, current_batch_percent: {round(current_batch_percent, 8)}, current_batch_size: {current_batch_size}, current_start: {current_start} (min: {min_id}), current_end: {current_end} (max: {max_id}), perc: {round(current_start / max_id * 100, 4)}")
 
     #             if current_end > max_id:
     #                 current_end = max_id
@@ -837,15 +825,13 @@ class SybaseASEConnector(DatabaseConnector):
     #             sybase_cursor.execute(f"""SELECT COUNT(*) FROM {schema_name}.{table_name} WHERE {primary_key_columns} BETWEEN %s AND %s""", (current_start, current_end))
     #             testing_row_count = sybase_cursor.fetchone()[0]
 
-    #             if self.config_parser.get_log_level() == 'DEBUG':
-    #                 self.logger.debug(f"Worker: {worker_id}: PK analysis: {loop_counter}: Testing row count: {testing_row_count}")
+    #             self.config_parser.print_log_message('DEBUG', f"Worker: {worker_id}: PK analysis: {loop_counter}: Testing row count: {testing_row_count}")
 
     #             if testing_row_count == previous_row_count:
     #                 same_previous_row_count += 1
     #                 if same_previous_row_count >= 2:
     #                     current_decrease_ratio *= 2
-    #                     if self.config_parser.get_log_level() == 'DEBUG':
-    #                         self.logger.debug(f"Worker: {worker_id}: PK analysis: {loop_counter}: changing current_decrease_ratio to {current_decrease_ratio}")
+    #                     self.config_parser.print_log_message('DEBUG', f"Worker: {worker_id}: PK analysis: {loop_counter}: changing current_decrease_ratio to {current_decrease_ratio}")
     #                     same_previous_row_count = 0
     #             else:
     #                 same_previous_row_count = 0
@@ -854,14 +840,12 @@ class SybaseASEConnector(DatabaseConnector):
 
     #             if testing_row_count > analyze_batch_size:
     #                 current_batch_percent /= current_decrease_ratio
-    #                 if self.config_parser.get_log_level() == 'DEBUG':
-    #                     self.logger.debug(f"Worker: {worker_id}: PK analysis: {loop_counter}: Decreasing analyze_batch_percent to {round(current_batch_percent, 8)}")
+    #                 self.config_parser.print_log_message('DEBUG', f"Worker: {worker_id}: PK analysis: {loop_counter}: Decreasing analyze_batch_percent to {round(current_batch_percent, 8)}")
     #                 continue
 
     #             if testing_row_count == 0:
     #                 current_batch_percent *= 1.5
-    #                 if self.config_parser.get_log_level() == 'DEBUG':
-    #                     self.logger.debug(f"Worker: {worker_id}: PK analysis: {loop_counter}: Increasing analyze_batch_percent to {round(current_batch_percent, 8)} without restarting loop")
+    #                 self.config_parser.print_log_message('DEBUG', f"Worker: {worker_id}: PK analysis: {loop_counter}: Increasing analyze_batch_percent to {round(current_batch_percent, 8)} without restarting loop")
 
     #             sybase_cursor.execute(f"""SELECT
     #                         %s::bigint AS batch_start,
@@ -876,16 +860,13 @@ class SybaseASEConnector(DatabaseConnector):
     #                 insert_batch_start = result[0]
     #                 insert_batch_end = result[1]
     #                 insert_row_count = result[2]
-    #                 if self.config_parser.get_log_level() == 'DEBUG':
-    #                     self.logger.debug(f"Worker: {worker_id}: PK analysis: {loop_counter}: Insert batch into temp table: start: {insert_batch_start}, end: {insert_batch_end}, row count: {insert_row_count}")
+    #                 self.config_parser.print_log_message('DEBUG', f"Worker: {worker_id}: PK analysis: {loop_counter}: Insert batch into temp table: start: {insert_batch_start}, end: {insert_batch_end}, row count: {insert_row_count}")
     #                 migrator_tables.protocol_connection.execute_query(f"""INSERT INTO "{temp_table}" (batch_start, batch_end, row_count) VALUES (%s, %s, %s)""", (insert_batch_start, insert_batch_end, insert_row_count))
 
     #             current_start = current_end + 1
-    #             if self.config_parser.get_log_level() == 'DEBUG':
-    #                 self.logger.debug(f"Worker: {worker_id}: PK analysis: {loop_counter}: loop end - new current_start: {current_start}")
+    #             self.config_parser.print_log_message('DEBUG', f"Worker: {worker_id}: PK analysis: {loop_counter}: loop end - new current_start: {current_start}")
 
-    #         if self.config_parser.get_log_level() == 'DEBUG':
-    #             self.logger.debug(f"Worker: {worker_id}: PK analysis: {loop_counter}: second loop")
+    #         self.config_parser.print_log_message('DEBUG', f"Worker: {worker_id}: PK analysis: {loop_counter}: second loop")
 
     #         current_start = min_id
     #         while current_start <= max_id:
@@ -910,8 +891,7 @@ class SybaseASEConnector(DatabaseConnector):
     #                 insert_batch_start = result[0]
     #                 insert_batch_end = result[1]
     #                 insert_row_count = result[2]
-    #                 if self.config_parser.get_log_level() == 'DEBUG':
-    #                     self.logger.debug(f"Worker: {worker_id}: PK analysis: {loop_counter}: Insert batch into protocol table: start: {insert_batch_start}, end: {insert_batch_end}, row count: {insert_row_count}")
+    #                 self.config_parser.print_log_message('DEBUG', (f"Worker: {worker_id}: PK analysis: {loop_counter}: Insert batch into protocol table: start: {insert_batch_start}, end: {insert_batch_end}, row count: {insert_row_count}")
 
     #             values = {}
     #             values['source_schema'] = schema_name
@@ -938,14 +918,12 @@ class SybaseASEConnector(DatabaseConnector):
 
             # # we need to do slower analysis with selecting all values of primary key
             # # necessary for composite keys or non-numeric keys
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Worker: {worker_id}: PK analysis: {primary_key_columns} ({primary_key_columns_types}): analyzing all PK values")
+            # self.config_parser.print_log_message('DEBUG', f"Worker: {worker_id}: PK analysis: {primary_key_columns} ({primary_key_columns_types}): analyzing all PK values")
 
             # primary_key_columns_list = primary_key_columns.split(',')
             # primary_key_columns_types_list = primary_key_columns_types.split(',')
             # temp_table_structure = ', '.join([f"{column.strip()} {column_type.strip()}" for column, column_type in zip(primary_key_columns_list, primary_key_columns_types_list)])
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Worker: {worker_id}: PK analysis: {primary_key_columns}: temp table structure: {temp_table_structure}")
+            # self.config_parser.print_log_message('DEBUG', f"Worker: {worker_id}: PK analysis: {primary_key_columns}: temp table structure: {temp_table_structure}")
 
             # # step 1: create temp table with all PK values
             # sybase_cursor = self.connection.cursor()
@@ -958,12 +936,10 @@ class SybaseASEConnector(DatabaseConnector):
             # rows = sybase_cursor.fetchall()
             # pk_temp_table_row_count = len(rows)
             # for row in rows:
-            #     # if self.config_parser.get_log_level() == 'DEBUG':
-            #     #     self.logger.debug(f"Worker: {worker_id}: PK analysis: {primary_key_columns}: row: {row}")
+            #     # self.config_parser.print_log_message('DEBUG', f"Worker: {worker_id}: PK analysis: {primary_key_columns}: row: {row}")
             #     insert_values = ', '.join([f"'{value}'" if isinstance(value, str) else str(value) for value in row])
             #     migrator_tables.protocol_connection.execute_query(f"""INSERT INTO "{temp_table}" ({primary_key_columns}) VALUES ({insert_values})""")
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Worker: {worker_id}: PK analysis: {primary_key_columns}: Inserted {pk_temp_table_row_count} rows into temp table {temp_table}")
+            # self.config_parser.print_log_message('DEBUG', f"Worker: {worker_id}: PK analysis: {primary_key_columns}: Inserted {pk_temp_table_row_count} rows into temp table {temp_table}")
 
             # # step 2: analyze distribution of PK values
             # pk_temp_table_offset = 0
@@ -990,8 +966,7 @@ class SybaseASEConnector(DatabaseConnector):
             #     if not rec_max_values:
             #         break
 
-            #     if self.config_parser.get_log_level() == 'DEBUG':
-            #         self.logger.debug(f"Worker: {worker_id}: PK analysis: {batch_loop}: Loop counter: {batch_loop}, PK values: {rec_min_values} / {rec_max_values}")
+            #     self.config_parser.print_log_message('DEBUG', f"Worker: {worker_id}: PK analysis: {batch_loop}: Loop counter: {batch_loop}, PK values: {rec_min_values} / {rec_max_values}")
 
             #     values = {}
             #     values['source_schema'] = schema_name
@@ -1057,8 +1032,7 @@ class SybaseASEConnector(DatabaseConnector):
                 if migration_limitation:
                     query += f" WHERE {migration_limitation}"
 
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"Worker {worker_id}: Fetching data with cursor using query: {query}")
+                self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Fetching data with cursor using query: {query}")
 
                 sybase_cursor = self.connection.cursor()
                 sybase_cursor.execute(query)
@@ -1067,8 +1041,7 @@ class SybaseASEConnector(DatabaseConnector):
                     records = sybase_cursor.fetchmany(batch_size)
                     if not records:
                         break
-                    if self.config_parser.get_log_level() == 'DEBUG':
-                        self.logger.debug(f"Worker {worker_id}: Fetched {len(records)} rows from source table '{source_table}' using cursor")
+                    self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Fetched {len(records)} rows from source table '{source_table}' using cursor")
 
                     # Convert records to a list of dictionaries
                     records = [
@@ -1085,8 +1058,7 @@ class SybaseASEConnector(DatabaseConnector):
                                 record[column_name] = str(record[column_name]) if record[column_name] is not None else None
 
                     # Insert batch into target table
-                    if self.config_parser.get_log_level() == 'DEBUG':
-                        self.logger.debug(f"Worker {worker_id}: Starting insert of {len(records)} rows from source table {source_table}")
+                    self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Starting insert of {len(records)} rows from source table {source_table}")
                     inserted_rows = migrate_target_connection.insert_batch({
                         'target_schema': target_schema,
                         'target_table': target_table,
@@ -1109,8 +1081,7 @@ class SybaseASEConnector(DatabaseConnector):
             self.logger.error(traceback.format_exc())
             raise e
         finally:
-            if self.config_parser.get_log_level() == 'DEBUG':
-                self.logger.debug(f"Worker {worker_id}: Finished processing table {source_table}.")
+            self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Finished processing table {source_table}.")
             return target_table_rows
 
     def convert_trigger(self, settings):
@@ -1137,9 +1108,8 @@ class SybaseASEConnector(DatabaseConnector):
                 AND (o.sysstat & 8 = 8)
             ORDER BY o.name
         """
-        # if self.config_parser.get_log_level() == 'DEBUG':
-        #     self.logger.debug(f"Fetching function/procedure names for schema {schema}")
-        #     self.logger.debug(f"Query: {query}")
+        self.config_parser.print_log_message('DEBUG3', f"Fetching function/procedure names for schema {schema_name}")
+        self.config_parser.print_log_message('DEBUG3', f"Query: {query}")
         self.connect()
         cursor = self.connection.cursor()
         cursor.execute(query)
@@ -1216,8 +1186,7 @@ class SybaseASEConnector(DatabaseConnector):
         return view_code_str
 
     def convert_view_code(self, view_code: str, settings: dict):
-        if self.config_parser.get_log_level() == 'DEBUG':
-            self.logger.debug(f"settings in convert_view_code: {settings}")
+        self.config_parser.print_log_message('DEBUG', f"settings in convert_view_code: {settings}")
         converted_code = view_code
         if settings['target_db_type'] == 'postgresql':
             sql_functions_mapping = self.get_sql_functions_mapping({ 'target_db_type': settings['target_db_type'] })
@@ -1226,8 +1195,7 @@ class SybaseASEConnector(DatabaseConnector):
                 for src_func, tgt_func in sql_functions_mapping.items():
                     escaped_src_func = re.escape(src_func)
                     converted_code = re.sub(rf"(?i){escaped_src_func}", tgt_func, converted_code, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
-                    if self.config_parser.get_log_level() == 'DEBUG':
-                        self.logger.debug(f"Checking convertion of function {src_func} to {tgt_func} in view code")
+                    self.config_parser.print_log_message('DEBUG', f"Checking convertion of function {src_func} to {tgt_func} in view code")
 
             converted_code = converted_code.replace(f"{settings['source_database']}..", f"{settings['target_schema']}.")
             converted_code = converted_code.replace(f"{settings['source_database']}.{settings['source_schema']}.", f"{settings['target_schema']}.")
@@ -1335,8 +1303,7 @@ class SybaseASEConnector(DatabaseConnector):
 
         cursor.close()
         self.disconnect()
-        if self.config_parser.get_log_level() == 'DEBUG':
-            self.logger.debug(f"Found domains: {domains}")
+        self.config_parser.print_log_message('DEBUG', f"Found domains: {domains}")
         return domains
 
     def get_create_domain_sql(self, settings):

@@ -153,8 +153,7 @@ class OracleConnector(DatabaseConnector):
                     'comment': '',
                 }
 
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"Checking if default value is a sequence for column {'column_name'} ({column_default})...")
+                self.config_parser.print_log_message('DEBUG', f"Checking if default value is a sequence for column {column_name} ({column_default})...")
                 if (isinstance(column_default, str)
                     and 'nextval' in column_default.lower()):
                     parts = column_default.replace('"', '').split(".")
@@ -162,8 +161,7 @@ class OracleConnector(DatabaseConnector):
                         owner, seq_name, _ = parts
                         sequence_details = self.get_sequence_details(owner, seq_name)
                         if sequence_details:
-                            if self.config_parser.get_log_level() == 'DEBUG':
-                                self.logger.debug(f"Substituting default value containing sequence: {column_default}")
+                            self.config_parser.print_log_message('DEBUG', f"Found sequence {sequence_details['name']} for column {column_name}.")
                             result[column_id]['column_default_value'] = ""
                             result[column_id]['is_identity'] = 'YES'
                             # if data_type in ('NUMBER'):
@@ -364,8 +362,7 @@ class OracleConnector(DatabaseConnector):
                     if ddl:
                         ddl = ddl.decode('utf-8') if isinstance(ddl, bytes) else ddl
                         table_indexes[order_num]['index_sql'] = f"{ddl}"
-                        if self.config_parser.get_log_level() == 'DEBUG':
-                            self.logger.debug(f"Fetched DDL for index {index_info['index_name']}: {ddl}")
+                        self.config_parser.print_log_message('DEBUG', f"Fetched DDL for index {index_info['index_name']}: {ddl}")
                 except cx_Oracle.DatabaseError as e:
                     self.logger.error(f"Error fetching DDL for index {index_info['index_name']}: {e}")
                     table_indexes[order_num]['index_sql'] = f"Error fetching DDL: {e}"
@@ -379,15 +376,13 @@ class OracleConnector(DatabaseConnector):
                     for col in hidden_columns:
                         col_name = col[0]
                         col_default = col[1] if col[1] else 'NULL'
-                        if self.config_parser.get_log_level() == 'DEBUG':
-                            self.logger.debug(f"Hidden column: {col_name}, Default value: {col_default}")
+                        self.config_parser.print_log_message('DEBUG', f"Hidden column: {col_name}, Default value: {col_default}")
 
                         for order_num, index_info in table_indexes.items():
                             if index_info['index_hidden_columns_count'] > 0:
                                 if col_name in index_info['index_columns']:
                                     index_info['index_columns'] = index_info['index_columns'].replace(col_name, f"{col_default}")
-                                    if self.config_parser.get_log_level() == 'DEBUG':
-                                        self.logger.debug(f"Updated index {index_info['index_name']} with hidden column {col_name} and default value {col_default}")
+                                    self.config_parser.print_log_message('DEBUG', f"Updated index {index_info['index_name']} with hidden column {col_name} and default value {col_default}")
                 except cx_Oracle.DatabaseError as e:
                     self.logger.error(f"Error fetching hidden columns for table {source_table_schema}.{source_table_name}: {e}")
 

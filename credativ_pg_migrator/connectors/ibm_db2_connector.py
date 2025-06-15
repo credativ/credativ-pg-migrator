@@ -273,28 +273,26 @@ class IBMDB2Connector(DatabaseConnector):
             })
 
             if source_table_rows == 0:
-                self.logger.info(f"Worker {worker_id}: Table {source_table} is empty - skipping data migration.")
+                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {source_table} is empty - skipping data migration.")
                 return 0
             else:
                 part_name = 'migrate_table in batches using cursor'
-                self.logger.info(f"Worker {worker_id}: Table {source_table} has {source_table_rows} rows - starting data migration.")
+                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {source_table} has {source_table_rows} rows - starting data migration.")
 
                 # Open a cursor and fetch rows in batches
                 query = f'''SELECT * FROM {source_schema.upper()}."{source_table}"'''
                 if migration_limitation:
                     query += f" WHERE {migration_limitation}"
 
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"Worker {worker_id}: Fetching data with cursor using query: {query}")
+                self.config_parser.print_log_message( 'DEBUG', f"Worker {worker_id}: Fetching data with cursor using query: {query}")
 
                 # # polars library is not always available
                 # for df in pl.read_database(query, self.connection, iter_batches=True, batch_size=batch_size):
                 #     if df.is_empty():
                 #         break
 
-                #     if self.config_parser.get_log_level() == 'DEBUG':
-                #         self.logger.debug(f"Worker {worker_id}: Fetched {len(df)} rows from source table {source_table} using cursor.")
-
+                #     self.config_parser.print_log_message( 'DEBUG', f"Worker {worker_id}: Fetched {len(df)} rows from source table {source_table} using cursor.")
+                #
                 #     # Convert Polars DataFrame to list of dictionaries for insertion
                 #     records = df.to_dicts()
 
@@ -305,8 +303,7 @@ class IBMDB2Connector(DatabaseConnector):
                     records = cursor.fetchmany(batch_size)
                     if not records:
                         break
-                    if self.config_parser.get_log_level() == 'DEBUG':
-                        self.logger.debug(f"Worker {worker_id}: Fetched {len(records)} rows from source table '{source_table}' using cursor")
+                    self.config_parser.print_log_message( 'DEBUG', f"Worker {worker_id}: Fetched {len(records)} rows from source table '{source_table}' using cursor")
 
                     # Convert records to a list of dictionaries
                     records = [
@@ -323,8 +320,7 @@ class IBMDB2Connector(DatabaseConnector):
                                 record[column_name] = str(record[column_name]) if record[column_name] is not None else None
 
                     # Insert batch into target table
-                    if self.config_parser.get_log_level() == 'DEBUG':
-                        self.logger.debug(f"Worker {worker_id}: Starting insert of {len(records)} rows from source table {source_table}")
+                    self.config_parser.print_log_message( 'DEBUG', f"Worker {worker_id}: Inserting {len(records)} rows into target table '{target_table}'")
                     inserted_rows = migrate_target_connection.insert_batch({
                         'target_schema': target_schema,
                         'target_table': target_table,
@@ -334,10 +330,10 @@ class IBMDB2Connector(DatabaseConnector):
                         'migrator_tables': migrator_tables,
                     })
                     total_inserted_rows += inserted_rows
-                    self.logger.info(f"Worker {worker_id}: Inserted {inserted_rows} (total: {total_inserted_rows} from: {source_table_rows} ({round(total_inserted_rows/source_table_rows*100, 2)}%)) rows into target table '{target_table}'")
+                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Inserted {inserted_rows} (total: {total_inserted_rows} from: {source_table_rows} ({round(total_inserted_rows/source_table_rows*100, 2)}%)) rows into target table '{target_table}'")
 
                 target_table_rows = migrate_target_connection.get_rows_count(target_schema, target_table)
-                self.logger.info(f"Worker {worker_id}: Target table {target_schema}.{target_table} has {target_table_rows} rows")
+                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Target table {target_schema}.{target_table} has {target_table_rows} rows")
                 migrator_tables.update_data_migration_status(protocol_id, True, 'OK', target_table_rows)
                 cursor.close()
                 return target_table_rows
@@ -389,12 +385,11 @@ class IBMDB2Connector(DatabaseConnector):
 
             cursor.close()
             self.disconnect()
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Indexes for table {source_table_name} ({source_table_schema}): {index_columns_data_types_str}")
+            self.config_parser.print_log_message( 'DEBUG2', f"Indexes for table {source_table_name} ({source_table_schema}): {index_columns_data_types_str}")
             return table_indexes
         except Exception as e:
-            self.logger.error(f"Error executing query: {query}")
-            self.logger.error(e)
+            self.config_parser.print_log_message( 'ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message( 'ERROR', str(e))
             raise
 
     def get_create_index_sql(self, settings):

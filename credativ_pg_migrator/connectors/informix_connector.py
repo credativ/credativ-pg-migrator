@@ -169,8 +169,7 @@ class InformixConnector(DatabaseConnector):
         try:
             self.connect()
             cursor = self.connection.cursor()
-            if self.config_parser.get_log_level() == 'DEBUG':
-                self.logger.debug(f"Informix: Reading columns for {table_schema}.{table_name}")
+            self.config_parser.print_log_message('DEBUG', f"Informix: Reading columns for {table_schema}.{table_name}")
             cursor.execute(query)
             for row in cursor.fetchall():
                 column_number = row[0]
@@ -340,8 +339,7 @@ class InformixConnector(DatabaseConnector):
             indexes = cursor.fetchall()
 
             for index in indexes:
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"Processing index: {index}")
+                self.config_parser.print_log_message('DEBUG', f"Processing index: {index}")
                 index_name = index[0].strip()
                 index_type = index[1].strip()
                 index_owner = index[3].strip()
@@ -366,8 +364,7 @@ class InformixConnector(DatabaseConnector):
                 #     index_name = constraint[1].strip()
 
                 index_columns = ', '.join([f'"{col}"' for col in columns])
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"Columns list: {index_columns}, index type: {index_type}, clustered: {index[2]}")
+                self.config_parser.print_log_message('DEBUG', f"Columns list: {index_columns}, index type: {index_type}, clustered: {index[2]}")
 
                 table_indexes[order_num] = {
                     'index_name': index_name,
@@ -406,8 +403,7 @@ class InformixConnector(DatabaseConnector):
         self.connect()
         cursor = self.connection.cursor()
 
-        # if self.config_parser.get_log_level() == 'DEBUG':
-        #     self.logger.debug(f"Reading constraints for {target_table_name}")
+        # self.config_parser.print_log_message('DEBUG', f"Reading constraints for {target_table_name}")
         # cursor.execute(index_query)
         # indexes = cursor.fetchall()
 
@@ -440,8 +436,7 @@ class InformixConnector(DatabaseConnector):
                 index_name = constraint[2]
 
                 if constraint_type == 'R':
-                    if self.config_parser.get_log_level() == 'DEBUG':
-                        self.logger.info(f"Processing table: {source_table_name} ({source_table_id}) - foreign key: {constraint_name}")
+                    self.config_parser.print_log_message('DEBUG', f"Processing table: {source_table_name} ({source_table_id}) - foreign key: {constraint_name}")
 
                     # Get foreign key details
                     find_fk_query = f"""
@@ -474,8 +469,7 @@ class InformixConnector(DatabaseConnector):
                         raise ValueError(f"ERROR: Multiple foreign key details found for table {source_table_name} and index {index_name}/{constraint_name}")
 
                     fk_details = cursor.fetchone()
-                    if self.config_parser.get_log_level() == 'DEBUG':
-                        self.logger.debug(f"Source table {source_table_name}: FOREIGN KEY details: {fk_details}")
+                    self.config_parser.print_log_message('DEBUG', f"Source table {source_table_name}: FOREIGN KEY details: {fk_details}")
 
                     # main_schema = fk_details[0]
                     # main_table_name = fk_details[1]
@@ -498,8 +492,7 @@ class InformixConnector(DatabaseConnector):
                     """
                     cursor.execute(find_ck_query)
                     ck_details = cursor.fetchone()
-                    if self.config_parser.get_log_level() == 'DEBUG':
-                        self.logger.debug(f"Source table {source_table_name}: CHECK constraint details: {ck_details}")
+                    self.config_parser.print_log_message('DEBUG', f"Source table {source_table_name}: CHECK constraint details: {ck_details}")
 
                     create_constraint_query = ''.join([f"{ck[0].strip()}" for ck in ck_details])
 
@@ -535,9 +528,8 @@ class InformixConnector(DatabaseConnector):
             WHERE owner = '{schema}'
             ORDER BY procname
         """
-        # if self.config_parser.get_log_level() == 'DEBUG':
-        #     self.logger.debug(f"Fetching function/procedure names for schema {schema}")
-        #     self.logger.debug(f"Query: {query}")
+        self.config_parser.print_log_message('DEBUG3', f"Fetching function/procedure names for schema {schema}")
+        self.config_parser.print_log_message('DEBUG3', f"Query: {query}")
         self.connect()
         cursor = self.connection.cursor()
         cursor.execute(query)
@@ -588,8 +580,7 @@ class InformixConnector(DatabaseConnector):
             commands = [command.strip() for command in postgresql_code.split('\n') if command.strip()]
             postgresql_code = ''
             line_number = 0
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f'Processing step 1: Splitting code into commands and replacing keywords')
+            # self.config_parser.print_log_message('DEBUG', 'Processing step 1: Splitting code into commands and replacing keywords')
 
             for command in commands:
                 if command.startswith('--'):
@@ -634,8 +625,7 @@ class InformixConnector(DatabaseConnector):
                 line_number += 1
 
             # Split the code based on ";"
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f'Processing step 2: Splitting code into commands based on ";", reformating code and removing unnecessary spaces')
+            # self.config_parser.print_log_message('DEBUG', 'Processing step 2: Splitting code into commands based on ";", reformating code and removing unnecessary spaces')
 
             commands = postgresql_code.split(';')
             postgresql_code = ''
@@ -655,8 +645,7 @@ class InformixConnector(DatabaseConnector):
             postgresql_code = re.sub(r'\n\*/;', ' */', postgresql_code, flags=re.IGNORECASE)
             postgresql_code = re.sub(r'(FOREACH\s+\w+\s+FOR);', r'\1', postgresql_code, flags=re.MULTILINE | re.IGNORECASE)
 
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f'[1] postgresql_code: {postgresql_code}')
+            self.config_parser.print_log_message('DEBUG3', f'[1] postgresql_code: {postgresql_code}')
 
             # Replace CREATE PROCEDURE ... RETURNS TRIGGER AS with CREATE FUNCTION
             # postgresql_code = re.sub(
@@ -698,18 +687,11 @@ class InformixConnector(DatabaseConnector):
 
             # Convert DEFINE lines to DECLARE and BEGIN block
             def_lines = re.findall(r'^\s*DEFINE\s+.*$', postgresql_code, flags=re.MULTILINE | re.IGNORECASE)
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f'[00] def_lines: {def_lines}')
-
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f'Processing step 3: Converting DEFINE lines to DECLARE and BEGIN block')
 
             if def_lines:
                 last_def_line = def_lines[-1].strip()
                 # print(f'last_def_line: {last_def_line}')
                 postgresql_code = postgresql_code.replace(last_def_line, last_def_line + '\nBEGIN;', 1)
-                # if self.config_parser.get_log_level() == 'DEBUG':
-                #     self.logger.debug(f'[000] postgresql_code: {postgresql_code}')
 
                 # Replace lvarchar definitions with text data type
                 postgresql_code = re.sub(r'\blvarchar\(\d+\)', 'text', postgresql_code, flags=re.IGNORECASE)
@@ -730,8 +712,6 @@ class InformixConnector(DatabaseConnector):
             # Replace variable declarations with %TYPE where LIKE is used
             postgresql_code = re.sub(r'\s+(\w+)\s+LIKE\s+([\w\d_]+)\.(\w+);', r'\n\1 \2.\3%TYPE;', postgresql_code, flags=re.IGNORECASE)
             postgresql_code = re.sub(r'\(([^)]+)\)', lambda match: re.sub(r'(\w+)\s+LIKE\s+([\w\d_]+)\.(\w+)', r'\1 \2.\3%TYPE', match.group(0)), postgresql_code, flags=re.IGNORECASE)
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f'[0000] postgresql_code: {postgresql_code}')
 
             # Replace SELECT INTO TEMP with CREATE TEMP TABLE
             postgresql_code = re.sub(
@@ -744,11 +724,9 @@ class InformixConnector(DatabaseConnector):
             # Remove WITH HOLD if there is no COMMIT or ROLLBACK
             if re.search(r'\bWITH HOLD\b', postgresql_code, re.IGNORECASE) and not re.search(r'\b(COMMIT|ROLLBACK)\b', postgresql_code, re.IGNORECASE):
                 postgresql_code = re.sub(r'\bWITH HOLD\b', '', postgresql_code, flags=re.IGNORECASE)
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f'code contains WITH HOLD but no COMMIT or ROLLBACK')
+                self.config_parser.print_log_message('DEBUG', f'code contains WITH HOLD but no COMMIT or ROLLBACK')
 
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f'Processing step 4: Converting FOREACH cursor FOR loop to FOR loop')
+            self.config_parser.print_log_message('DEBUG3', f'Processing step 4: Converting FOREACH cursor FOR loop to FOR loop')
             # convert FOREACH cursor FOR loop to FOR loop
             foreach_cursor_matches = re.finditer(
                 # r'FOREACH\s+\w+\s+FOR\s+SELECT\s+(.*?)\s+INTO\s+(.*?)\s+FROM\s+(.*?)\s+WHERE\s+(.*?)(?=;\s*FOREACH|;\s*END|;\s*IF|;\s*UPDATE|;\s*LET|;\s*SELECT|;|$)',
@@ -771,57 +749,38 @@ class InformixConnector(DatabaseConnector):
                 for_sql = f'FOR {match.group(2).strip()} IN (SELECT {match.group(1).strip()} FROM {match.group(3).strip()} \n)\nLOOP'
                 postgresql_code = postgresql_code.replace(foreach_cursor_sql, for_sql)
 
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f'Processing step 5: Header for Procedures, Adding AS $$ and BEGIN to the code')
+            self.config_parser.print_log_message('DEBUG3', f'Processing step 5: Header for Procedures, Adding AS $$ and BEGIN to the code')
             # header for procedures
             header_match = re.search(r'CREATE PROCEDURE.*?\);', postgresql_code, flags=re.DOTALL | re.IGNORECASE)
             if header_match:
                 header_end = header_match.end()-1
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"[1] header_end: {header_end}, postgresql_code: {postgresql_code[:header_end]}")
                 postgresql_code = postgresql_code[:header_end] + ' AS $$\n' + postgresql_code[header_end:]
-                # if self.config_parser.get_log_level() == 'DEBUG':
-                #     self.logger.debug(f"[1] postgresql_code: {postgresql_code[:header_end+10]}")
             else:
                 header_match = re.search(r'CREATE PROCEDURE.*?\(\)\s*', postgresql_code, flags=re.DOTALL | re.IGNORECASE)
                 if header_match:
                     header_end = header_match.end()
-                    # if self.config_parser.get_log_level() == 'DEBUG':
-                    #     self.logger.debug(f"[1b] header_end: {header_end}, postgresql_code: {postgresql_code[:header_end]}")
                     postgresql_code = postgresql_code[:header_end] + '\n AS $$\n' + postgresql_code[header_end:]
-                    # if self.config_parser.get_log_level() == 'DEBUG':
-                    #     self.logger.debug(f"[1b] postgresql_code: {postgresql_code[:header_end+10]}")
 
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f'Processing step 6: Header for Functions, replacing RETURNING with RETURNS and adding AS $$')
             # header for functions
             header_match = re.search(r'CREATE FUNCTION.*?RETURNING\s+\w+\s+;?', postgresql_code, flags=re.DOTALL | re.IGNORECASE)
             if header_match:
                 header_end = header_match.end()
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"[2] header_end: {header_end}, postgresql_code: {postgresql_code[:header_end]}")
                 postgresql_code_part = re.sub(r'RETURNING', 'RETURNS', postgresql_code[:header_end], flags=re.DOTALL | re.IGNORECASE)
                 if ';' in postgresql_code_part:
                     postgresql_code_part = re.sub(r';', ' AS $$\n', postgresql_code_part, flags=re.DOTALL | re.IGNORECASE)
                 else:
                     postgresql_code_part += ' AS $$\n'
                 postgresql_code = postgresql_code_part + postgresql_code[header_end:]
-                # if self.config_parser.get_log_level() == 'DEBUG':
-                #     self.logger.debug(f"[2] postgresql_code: {postgresql_code[:header_end+10]}")
 
             header_match = re.search(r'\s*RETURNING\s+\w+\s+;?', postgresql_code, flags=re.DOTALL | re.IGNORECASE)
             if header_match:
                 header_end = header_match.end()
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"[3] header_end: {header_end}, postgresql_code: {postgresql_code[:header_end]}")
                 postgresql_code_part = re.sub(r'RETURNING', 'RETURNS', postgresql_code[:header_end], flags=re.DOTALL | re.IGNORECASE)
                 if ';' in postgresql_code_part:
                     postgresql_code_part = re.sub(r';', ' AS $$\n', postgresql_code_part, flags=re.DOTALL | re.IGNORECASE)
                 else:
                     postgresql_code_part += ' AS $$\n'
                 postgresql_code = postgresql_code_part + postgresql_code[header_end:]
-                # if self.config_parser.get_log_level() == 'DEBUG':
-                #     self.logger.debug(f"[3] postgresql_code: {postgresql_code[:header_end+10]}")
 
             # Simplify LET commands
             postgresql_code = re.sub(r'(?i)^\s*LET\s+', '', postgresql_code, flags=re.MULTILINE)
@@ -862,11 +821,10 @@ class InformixConnector(DatabaseConnector):
             postgresql_code = re.sub(r';;', ';', postgresql_code, flags=re.IGNORECASE )
             postgresql_code = re.sub(r'\*/;', '*/', postgresql_code, flags=re.IGNORECASE)
 
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f'Processing step 7: Replacing source schema and table names with target schema and table names ({len(table_list)} tables)')
+            self.config_parser.print_log_message('DEBUG3', f'Processing step 7: Replacing source schema and table names with target schema and table names ({len(table_list)} tables)')
 
             for table in table_list:
-                # if self.config_parser.get_log_level() == 'DEBUG':
+                self.config_parser.print_log_message('DEBUG3', f'Replacing table {table} from schema {source_schema} to {target_schema}')
                 #     self.logger.debug(f'Replacing table {table} from schema {source_schema} to {target_schema}')
 
                 source_table_pattern = re.compile(rf'("{source_schema}"\.)?"{table}"')
@@ -877,8 +835,7 @@ class InformixConnector(DatabaseConnector):
                 postgresql_code = source_table_pattern.sub(target_table, postgresql_code)
 
             for view in view_list:
-                # if self.config_parser.get_log_level() == 'DEBUG':
-                #     self.logger.debug(f'Replacing view {view} from schema {source_schema} to {target_schema}')
+                self.config_parser.print_log_message('DEBUG3', f'Replacing view {view} from schema {source_schema} to {target_schema}')
 
                 source_view_pattern = re.compile(rf'("{source_schema}"\.)?"{view}"')
                 target_view = f'"{target_schema}"."{view}"'
@@ -906,16 +863,11 @@ class InformixConnector(DatabaseConnector):
             # returning_matches = re.finditer(r'^\s*CREATE\s+FUNCTION\s+[\w\s".]+\([\w\s".]+\)\s+RETURNS\s+(\w+)\s*;', postgresql_code, flags=re.DOTALL | re.IGNORECASE | re.MULTILINE)
             returning_matches = re.finditer(r'^\s*(CREATE\s+FUNCTION\s+.*?\))\s+RETURNS\s+(\w+)\s*;', postgresql_code, flags=re.DOTALL | re.IGNORECASE | re.MULTILINE)
             for match in returning_matches:
-                # if self.config_parser.get_log_level() == 'DEBUG':
-                #     self.logger.debug(f'[4] match.group(0): {match.group(0)}')
-                #     self.logger.debug(f'[4] match.group(1): {match.group(1)}')
-                #     self.logger.debug(f'[4] match.group(2): {match.group(2)}')
                 header_part = match.group(1)
                 return_type = match.group(2)
                 postgresql_code = postgresql_code.replace(match.group(0), f'{header_part} RETURNS {return_type} AS $$\n')
 
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f'Starting processing ON EXCEPTION blocks in the code')
+            self.config_parser.print_log_message('DEBUG3', 'Processing step 8: Handling ON EXCEPTION blocks')
             # some procs /funcs have ON EXCEPTION block, some of them several times
             if "ON EXCEPTION" in postgresql_code:
                 exception_lines = [line for line in postgresql_code.split('\n') if 'ON EXCEPTION' in line]
@@ -926,8 +878,7 @@ class InformixConnector(DatabaseConnector):
                         commentedout_exception_occurences += 1
 
                 live_exception_occurences = len(exception_lines) - commentedout_exception_occurences
-                # if self.config_parser.get_log_level() == 'DEBUG':
-                #     self.logger.debug(f'Found {len(exception_lines)} ON EXCEPTION occurences, {commentedout_exception_occurences} commented out, {live_exception_occurences} live')
+                self.config_parser.print_log_message('DEBUG3', f'Found {len(exception_lines)} ON EXCEPTION occurences, {commentedout_exception_occurences} commented out, {live_exception_occurences} live')
                 if live_exception_occurences > 0:
 
                     for i in range(live_exception_occurences):
@@ -937,43 +888,31 @@ class InformixConnector(DatabaseConnector):
 
                         # Find the first occurrence of BEGIN
                         begin_index = next((i for i, line in enumerate(lines) if 'BEGIN' in line), None)
-                        if self.config_parser.get_log_level() == 'DEBUG':
-                            self.logger.debug(f'ON EXCEPTION - begin_index: {begin_index}')
+                        self.config_parser.print_log_message('DEBUG3', f'ON EXCEPTION - begin_index: {begin_index}')
 
                         if begin_index is not None:
                             # Find the ON EXCEPTION - END EXCEPTION block that follows the first BEGIN
                             exception_start_index = next((i for i, line in enumerate(lines[begin_index:], start=begin_index) if 'ON EXCEPTION' in line), None)
                             exception_end_index = next((i for i, line in enumerate(lines[begin_index:], start=begin_index) if 'END EXCEPTION;' in line), None)
-                            if self.config_parser.get_log_level() == 'DEBUG':
-                                self.logger.debug(f'ON EXCEPTION - exception_start_index: {exception_start_index}')
-                            if self.config_parser.get_log_level() == 'DEBUG':
-                                self.logger.debug(f'ON EXCEPTION - exception_end_index: {exception_end_index}')
 
                             # Ensure that exception_start_index is immediately after begin_index
                             if exception_start_index is not None and exception_start_index != begin_index + 1:
-                                if self.config_parser.get_log_level() == 'DEBUG':
-                                    self.logger.debug('ON EXCEPTION does not immediately follow BEGIN, trying LOOP occurence')
+                                self.config_parser.print_log_message('DEBUG3', 'ON EXCEPTION does not immediately follow BEGIN, trying LOOP occurence')
 
                                 ## try LOOP - END LOOP occurence
                                 # loop_begin_index = next((i for i, line in enumerate(lines) if 'LOOP' in line), None)
                                 loop_begin_index = next((i for i, line in enumerate(lines) if 'LOOP' in line and i + 1 < len(lines) and 'ON EXCEPTION' in lines[i + 1]), None)
 
-                                if self.config_parser.get_log_level() == 'DEBUG':
-                                    self.logger.debug(f'loop_begin_index: {loop_begin_index}')
+                                self.config_parser.print_log_message('DEBUG3', f'loop_begin_index: {loop_begin_index}')
 
                                 if loop_begin_index is not None:
                                     # Find the ON EXCEPTION - END EXCEPTION block that follows the first BEGIN
                                     exception_start_index = next((i for i, line in enumerate(lines[loop_begin_index:], start=loop_begin_index) if 'ON EXCEPTION' in line), None)
                                     exception_end_index = next((i for i, line in enumerate(lines[loop_begin_index:], start=loop_begin_index) if 'END EXCEPTION' in line), None)
-                                    if self.config_parser.get_log_level() == 'DEBUG':
-                                        self.logger.debug(f'loop: exception_start_index: {exception_start_index}')
-                                    if self.config_parser.get_log_level() == 'DEBUG':
-                                        self.logger.debug(f'loop: exception_end_index: {exception_end_index}')
 
                                     # Ensure that exception_start_index is immediately after loop_begin_index
                                     if exception_start_index is not None and exception_start_index != loop_begin_index + 1:
-                                        if self.config_parser.get_log_level() == 'DEBUG':
-                                            self.logger.debug('ON EXCEPTION does not immediately follow LOOP command')
+                                        self.config_parser.print_log_message('DEBUG3', 'ON EXCEPTION does not immediately follow LOOP command')
 
                                     if exception_start_index is not None and exception_end_index is not None:
                                         # Extract the exception block
@@ -1060,20 +999,13 @@ class InformixConnector(DatabaseConnector):
                                 modified_exception_block = [re.sub(r'ON EXCEPTION SET \w+', f'EXCEPTION WHEN OTHERS THEN\n{set_variable_line}', line) for line in exception_block]
                                 modified_exception_block = [re.sub(r'ON EXCEPTION;?', f'EXCEPTION WHEN OTHERS THEN', line) for line in modified_exception_block]
                                 modified_exception_block = [line for line in modified_exception_block if 'END EXCEPTION' not in line]
-                                # if self.config_parser.get_log_level() == 'DEBUG':
-                                #     self.logger.debug(f'modified_exception_block: {modified_exception_block}')
-                                #     self.logger.debug(f'lines: {lines}')
 
                                 end_index = next((i for i, line in enumerate(lines) if 'END;' in line and '$$ LANGUAGE plpgsql {function_immutable};' in lines[i + 1]), None)
-                                if self.config_parser.get_log_level() == 'DEBUG':
-                                    self.logger.debug(f'end_index: {end_index}')
                                 if end_index is not None:
                                     lines = lines[:end_index] + modified_exception_block + lines[end_index:]
 
                                 # Join the lines back into a single string
                                 postgresql_code = '\n'.join(lines)
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f'Finished processing ON EXCEPTION blocks in the code')
 
             postgresql_code = re.sub(r';;', ';', postgresql_code, flags=re.IGNORECASE)
             # Indent the code
@@ -1144,8 +1076,7 @@ class InformixConnector(DatabaseConnector):
                 if migration_limitation:
                     query += f" WHERE {migration_limitation}"
 
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"Worker {worker_id}: Fetching data with cursor using query: {query}")
+                self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Fetching data with cursor using query: {query}")
 
                 part_name = 'execute query'
                 cursor = self.connection.cursor()
@@ -1159,8 +1090,6 @@ class InformixConnector(DatabaseConnector):
                     # else:
                     #     query = f"SELECT SKIP {offset} * FROM {source_schema}.{source_table} LIMIT {batch_size}"
 
-                    # if self.config_parser.get_log_level() == 'DEBUG':
-                    #     self.logger.debug(f"Worker {worker_id}: Fetching data with query: {query}")
 
                     # part_name = f'do fetch data: {source_table} - {offset}'
                     # # polars library is not always available
@@ -1177,8 +1106,7 @@ class InformixConnector(DatabaseConnector):
                     records = cursor.fetchmany(batch_size)
                     if not records:
                         break
-                    if self.config_parser.get_log_level() == 'DEBUG':
-                        self.logger.debug(f"Worker {worker_id}: Fetched {len(records)} rows from source table {source_table}.")
+                    self.config_parser.print_log_message('DEBUG',f"Worker {worker_id}: Fetched {len(records)} rows from source table {source_table}.")
 
                     records = [
                         {column['column_name']: value for column, value in zip(source_columns.values(), record)}
@@ -1204,8 +1132,7 @@ class InformixConnector(DatabaseConnector):
                                 record[column_name] = bool(record[column_name])
 
                     # Insert batch into target table
-                    if self.config_parser.get_log_level() == 'DEBUG':
-                        self.logger.debug(f"Worker {worker_id}: Starting insert of {len(records)} rows from source table {source_table}")
+                    self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Starting insert of {len(records)} rows from source table {source_table}")
                     inserted_rows = migrate_target_connection.insert_batch({
                         'target_schema': target_schema,
                         'target_table': target_table,
@@ -1252,11 +1179,8 @@ class InformixConnector(DatabaseConnector):
             cursor.execute(query)
             triggers = {}
             order_num = 1
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"fetch_triggers query: {query}")
             for row in cursor.fetchall():
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"fetch_triggers row: {row}")
+                self.config_parser.print_log_message('DEBUG', f"fetch_triggers row: {row}")
                 triggers[order_num] = {
                     'id': row[0],
                     'name': row[1].strip(),
@@ -1288,8 +1212,7 @@ class InformixConnector(DatabaseConnector):
 
                 trigger_code_str = '\n'.join(trigger_code_lines)
 
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"trigger SQL: {trigger_code_str}")
+                self.config_parser.print_log_message('DEBUG', f"trigger SQL: {trigger_code_str}")
 
                 triggers[order_num]['sql'] = trigger_code_str
                 triggers[order_num]['row_statement'] = 'FOR EACH ROW' if 'FOR EACH ROW' in trigger_code_str.upper() else ''
@@ -1322,8 +1245,7 @@ class InformixConnector(DatabaseConnector):
                 trig_lines = [line for line in trig_lines if line != '--']
                 trig_lines = [f"/* {line.strip()} */" if line.startswith('--') else line for line in trig_lines]
                 trig = '\n'.join(trig_lines)
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"Trigger code: {trig}")
+                self.config_parser.print_log_message('DEBUG', f"Trigger code: {trig}")
 
                 # Replace groups of multiple spaces with just one space
                 trig = re.sub(r'\s+', ' ', trig)
@@ -1338,8 +1260,7 @@ class InformixConnector(DatabaseConnector):
                     new_ref = ref_match.group(2) if ref_match.group(2) else ""
                     old_ref = ref_match.group(4) if ref_match.group(4) else ""
 
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"new_ref: {new_ref}, old_ref: {old_ref}")
+                self.config_parser.print_log_message('DEBUG', f"new_ref: {new_ref}, old_ref: {old_ref}")
 
                 # Extract schema, trigger name, and operation (insert/update)
                 header_match = re.match(r'"([^"]+)"\.(\S+)\s+(insert|update|delete)', trig, re.IGNORECASE)
@@ -1349,8 +1270,7 @@ class InformixConnector(DatabaseConnector):
                 trigger_name = header_match.group(2)
                 operation = header_match.group(3).lower()
 
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"Trigger name: {trigger_name}, Operation: {operation}")
+                self.config_parser.print_log_message('DEBUG', f"Trigger name: {trigger_name}, Operation: {operation}")
 
                 # Extract the table name (assumes: on "schemaname".table)
                 table_match = re.search(r'\s+on\s+"([^"]+)"\.(\S+)', trig, re.IGNORECASE)
@@ -1361,8 +1281,7 @@ class InformixConnector(DatabaseConnector):
                     table_schema = schema
                     table_name = "unknown_table"
 
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"Table name: {table_name}, Schema: {table_schema}")
+                self.config_parser.print_log_message('DEBUG', f"Table name: {table_name}, Schema: {table_schema}")
 
                 func_body_lines = []
 
@@ -1379,8 +1298,7 @@ class InformixConnector(DatabaseConnector):
                 when_matches = re.findall(r'when\s*\((.*?)\)\s*\((.*?\)\s*\))', trig, re.IGNORECASE | re.DOTALL | re.MULTILINE)
                 # when_matches = re.findall(r'when\s*\((.*?)\)\s*\((.*?\n*?)\)', trig, re.IGNORECASE | re.DOTALL | re.MULTILINE)
 
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"when_matches: {when_matches}")
+                self.config_parser.print_log_message('DEBUG', f"when_matches: {when_matches}")
 
                 for match in when_matches:
                     when_condition = match[0]
@@ -1389,9 +1307,8 @@ class InformixConnector(DatabaseConnector):
                     when_conditions[order_num] = when_condition
                     proc_calls[order_num] = proc_call
                     order_num += 1
-                    if self.config_parser.get_log_level() == 'DEBUG':
-                        self.logger.debug(f"when_condition: {when_condition}")
-                        self.logger.debug(f"proc_call: {proc_call}")
+                    self.config_parser.print_log_message('DEBUG', f"when_condition: {when_condition}")
+                    self.config_parser.print_log_message('DEBUG', f"proc_call: {proc_call}")
 
                 after_pattern = re.compile(r'after\s*\((.*)\)', re.DOTALL | re.IGNORECASE | re.MULTILINE)
                 # Extract AFTER clause
@@ -1428,8 +1345,7 @@ class InformixConnector(DatabaseConnector):
                             if after_all_commands:
                                 after_all_commands[-1] += ',' + ''.join(after_current_command).strip()
 
-                    if self.config_parser.get_log_level() == 'DEBUG':
-                        self.logger.debug(f"AFTER part after_all_commands: {after_all_commands}")
+                    self.config_parser.print_log_message('DEBUG', f"AFTER part after_all_commands: {after_all_commands}")
 
                 if not when_conditions and not proc_calls:
                     action_all_commands = []
@@ -1465,8 +1381,7 @@ class InformixConnector(DatabaseConnector):
                                 if action_all_commands:
                                     action_all_commands[-1] += ',' + ''.join(action_current_command).strip()
 
-                        if self.config_parser.get_log_level() == 'DEBUG':
-                            self.logger.debug(f"ACTION part action_all_commands: {action_all_commands}")
+                        self.config_parser.print_log_message('DEBUG', f"ACTION part action_all_commands: {action_all_commands}")
 
                         actions = actions_match.group(1).split(',')
                         for action in actions:
@@ -1478,9 +1393,8 @@ class InformixConnector(DatabaseConnector):
                             proc_calls[order_num] = action.strip()
                             order_num += 1
 
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"when_conditions: {when_conditions}")
-                    self.logger.debug(f"proc_calls: {proc_calls}")
+                self.config_parser.print_log_message('DEBUG', f"when_conditions: {when_conditions}")
+                self.config_parser.print_log_message('DEBUG', f"proc_calls: {proc_calls}")
 
                 function_name = trigger_name + "_trigfunc"
                 counter = 0
@@ -1508,8 +1422,7 @@ class InformixConnector(DatabaseConnector):
                             if after_command:
                                 func_body_lines.append(f"/*    {after_command.replace(settings['source_schema'], settings['target_schema'])}; */")
 
-                    if self.config_parser.get_log_level() == 'DEBUG':
-                        self.logger.debug(f"func_body_lines: {func_body_lines}")
+                    self.config_parser.print_log_message('DEBUG3', f"func_body_lines: {func_body_lines}")
 
                     func_code = f"""CREATE OR REPLACE FUNCTION "{settings['target_schema']}"."{function_name + str(counter)}"()
                         RETURNS trigger AS $$
@@ -1542,8 +1455,7 @@ class InformixConnector(DatabaseConnector):
                         trigger_code = ''
                         func_code = ''
                         proc_call = proc_calls[i]
-                        if self.config_parser.get_log_level() == 'DEBUG':
-                            self.logger.debug(f"proc_call: {proc_call}")
+                        self.config_parser.print_log_message('DEBUG3', f"proc_call: {proc_call}")
 
                         trigger_code = f"""CREATE TRIGGER "{trigger_name + str(counter)}" """
 
@@ -1627,8 +1539,7 @@ class InformixConnector(DatabaseConnector):
 
     def get_rows_count(self, table_schema: str, table_name: str):
         query = f"""SELECT COUNT(*) FROM "{table_schema}".{table_name} """
-        if self.config_parser.get_log_level() == 'DEBUG':
-            self.logger.debug(f"get_rows_count query: {query}")
+        self.config_parser.print_log_message('DEBUG3', f"get_rows_count query: {query}")
         cursor = self.connection.cursor()
         cursor.execute(query)
         count = cursor.fetchone()[0]

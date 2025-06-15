@@ -405,6 +405,20 @@ class ConfigParser:
             return self.args.log_level.upper()
         return 'INFO'
 
+    def print_log_message(self, message_level, message):
+        current_log_level = self.get_log_level()
+        if message_level.upper() not in constants.MIGRATOR_MESSAGE_LEVELS:
+            raise ValueError(f"Invalid message_level: {message_level}. Must be one of {constants.MIGRATOR_MESSAGE_LEVELS}")
+        if constants.MIGRATOR_MESSAGE_LEVELS.index(message_level.upper()) <= constants.MIGRATOR_MESSAGE_LEVELS.index(current_log_level.upper()):
+            if message_level == 'DEBUG':
+                self.logger.debug(message)
+            elif message_level == 'DEBUG2':
+                self.logger.debug('DEBUG2: ' + message)
+            elif message_level == 'DEBUG3':
+                self.logger.debug('DEBUG3: ' + message)
+            else:
+                self.logger.info(message)
+
 
     def get_indent(self):
         return self.config.get('migrator', {}).get('indent', constants.MIGRATOR_DEFAULT_INDENT)

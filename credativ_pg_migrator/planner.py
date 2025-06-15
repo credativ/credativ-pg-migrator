@@ -71,8 +71,7 @@ class Planner:
         """Dynamically load the database connector."""
         # Get the database type from the config
         database_type = self.config_parser.get_db_type(source_or_target)
-        if self.config_parser.get_log_level() == 'DEBUG':
-            self.logger.debug(f"Loading connector for {source_or_target} with database type: {database_type}")
+        self.config_parser.print_log_message( 'DEBUG', f"Loading connector for {source_or_target} with database type: {database_type}")
         if source_or_target == 'target' and database_type != 'postgresql':
             raise ValueError("Target database type must be 'postgresql'")
         # Check if the database type is supported
@@ -92,26 +91,22 @@ class Planner:
         try:
             self.logger.info("Running pre-planning actions...")
 
-            if self.config_parser.get_log_level() == 'DEBUG':
-                self.logger.debug(f"Target schema: {self.target_schema}")
-                self.logger.debug(f"Pre migration script: {self.pre_script}")
-                self.logger.debug(f"Post migration script: {self.post_script}")
+            self.config_parser.print_log_message( 'DEBUG', f"Target schema: {self.target_schema}")
+            self.config_parser.print_log_message( 'DEBUG', f"Pre migration script: {self.pre_script}")
+            self.config_parser.print_log_message( 'DEBUG', f"Post migration script: {self.post_script}")
 
 
-            if self.config_parser.get_log_level() == 'DEBUG':
-                self.logger.debug("Connecting to source and target databases...")
+            self.config_parser.print_log_message( 'DEBUG', "Connecting to source and target databases...")
             self.check_database_connection(self.source_connection, "Source Database")
             self.check_database_connection(self.target_connection, "Target Database")
 
-            if self.config_parser.get_log_level() == 'DEBUG':
-                self.logger.debug("Checking scripts accessibility...")
+            self.config_parser.print_log_message( 'DEBUG', "Checking scripts accessibility...")
             self.check_script_accessibility(self.pre_script)
             self.check_script_accessibility(self.post_script)
 
             self.target_connection.connect()
             if self.target_connection.session_settings:
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.info(f"Planner CREATE SCHEMA - Executing session settings for target database: {self.target_connection.session_settings}")
+                self.config_parser.print_log_message( 'DEBUG', f"Planner CREATE SCHEMA - Executing session settings for target database: {self.target_connection.session_settings}")
                 self.target_connection.execute_query(self.target_connection.session_settings)
 
             if self.config_parser.should_drop_schema():
@@ -121,8 +116,7 @@ class Planner:
                     self.logger.info(f"Dropping target schema '{self.target_schema}'...")
                     self.target_connection.execute_query(f"DROP SCHEMA IF EXISTS {self.target_schema} CASCADE")
 
-            if self.config_parser.get_log_level() == 'DEBUG':
-                self.logger.debug(f"Creating target schema '{self.target_schema}' if it does not exist...")
+            self.config_parser.print_log_message( 'DEBUG', f"Creating target schema '{self.target_schema}' if it does not exist...")
             self.target_connection.execute_query(f"CREATE SCHEMA IF NOT EXISTS {self.target_schema}")
             self.target_connection.disconnect()
 
@@ -158,11 +152,10 @@ class Planner:
         include_tables = self.config_parser.get_include_tables()
         exclude_tables = self.config_parser.get_exclude_tables() or []
 
-        if self.config_parser.get_log_level() == 'DEBUG':
-            self.logger.debug(f"Source schema: {self.source_schema}")
-            self.logger.debug(f"Source tables: {source_tables}")
-            self.logger.debug(f"Include tables: {include_tables}")
-            self.logger.debug(f"Exclude tables: {exclude_tables}")
+        self.config_parser.print_log_message( 'DEBUG', f"Source schema: {self.source_schema}")
+        self.config_parser.print_log_message( 'DEBUG', f"Source tables: {source_tables}")
+        self.config_parser.print_log_message( 'DEBUG', f"Include tables: {include_tables}")
+        self.config_parser.print_log_message( 'DEBUG', f"Exclude tables: {exclude_tables}")
 
         for order_num, table_info in source_tables.items():
             self.logger.info(f"Processing table ({order_num}/{len(source_tables)}): {table_info['table_name']}")
@@ -191,32 +184,26 @@ class Planner:
                 }
                 table_description = self.source_connection.get_table_description(settings)
                 table_description = table_description['table_description'] if 'table_description' in table_description else ''
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"Table description: {table_description}")
+                self.config_parser.print_log_message( 'DEBUG', f"Table description: {table_description}")
                 source_columns = self.source_connection.fetch_table_columns(settings)
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"Fetched source columns: {source_columns}")
+                self.config_parser.print_log_message( 'DEBUG', f"Fetched source columns: {source_columns}")
 
                 for _, column_info in source_columns.items():
-                    if self.config_parser.get_log_level() == 'DEBUG':
-                        self.logger.debug(f"Checking for data types / default values substitutions for column {column_info}...")
+                    self.config_parser.print_log_message( 'DEBUG', f"Checking for data types / default values substitutions for column {column_info}...")
                     substitution = self.migrator_tables.check_data_types_substitution(column_info['data_type'])
                     if substitution:
-                        if self.config_parser.get_log_level() == 'DEBUG':
-                            self.logger.debug(f"Substitution based on data_type ({column_info['data_type']}): {substitution}")
+                        self.config_parser.print_log_message( 'DEBUG', f"Substitution based on data_type ({column_info['data_type']}): {substitution}")
                         column_info['column_type_substitution'] = substitution
                     else:
                         substitution = self.migrator_tables.check_data_types_substitution(column_info['column_type'])
                         if substitution:
-                            if self.config_parser.get_log_level() == 'DEBUG':
-                                self.logger.debug(f"Substitution based on column_type ({column_info['column_type']}): {substitution}")
+                            self.config_parser.print_log_message( 'DEBUG', f"Substitution based on column_type ({column_info['column_type']}): {substitution}")
                             column_info['column_type_substitution'] = substitution
                         else:
                             if 'basic_data_type' in column_info and column_info['basic_data_type'] != '':
                                 substitution = self.migrator_tables.check_data_types_substitution(column_info['basic_data_type'])
                                 if substitution:
-                                    if self.config_parser.get_log_level() == 'DEBUG':
-                                        self.logger.debug(f"Substitution based on basic_data_type ({column_info['basic_data_type']}): {substitution}")
+                                    self.config_parser.print_log_message( 'DEBUG', f"Substitution based on basic_data_type ({column_info['basic_data_type']}): {substitution}")
                                     column_info['column_type_substitution'] = substitution
 
                     # checking for default values substitution with the new data type
@@ -228,8 +215,7 @@ class Planner:
                         })
                         if substitution and substitution != None and column_info['column_default_value'] != substitution:
                             column_info['replaced_column_default_value'] = substitution
-                            if self.config_parser.get_log_level() == 'DEBUG':
-                                self.logger.debug(f"Substituted default value: {column_info['column_default_value']} -> {substitution}")
+                            self.config_parser.print_log_message( 'DEBUG', f"Substituted default value: {column_info['column_default_value']} -> {substitution}")
 
                 settings = {
                     'source_db_type': self.config_parser.get_source_db_type(),
@@ -245,9 +231,8 @@ class Planner:
                 target_columns = self.convert_table_columns(settings)
                 settings['target_columns'] = target_columns
                 target_table_sql = self.target_connection.get_create_table_sql(settings)
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"Target columns: {target_columns}")
-                    self.logger.debug(f"Target table SQL: {target_table_sql}")
+                self.config_parser.print_log_message( 'DEBUG', f"Target columns: {target_columns}")
+                self.config_parser.print_log_message( 'DEBUG', f"Target table SQL: {target_table_sql}")
 
                 target_partitioning = self.config_parser.get_target_partitioning()
                 if target_partitioning:
@@ -260,8 +245,7 @@ class Planner:
                             target_table_sql += f" PARTITION BY {partitioning_case['partition_by']} ({table_partitioning_columns})"
                             table_partitioned = True
                             table_partitioned_by = partitioning_case['partition_by']
-                            if self.config_parser.get_log_level() == 'DEBUG':
-                                self.logger.debug(f"Adding partitioning to table {table_info['table_name']}: {target_table_sql}")
+                            self.config_parser.print_log_message( 'DEBUG', f"Adding partitioning to table {table_info['table_name']}: {target_table_sql}")
                             if 'date_range' in partitioning_case:
                                 if partitioning_case['date_range'] in ('year', 'month', 'week', 'day'):
                                     query = f"""
@@ -270,8 +254,7 @@ class Planner:
                                         FROM {self.source_schema}.{table_info['table_name']}
                                         """
                                     self.source_connection.connect()
-                                    if self.config_parser.get_log_level() == 'DEBUG':
-                                        self.logger.debug(f"Query to get min/max values for partitioning: {query}")
+                                    self.config_parser.print_log_message( 'DEBUG', f"Query to get min/max values for partitioning: {query}")
                                     cursor = self.source_connection.connection.cursor()
                                     cursor.execute(query)
                                     min_max = cursor.fetchall()
@@ -280,8 +263,7 @@ class Planner:
                                     if min_max and len(min_max) > 0:
                                         min_value = min_max[0][0]
                                         max_value = min_max[0][1]
-                                        if self.config_parser.get_log_level() == 'DEBUG':
-                                            self.logger.debug(f"Min/Max values for partitioning: {min_value}, {max_value}")
+                                        self.config_parser.print_log_message( 'DEBUG', f"Min/Max values for partitioning: {min_value}, {max_value}")
                                         if partitioning_case['date_range'] in ('year', 'month', 'week'):
                                             query = f"""
                                                 SELECT
@@ -300,8 +282,7 @@ class Planner:
                                                         '1 {partitioning_case['date_range']}'::interval)
                                                 ) gs
                                             """
-                                            if self.config_parser.get_log_level() == 'DEBUG':
-                                                self.logger.debug(f"Create partitions SQL: {query}")
+                                            self.config_parser.print_log_message( 'DEBUG', f"Create partitions SQL: {query}")
                                             self.target_connection.connect()
                                             cursor = self.target_connection.connection.cursor()
                                             cursor.execute(query)
@@ -311,8 +292,7 @@ class Planner:
                                             create_partitions_sql = json.dumps([row[0] for row in create_partitions_sql])
                                             cursor.close()
                                             self.target_connection.disconnect()
-                                            if self.config_parser.get_log_level() == 'DEBUG':
-                                                self.logger.debug(f"Create partitions SQL: {create_partitions_sql}")
+                                            self.config_parser.print_log_message( 'DEBUG', f"Create partitions SQL: {create_partitions_sql}")
 
                 self.migrator_tables.insert_tables({
                     'source_schema': self.source_schema,
@@ -360,8 +340,7 @@ class Planner:
                     'target_table_name': table_info['table_name'],
                     'target_columns': target_columns,
                 })
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"Indexes: {indexes}")
+                self.config_parser.print_log_message( 'DEBUG', f"Indexes: {indexes}")
                 if indexes:
                     for _, index_details in indexes.items():
                         values = {}
@@ -377,12 +356,11 @@ class Planner:
                         values['index_comment'] = index_details['index_comment']
                         values['index_sql'] = self.target_connection.get_create_index_sql(values)
                         self.migrator_tables.insert_indexes( values )
-                        if self.config_parser.get_log_level() == 'DEBUG':
-                            self.logger.debug(f"Processed index: {values}")
+                        self.config_parser.print_log_message( 'DEBUG', f"Processed index: {values}")
                 else:
-                    self.logger.info(f"No indexes found for table {table_info['table_name']}.")
+                    self.config_parser.print_log_message( 'INFO', f"No indexes found for table {table_info['table_name']}.")
             else:
-                self.logger.info("Skipping index migration.")
+                self.config_parser.print_log_message( 'INFO', "Skipping index migration.")
 
             if self.config_parser.should_migrate_constraints():
                 constraints = self.source_connection.fetch_constraints({
@@ -390,8 +368,7 @@ class Planner:
                     'source_table_schema': self.source_schema,
                     'source_table_name': table_info['table_name'],
                 })
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"Constraints: {constraints}")
+                self.config_parser.print_log_message( 'DEBUG', f"Constraints: {constraints}")
                 if constraints:
                     for _, constraint_details in constraints.items():
 
@@ -444,8 +421,7 @@ class Planner:
 
             if self.config_parser.should_migrate_triggers():
                 triggers = self.source_connection.fetch_triggers(table_info['id'], self.source_schema, table_info['table_name'])
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"Triggers: {triggers}")
+                self.config_parser.print_log_message( 'DEBUG', f"Triggers: {triggers}")
                 if triggers:
                     for _, trigger_details in triggers.items():
 
@@ -457,9 +433,8 @@ class Planner:
                                 'table_list': []
                             })
 
-                        if self.config_parser.get_log_level() == 'DEBUG':
-                            self.logger.debug(f"Source trigger code: {trigger_details['sql']}")
-                            self.logger.debug(f"Converted trigger code: {converted_code}")
+                        self.config_parser.print_log_message( 'DEBUG', f"Source trigger code: {trigger_details['sql']}")
+                        self.config_parser.print_log_message( 'DEBUG', f"Converted trigger code: {converted_code}")
 
                         self.migrator_tables.insert_trigger(
                             self.source_schema,
@@ -501,8 +476,7 @@ class Planner:
                     character_maximum_length = 0
                     ## we presume substitution contains also length/ precision, scale
                     ## and proper data type, so we can use it directly
-                    if self.config_parser.get_log_level() == 'DEBUG':
-                        self.logger.debug(f"Column {column_info['column_name']} - using substitution: {coltype}")
+                    self.config_parser.print_log_message( 'DEBUG', f"Column {column_info['column_name']} - using substitution: {coltype}")
                 else:
                     coltype = column_info['data_type'].upper()
                     character_maximum_length = column_info['character_maximum_length'] if column_info['character_maximum_length'] is not None else 0
@@ -524,8 +498,7 @@ class Planner:
                         if self.source_connection.is_string_type(coltype) and character_maximum_length >= self.config_parser.get_varchar_to_text_length():
                             coltype = 'TEXT'
 
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"Column {column_info['column_name']} - using data type: {coltype}")
+                self.config_parser.print_log_message( 'DEBUG', f"Column {column_info['column_name']} - using data type: {coltype}")
 
                 converted[order_num] = {
                     'column_name': column_info['column_name'],
@@ -570,10 +543,9 @@ class Planner:
             include_views = self.config_parser.get_include_views()
             exclude_views = self.config_parser.get_exclude_views() or []
 
-            if self.config_parser.get_log_level() == 'DEBUG':
-                self.logger.debug(f"Source views: {views}")
-                self.logger.debug(f"Include views: {include_views}")
-                self.logger.debug(f"Exclude views: {exclude_views}")
+            self.config_parser.print_log_message( 'DEBUG', f"Source views: {views}")
+            self.config_parser.print_log_message( 'DEBUG', f"Include views: {include_views}")
+            self.config_parser.print_log_message( 'DEBUG', f"Exclude views: {exclude_views}")
 
             for order_num, view_info in views.items():
                 self.logger.info(f"Processing view ({order_num}): {view_info}")
@@ -593,8 +565,7 @@ class Planner:
                     'target_schema': self.config_parser.get_target_schema(),
                     'target_view_name': view_info['view_name'],
                 })
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"Source view SQL: {view_sql}")
+                self.config_parser.print_log_message( 'DEBUG', f"Source view SQL: {view_sql}")
                 converted_view_sql = self.source_connection.convert_view_code(view_sql, {
                     'source_database': self.config_parser.get_source_db_name(),
                     'source_schema': self.config_parser.get_source_schema(),
@@ -602,38 +573,32 @@ class Planner:
                     'target_db_type': self.config_parser.get_target_db_type(),
                 })
 
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug("Checking for remote objects substitution in view SQL...")
+                self.config_parser.print_log_message( 'DEBUG', "Checking for remote objects substitution in view SQL...")
                 rows = self.migrator_tables.get_records_remote_objects_substitution()
                 if rows:
                     for row in rows:
-                        if self.config_parser.get_log_level() == 'DEBUG':
-                            self.logger.debug(f"Views - remote objects substituting {row[0]} with {row[1]}")
+                        self.config_parser.print_log_message( 'DEBUG', f"Views - remote objects substituting {row[0]} with {row[1]}")
                         converted_view_sql = re.sub(re.escape(row[0]), row[1], converted_view_sql, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
 
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"Converted view SQL: {converted_view_sql}")
+                self.config_parser.print_log_message( 'DEBUG', f"Converted view SQL: {converted_view_sql}")
                 self.migrator_tables.insert_view(self.source_schema, view_info['view_name'], view_info['id'], view_sql,
                                                  self.target_schema, view_info['view_name'], converted_view_sql, view_info['comment'])
-                self.logger.info(f"View {view_info['view_name']} processed successfully.")
-            self.logger.info("Views processed successfully.")
+                self.config_parser.print_log_message( 'INFO', f"View {view_info['view_name']} processed successfully.")
+            self.config_parser.print_log_message( 'INFO', "Views processed successfully.")
         else:
-            self.logger.info("Skipping views migration.")
-        self.logger.info("Planner - Views processed successfully.")
+            self.config_parser.print_log_message( 'INFO', "Skipping views migration.")
+        self.config_parser.print_log_message( 'INFO', "Planner - Views processed successfully.")
 
     def run_prepare_user_defined_types(self):
-        self.logger.info("Planner - Preparing user defined types...")
+        self.config_parser.print_log_message( 'INFO', "Planner - Preparing user defined types...")
         user_defined_types = self.source_connection.fetch_user_defined_types(self.source_schema)
-        if self.config_parser.get_log_level() == 'DEBUG':
-            self.logger.debug(f"User defined types: {user_defined_types}")
+        self.config_parser.print_log_message( 'DEBUG', f"User defined types: {user_defined_types}")
         if user_defined_types:
             for order_num, type_info in user_defined_types.items():
                 type_sql = type_info['sql']
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"Source type SQL: {type_sql}")
+                self.config_parser.print_log_message( 'DEBUG', f"Source type SQL: {type_sql}")
                 converted_type_sql = type_sql.replace(f'{self.source_schema}.', f'{self.target_schema}.')
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"Converted type SQL: {converted_type_sql}")
+                self.config_parser.print_log_message( 'DEBUG', f"Converted type SQL: {converted_type_sql}")
 
                 self.migrator_tables.insert_user_defined_type({
                     'source_schema_name': self.source_schema,
@@ -653,17 +618,14 @@ class Planner:
         self.logger.info("Planner - Preparing domains...")
         migrated_as = 'CHECK CONSTRAINT'
         domains = self.source_connection.fetch_domains(self.source_schema)
-        if self.config_parser.get_log_level() == 'DEBUG':
-            self.logger.debug(f"Domains found in source database: {domains}")
+        self.config_parser.print_log_message( 'DEBUG', f"Domains found in source database: {domains}")
         if domains:
             for order_num, domain_info in domains.items():
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"Processing domain: {domain_info}")
+                self.config_parser.print_log_message( 'DEBUG', f"Processing domain: {domain_info}")
                 domain_info['target_schema'] = self.target_schema
                 domain_info['migrated_as'] = migrated_as
                 converted_domain_sql = self.target_connection.get_create_domain_sql(domain_info)
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"Converted domain SQL: {converted_domain_sql}")
+                self.config_parser.print_log_message( 'DEBUG', f"Converted domain SQL: {converted_domain_sql}")
 
                 # If the source domain SQL contains 'CREATE RULE', set 'migrated_as' accordingly
                 self.migrator_tables.insert_domain({
@@ -686,11 +648,9 @@ class Planner:
         self.logger.info("Planner - Preparing defaults...")
         defaults = self.source_connection.fetch_default_values({ 'source_schema': self.source_schema})
         if defaults:
-            if self.config_parser.get_log_level() == 'DEBUG':
-                self.logger.debug(f"Defaults found in source database: {defaults}")
+            self.config_parser.print_log_message( 'DEBUG', f"Defaults found in source database: {defaults}")
             for order_num, default_info in defaults.items():
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"Processing default: {default_info}")
+                self.config_parser.print_log_message( 'DEBUG', f"Processing default: {default_info}")
 
                 self.migrator_tables.insert_default_value({
                     'default_value_schema': default_info['default_value_schema'],

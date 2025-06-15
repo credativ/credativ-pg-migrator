@@ -2,10 +2,12 @@
 
 ## 0.8.3 - 2025.06.xx
 
-- 2025.06.14
+- 2025.06.15
 
-  - Fixes in MySQL data model migration - added missing migration of comments for columns, tables, indexes, repairs in migration of special data types
+  - Fixes in MySQL data model migration - added missing migration of comments for columns, tables, indexes, repairs in migration of special data types, fixed migration of geometry data type and set data type
   - Multiple improvements in MySQL tests, added Sakila testing database (dev repository)
+  - Started refactoring of exception handling in connectors - too specific exceptions masked some errors, generic "Exception" should be now used in most cases
+  - Started refactoring of log levels for different messages in the migrator - added deeper DEBUG levels DEBUG2 and DEBUG3 for better granularity
 
 - 2025.06.13:
 

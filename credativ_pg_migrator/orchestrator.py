@@ -393,7 +393,7 @@ class Orchestrator:
                 ## Retry truncating the table if it fails due to locks or other issues
                 while True:
                     try:
-                        worker_target_connection.execute_query(f"TRUNCATE TABLE {target_schema}.{target_table} CASCADE")
+                        worker_target_connection.execute_query(f'''TRUNCATE TABLE "{target_schema}"."{target_table}" CASCADE''')
                         break
                     except Exception as e:
                         if repeat_count > 5:

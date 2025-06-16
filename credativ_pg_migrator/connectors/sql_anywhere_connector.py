@@ -254,7 +254,7 @@ class SQLAnywhereConnector(DatabaseConnector):
                     # elif col['data_type'].lower() == 'set':
                     #     select_columns_list.append(f"cast(`{col['column_name']}` as char(4000)) as `{col['column_name']}`")
                     # else:
-                    select_columns_list.append(f"{col['column_name']}")
+                    select_columns_list.append(f'''"{col['column_name']}"''')
                 select_columns = ', '.join(select_columns_list)
 
                 part_name = 'fetch_data'
@@ -403,7 +403,9 @@ class SQLAnywhereConnector(DatabaseConnector):
                 primary_tname,
                 foreign_creator,
                 foreign_tname,
-                columns
+                columns,
+                count(*) over (partition by "role") fk_name_uniqueness,
+                row_number() over (partition by "role" order by s.foreign_tname) as fk_name_ordinal_number
             FROM SYS.SYSFOREIGNKEYS s
             WHERE (primary_creator = '{source_table_schema}' or foreign_creator = '{source_table_schema}')
             AND primary_tname = '{source_table_name}'
@@ -414,12 +416,18 @@ class SQLAnywhereConnector(DatabaseConnector):
             cursor = self.connection.cursor()
             cursor.execute(query)
             for row in cursor.fetchall():
-                constraint_name = row[0]
+                constraint_name = f"{row[0]}_fk"
                 constraint_type = 'FOREIGN KEY'
                 primary_table_name = row[2]
                 foreign_table_name = row[4]
                 sa_columns = row[5]
                 pk_columns, ref_columns = sa_columns.split(" IS ")
+
+                fk_name_uniqueness = row[6]
+                fk_name_ordinal_number = row[7]
+                if fk_name_uniqueness > 1:
+                    constraint_name = f"{constraint_name}{fk_name_ordinal_number}"
+
                 columns = []
                 for col in ref_columns.split(","):
                     col = col.strip().replace(" ASC", "").replace(" DESC", "")

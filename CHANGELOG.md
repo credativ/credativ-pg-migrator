@@ -9,6 +9,7 @@
     - Note: Currently fully relevant only for Informix, where we migrate functions/procedures - however, it is now prepared for other connectors as well
   - Change in all connectors - data are now selected using explicitly defined list of columns in the SELECT statement, not using SELECT \* - this allows to use casting or other transformations for some specific data types in the SELECT statement
     - Rationale: Some special data types like geometry, set, some types of LOBs, user defined data types, complex data types etc. are hard to handle in the python code, but can be easily manipulated in the SQL SELECT statement in the source database
+  - Fix in SQL Anywhere connector - added handling of duplicated foreign key names in the source database (duplicates are possible due to different scope of uniqueness in the source database)
 
 - 2025.06.15
 

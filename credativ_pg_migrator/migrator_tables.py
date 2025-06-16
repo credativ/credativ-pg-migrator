@@ -1031,6 +1031,7 @@ class MigratorTables:
             index_sql TEXT,
             index_columns TEXT,
             index_comment TEXT,
+            is_function_based BOOLEAN DEFAULT FALSE,
             task_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             task_started TIMESTAMP,
             task_completed TIMESTAMP,
@@ -1178,6 +1179,7 @@ class MigratorTables:
             'index_sql': row[9],
             'index_columns': row[10],
             'index_comment': row[11],
+            'is_function_based': row[12]
         }
 
     def decode_funcproc_row(self, row):
@@ -1347,14 +1349,14 @@ class MigratorTables:
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
             (source_schema, source_table, source_table_id, index_owner, index_name, index_type,
-            target_schema, target_table, index_sql, index_columns, index_comment)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            target_schema, target_table, index_sql, index_columns, index_comment, is_function_based)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
         params = (values['source_schema'], values['source_table'], values['source_table_id'], values['index_owner'],
                   values['index_name'], values['index_type'], values['target_schema'],
                   values['target_table'], values['index_sql'], values['index_columns'],
-                  values['index_comment'])
+                  values['index_comment'], True if values['is_function_based'] == 'YES' else False)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)

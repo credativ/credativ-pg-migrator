@@ -741,6 +741,9 @@ class PostgreSQLConnector(DatabaseConnector):
         if not insert_columns:
             insert_columns = [f'"{columns[col]["column_name"]}"' for col in sorted(columns.keys())]
 
+        if isinstance(insert_columns, list):
+            insert_columns = ', '.join(insert_columns)
+
         inserted_rows = 0
         self.config_parser.print_log_message('DEBUG2', f"Worker {worker_id}: insert_batch into {target_schema}.{target_table} with {len(data)} rows, columns: {insert_columns}, data type: {type(data)}")
         try:

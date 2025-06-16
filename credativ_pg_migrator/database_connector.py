@@ -269,6 +269,8 @@ class DatabaseConnector(ABC):
                 'index_sql':
                     - Some databases offer directly SQL statement to create the index
                     - if available, it is returned for debugging purposes
+                'is_function_based':
+                    - 'YES' / 'NO' - if the index is function based
                 }
             }
 

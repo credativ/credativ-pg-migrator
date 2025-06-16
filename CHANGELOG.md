@@ -2,6 +2,11 @@
 
 ## 0.8.3 - 2025.06.xx
 
+- 2025.06.16:
+
+  - Improvements in Informix connector - improved handling of default values for columns, updates in data migration for special data types, fix in interpretation of numeric precision and scale, implemented proper handling of function based indexes
+  - Change in Orchestrator - run migration of function based indexes after the migration of user defined functions/procedures because these indexes can reference user defined functions/procedures
+
 - 2025.06.15
 
   - Fixes in MySQL data model migration - added missing migration of comments for columns, tables, indexes, repairs in migration of special data types, fixed migration of geometry data type and set data type

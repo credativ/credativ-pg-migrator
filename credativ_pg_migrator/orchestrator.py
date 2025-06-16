@@ -50,11 +50,12 @@ class Orchestrator:
             # self.run_create_domains()
 
             self.run_migrate_tables()
-            self.run_migrate_indexes()
+            self.run_migrate_indexes('standard')
             self.run_migrate_constraints()
             self.run_migrate_views()
             self.run_migrate_funcprocs()
             self.run_migrate_triggers()
+            self.run_migrate_indexes('function_based')
             self.run_migrate_comments()
 
             self.run_post_migration_script()
@@ -208,7 +209,7 @@ class Orchestrator:
             self.logger.info("No domains found to migrate.")
         self.migrator_tables.update_main_status('Orchestrator', 'domains migration', True, 'finished OK')
 
-    def run_migrate_indexes(self):
+    def run_migrate_indexes(self, run_mode='standard'):
         self.migrator_tables.insert_main('Orchestrator', 'indexes migration')
         workers_requested = self.config_parser.get_parallel_workers_count()
         target_db_type = self.config_parser.get_target_db_type()
@@ -220,6 +221,13 @@ class Orchestrator:
                 futures = {}
                 for index_row in migrate_indexes:
                     index_data = self.migrator_tables.decode_index_row(index_row)
+                    if run_mode == 'function_based' and not index_data['is_function_based']:
+                        self.config_parser.print_log_message( 'DEBUG3', f"Function based run mode: Skipping index {index_data['index_name']} as it is not a function based index.")
+                        continue
+                    elif run_mode == 'standard' and index_data['is_function_based']:
+                        self.config_parser.print_log_message( 'INFO', f"Standard run mode: Skipping function based index {index_data['index_name']} ")
+                        continue
+
                     if len(futures) >= workers_requested:
                         done, _ = concurrent.futures.wait(futures, return_when=concurrent.futures.FIRST_COMPLETED)
                         for future in done:

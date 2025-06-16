@@ -5,7 +5,8 @@
 - 2025.06.16:
 
   - Improvements in Informix connector - improved handling of default values for columns, updates in data migration for special data types, fix in interpretation of numeric precision and scale, implemented proper handling of function based indexes
-  - Change in Orchestrator - run migration of function based indexes after the migration of user defined functions/procedures because these indexes can reference user defined functions/procedures
+  - Change in Orchestrator - run migration of function based indexes only after the migration of user defined functions because these indexes can reference some of these functions
+    - Note: Currently fully relevant only for Informix, where we migrate functions/procedures - however, it is now prepared for other connectors as well
 
 - 2025.06.15
 

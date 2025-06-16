@@ -151,7 +151,7 @@ class InformixConnector(DatabaseConnector):
                     	ELSE 'UNKNOWN-'||cast(c.coltype as varchar(10))||'-'||cast(x.extended_id as varchar(10)) END
                 END AS coltype,
                 c.collength,
-                CASE WHEN c.coltype >= 256 THEN 'NOT NULL' ELSE '' END AS nullable,
+                CASE WHEN c.coltype >= 256 THEN 'NO' ELSE 'YES' END AS nullable,
                 CASE WHEN d.type = 'L' THEN
                     CASE
                         WHEN c.coltype IN (0, 13, 15, 16, 40, 41, 45) THEN d.default
@@ -169,10 +169,6 @@ class InformixConnector(DatabaseConnector):
                             AND t.owner = '{table_schema}')
             ORDER BY colno
         """
-                    # CASE WHEN d.default LIKE 'AAAAAA%' THEN replace(d.default, 'AAAAAA ', '')
-                    # WHEN d.default LIKE 'AAAD6A%' THEN replace(d.default, 'AAAD6A ', '')
-                    # ELSE d.default END
-                    # re.sub(r'[^\x20-\x7E]', ' ', row[5]).strip() if row[5] else '',
         try:
             self.connect()
             cursor = self.connection.cursor()
@@ -183,7 +179,7 @@ class InformixConnector(DatabaseConnector):
                 column_name = row[1]
                 data_type = row[2].strip().upper()
                 maximum_length = row[3]
-                is_nullable = row[4]
+                is_nullable = row[4].strip().upper()
                 column_default_value = row[5]
                 numeric_precision = row[6]
                 numeric_scale = row[7]

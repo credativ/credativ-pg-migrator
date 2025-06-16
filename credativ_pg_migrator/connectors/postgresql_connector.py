@@ -189,6 +189,8 @@ class PostgreSQLConnector(DatabaseConnector):
 
             column_name = self.config_parser.convert_names_case(column_info['column_name'])
 
+            self.config_parser.print_log_message('DEBUG3', f"Creating DDL for table {target_schema}.{target_table_name}, column_info: {column_info}")
+
             if column_info['is_hidden_column'] == 'YES':
                 self.config_parser.print_log_message('DEBUG', f"Skipping hidden column {column_name}: {column_info}")
                 continue
@@ -382,6 +384,7 @@ class PostgreSQLConnector(DatabaseConnector):
                             'constraint_comment': ('added from domains ' + column_comment).strip(),
                         })
 
+            self.config_parser.print_log_message('DEBUG3', f"Creating DDL for table {target_schema}.{target_table_name}, create_column_sql: {create_column_sql}")
             create_table_sql_parts.append(create_column_sql)
 
         create_table_sql = ", ".join(create_table_sql_parts)

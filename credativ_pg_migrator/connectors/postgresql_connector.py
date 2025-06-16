@@ -668,8 +668,23 @@ class PostgreSQLConnector(DatabaseConnector):
                 part_name = 'migrate_table in batches using cursor'
                 self.logger.info(f"Worker {worker_id}: Table {source_table} has {source_table_rows} rows - starting data migration.")
 
+                select_columns_list = []
+                for order_num, col in source_columns.items():
+                    self.config_parser.print_log_message('DEBUG2',
+                                                         f"Worker {worker_id}: Table {source_schema}.{source_table}: Processing column {col['column_name']} ({order_num}) with data type {col['data_type']}")
+                    insert_columns = ', '.join([f'''"{col['column_name']}"''' for col in source_columns.values()])
+
+                    if col['data_type'].lower() == 'datetime':
+                        select_columns_list.append(f"TO_CHAR({col['column_name']}, '%Y-%m-%d %H:%M:%S') as {col['column_name']}")
+                    #     select_columns_list.append(f"ST_asText(`{col['column_name']}`) as `{col['column_name']}`")
+                    # elif col['data_type'].lower() == 'set':
+                    #     select_columns_list.append(f"cast(`{col['column_name']}` as char(4000)) as `{col['column_name']}`")
+                    else:
+                        select_columns_list.append(f'''"{col['column_name']}"''')
+                select_columns = ', '.join(select_columns_list)
+
                 # Open a cursor and fetch rows in batches
-                query = f'''SELECT * FROM {source_schema.upper()}."{source_table}"'''
+                query = f'''SELECT {select_columns} FROM "{source_schema}"."{source_table}"'''
                 if migration_limitation:
                     query += f" WHERE {migration_limitation}"
 
@@ -718,6 +733,7 @@ class PostgreSQLConnector(DatabaseConnector):
                         'data': records,
                         'worker_id': worker_id,
                         'migrator_tables': migrator_tables,
+                        'insert_columns': insert_columns,
                     })
                     total_inserted_rows += inserted_rows
                     self.logger.info(f"Worker {worker_id}: Inserted {inserted_rows} (total: {total_inserted_rows} from: {source_table_rows} ({round(total_inserted_rows/source_table_rows*100, 2)}%)) rows into target table '{target_table}'")

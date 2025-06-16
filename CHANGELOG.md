@@ -4,9 +4,11 @@
 
 - 2025.06.16:
 
-  - Improvements in Informix connector - improved handling of default values for columns, updates in data migration for special data types, fix in interpretation of numeric precision and scale, implemented proper handling of function based indexes
+  - Improvements in Informix connector - improved handling of default values for columns, fix in is_nullable flag, updates in data migration for special data types, fix in interpretation of numeric precision and scale, implemented proper handling of function based indexes
   - Change in Orchestrator - run migration of function based indexes only after the migration of user defined functions because these indexes can reference some of these functions
     - Note: Currently fully relevant only for Informix, where we migrate functions/procedures - however, it is now prepared for other connectors as well
+  - Change in all connectors - data are now selected using explicitly defined list of columns in the SELECT statement, not using SELECT \* - this allows to use casting or other transformations for some specific data types in the SELECT statement
+    - Rationale: Some special data types like geometry, set, some types of LOBs, user defined data types, complex data types etc. are hard to handle in the python code, but can be easily manipulated in the SQL SELECT statement in the source database
 
 - 2025.06.15
 

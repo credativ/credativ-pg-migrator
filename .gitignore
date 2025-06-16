@@ -1,6 +1,7 @@
 lib/*.zip
 *.tar.gz
 credativ_pg_migrator/*.tar.gz
+credativ_pg_migrator/*.log
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

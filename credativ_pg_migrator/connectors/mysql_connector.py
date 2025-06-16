@@ -256,6 +256,7 @@ class MySQLConnector(DatabaseConnector):
                     else:
                         select_columns_list.append(f"`{col['column_name']}`")
                 select_columns = ', '.join(select_columns_list)
+
                 query = f'''SELECT {select_columns} FROM {source_schema}.{source_table}'''
                 if migration_limitation:
                     query += f" WHERE {migration_limitation}"

@@ -367,6 +367,7 @@ class Planner:
                         values['index_columns'] = index_details['index_columns']
                         values['index_comment'] = index_details['index_comment']
                         values['index_sql'] = self.target_connection.get_create_index_sql(values)
+                        values['is_function_based'] = index_details.get('is_function_based', 'NO')
                         self.migrator_tables.insert_indexes( values )
                         self.config_parser.print_log_message( 'DEBUG', f"Processed index: {values}")
                 else:

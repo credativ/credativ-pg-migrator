@@ -67,7 +67,11 @@ class InformixConnector(DatabaseConnector):
         """ Returns a dictionary of SQL functions mapping for the target database """
         target_db_type = settings['target_db_type']
         if target_db_type == 'postgresql':
-            return {}
+            return {
+                'year(': 'extract(year from ',
+                'month(': 'extract(month from ',
+                'day(': 'extract(day from ',
+            }
         else:
             self.logger.error(f"Unsupported target database type: {target_db_type}")
 
@@ -149,7 +153,10 @@ class InformixConnector(DatabaseConnector):
                 c.collength,
                 CASE WHEN c.coltype >= 256 THEN 'NOT NULL' ELSE '' END AS nullable,
                 CASE WHEN d.type = 'L' THEN
-                    d.default
+                    CASE
+                        WHEN c.coltype IN (0, 13, 15, 16, 40, 41, 45) THEN d.default
+                        ELSE SUBSTR(d.default, INSTR(d.default, ' ') + 1)
+                    END
                 ELSE NULL
                 END AS default_value,
                 ifx_bit_rightshift(c.collength, 8) as numeric_precision,
@@ -192,7 +199,7 @@ class InformixConnector(DatabaseConnector):
                     'column_type': '',
                     'character_maximum_length': maximum_length if self.is_string_type(data_type) else None,
                     'numeric_precision': numeric_precision if self.is_numeric_type(data_type) else None,
-                    'numeric_scale': numeric_scale if self.is_numeric_type(data_type) else None,
+                    'numeric_scale': numeric_scale if self.is_numeric_type(data_type) and numeric_scale < 255 else None,
                     'is_nullable': is_nullable,
                     'is_identity': 'YES' if data_type in ('SERIAL', 'SERIAL8', 'BIGSERIAL') else 'NO',
                     'column_default_value': column_default_value,
@@ -324,10 +331,13 @@ class InformixConnector(DatabaseConnector):
                 coalesce(c.constrtype, i.idxtype) as index_type,
                 i.clustered,
                 i.owner,
+                cast(i2.indexkeys  AS lvarchar) as index_keys,
                 part1, part2, part3, part4, part5, part6, part7, part8, part9, part10, part11, part12, part13, part14, part15, part16
             FROM sysindexes i
             LEFT JOIN sysconstraints c
             ON i.tabid = c.tabid and i.idxname = c.idxname
+            LEFT JOIN sysindices i2
+            ON i.tabid = i2.tabid and i.idxname = i2.idxname
             WHERE i.tabid = '{source_table_id}'
             ORDER BY index_name
         """
@@ -340,38 +350,69 @@ class InformixConnector(DatabaseConnector):
 
             for index in indexes:
                 self.config_parser.print_log_message('DEBUG', f"Processing index: {index}")
+                procedure_id = 0
+                procedure_colnos = []
+                procedure_owner = ''
+                procedure_name = ''
+                procedure_columns = ''
+                function_based_index = False
+
                 index_name = index[0].strip()
                 index_type = index[1].strip()
                 index_owner = index[3].strip()
-                colnos = [colno for colno in index[4:] if colno]
+                index_keys = index[4]
+                colnos = [colno for colno in index[5:] if colno]
 
+                # Check if index_keys matches the pattern like '<561>(4) [1]'
+                match = re.match(r'<(\d+)>\(([\d,]+)\)', str(index_keys))
+                if match:
+                    procedure_id = int(match.group(1))
+                    procedure_colnos = [int(x) for x in match.group(2).split(',')]
+                    self.config_parser.print_log_message('DEBUG', f"Index {index_name}: index_keys: procedure_id={procedure_id}, procedure_colnos={procedure_colnos}")
                 # Get column names for each colno
-                columns = []
-                for colno in colnos:
-                    cursor.execute(f"SELECT colname FROM syscolumns WHERE colno = {colno} AND tabid = {source_table_id}")
-                    colname = cursor.fetchone()[0]
-                    columns.append(colname)
 
-                # this part is now included in the original query
-                # # Check if the index is a primary key by looking at sysconstraints
-                # cursor.execute(f"""
-                # SELECT constrtype, constrname FROM sysconstraints
-                # WHERE tabid = {source_table_id} AND idxname = '{index_name}'
-                # """)
-                # constraint = cursor.fetchone()
-                # if constraint and constraint[0] in ('P', 'R'):
-                #     index_type = constraint[0].strip()
-                #     index_name = constraint[1].strip()
+                columns = []
+                if colnos:
+                    self.config_parser.print_log_message('DEBUG3', f"Index {index_name}: Extracted colnos: {colnos}")
+                    for colno in colnos:
+                        cursor.execute(f"SELECT colname FROM syscolumns WHERE colno = {colno} AND tabid = {source_table_id}")
+                        colname = cursor.fetchone()[0]
+                        columns.append(colname)
+
+                if procedure_id > 0:
+                    cursor.execute(f"""
+                    SELECT owner, procname
+                    FROM sysprocedures
+                    WHERE procid = {procedure_id}
+                    """)
+                    procedure_info = cursor.fetchone()
+                    if procedure_info:
+                        procedure_owner = procedure_info[0].strip()
+                        procedure_name = procedure_info[1].strip()
+                        self.config_parser.print_log_message('DEBUG', f"Index {index_name}: Function-based index found: {index_name} on procedure {procedure_name}")
+                        function_based_index = True
+
+                if procedure_colnos:
+                    # Get the column names for the function-based index
+                    proc_columns = []
+                    for colno in procedure_colnos:
+                        cursor.execute(f"SELECT colname FROM syscolumns WHERE colno = {colno} AND tabid = {source_table_id}")
+                        colname = cursor.fetchone()[0]
+                        proc_columns.append(colname)
+                    procedure_columns = ', '.join(proc_columns)
+                    self.config_parser.print_log_message('DEBUG', f"Index {index_name}: Function-based index columns: {procedure_columns}")
 
                 index_columns = ', '.join([f'"{col}"' for col in columns])
-                self.config_parser.print_log_message('DEBUG', f"Columns list: {index_columns}, index type: {index_type}, clustered: {index[2]}")
+                self.config_parser.print_log_message('DEBUG', f"Index {index_name}: Columns list: {index_columns}, index type: {index_type}, clustered: {index[2]}")
 
                 table_indexes[order_num] = {
                     'index_name': index_name,
                     'index_type': "PRIMARY KEY" if index_type == 'P' else "UNIQUE" if index_type == 'U' else "INDEX",
                     'index_owner': index_owner,
-                    'index_columns': index_columns,
-                    'index_comment': ''
+                    'index_columns': index_columns if not function_based_index else f'''{procedure_owner}.{procedure_name}({procedure_columns})''',
+                    'index_keys': index_keys,
+                    'index_comment': '',
+                    'is_function_based': 'YES' if function_based_index else 'NO',
                 }
                 order_num += 1
 
@@ -1072,7 +1113,23 @@ class InformixConnector(DatabaseConnector):
                 self.logger.info(f"Worker {worker_id}: Table {source_table} has {source_table_rows} rows - starting data migration.")
                 # Fetch the data in batches
                 # Open a cursor and fetch rows in batches
-                query = f'''SELECT * FROM "{source_schema}".{source_table}'''
+
+                select_columns_list = []
+                for order_num, col in source_columns.items():
+                    self.config_parser.print_log_message('DEBUG2',
+                                                         f"Worker {worker_id}: Table {source_schema}.{source_table}: Processing column {col['column_name']} ({order_num}) with data type {col['data_type']}")
+                    insert_columns = ', '.join([f'''"{col['column_name']}"''' for col in source_columns.values()])
+
+                    if col['data_type'].lower() == 'datetime':
+                        select_columns_list.append(f"TO_CHAR({col['column_name']}, '%Y-%m-%d %H:%M:%S') as {col['column_name']}")
+                    #     select_columns_list.append(f"ST_asText(`{col['column_name']}`) as `{col['column_name']}`")
+                    # elif col['data_type'].lower() == 'set':
+                    #     select_columns_list.append(f"cast(`{col['column_name']}` as char(4000)) as `{col['column_name']}`")
+                    else:
+                        select_columns_list.append(f"{col['column_name']}")
+                select_columns = ', '.join(select_columns_list)
+
+                query = f'''SELECT {select_columns} FROM "{source_schema}".{source_table}'''
                 if migration_limitation:
                     query += f" WHERE {migration_limitation}"
 
@@ -1140,6 +1197,7 @@ class InformixConnector(DatabaseConnector):
                         'data': records,
                         'worker_id': worker_id,
                         'migrator_tables': migrator_tables,
+                        'insert_columns': insert_columns,
                     })
                     total_inserted_rows += inserted_rows
                     self.logger.info(f"Worker {worker_id}: Inserted {inserted_rows} (total: {total_inserted_rows} from: {source_table_rows} ({round(total_inserted_rows/source_table_rows*100, 2)}%)) rows into target table {target_table}")

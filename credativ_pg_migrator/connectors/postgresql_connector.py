@@ -17,8 +17,8 @@
 import psycopg2
 import psycopg2.extras
 from psycopg2 import sql
-from database_connector import DatabaseConnector
-from migrator_logging import MigratorLogger
+from credativ_pg_migrator.database_connector import DatabaseConnector
+from credativ_pg_migrator.migrator_logging import MigratorLogger
 import traceback
 import re
 

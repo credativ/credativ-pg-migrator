@@ -14,8 +14,8 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-from database_connector import DatabaseConnector
-from migrator_logging import MigratorLogger
+from credativ_pg_migrator.database_connector import DatabaseConnector
+from credativ_pg_migrator.migrator_logging import MigratorLogger
 import sqlanydb
 import pyodbc
 import traceback

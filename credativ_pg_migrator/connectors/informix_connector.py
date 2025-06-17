@@ -15,8 +15,8 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import jaydebeapi
-from database_connector import DatabaseConnector
-from migrator_logging import MigratorLogger
+from credativ_pg_migrator.database_connector import DatabaseConnector
+from credativ_pg_migrator.migrator_logging import MigratorLogger
 import re
 import traceback
 import pyodbc

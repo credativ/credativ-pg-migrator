@@ -15,14 +15,41 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import json
-from connectors.postgresql_connector import PostgreSQLConnector
+import psycopg2
+
+class ProtocolPostgresConnection:
+    def __init__(self, config_parser):
+        self.config_parser = config_parser
+        self.connection = None
+
+    def connect(self):
+        cfg = self.config_parser.get_migrator_config()
+        if not cfg:
+            raise ValueError("Configuration for the migrator is not set.")
+        if cfg['type'] != 'postgresql':
+            raise ValueError(f"Unsupported database type for protocol connection: {cfg['type']}")
+        if 'username' not in cfg or 'password' not in cfg or 'database' not in cfg:
+            raise ValueError("Configuration for the migrator is incomplete. 'username', 'password', and 'database' are required.")
+        self.connection = psycopg2.connect(
+            dbname=cfg['database'],
+            user=cfg['username'],
+            password=cfg['password'],
+            host=cfg.get('host', 'localhost'),
+            port=cfg.get('port', 5432)
+        )
+
+    def execute_query(self, query, params=None):
+        with self.connection.cursor() as cur:
+            cur.execute(query, params) if params else cur.execute(query)
+            self.connection.commit()
+
 class MigratorTables:
     def __init__(self, logger, config_parser):
         self.logger = logger
         self.config_parser = config_parser
         protocol_db_type = self.config_parser.get_migrator_db_type()
         if protocol_db_type == 'postgresql':
-            self.protocol_connection = PostgreSQLConnector(self.config_parser, 'target')
+            self.protocol_connection = ProtocolPostgresConnection(self.config_parser)
         else:
             raise ValueError(f"Unsupported database type for protocol table: {protocol_db_type}")
         self.protocol_connection.connect()
@@ -1756,6 +1783,7 @@ class MigratorTables:
             if row:
                 view_row = self.decode_view_row(row)
                 self.update_protocol('view', view_row['id'], success, message, None)
+
             else:
                 self.config_parser.print_log_message('ERROR', f"Error updating status for view {row_id} in {table_name}.")
                 self.config_parser.print_log_message('ERROR', f"Error: No protocol row returned.")

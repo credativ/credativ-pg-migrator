@@ -48,12 +48,12 @@ class OracleConnector(DatabaseConnector):
                                                     encoding="UTF-8")
 
         except Exception as e:
-            self.logger.error("cx_Oracle module is not installed.")
+            self.config_parser.print_log_message('ERROR', "cx_Oracle module is not installed.")
             raise e
         except Exception as e:
-            self.logger.error(f"Error connecting to Oracle database: {e}")
-            self.logger.error("Full stack trace:")
-            self.logger.error(traceback.format_exc())
+            self.config_parser.print_log_message('ERROR', f"Error connecting to Oracle database: {e}")
+            self.config_parser.print_log_message('ERROR', "Full stack trace:")
+            self.config_parser.print_log_message('ERROR', traceback.format_exc())
             raise e
 
     def disconnect(self):
@@ -69,7 +69,7 @@ class OracleConnector(DatabaseConnector):
         if target_db_type == 'postgresql':
             return {}
         else:
-            self.logger.error(f"Unsupported target database type: {target_db_type}")
+            self.config_parser.print_log_message('ERROR', f"Unsupported target database type: {target_db_type}")
 
     def fetch_table_names(self, table_schema: str):
         query = f"""
@@ -96,8 +96,8 @@ class OracleConnector(DatabaseConnector):
             self.disconnect()
             return tables
         except Exception as e:
-            self.logger.error(f"Error executing query: {query}")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def fetch_table_columns(self, settings) -> dict:
@@ -174,8 +174,8 @@ class OracleConnector(DatabaseConnector):
 
             return result
         except Exception as e:
-            self.logger.error(f"Error executing query: {query}")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def get_types_mapping(self, settings):
@@ -272,8 +272,8 @@ class OracleConnector(DatabaseConnector):
             else:
                 return None
         except Exception as e:
-            self.logger.error(f"Error executing query: {query}")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def migrate_table(self, migrate_target_connection, settings):
@@ -364,11 +364,11 @@ class OracleConnector(DatabaseConnector):
                         table_indexes[order_num]['index_sql'] = f"{ddl}"
                         self.config_parser.print_log_message('DEBUG', f"Fetched DDL for index {index_info['index_name']}: {ddl}")
                 except Exception as e:
-                    self.logger.error(f"Error fetching DDL for index {index_info['index_name']}: {e}")
+                    self.config_parser.print_log_message('ERROR', f"Error fetching DDL for index {index_info['index_name']}: {e}")
                     table_indexes[order_num]['index_sql'] = f"Error fetching DDL: {e}"
 
             if hidden_columns_count > 0:
-                self.logger.warning(f"Table {source_table_schema}.{source_table_name} has {hidden_columns_count} hidden columns in indexes.")
+                self.config_parser.print_log_message('INFO', f"Table {source_table_schema}.{source_table_name} has {hidden_columns_count} hidden columns in indexes.")
                 try:
                     query = f"""SELECT COLUMN_NAME, DATA_DEFAULT FROM all_tab_cols WHERE owner = '{source_table_schema.upper()}' AND table_name = '{source_table_name.upper()}' AND hidden_column = 'YES'"""
                     cursor.execute(query)
@@ -384,15 +384,15 @@ class OracleConnector(DatabaseConnector):
                                     index_info['index_columns'] = index_info['index_columns'].replace(col_name, f"{col_default}")
                                     self.config_parser.print_log_message('DEBUG', f"Updated index {index_info['index_name']} with hidden column {col_name} and default value {col_default}")
                 except Exception as e:
-                    self.logger.error(f"Error fetching hidden columns for table {source_table_schema}.{source_table_name}: {e}")
+                    self.config_parser.print_log_message('ERROR', f"Error fetching hidden columns for table {source_table_schema}.{source_table_name}: {e}")
 
             cursor.close()
             self.disconnect()
             return table_indexes
 
         except Exception as e:
-            self.logger.error(f"Error executing query: {index_query}")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {index_query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def get_create_index_sql(self, settings):
@@ -479,8 +479,8 @@ class OracleConnector(DatabaseConnector):
             self.disconnect()
             return table_constraints
         except Exception as e:
-            self.logger.error(f"Error executing query: {constraints_query}")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {constraints_query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def get_create_constraint_sql(self, settings):
@@ -531,8 +531,8 @@ class OracleConnector(DatabaseConnector):
             self.disconnect()
             return triggers
         except Exception as e:
-            self.logger.error(f"Error executing query: {query}")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def convert_trigger(self, trig: str, settings: dict):
@@ -587,8 +587,8 @@ class OracleConnector(DatabaseConnector):
             self.disconnect()
             return views
         except Exception as e:
-            self.logger.error(f"Error executing query: {query}")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def fetch_view_code(self, settings):
@@ -612,8 +612,8 @@ class OracleConnector(DatabaseConnector):
             self.disconnect()
             return view_code
         except Exception as e:
-            self.logger.error(f"Error executing query: {query}")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def convert_view_code(self, view_code: str, settings: dict):
@@ -634,8 +634,8 @@ class OracleConnector(DatabaseConnector):
                 cursor.execute(query)
             cursor.close()
         except Exception as e:
-            self.logger.error(f"Error executing query: {query}")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def execute_sql_script(self, script_path: str):
@@ -646,8 +646,8 @@ class OracleConnector(DatabaseConnector):
             cursor.execute(script)
             cursor.close()
         except Exception as e:
-            self.logger.error(f"Error executing SQL script: {script_path}")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error executing SQL script: {script_path}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def begin_transaction(self):
@@ -668,8 +668,8 @@ class OracleConnector(DatabaseConnector):
             cursor.close()
             return count
         except Exception as e:
-            self.logger.error(f"Error executing query: {query}")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def get_table_size(self, table_schema: str, table_name: str):
@@ -714,7 +714,7 @@ class OracleConnector(DatabaseConnector):
             cursor.close()
             self.disconnect()
         except Exception as e:
-            self.logger.error(f"Error fetching table description for {table_schema}.{table_name}: {e}")
+            self.config_parser.print_log_message('ERROR', f"Error fetching table description for {table_schema}.{table_name}: {e}")
             raise
 
         return { 'table_description': output.strip() }

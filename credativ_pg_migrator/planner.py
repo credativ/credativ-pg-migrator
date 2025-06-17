@@ -62,7 +62,7 @@ class Planner:
             except Exception as e:
                 pass
 
-            self.logger.info("Planner phase done successfully.")
+            self.config_parser.print_log_message('INFO', "Planner phase done successfully.")
         except Exception as e:
             self.migrator_tables.update_main_status('Planner', '', False, f'ERROR: {e}')
             self.handle_error(e, "Planner")
@@ -89,7 +89,7 @@ class Planner:
 
     def pre_planning(self):
         try:
-            self.logger.info("Running pre-planning actions...")
+            self.config_parser.print_log_message('INFO', "Running pre-planning actions...")
 
             self.config_parser.print_log_message( 'DEBUG', f"Target schema: {self.target_schema}")
             self.config_parser.print_log_message( 'DEBUG', f"Pre migration script: {self.pre_script}")
@@ -111,9 +111,9 @@ class Planner:
 
             if self.config_parser.should_drop_schema():
                 if self.target_schema.lower() == 'public':
-                    self.logger.info("Cannot drop the 'public' schema - skipping drop of schema.")
+                    self.config_parser.print_log_message('INFO', "Cannot drop the 'public' schema - skipping drop of schema.")
                 else:
-                    self.logger.info(f"Dropping target schema '{self.target_schema}'...")
+                    self.config_parser.print_log_message('INFO', f"Dropping target schema '{self.target_schema}'...")
                     self.target_connection.execute_query(f"DROP SCHEMA IF EXISTS {self.target_schema} CASCADE")
 
             self.config_parser.print_log_message( 'DEBUG', f"Creating target schema '{self.target_schema}' if it does not exist...")
@@ -122,7 +122,7 @@ class Planner:
 
             self.run_pre_migration_script()
 
-            self.logger.info("Creating migration plan...")
+            self.config_parser.print_log_message('INFO', "Creating migration plan...")
             self.migrator_tables.create_all()
             self.migrator_tables.insert_main('Planner', '')
             self.migrator_tables.prepare_data_types_substitution()
@@ -142,12 +142,12 @@ class Planner:
             self.migrator_tables.prepare_data_migration_limitation()
             self.migrator_tables.prepare_remote_objects_substitution()
 
-            self.logger.info("Pre-planning part done successfully.")
+            self.config_parser.print_log_message('INFO', "Pre-planning part done successfully.")
         except Exception as e:
             self.handle_error(e, "Pre-planning runs")
 
     def run_prepare_tables(self):
-        self.logger.info("Planner - Preparing tables...")
+        self.config_parser.print_log_message('INFO', "Planner - Preparing tables...")
         source_tables = self.source_connection.fetch_table_names(self.source_schema)
         include_tables = self.config_parser.get_include_tables()
         exclude_tables = self.config_parser.get_exclude_tables() or []
@@ -158,7 +158,7 @@ class Planner:
         self.config_parser.print_log_message( 'DEBUG', f"Exclude tables: {exclude_tables}")
 
         for order_num, table_info in source_tables.items():
-            self.logger.info(f"Processing table ({order_num}/{len(source_tables)}): {table_info['table_name']}")
+            self.config_parser.print_log_message('INFO', f"Processing table ({order_num}/{len(source_tables)}): {table_info['table_name']}")
             # If include_tables is empty, include all tables
             # If include_tables is ['.*'] or contains '.*', include all tables
             if include_tables == ['.*'] or '.*' in include_tables:
@@ -166,7 +166,7 @@ class Planner:
             elif include_tables and not any(fnmatch.fnmatch(table_info['table_name'], pattern) for pattern in include_tables):
                 continue
             if any(fnmatch.fnmatch(table_info['table_name'], pattern) for pattern in exclude_tables):
-                self.logger.info(f"Table {table_info['table_name']} is excluded from migration.")
+                self.config_parser.print_log_message('INFO', f"Table {table_info['table_name']} is excluded from migration.")
                 continue
 
             source_columns = []
@@ -426,11 +426,11 @@ class Planner:
                             'constraint_status': constraint_details['constraint_status'] if 'constraint_status' in constraint_details else '',
                             }
                         )
-                    self.logger.info(f"Constraint {constraint_details['constraint_name']} for table {table_info['table_name']}")
+                    self.config_parser.print_log_message('INFO', f"Constraint {constraint_details['constraint_name']} for table {table_info['table_name']}")
                 else:
-                    self.logger.info(f"No constraints found for table {table_info['table_name']}.")
+                    self.config_parser.print_log_message('INFO', f"No constraints found for table {table_info['table_name']}.")
             else:
-                self.logger.info("Skipping constraint migration.")
+                self.config_parser.print_log_message('INFO', "Skipping constraint migration.")
 
             if self.config_parser.should_migrate_triggers():
                 triggers = self.source_connection.fetch_triggers(table_info['id'], self.source_schema, table_info['table_name'])
@@ -464,14 +464,14 @@ class Planner:
                             converted_code,
                             trigger_details['comment']
                         )
-                    self.logger.info(f"Trigger {trigger_details['name']} for table {table_info['table_name']}")
+                    self.config_parser.print_log_message('INFO', f"Trigger {trigger_details['name']} for table {table_info['table_name']}")
                 else:
-                    self.logger.info(f"No triggers found for table {table_info['table_name']}.")
+                    self.config_parser.print_log_message('INFO', f"No triggers found for table {table_info['table_name']}.")
             else:
-                self.logger.info("Skipping trigger migration.")
+                self.config_parser.print_log_message('INFO', "Skipping trigger migration.")
 
-            self.logger.info(f"Table {table_info['table_name']} processed successfully.")
-        self.logger.info("Planner - Tables processed successfully.")
+            self.config_parser.print_log_message('INFO', f"Table {table_info['table_name']} processed successfully.")
+        self.config_parser.print_log_message('INFO', "Planner - Tables processed successfully.")
 
     def convert_table_columns(self, settings):
         target_db_type = settings['target_db_type']
@@ -495,15 +495,15 @@ class Planner:
                     character_maximum_length = column_info['character_maximum_length'] if column_info['character_maximum_length'] is not None else 0
                     if source_db_type != 'postgresql':
                         if types_mapping.get(coltype, 'UNKNOWN').startswith('UNKNOWN'):
-                            self.logger.info(f"Column {column_info['column_name']} - unknown data type: {column_info['data_type']} - checking column_type...")
+                            self.config_parser.print_log_message('INFO', f"Column {column_info['column_name']} - unknown data type: {column_info['data_type']} - checking column_type...")
                             if 'column_type' in column_info and column_info['column_type']:
                                 coltype = column_info['column_type'].upper()
                                 if types_mapping.get(coltype, 'UNKNOWN').startswith('UNKNOWN'):
-                                    self.logger.info(f"Column {column_info['column_name']} - unknown column type: {column_info['column_type']} - checking basic_data_type...")
+                                    self.config_parser.print_log_message('INFO', f"Column {column_info['column_name']} - unknown column type: {column_info['column_type']} - checking basic_data_type...")
                                     if 'basic_data_type' in column_info and column_info['basic_data_type']:
                                         coltype = column_info['basic_data_type'].upper()
                                         if types_mapping.get(coltype, 'UNKNOWN').startswith('UNKNOWN'):
-                                            self.logger.info(f"Column {column_info['column_name']} - unknown basic data type: {column_info['basic_data_type']} - mapping missing, using TEXT...")
+                                            self.config_parser.print_log_message('INFO', f"Column {column_info['column_name']} - unknown basic data type: {column_info['basic_data_type']} - mapping missing, using TEXT...")
 
                     coltype = types_mapping.get(coltype, 'TEXT').upper()
 
@@ -548,9 +548,9 @@ class Planner:
         return converted
 
     def run_prepare_views(self):
-        self.logger.info("Planner - Preparing views...")
+        self.config_parser.print_log_message('INFO', "Planner - Preparing views...")
         if self.config_parser.should_migrate_views():
-            self.logger.info("Processing views...")
+            self.config_parser.print_log_message('INFO', "Processing views...")
             views = self.source_connection.fetch_views_names(self.source_schema)
 
             include_views = self.config_parser.get_include_views()
@@ -561,16 +561,16 @@ class Planner:
             self.config_parser.print_log_message( 'DEBUG', f"Exclude views: {exclude_views}")
 
             for order_num, view_info in views.items():
-                self.logger.info(f"Processing view ({order_num}): {view_info}")
+                self.config_parser.print_log_message('INFO', f"Processing view ({order_num}): {view_info}")
                 if include_views == ['.*'] or '.*' in include_views:
                     pass
                 elif not any(fnmatch.fnmatch(view_info['view_name'], pattern) for pattern in include_views):
-                    self.logger.info(f"View {view_info['view_name']} does not match patterns for migration.")
+                    self.config_parser.print_log_message('INFO', f"View {view_info['view_name']} does not match patterns for migration.")
                     continue
                 if any(fnmatch.fnmatch(view_info['view_name'], pattern) for pattern in exclude_views):
-                    self.logger.info(f"View {view_info['view_name']} is excluded from migration.")
+                    self.config_parser.print_log_message('INFO', f"View {view_info['view_name']} is excluded from migration.")
                     continue
-                self.logger.info(f"View {view_info['view_name']} is included for migration.")
+                self.config_parser.print_log_message('INFO', f"View {view_info['view_name']} is included for migration.")
                 view_sql = self.source_connection.fetch_view_code({
                     'view_id': view_info['id'],
                     'source_schema': self.config_parser.get_source_schema(),
@@ -622,13 +622,13 @@ class Planner:
                     'target_type_sql': converted_type_sql,
                     'type_comment':  type_info['comment'],
                 })
-                self.logger.info(f"User defined type {type_info['type_name']} processed successfully.")
-            self.logger.info("Planner - User defined types processed successfully.")
+                self.config_parser.print_log_message('INFO', f"User defined type {type_info['type_name']} processed successfully.")
+            self.config_parser.print_log_message('INFO', "Planner - User defined types processed successfully.")
         else:
-            self.logger.info("No user defined types found.")
+            self.config_parser.print_log_message('INFO', "No user defined types found.")
 
     def run_prepare_domains(self):
-        self.logger.info("Planner - Preparing domains...")
+        self.config_parser.print_log_message('INFO', "Planner - Preparing domains...")
         migrated_as = 'CHECK CONSTRAINT'
         domains = self.source_connection.fetch_domains(self.source_schema)
         self.config_parser.print_log_message( 'DEBUG', f"Domains found in source database: {domains}")
@@ -652,13 +652,13 @@ class Planner:
                     'migrated_as': migrated_as,
                     'domain_comment':  domain_info['domain_comment'],
                 })
-                self.logger.info(f"Domain {domain_info['domain_name']} processed successfully.")
-            self.logger.info("Planner - Domains processed successfully.")
+                self.config_parser.print_log_message('INFO', f"Domain {domain_info['domain_name']} processed successfully.")
+            self.config_parser.print_log_message('INFO', "Planner - Domains processed successfully.")
         else:
-            self.logger.info("No domains found.")
+            self.config_parser.print_log_message('INFO', "No domains found.")
 
     def run_prepare_defaults(self):
-        self.logger.info("Planner - Preparing defaults...")
+        self.config_parser.print_log_message('INFO', "Planner - Preparing defaults...")
         defaults = self.source_connection.fetch_default_values({ 'source_schema': self.source_schema})
         if defaults:
             self.config_parser.print_log_message( 'DEBUG', f"Defaults found in source database: {defaults}")
@@ -673,34 +673,34 @@ class Planner:
                     'default_value_data_type': default_info['default_value_data_type'] if 'default_value_data_type' in default_info else '',
                     'default_value_comment':  default_info['default_value_comment'] if 'default_value_comment' in default_info else '',
                 })
-                self.logger.info(f"Default {default_info['default_value_name']} processed successfully.")
-            self.logger.info("Planner - Defaults processed successfully.")
+                self.config_parser.print_log_message('INFO', f"Default {default_info['default_value_name']} processed successfully.")
+            self.config_parser.print_log_message('INFO', "Planner - Defaults processed successfully.")
         else:
-            self.logger.info("No defaults found.")
+            self.config_parser.print_log_message('INFO', "No defaults found.")
 
     def run_pre_migration_script(self):
         pre_migration_script = self.config_parser.get_pre_migration_script()
         if pre_migration_script:
-            self.logger.info(f"Running pre-migration script '{pre_migration_script}' in target database.")
+            self.config_parser.print_log_message('INFO', f"Running pre-migration script '{pre_migration_script}' in target database.")
             try:
                 self.target_connection.connect()
                 self.target_connection.execute_sql_script(pre_migration_script)
                 self.target_connection.disconnect()
-                self.logger.info("Pre-migration script executed successfully.")
+                self.config_parser.print_log_message('INFO', "Pre-migration script executed successfully.")
             except Exception as e:
                 self.handle_error(e, "Pre-migration script")
         else:
-            self.logger.info("No pre-migration script specified.")
+            self.config_parser.print_log_message('INFO', "No pre-migration script specified.")
 
     def check_script_accessibility(self, script_path):
         if not script_path:
             return
         if not os.path.isfile(script_path):
-            self.logger.error(f"Script {script_path} does not exist or is not accessible.")
+            self.config_parser.print_log_message('ERROR', f"Script {script_path} does not exist or is not accessible.")
             if self.config_parser.get_on_error_action() == 'stop':
-                self.logger.error("Stopping execution due to error.")
+                self.config_parser.print_log_message('ERROR', "Stopping execution due to error.")
                 exit(1)
-        self.logger.info(f"Script {script_path} is accessible.")
+        self.config_parser.print_log_message('INFO', f"Script {script_path} is accessible.")
 
     def check_database_connection(self, connector, db_name):
         try:
@@ -711,19 +711,19 @@ class Planner:
             result = cursor.fetchone()
             if result[0] != 1:
                 raise ConnectionError(f"Connection to {db_name} failed.")
-            self.logger.info(f"Connection to {db_name} is OK.")
+            self.config_parser.print_log_message('INFO', f"Connection to {db_name} is OK.")
             cursor.close()
             connector.disconnect()
         except Exception as e:
-            self.logger.error(f"Failed to connect to {db_name}: {e}")
-            self.logger.error(traceback.format_exc())
+            self.config_parser.print_log_message('ERROR', f"Failed to connect to {db_name}: {e}")
+            self.config_parser.print_log_message('ERROR', traceback.format_exc())
             exit(1)
 
     def handle_error(self, e, description=None):
-        self.logger.error(f"An error in {self.__class__.__name__} ({description}): {e}")
-        self.logger.error(traceback.format_exc())
+        self.config_parser.print_log_message('ERROR', f"An error in {self.__class__.__name__} ({description}): {e}")
+        self.config_parser.print_log_message('ERROR', traceback.format_exc())
         if self.on_error_action == 'stop':
-            self.logger.error("Stopping due to error.")
+            self.config_parser.print_log_message('ERROR', "Stopping due to error.")
             exit(1)
 
 if __name__ == "__main__":

@@ -19,6 +19,7 @@
     - Rational: Tests with Sakila database showed issue with migration of encoded passwords - in the table staff column password is varchar(40) but migrated value exceeds this length -> we need to be able to specify replacements for specific columns, existing solution was not flexible enough
   - Refactoring of exception handling in connectors - too specific exceptions masked some errors, generic "Exception" is now used in most cases
   - Refactoring of log levels for different messages in the migrator - added deeper DEBUG levels DEBUG2 and DEBUG3 for better granularity, old calls replaced with new function
+    - Refactoring of all calls to print log messages in the whole code
 
 - 2025.06.13:
 

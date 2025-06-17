@@ -67,7 +67,7 @@ class MsSQLConnector(DatabaseConnector):
         if target_db_type == 'postgresql':
             return {}
         else:
-            self.logger.error(f"Unsupported target database type: {target_db_type}")
+            self.config_parser.print_log_message('ERROR', f"Unsupported target database type: {target_db_type}")
 
     def fetch_table_names(self, table_schema: str):
         query = f"""
@@ -98,8 +98,8 @@ class MsSQLConnector(DatabaseConnector):
             self.disconnect()
             return tables
         except Exception as e:
-            self.logger.error(f"Error executing query: {query}")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def fetch_table_columns(self, settings) -> dict:
@@ -185,8 +185,8 @@ class MsSQLConnector(DatabaseConnector):
             self.disconnect()
             return result
         except Exception as e:
-            self.logger.error(f"Error executing query: {query}")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def get_types_mapping(self, settings):
@@ -312,8 +312,8 @@ class MsSQLConnector(DatabaseConnector):
             return table_indexes
 
         except Exception as e:
-            self.logger.error(f"Error executing query: {query}")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def get_create_index_sql(self, settings):
@@ -403,8 +403,8 @@ class MsSQLConnector(DatabaseConnector):
             self.disconnect()
             return table_constraints
         except Exception as e:
-            self.logger.error(f"Error executing query: {query}")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def get_create_constraint_sql(self, settings):
@@ -477,8 +477,8 @@ class MsSQLConnector(DatabaseConnector):
             self.disconnect()
             return views
         except Exception as e:
-            self.logger.error(f"Error executing query: {query}")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def fetch_view_code(self, settings):
@@ -506,8 +506,8 @@ class MsSQLConnector(DatabaseConnector):
             self.disconnect()
             return view_code
         except Exception as e:
-            self.logger.error(f"Error executing query: {query}")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def convert_view_code(self, view_code: str, settings: dict):
@@ -604,9 +604,9 @@ class MsSQLConnector(DatabaseConnector):
                 migrator_tables.update_data_migration_status(protocol_id, True, 'OK', target_table_rows)
                 cursor.close()
         except Exception as e:
-            self.logger.error(f"Worker {worker_id}: Error during {part_name} -> {e}")
-            self.logger.error("Full stack trace:")
-            self.logger.error(traceback.format_exc())
+            self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Error during {part_name} -> {e}")
+            self.config_parser.print_log_message('ERROR', "Full stack trace:")
+            self.config_parser.print_log_message('ERROR', traceback.format_exc())
             raise e
         finally:
             self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Finished processing table {source_table}. Inserted {inserted_rows} rows into target table '{target_table}'.")

@@ -90,7 +90,7 @@ class SybaseASEConnector(DatabaseConnector):
                 'charindex(': 'position(',
             }
         else:
-            self.logger.error(f"Unsupported target database type: {target_db_type}")
+            self.config_parser.print_log_message('ERROR', f"Unsupported target database type: {target_db_type}")
 
     def fetch_table_names(self, table_schema: str):
         # 2048 = proxy table referencing remote table
@@ -122,8 +122,8 @@ class SybaseASEConnector(DatabaseConnector):
             self.disconnect()
             return tables
         except Exception as e:
-            self.logger.error(f"Error executing query: {query}")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def fetch_table_columns(self, settings) -> dict:
@@ -287,8 +287,8 @@ class SybaseASEConnector(DatabaseConnector):
             self.disconnect()
             return result
         except Exception as e:
-            self.logger.error(f"Error executing query: {query}")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def fetch_default_values(self, settings) -> dict:
@@ -481,8 +481,8 @@ class SybaseASEConnector(DatabaseConnector):
             return table_indexes
 
         except Exception as e:
-            self.logger.error(f"Error executing query: {query}")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def get_create_index_sql(self, settings):
@@ -752,10 +752,10 @@ class SybaseASEConnector(DatabaseConnector):
         self.connection.rollback()
 
     def handle_error(self, e, description=None):
-        self.logger.error(f"An error in {self.__class__.__name__} ({description}): {e}")
-        self.logger.error(traceback.format_exc())
+        self.config_parser.print_log_message('ERROR', f"An error in {self.__class__.__name__} ({description}): {e}")
+        self.config_parser.print_log_message('ERROR', traceback.format_exc())
         if self.on_error_action == 'stop':
-            self.logger.error("Stopping due to error.")
+            self.config_parser.print_log_message('ERROR', "Stopping due to error.")
             exit(1)
         else:
             pass
@@ -910,7 +910,7 @@ class SybaseASEConnector(DatabaseConnector):
 
     #         migrator_tables.protocol_connection.execute_query(f"""DROP TABLE IF EXISTS "{temp_table}" """)
     #         self.connection.commit()
-    #         self.logger.info(f"Worker: {worker_id}: PK analysis: {loop_counter}: Finished analyzing PK distribution for table {table_name}.")
+    #         self.config_parser.print_log_message('INFO', f"Worker: {worker_id}: PK analysis: {loop_counter}: Finished analyzing PK distribution for table {table_name}.")
     #         ## end of function
 
 
@@ -1023,11 +1023,11 @@ class SybaseASEConnector(DatabaseConnector):
             })
 
             if source_table_rows == 0:
-                self.logger.info(f"Worker {worker_id}: Table {source_table} is empty - skipping data migration.")
+                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {source_table} is empty - skipping data migration.")
                 return 0
             else:
                 part_name = 'migrate_table in batches using cursor'
-                self.logger.info(f"Worker {worker_id}: Table {source_table} has {source_table_rows} rows - starting data migration.")
+                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {source_table} has {source_table_rows} rows - starting data migration.")
 
                 select_columns_list = []
                 for order_num, col in source_columns.items():
@@ -1087,17 +1087,17 @@ class SybaseASEConnector(DatabaseConnector):
                         'insert_columns': insert_columns,
                     })
                     total_inserted_rows += inserted_rows
-                    self.logger.info(f"Worker {worker_id}: Inserted {inserted_rows} (total: {total_inserted_rows} from: {source_table_rows} ({round(total_inserted_rows/source_table_rows*100, 2)}%)) rows into target table '{target_table}'")
+                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Inserted {inserted_rows} (total: {total_inserted_rows} from: {source_table_rows} ({round(total_inserted_rows/source_table_rows*100, 2)}%)) rows into target table '{target_table}'")
 
                 target_table_rows = migrate_target_connection.get_rows_count(target_schema, target_table)
-                self.logger.info(f"Worker {worker_id}: Target table {target_schema}.{target_table} has {target_table_rows} rows")
+                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Target table {target_schema}.{target_table} has {target_table_rows} rows")
                 migrator_tables.update_data_migration_status(protocol_id, True, 'OK', target_table_rows)
                 sybase_cursor.close()
 
         except Exception as e:
-            self.logger.error(f"Worker {worker_id}: Error during {part_name} -> {e}")
-            self.logger.error("Full stack trace:")
-            self.logger.error(traceback.format_exc())
+            self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Error during {part_name} -> {e}")
+            self.config_parser.print_log_message('ERROR', "Full stack trace:")
+            self.config_parser.print_log_message('ERROR', traceback.format_exc())
             raise e
         finally:
             self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Finished processing table {source_table}.")
@@ -1177,8 +1177,8 @@ class SybaseASEConnector(DatabaseConnector):
             self.disconnect()
             return views
         except Exception as e:
-            self.logger.error(f"Error executing query: {query}")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def fetch_view_code(self, settings):
@@ -1220,7 +1220,7 @@ class SybaseASEConnector(DatabaseConnector):
             converted_code = converted_code.replace(f"{settings['source_database']}.{settings['source_schema']}.", f"{settings['target_schema']}.")
             converted_code = converted_code.replace(f"{settings['source_schema']}.", f"{settings['target_schema']}.")
         else:
-            self.logger.error(f"Unsupported target database type: {settings['target_db_type']}")
+            self.config_parser.print_log_message('ERROR', f"Unsupported target database type: {settings['target_db_type']}")
         return converted_code
 
     def get_sequence_current_value(self, sequence_name):
@@ -1354,7 +1354,7 @@ class SybaseASEConnector(DatabaseConnector):
             cursor.close()
             self.disconnect()
         except Exception as e:
-            self.logger.error(f"Error fetching table description for {table_schema}.{table_name}: {e}")
+            self.config_parser.print_log_message('ERROR', f"Error fetching table description for {table_schema}.{table_name}: {e}")
             raise
 
         return { 'table_description': output.strip() }

@@ -48,7 +48,7 @@ class PostgreSQLConnector(DatabaseConnector):
         if target_db_type == 'postgresql':
             return {}
         else:
-            self.logger.error(f"Unsupported target database type: {target_db_type}")
+            self.config_parser.print_log_message('ERROR', f"Unsupported target database type: {target_db_type}")
 
     def fetch_table_names(self, schema: str = 'public'):
         query = f"""
@@ -81,8 +81,8 @@ class PostgreSQLConnector(DatabaseConnector):
             self.disconnect()
             return tables
         except Exception as e:
-            self.logger.error(f"Error executing query: {query}")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def fetch_table_columns(self, settings) -> dict:
@@ -160,8 +160,8 @@ class PostgreSQLConnector(DatabaseConnector):
             return result
 
         except Exception as e:
-            self.logger.error(f"Error executing query: {query}")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def get_types_mapping(self, settings):
@@ -446,8 +446,8 @@ class PostgreSQLConnector(DatabaseConnector):
             self.disconnect()
             return table_indexes
         except Exception as e:
-            self.logger.error(f"Error executing query: {query}")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def get_create_index_sql(self, settings):
@@ -550,8 +550,8 @@ class PostgreSQLConnector(DatabaseConnector):
             self.disconnect()
             return constraints
         except Exception as e:
-            self.logger.error(f"Error executing query: {query}")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def get_create_constraint_sql(self, settings):
@@ -611,11 +611,11 @@ class PostgreSQLConnector(DatabaseConnector):
             try:
                 cursor.execute(script)
                 for notice in cursor.connection.notices:
-                    self.logger.info(notice)
+                    self.config_parser.print_log_message('INFO', notice)
             except Exception as e:
                 for notice in cursor.connection.notices:
-                    self.logger.info(notice)
-                self.logger.error(f"Error executing script: {e}")
+                    self.config_parser.print_log_message('INFO', notice)
+                self.config_parser.print_log_message('ERROR', f"Error executing script: {e}")
                 raise
 
     def begin_transaction(self):
@@ -662,11 +662,11 @@ class PostgreSQLConnector(DatabaseConnector):
             })
 
             if source_table_rows == 0:
-                self.logger.info(f"Worker {worker_id}: Table {source_table} is empty - skipping data migration.")
+                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {source_table} is empty - skipping data migration.")
                 return 0
             else:
                 part_name = 'migrate_table in batches using cursor'
-                self.logger.info(f"Worker {worker_id}: Table {source_table} has {source_table_rows} rows - starting data migration.")
+                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {source_table} has {source_table_rows} rows - starting data migration.")
 
                 select_columns_list = []
                 for order_num, col in source_columns.items():
@@ -736,17 +736,17 @@ class PostgreSQLConnector(DatabaseConnector):
                         'insert_columns': insert_columns,
                     })
                     total_inserted_rows += inserted_rows
-                    self.logger.info(f"Worker {worker_id}: Inserted {inserted_rows} (total: {total_inserted_rows} from: {source_table_rows} ({round(total_inserted_rows/source_table_rows*100, 2)}%)) rows into target table '{target_table}'")
+                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Inserted {inserted_rows} (total: {total_inserted_rows} from: {source_table_rows} ({round(total_inserted_rows/source_table_rows*100, 2)}%)) rows into target table '{target_table}'")
 
                 target_table_rows = migrate_target_connection.get_rows_count(target_schema, target_table)
-                self.logger.info(f"Worker {worker_id}: Target table {target_schema}.{target_table} has {target_table_rows} rows")
+                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Target table {target_schema}.{target_table} has {target_table_rows} rows")
                 migrator_tables.update_data_migration_status(protocol_id, True, 'OK', target_table_rows)
                 cursor.close()
                 return target_table_rows
         except Exception as e:
-            self.logger.error(f"Woker {worker_id}: Error in {part_name}: {e}")
-            self.logger.error("Full stack trace:")
-            self.logger.error(traceback.format_exc())
+            self.config_parser.print_log_message('ERROR', f"Woker {worker_id}: Error in {part_name}: {e}")
+            self.config_parser.print_log_message('ERROR', "Full stack trace:")
+            self.config_parser.print_log_message('ERROR', traceback.format_exc())
             raise e
 
     def insert_batch(self, settings):
@@ -785,7 +785,7 @@ class PostgreSQLConnector(DatabaseConnector):
                     formatted_data.append(tuple(row))
                 data = formatted_data
             else:
-                self.logger.error(f"Worker {worker_id}: Data for insert_batch must be a list of dictionaries, got {type(data)}")
+                self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Data for insert_batch must be a list of dictionaries, got {type(data)}")
                 return 0
 
             self.config_parser.print_log_message('DEBUG2', f"Worker {worker_id}: insert_batch [2] into {target_schema}.{target_table} with {len(data)} rows, columns: |{insert_columns}| data type: {type(data)}")
@@ -802,8 +802,8 @@ class PostgreSQLConnector(DatabaseConnector):
                     psycopg2.extras.execute_batch(cursor, insert_query, data)
                     inserted_rows = len(data)
                 except Exception as e:
-                    self.logger.error(f"Worker {worker_id}: Error inserting batch data into {target_table}: {e}")
-                    self.logger.error(f"Worker {worker_id}: Trying to insert row by row.")
+                    self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Error inserting batch data into {target_table}: {e}")
+                    self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Trying to insert row by row.")
                     self.connection.rollback()
                     for row in data:
                         try:
@@ -812,11 +812,11 @@ class PostgreSQLConnector(DatabaseConnector):
                             self.connection.commit()
                         except Exception as e:
                             self.connection.rollback()
-                            self.logger.error(f"Worker {worker_id}: Error inserting row into {target_table}: {row}")
-                            self.logger.error(e)
+                            self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Error inserting row into {target_table}: {row}")
+                            self.config_parser.print_log_message('ERROR', e)
 
         except Exception as e:
-            self.logger.error(f"Worker {worker_id}: Error before inserting batch data: {e}")
+            self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Error before inserting batch data: {e}")
             raise
         finally:
             self.connection.commit()
@@ -841,10 +841,10 @@ class PostgreSQLConnector(DatabaseConnector):
         return converted_code
 
     def handle_error(self, e, description=None):
-        self.logger.error(f"An error in {self.__class__.__name__} ({description}): {e}")
-        self.logger.error(traceback.format_exc())
+        self.config_parser.print_log_message('ERROR', f"An error in {self.__class__.__name__} ({description}): {e}")
+        self.config_parser.print_log_message('ERROR', traceback.format_exc())
         if self.on_error_action == 'stop':
-            self.logger.error("Stopping due to error.")
+            self.config_parser.print_log_message('ERROR', "Stopping due to error.")
             exit(1)
 
     def fetch_sequences(self, table_schema: str, table_name: str):
@@ -887,8 +887,8 @@ class PostgreSQLConnector(DatabaseConnector):
             # self.disconnect()
             return sequence_data
         except Exception as e:
-            self.logger.error(f"Error executing sequence query: {query}")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error executing sequence query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
 
     def get_sequence_details(self, sequence_owner, sequence_name):
         # Placeholder for fetching sequence details
@@ -914,8 +914,8 @@ class PostgreSQLConnector(DatabaseConnector):
             self.disconnect()
             return cur_value
         except Exception as e:
-            self.logger.error(f"Error executing query: {query}")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def get_rows_count(self, table_schema: str, table_name: str):
@@ -972,8 +972,8 @@ class PostgreSQLConnector(DatabaseConnector):
             self.disconnect()
             return views
         except Exception as e:
-            self.logger.error(f"Error executing query: {query}")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def fetch_view_code(self, settings):
@@ -996,8 +996,8 @@ class PostgreSQLConnector(DatabaseConnector):
             self.disconnect()
             return view_code
         except Exception as e:
-            self.logger.error(f"Error executing query: {query}")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def convert_view_code(self, view_code: str, settings: dict):
@@ -1034,8 +1034,8 @@ class PostgreSQLConnector(DatabaseConnector):
             self.disconnect()
             return user_defined_types
         except Exception as e:
-            self.logger.error(f"Error executing query: {query}")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def prepare_session_settings(self):
@@ -1046,9 +1046,9 @@ class PostgreSQLConnector(DatabaseConnector):
         try:
             settings = self.config_parser.get_target_db_session_settings()
             if not settings:
-                self.logger.warning("No session settings found in config file.")
+                self.config_parser.print_log_message('INFO', "No session settings found in config file.")
                 return filtered_settings
-            # self.logger.info(f"Preparing session settings: {settings} / {settings.keys()} / {tuple(settings.keys())}")
+            # self.config_parser.print_log_message('INFO', f"Preparing session settings: {settings} / {settings.keys()} / {tuple(settings.keys())}")
             self.connect()
             cursor = self.connection.cursor()
             lower_keys = tuple(k.lower() for k in settings.keys())
@@ -1057,7 +1057,7 @@ class PostgreSQLConnector(DatabaseConnector):
             cursor.close()
             self.disconnect()
             if not matching_settings:
-                self.logger.warning("No settings found to prepare.")
+                self.config_parser.print_log_message('INFO', "No settings found to prepare.")
                 return filtered_settings
 
             for setting in matching_settings:
@@ -1066,10 +1066,10 @@ class PostgreSQLConnector(DatabaseConnector):
                     filtered_settings += f"SET {setting_name} = {settings[setting_name]};"
                 else:
                     filtered_settings += f"SET {setting_name} = '{settings[setting_name]}';"
-            self.logger.info(f"Session settings: {filtered_settings}")
+            self.config_parser.print_log_message('INFO', f"Session settings: {filtered_settings}")
             return filtered_settings
         except Exception as e:
-            self.logger.error(f"Error preparing session settings: {e}")
+            self.config_parser.print_log_message('ERROR', f"Error preparing session settings: {e}")
             raise
 
     def fetch_domains(self, schema: str):

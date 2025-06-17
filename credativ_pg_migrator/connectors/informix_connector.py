@@ -73,7 +73,7 @@ class InformixConnector(DatabaseConnector):
                 'day(': 'extract(day from ',
             }
         else:
-            self.logger.error(f"Unsupported target database type: {target_db_type}")
+            self.config_parser.print_log_message('ERROR', f"Unsupported target database type: {target_db_type}")
 
     def fetch_table_names(self, table_schema: str):
         query = f"""
@@ -100,8 +100,8 @@ class InformixConnector(DatabaseConnector):
             self.disconnect()
             return tables
         except Exception as e:
-            self.logger.error(f"Error executing query: {query}")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def fetch_table_columns(self, settings) -> dict:
@@ -206,8 +206,8 @@ class InformixConnector(DatabaseConnector):
             self.disconnect()
             return result
         except Exception as e:
-            self.logger.error(f"Error executing query: {query}")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def fetch_views_names(self, source_schema: str):
@@ -236,8 +236,8 @@ class InformixConnector(DatabaseConnector):
             self.disconnect()
             return views
         except Exception as e:
-            self.logger.error(f"Error executing query: {query}")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def fetch_view_code(self, settings):
@@ -417,8 +417,8 @@ class InformixConnector(DatabaseConnector):
             return table_indexes
 
         except Exception as e:
-            self.logger.error(f"Error executing query: {query}")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def get_create_index_sql(self, settings):
@@ -862,7 +862,6 @@ class InformixConnector(DatabaseConnector):
 
             for table in table_list:
                 self.config_parser.print_log_message('DEBUG3', f'Replacing table {table} from schema {source_schema} to {target_schema}')
-                #     self.logger.debug(f'Replacing table {table} from schema {source_schema} to {target_schema}')
 
                 source_table_pattern = re.compile(rf'("{source_schema}"\.)?"{table}"')
                 target_table = f'"{target_schema}"."{table}"'
@@ -1103,10 +1102,10 @@ class InformixConnector(DatabaseConnector):
             })
 
             if source_table_rows == 0:
-                self.logger.info(f"Worker {worker_id}: Table {source_table} is empty - skipping data migration.")
+                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {source_table} is empty - skipping data migration.")
                 return 0
             else:
-                self.logger.info(f"Worker {worker_id}: Table {source_table} has {source_table_rows} rows - starting data migration.")
+                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {source_table} has {source_table_rows} rows - starting data migration.")
                 # Fetch the data in batches
                 # Open a cursor and fetch rows in batches
 
@@ -1149,8 +1148,8 @@ class InformixConnector(DatabaseConnector):
                     # df = pl.read_database(query, self.connection)
                     # if df.is_empty():
                     #     break
-                    # self.logger.info(f"Worker {worker_id}: Fetched {len(df)} rows from source table {source_table}.")
-                    # # self.logger.info(f"Worker {worker_id}: Migrating batch starting at offset {offset} for table {table_name}.")
+                    # self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Fetched {len(df)} rows from source table {source_table}.")
+                    # # self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Migrating batch starting at offset {offset} for table {table_name}.")
                     # # Convert Polars DataFrame to list of tuples for insertion
                     # records = df.to_dicts()
 
@@ -1196,19 +1195,19 @@ class InformixConnector(DatabaseConnector):
                         'insert_columns': insert_columns,
                     })
                     total_inserted_rows += inserted_rows
-                    self.logger.info(f"Worker {worker_id}: Inserted {inserted_rows} (total: {total_inserted_rows} from: {source_table_rows} ({round(total_inserted_rows/source_table_rows*100, 2)}%)) rows into target table {target_table}")
+                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Inserted {inserted_rows} (total: {total_inserted_rows} from: {source_table_rows} ({round(total_inserted_rows/source_table_rows*100, 2)}%)) rows into target table {target_table}")
 
                     # offset += batch_size
 
                 target_table_rows = migrate_target_connection.get_rows_count(target_schema, target_table)
-                self.logger.info(f"Worker {worker_id}: Target table {target_schema}.{target_table} has {target_table_rows} rows")
+                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Target table {target_schema}.{target_table} has {target_table_rows} rows")
                 migrator_tables.update_data_migration_status(protocol_id, True, 'OK', target_table_rows)
                 cursor.close()
                 return target_table_rows
         except Exception as e:
-            self.logger.error(f"Worker {worker_id}: Error during {part_name} -> {e}")
-            self.logger.error("Full stack trace:")
-            self.logger.error(traceback.format_exc())
+            self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Error during {part_name} -> {e}")
+            self.config_parser.print_log_message('ERROR', "Full stack trace:")
+            self.config_parser.print_log_message('ERROR', traceback.format_exc())
             raise e
 
 
@@ -1275,7 +1274,7 @@ class InformixConnector(DatabaseConnector):
             self.disconnect()
             return triggers
         except Exception as e:
-            self.logger.error(f"Error when fetching triggers for the table {table_name}/{table_id}: {e}")
+            self.config_parser.print_log_message('ERROR', f"Error when fetching triggers for the table {table_name}/{table_id}: {e}")
             raise
 
 
@@ -1470,7 +1469,7 @@ class InformixConnector(DatabaseConnector):
 
                     if ((not re.search(r'for each row', trig, re.IGNORECASE) or re.search(r'before', trig, re.IGNORECASE))
                         and after_all_commands):
-                        self.logger.error(f"Trigger {trigger_name} has AFTER clause but is not FOR EACH ROW. This is not supported!!!")
+                        self.config_parser.print_log_message('ERROR', f"Trigger {trigger_name} has AFTER clause but is not FOR EACH ROW. This is not supported!!!")
                         func_body_lines.append("/* AFTER clause not migrated */")
                         for after_command in after_all_commands:
                             if after_command:
@@ -1542,8 +1541,8 @@ class InformixConnector(DatabaseConnector):
 
             pgsql_trigger_code = "\n\n".join(pgsql_triggers)
         except Exception as e:
-            self.logger.error(f"Error converting trigger {trigger_name}: {e}")
-            self.logger.error(traceback.format_exc())
+            self.config_parser.print_log_message('ERROR', f"Error converting trigger {trigger_name}: {e}")
+            self.config_parser.print_log_message('ERROR', traceback.format_exc())
 
         return pgsql_trigger_code
 
@@ -1583,10 +1582,10 @@ class InformixConnector(DatabaseConnector):
         return maxval
 
     def handle_error(self, e, description=None):
-        self.logger.error(f"An error in {self.__class__.__name__} ({description}): {e}")
-        self.logger.error(traceback.format_exc())
+        self.config_parser.print_log_message('ERROR', f"An error in {self.__class__.__name__} ({description}): {e}")
+        self.config_parser.print_log_message('ERROR', traceback.format_exc())
         if self.on_error_action == 'stop':
-            self.logger.error("Stopping due to error.")
+            self.config_parser.print_log_message('ERROR', "Stopping due to error.")
             exit(1)
         else:
             pass

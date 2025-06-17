@@ -16,9 +16,9 @@
 
 import concurrent.futures
 import importlib
-import constants
 from migrator_logging import MigratorLogger
 from migrator_tables import MigratorTables
+from constants import MigratorConstants
 import traceback
 import uuid
 import fnmatch
@@ -85,7 +85,7 @@ class Orchestrator:
         if source_or_target == 'target' and database_type != 'postgresql':
             raise ValueError("Target database type must be 'postgresql'")
         # Check if the database type is supported
-        database_module = constants.MIGRATOR_MODULES.get(database_type)
+        database_module = MigratorConstants.get_modules().get(database_type)
         if not database_module:
             raise ValueError(f"Unsupported database type: {database_type}")
         # Import the module and get the class

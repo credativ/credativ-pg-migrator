@@ -1,16 +1,16 @@
 # credativ-pg-migrator
 # Copyright (C) 2025 credativ GmbH
-# 
+#
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
 # the Free Software Foundation, either version 3 of the License, or
 # (at your option) any later version.
-# 
+#
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 # GNU General Public License for more details.
-# 
+#
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
@@ -23,7 +23,7 @@ from config_parser import ConfigParser
 from orchestrator import Orchestrator
 from migrator_logging import MigratorLogger
 from planner import Planner
-import constants
+from constants import MigratorConstants
 import sys
 import os
 import traceback
@@ -35,8 +35,8 @@ def main():
 
     # Check if the version flag is set
     if args.version:
-        print(f"{constants.MIGRATOR_FULL_NAME}")
-        print(f"Version: {constants.MIGRATOR_VERSION}")
+        print(f"{MigratorConstants.get_full_name()}")
+        print(f"Version: {MigratorConstants.get_version()}")
         sys.exit(0)
 
     signal.signal(signal.SIGINT, ctrlc_signal_handler)
@@ -48,7 +48,7 @@ def main():
     logger = MigratorLogger(args.log_file)
 
     try:
-        logger.logger.info(f"""{constants.MIGRATOR_FULL_NAME}, version: {constants.MIGRATOR_VERSION}""")
+        logger.logger.info(f"""{MigratorConstants.get_full_name()}, version: {MigratorConstants.get_version()}""")
 
         cmd.print_all(logger.logger)
 

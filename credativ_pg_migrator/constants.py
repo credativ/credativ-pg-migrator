@@ -14,32 +14,57 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-MIGRATOR_VERSION = '0.8.3'
-MIGRATOR_FULL_NAME = 'Database Migration Tool credativ-pg-migrator'
-MIGRATOR_MESSAGE_LEVELS = ['INFO', 'DEBUG', 'DEBUG2', 'DEBUG3']
+class MigratorConstants:
+    @staticmethod
+    def get_version():
+        return '0.8.3'
 
-## Internal defaults used by the migrator
-## Do not change these values unless !
-MIGRATOR_DEFAULT_NAME = 'migrator'
-MIGRATOR_DEFAULT_LOG = f'./{MIGRATOR_DEFAULT_NAME}.log'
-MIGRATOR_DEFAULT_SCHEMA = f'{MIGRATOR_DEFAULT_NAME}'
-MIGRATOR_TASKS_TABLE = 'protocol'
-MIGRATOR_DEFAULT_INDENT='    '
-MIGRATOR_INTERNAL_CONFIGURATION = {
-	'migrate_domains_as': 'CHECK CONSTRAINT',
-}
+    @staticmethod
+    def get_full_name():
+        return 'Database Migration Tool credativ-pg-migrator'
 
-## Modules of database connectors
-MIGRATOR_MODULES = {
-					'postgresql': 'connectors.postgresql_connector:PostgreSQLConnector',
-					'ibm_db2': 'connectors.ibm_db2_connector:IBMDB2Connector',
-					'informix': 'connectors.informix_connector:InformixConnector',
-					'mssql': 'connectors.ms_sql_connector:MsSQLConnector',
-					'mysql': 'connectors.mysql_connector:MySQLConnector',
-					'oracle': 'connectors.oracle_connector:OracleConnector',
-					'sql_anywhere': 'connectors.sql_anywhere_connector:SQLAnywhereConnector',
-					'sybase_ase': 'connectors.sybase_ase_connector:SybaseASEConnector'
-					}
+    @staticmethod
+    def get_message_levels():
+        return ['INFO', 'DEBUG', 'DEBUG2', 'DEBUG3']
+
+    @staticmethod
+    def get_default_name():
+        return 'migrator'
+
+    @staticmethod
+    def get_default_log():
+        return f'./{MigratorConstants.get_default_name()}.log'
+
+    @staticmethod
+    def get_default_schema():
+        return f'{MigratorConstants.get_default_name()}'
+
+    @staticmethod
+    def get_tasks_table():
+        return 'protocol'
+
+    @staticmethod
+    def get_default_indent():
+        return '    '
+
+    @staticmethod
+    def get_internal_configuration():
+        return {
+            'migrate_domains_as': 'CHECK CONSTRAINT',
+        }
+
+    @staticmethod
+    def get_modules():
+        return {
+            'postgresql': 'connectors.postgresql_connector:PostgreSQLConnector',
+            'ibm_db2': 'connectors.ibm_db2_connector:IBMDB2Connector',
+            'informix': 'connectors.informix_connector:InformixConnector',
+            'mssql': 'connectors.ms_sql_connector:MsSQLConnector',
+            'mysql': 'connectors.mysql_connector:MySQLConnector',
+            'oracle': 'connectors.oracle_connector:OracleConnector',
+            'sql_anywhere': 'connectors.sql_anywhere_connector:SQLAnywhereConnector',
+            'sybase_ase': 'connectors.sybase_ase_connector:SybaseASEConnector'
+        }
 
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

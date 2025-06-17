@@ -16,9 +16,9 @@
 
 import concurrent.futures
 import importlib
-from migrator_logging import MigratorLogger
-from migrator_tables import MigratorTables
-from constants import MigratorConstants
+from credativ_pg_migrator.migrator_logging import MigratorLogger
+from credativ_pg_migrator.migrator_tables import MigratorTables
+from credativ_pg_migrator.constants import MigratorConstants
 import traceback
 import uuid
 import fnmatch

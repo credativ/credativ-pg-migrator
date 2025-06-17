@@ -18,8 +18,8 @@ import jaydebeapi
 from jaydebeapi import Error
 import pyodbc
 from pyodbc import Error
-from database_connector import DatabaseConnector
-from migrator_logging import MigratorLogger
+from credativ_pg_migrator.database_connector import DatabaseConnector
+from credativ_pg_migrator.migrator_logging import MigratorLogger
 import re
 import traceback
 

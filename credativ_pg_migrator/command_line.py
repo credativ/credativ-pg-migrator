@@ -15,7 +15,7 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import argparse
-from constants import MigratorConstants
+from credativ_pg_migrator.constants import MigratorConstants
 
 class CommandLine:
     def __init__(self):

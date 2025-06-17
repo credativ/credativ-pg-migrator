@@ -1204,9 +1204,9 @@ class SybaseASEConnector(DatabaseConnector):
         view_code_str = ''.join([code[0] for code in view_code])
         return view_code_str
 
-    def convert_view_code(self, view_code: str, settings: dict):
+    def convert_view_code(self, settings: dict):
         self.config_parser.print_log_message('DEBUG', f"settings in convert_view_code: {settings}")
-        converted_code = view_code
+        converted_code = settings['view_code']
         if settings['target_db_type'] == 'postgresql':
             sql_functions_mapping = self.get_sql_functions_mapping({ 'target_db_type': settings['target_db_type'] })
 

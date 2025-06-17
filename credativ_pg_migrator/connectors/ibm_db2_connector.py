@@ -528,7 +528,8 @@ class IBMDB2Connector(DatabaseConnector):
         # Placeholder for fetching view code
         return ""
 
-    def convert_view_code(self, view_code: str, settings: dict):
+    def convert_view_code(self, settings: dict):
+        view_code = settings['view_code']
         # Placeholder for view conversion
         return view_code
 

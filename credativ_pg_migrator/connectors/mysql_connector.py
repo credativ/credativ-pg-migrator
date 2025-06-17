@@ -600,7 +600,8 @@ class MySQLConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', f"Error fetching view {source_view_name} code: {e}")
             raise
 
-    def convert_view_code(self, view_code: str, settings: dict):
+    def convert_view_code(self, settings: dict):
+        view_code = settings['view_code']
         converted_view_code = view_code
         converted_view_code = converted_view_code.replace('`', '"')
         converted_view_code = converted_view_code.replace(f'''"{settings['source_schema']}".''', f'''"{settings['target_schema']}".''')

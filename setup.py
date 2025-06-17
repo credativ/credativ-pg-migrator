@@ -9,5 +9,5 @@ setup(
     description='Migrator from proprietary and legacy databases into PostgreSQL',
     packages=find_packages(),
     install_requires=['psycopg2', 'jaydebeapi', 'pyyaml', 'pandas', 'pyodbc', 'importlib', 'tabulate'],
-    entry_points={'console_scripts': ['credativ-pg-migrator = credativ_pg_migrator:main']},
+    entry_points={'console_scripts': ['credativ-pg-migrator = credativ_pg_migrator.main:main']},
 )

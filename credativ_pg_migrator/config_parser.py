@@ -15,7 +15,7 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import yaml
-from constants import MigratorConstants
+from credativ_pg_migrator.constants import MigratorConstants
 
 class ConfigParser:
     def __init__(self, args, logger):

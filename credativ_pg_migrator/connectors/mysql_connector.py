@@ -51,11 +51,14 @@ class MySQLConnector(DatabaseConnector):
         if target_db_type == 'postgresql':
             return {}
         else:
-            self.logger.error(f"Unsupported target database type: {target_db_type}")
+            self.config_parser.print_log_message('ERROR', f"Unsupported target database type: {target_db_type}")
 
     def fetch_table_names(self, table_schema: str):
+        tables = {}
         query = f"""
-            SELECT TABLE_NAME
+            SELECT
+                TABLE_NAME,
+                TABLE_COMMENT
             FROM INFORMATION_SCHEMA.TABLES
             WHERE TABLE_SCHEMA = '{table_schema}'
             AND TABLE_TYPE not in ('VIEW', 'SYSTEM VIEW')
@@ -64,12 +67,18 @@ class MySQLConnector(DatabaseConnector):
             self.connect()
             cursor = self.connection.cursor()
             cursor.execute(query)
-            tables = {i + 1: {'id': None, 'schema_name': table_schema, 'table_name': row[0], 'comment': ''} for i, row in enumerate(cursor.fetchall())}
+            for i, row in enumerate(cursor.fetchall()):
+                tables[i + 1] = {
+                    'id': None,
+                    'schema_name': table_schema,
+                    'table_name': row[0],
+                    'comment': row[1]
+                }
             cursor.close()
             self.disconnect()
             return tables
-        except mysql.connector.Error as e:
-            self.logger.error(f"Error fetching table names: {e}")
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error fetching table names: {e}")
             raise
 
     def fetch_table_columns(self, settings) -> dict:
@@ -93,7 +102,8 @@ class MySQLConnector(DatabaseConnector):
                 ELSE 'NO' END AS IS_GENERATED_STORED,
                 CASE WHEN upper(EXTRA) = 'VIRTUAL GENERATED' THEN 'YES'
                 ELSE 'NO' END AS IS_GENERATED_VIRTUAL,
-                GENERATION_EXPRESSION
+                GENERATION_EXPRESSION,
+                COLUMN_COMMENT
             FROM INFORMATION_SCHEMA.COLUMNS
             WHERE TABLE_SCHEMA = '{table_schema}' AND TABLE_NAME = '{table_name}'
             ORDER BY ORDINAL_POSITION
@@ -116,27 +126,29 @@ class MySQLConnector(DatabaseConnector):
                 is_generated_stored = row[10]
                 is_generated_virtual = row[11]
                 generation_expression = row[12]
+                column_comment = row[13]
                 columns[ordinal_position] = {
                     'column_name': column_name,
                     'data_type': data_type,
+                    'column_type': column_type,
                     'character_maximum_length': character_maximum_length,
                     'numeric_precision': numeric_precision,
                     'numeric_scale': numeric_scale,
                     'is_nullable': is_nullable,
-                    'column_type': column_type,
                     'column_default_value': column_default,
                     'is_identity': is_identity,
                     'is_generated_stored': is_generated_stored,
                     'is_generated_virtual': is_generated_virtual,
-                    'generation_expression': generation_expression
+                    'generation_expression': generation_expression,
+                    'column_comment': column_comment,
                 }
             cursor.close()
             self.disconnect()
             return columns
-        except mysql.connector.Error as e:
-            self.logger.error(f"Error fetching table columns: {e}")
-            self.logger.error("Full stack trace:")
-            self.logger.error(traceback.format_exc())
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error fetching table columns: {e}")
+            self.config_parser.print_log_message('ERROR', "Full stack trace:")
+            self.config_parser.print_log_message('ERROR', traceback.format_exc())
             raise
 
     def get_types_mapping(self, settings):
@@ -145,25 +157,29 @@ class MySQLConnector(DatabaseConnector):
         if target_db_type == 'postgresql':
             types_mapping = {
                 'INT': 'INTEGER',
-                'VARCHAR': 'VARCHAR',
-                'TEXT': 'TEXT',
-                'CHAR': 'TEXT',
+                'INTEGER': 'INTEGER',
                 'FLOAT': 'REAL',
                 'DOUBLE': 'DOUBLE PRECISION',
                 'DECIMAL': 'NUMERIC',
-                'DATETIME': 'DATETIME',
-                'TIMESTAMP': 'TIMESTAMP',
-                'DATE': 'DATE',
-                'TIME': 'TIME',
-                'BOOLEAN': 'BOOLEAN',
-                'BLOB': 'BYTEA',
-                'JSON': 'JSON',
-                'ENUM': 'VARCHAR',
-                'SET': 'VARCHAR',
                 'TINYINT': 'SMALLINT',
                 'SMALLINT': 'SMALLINT',
                 'MEDIUMINT': 'INTEGER',
                 'BIGINT': 'BIGINT',
+
+                'VARCHAR': 'VARCHAR',
+                'TEXT': 'TEXT',
+                'CHAR': 'CHAR',
+                'JSON': 'JSONB',
+                'ENUM': 'VARCHAR',
+                'SET': 'TEXT',  # PostgreSQL does not have a direct SET type, using TEXT array instead
+
+                'DATETIME': 'TIMESTAMP',
+                'TIMESTAMP': 'TIMESTAMP',
+                'DATE': 'DATE',
+                'TIME': 'TIME',
+
+                'BOOLEAN': 'BOOLEAN',
+                'BLOB': 'BYTEA',
                 'BIT': 'BOOLEAN',
                 'YEAR': 'INTEGER',
                 'POINT': 'POINT',
@@ -219,18 +235,34 @@ class MySQLConnector(DatabaseConnector):
             })
 
             if source_table_rows == 0:
-                self.logger.info(f"Worker {worker_id}: Table {source_schema}.{source_table} is empty, skipping migration.")
+                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {source_schema}.{source_table} is empty, skipping migration.")
                 return 0
             else:
-                self.logger.info(f"Worker {worker_id}: Table {source_schema}.{source_table} has {source_table_rows} rows.")
+                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {source_schema}.{source_table} has {source_table_rows} rows.")
 
                 # Open a cursor and fetch rows in batches
-                query = f'''SELECT * FROM {source_schema}.{source_table}'''
+                # Build comma-separated column names, encapsulated in double quotes
+
+                select_columns_list = []
+                for order_num, col in source_columns.items():
+                    self.config_parser.print_log_message('DEBUG2',
+                                                         f"Worker {worker_id}: Table {source_schema}.{source_table}: Processing column {col['column_name']} ({order_num}) with data type {col['data_type']}")
+                    insert_columns = ', '.join([f'''"{col['column_name']}"''' for col in source_columns.values()])
+
+                    if col['data_type'].lower() == 'geometry':
+                        select_columns_list.append(f"ST_asText(`{col['column_name']}`) as `{col['column_name']}`")
+                    elif col['data_type'].lower() == 'set':
+                        select_columns_list.append(f"cast(`{col['column_name']}` as char(4000)) as `{col['column_name']}`")
+                    else:
+                        select_columns_list.append(f"`{col['column_name']}`")
+                select_columns = ', '.join(select_columns_list)
+
+                query = f'''SELECT {select_columns} FROM {source_schema}.{source_table}'''
                 if migration_limitation:
                     query += f" WHERE {migration_limitation}"
 
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"Worker {worker_id}: Fetching data with cursor using query: {query}")
+                self.config_parser.print_log_message('DEBUG2',
+                    f"Worker {worker_id}: Fetching data with cursor using query: {query}")
 
                 # offset = 0
                 total_inserted_rows = 0
@@ -247,8 +279,8 @@ class MySQLConnector(DatabaseConnector):
                     records = cursor.fetchmany(batch_size)
                     if not records:
                         break
-                    if self.config_parser.get_log_level() == 'DEBUG':
-                        self.logger.debug(f"Worker {worker_id}: Fetched {len(records)} rows from source table {source_table}.")
+                    self.config_parser.print_log_message( 'DEBUG',
+                        f"Worker {worker_id}: Fetched {len(records)} rows from source table {source_table}.")
 
                     records = [
                         {column['column_name']: value for column, value in zip(source_columns.values(), record)}
@@ -262,18 +294,46 @@ class MySQLConnector(DatabaseConnector):
                             target_column_type = target_columns[order_num]['data_type']
                             # if column_type.lower() in ['binary', 'bytea']:
                             if column_type.lower() in ['blob']:
-                                record[column_name] = bytes(record[column_name].getBytes(1, int(record[column_name].length())))  # Convert 'com.informix.jdbc.IfxCblob' to bytes
+                                if record[column_name] is not None:
+                                    record[column_name] = bytes(record[column_name])
                             elif column_type.lower() in ['clob']:
-                                # elif isinstance(record[column_name], IfxCblob):
                                 record[column_name] = record[column_name].getSubString(1, int(record[column_name].length()))  # Convert IfxCblob to string
                                 # record[column_name] = bytes(record[column_name].getBytes(1, int(record[column_name].length())))  # Convert IfxBblob to bytes
                                 # record[column_name] = record[column_name].read()  # Convert IfxBblob to bytes
+                            elif column_type.lower() == 'set':
+                                # Convert SET to plain comma separated string
+                                if isinstance(record[column_name], list):
+                                    record[column_name] = ','.join(str(item) for item in record[column_name])
+                                elif record[column_name] is None:
+                                    record[column_name] = ''
+                                else:
+                                    record[column_name] = str(record[column_name])
+                            elif column_type.lower() == 'geometry':
+                                record[column_name] = f"{record[column_name]}"
+
+                                # # Convert geometry to string representation if possible
+                                # if record[column_name] is not None:
+                                #     try:
+                                #         # Try to decode as UTF-8 string (may work for some geometry types)
+                                #         record[column_name] = record[column_name].decode('utf-8', errors='replace')
+                                #     except Exception as e:
+                                #         # Fallback: represent as string of bytes
+                                #         record[column_name] = str(record[column_name])
+                                # else:
+                                #     record[column_name] = None
                             elif column_type.lower() in ['integer', 'smallint', 'tinyint', 'bit', 'boolean'] and target_column_type.lower() in ['boolean']:
                                 # Convert integer to boolean
                                 record[column_name] = bool(record[column_name])
 
-                    if self.config_parser.get_log_level() == 'DEBUG':
-                        self.logger.debug(f"Worker {worker_id}: Starting insert of {len(records)} rows from source table {source_table}")
+                    # Reorder columns in each record based on the order in source_columns
+                    ordered_column_names = [col['column_name'] for col in source_columns.values()]
+                    records = [
+                        {col_name: record[col_name] for col_name in ordered_column_names}
+                        for record in records
+                    ]
+
+                    self.config_parser.print_log_message('DEBUG',
+                        f"Worker {worker_id}: Starting insert of {len(records)} rows from source table {source_table}")
                     inserted_rows = migrate_target_connection.insert_batch({
                         'target_schema': target_schema,
                         'target_table': target_table,
@@ -281,21 +341,22 @@ class MySQLConnector(DatabaseConnector):
                         'data': records,
                         'worker_id': worker_id,
                         'migrator_tables': migrator_tables,
+                        'insert_columns': insert_columns,
                     })
                     total_inserted_rows += inserted_rows
-                    self.logger.info(f"Worker {worker_id}: Inserted {inserted_rows} (total: {total_inserted_rows} from: {source_table_rows} ({round(total_inserted_rows/source_table_rows*100, 2)}%)) rows into target table {target_table}")
+                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Inserted {inserted_rows} (total: {total_inserted_rows} from: {source_table_rows} ({round(total_inserted_rows/source_table_rows*100, 2)}%)) rows into target table {target_table}")
 
                     # offset += batch_size
 
                 target_table_rows = migrate_target_connection.get_rows_count(target_schema, target_table)
-                self.logger.info(f"Worker {worker_id}: Finished migrating data for table {target_table} - migrated {target_table_rows} rows.")
+                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Finished migrating data for table {target_table} - migrated {target_table_rows} rows.")
                 migrator_tables.update_data_migration_status(protocol_id, True, 'OK', target_table_rows)
                 cursor.close()
                 return target_table_rows
-        except mysql.connector.Error as e:
-            self.logger.error(f"Worker {worker_id}: Error during {part_name} -> {e}")
-            self.logger.error("Full stack trace:")
-            self.logger.error(traceback.format_exc())
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Error during {part_name} -> {e}")
+            self.config_parser.print_log_message('ERROR', "Full stack trace:")
+            self.config_parser.print_log_message('ERROR', traceback.format_exc())
             raise e
 
     def fetch_indexes(self, settings):
@@ -306,14 +367,19 @@ class MySQLConnector(DatabaseConnector):
         order_num = 1
         query = f"""
             SELECT
-                DISTINCT INDEX_NAME, COLUMN_NAME, SEQ_IN_INDEX,
-                NON_UNIQUE, coalesce(CONSTRAINT_TYPE,'INDEX') as CONSTRAINT_TYPE
+                DISTINCT
+                INDEX_NAME,
+                COLUMN_NAME,
+                SEQ_IN_INDEX,
+                NON_UNIQUE,
+                coalesce(CONSTRAINT_TYPE,'INDEX') as CONSTRAINT_TYPE,
+                INDEX_COMMENT
             FROM INFORMATION_SCHEMA.STATISTICS S
             LEFT JOIN INFORMATION_SCHEMA.TABLE_CONSTRAINTS tC
             ON S.TABLE_SCHEMA = tC.TABLE_SCHEMA AND S.TABLE_NAME = tC.TABLE_NAME
-            AND S.INDEX_NAME = tC.CONSTRAINT_NAME
+                AND S.INDEX_NAME = tC.CONSTRAINT_NAME
             WHERE S.TABLE_SCHEMA = '{source_table_schema}'
-            AND S.TABLE_NAME = '{source_table_name}'
+                AND S.TABLE_NAME = '{source_table_name}'
             ORDER BY INDEX_NAME, SEQ_IN_INDEX
         """
         try:
@@ -326,14 +392,14 @@ class MySQLConnector(DatabaseConnector):
                 seq_in_index = row[2]
                 non_unique = row[3]
                 constraint_type = row[4]
-
+                index_comment = row[5]
                 if index_name not in table_indexes:
                     table_indexes[index_name] = {
                         'index_name': index_name,
                         'index_owner': source_table_schema,
                         'index_columns': [],
                         'index_type': constraint_type,
-                        'index_comment': '',
+                        'index_comment': index_comment,
                     }
 
                 table_indexes[index_name]['index_columns'].append(column_name)
@@ -353,8 +419,8 @@ class MySQLConnector(DatabaseConnector):
                 }
                 order_num += 1
             return returned_indexes
-        except mysql.connector.Error as e:
-            self.logger.error(f"Error fetching indexes: {e}")
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error fetching indexes: {e}")
             raise
 
     def get_create_index_sql(self, settings):
@@ -439,8 +505,8 @@ class MySQLConnector(DatabaseConnector):
 
             return returned_constraints
 
-        except mysql.connector.Error as e:
-            self.logger.error(f"Error fetching constraints: {e}")
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error fetching constraints: {e}")
             raise
 
     def get_create_constraint_sql(self, settings):
@@ -484,7 +550,11 @@ class MySQLConnector(DatabaseConnector):
     def fetch_views_names(self, source_schema: str):
         views = {}
         order_num = 1
-        query = f"""SELECT TABLE_NAME FROM INFORMATION_SCHEMA.VIEWS WHERE TABLE_SCHEMA = '{source_schema}'"""
+        query = f"""
+            SELECT
+                TABLE_NAME
+            FROM INFORMATION_SCHEMA.VIEWS
+            WHERE TABLE_SCHEMA = '{source_schema}'"""
         try:
             self.connect()
             cursor = self.connection.cursor()
@@ -501,8 +571,8 @@ class MySQLConnector(DatabaseConnector):
             cursor.close()
             self.disconnect()
             return views
-        except mysql.connector.Error as e:
-            self.logger.error(f"Error fetching view names: {e}")
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error fetching view names: {e}")
             raise
 
     def fetch_view_code(self, settings):
@@ -512,9 +582,11 @@ class MySQLConnector(DatabaseConnector):
         # target_schema = settings['target_schema']
         # target_view_name = settings['target_view_name']
         query = f"""
-            SELECT VIEW_DEFINITION
+            SELECT
+                VIEW_DEFINITION
             FROM INFORMATION_SCHEMA.VIEWS
-            WHERE TABLE_SCHEMA = '{source_schema}' AND TABLE_NAME = '{source_view_name}'
+            WHERE TABLE_SCHEMA = '{source_schema}'
+            AND TABLE_NAME = '{source_view_name}'
         """
         try:
             self.connect()
@@ -524,14 +596,16 @@ class MySQLConnector(DatabaseConnector):
             cursor.close()
             self.disconnect()
             return view_code
-        except mysql.connector.Error as e:
-            self.logger.error(f"Error fetching view {source_view_name} code: {e}")
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error fetching view {source_view_name} code: {e}")
             raise
 
     def convert_view_code(self, view_code: str, settings: dict):
         converted_view_code = view_code
         converted_view_code = converted_view_code.replace('`', '"')
         converted_view_code = converted_view_code.replace(f'''"{settings['source_schema']}".''', f'''"{settings['target_schema']}".''')
+        converted_view_code = converted_view_code.replace(f'''{settings['source_schema']}.''', f'''"{settings['target_schema']}".''')
+        converted_view_code = converted_view_code.replace('""', '"')
         return converted_view_code
 
     def get_sequence_current_value(self, sequence_id: int):
@@ -543,8 +617,8 @@ class MySQLConnector(DatabaseConnector):
             cursor = self.connection.cursor()
             cursor.execute(query, params)
             cursor.close()
-        except mysql.connector.Error as e:
-            self.logger.error(f"Error executing query: {e}")
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {e}")
             raise
 
     def execute_sql_script(self, script_path: str):
@@ -556,8 +630,8 @@ class MySQLConnector(DatabaseConnector):
                 if statement.strip():
                     cursor.execute(statement)
             cursor.close()
-        except mysql.connector.Error as e:
-            self.logger.error(f"Error executing SQL script: {e}")
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error executing SQL script: {e}")
             raise
 
     def begin_transaction(self):
@@ -577,8 +651,8 @@ class MySQLConnector(DatabaseConnector):
             count = cursor.fetchone()[0]
             cursor.close()
             return count
-        except mysql.connector.Error as e:
-            self.logger.error(f"Error fetching row count: {e}")
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error fetching row count: {e}")
             raise
 
     def get_table_size(self, table_schema: str, table_name: str):
@@ -593,8 +667,8 @@ class MySQLConnector(DatabaseConnector):
             size = cursor.fetchone()[0]
             cursor.close()
             return size
-        except mysql.connector.Error as e:
-            self.logger.error(f"Error fetching table size: {e}")
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error fetching table size: {e}")
             raise
 
     def fetch_user_defined_types(self, schema: str):
@@ -635,10 +709,25 @@ class MySQLConnector(DatabaseConnector):
                 if not cursor.nextset():
                     break
 
+            cursor.execute(f"show create table {table_schema}.{table_name}")
+
+            set_num = 1
+            while True:
+                if cursor.description is not None:
+                    rows = cursor.fetchall()
+                    if rows:
+                        output += f"Result set {set_num}:\n"
+                        columns = [column[0] for column in cursor.description]
+                        table = tabulate(rows, headers=columns, tablefmt="github")
+                        output += table + "\n\n"
+                        set_num += 1
+                if not cursor.nextset():
+                    break
+
             cursor.close()
             self.disconnect()
-        except Error as e:
-            self.logger.error(f"Error fetching table description for {table_schema}.{table_name}: {e}")
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error fetching table description for {table_schema}.{table_name}: {e}")
             raise
 
         return { 'table_description': output.strip() }

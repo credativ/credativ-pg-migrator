@@ -6,6 +6,8 @@
 
   - Constants transformed into a class with static methods - this allows to use constants in the code without importing them, just using the class name
     - Rationale: This is more pythonic way of using constants, allows to use constants in the code without importing them, just using the class name
+  - Refactoring in migrator_tables.py - removed import and usage of PostgreSQL connector, added new local class and methods for usage in the MigratorTables class
+    - Rationale: MigratorTables class cannot depend on PostgreSQL connector, it breaks dependencies
 
 - 2025.06.16:
 

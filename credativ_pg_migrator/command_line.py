@@ -15,11 +15,11 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import argparse
-import constants
+from constants import MigratorConstants
 
 class CommandLine:
     def __init__(self):
-        self.parser = argparse.ArgumentParser(description=f"""{constants.MIGRATOR_FULL_NAME}, version: {constants.MIGRATOR_VERSION}""")
+        self.parser = argparse.ArgumentParser(description=f"""{MigratorConstants.get_full_name()}, version: {MigratorConstants.get_version()}""")
         self.args = None
         self.setup_arguments()
 
@@ -27,7 +27,7 @@ class CommandLine:
         self.parser.add_argument(
             '--log-level',
             default='INFO',
-            choices=constants.MIGRATOR_MESSAGE_LEVELS,
+            choices=MigratorConstants.get_message_levels(),
             help="Set the logging level")
 
         self.parser.add_argument(
@@ -44,8 +44,8 @@ class CommandLine:
         self.parser.add_argument(
             '--log-file',
             type=str,
-            default=constants.MIGRATOR_DEFAULT_LOG,
-            help=f'Path/name of the log file (default: {constants.MIGRATOR_DEFAULT_LOG})')
+            default=MigratorConstants.get_default_log(),
+            help=f'Path/name of the log file (default: {MigratorConstants.get_default_log()})')
 
         self.parser.add_argument(
             '--version',

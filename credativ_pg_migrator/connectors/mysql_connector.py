@@ -51,7 +51,7 @@ class MySQLConnector(DatabaseConnector):
         if target_db_type == 'postgresql':
             return {}
         else:
-            self.logger.error(f"Unsupported target database type: {target_db_type}")
+            self.config_parser.print_log_message('ERROR', f"Unsupported target database type: {target_db_type}")
 
     def fetch_table_names(self, table_schema: str):
         tables = {}
@@ -78,7 +78,7 @@ class MySQLConnector(DatabaseConnector):
             self.disconnect()
             return tables
         except Exception as e:
-            self.logger.error(f"Error fetching table names: {e}")
+            self.config_parser.print_log_message('ERROR', f"Error fetching table names: {e}")
             raise
 
     def fetch_table_columns(self, settings) -> dict:
@@ -146,9 +146,9 @@ class MySQLConnector(DatabaseConnector):
             self.disconnect()
             return columns
         except Exception as e:
-            self.logger.error(f"Error fetching table columns: {e}")
-            self.logger.error("Full stack trace:")
-            self.logger.error(traceback.format_exc())
+            self.config_parser.print_log_message('ERROR', f"Error fetching table columns: {e}")
+            self.config_parser.print_log_message('ERROR', "Full stack trace:")
+            self.config_parser.print_log_message('ERROR', traceback.format_exc())
             raise
 
     def get_types_mapping(self, settings):
@@ -235,10 +235,10 @@ class MySQLConnector(DatabaseConnector):
             })
 
             if source_table_rows == 0:
-                self.logger.info(f"Worker {worker_id}: Table {source_schema}.{source_table} is empty, skipping migration.")
+                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {source_schema}.{source_table} is empty, skipping migration.")
                 return 0
             else:
-                self.logger.info(f"Worker {worker_id}: Table {source_schema}.{source_table} has {source_table_rows} rows.")
+                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {source_schema}.{source_table} has {source_table_rows} rows.")
 
                 # Open a cursor and fetch rows in batches
                 # Build comma-separated column names, encapsulated in double quotes
@@ -344,19 +344,19 @@ class MySQLConnector(DatabaseConnector):
                         'insert_columns': insert_columns,
                     })
                     total_inserted_rows += inserted_rows
-                    self.logger.info(f"Worker {worker_id}: Inserted {inserted_rows} (total: {total_inserted_rows} from: {source_table_rows} ({round(total_inserted_rows/source_table_rows*100, 2)}%)) rows into target table {target_table}")
+                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Inserted {inserted_rows} (total: {total_inserted_rows} from: {source_table_rows} ({round(total_inserted_rows/source_table_rows*100, 2)}%)) rows into target table {target_table}")
 
                     # offset += batch_size
 
                 target_table_rows = migrate_target_connection.get_rows_count(target_schema, target_table)
-                self.logger.info(f"Worker {worker_id}: Finished migrating data for table {target_table} - migrated {target_table_rows} rows.")
+                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Finished migrating data for table {target_table} - migrated {target_table_rows} rows.")
                 migrator_tables.update_data_migration_status(protocol_id, True, 'OK', target_table_rows)
                 cursor.close()
                 return target_table_rows
         except Exception as e:
-            self.logger.error(f"Worker {worker_id}: Error during {part_name} -> {e}")
-            self.logger.error("Full stack trace:")
-            self.logger.error(traceback.format_exc())
+            self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Error during {part_name} -> {e}")
+            self.config_parser.print_log_message('ERROR', "Full stack trace:")
+            self.config_parser.print_log_message('ERROR', traceback.format_exc())
             raise e
 
     def fetch_indexes(self, settings):
@@ -420,7 +420,7 @@ class MySQLConnector(DatabaseConnector):
                 order_num += 1
             return returned_indexes
         except Exception as e:
-            self.logger.error(f"Error fetching indexes: {e}")
+            self.config_parser.print_log_message('ERROR', f"Error fetching indexes: {e}")
             raise
 
     def get_create_index_sql(self, settings):
@@ -506,7 +506,7 @@ class MySQLConnector(DatabaseConnector):
             return returned_constraints
 
         except Exception as e:
-            self.logger.error(f"Error fetching constraints: {e}")
+            self.config_parser.print_log_message('ERROR', f"Error fetching constraints: {e}")
             raise
 
     def get_create_constraint_sql(self, settings):
@@ -572,7 +572,7 @@ class MySQLConnector(DatabaseConnector):
             self.disconnect()
             return views
         except Exception as e:
-            self.logger.error(f"Error fetching view names: {e}")
+            self.config_parser.print_log_message('ERROR', f"Error fetching view names: {e}")
             raise
 
     def fetch_view_code(self, settings):
@@ -597,7 +597,7 @@ class MySQLConnector(DatabaseConnector):
             self.disconnect()
             return view_code
         except Exception as e:
-            self.logger.error(f"Error fetching view {source_view_name} code: {e}")
+            self.config_parser.print_log_message('ERROR', f"Error fetching view {source_view_name} code: {e}")
             raise
 
     def convert_view_code(self, view_code: str, settings: dict):
@@ -618,7 +618,7 @@ class MySQLConnector(DatabaseConnector):
             cursor.execute(query, params)
             cursor.close()
         except Exception as e:
-            self.logger.error(f"Error executing query: {e}")
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {e}")
             raise
 
     def execute_sql_script(self, script_path: str):
@@ -631,7 +631,7 @@ class MySQLConnector(DatabaseConnector):
                     cursor.execute(statement)
             cursor.close()
         except Exception as e:
-            self.logger.error(f"Error executing SQL script: {e}")
+            self.config_parser.print_log_message('ERROR', f"Error executing SQL script: {e}")
             raise
 
     def begin_transaction(self):
@@ -652,7 +652,7 @@ class MySQLConnector(DatabaseConnector):
             cursor.close()
             return count
         except Exception as e:
-            self.logger.error(f"Error fetching row count: {e}")
+            self.config_parser.print_log_message('ERROR', f"Error fetching row count: {e}")
             raise
 
     def get_table_size(self, table_schema: str, table_name: str):
@@ -668,7 +668,7 @@ class MySQLConnector(DatabaseConnector):
             cursor.close()
             return size
         except Exception as e:
-            self.logger.error(f"Error fetching table size: {e}")
+            self.config_parser.print_log_message('ERROR', f"Error fetching table size: {e}")
             raise
 
     def fetch_user_defined_types(self, schema: str):
@@ -727,7 +727,7 @@ class MySQLConnector(DatabaseConnector):
             cursor.close()
             self.disconnect()
         except Exception as e:
-            self.logger.error(f"Error fetching table description for {table_schema}.{table_name}: {e}")
+            self.config_parser.print_log_message('ERROR', f"Error fetching table description for {table_schema}.{table_name}: {e}")
             raise
 
         return { 'table_description': output.strip() }

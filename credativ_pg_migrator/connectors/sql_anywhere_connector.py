@@ -59,7 +59,7 @@ class SQLAnywhereConnector(DatabaseConnector):
         if target_db_type == 'postgresql':
             return {}
         else:
-            self.logger.error(f"Unsupported target database type: {target_db_type}")
+            self.config_parser.print_log_message('ERROR', f"Unsupported target database type: {target_db_type}")
 
     def fetch_table_names(self, table_schema: str):
         query = f"""
@@ -88,8 +88,8 @@ class SQLAnywhereConnector(DatabaseConnector):
             self.disconnect()
             return tables
         except Exception as e:
-            self.logger.error(f"Error executing query: {query}")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def fetch_table_columns(self, settings) -> dict:
@@ -152,8 +152,8 @@ class SQLAnywhereConnector(DatabaseConnector):
             self.disconnect()
             return result
         except Exception as e:
-            self.logger.error(f"Error executing query: {query}")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def get_types_mapping(self, settings):
@@ -318,9 +318,9 @@ class SQLAnywhereConnector(DatabaseConnector):
                 cursor.close()
                 return target_table_rows
         except Exception as e:
-            self.logger.error(f"Worker {worker_id}: Error during {part_name} -> {e}")
-            self.logger.error("Full stack trace:")
-            self.logger.error(traceback.format_exc())
+            self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Error during {part_name} -> {e}")
+            self.config_parser.print_log_message('ERROR', "Full stack trace:")
+            self.config_parser.print_log_message('ERROR', traceback.format_exc())
             raise e
 
 
@@ -382,8 +382,8 @@ class SQLAnywhereConnector(DatabaseConnector):
 
             return table_indexes
         except Exception as e:
-            self.logger.error(f"Error executing query: {query}")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def get_create_index_sql(self, settings):
@@ -458,8 +458,8 @@ class SQLAnywhereConnector(DatabaseConnector):
 
             return table_constraints
         except Exception as e:
-            self.logger.error(f"Error executing query: {query}")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def get_create_constraint_sql(self, settings):
@@ -515,8 +515,8 @@ class SQLAnywhereConnector(DatabaseConnector):
             self.disconnect()
             return views
         except Exception as e:
-            self.logger.error(f"Error executing query: {query}")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def fetch_view_code(self, settings):
@@ -540,8 +540,8 @@ class SQLAnywhereConnector(DatabaseConnector):
             self.disconnect()
             return view_code
         except Exception as e:
-            self.logger.error(f"Error executing query: {query}")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def convert_view_code(self, view_code: str, settings: dict):
@@ -623,7 +623,7 @@ class SQLAnywhereConnector(DatabaseConnector):
             cursor.close()
             self.disconnect()
         except Exception as e:
-            self.logger.error(f"Error fetching table description for {table_schema}.{table_name}: {e}")
+            self.config_parser.print_log_message('ERROR', f"Error fetching table description for {table_schema}.{table_name}: {e}")
             raise
 
         return { 'table_description': output.strip() }

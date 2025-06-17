@@ -37,7 +37,7 @@ class IBMDB2Connector(DatabaseConnector):
             if not self.connection:
                 raise Exception("Failed to connect to the database")
         except Exception as e:
-            self.logger.error(f"Unexpected error while conneting into the database: {e}")
+            self.config_parser.print_log_message('ERROR', f"Unexpected error while conneting into the database: {e}")
             raise
 
     def disconnect(self):
@@ -53,7 +53,7 @@ class IBMDB2Connector(DatabaseConnector):
         if target_db_type == 'postgresql':
             return {}
         else:
-            self.logger.error(f"Unsupported target database type: {target_db_type}")
+            self.config_parser.print_log_message('ERROR', f"Unsupported target database type: {target_db_type}")
 
     def fetch_table_names(self, table_schema: str):
         query = f"""
@@ -82,8 +82,8 @@ class IBMDB2Connector(DatabaseConnector):
             self.disconnect()
             return tables
         except Exception as e:
-            self.logger.error(f"Error executing query: {query}")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def fetch_table_columns(self, settings) -> dict:
@@ -162,8 +162,8 @@ class IBMDB2Connector(DatabaseConnector):
             self.disconnect()
             return result
         except Exception as e:
-            self.logger.error(f"Error executing query: {query}")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def get_types_mapping(self, settings):
@@ -279,8 +279,23 @@ class IBMDB2Connector(DatabaseConnector):
                 part_name = 'migrate_table in batches using cursor'
                 self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {source_table} has {source_table_rows} rows - starting data migration.")
 
+                select_columns_list = []
+                for order_num, col in source_columns.items():
+                    self.config_parser.print_log_message('DEBUG2',
+                                                         f"Worker {worker_id}: Table {source_schema}.{source_table}: Processing column {col['column_name']} ({order_num}) with data type {col['data_type']}")
+                    insert_columns = ', '.join([f'''"{col['column_name']}"''' for col in source_columns.values()])
+
+                    # if col['data_type'].lower() == 'datetime':
+                    #     select_columns_list.append(f"TO_CHAR({col['column_name']}, '%Y-%m-%d %H:%M:%S') as {col['column_name']}")
+                    #     select_columns_list.append(f"ST_asText(`{col['column_name']}`) as `{col['column_name']}`")
+                    # elif col['data_type'].lower() == 'set':
+                    #     select_columns_list.append(f"cast(`{col['column_name']}` as char(4000)) as `{col['column_name']}`")
+                    # else:
+                    select_columns_list.append(f'''"{col['column_name']}"''')
+                select_columns = ', '.join(select_columns_list)
+
                 # Open a cursor and fetch rows in batches
-                query = f'''SELECT * FROM {source_schema.upper()}."{source_table}"'''
+                query = f'''SELECT {select_columns} FROM {source_schema.upper()}."{source_table}"'''
                 if migration_limitation:
                     query += f" WHERE {migration_limitation}"
 
@@ -328,6 +343,7 @@ class IBMDB2Connector(DatabaseConnector):
                         'data': records,
                         'worker_id': worker_id,
                         'migrator_tables': migrator_tables,
+                        'insert_columns': insert_columns,
                     })
                     total_inserted_rows += inserted_rows
                     self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Inserted {inserted_rows} (total: {total_inserted_rows} from: {source_table_rows} ({round(total_inserted_rows/source_table_rows*100, 2)}%)) rows into target table '{target_table}'")
@@ -338,9 +354,9 @@ class IBMDB2Connector(DatabaseConnector):
                 cursor.close()
                 return target_table_rows
         except Exception as e:
-            self.logger.error(f"Worker {worker_id}: Error during {part_name} -> {e}")
-            self.logger.error("Full stack trace:")
-            self.logger.error(traceback.format_exc())
+            self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Error during {part_name} -> {e}")
+            self.config_parser.print_log_message('ERROR', "Full stack trace:")
+            self.config_parser.print_log_message('ERROR', traceback.format_exc())
             raise e
 
     def fetch_indexes(self, settings):
@@ -350,7 +366,6 @@ class IBMDB2Connector(DatabaseConnector):
 
         table_indexes = {}
         order_num = 1
-        # index_columns_data_types_str = ''
         query = f"""
             SELECT
                 INDNAME,
@@ -385,7 +400,7 @@ class IBMDB2Connector(DatabaseConnector):
 
             cursor.close()
             self.disconnect()
-            self.config_parser.print_log_message( 'DEBUG2', f"Indexes for table {source_table_name} ({source_table_schema}): {index_columns_data_types_str}")
+            self.config_parser.print_log_message( 'DEBUG2', f"Indexes for table {source_table_name} ({source_table_schema}): {index_columns}")
             return table_indexes
         except Exception as e:
             self.config_parser.print_log_message( 'ERROR', f"Error executing query: {query}")
@@ -458,8 +473,8 @@ class IBMDB2Connector(DatabaseConnector):
             self.disconnect()
             return table_constraints
         except Exception as e:
-            self.logger.error(f"Error executing query: {query}")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def get_create_constraint_sql(self, settings):
@@ -530,8 +545,8 @@ class IBMDB2Connector(DatabaseConnector):
                 cursor.execute(query)
             cursor.close()
         except Exception as e:
-            self.logger.error(f"Error executing query: {query}")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def execute_sql_script(self, script_path: str):
@@ -542,8 +557,8 @@ class IBMDB2Connector(DatabaseConnector):
             cursor.execute(script)
             cursor.close()
         except Exception as e:
-            self.logger.error(f"Error executing script: {script_path}")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error executing script: {script_path}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def begin_transaction(self):
@@ -565,8 +580,8 @@ class IBMDB2Connector(DatabaseConnector):
             cursor.close()
             return count
         except Exception as e:
-            self.logger.error(f"Error executing query: {query}")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def get_table_size(self, table_schema: str, table_name: str):

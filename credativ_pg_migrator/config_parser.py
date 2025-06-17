@@ -387,6 +387,9 @@ class ConfigParser:
         return 'INFO'
 
     def print_log_message(self, message_level, message):
+        if message_level.upper() == 'ERROR':
+            self.logger.error(message)
+            return
         current_log_level = self.get_log_level()
         if message_level.upper() not in constants.MIGRATOR_MESSAGE_LEVELS:
             raise ValueError(f"Invalid message_level: {message_level}. Must be one of {constants.MIGRATOR_MESSAGE_LEVELS}")

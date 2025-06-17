@@ -9,6 +9,7 @@
   - Refactoring in migrator_tables.py - removed import and usage of PostgreSQL connector, added new local class and methods for usage in the MigratorTables class
     - Rationale: MigratorTables class cannot depend on PostgreSQL connector, it breaks dependencies
   - Library 'importlib' removed from requirements and setup.py - it is an implicit python package, when pip tries to explicitly install it, it fails with a misleading error in setuptools library
+  - Fix in constants - added missing path to connectors in modules
 
 - 2025.06.16:
 

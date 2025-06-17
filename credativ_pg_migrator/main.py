@@ -18,12 +18,12 @@
 Migrator code
 source venv/bin/activate
 """
-from command_line import CommandLine
-from config_parser import ConfigParser
-from orchestrator import Orchestrator
-from migrator_logging import MigratorLogger
-from planner import Planner
-from constants import MigratorConstants
+from credativ_pg_migrator.command_line import CommandLine
+from credativ_pg_migrator.config_parser import ConfigParser
+from credativ_pg_migrator.orchestrator import Orchestrator
+from credativ_pg_migrator.migrator_logging import MigratorLogger
+from credativ_pg_migrator.planner import Planner
+from credativ_pg_migrator.constants import MigratorConstants
 import sys
 import os
 import traceback

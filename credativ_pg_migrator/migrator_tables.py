@@ -15,7 +15,7 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import json
-from connectors.postgresql_connector import PostgreSQLConnector
+from credativ_pg_migrator.connectors.postgresql_connector import PostgreSQLConnector
 class MigratorTables:
     def __init__(self, logger, config_parser):
         self.logger = logger

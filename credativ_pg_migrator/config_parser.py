@@ -42,31 +42,12 @@ class ConfigParser:
             # and type(include_tables) is not list):
             raise ValueError("When include_tables is used, it must be a list of names or regex patterns")
 
-        ## This whole logic is an overkill right now
-        ## we need more practical experiences from migrations to see if something like this is really needed
-        ##
-        # include_tables = self.config['include_tables']
-        # exclude_tables = self.config['exclude_tables']
+        data_types_substitution = self.get_data_types_substitution()
+        if isinstance(data_types_substitution, list):
+            for entry in data_types_substitution:
+                if not isinstance(entry, (list, tuple)) or len(entry) != 5:
+                    raise ValueError("Please update your config file. Each entry in data_types_substitution must have 5 elements - [table_name, column_name, source_type, target_type, comment].")
 
-        # if self.args.log_level == 'DEBUG':
-        #     self.logger.debug(f"type(include_tables): {type(include_tables)} - {include_tables}")
-        #     self.logger.debug(f"type(exclude_tables): {type(exclude_tables)} - {exclude_tables}")
-
-        # if include_tables is None and exclude_tables is None:
-        #     self.config['include_tables'] = ['.*']  # Default to include all tables
-
-        # if type(include_tables) is str and include_tables == '.*' and exclude_tables is None:
-        #     self.logger.info("Check of include_tables and exclude_tables passed - all tables will be included")
-        # elif type(include_tables) is list and exclude_tables is None:
-        #     self.logger.info("Check of include_tables and exclude_tables passed - selected tables will be included")
-        # elif type(include_tables) is str and include_tables == '.*' and type(exclude_tables) is list:
-        #     self.logger.info("Check of include_tables and exclude_tables passed - all tables will be included except for the ones specified")
-        # elif type(include_tables) is list and type(exclude_tables) is list:
-        #     if set(include_tables) & set(exclude_tables):
-        #         raise ValueError("Configuration error: There are tables specified in both 'include_tables.specific_tables' and 'exclude_tables.specific_tables'.")
-
-        # if self.args.log_level == 'DEBUG':
-        #     self.logger.debug(f"Configuration validated: {self.config}")
         return True
 
     ## Databases
@@ -339,7 +320,7 @@ class ConfigParser:
         return self.config.get('migration', {}).get('post_migration_script', None)
 
     def get_names_case_handling(self):
-        return self.config.get('migration', {}).get('names_case_handling', 'keep')
+        return self.config.get('migration', {}).get('names_case_handling', 'keep').lower()
 
     def convert_names_case(self, name):
         case_handling = self.get_names_case_handling().lower()
@@ -385,9 +366,10 @@ class ConfigParser:
         return self.config.get('exclude_views', [])
 
     def get_include_funcprocs(self):
-        include_funcprocs = self.config.get('include_funcprocs', [])
-        if type(include_funcprocs) is str:
-            return '.*'
+        include_funcprocs = self.config.get('include_funcprocs', None)
+        if include_funcprocs is None or (type(include_funcprocs) is str and include_funcprocs.lower() == 'all'):
+            # Pattern matching all function/procedure names
+            return ['.*']
         elif type(include_funcprocs) is list:
             return include_funcprocs
         else:
@@ -404,6 +386,23 @@ class ConfigParser:
             return self.args.log_level.upper()
         return 'INFO'
 
+    def print_log_message(self, message_level, message):
+        if message_level.upper() == 'ERROR':
+            self.logger.error(message)
+            return
+        current_log_level = self.get_log_level()
+        if message_level.upper() not in constants.MIGRATOR_MESSAGE_LEVELS:
+            raise ValueError(f"Invalid message_level: {message_level}. Must be one of {constants.MIGRATOR_MESSAGE_LEVELS}")
+        if constants.MIGRATOR_MESSAGE_LEVELS.index(message_level.upper()) <= constants.MIGRATOR_MESSAGE_LEVELS.index(current_log_level.upper()):
+            if message_level == 'DEBUG':
+                self.logger.debug(message)
+            elif message_level == 'DEBUG2':
+                self.logger.debug('DEBUG2: ' + message)
+            elif message_level == 'DEBUG3':
+                self.logger.debug('DEBUG3: ' + message)
+            else:
+                self.logger.info(message)
+
 
     def get_indent(self):
         return self.config.get('migrator', {}).get('indent', constants.MIGRATOR_DEFAULT_INDENT)
@@ -413,6 +412,33 @@ class ConfigParser:
 
     def get_target_partitioning(self):
         return self.config.get('target_partitioning', {})
+
+    # another service functions
+
+    def indent_code(self, code):
+        lines = code.split('\n')
+        indent_level = 0
+        indented_lines = []
+        for line in lines:
+            stripped_line = line.strip()
+            if (stripped_line.upper().startswith('END')
+                or stripped_line.upper().startswith('ELSE')
+                or stripped_line.upper().startswith('ELSIF')
+                or stripped_line.upper().startswith('EXCEPTION')
+                or stripped_line.upper().startswith('BEGIN')):
+                indent_level -= 1
+                if indent_level < 0:
+                    indent_level = 0
+            indented_lines.append(f"{self.get_indent() * indent_level}{stripped_line}")
+            if (stripped_line.upper().endswith('LOOP')
+                or stripped_line.upper().startswith('BEGIN')
+                or stripped_line.upper().startswith('IF')
+                or stripped_line.upper().startswith('ELSIF')
+                or stripped_line.upper().startswith('EXCEPTION')
+                or stripped_line.upper().startswith('DECLARE')):
+                indent_level += 1
+        return '\n'.join(indented_lines)
+
 
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

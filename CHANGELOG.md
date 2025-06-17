@@ -2,6 +2,25 @@
 
 ## 0.8.3 - 2025.06.xx
 
+- 2025.06.16:
+
+  - Improvements in Informix connector - improved handling of default values for columns, fix in is_nullable flag, updates in data migration for special data types, fix in interpretation of numeric precision and scale, implemented proper handling of function based indexes
+  - Change in Orchestrator - run migration of function based indexes only after the migration of user defined functions because these indexes can reference some of these functions
+    - Note: Currently fully relevant only for Informix, where we migrate functions/procedures - however, it is now prepared for other connectors as well
+  - Change in all connectors - data are now selected using explicitly defined list of columns in the SELECT statement, not using SELECT \* - this allows to use casting or other transformations for some specific data types in the SELECT statement
+    - Rationale: Some special data types like geometry, set, some types of LOBs, user defined data types, complex data types etc. are hard to handle in the python code, but can be easily manipulated in the SQL SELECT statement in the source database
+  - Fix in SQL Anywhere connector - added handling of duplicated foreign key names in the source database (duplicates are possible due to different scope of uniqueness in the source database)
+
+- 2025.06.15
+
+  - Fixes in MySQL data model migration - added missing migration of comments for columns, tables, indexes, repairs in migration of special data types, fixed migration of geometry data type and set data type
+  - Multiple improvements in MySQL tests, added Sakila testing database (dev repository)
+  - Breaking change: custom replacements for data types in the config file now require table name and column name to be specified - new format is checked in the config parser and error is raised if not enough parameters are specified - new parameters can be empty strings, but must be present
+    - Rational: Tests with Sakila database showed issue with migration of encoded passwords - in the table staff column password is varchar(40) but migrated value exceeds this length -> we need to be able to specify replacements for specific columns, existing solution was not flexible enough
+  - Refactoring of exception handling in connectors - too specific exceptions masked some errors, generic "Exception" is now used in most cases
+  - Refactoring of log levels for different messages in the migrator - added deeper DEBUG levels DEBUG2 and DEBUG3 for better granularity, old calls replaced with new function
+    - Refactoring of all calls to print log messages in the whole code
+
 - 2025.06.13:
 
   - Sybase ASE connector - added new functions into SQL functions mapping (solves issues in migration of views like replacement of isNull etc)

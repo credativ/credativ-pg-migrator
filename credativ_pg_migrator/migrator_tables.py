@@ -55,63 +55,65 @@ class MigratorTables:
         # Create table if not exists
         self.protocol_connection.execute_query(f"""
         CREATE TABLE IF NOT EXISTS "{self.protocol_schema}".data_types_substitution (
-        source_type TEXT,
-        target_type TEXT,
-        comment TEXT,
-        inserted TIMESTAMP DEFAULT clock_timestamp()
+            table_name TEXT,
+            column_name TEXT,
+            source_type TEXT,
+            target_type TEXT,
+            comment TEXT,
+            inserted TIMESTAMP DEFAULT clock_timestamp()
         )
         """)
 
         # Insert data into the table
-        for source_type, target_type, comment in self.config_parser.get_data_types_substitution():
+        for table_name, column_name, source_type, target_type, comment in self.config_parser.get_data_types_substitution():
             self.protocol_connection.execute_query(f"""
             INSERT INTO "{self.protocol_schema}".data_types_substitution
-            (source_type, target_type, comment)
-            VALUES (%s, %s, %s)
-            """, (source_type, target_type, comment))
+            (table_name, column_name, source_type, target_type, comment)
+            VALUES (%s, %s, %s, %s, %s)
+            """, (table_name, column_name, source_type, target_type, comment))
 
-    def check_data_types_substitution(self, check_type):
+    def check_data_types_substitution(self, settings):
         """
-        Check if replacement for the data type exists in the data_types_substitution table
-        Returns target_data_type
+        Check if replacement for the data type exists in the data_types_substitution table.
+        Returns target_data_type or None.
         """
+        table_name = settings.get('table_name', '')
+        column_name = settings.get('column_name', '')
+        check_type = settings['check_type']
+        where_clauses = []
+        params = []
+
+        if table_name != '':
+            where_clauses.append(f'trim(%s) = trim(table_name)')
+            params.append(table_name)
+
+        if column_name != '':
+            where_clauses.append(f'trim(%s) = trim(column_name)')
+            params.append(column_name)
+
+        where_clauses.append("""
+            (
+            lower(trim(%s)) = lower(trim(source_type))
+            OR trim(%s) ILIKE trim(source_type)
+            OR lower(trim(%s)) ~ lower(trim(source_type))
+            )
+        """)
+        params.extend([check_type, check_type, check_type])
+
+        where_sql = " AND ".join(where_clauses)
         query = f"""
         SELECT target_type
         FROM "{self.protocol_schema}".data_types_substitution
-        WHERE lower(trim($escape${check_type}$escape$)) = lower(trim(source_type))
+        WHERE {where_sql}
+        LIMIT 1
         """
+        self.config_parser.print_log_message('DEBUG2', f"check_data_types_substitution query: {query} - params: {params}")
         cursor = self.protocol_connection.connection.cursor()
-        cursor.execute(query)
+        cursor.execute(query, params)
         result = cursor.fetchone()
         cursor.close()
-        if result:
-            return result[0]
-        else:
-            query = f"""
-            SELECT target_type
-            FROM "{self.protocol_schema}".data_types_substitution
-            WHERE trim($escape${check_type}$escape$) ILIKE trim(source_type)
-            """
-            cursor = self.protocol_connection.connection.cursor()
-            cursor.execute(query)
-            result = cursor.fetchone()
-            cursor.close()
-            if result:
-                return result[0]
-            else:
-                query = f"""
-                SELECT target_type
-                FROM "{self.protocol_schema}".data_types_substitution
-                WHERE lower(trim($escape${check_type}$escape$)) ~ lower(trim(source_type))
-                """
-                cursor = self.protocol_connection.connection.cursor()
-                cursor.execute(query)
-                result = cursor.fetchone()
-                cursor.close()
-                if result:
-                    return result[0]
-                else:
-                    return None
+        self.config_parser.print_log_message('DEBUG2', f"check_data_types_substitution result: {result}")
+        return result[0] if result else None
 
     def prepare_data_migration_limitation(self):
         # Drop table if exists
@@ -143,8 +145,7 @@ class MigratorTables:
         WHERE trim('{source_table_name}') = trim(source_table_name)
         OR trim('{source_table_name}') ~ trim(source_table_name)
         """
-        # if self.config_parser.get_log_level() == 'DEBUG':
-        #     self.logger.debug(f"get_records_data_migration_limitation query: {query}")
+        self.config_parser.print_log_message( 'DEBUG3', f"get_records_data_migration_limitation query: {query}")
         cursor = self.protocol_connection.connection.cursor()
         cursor.execute(query)
         result = cursor.fetchall()
@@ -252,8 +253,7 @@ class MigratorTables:
                 cursor = self.protocol_connection.connection.cursor()
                 cursor.execute(query, (check_column_name, check_column_data_type, check_default_value))
                 result = cursor.fetchone()
-                # if self.config_parser.get_log_level() == 'DEBUG':
-                #     self.logger.debug(f"1 check_default_values_substitution {check_column_name}, {check_column_data_type}, {check_default_value} query: {query} - {result}")
+                self.config_parser.print_log_message( 'DEBUG3', f"1 check_default_values_substitution {check_column_name}, {check_column_data_type}, {check_default_value} query: {query} - {result}")
                 if result:
                     target_default_value = result[0]
                 else:
@@ -266,8 +266,7 @@ class MigratorTables:
                     """
                     cursor.execute(query, (check_column_data_type, check_default_value))
                     result = cursor.fetchone()
-                    # if self.config_parser.get_log_level() == 'DEBUG':
-                    #     self.logger.debug(f"2 check_default_values_substitution {check_column_name}, {check_column_data_type}, {check_default_value} query: {query} - {result}")
+                    self.config_parser.print_log_message( 'DEBUG3', f"2 check_default_values_substitution {check_column_name}, {check_column_data_type}, {check_default_value} query: {query} - {result}")
                     if result:
                         target_default_value = result[0]
                     else:
@@ -280,14 +279,13 @@ class MigratorTables:
                         """
                         cursor.execute(query, (check_default_value,))
                         result = cursor.fetchone()
-                        # if self.config_parser.get_log_level() == 'DEBUG':
-                        #     self.logger.debug(f"3 check_default_values_substitution {check_column_name}, {check_column_data_type}, {check_default_value} query: {query} - {result}")
+                        self.config_parser.print_log_message( 'DEBUG3', f"3 check_default_values_substitution {check_column_name}, {check_column_data_type}, {check_default_value} query: {query} - {result}")
                         if result:
                             target_default_value = result[0]
             cursor.close()
         except Exception as e:
-            self.logger.error(f"Error checking default values substitution for {check_column_name}, {check_column_data_type}, {check_default_value}.")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error checking default values substitution for {check_column_name}, {check_column_data_type}, {check_default_value}.")
+            self.config_parser.print_log_message('ERROR', e)
 
         return target_default_value
 
@@ -317,8 +315,6 @@ class MigratorTables:
         );
         """
         self.protocol_connection.execute_query(query)
-        # if self.config_parser.get_log_level() == 'DEBUG':
-        #     self.logger.debug(f"Protocol table {table_name} created.")
 
     def create_table_for_main(self):
         table_name = self.config_parser.get_protocol_name_main()
@@ -334,8 +330,6 @@ class MigratorTables:
             message TEXT
             )
         """)
-        # if self.config_parser.get_log_level() == 'DEBUG':
-        #     self.logger.debug(f"Tasks table {table_name} created.")
 
     def insert_main(self, task_name, subtask_name):
         table_name = self.config_parser.get_protocol_name_main()
@@ -349,13 +343,12 @@ class MigratorTables:
             cursor.execute(query)
             row = cursor.fetchone()
             cursor.close()
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Returned row: {row}")
+            self.config_parser.print_log_message( 'DEBUG3', f"Returned row: {row}")
             main_row = self.decode_main_row(row)
             self.insert_protocol('main', task_name + ': ' + subtask_name, 'start', None, None, None, None, 'info', None, main_row['id'])
         except Exception as e:
-            self.logger.error(f"Error inserting task {task_name} into {table_name}.")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error inserting task {task_name} into {table_name}.")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def update_main_status(self, task_name, subtask_name, success, message):
@@ -375,18 +368,17 @@ class MigratorTables:
             cursor.execute(query, params)
             row = cursor.fetchone()
             cursor.close()
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Returned row: {row}")
+            self.config_parser.print_log_message( 'DEBUG3', f"Returned row: {row}")
             if row:
                 main_row = self.decode_main_row(row)
                 self.update_protocol('main', main_row['id'], success, message, None)
             else:
-                self.logger.error(f"Error updating status for task {task_name} in {table_name}.")
-                self.logger.error(f"Error: No protocol row returned.")
+                self.config_parser.print_log_message('ERROR', f"Error updating status for task {task_name} in {table_name}.")
+                self.config_parser.print_log_message('ERROR', f"Error: No protocol row returned.")
         except Exception as e:
-            self.logger.error(f"Error updating status for task {task_name} in {table_name}.")
-            self.logger.error(f"Query: {query}")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error updating status for task {task_name} in {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"Query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def decode_main_row(self, row):
@@ -420,8 +412,6 @@ class MigratorTables:
             message TEXT
             )
         """)
-        # if self.config_parser.get_log_level() == 'DEBUG':
-        #     self.logger.debug(f"User defined types table {table_name} created.")
 
     def insert_user_defined_type(self, settings):
         ## source_schema_name, source_type_name, source_type_sql, target_schema_name, target_type_name, target_type_sql, type_comment
@@ -447,13 +437,12 @@ class MigratorTables:
             row = cursor.fetchone()
             cursor.close()
 
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Returned row: {row}")
+            self.config_parser.print_log_message( 'DEBUG3', f"Returned row: {row}")
             user_defined_type_row = self.decode_user_defined_type_row(row)
             self.insert_protocol('user_defined_type', target_type_name, 'create', target_type_sql, None, None, None, 'info', None, user_defined_type_row['id'])
         except Exception as e:
-            self.logger.error(f"Error inserting user defined type {target_type_name} into {table_name}.")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error inserting user defined type {target_type_name} into {table_name}.")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def update_user_defined_type_status(self, row_id, success, message):
@@ -473,18 +462,16 @@ class MigratorTables:
             row = cursor.fetchone()
             cursor.close()
 
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Returned row: {row}")
             if row:
                 user_defined_type_row = self.decode_user_defined_type_row(row)
                 self.update_protocol('user_defined_type', user_defined_type_row['id'], success, message, None)
             else:
-                self.logger.error(f"Error updating status for user defined type {row_id} in {table_name}.")
-                self.logger.error(f"Error: No protocol row returned.")
+                self.config_parser.print_log_message('ERROR', f"Error updating status for user defined type {row_id} in {table_name}.")
+                self.config_parser.print_log_message('ERROR', f"Error: No protocol row returned.")
         except Exception as e:
-            self.logger.error(f"Error updating status for user defined type {row_id} in {table_name}.")
-            self.logger.error(f"Query: {query}")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error updating status for user defined type {row_id} in {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"Query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def fetch_all_user_defined_types(self):
@@ -530,8 +517,6 @@ class MigratorTables:
             message TEXT
             )
         """)
-        # if self.config_parser.get_log_level() == 'DEBUG':
-        #     self.logger.debug(f"Domains table {table_name} created.")
 
     def insert_domain(self, settings):
         ## source_schema_name, source_domain_name, source_domain_sql, target_schema_name, target_domain_name, target_domain_sql, domain_comment
@@ -561,13 +546,11 @@ class MigratorTables:
             row = cursor.fetchone()
             cursor.close()
 
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Returned row: {row}")
             domain_row = self.decode_user_defined_type_row(row)
             self.insert_protocol('domain', target_domain_name, 'create', target_domain_sql, None, None, None, 'info', None, domain_row['id'])
         except Exception as e:
-            self.logger.error(f"Error inserting domain {target_domain_name} into {table_name}.")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error inserting domain {target_domain_name} into {table_name}.")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def update_domain_status(self, row_id, success, message):
@@ -580,8 +563,7 @@ class MigratorTables:
             WHERE id = %s
             RETURNING *
         """
-        if self.config_parser.get_log_level() == 'DEBUG':
-            self.logger.debug(f"Query: {query}")
+        self.config_parser.print_log_message( 'DEBUG3', f"Query: {query}")
         params = ('TRUE' if success else 'FALSE', message, row_id)
         try:
             cursor = self.protocol_connection.connection.cursor()
@@ -589,18 +571,16 @@ class MigratorTables:
             row = cursor.fetchone()
             cursor.close()
 
-            if self.config_parser.get_log_level() == 'DEBUG':
-                self.logger.debug(f"Returned row: {row}")
             if row:
                 domain_row = self.decode_domain_row(row)
                 self.update_protocol('domain', domain_row['id'], success, message, None)
             else:
-                self.logger.error(f"Error updating status for domain {row_id} in {table_name}.")
-                self.logger.error(f"Error: No protocol row returned.")
+                self.config_parser.print_log_message('ERROR', f"Error updating status for domain {row_id} in {table_name}.")
+                self.config_parser.print_log_message('ERROR', f"Error: No protocol row returned.")
         except Exception as e:
-            self.logger.error(f"Error updating status for domain {row_id} in {table_name}.")
-            self.logger.error(f"Query: {query}")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error updating status for domain {row_id} in {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"Query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def fetch_all_domains(self, domain_owner=None, domain_name=None):
@@ -618,8 +598,6 @@ class MigratorTables:
         cursor.execute(query)
         rows = cursor.fetchall()
         cursor.close()
-        # if self.config_parser.get_log_level() == 'DEBUG':
-        #     self.logger.debug(f"Fetched rows: {rows}")
         return rows
 
     def get_domain_details(self, domain_owner=None, domain_name=None):
@@ -659,8 +637,6 @@ class MigratorTables:
             message TEXT
             )
         """)
-        # if self.config_parser.get_log_level() == 'DEBUG':
-        #     self.logger.debug(f"Default values table {table_name} created.")
 
     def insert_default_value(self, settings):
         default_value_schema = settings['default_value_schema']
@@ -685,13 +661,11 @@ class MigratorTables:
             row = cursor.fetchone()
             cursor.close()
 
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Returned row: {row}")
             default_value_row = self.decode_user_defined_type_row(row)
             self.insert_protocol('default_value', default_value_name, 'create', None, None, None, None, 'info', None, default_value_row['id'])
         except Exception as e:
-            self.logger.error(f"Error inserting default value {default_value_name} into {table_name}.")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error inserting default value {default_value_name} into {table_name}.")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def update_default_value_status(self, row_id, success, message):
@@ -711,18 +685,16 @@ class MigratorTables:
             row = cursor.fetchone()
             cursor.close()
 
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Returned row: {row}")
             if row:
                 default_value_row = self.decode_default_value_row(row)
                 self.update_protocol('default_value', default_value_row['id'], success, message, None)
             else:
-                self.logger.error(f"Error updating status for default value {row_id} in {table_name}.")
-                self.logger.error(f"Error: No protocol row returned.")
+                self.config_parser.print_log_message('ERROR', f"Error updating status for default value {row_id} in {table_name}.")
+                self.config_parser.print_log_message('ERROR', f"Error: No protocol row returned.")
         except Exception as e:
-            self.logger.error(f"Error updating status for default value {row_id} in {table_name}.")
-            self.logger.error(f"Query: {query}")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error updating status for default value {row_id} in {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"Query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def decode_default_value_row(self, row):
@@ -742,8 +714,6 @@ class MigratorTables:
         cursor.execute(query)
         row = cursor.fetchone()
         cursor.close()
-        # if self.config_parser.get_log_level() == 'DEBUG':
-        #     self.logger.debug(f"Fetched rows: {row}")
         return self.decode_default_value_row(row) if row else {}
 
     def create_table_for_target_columns_alterations(self):
@@ -764,8 +734,6 @@ class MigratorTables:
             message TEXT
             )
         """)
-        # if self.config_parser.get_log_level() == 'DEBUG':
-        #     self.logger.debug(f"Target columns alterations table {table_name} created.")
 
     def insert_target_column_alteration(self, settings):
         ## target_schema, target_table, target_column, original_data_type, altered_data_type
@@ -784,23 +752,18 @@ class MigratorTables:
             RETURNING *
         """
         params = (target_schema, target_table, target_column, reason, original_data_type, altered_data_type)
-        # if self.config_parser.get_log_level() == 'DEBUG':
-        #     self.logger.debug(f"Target column alteration insert query: {query}")
-        #     self.logger.debug(f"Target column alteration insert params: {params}")
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
             row = cursor.fetchone()
             cursor.close()
 
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Returned row: {row}")
             target_column_alteration_row = self.decode_target_column_alteration_row(row)
             self.insert_protocol('target_column_alteration', target_table + '.' + target_column, 'alter', None, None, None, None, 'info', None, target_column_alteration_row['id'])
             return target_column_alteration_row['id']
         except Exception as e:
-            self.logger.error(f"Error inserting target column alteration {target_table}.{target_column} into {table_name}.")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error inserting target column alteration {target_table}.{target_column} into {table_name}.")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def decode_target_column_alteration_row(self, row):
@@ -865,8 +828,6 @@ class MigratorTables:
             message TEXT
             )
         """)
-        # if self.config_parser.get_log_level() == 'DEBUG':
-        #     self.logger.debug(f"Data migration table {table_name} created.")
 
     def insert_data_migration(self, settings):
         ## source_schema, source_table, source_table_id, source_table_rows, worker_id, target_schema, target_table, target_table_rows
@@ -887,23 +848,18 @@ class MigratorTables:
             RETURNING *
         """
         params = (source_schema, source_table, source_table_id, source_table_rows, str(worker_id), target_schema, target_table, target_table_rows)
-        # if self.config_parser.get_log_level() == 'DEBUG':
-        #     self.logger.debug(f"Data migration insert query: {query}")
-        #     self.logger.debug(f"Data migration insert params: {params}")
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
             row = cursor.fetchone()
             cursor.close()
 
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Returned row: {row}")
             data_migration_row = self.decode_data_migration_row(row)
             self.insert_protocol('data_migration', target_table, 'create', None, None, None, None, 'info', None, data_migration_row['id'])
             return data_migration_row['id']
         except Exception as e:
-            self.logger.error(f"Error inserting data migration {target_table} into {table_name}.")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error inserting data migration {target_table} into {table_name}.")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def update_data_migration_status(self, row_id, success, message, target_table_rows):
@@ -924,18 +880,16 @@ class MigratorTables:
             row = cursor.fetchone()
             cursor.close()
 
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Returned row: {row}")
             if row:
                 data_migration_row = self.decode_data_migration_row(row)
                 self.update_protocol('data_migration', data_migration_row['id'], success, message, 'source rows: ' + str(data_migration_row['source_table_rows']) + ', target rows: ' + str(target_table_rows))
             else:
-                self.logger.error(f"Error updating status for data migration {row_id} in {table_name}.")
-                self.logger.error(f"Error: No protocol row returned.")
+                self.config_parser.print_log_message('ERROR', f"Error updating status for data migration {row_id} in {table_name}.")
+                self.config_parser.print_log_message('ERROR', f"Error: No protocol row returned.")
         except Exception as e:
-            self.logger.error(f"Error updating status for data migration {row_id} in {table_name}.")
-            self.logger.error(f"Query: {query}")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error updating status for data migration {row_id} in {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"Query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def decode_data_migration_row(self, row):
@@ -967,8 +921,6 @@ class MigratorTables:
             row_count BIGINT
             )
         """)
-        # if self.config_parser.get_log_level() == 'DEBUG':
-        #     self.logger.debug(f"PK ranges table {table_name} created.")
 
     def insert_pk_ranges(self, values):
         table_name = self.config_parser.get_protocol_name_pk_ranges()
@@ -987,15 +939,13 @@ class MigratorTables:
             row = cursor.fetchone()
             cursor.close()
 
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Returned row: {row}")
             data_migration_row = self.decode_pk_ranges_row(row)
             self.insert_protocol('data_migration', values['source_table'], 'pk_range',
                                  f'''PK range: {values['batch_start']} - {values['batch_end']} / {values['row_count']}''',
                                  None, True, None, 'info', None, data_migration_row['id'])
         except Exception as e:
-            self.logger.error(f"Error inserting PK ranges {values['source_table']} into {table_name}.")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error inserting PK ranges {values['source_table']} into {table_name}.")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def fetch_all_pk_ranges(self, worker_id):
@@ -1035,8 +985,6 @@ class MigratorTables:
             message TEXT
             )
         """)
-        # if self.config_parser.get_log_level() == 'DEBUG':
-        #     self.logger.debug(f"New objects table {table_name} created.")
 
     def create_table_for_tables(self):
         table_name = self.config_parser.get_protocol_name_tables()
@@ -1065,8 +1013,6 @@ class MigratorTables:
             message TEXT
             )
         """)
-        # if self.config_parser.get_log_level() == 'DEBUG':
-        #     self.logger.debug(f"Tasks table {table_name} created.")
 
     def create_table_for_indexes(self):
         table_name = self.config_parser.get_protocol_name_indexes()
@@ -1085,6 +1031,7 @@ class MigratorTables:
             index_sql TEXT,
             index_columns TEXT,
             index_comment TEXT,
+            is_function_based BOOLEAN DEFAULT FALSE,
             task_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             task_started TIMESTAMP,
             task_completed TIMESTAMP,
@@ -1092,8 +1039,6 @@ class MigratorTables:
             message TEXT
             )
         """)
-        # if self.config_parser.get_log_level() == 'DEBUG':
-        #     self.logger.debug(f"Indexes table {table_name} created.")
 
     def create_table_for_funcprocs(self):
         table_name = self.config_parser.get_protocol_name_funcprocs()
@@ -1116,8 +1061,6 @@ class MigratorTables:
             message TEXT
             )
         """)
-        # if self.config_parser.get_log_level() == 'DEBUG':
-        #     self.logger.debug(f"Funcprocs table {table_name} created.")
 
     def create_table_for_sequences(self):
         table_name = self.config_parser.get_protocol_name_sequences()
@@ -1236,6 +1179,7 @@ class MigratorTables:
             'index_sql': row[9],
             'index_columns': row[10],
             'index_comment': row[11],
+            'is_function_based': row[12]
         }
 
     def decode_funcproc_row(self, row):
@@ -1303,11 +1247,9 @@ class MigratorTables:
         params = (object_type, object_name, object_action, object_ddl, execution_timestamp, execution_success, execution_error_message, row_type, execution_results, object_protocol_id)
         try:
             self.protocol_connection.execute_query(query, params)
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Info for {object_name} inserted into {table_name}.")
         except Exception as e:
-            self.logger.error(f"Error inserting info {object_name} into {table_name}.")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error inserting info {object_name} into {table_name}.")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def update_protocol(self, object_type, object_protocol_id, execution_success, execution_error_message, execution_results):
@@ -1324,11 +1266,9 @@ class MigratorTables:
         params = ('TRUE' if execution_success else 'FALSE', execution_error_message, execution_results, object_protocol_id, object_type)
         try:
             self.protocol_connection.execute_query(query, params)
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Info for {object_protocol_id} updated in {table_name}.")
         except Exception as e:
-            self.logger.error(f"Error updating info {object_protocol_id} in {table_name}.")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error updating info {object_protocol_id} in {table_name}.")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def insert_tables(self, settings):
@@ -1367,14 +1307,12 @@ class MigratorTables:
             row = cursor.fetchone()
             cursor.close()
 
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"(insert_tables) returned row: {row}")
             table_row = self.decode_table_row(row)
             self.insert_protocol('table', target_table, 'create', target_table_sql, None, None, None, 'info', None, table_row['id'])
         except Exception as e:
-            self.logger.error(f"Error inserting table info {source_table} into {table_name}.")
-            self.logger.error(f"Settings: {settings}")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error inserting table info {source_table} into {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"Settings: {settings}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def update_table_status(self, row_id, success, message):
@@ -1394,18 +1332,16 @@ class MigratorTables:
             row = cursor.fetchone()
             cursor.close()
 
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"(update_table_status) returned row: {row}")
             if row:
                 table_row = self.decode_table_row(row)
                 self.update_protocol('table', table_row['id'], success, message, None)
             else:
-                self.logger.error(f"Error updating status for table {row_id} in {table_name}.")
-                self.logger.error(f"Error: No protocol row returned.")
+                self.config_parser.print_log_message('ERROR', f"Error updating status for table {row_id} in {table_name}.")
+                self.config_parser.print_log_message('ERROR', f"Error: No protocol row returned.")
         except Exception as e:
-            self.logger.error(f"Error updating status for table {row_id} in {table_name}.")
-            self.logger.error(f"Query: {query}")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error updating status for table {row_id} in {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"Query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def insert_indexes(self, values):
@@ -1413,27 +1349,25 @@ class MigratorTables:
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
             (source_schema, source_table, source_table_id, index_owner, index_name, index_type,
-            target_schema, target_table, index_sql, index_columns, index_comment)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            target_schema, target_table, index_sql, index_columns, index_comment, is_function_based)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
         params = (values['source_schema'], values['source_table'], values['source_table_id'], values['index_owner'],
                   values['index_name'], values['index_type'], values['target_schema'],
                   values['target_table'], values['index_sql'], values['index_columns'],
-                  values['index_comment'])
+                  values['index_comment'], True if values['is_function_based'] == 'YES' else False)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
             row = cursor.fetchone()
             cursor.close()
 
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Returned row: {row}")
             index_row = self.decode_index_row(row)
             self.insert_protocol('index', values['index_name'], 'create', values['index_sql'], None, None, None, 'info', None, index_row['id'])
         except Exception as e:
-            self.logger.error(f"Error inserting index info {values['index_name']} into {table_name}.")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error inserting index info {values['index_name']} into {table_name}.")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def update_index_status(self, row_id, success, message):
@@ -1453,18 +1387,16 @@ class MigratorTables:
             row = cursor.fetchone()
             cursor.close()
 
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Returned row: {row}")
             if row:
                 index_row = self.decode_index_row(row)
                 self.update_protocol('index', index_row['id'], success, message, None)
             else:
-                self.logger.error(f"Error updating status for index {row_id} in {table_name}.")
-                self.logger.error(f"Error: No protocol row returned.")
+                self.config_parser.print_log_message('ERROR', f"Error updating status for index {row_id} in {table_name}.")
+                self.config_parser.print_log_message('ERROR', f"Error: No protocol row returned.")
         except Exception as e:
-            self.logger.error(f"Error updating status for index {row_id} in {table_name}.")
-            self.logger.error(f"Query: {query}")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error updating status for index {row_id} in {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"Query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def create_table_for_constraints(self):
@@ -1497,8 +1429,6 @@ class MigratorTables:
             message TEXT
             )
         """)
-        # if self.config_parser.get_log_level() == 'DEBUG':
-        #     self.logger.debug(f"Constraints table {table_name} created.")
 
     def decode_constraint_row(self, row):
         return {
@@ -1563,15 +1493,13 @@ class MigratorTables:
             row = cursor.fetchone()
             cursor.close()
 
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Returned row: {row}")
             constraint_row = self.decode_constraint_row(row)
             self.insert_protocol('constraint', settings['constraint_name'], 'create',
                                  settings['constraint_sql'], None, None, None, 'info', None, constraint_row['id'])
         except Exception as e:
-            self.logger.error(f"Error inserting constraint info {settings['constraint_name']} into {table_name}.")
-            self.logger.error(f"Query: {query}")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error inserting constraint info {settings['constraint_name']} into {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"Query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def update_constraint_status(self, row_id, success, message):
@@ -1591,18 +1519,16 @@ class MigratorTables:
             row = cursor.fetchone()
             cursor.close()
 
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Returned row: {row}")
             if row:
                 constraint_row = self.decode_constraint_row(row)
                 self.update_protocol('constraint', constraint_row['id'], success, message, None)
             else:
-                self.logger.error(f"Error updating status for constraint {row_id} in {table_name}.")
-                self.logger.error(f"Error: No protocol row returned.")
+                self.config_parser.print_log_message('ERROR', f"Error updating status for constraint {row_id} in {table_name}.")
+                self.config_parser.print_log_message('ERROR', f"Error: No protocol row returned.")
         except Exception as e:
-            self.logger.error(f"Error updating status for constraint {row_id} in {table_name}.")
-            self.logger.error(f"Query: {query}")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error updating status for constraint {row_id} in {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"Query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def insert_funcprocs(self, source_schema, source_funcproc_name, source_funcproc_id, source_funcproc_sql, target_schema, target_funcproc_name, target_funcproc_sql, funcproc_comment):
@@ -1620,13 +1546,11 @@ class MigratorTables:
             row = cursor.fetchone()
             cursor.close()
 
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Returned row: {row}")
             funcproc_row = self.decode_funcproc_row(row)
             self.insert_protocol('funcproc', source_funcproc_name, 'create', target_funcproc_sql, None, None, None, 'info', None, funcproc_row['id'])
         except Exception as e:
-            self.logger.error(f"Error inserting funcproc info {source_funcproc_name} into {table_name}.")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error inserting funcproc info {source_funcproc_name} into {table_name}.")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def update_funcproc_status(self, source_funcproc_id, success, message):
@@ -1646,19 +1570,16 @@ class MigratorTables:
             row = cursor.fetchone()
             cursor.close()
 
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Parameters: {params}")
-            #     self.logger.debug(f"Returned row: {row}")
             if row:
                 funcproc_row = self.decode_funcproc_row(row)
                 self.update_protocol('funcproc', funcproc_row['id'], success, message, None)
             else:
-                self.logger.error(f"Error updating status for funcproc {source_funcproc_id} in {table_name}.")
-                self.logger.error(f"Error: No protocol row returned.")
+                self.config_parser.print_log_message('ERROR', f"Error updating status for funcproc {source_funcproc_id} in {table_name}.")
+                self.config_parser.print_log_message('ERROR', f"Error: No protocol row returned.")
         except Exception as e:
-            self.logger.error(f"Error updating status for funcproc {source_funcproc_id} in {table_name}.")
-            self.logger.error(f"Query: {query}")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error updating status for funcproc {source_funcproc_id} in {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"Query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def insert_sequence(self, sequence_id, schema_name, table_name, column_name, sequence_name, set_sequence_sql):
@@ -1676,13 +1597,11 @@ class MigratorTables:
             row = cursor.fetchone()
             cursor.close()
 
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Returned row: {row}")
             sequence_row = self.decode_sequence_row(row)
             self.insert_protocol('sequence', sequence_name, 'create', set_sequence_sql, None, None, None, 'info', None, sequence_row['sequence_id'])
         except Exception as e:
-            self.logger.error(f"Error inserting sequence info {sequence_name} into {table_name}.")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error inserting sequence info {sequence_name} into {table_name}.")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def update_sequence_status(self, sequence_id, success, message):
@@ -1702,18 +1621,16 @@ class MigratorTables:
             row = cursor.fetchone()
             cursor.close()
 
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Returned row: {row}")
             if row:
                 sequence_row = self.decode_sequence_row(row)
                 self.update_protocol('sequence', sequence_row['sequence_id'], success, message, None)
             else:
-                self.logger.error(f"Error updating status for sequence {sequence_id} in {table_name}.")
-                self.logger.error(f"Error: No protocol row returned.")
+                self.config_parser.print_log_message('ERROR', f"Error updating status for sequence {sequence_id} in {table_name}.")
+                self.config_parser.print_log_message('ERROR', f"Error: No protocol row returned.")
         except Exception as e:
-            self.logger.error(f"Error updating status for sequence_if {sequence_id} in {table_name}.")
-            self.logger.error(f"Query: {query}")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error updating status for sequence_if {sequence_id} in {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"Query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def insert_trigger(self, source_schema, source_table, source_table_id, target_schema, target_table, trigger_id, trigger_name, trigger_event, trigger_new, trigger_old, trigger_source_sql, trigger_target_sql, trigger_comment):
@@ -1731,13 +1648,11 @@ class MigratorTables:
             row = cursor.fetchone()
             cursor.close()
 
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Returned row: {row}")
             trigger_row = self.decode_trigger_row(row)
             self.insert_protocol('trigger', trigger_name, 'create', trigger_target_sql, None, None, None, 'info', None, trigger_row['id'])
         except Exception as e:
-            self.logger.error(f"Error inserting trigger info {trigger_name} into {table_name}.")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error inserting trigger info {trigger_name} into {table_name}.")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def update_trigger_status(self, row_id, success, message):
@@ -1757,18 +1672,16 @@ class MigratorTables:
             row = cursor.fetchone()
             cursor.close()
 
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Returned row: {row}")
             if row:
                 trigger_row = self.decode_trigger_row(row)
                 self.update_protocol('trigger', trigger_row['id'], success, message, None)
             else:
-                self.logger.error(f"Error updating status for trigger {row_id} in {table_name}.")
-                self.logger.error(f"Error: No protocol row returned.")
+                self.config_parser.print_log_message('ERROR', f"Error updating status for trigger {row_id} in {table_name}.")
+                self.config_parser.print_log_message('ERROR', f"Error: No protocol row returned.")
         except Exception as e:
-            self.logger.error(f"Error updating status for trigger {row_id} in {table_name}.")
-            self.logger.error(f"Query: {query}")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error updating status for trigger {row_id} in {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"Query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def fetch_all_triggers(self):
@@ -1783,8 +1696,8 @@ class MigratorTables:
             cursor.close()
             return rows
         except Exception as e:
-            self.logger.error(f"Error selecting triggers.")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error selecting triggers.")
+            self.config_parser.print_log_message('ERROR', e)
             return None
 
     def insert_view(self, source_schema, source_view_name, source_view_id, source_view_sql, target_schema, target_view_name, target_view_sql, view_comment):
@@ -1802,13 +1715,11 @@ class MigratorTables:
             row = cursor.fetchone()
             cursor.close()
 
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Returned row: {row}")
             view_row = self.decode_view_row(row)
             self.insert_protocol('view', source_view_name, 'create', target_view_sql, None, None, None, 'info', None, view_row['id'])
         except Exception as e:
-            self.logger.error(f"Error inserting view info {source_view_name} into {table_name}.")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error inserting view info {source_view_name} into {table_name}.")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def fetch_all_views(self):
@@ -1821,8 +1732,8 @@ class MigratorTables:
             cursor.close()
             return rows
         except Exception as e:
-            self.logger.error(f"Error selecting views.")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error selecting views.")
+            self.config_parser.print_log_message('ERROR', e)
             return None
 
     def update_view_status(self, row_id, success, message):
@@ -1842,18 +1753,16 @@ class MigratorTables:
             row = cursor.fetchone()
             cursor.close()
 
-            # if self.config_parser.get_log_level() == 'DEBUG':
-            #     self.logger.debug(f"Returned row: {row}")
             if row:
                 view_row = self.decode_view_row(row)
                 self.update_protocol('view', view_row['id'], success, message, None)
             else:
-                self.logger.error(f"Error updating status for view {row_id} in {table_name}.")
-                self.logger.error(f"Error: No protocol row returned.")
+                self.config_parser.print_log_message('ERROR', f"Error updating status for view {row_id} in {table_name}.")
+                self.config_parser.print_log_message('ERROR', f"Error: No protocol row returned.")
         except Exception as e:
-            self.logger.error(f"Error updating status for view {row_id} in {table_name}.")
-            self.logger.error(f"Query: {query}")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error updating status for view {row_id} in {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"Query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     # def select_primary_key(self, target_schema, target_table):
@@ -1880,21 +1789,21 @@ class MigratorTables:
     #         else:
     #             return None
     #     except Exception as e:
-    #         self.logger.error(f"Error selecting primary key for {target_schema}.{target_table}.")
-    #         self.logger.error(e)
+    #         self.config_parser.print_log_message('ERROR', f"Error selecting primary key for {target_schema}.{target_table}.")
+    #         self.config_parser.print_log_message('ERROR', e)
     #         return None
 
     def print_summary(self, objects, migrator_table_name, additional_columns=None):
         try:
-            self.logger.info(f"{objects} summary:")
+            self.config_parser.print_log_message('INFO', f"{objects} summary:")
             query = f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{migrator_table_name}" """
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query)
             summary = cursor.fetchone()[0]
             if objects.lower() not in ['sequences']:
-                self.logger.info(f"    Found in source: {summary}")
+                self.config_parser.print_log_message('INFO', f"    Found in source: {summary}")
             else:
-                self.logger.info(f"    Found: {summary}")
+                self.config_parser.print_log_message('INFO', f"    Found: {summary}")
             if additional_columns:
                 columns_count = len(additional_columns.split(','))
                 columns_numbers = ', '.join(str(i + 2) for i in range(columns_count))
@@ -1902,7 +1811,7 @@ class MigratorTables:
                 cursor.execute(query)
                 rows = cursor.fetchall()
                 for row in rows:
-                    self.logger.info(f"        {row[1:]}: {row[0]}")
+                    self.config_parser.print_log_message('INFO', f"        {row[1:]}: {row[0]}")
 
             query = f"""SELECT success, COUNT(*) FROM "{self.protocol_schema}"."{migrator_table_name}" GROUP BY 1 ORDER BY 1"""
             cursor.execute(query)
@@ -1914,19 +1823,19 @@ class MigratorTables:
             for row in rows:
                 status = success_description if row[0] else "error" if row[0] is False else "unknown status"
                 row_success = row[0] if row[0] is not None else 'NULL'
-                self.logger.info(f"    {status}: {row[1]}")
+                self.config_parser.print_log_message('INFO', f"    {status}: {row[1]}")
                 if additional_columns:
                     query = f"""SELECT COUNT(*), {additional_columns} FROM "{self.protocol_schema}"."{migrator_table_name}" WHERE success = {row_success} GROUP BY {columns_numbers} ORDER BY {columns_numbers}"""
                     cursor.execute(query)
                     rows = cursor.fetchall()
                     for row in rows:
                         # status = success_description if row[0] else "error" if row[0] is False else "unknown status"
-                        self.logger.info(f"        {row[1:]}: {row[0]}")
+                        self.config_parser.print_log_message('INFO', f"        {row[1:]}: {row[0]}")
             cursor.close()
 
         except Exception as e:
-            self.logger.error(f"Error printing migration summary.")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error printing migration summary.")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def print_main(self, migrator_table_name):
@@ -1946,14 +1855,14 @@ class MigratorTables:
                 if task_data['subtask_name'] != '':
                     intendation = '    '
                 status = f"{intendation}{(task_data['task_name']+': '+task_data['subtask_name'])[:50]:<50} | {str(task_data['task_started'])[:19]:<19} -> {str(task_data['task_completed'])[:19]:<19} | length: {str(length)[:19]}"
-                self.logger.info(f"{status}")
+                self.config_parser.print_log_message('INFO', f"{status}")
         except Exception as e:
-            self.logger.error(f"Error printing migration summary.")
-            self.logger.error(e)
+            self.config_parser.print_log_message('ERROR', f"Error printing migration summary.")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def print_data_migration_summary(self):
-        self.logger.info("Table rows migration stats:")
+        self.config_parser.print_log_message('INFO', "Table rows migration stats:")
         table_name = self.config_parser.get_protocol_name_data_migration()
         data_migration_table_name = self.config_parser.get_protocol_name_data_migration()
         query = f"""SELECT min(task_created) as min_time, max(task_completed) as max_time FROM "{self.protocol_schema}"."{table_name}" WHERE task_completed IS NOT NULL"""
@@ -1964,29 +1873,29 @@ class MigratorTables:
             min_time = row[0]
             max_time = row[1]
             length = max_time - min_time
-            self.logger.info(f"    start: {str(min_time)[:19]} | end: {str(max_time)[:19]} | length: {str(length)[:19]}")
+            self.config_parser.print_log_message('INFO', f"    start: {str(min_time)[:19]} | end: {str(max_time)[:19]} | length: {str(length)[:19]}")
         else:
-            self.logger.info("    No data migration tasks completed.")
+            self.config_parser.print_log_message('INFO', "    No data migration tasks completed.")
 
         query = f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{table_name}" """
         cursor.execute(query)
         summary = cursor.fetchone()[0]
-        self.logger.info(f"    Tables in total: {summary}")
+        self.config_parser.print_log_message('INFO', f"    Tables in total: {summary}")
 
         query = f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{table_name}" WHERE source_table_rows = 0 OR source_table_rows IS NULL"""
         cursor.execute(query)
         summary = cursor.fetchone()[0]
-        self.logger.info(f"    Empty tables (0 rows): {summary}")
+        self.config_parser.print_log_message('INFO', f"    Empty tables (0 rows): {summary}")
 
         query = f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{table_name}" WHERE source_table_rows > 0"""
         cursor.execute(query)
         summary = cursor.fetchone()[0]
-        self.logger.info(f"    Tables with data: {summary}")
+        self.config_parser.print_log_message('INFO', f"    Tables with data: {summary}")
 
         query = f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{table_name}" WHERE source_table_rows > 0 AND source_table_rows = target_table_rows"""
         cursor.execute(query)
         summary = cursor.fetchone()[0]
-        self.logger.info(f"    Tables with data - fully migrated: {summary}")
+        self.config_parser.print_log_message('INFO', f"    Tables with data - fully migrated: {summary}")
 
         query = f"""SELECT target_schema, target_table, source_table_rows, target_table_rows, task_completed - task_created as migration_time
         FROM "{self.protocol_schema}"."{data_migration_table_name}" WHERE source_table_rows > 0 AND source_table_rows = target_table_rows
@@ -1994,7 +1903,7 @@ class MigratorTables:
         cursor.execute(query)
         rows = cursor.fetchall()
         if rows:
-            self.logger.info("        Tables with data - fully migrated (top 10):")
+            self.config_parser.print_log_message('INFO', "        Tables with data - fully migrated (top 10):")
             max_table_name_length = max(len(row[1]) for row in rows) if rows else 0
             max_table_name_length += 1
             for row in rows:
@@ -2005,12 +1914,12 @@ class MigratorTables:
                 migration_time = row[4]
                 formatted_source_rows = f"{source_table_rows:,}".rjust(15)
                 formatted_target_rows = f"{target_table_rows:,}".rjust(15)
-                self.logger.info(f"        {target_schema}.{target_table[:max_table_name_length].ljust(max_table_name_length)}| {formatted_source_rows} = {formatted_target_rows} | length: {str(migration_time)[:19]:<19}")
+                self.config_parser.print_log_message('INFO', f"        {target_schema}.{target_table[:max_table_name_length].ljust(max_table_name_length)}| {formatted_source_rows} = {formatted_target_rows} | length: {str(migration_time)[:19]:<19}")
 
         query = f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{table_name}" WHERE source_table_rows > 0 AND source_table_rows <> target_table_rows"""
         cursor.execute(query)
         summary = cursor.fetchone()[0]
-        self.logger.info(f"    Tables with data - NOT fully migrated: {summary}")
+        self.config_parser.print_log_message('INFO', f"    Tables with data - NOT fully migrated: {summary}")
 
         query = f"""SELECT target_schema, target_table, source_table_rows, target_table_rows, task_completed - task_created as migration_time
         FROM "{self.protocol_schema}"."{data_migration_table_name}" WHERE source_table_rows > 0 AND source_table_rows <> target_table_rows
@@ -2018,7 +1927,7 @@ class MigratorTables:
         cursor.execute(query)
         rows = cursor.fetchall()
         if rows:
-            self.logger.info("        Tables with data - NOT fully migrated (top 10):")
+            self.config_parser.print_log_message('INFO', "        Tables with data - NOT fully migrated (top 10):")
             max_table_name_length = max(len(row[1]) for row in rows) if rows else 0
             max_table_name_length += 1
             for row in rows:
@@ -2029,16 +1938,16 @@ class MigratorTables:
                 migration_time = row[4]
                 formatted_source_rows = f"{source_table_rows:,}".rjust(12)
                 formatted_target_rows = f"{target_table_rows:,}".rjust(12)
-                self.logger.info(f"        {target_schema}.{target_table[:max_table_name_length].ljust(max_table_name_length)}| {formatted_source_rows} <> {formatted_target_rows} | length: {str(migration_time)[:19]:<19}")
+                self.config_parser.print_log_message('INFO', f"        {target_schema}.{target_table[:max_table_name_length].ljust(max_table_name_length)}| {formatted_source_rows} <> {formatted_target_rows} | length: {str(migration_time)[:19]:<19}")
 
         cursor.close()
 
     def print_migration_summary(self):
-        self.logger.info("Migration stats:")
-        self.logger.info(f"    Source database: {self.config_parser.get_source_db_name()}, schema: {self.config_parser.get_source_owner()} ({self.config_parser.get_source_db_type()})")
-        self.logger.info(f"    Target database: {self.config_parser.get_target_db_name()}, schema: {self.config_parser.get_target_schema()} ({self.config_parser.get_target_db_type()})")
+        self.config_parser.print_log_message('INFO', "Migration stats:")
+        self.config_parser.print_log_message('INFO', f"    Source database: {self.config_parser.get_source_db_name()}, schema: {self.config_parser.get_source_owner()} ({self.config_parser.get_source_db_type()})")
+        self.config_parser.print_log_message('INFO', f"    Target database: {self.config_parser.get_target_db_name()}, schema: {self.config_parser.get_target_schema()} ({self.config_parser.get_target_db_type()})")
         self.print_main(self.config_parser.get_protocol_name_main())
-        self.logger.info("Migration summary:")
+        self.config_parser.print_log_message('INFO', "Migration summary:")
         self.print_summary('User Defined Types', self.config_parser.get_protocol_name_user_defined_types())
         self.print_summary('Tables', self.config_parser.get_protocol_name_tables())
         self.print_data_migration_summary()

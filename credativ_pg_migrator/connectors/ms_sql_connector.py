@@ -58,7 +58,7 @@ class MsSQLConnector(DatabaseConnector):
         try:
             if self.connection:
                 self.connection.close()
-        except AttributeError:
+        except Exception as e:
             pass
 
     def get_sql_functions_mapping(self, settings):
@@ -67,7 +67,7 @@ class MsSQLConnector(DatabaseConnector):
         if target_db_type == 'postgresql':
             return {}
         else:
-            self.logger.error(f"Unsupported target database type: {target_db_type}")
+            self.config_parser.print_log_message('ERROR', f"Unsupported target database type: {target_db_type}")
 
     def fetch_table_names(self, table_schema: str):
         query = f"""
@@ -97,9 +97,9 @@ class MsSQLConnector(DatabaseConnector):
             cursor.close()
             self.disconnect()
             return tables
-        except Error as e:
-            self.logger.error(f"Error executing query: {query}")
-            self.logger.error(e)
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def fetch_table_columns(self, settings) -> dict:
@@ -147,8 +147,7 @@ class MsSQLConnector(DatabaseConnector):
         try:
             self.connect()
             cursor = self.connection.cursor()
-            if self.config_parser.get_log_level() == 'DEBUG':
-                self.logger.debug(f"MSSQL: Reading columns for {table_schema}.{table_name}")
+            self.config_parser.print_log_message('DEBUG2', f"MSSQL: Reading columns for {table_schema}.{table_name}")
             cursor.execute(query)
             for row in cursor.fetchall():
                 ordinal_position = row[0]
@@ -185,9 +184,9 @@ class MsSQLConnector(DatabaseConnector):
             cursor.close()
             self.disconnect()
             return result
-        except Error as e:
-            self.logger.error(f"Error executing query: {query}")
-            self.logger.error(e)
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def get_types_mapping(self, settings):
@@ -292,8 +291,7 @@ class MsSQLConnector(DatabaseConnector):
             indexes = cursor.fetchall()
 
             for index in indexes:
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"Processing index: {index}")
+                self.config_parser.print_log_message('DEBUG', f"Processing index: {index}")
                 index_name = index[0].strip()
                 index_unique = index[1]  ## integer 0 or 1
                 index_primary_key = index[2]  ## integer 0 or 1
@@ -313,9 +311,9 @@ class MsSQLConnector(DatabaseConnector):
             self.disconnect()
             return table_indexes
 
-        except Error as e:
-            self.logger.error(f"Error executing query: {query}")
-            self.logger.error(e)
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def get_create_index_sql(self, settings):
@@ -380,8 +378,7 @@ class MsSQLConnector(DatabaseConnector):
             constraints = cursor.fetchall()
 
             for constraint in constraints:
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"Processing constraint: {constraint}")
+                self.config_parser.print_log_message('DEBUG', f"Processing constraint: {constraint}")
                 constraint_name = constraint[0].strip()
                 constraint_type = constraint[1].strip()
                 constraint_columns = constraint[2].strip()
@@ -405,9 +402,9 @@ class MsSQLConnector(DatabaseConnector):
             cursor.close()
             self.disconnect()
             return table_constraints
-        except Error as e:
-            self.logger.error(f"Error executing query: {query}")
-            self.logger.error(e)
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def get_create_constraint_sql(self, settings):
@@ -479,9 +476,9 @@ class MsSQLConnector(DatabaseConnector):
             cursor.close()
             self.disconnect()
             return views
-        except Error as e:
-            self.logger.error(f"Error executing query: {query}")
-            self.logger.error(e)
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def fetch_view_code(self, settings):
@@ -503,15 +500,14 @@ class MsSQLConnector(DatabaseConnector):
             rows = cursor.fetchall()
             for row in rows:
                 view_code = row[0]
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"View code for {source_schema}.{source_view_name}: {view_code}")
+                self.config_parser.print_log_message('DEBUG', f"View code for {source_schema}.{source_view_name}: {view_code}")
                 return view_code
             cursor.close()
             self.disconnect()
             return view_code
-        except Error as e:
-            self.logger.error(f"Error executing query: {query}")
-            self.logger.error(e)
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
             raise
 
     def convert_view_code(self, view_code: str, settings: dict):
@@ -554,30 +550,33 @@ class MsSQLConnector(DatabaseConnector):
             })
 
             if source_table_rows == 0:
-                self.logger.info(f"Worker {worker_id}: Table {source_table} is empty - skipping data migration.")
+                self.config_parser.print_log_message( 'INFO', f"Worker {worker_id}: Table {source_table} is empty - skipping data migration.")
                 return 0
             else:
                 part_name = 'migrate_table in batches using cursor'
-                self.logger.info(f"Worker {worker_id}: Table {source_table} has {source_table_rows} rows - starting data migration.")
+                self.config_parser.print_log_message( 'INFO', f"Worker {worker_id}: Table {source_table} has {source_table_rows} rows - starting data migration.")
+
+                select_columns_list = []
+                for order_num, col in source_columns.items():
+                    self.config_parser.print_log_message('DEBUG2',
+                                                         f"Worker {worker_id}: Table {source_schema}.{source_table}: Processing column {col['column_name']} ({order_num}) with data type {col['data_type']}")
+                    insert_columns = ', '.join([f'''"{col['column_name']}"''' for col in source_columns.values()])
+
+                    # if col['data_type'].lower() == 'datetime':
+                    #     select_columns_list.append(f"TO_CHAR({col['column_name']}, '%Y-%m-%d %H:%M:%S') as {col['column_name']}")
+                    #     select_columns_list.append(f"ST_asText(`{col['column_name']}`) as `{col['column_name']}`")
+                    # elif col['data_type'].lower() == 'set':
+                    #     select_columns_list.append(f"cast(`{col['column_name']}` as char(4000)) as `{col['column_name']}`")
+                    # else:
+                    select_columns_list.append(f'''{col['column_name']}''')
+                select_columns = ', '.join(select_columns_list)
 
                 # Open a cursor and fetch rows in batches
-                query = f"SELECT * FROM {source_schema}.{source_table}"
+                query = f"SELECT {select_columns} FROM {source_schema}.{source_table}"
                 if migration_limitation:
                     query += f" WHERE {migration_limitation}"
 
-                if self.config_parser.get_log_level() == 'DEBUG':
-                    self.logger.debug(f"Worker {worker_id}: Fetching data with cursor using query: {query}")
-
-                # # polars library is not always available
-                # for df in pl.read_database(query, self.connection, iter_batches=True, batch_size=batch_size):
-                #     if df.is_empty():
-                #         break
-
-                #     if self.config_parser.get_log_level() == 'DEBUG':
-                #         self.logger.debug(f"Worker {worker_id}: Fetched {len(df)} rows from source table {source_table} using cursor.")
-
-                #     # Convert Polars DataFrame to list of dictionaries for insertion
-                #     records = df.to_dicts()
+                self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Fetching data with cursor using query: {query}")
 
                 cursor = self.connection.cursor()
                 cursor.execute(query)
@@ -586,8 +585,7 @@ class MsSQLConnector(DatabaseConnector):
                     records = cursor.fetchmany(batch_size)
                     if not records:
                         break
-                    if self.config_parser.get_log_level() == 'DEBUG':
-                        self.logger.debug(f"Worker {worker_id}: Fetched {len(records)} rows from source table '{source_table}' using cursor")
+                    self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Fetched {len(records)} rows from source table '{source_table}' using cursor")
 
                     # Convert records to a list of dictionaries
                     records = [
@@ -604,8 +602,7 @@ class MsSQLConnector(DatabaseConnector):
                                 record[column_name] = str(record[column_name]) if record[column_name] is not None else None
 
                     # Insert batch into target table
-                    if self.config_parser.get_log_level() == 'DEBUG':
-                        self.logger.debug(f"Worker {worker_id}: Starting insert of {len(records)} rows from source table {source_table}")
+                    self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Inserting {len(records)} rows into target table '{target_table}'")
                     inserted_rows = migrate_target_connection.insert_batch({
                         'target_schema': target_schema,
                         'target_table': target_table,
@@ -613,22 +610,22 @@ class MsSQLConnector(DatabaseConnector):
                         'data': records,
                         'worker_id': worker_id,
                         'migrator_tables': migrator_tables,
+                        'insert_columns': insert_columns,
                     })
                     total_inserted_rows += inserted_rows
-                    self.logger.info(f"Worker {worker_id}: Inserted {inserted_rows} (total: {total_inserted_rows} from: {source_table_rows} ({round(total_inserted_rows/source_table_rows*100, 2)}%)) rows into target table '{target_table}'")
+                    self.config_parser.print_log_message( 'INFO', f"Worker {worker_id}: Inserted {inserted_rows} (total: {total_inserted_rows} from: {source_table_rows} ({round(total_inserted_rows/source_table_rows*100, 2)}%)) rows into target table '{target_table}'")
 
                 target_table_rows = migrate_target_connection.get_rows_count(target_schema, target_table)
-                self.logger.info(f"Worker {worker_id}: Target table {target_schema}.{target_table} has {target_table_rows} rows")
+                self.config_parser.print_log_message( 'INFO', f"Worker {worker_id}: Target table {target_schema}.{target_table} has {target_table_rows} rows")
                 migrator_tables.update_data_migration_status(protocol_id, True, 'OK', target_table_rows)
                 cursor.close()
         except Exception as e:
-            self.logger.error(f"Worker {worker_id}: Error during {part_name} -> {e}")
-            self.logger.error("Full stack trace:")
-            self.logger.error(traceback.format_exc())
+            self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Error during {part_name} -> {e}")
+            self.config_parser.print_log_message('ERROR', "Full stack trace:")
+            self.config_parser.print_log_message('ERROR', traceback.format_exc())
             raise e
         finally:
-            if self.config_parser.get_log_level() == 'DEBUG':
-                self.logger.debug(f"Worker {worker_id}: Finished processing table {source_table}.")
+            self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Finished processing table {source_table}. Inserted {inserted_rows} rows into target table '{target_table}'.")
             return target_table_rows
 
     def fetch_triggers(self, schema_name, table_name):
@@ -666,8 +663,7 @@ class MsSQLConnector(DatabaseConnector):
     def get_rows_count(self, table_schema: str, table_name: str):
         query = f"""SELECT COUNT(*) FROM [{table_schema}].[{table_name}]"""
         # query = f"""SELECT COUNT(*) FROM {table_schema}.{table_name} """
-        if self.config_parser.get_log_level() == 'DEBUG':
-            self.logger.debug(f"get_rows_count query: {query}")
+        self.config_parser.print_log_message('DEBUG', f"get_rows_count query: {query}")
         cursor = self.connection.cursor()
         cursor.execute(query)
         count = cursor.fetchone()[0]

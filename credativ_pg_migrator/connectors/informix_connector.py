@@ -261,7 +261,8 @@ class InformixConnector(DatabaseConnector):
         view_code_str = ''.join([code[0] for code in view_code])
         return view_code_str
 
-    def convert_view_code(self, view_code: str, settings: dict):
+    def convert_view_code(self, settings: dict):
+        view_code = settings['view_code']
         converted_view_code = view_code
         converted_view_code = converted_view_code.replace(f'''"{settings['source_schema']}".''', f'''"{settings['target_schema']}".''')
         return converted_view_code

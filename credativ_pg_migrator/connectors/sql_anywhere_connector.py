@@ -544,7 +544,8 @@ class SQLAnywhereConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', e)
             raise
 
-    def convert_view_code(self, view_code: str, settings: dict):
+    def convert_view_code(self, settings: dict):
+        view_code = settings['view_code']
         return view_code
 
     def get_sequence_current_value(self, sequence_id: int):

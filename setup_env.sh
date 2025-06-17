@@ -10,6 +10,9 @@ else
     echo "Creating new virtual environment..."
     python3 -m venv "$VENV_DIR"
     source "$VENV_DIR/bin/activate"
+    pip install --upgrade pip
+    pip install wheel
+    pip install setuptools
     echo "Installing required libraries..."
     pip install -r requirements.txt
 fi

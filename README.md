@@ -31,6 +31,7 @@ For practical usage and examples refer to the [tests](./tests/) directory. There
 ## Usage
 
 In a python venv:
+
 ```
 . ../migrator_venv/bin/activate
 python3 main.py --config=../config/test_database.yaml --log-file=../logs/test_database_$(date +%Y%m%d).log --log-level=DEBUG
@@ -74,11 +75,9 @@ credativ-pg-migrator --config=./test_database.yaml --log-file=./test_database_$(
 
 See [CHANGELOG](./CHANGELOG.md).
 
-## TODO
+## Known issues
 
-- In Informix we currently do not support ROW data type (corresponds with PostgreSQL composite type)
-- Not all types of default values are currently supported simply because we do not know all possible values/functions. Every database is somehow unique, so these will be added on demand.
-- Support for partitioning of target tables is only in the experimental stage.
+See [ISSUESLOG](./ISSUESLOG.md)
 
 ## Authors
 

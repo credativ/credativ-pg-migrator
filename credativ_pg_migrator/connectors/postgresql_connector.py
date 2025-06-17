@@ -637,8 +637,8 @@ class PostgreSQLConnector(DatabaseConnector):
             source_table = settings['source_table']
             source_table_id = settings['source_table_id']
             source_columns = settings['source_columns']
-            target_schema = settings['target_schema']
-            target_table = settings['target_table']
+            target_schema = self.config_parser.convert_names_case(settings['target_schema'])
+            target_table = self.config_parser.convert_names_case(settings['target_table'])
             target_columns = settings['target_columns']
             # primary_key_columns = settings['primary_key_columns']
             batch_size = settings['batch_size']

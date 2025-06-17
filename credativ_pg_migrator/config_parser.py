@@ -320,7 +320,7 @@ class ConfigParser:
         return self.config.get('migration', {}).get('post_migration_script', None)
 
     def get_names_case_handling(self):
-        return self.config.get('migration', {}).get('names_case_handling', 'keep')
+        return self.config.get('migration', {}).get('names_case_handling', 'keep').lower()
 
     def convert_names_case(self, name):
         case_handling = self.get_names_case_handling().lower()

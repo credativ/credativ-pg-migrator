@@ -311,8 +311,8 @@ class Orchestrator:
         worker_target_connection = None
         rows_migrated = 0
         try:
-            target_schema = table_data['target_schema']
-            target_table = table_data['target_table']
+            target_schema = self.config_parser.convert_names_case(table_data['target_schema'])
+            target_table = self.config_parser.convert_names_case(table_data['target_table'])
             create_table_sql = table_data['target_table_sql']
             migrator_tables = settings['migrator_tables']
 

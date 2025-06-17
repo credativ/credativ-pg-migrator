@@ -56,13 +56,13 @@ class MigratorConstants:
     @staticmethod
     def get_modules():
         return {
-            'postgresql': 'connectors.postgresql_connector:PostgreSQLConnector',
-            'ibm_db2': 'connectors.ibm_db2_connector:IBMDB2Connector',
-            'informix': 'connectors.informix_connector:InformixConnector',
-            'mssql': 'connectors.ms_sql_connector:MsSQLConnector',
-            'mysql': 'connectors.mysql_connector:MySQLConnector',
-            'oracle': 'connectors.oracle_connector:OracleConnector',
-            'sql_anywhere': 'connectors.sql_anywhere_connector:SQLAnywhereConnector',
+            'postgresql': 'credativ_pg_migrator.connectors.postgresql_connector:PostgreSQLConnector',
+            'ibm_db2': 'credativ_pg_migrator.connectors.ibm_db2_connector:IBMDB2Connector',
+            'informix': 'credativ_pg_migrator.connectors.informix_connector:InformixConnector',
+            'mssql': 'credativ_pg_migrator.connectors.ms_sql_connector:MsSQLConnector',
+            'mysql': 'credativ_pg_migrator.connectors.mysql_connector:MySQLConnector',
+            'oracle': 'credativ_pg_migrator.connectors.oracle_connector:OracleConnector',
+            'sql_anywhere': 'credativ_pg_migrator.connectors.sql_anywhere_connector:SQLAnywhereConnector',
             'sybase_ase': 'connectors.sybase_ase_connector:SybaseASEConnector'
         }
 

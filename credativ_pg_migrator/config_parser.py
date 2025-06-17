@@ -16,6 +16,7 @@
 
 import yaml
 import constants
+from constants import MigratorConstants
 
 class ConfigParser:
     def __init__(self, args, logger):
@@ -182,7 +183,7 @@ class ConfigParser:
         return self.get_migrator_config().get('type', None)
 
     def get_migrator_schema(self):
-        return self.get_migrator_config().get('schema', constants.MIGRATOR_DEFAULT_SCHEMA)
+        return self.get_migrator_config().get('schema', MigratorConstants.get_default_schema())
 
     def get_migration_settings(self):
         return self.config['migration']
@@ -191,7 +192,7 @@ class ConfigParser:
         return self.config.get('tables', []) # Default to empty list if not specified
 
     def get_protocol_name(self):
-        return constants.MIGRATOR_TASKS_TABLE
+        return MigratorConstants.get_tasks_table()
 
     def get_protocol_name_main(self):
         return f"{self.get_protocol_name()}_main"
@@ -379,11 +380,11 @@ class ConfigParser:
         return self.config.get('exclude_funcprocs', [])
 
     def get_log_file(self):
-        return self.args.log_file or constants.MIGRATOR_DEFAULT_LOG
+        return self.args.log_file or MigratorConstants.get_default_log()
 
     def get_log_level(self):
         if self.args.log_level:
-            return self.args.log_level.upper()
+            return self.args.log_level
         return 'INFO'
 
     def print_log_message(self, message_level, message):
@@ -391,9 +392,10 @@ class ConfigParser:
             self.logger.error(message)
             return
         current_log_level = self.get_log_level()
-        if message_level.upper() not in constants.MIGRATOR_MESSAGE_LEVELS:
-            raise ValueError(f"Invalid message_level: {message_level}. Must be one of {constants.MIGRATOR_MESSAGE_LEVELS}")
-        if constants.MIGRATOR_MESSAGE_LEVELS.index(message_level.upper()) <= constants.MIGRATOR_MESSAGE_LEVELS.index(current_log_level.upper()):
+        if message_level.upper() not in MigratorConstants.get_message_levels():
+            raise ValueError(f"Invalid message_level: {message_level}. Must be one of {MigratorConstants.get_message_levels()}")
+        if MigratorConstants.get_message_levels().index(message_level.upper()) <= MigratorConstants.get_message_levels().index(current_log_level.upper()):
+            pass
             if message_level == 'DEBUG':
                 self.logger.debug(message)
             elif message_level == 'DEBUG2':
@@ -405,7 +407,7 @@ class ConfigParser:
 
 
     def get_indent(self):
-        return self.config.get('migrator', {}).get('indent', constants.MIGRATOR_DEFAULT_INDENT)
+        return self.config.get('migrator', {}).get('indent', MigratorConstants.get_default_indent())
 
     def get_target_db_session_settings(self):
         return self.config['target'].get('settings', {})

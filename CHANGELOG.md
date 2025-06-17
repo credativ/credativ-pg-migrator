@@ -2,6 +2,11 @@
 
 ## 0.8.3 - 2025.06.xx
 
+- 2025.06.17:
+
+  - Constants transformed into a class with static methods - this allows to use constants in the code without importing them, just using the class name
+    - Rationale: This is more pythonic way of using constants, allows to use constants in the code without importing them, just using the class name
+
 - 2025.06.16:
 
   - Improvements in Informix connector - improved handling of default values for columns, fix in is_nullable flag, updates in data migration for special data types, fix in interpretation of numeric precision and scale, implemented proper handling of function based indexes

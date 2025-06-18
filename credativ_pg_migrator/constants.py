@@ -17,7 +17,7 @@
 class MigratorConstants:
     @staticmethod
     def get_version():
-        return '0.8.3'
+        return '0.8.3dev'
 
     @staticmethod
     def get_full_name():

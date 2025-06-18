@@ -1,0 +1,39 @@
+[build-system]
+requires = [ "setuptools" ]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "credativ-pg-migrator"
+version = "0.8.3dev"
+authors = [
+    { name="Josef Machytka", email="josef.machytka@credativ.de" },
+]
+description = "Migrator from proprietary and legacy databases into PostgreSQL"
+readme = "README.md"
+requires-python = ">=3.6"
+license = "GPL-3.0-or-later"
+license-files = [ "COPYING" ]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: System Administrators",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Topic :: Database",
+    "Topic :: Utilities",
+]
+dependencies = [
+    "jaydebeapi",
+    "pandas",
+    "psycopg2",
+    "pyodbc",
+    "pyyaml",
+    "tabulate",
+]
+
+[project.urls]
+Homepage = "https://github.com/credativ/credativ-pg-migrator"
+Issues = "https://github.com/credativ/credativ-pg-migrator/issues"
+
+[project.scripts]
+credativ-pg-migrator = "credativ_pg_migrator.main:main"

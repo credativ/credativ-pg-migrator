@@ -1,0 +1,2 @@
+include config_sample.yaml
+include *.md

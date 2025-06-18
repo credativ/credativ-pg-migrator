@@ -63,7 +63,7 @@ class MigratorConstants:
             'mysql': 'credativ_pg_migrator.connectors.mysql_connector:MySQLConnector',
             'oracle': 'credativ_pg_migrator.connectors.oracle_connector:OracleConnector',
             'sql_anywhere': 'credativ_pg_migrator.connectors.sql_anywhere_connector:SQLAnywhereConnector',
-            'sybase_ase': 'connectors.sybase_ase_connector:SybaseASEConnector'
+            'sybase_ase': 'credativ_pg_migrator.connectors.sybase_ase_connector:SybaseASEConnector'
         }
 
 if __name__ == "__main__":

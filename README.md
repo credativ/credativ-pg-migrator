@@ -28,16 +28,23 @@ For practical usage and examples refer to the [tests](./tests/) directory. There
 - By default logging messages are printed both to console and to log file, name of the log file is configurable in command line arguments.
 - Rich information is also logged to the migration database - see below.
 
+## Installation
+
+Via PyPI:
+
+`credativ-pg-migrator` is available from PyPI: <https://pypi.org/project/credativ-pg-migrator/>
+
+```
+python3 -m venv migrator_venv
+. ./migrator_venv/bin/activate
+pip install credativ-pg-migrator
+```
+
+Via Debian/Ubuntu packages:
+
+`credativ-pg-migrator` is included in `apt.postgresql.org` PostgreSQL community repository, see <https://wiki.postgresql.org/wiki/Apt> for details.
+
 ## Usage
-
-In a python venv:
-
-```
-. ../migrator_venv/bin/activate
-python3 main.py --config=../config/test_database.yaml --log-file=../logs/test_database_$(date +%Y%m%d).log --log-level=DEBUG
-```
-
-From packages:
 
 ```
 credativ-pg-migrator --config=./test_database.yaml --log-file=./test_database_$(date +%Y%m%d).log --log-level=INFO

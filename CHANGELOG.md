@@ -2,6 +2,10 @@
 
 ## 0.9.0 - 2025.06.xx
 
+- 2025.06.18:
+
+  - Add support for PyPi distribution via pyproject.toml (@mbanck-cd)
+
 - 2025.06.17:
 
   - Constants transformed into a class with static methods - this allows to use constants in the code without importing them, just using the class name

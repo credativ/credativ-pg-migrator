@@ -1293,7 +1293,12 @@ class SybaseASEConnector(DatabaseConnector):
         converted_code = settings['view_code']
         if settings['target_db_type'] == 'postgresql':
 
-            parsed_code = sqlglot.parse_one(converted_code)
+            try:
+                parsed_code = sqlglot.parse_one(converted_code)
+            except Exception as e:
+                self.config_parser.print_log_message('ERROR', f"Error parsing View code: {e}")
+                return ''
+
             # double quote column names
             parsed_code = parsed_code.transform(quote_column_names)
             self.config_parser.print_log_message('DEBUG3', f"Double quoted columns: {parsed_code.sql()}")

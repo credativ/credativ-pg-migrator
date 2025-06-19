@@ -612,5 +612,29 @@ class IBMDB2Connector(DatabaseConnector):
     def testing_select(self):
         return "SELECT 1 FROM SYSIBM.SYSDUMMY1"
 
+    def get_database_version(self):
+        try:
+            query = "SELECT SERVICE_LEVEL FROM SYSIBMADM.ENV_INST_INFO"
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            version = cursor.fetchone()[0]
+            cursor.close()
+            return version
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error fetching database version: {e}")
+            raise
+
+    def get_database_size(self):
+        query = "SELECT SUM(DATA_OBJECT_P_SIZE + INDEX_OBJECT_P_SIZE) FROM SYSIBMADM.ADMINTABINFO WHERE TABSCHEMA = 'SYSIBM'"
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            size = cursor.fetchone()[0]
+            cursor.close()
+            return size
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error fetching database size: {e}")
+            raise
+
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

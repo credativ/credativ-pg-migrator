@@ -1474,5 +1474,70 @@ class SybaseASEConnector(DatabaseConnector):
     def testing_select(self):
         return 'SELECT 1'
 
+    def get_database_version(self):
+        query = "SELECT @@version"
+        self.connect()
+        cursor = self.connection.cursor()
+        cursor.execute(query)
+        version = cursor.fetchone()[0]
+        cursor.close()
+        self.disconnect()
+        return version
+
+    def get_database_size(self):
+        self.connect()
+        cursor = self.connection.cursor()
+        cursor.execute("exec sp_spaceused")
+        row = cursor.fetchone()
+        self.logger.info(f"\n* Total size of Sybase database: {row}")
+        size = row[1]
+        if cursor.nextset():
+            row = cursor.fetchone()
+            self.logger.info(
+            f"  Reserved: {row[0]}\n"
+            f"  Data: {row[1]}\n"
+            f"  Indexes: {row[2]}\n"
+            f"  Unused: {row[3]}"
+            )
+        cursor.close()
+        self.disconnect()
+        return size
+
+    def get_top10_biggest_tables(self):
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            top_n = 10
+            query = f"""
+            SELECT TOP {top_n}
+                o.name,
+                row_count(db_id(), o.id) as total_rows,
+                data_pages(db_id(), o.id, 0)*b.blocksize as size_kb
+            FROM {self.config_parser.get_db_config('source')['schema']}.sysobjects o,
+                (SELECT low/1024 as blocksize
+                 FROM master.{self.config_parser.get_db_config('source')['schema']}.spt_values d
+                 WHERE d.number = 1 AND d.type = 'E') b
+            WHERE type='U'
+            ORDER BY size_kb DESC
+            """
+            self.config_parser.print_log_message('DEBUG', f"Executing query to get top {top_n} biggest tables: {query}")
+            cursor.execute(query)
+            result = {}
+            order_num = 1
+            rows = cursor.fetchall()
+            for row in rows:
+                result[order_num] = {
+                    'table_name': row[0],
+                    'total_rows': row[1],
+                    'size_bytes': int(row[2]) * 1024
+                }
+                order_num += 1
+            cursor.close()
+            self.disconnect()
+            return result
+        except Exception as error:
+            self.config_parser.print_log_message('ERROR', f"Warning: cannot check top biggest tables - error: {error}")
+            return []
+
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

@@ -736,5 +736,33 @@ class MySQLConnector(DatabaseConnector):
     def testing_select(self):
         return "SELECT 1"
 
+    def get_database_version(self):
+        query = "SELECT VERSION()"
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            version = cursor.fetchone()[0]
+            cursor.close()
+            self.disconnect()
+            return version
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error fetching database version: {e}")
+            raise
+
+    def get_database_size(self):
+        query = "SELECT SUM(data_length + index_length) FROM information_schema.tables WHERE table_schema = DATABASE()"
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            size = cursor.fetchone()[0]
+            cursor.close()
+            self.disconnect()
+            return size
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error fetching database size: {e}")
+            raise
+
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

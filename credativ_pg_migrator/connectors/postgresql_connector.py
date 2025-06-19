@@ -1106,5 +1106,58 @@ class PostgreSQLConnector(DatabaseConnector):
     def testing_select(self):
         return "SELECT 1"
 
+    def get_database_version(self):
+        query = "SELECT version()"
+        self.connect()
+        cursor = self.connection.cursor()
+        cursor.execute(query)
+        version = cursor.fetchone()[0]
+        cursor.close()
+        self.disconnect()
+        return version
+
+    def get_database_size(self):
+        query = "SELECT pg_database_size(current_database())"
+        self.connect()
+        cursor = self.connection.cursor()
+        cursor.execute(query)
+        size = cursor.fetchone()[0]
+        cursor.close()
+        self.disconnect()
+        return size
+
+    def get_top10_biggest_tables(self, settings):
+        source_schema = settings.get('source_schema', 'public')
+        query = f"""
+            SELECT
+                c.relname AS table_name,
+                pg_total_relation_size(c.oid) AS table_size
+            FROM
+                pg_class c
+            JOIN
+                pg_namespace n ON n.oid = c.relnamespace
+            WHERE
+                c.relkind = 'r' AND n.nspname = '{source_schema}'
+            ORDER BY
+                pg_total_relation_size(c.oid) DESC
+            LIMIT 10;
+        """
+        self.connect()
+        cursor = self.connection.cursor()
+        cursor.execute(query)
+        results = cursor.fetchall()
+        cursor.close()
+
+        top_tables = {}
+        for ordinal_number, (table_name, table_size) in enumerate(results, start=1):
+            top_tables[ordinal_number] = {
+                'table_name': table_name,
+                'size_bytes': table_size,
+                'total_rows': ''
+            }
+
+        self.disconnect()
+        return top_tables
+
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

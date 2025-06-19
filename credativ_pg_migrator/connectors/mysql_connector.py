@@ -16,7 +16,7 @@
 
 from credativ_pg_migrator.database_connector import DatabaseConnector
 from credativ_pg_migrator.migrator_logging import MigratorLogger
-import mysql.connector
+import mysql.connector  ## install mysql-connector-python
 import traceback
 from tabulate import tabulate
 
@@ -735,6 +735,64 @@ class MySQLConnector(DatabaseConnector):
 
     def testing_select(self):
         return "SELECT 1"
+
+    def get_database_version(self):
+        query = "SELECT VERSION()"
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            version = cursor.fetchone()[0]
+            cursor.close()
+            self.disconnect()
+            return version
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error fetching database version: {e}")
+            raise
+
+    def get_database_size(self):
+        query = "SELECT SUM(data_length + index_length) FROM information_schema.tables WHERE table_schema = DATABASE()"
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            size = cursor.fetchone()[0]
+            cursor.close()
+            self.disconnect()
+            return size
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error fetching database size: {e}")
+            raise
+
+    def get_top10_biggest_tables(self, settings):
+        query = f"""
+            SELECT
+                TABLE_NAME,
+                (DATA_LENGTH + INDEX_LENGTH) AS total_size
+            FROM
+                information_schema.tables
+            WHERE
+                TABLE_SCHEMA = '{settings['source_schema']}'
+            ORDER BY
+                total_size DESC
+            LIMIT 10
+        """
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            tables = {}
+            for i, row in enumerate(cursor.fetchall()):
+                tables[i + 1] = {
+                    'table_name': row[0],
+                    'total_size': row[1]
+                }
+            cursor.close()
+            self.disconnect()
+            return tables
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error fetching top 10 biggest tables: {e}")
+            raise
 
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

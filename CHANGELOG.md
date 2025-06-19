@@ -15,6 +15,7 @@
   - Library 'importlib' removed from requirements and setup.py - it is an implicit python package, when pip tries to explicitly install it, it fails with a misleading error in setuptools library
   - Fix in constants - added missing path to connectors in modules
   - Implemented better conversion of views in Sybase ASE connector - added parsing of view code using sqlglot library - change significantly improves success rate of views migration
+    - Remaining issue: conversion of special operators _= and =_ in conditions which in Sybase ASE mean LEFT OUTER JOIN and RIGHT OUTER JOIN respectively - parser fails on these operators
   - Library sqlglot added to requirements and setup.py - will be used for parsing of SQL code / view code also in other connectors
 
 - 2025.06.16:

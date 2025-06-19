@@ -1126,7 +1126,8 @@ class PostgreSQLConnector(DatabaseConnector):
         self.disconnect()
         return size
 
-    def get_top10_biggest_tables(self):
+    def get_top10_biggest_tables(self, settings):
+        source_schema = settings.get('source_schema', 'public')
         query = """
             SELECT
                 c.relname AS table_name,
@@ -1136,7 +1137,7 @@ class PostgreSQLConnector(DatabaseConnector):
             JOIN
                 pg_namespace n ON n.oid = c.relnamespace
             WHERE
-                c.relkind = 'r' AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+                c.relkind = 'r' AND n.nspname = '{source_schema}'
             ORDER BY
                 pg_total_relation_size(c.oid) DESC
             LIMIT 10;

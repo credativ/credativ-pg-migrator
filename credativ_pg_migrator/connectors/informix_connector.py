@@ -1644,5 +1644,8 @@ class InformixConnector(DatabaseConnector):
     def get_database_size(self):
         return None
 
+    def get_top10_biggest_tables(self, settings):
+        return {}
+
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

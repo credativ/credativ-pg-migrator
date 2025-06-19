@@ -1503,7 +1503,8 @@ class SybaseASEConnector(DatabaseConnector):
         self.disconnect()
         return size
 
-    def get_top10_biggest_tables(self):
+    def get_top10_biggest_tables(self, settings):
+        source_schema = settings['source_schema']
         try:
             self.connect()
             cursor = self.connection.cursor()
@@ -1513,9 +1514,9 @@ class SybaseASEConnector(DatabaseConnector):
                 o.name,
                 row_count(db_id(), o.id) as total_rows,
                 data_pages(db_id(), o.id, 0)*b.blocksize as size_kb
-            FROM {self.config_parser.get_db_config('source')['schema']}.sysobjects o,
+            FROM {source_schema}.sysobjects o,
                 (SELECT low/1024 as blocksize
-                 FROM master.{self.config_parser.get_db_config('source')['schema']}.spt_values d
+                 FROM master.{source_schema}.spt_values d
                  WHERE d.number = 1 AND d.type = 'E') b
             WHERE type='U'
             ORDER BY size_kb DESC

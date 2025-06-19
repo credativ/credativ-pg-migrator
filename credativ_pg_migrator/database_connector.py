@@ -579,8 +579,33 @@ class DatabaseConnector(ABC):
     @abstractmethod
     def testing_select(self):
         """
-        Simple select statement to test the connection.
+        Simple select statement to test the connection - like "SELECT 1"
         Some databases require special form of statement
+        """
+        pass
+
+    @abstractmethod
+    def get_database_version(self):
+        """
+        Returns the version of the database.
+        This is used for debugging purposes and for checking compatibility with the migrator.
+        """
+        pass
+
+    @abstractmethod
+    def get_database_size(self):
+        """
+        Returns the size of the database in bytes.
+        This is used for debugging purposes and for checking compatibility with the migrator.
+        """
+        pass
+
+    @abstractmethod
+    def get_top10_biggest_tables(self):
+        """
+        Returns the top 10 biggest tables in the database.
+        This is used for debugging purposes and for checking compatibility with the migrator.
+        Returns a dictionary: {ordinal_number: {table_name: table_size}} sorted by table_size in descending order.
         """
         pass
 

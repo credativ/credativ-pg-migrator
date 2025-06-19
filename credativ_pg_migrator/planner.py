@@ -45,6 +45,8 @@ class Planner:
         try:
             self.pre_planning()
 
+            self.run_premigration_analysis()
+
             self.run_prepare_user_defined_types()
             self.run_prepare_domains()
             self.run_prepare_defaults()
@@ -145,6 +147,40 @@ class Planner:
             self.config_parser.print_log_message('INFO', "Pre-planning part done successfully.")
         except Exception as e:
             self.handle_error(e, "Pre-planning runs")
+
+    def run_premigration_analysis(self):
+        self.config_parser.print_log_message('INFO', "Running pre-migration analysis...")
+        try:
+            self.source_connection.connect()
+            self.target_connection.connect()
+
+            self.config_parser.print_log_message('INFO', "***** Source database *****")
+            source_db_version = self.source_connection.get_database_version()
+            self.config_parser.print_log_message('INFO', f"Version: {source_db_version}")
+            source_db_size = self.source_connection.get_database_size()
+            self.config_parser.print_log_message('INFO', f"Size: {source_db_size}")
+
+            source_db_top10_tables = self.source_connection.get_top10_biggest_tables()
+            self.config_parser.print_log_message('INFO', "Top 10 largest tables in source database:")
+            for ord_num, table in source_db_top10_tables.items():
+                self.config_parser.print_log_message('INFO', f"Table: {table['table_name']}, Size: {table['size_bytes']}, Rows: {table['total_rows'] if 'total_rows' in table else 'N/A'}")
+
+            self.config_parser.print_log_message('INFO', "***** Target database *****")
+            target_db_version = self.target_connection.get_database_version()
+            self.config_parser.print_log_message('INFO', f"Version: {target_db_version}")
+            target_db_size = self.target_connection.get_database_size()
+            self.config_parser.print_log_message('INFO', f"Size: {target_db_size}")
+            target_db_top10_tables = self.target_connection.get_top10_biggest_tables()
+            self.config_parser.print_log_message('INFO', "Top 10 largest tables in target database:")
+            for ord_num, table in target_db_top10_tables.items():
+                self.config_parser.print_log_message('INFO', f"Table: {table['table_name']}, Size: {table['size_bytes']}, Rows: {table['total_rows'] if 'total_rows' in table else 'N/A'}")
+
+            self.config_parser.print_log_message('INFO', "Pre-migration analysis completed successfully.")
+        except Exception as e:
+            self.handle_error(e, "Pre-migration analysis")
+        finally:
+            self.source_connection.disconnect()
+            self.target_connection.disconnect()
 
     def run_prepare_tables(self):
         self.config_parser.print_log_message('INFO', "Planner - Preparing tables...")

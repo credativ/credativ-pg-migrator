@@ -1631,5 +1631,18 @@ class InformixConnector(DatabaseConnector):
     def testing_select(self):
         return "SELECT 1"
 
+    def get_database_version(self):
+        query = "SELECT DBINFO('version') FROM systables WHERE tabid = 1"
+        self.connect()
+        cursor = self.connection.cursor()
+        cursor.execute(query)
+        version = cursor.fetchone()[0]
+        cursor.close()
+        self.disconnect()
+        return version
+
+    def get_database_size(self):
+        return None
+
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

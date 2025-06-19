@@ -724,5 +724,39 @@ class OracleConnector(DatabaseConnector):
     def testing_select(self):
         return "SELECT 1 FROM DUAL"
 
+    def get_database_version(self):
+        query = "SELECT * FROM v$version"
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            version_info = cursor.fetchall()
+            cursor.close()
+            self.disconnect()
+            return version_info
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
+            raise
+
+    def get_database_size(self):
+        query = """
+            SELECT SUM(bytes) / 1024 / 1024 AS size_mb
+            FROM dba_data_files
+            WHERE tablespace_name NOT IN ('SYSTEM', 'SYSAUX')
+        """
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            size_mb = cursor.fetchone()[0]
+            cursor.close()
+            self.disconnect()
+            return size_mb
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
+            raise
+
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

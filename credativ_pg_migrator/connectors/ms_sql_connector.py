@@ -732,5 +732,25 @@ class MsSQLConnector(DatabaseConnector):
     def testing_select(self):
         return "SELECT 1"
 
+    def get_database_version(self):
+        query = "SELECT @@VERSION"
+        self.connect()
+        cursor = self.connection.cursor()
+        cursor.execute(query)
+        version = cursor.fetchone()[0]
+        cursor.close()
+        self.disconnect()
+        return version
+
+    def get_database_size(self):
+        query = "SELECT SUM(size * 8 * 1024) FROM sys.master_files WHERE database_id = DB_ID()"
+        self.connect()
+        cursor = self.connection.cursor()
+        cursor.execute(query)
+        size = cursor.fetchone()[0]
+        cursor.close()
+        self.disconnect()
+        return size
+
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

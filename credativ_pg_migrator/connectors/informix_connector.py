@@ -1631,5 +1631,46 @@ class InformixConnector(DatabaseConnector):
     def testing_select(self):
         return "SELECT 1"
 
+    def get_database_version(self):
+        query = """SELECT DBINFO('version','full') FROM systables WHERE tabid = 1;"""
+        self.connect()
+        cursor = self.connection.cursor()
+        cursor.execute(query)
+        version = cursor.fetchone()[0]
+        cursor.close()
+        self.disconnect()
+        return version
+
+    def get_database_size(self):
+        return None
+
+    def get_top10_biggest_tables(self, settings):
+        query = f"""
+            select
+                owner, tabname, rowsize, nrows, rowsize*nrows as size
+            from systables where owner = '{settings['source_schema']}'
+            order by size desc limit 10
+        """
+        self.config_parser.print_log_message('DEBUG', f"Fetching top 10 biggest tables for schema {settings['source_schema']} with query: {query}")
+        self.connect()
+        cursor = self.connection.cursor()
+        cursor.execute(query)
+        tables = cursor.fetchall()
+        cursor.close()
+        self.disconnect()
+        top_tables = {}
+        order_num = 1
+        for row in tables:
+            top_tables[order_num] = {
+                'owner': row[0].strip(),
+                'table_name': row[1].strip(),
+                'row_size': row[2],
+                'row_count': row[3],
+                'size': row[4]
+            }
+            order_num += 1
+        self.config_parser.print_log_message('DEBUG', f"Top 10 biggest tables: {top_tables}")
+        return top_tables
+
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

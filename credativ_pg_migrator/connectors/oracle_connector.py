@@ -724,5 +724,73 @@ class OracleConnector(DatabaseConnector):
     def testing_select(self):
         return "SELECT 1 FROM DUAL"
 
+    def get_database_version(self):
+        query = "SELECT * FROM v$version"
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            version_info = cursor.fetchall()
+            cursor.close()
+            self.disconnect()
+            return version_info
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
+            raise
+
+    def get_database_size(self):
+        query = """
+            SELECT SUM(bytes) / 1024 / 1024 AS size_mb
+            FROM dba_data_files
+            WHERE tablespace_name NOT IN ('SYSTEM', 'SYSAUX')
+        """
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            size_mb = cursor.fetchone()[0]
+            cursor.close()
+            self.disconnect()
+            return size_mb
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
+            raise
+
+    def get_top10_biggest_tables(self, settings):
+        query = f"""
+            SELECT
+                owner,
+                segment_name,
+                ROUND(SUM(bytes) / 1024 / 1024, 2) AS size_mb
+            FROM dba_segments
+            WHERE owner = '{settings['source_schema'].upper()}'
+            AND segment_type = 'TABLE'
+            GROUP BY owner, segment_name
+            ORDER BY size_mb DESC
+            FETCH FIRST 10 ROWS ONLY
+        """
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            tables = cursor.fetchall()
+            cursor.close()
+            self.disconnect()
+
+            result = {}
+            for order_num, row in enumerate(tables, start=1):
+                result[order_num] = {
+                    'owner': row[0],
+                    'table_name': row[1],
+                    'size_mb': row[2]
+                }
+            return result
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
+            raise
+
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

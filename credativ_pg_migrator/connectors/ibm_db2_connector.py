@@ -16,7 +16,7 @@
 
 from credativ_pg_migrator.database_connector import DatabaseConnector
 from credativ_pg_migrator.migrator_logging import MigratorLogger
-import ibm_db_dbi
+import ibm_db_dbi  ## install ibm_db package to use this connector
 import traceback
 
 class IBMDB2Connector(DatabaseConnector):
@@ -611,6 +611,54 @@ class IBMDB2Connector(DatabaseConnector):
 
     def testing_select(self):
         return "SELECT 1 FROM SYSIBM.SYSDUMMY1"
+
+    def get_database_version(self):
+        try:
+            query = "SELECT SERVICE_LEVEL FROM SYSIBMADM.ENV_INST_INFO"
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            version = cursor.fetchone()[0]
+            cursor.close()
+            return version
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error fetching database version: {e}")
+            raise
+
+    def get_database_size(self):
+        query = "SELECT SUM(DATA_OBJECT_P_SIZE + INDEX_OBJECT_P_SIZE) FROM SYSIBMADM.ADMINTABINFO WHERE TABSCHEMA = 'SYSIBM'"
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            size = cursor.fetchone()[0]
+            cursor.close()
+            return size
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error fetching database size: {e}")
+            raise
+
+    def get_top10_biggest_tables(self, settings):
+        source_schema = settings['source_schema']
+        query = f"""
+            SELECT
+                TABSCHEMA,
+                TABNAME,
+                SUM(DATA_OBJECT_P_SIZE + INDEX_OBJECT_P_SIZE) AS TOTAL_SIZE
+            FROM SYSIBMADM.ADMINTABINFO
+            WHERE TABSCHEMA = upper('{source_schema}')
+            GROUP BY TABSCHEMA, TABNAME
+            ORDER BY TOTAL_SIZE DESC
+            FETCH FIRST 10 ROWS ONLY
+        """
+        self.config_parser.print_log_message('DEBUG', f"Fetching top 10 biggest tables for schema {source_schema} with query: {query}")
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            tables = cursor.fetchall()
+            cursor.close()
+            return tables
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error fetching top 10 biggest tables: {e}")
+            raise
 
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

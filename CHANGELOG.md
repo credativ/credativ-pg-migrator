@@ -2,9 +2,12 @@
 
 ## 0.9.1 - 2025.06.xx
 
-- Implemented better conversion of views in Sybase ASE connector - added parsing of view code using sqlglot library - change significantly improves success rate of views migration
-  - Remaining issue: conversion of special operators \*= and =\* in conditions which in Sybase ASE mean LEFT OUTER JOIN and RIGHT OUTER JOIN respectively - parser fails on these operators
-- Library sqlglot added to requirements and setup.py - will be used for parsing of SQL code / view code in other connectors too
+- 2025.06.19:
+  - Implemented better conversion of views in Sybase ASE connector - added parsing of view code using sqlglot library - change significantly improves success rate of views migration
+    - Remaining issue: conversion of special operators \*= and =\* in conditions which in Sybase ASE mean LEFT OUTER JOIN and RIGHT OUTER JOIN respectively - parser fails on these operators
+  - Library sqlglot added to requirements and setup.py - will be used for parsing of SQL code / view code in other connectors too
+  - Started implementation of functions for premigration analysis of the source databases - in this step code returns only values readily available in the source database without effort to standardize it and just output results into log file - this will be improved in future steps once we have more data available
+    - Rationale: We ask clients still the same questions about the source database, so we can automate this process and provide better overview of the source database, not to mention that clients often do not know the answers / do not know how to extract the information
 
 ## 0.9.0 - 2025.06.18
 

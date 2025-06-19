@@ -510,7 +510,8 @@ class MsSQLConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', e)
             raise
 
-    def convert_view_code(self, view_code: str, settings: dict):
+    def convert_view_code(self, settings: dict):
+        view_code = settings['view_code']
         # ...existing code from SybaseASEConnector.convert_view_code...
         pass
 

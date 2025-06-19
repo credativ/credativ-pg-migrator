@@ -23,7 +23,7 @@ from credativ_pg_migrator.migrator_logging import MigratorLogger
 import re
 import traceback
 from tabulate import tabulate
-#import polars as pl
+import sqlglot
 
 class SybaseASEConnector(DatabaseConnector):
     def __init__(self, config_parser, source_or_target):
@@ -263,6 +263,7 @@ class SybaseASEConnector(DatabaseConnector):
                     data_type_precision = custom_type[4]
                     data_type_scale = custom_type[5]
 
+                    basic_character_maximum_length = None
                     if source_data_type in ('univarchar', 'unichar'):
                         source_length = str(int(length / unichar_size))
                         basic_character_maximum_length = int(length / unichar_size)
@@ -1204,10 +1205,119 @@ class SybaseASEConnector(DatabaseConnector):
         view_code_str = ''.join([code[0] for code in view_code])
         return view_code_str
 
-    def convert_view_code(self, view_code: str, settings: dict):
-        self.config_parser.print_log_message('DEBUG', f"settings in convert_view_code: {settings}")
-        converted_code = view_code
+    def convert_view_code(self, settings: dict):
+
+        def quote_column_names(node):
+            if isinstance(node, sqlglot.exp.Column) and node.name:
+                node.set("this", sqlglot.exp.Identifier(this=node.name, quoted=True))
+            if isinstance(node, sqlglot.exp.Alias) and isinstance(node.args.get("alias"), sqlglot.exp.Identifier):
+                alias = node.args["alias"]
+                if not alias.args.get("quoted"):
+                    alias.set("quoted", True)
+            # for child in node.iter_expressions():
+            #     quote_column_names(child)
+            return node
+
+        def replace_schema_names(node):
+            if isinstance(node, sqlglot.exp.Table):
+                schema = node.args.get("db")
+                if schema and schema.name == settings['source_schema']:
+                    node.set("db", sqlglot.exp.Identifier(this=settings['target_schema'], quoted=False))
+            return node
+
+        def quote_schema_and_table_names(node):
+            if isinstance(node, sqlglot.exp.Table):
+                # Quote schema name if present
+                schema = node.args.get("db")
+                if schema and not schema.args.get("quoted"):
+                    schema.set("quoted", True)
+                # Quote table name
+                table = node.args.get("this")
+                if table and not table.args.get("quoted"):
+                    table.set("quoted", True)
+            return node
+
+        def replace_functions(node):
+            mapping = self.get_sql_functions_mapping({ 'target_db_type': settings['target_db_type'] })
+            # Prepare mapping for function names (without parentheses)
+            func_name_map = {}
+            for k, v in mapping.items():
+                if k.endswith('('):
+                    func_name_map[k[:-1].lower()] = v[:-1] if v.endswith('(') else v
+                elif k.endswith('()'):
+                    func_name_map[k[:-2].lower()] = v
+                else:
+                    func_name_map[k.lower()] = v
+
+            if isinstance(node, sqlglot.exp.Anonymous):
+                func_name = node.name.lower()
+                if func_name in func_name_map:
+                    mapped = func_name_map[func_name]
+                    # If mapped is a function name, replace the function name
+                    if '(' not in mapped:
+                        node.set("this", sqlglot.exp.Identifier(this=mapped, quoted=False))
+                    else:
+                        # For mappings like 'year(' -> 'extract(year from '
+                        # We need to rewrite the function call
+                        if mapped.startswith('extract('):
+                            # e.g. year(t1.b) -> extract(year from t1.b)
+                            arg = node.args.get("expressions")
+                            if arg and len(arg) == 1:
+                                part = func_name
+                                return sqlglot.exp.Extract(
+                                    this=sqlglot.exp.Identifier(this=part, quoted=False),
+                                    expression=arg[0]
+                                )
+                        else:
+                            # Iterate over the mapping to handle function name replacements
+                            for orig, repl in mapping.items():
+                                # Handle mappings ending with '(' (function calls)
+                                if orig.endswith('(') and func_name == orig[:-1].lower():
+                                    if repl.endswith('('):
+                                        node.set("this", sqlglot.exp.Identifier(this=repl[:-1], quoted=False))
+                                    else:
+                                        node.set("this", sqlglot.exp.Identifier(this=repl, quoted=False))
+                                    break
+                                # Handle mappings ending with '()' (function calls with no args)
+                                elif orig.endswith('()') and func_name == orig[:-2].lower():
+                                    node.set("this", sqlglot.exp.Identifier(this=repl, quoted=False))
+                                    break
+                    # For direct function name replacements, handled above
+                # For functions like getdate(), getutcdate(), etc.
+                elif func_name + "()" in func_name_map:
+                    mapped = func_name_map[func_name + "()"]
+                    return sqlglot.exp.Anonymous(this=mapped)
+            return node
+
+        self.config_parser.print_log_message('DEBUG3', f"settings in convert_view_code: {settings}")
+        converted_code = settings['view_code']
         if settings['target_db_type'] == 'postgresql':
+
+            try:
+                parsed_code = sqlglot.parse_one(converted_code)
+            except Exception as e:
+                self.config_parser.print_log_message('ERROR', f"Error parsing View code: {e}")
+                return ''
+
+            # double quote column names
+            parsed_code = parsed_code.transform(quote_column_names)
+            self.config_parser.print_log_message('DEBUG3', f"Double quoted columns: {parsed_code.sql()}")
+
+            # replace source schema with target schema
+            parsed_code = parsed_code.transform(replace_schema_names)
+            self.config_parser.print_log_message('DEBUG3', f"Replaced schema names: {parsed_code.sql()}")
+
+            # double quote schema and table names
+            parsed_code = parsed_code.transform(quote_schema_and_table_names)
+            self.config_parser.print_log_message('DEBUG3', f"Double quoted schema and table names: {parsed_code.sql()}")
+
+            # replace functions
+            parsed_code = parsed_code.transform(replace_functions)
+            self.config_parser.print_log_message('DEBUG3', f"Replaced functions: {parsed_code.sql()}")
+
+            converted_code = parsed_code.sql()
+            converted_code = converted_code.replace("()()", "()")
+
             sql_functions_mapping = self.get_sql_functions_mapping({ 'target_db_type': settings['target_db_type'] })
 
             if sql_functions_mapping:
@@ -1216,9 +1326,10 @@ class SybaseASEConnector(DatabaseConnector):
                     converted_code = re.sub(rf"(?i){escaped_src_func}", tgt_func, converted_code, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
                     self.config_parser.print_log_message('DEBUG', f"Checking convertion of function {src_func} to {tgt_func} in view code")
 
-            converted_code = converted_code.replace(f"{settings['source_database']}..", f"{settings['target_schema']}.")
-            converted_code = converted_code.replace(f"{settings['source_database']}.{settings['source_schema']}.", f"{settings['target_schema']}.")
-            converted_code = converted_code.replace(f"{settings['source_schema']}.", f"{settings['target_schema']}.")
+            # converted_code = converted_code.replace(f"{settings['source_database']}..", f"{settings['target_schema']}.")
+            # converted_code = converted_code.replace(f"{settings['source_database']}.{settings['source_schema']}.", f"{settings['target_schema']}.")
+            # converted_code = converted_code.replace(f"{settings['source_schema']}.", f"{settings['target_schema']}.")
+            self.config_parser.print_log_message('DEBUG', f"Converted view: {converted_code}")
         else:
             self.config_parser.print_log_message('ERROR', f"Unsupported target database type: {settings['target_db_type']}")
         return converted_code

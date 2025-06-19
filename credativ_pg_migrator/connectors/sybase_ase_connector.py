@@ -1504,6 +1504,18 @@ class SybaseASEConnector(DatabaseConnector):
         return size
 
     def get_top10_biggest_tables(self, settings):
+        """
+        //TODO
+        what about this query?:
+
+        select top 10 convert(varchar(30),o.name) AS table_name,
+        row_count(db_id(), o.id) AS row_count,
+        data_pages(db_id(), o.id, 0) AS pages,
+        data_pages(db_id(), o.id, 0) * (@@maxpagesize/1024) AS kbs
+        from sysobjects o
+        where type = 'U'
+        order by kbs DESC, table_name ASC
+        """
         source_schema = settings['source_schema']
         try:
             self.connect()

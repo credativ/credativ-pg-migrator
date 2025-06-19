@@ -636,8 +636,8 @@ class SQLAnywhereConnector(DatabaseConnector):
         try:
             self.connect()
             cursor = self.connection.cursor()
-            cursor.execute("SELECT DB_VERSION()")
-            version = cursor.fetchone()[0]
+            cursor.execute("select top 1 version, platform, first_time from SYSHISTORY order by first_time desc")
+            version = cursor.fetchone()
             cursor.close()
             self.disconnect()
             return version
@@ -646,7 +646,7 @@ class SQLAnywhereConnector(DatabaseConnector):
             raise
 
     def get_database_size(self):
-        query = "SELECT SUM(size * 8 * 1024) FROM sys.master_files WHERE database_id = DB_ID()"
+        query = "select round(db_property('FileSize') * db_property('PageSize') / 1024 / 1024,2) as db_size_mb"
         self.connect()
         cursor = self.connection.cursor()
         cursor.execute(query)
@@ -656,7 +656,32 @@ class SQLAnywhereConnector(DatabaseConnector):
         return size
 
     def get_top10_biggest_tables(self, settings):
-        return {}
+        query = f"""
+            SELECT TOP 10
+                t.table_name,
+                table_page_count
+            FROM sys.systable t
+            WHERE creator in (SELECT DISTINCT user_id
+            FROM sys.SYSUSERPERM where user_name = '{settings.get('source_schema', 'public')}')
+            ORDER BY table_page_count DESC
+        """
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            tables = []
+            for row in cursor.fetchall():
+                tables.append({
+                    'table_name': row[0],
+                    'table_size_pages': row[1]
+                })
+            cursor.close()
+            self.disconnect()
+            return tables
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
+            raise
 
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

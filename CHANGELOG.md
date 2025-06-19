@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.9.1 - 2025.06.xx
+
+- Implemented better conversion of views in Sybase ASE connector - added parsing of view code using sqlglot library - change significantly improves success rate of views migration
+  - Remaining issue: conversion of special operators \*= and =\* in conditions which in Sybase ASE mean LEFT OUTER JOIN and RIGHT OUTER JOIN respectively - parser fails on these operators
+- Library sqlglot added to requirements and setup.py - will be used for parsing of SQL code / view code in other connectors too
+
 ## 0.9.0 - 2025.06.18
 
 - 2025.06.18:

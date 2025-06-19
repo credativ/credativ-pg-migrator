@@ -579,7 +579,8 @@ class Planner:
                     'target_view_name': view_info['view_name'],
                 })
                 self.config_parser.print_log_message( 'DEBUG', f"Source view SQL: {view_sql}")
-                converted_view_sql = self.source_connection.convert_view_code(view_sql, {
+                converted_view_sql = self.source_connection.convert_view_code({
+                    'view_code': view_sql,
                     'source_database': self.config_parser.get_source_db_name(),
                     'source_schema': self.config_parser.get_source_schema(),
                     'target_schema': self.config_parser.get_target_schema(),

@@ -160,20 +160,22 @@ class Planner:
             source_db_size = self.source_connection.get_database_size()
             self.config_parser.print_log_message('INFO', f"Size: {source_db_size}")
 
-            source_db_top10_tables = self.source_connection.get_top10_biggest_tables()
+            source_db_top10_tables = self.source_connection.get_top10_biggest_tables({'source_schema': self.source_schema})
             self.config_parser.print_log_message('INFO', "Top 10 largest tables in source database:")
-            for ord_num, table in source_db_top10_tables.items():
-                self.config_parser.print_log_message('INFO', f"Table: {table['table_name']}, Size: {table['size_bytes']}, Rows: {table['total_rows'] if 'total_rows' in table else 'N/A'}")
+            self.config_parser.print_log_message('DEBUG', f"Source database top 10 tables: {source_db_top10_tables}")
+            # for ord_num, table in source_db_top10_tables.items():
+            #     self.config_parser.print_log_message('INFO', f"Table: {table['table_name']}, Size: {table['size_bytes']}, Rows: {table['total_rows'] if 'total_rows' in table else 'N/A'}")
 
             self.config_parser.print_log_message('INFO', "***** Target database *****")
             target_db_version = self.target_connection.get_database_version()
             self.config_parser.print_log_message('INFO', f"Version: {target_db_version}")
             target_db_size = self.target_connection.get_database_size()
-            self.config_parser.print_log_message('INFO', f"Size: {target_db_size}")
-            target_db_top10_tables = self.target_connection.get_top10_biggest_tables()
-            self.config_parser.print_log_message('INFO', "Top 10 largest tables in target database:")
-            for ord_num, table in target_db_top10_tables.items():
-                self.config_parser.print_log_message('INFO', f"Table: {table['table_name']}, Size: {table['size_bytes']}, Rows: {table['total_rows'] if 'total_rows' in table else 'N/A'}")
+            # self.config_parser.print_log_message('INFO', f"Size: {target_db_size}")
+            # target_db_top10_tables = self.target_connection.get_top10_biggest_tables({'source_schema': self.target_schema})
+            # self.config_parser.print_log_message('INFO', "Top 10 largest tables in target database:")
+            # self.config_parser.print_log_message('DEBUG', f"Target database top 10 tables: {target_db_top10_tables}")
+            # for ord_num, table in target_db_top10_tables.items():
+            #     self.config_parser.print_log_message('INFO', f"Table: {table['table_name']}, Size: {table['size_bytes']}, Rows: {table['total_rows'] if 'total_rows' in table else 'N/A'}")
 
             self.config_parser.print_log_message('INFO', "Pre-migration analysis completed successfully.")
         except Exception as e:

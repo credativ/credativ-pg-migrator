@@ -764,5 +764,8 @@ class MySQLConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', f"Error fetching database size: {e}")
             raise
 
+    def get_top10_biggest_tables(self, settings):
+        return {}
+
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

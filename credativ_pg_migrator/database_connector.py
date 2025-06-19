@@ -601,8 +601,10 @@ class DatabaseConnector(ABC):
         pass
 
     @abstractmethod
-    def get_top10_biggest_tables(self):
+    def get_top10_biggest_tables(self, settings):
         """
+        Settings - dictionary with the following keys
+            - source_schema: str - schema name of the tables to be checked
         Returns the top 10 biggest tables in the database.
         This is used for debugging purposes and for checking compatibility with the migrator.
         Returns a dictionary: {ordinal_number: {table_name: table_size}} sorted by table_size in descending order.

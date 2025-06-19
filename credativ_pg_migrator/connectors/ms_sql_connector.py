@@ -753,7 +753,43 @@ class MsSQLConnector(DatabaseConnector):
         return size
 
     def get_top10_biggest_tables(self, settings):
-        return {}
+        source_schema = settings['source_schema']
+        query = """
+            SELECT TOP 10
+                s.name AS schema_name,
+                t.name AS table_name,
+                SUM(p.rows) AS row_count,
+                SUM(a.total_pages) * 8 AS total_size_kb
+            FROM sys.tables t
+            JOIN sys.schemas s ON t.schema_id = s.schema_id
+            JOIN sys.partitions p ON t.object_id = p.object_id AND p.index_id IN (0, 1)
+            JOIN sys.allocation_units a ON p.partition_id = a.container_id
+            WHERE s.name = '{source_schema}'
+            GROUP BY s.name, t.name
+            ORDER BY total_size_kb DESC
+        """
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query.format(source_schema=source_schema))
+            rows = cursor.fetchall()
+            biggest_tables = {}
+            order_num = 1
+            for row in rows:
+                biggest_tables[order_num] = {
+                    'schema_name': row[0],
+                    'table_name': row[1],
+                    'row_count': row[2],
+                    'total_size_kb': row[3]
+                }
+                order_num += 1
+            cursor.close()
+            self.disconnect()
+            return biggest_tables
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
+            raise e
 
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

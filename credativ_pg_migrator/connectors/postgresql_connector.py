@@ -1128,7 +1128,7 @@ class PostgreSQLConnector(DatabaseConnector):
 
     def get_top10_biggest_tables(self, settings):
         source_schema = settings.get('source_schema', 'public')
-        query = """
+        query = f"""
             SELECT
                 c.relname AS table_name,
                 pg_total_relation_size(c.oid) AS table_size

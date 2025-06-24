@@ -2,6 +2,9 @@
 
 ## 0.9.1 - 2025.06.xx
 
+- 2025.06.24:
+  - Add project logo and architecture diagram to PyPI page (@mbanck)
+
 - 2025.06.19:
   - Implemented better conversion of views in Sybase ASE connector - added parsing of view code using sqlglot library - change significantly improves success rate of views migration
     - Remaining issue: conversion of special operators \*= and =\* in conditions which in Sybase ASE mean LEFT OUTER JOIN and RIGHT OUTER JOIN respectively - parser fails on these operators

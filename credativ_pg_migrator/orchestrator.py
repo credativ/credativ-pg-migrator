@@ -133,18 +133,19 @@ class Orchestrator:
                     # (table_data['primary_key_columns'],
                     # table_data['primary_key_columns_count'],
                     # table_data['primary_key_columns_types']) = self.migrator_tables.select_primary_key(table_data['target_schema'], table_data['target_table'])
-                    if len(futures) >= workers_requested:
+                    # Submit tasks until we have workers_requested running, then as soon as one finishes, submit a new one
+                    while len(futures) >= workers_requested:
+                        # Wait for the first completed future
                         done, _ = concurrent.futures.wait(futures, return_when=concurrent.futures.FIRST_COMPLETED)
                         for future in done:
-                            table_done = futures[future]
+                            table_done = futures.pop(future)
                             if future.result() == False:
                                 if self.on_error_action == 'stop':
                                     self.config_parser.print_log_message('ERROR', "Stopping execution due to error.")
                                     exit(1)
                             else:
                                 self.migrator_tables.update_table_status(table_done['id'], True, 'migrated OK')
-
-                            futures.pop(future)
+                    # Submit the next task
                     future = executor.submit(self.table_worker, table_data, settings)
                     futures[future] = table_data
 

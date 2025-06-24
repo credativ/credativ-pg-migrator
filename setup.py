@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name='credativ-pg-migrator',
-    version='0.9.1',
+    version='0.9.2dev',
     url='https://github.com/credativ/credativ-pg-migrator.git',
     author='Josef Machytka',
     author_email='josef.machytka@credativ.de',

@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.9.1 - 2025.06.xx
+## 0.9.1 - 2025.06.24
 
 - 2025.06.24:
   - Add project logo and architecture diagram to PyPI page (@mbanck)

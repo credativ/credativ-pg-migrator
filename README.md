@@ -1,6 +1,6 @@
 # credativ-pg-migrator
 
-<img src="docs/images/credativ-pg-migrator.png" alt="Logo" width="200"/>
+<img src="https://raw.githubusercontent.com/credativ/credativ-pg-migrator/main/docs/images/credativ-pg-migrator.png" alt="credativ-pg-migrator Logo" width="200"/>
 
 `credativ-pg-migrator` is a solution for the migration of databases from legacy systems to PostgreSQL.
 It is is written in Python in multiple classes and modules.
@@ -57,7 +57,7 @@ credativ-pg-migrator --config=./test_database.yaml --log-file=./test_database_$(
 
 ## Architecture
 
-![Architecture](./docs/images/architecture.jpg)
+![Architecture](https://raw.githubusercontent.com/credativ/credativ-pg-migrator/main/docs/images/architecture.jpg)
 
 ## Source databases
 

@@ -134,6 +134,7 @@ class Orchestrator:
                     # table_data['primary_key_columns_count'],
                     # table_data['primary_key_columns_types']) = self.migrator_tables.select_primary_key(table_data['target_schema'], table_data['target_table'])
                     # Submit tasks until we have workers_requested running, then as soon as one finishes, submit a new one
+                    self.config_parser.print_log_message('DEBUG3', f"run_migrate_tables: futures running count: {len(futures)}")
                     while len(futures) >= workers_requested:
                         # Wait for the first completed future
                         done, _ = concurrent.futures.wait(futures, return_when=concurrent.futures.FIRST_COMPLETED)
@@ -145,6 +146,7 @@ class Orchestrator:
                                     exit(1)
                             else:
                                 self.migrator_tables.update_table_status(table_done['id'], True, 'migrated OK')
+
                     # Submit the next task
                     future = executor.submit(self.table_worker, table_data, settings)
                     futures[future] = table_data
@@ -228,11 +230,11 @@ class Orchestrator:
                     elif run_mode == 'standard' and index_data['is_function_based']:
                         self.config_parser.print_log_message( 'INFO', f"Standard run mode: Skipping function based index {index_data['index_name']} ")
                         continue
-
-                    if len(futures) >= workers_requested:
+                    self.config_parser.print_log_message('DEBUG3', f"run_migrate_indexes: futures running count: {len(futures)}")
+                    while len(futures) >= workers_requested:
                         done, _ = concurrent.futures.wait(futures, return_when=concurrent.futures.FIRST_COMPLETED)
                         for future in done:
-                            index_done = futures[future]
+                            index_done = futures.pop(future)
                             if future.result() == False:
                                 if self.on_error_action == 'stop':
                                     self.config_parser.print_log_message('ERROR', "Stopping execution due to error.")
@@ -240,8 +242,7 @@ class Orchestrator:
                             else:
                                 self.migrator_tables.update_index_status(index_done['id'], True, 'migrated OK')
 
-                            futures.pop(future)
-
+                    # Submit the next task
                     future = executor.submit(self.index_worker, index_data, target_db_type)
                     futures[future] = index_data
 
@@ -273,19 +274,18 @@ class Orchestrator:
                 futures = {}
                 for constraint_row in migrate_constraints:
                     constraint_data = self.migrator_tables.decode_constraint_row(constraint_row)
-                    if len(futures) >= workers_requested:
+                    self.config_parser.print_log_message('DEBUG3', f"run_migrate_constraints: futures running count: {len(futures)}")
+                    while len(futures) >= workers_requested:
                         done, _ = concurrent.futures.wait(futures, return_when=concurrent.futures.FIRST_COMPLETED)
                         for future in done:
-                            constraint_done = futures[future]
+                            constraint_done = futures.pop(future)
                             if future.result() == False:
                                 if self.on_error_action == 'stop':
                                     self.config_parser.print_log_message('ERROR', "Stopping execution due to error.")
                                     exit(1)
                             else:
                                 self.migrator_tables.update_constraint_status(constraint_done['id'], True, 'migrated OK')
-
-                            futures.pop(future)
-
+                    # Submit the next task
                     future = executor.submit(self.constraint_worker, constraint_data, target_db_type)
                     futures[future] = constraint_data
 

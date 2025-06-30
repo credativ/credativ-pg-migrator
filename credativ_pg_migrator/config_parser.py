@@ -393,8 +393,8 @@ class ConfigParser:
         current_log_level = self.get_log_level()
         if message_level.upper() not in MigratorConstants.get_message_levels():
             raise ValueError(f"Invalid message_level: {message_level}. Must be one of {MigratorConstants.get_message_levels()}")
+        # self.logger.debug(f"Log level: {current_log_level}, Message level: {message_level.upper()}, Message level index: {MigratorConstants.get_message_levels().index(message_level.upper())}, Current log level index: {MigratorConstants.get_message_levels().index(current_log_level.upper())}")
         if MigratorConstants.get_message_levels().index(message_level.upper()) <= MigratorConstants.get_message_levels().index(current_log_level.upper()):
-            pass
             if message_level == 'DEBUG':
                 self.logger.debug(message)
             elif message_level == 'DEBUG2':

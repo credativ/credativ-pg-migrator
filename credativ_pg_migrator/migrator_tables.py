@@ -332,7 +332,7 @@ class MigratorTables:
             object_name TEXT,
             object_action TEXT,
             object_ddl TEXT,
-            insertion_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            insertion_timestamp TIMESTAMP DEFAULT clock_timestamp(),
             execution_timestamp TIMESTAMP,
             execution_success BOOLEAN,
             execution_error_message TEXT,
@@ -351,7 +351,7 @@ class MigratorTables:
             (id SERIAL PRIMARY KEY,
             task_name TEXT,
             subtask_name TEXT,
-            task_started TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            task_started TIMESTAMP DEFAULT clock_timestamp(),
             task_completed TIMESTAMP,
             success BOOLEAN,
             message TEXT
@@ -382,7 +382,7 @@ class MigratorTables:
         table_name = self.config_parser.get_protocol_name_main()
         query = f"""
             UPDATE "{self.protocol_schema}"."{table_name}"
-            SET task_completed = CURRENT_TIMESTAMP,
+            SET task_completed = clock_timestamp(),
             success = %s,
             message = %s
             WHERE task_name = %s
@@ -432,7 +432,7 @@ class MigratorTables:
             target_type_name TEXT,
             target_type_sql TEXT,
             type_comment TEXT,
-            task_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            task_created TIMESTAMP DEFAULT clock_timestamp(),
             task_started TIMESTAMP,
             task_completed TIMESTAMP,
             success BOOLEAN,
@@ -476,7 +476,7 @@ class MigratorTables:
         table_name = self.config_parser.get_protocol_name_user_defined_types()
         query = f"""
             UPDATE "{self.protocol_schema}"."{table_name}"
-            SET task_completed = CURRENT_TIMESTAMP,
+            SET task_completed = clock_timestamp(),
             success = %s,
             message = %s
             WHERE id = %s
@@ -537,7 +537,7 @@ class MigratorTables:
             target_domain_sql TEXT,
             migrated_as TEXT,
             domain_comment TEXT,
-            task_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            task_created TIMESTAMP DEFAULT clock_timestamp(),
             task_started TIMESTAMP,
             task_completed TIMESTAMP,
             success BOOLEAN,
@@ -584,7 +584,7 @@ class MigratorTables:
         table_name = self.config_parser.get_protocol_name_domains()
         query = f"""
             UPDATE "{self.protocol_schema}"."{table_name}"
-            SET task_completed = CURRENT_TIMESTAMP,
+            SET task_completed = clock_timestamp(),
             success = %s,
             message = %s
             WHERE id = %s
@@ -658,7 +658,7 @@ class MigratorTables:
             extracted_default_value TEXT,
             default_value_data_type TEXT,
             default_value_comment TEXT,
-            task_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            task_created TIMESTAMP DEFAULT clock_timestamp(),
             task_completed TIMESTAMP,
             success BOOLEAN,
             message TEXT
@@ -699,7 +699,7 @@ class MigratorTables:
         table_name = self.config_parser.get_protocol_name_default_values()
         query = f"""
             UPDATE "{self.protocol_schema}"."{table_name}"
-            SET task_completed = CURRENT_TIMESTAMP,
+            SET task_completed = clock_timestamp(),
             success = %s,
             message = %s
             WHERE id = %s
@@ -755,7 +755,7 @@ class MigratorTables:
             reason TEXT,
             original_data_type TEXT,
             altered_data_type TEXT,
-            task_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            task_created TIMESTAMP DEFAULT clock_timestamp(),
             task_completed TIMESTAMP,
             success BOOLEAN,
             message TEXT
@@ -848,11 +848,15 @@ class MigratorTables:
             target_schema TEXT,
             target_table TEXT,
             target_table_rows INTEGER,
-            task_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            task_started TIMESTAMP,
+            task_created TIMESTAMP DEFAULT clock_timestamp(),
+            task_started TIMESTAMP DEFAULT clock_timestamp(),
             task_completed TIMESTAMP,
             success BOOLEAN,
-            message TEXT
+            message TEXT,
+            batch_count INTEGER DEFAULT 0,
+            shortest_batch_seconds INTEGER DEFAULT 0,
+            longest_batch_seconds INTEGER DEFAULT 0,
+            average_batch_seconds INTEGER DEFAULT 0
             )
         """)
 
@@ -889,18 +893,61 @@ class MigratorTables:
             self.config_parser.print_log_message('ERROR', e)
             raise
 
-    def update_data_migration_status(self, row_id, success, message, target_table_rows):
+    def update_data_migration_started(self, row_id):
         table_name = self.config_parser.get_protocol_name_data_migration()
         query = f"""
             UPDATE "{self.protocol_schema}"."{table_name}"
-            SET task_completed = CURRENT_TIMESTAMP,
-            success = %s,
-            message = %s,
-            target_table_rows = %s
+            SET task_started = clock_timestamp()
             WHERE id = %s
             RETURNING *
         """
-        params = ('TRUE' if success else 'FALSE', message, target_table_rows, row_id)
+        params = (row_id,)
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+
+            # if row:
+            #     data_migration_row = self.decode_data_migration_row(row)
+            #     self.update_protocol('data_migration', data_migration_row['id'], None, None, None)
+            # else:
+            #     self.config_parser.print_log_message('ERROR', f"Error updating started status for data migration {row_id} in {table_name}.")
+            #     self.config_parser.print_log_message('ERROR', f"Error: No protocol row returned.")
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error updating started status for data migration {row_id} in {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"Query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
+            raise
+
+    def update_data_migration_status(self, settings):
+        row_id = settings['row_id']
+        success = settings['success']
+        message = settings['message']
+        target_table_rows = settings['target_table_rows']
+        batch_count = settings.get('batch_count', 0)
+        shortest_batch_seconds = settings.get('shortest_batch_seconds', 0)
+        longest_batch_seconds = settings.get('longest_batch_seconds', 0)
+        average_batch_seconds = settings.get('average_batch_seconds', 0)
+        table_name = self.config_parser.get_protocol_name_data_migration()
+        query = f"""
+            UPDATE "{self.protocol_schema}"."{table_name}"
+            SET task_completed = clock_timestamp(),
+            success = %s,
+            message = %s,
+            target_table_rows = %s,
+            batch_count = %s,
+            shortest_batch_seconds = %s,
+            longest_batch_seconds = %s,
+            average_batch_seconds = %s
+            WHERE id = %s
+            RETURNING *
+        """
+        params = ('TRUE' if success else 'FALSE', 
+                  message, target_table_rows, 
+                  batch_count, shortest_batch_seconds, 
+                  longest_batch_seconds, average_batch_seconds, 
+                  row_id)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -929,7 +976,16 @@ class MigratorTables:
             'worker_id': row[5],
             'target_schema': row[6],
             'target_table': row[7],
-            'target_table_rows': row[8]
+            'target_table_rows': row[8],
+            'task_created': row[9],
+            'task_started': row[10],
+            'task_completed': row[11],
+            'success': row[12],
+            'message': row[13],
+            'batch_count': row[14],
+            'shortest_batch_seconds': row[15],
+            'longest_batch_seconds': row[16],
+            'average_batch_seconds': row[17],
         }
 
     def create_table_for_pk_ranges(self):
@@ -1005,7 +1061,7 @@ class MigratorTables:
             object_comment TEXT,
             object_type TEXT,
             object_sql TEXT,
-            task_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            task_created TIMESTAMP DEFAULT clock_timestamp(),
             task_started TIMESTAMP,
             task_completed TIMESTAMP,
             success BOOLEAN,
@@ -1033,7 +1089,7 @@ class MigratorTables:
             partitioned_by TEXT,
             partitioning_columns TEXT,
             create_partitions_sql TEXT,
-            task_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            task_created TIMESTAMP DEFAULT clock_timestamp(),
             task_started TIMESTAMP,
             task_completed TIMESTAMP,
             success BOOLEAN,
@@ -1059,7 +1115,7 @@ class MigratorTables:
             index_columns TEXT,
             index_comment TEXT,
             is_function_based BOOLEAN DEFAULT FALSE,
-            task_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            task_created TIMESTAMP DEFAULT clock_timestamp(),
             task_started TIMESTAMP,
             task_completed TIMESTAMP,
             success BOOLEAN,
@@ -1081,7 +1137,7 @@ class MigratorTables:
             target_funcproc_name TEXT,
             target_funcproc_sql TEXT,
             funcproc_comment TEXT,
-            task_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            task_created TIMESTAMP DEFAULT clock_timestamp(),
             task_started TIMESTAMP,
             task_completed TIMESTAMP,
             success BOOLEAN,
@@ -1100,7 +1156,7 @@ class MigratorTables:
             column_name TEXT,
             sequence_name TEXT,
             set_sequence_sql TEXT,
-            task_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            task_created TIMESTAMP DEFAULT clock_timestamp(),
             task_started TIMESTAMP,
             task_completed TIMESTAMP,
             success BOOLEAN,
@@ -1128,7 +1184,7 @@ class MigratorTables:
             trigger_source_sql TEXT,
             trigger_target_sql TEXT,
             trigger_comment TEXT,
-            task_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            task_created TIMESTAMP DEFAULT clock_timestamp(),
             task_started TIMESTAMP,
             task_completed TIMESTAMP,
             success BOOLEAN,
@@ -1150,7 +1206,7 @@ class MigratorTables:
             target_view_name TEXT,
             target_view_sql TEXT,
             view_comment TEXT,
-            task_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            task_created TIMESTAMP DEFAULT clock_timestamp(),
             task_started TIMESTAMP,
             task_completed TIMESTAMP,
             success BOOLEAN,
@@ -1286,7 +1342,7 @@ class MigratorTables:
         SET execution_success = %s,
         execution_error_message = %s,
         execution_results = %s,
-        execution_timestamp = CURRENT_TIMESTAMP
+        execution_timestamp = clock_timestamp()
         WHERE object_protocol_id = %s
         AND object_type = %s
         """
@@ -1346,7 +1402,7 @@ class MigratorTables:
         table_name = self.config_parser.get_protocol_name_tables()
         query = f"""
             UPDATE "{self.protocol_schema}"."{table_name}"
-            SET task_completed = CURRENT_TIMESTAMP,
+            SET task_completed = clock_timestamp(),
             success = %s,
             message = %s
             WHERE id = %s
@@ -1401,7 +1457,7 @@ class MigratorTables:
         table_name = self.config_parser.get_protocol_name_indexes()
         query = f"""
             UPDATE "{self.protocol_schema}"."{table_name}"
-            SET task_completed = CURRENT_TIMESTAMP,
+            SET task_completed = clock_timestamp(),
             success = %s,
             message = %s
             WHERE id = %s
@@ -1449,7 +1505,7 @@ class MigratorTables:
             update_rule TEXT,
             constraint_comment TEXT,
             constraint_status TEXT,
-            task_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            task_created TIMESTAMP DEFAULT clock_timestamp(),
             task_started TIMESTAMP,
             task_completed TIMESTAMP,
             success BOOLEAN,
@@ -1533,7 +1589,7 @@ class MigratorTables:
         table_name = self.config_parser.get_protocol_name_constraints()
         query = f"""
             UPDATE "{self.protocol_schema}"."{table_name}"
-            SET task_completed = CURRENT_TIMESTAMP,
+            SET task_completed = clock_timestamp(),
             success = %s,
             message = %s
             WHERE id = %s
@@ -1584,7 +1640,7 @@ class MigratorTables:
         table_name = self.config_parser.get_protocol_name_funcprocs()
         query = f"""
             UPDATE "{self.protocol_schema}"."{table_name}"
-            SET task_completed = CURRENT_TIMESTAMP,
+            SET task_completed = clock_timestamp(),
             success = %s,
             message = %s
             WHERE source_funcproc_id = %s
@@ -1635,7 +1691,7 @@ class MigratorTables:
         table_name = self.config_parser.get_protocol_name_sequences()
         query = f"""
             UPDATE "{self.protocol_schema}"."{table_name}"
-            SET task_completed = CURRENT_TIMESTAMP,
+            SET task_completed = clock_timestamp(),
             success = %s,
             message = %s
             WHERE sequence_id = %s
@@ -1686,7 +1742,7 @@ class MigratorTables:
         table_name = self.config_parser.get_protocol_name_triggers()
         query = f"""
             UPDATE "{self.protocol_schema}"."{table_name}"
-            SET task_completed = CURRENT_TIMESTAMP,
+            SET task_completed = clock_timestamp(),
             success = %s,
             message = %s
             WHERE id = %s
@@ -1767,7 +1823,7 @@ class MigratorTables:
         table_name = self.config_parser.get_protocol_name_views()
         query = f"""
             UPDATE "{self.protocol_schema}"."{table_name}"
-            SET task_completed = CURRENT_TIMESTAMP,
+            SET task_completed = clock_timestamp(),
             success = %s,
             message = %s
             WHERE id = %s

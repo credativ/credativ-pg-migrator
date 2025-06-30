@@ -618,7 +618,16 @@ class MsSQLConnector(DatabaseConnector):
 
                 target_table_rows = migrate_target_connection.get_rows_count(target_schema, target_table)
                 self.config_parser.print_log_message( 'INFO', f"Worker {worker_id}: Target table {target_schema}.{target_table} has {target_table_rows} rows")
-                migrator_tables.update_data_migration_status(protocol_id, True, 'OK', target_table_rows)
+                migrator_tables.update_data_migration_status({
+                    'row_id': protocol_id,
+                    'success': True,
+                    'message': 'OK',
+                    'target_table_rows': target_table_rows,
+                    'batch_count': 0,
+                    'shortest_batch_seconds': 0,
+                    'longest_batch_seconds': 0,
+                    'average_batch_seconds': 0,
+                })
                 cursor.close()
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Error during {part_name} -> {e}")

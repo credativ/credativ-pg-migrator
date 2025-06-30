@@ -311,6 +311,8 @@ class Orchestrator:
         worker_source_connection = None
         worker_target_connection = None
         rows_migrated = 0
+        worker_start_time = time.time()
+        worker_end_time = None
         try:
             target_schema = self.config_parser.convert_names_case(table_data['target_schema'])
             target_table = self.config_parser.convert_names_case(table_data['target_table'])
@@ -484,6 +486,9 @@ class Orchestrator:
             else:
                 self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Skipping data migration for table {target_table}.")
 
+            worker_end_time = time.time()
+            elapsed_time = worker_end_time - worker_start_time
+            self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Total time spent on migrating table {target_table} is {elapsed_time:.2f} seconds ({elapsed_time / 60:.2f} minutes)")
             try:
                 worker_target_connection.disconnect()
             except Exception as e:

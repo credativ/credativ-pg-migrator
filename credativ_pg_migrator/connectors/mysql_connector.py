@@ -19,6 +19,8 @@ from credativ_pg_migrator.migrator_logging import MigratorLogger
 import mysql.connector  ## install mysql-connector-python
 import traceback
 from tabulate import tabulate
+import time
+import datetime
 
 class MySQLConnector(DatabaseConnector):
     def __init__(self, config_parser, source_or_target):
@@ -264,21 +266,20 @@ class MySQLConnector(DatabaseConnector):
                 self.config_parser.print_log_message('DEBUG2',
                     f"Worker {worker_id}: Fetching data with cursor using query: {query}")
 
-                # offset = 0
-                total_inserted_rows = 0
                 cursor = self.connection.cursor()
+
+                batch_start_time = time.time()
+                batch_end_time = None
+                batch_number = 0
+                batch_durations = []
+
                 cursor.execute(query)
+                total_inserted_rows = 0
                 while True:
-                    # part_name = 'fetch_data: {source_table} - {offset}'
-                    # if primary_key_columns:
-                    #     query = f"""SELECT * FROM {source_schema}.{source_table} ORDER BY {primary_key_columns} LIMIT {batch_size} OFFSET {offset}"""
-                    # else:
-                    #     query = f"""SELECT * FROM {source_schema}.{source_table} LIMIT {batch_size} OFFSET {offset}"""
-                    # cursor.execute(query)
-                    # records = cursor.fetchall()
                     records = cursor.fetchmany(batch_size)
                     if not records:
                         break
+                    batch_number += 1
                     self.config_parser.print_log_message( 'DEBUG',
                         f"Worker {worker_id}: Fetched {len(records)} rows from source table {source_table}.")
 
@@ -344,13 +345,57 @@ class MySQLConnector(DatabaseConnector):
                         'insert_columns': insert_columns,
                     })
                     total_inserted_rows += inserted_rows
-                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Inserted {inserted_rows} (total: {total_inserted_rows} from: {source_table_rows} ({round(total_inserted_rows/source_table_rows*100, 2)}%)) rows into target table {target_table}")
 
-                    # offset += batch_size
+                    batch_end_time = time.time()
+                    batch_duration = batch_end_time - batch_start_time
+                    batch_durations.append(batch_duration)
+                    percent_done = round(total_inserted_rows / source_table_rows * 100, 2)
+                    msg = (
+                        f"Worker {worker_id}: Inserted {inserted_rows} "
+                        f"(total: {total_inserted_rows} from: {source_table_rows} "
+                        f"({percent_done}%)) rows into target table '{target_table}': "
+                        f"Batch {batch_number} duration: {batch_duration:.2f} seconds"
+                    )
+                    self.config_parser.print_log_message('INFO', msg)
+
+                    batch_start_dt = datetime.datetime.fromtimestamp(batch_start_time)
+                    batch_end_dt = datetime.datetime.fromtimestamp(batch_end_time)
+                    batch_start_str = batch_start_dt.strftime('%Y-%m-%d %H:%M:%S.%f')
+                    batch_end_str = batch_end_dt.strftime('%Y-%m-%d %H:%M:%S.%f')
+                    migrator_tables.insert_batches_stats({
+                        'source_schema': source_schema,
+                        'source_table': source_table,
+                        'source_table_id': source_table_id,
+                        'batch_number': batch_number,
+                        'batch_start': batch_start_str,
+                        'batch_end': batch_end_str,
+                        'batch_rows': inserted_rows,
+                        'batch_seconds': batch_duration,
+                        'worker_id': worker_id,
+                    })
+                    batch_start_time = time.time()
 
                 target_table_rows = migrate_target_connection.get_rows_count(target_schema, target_table)
                 self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Finished migrating data for table {target_table} - migrated {target_table_rows} rows.")
-                migrator_tables.update_data_migration_status(protocol_id, True, 'OK', target_table_rows)
+
+                shortest_batch_seconds = min(batch_durations) if batch_durations else 0
+                longest_batch_seconds = max(batch_durations) if batch_durations else 0
+                average_batch_seconds = sum(batch_durations) / len(batch_durations) if batch_durations else 0
+                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Migrated {total_inserted_rows} rows from {source_table} to {target_schema}.{target_table} in {batch_number} batches: "
+                                                        f"Shortest batch: {shortest_batch_seconds:.2f} seconds, "
+                                                        f"Longest batch: {longest_batch_seconds:.2f} seconds, "
+                                                        f"Average batch: {average_batch_seconds:.2f} seconds")
+
+                migrator_tables.update_data_migration_status({
+                    'row_id': protocol_id,
+                    'success': True,
+                    'message': 'OK',
+                    'target_table_rows': target_table_rows,
+                    'batch_count': batch_number,
+                    'shortest_batch_seconds': shortest_batch_seconds,
+                    'longest_batch_seconds': longest_batch_seconds,
+                    'average_batch_seconds': average_batch_seconds,
+                })
                 cursor.close()
                 return target_table_rows
         except Exception as e:

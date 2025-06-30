@@ -2,9 +2,14 @@
 
 ## 0.9.2 - 2025.xx.xx
 
+- 2025.06.30:
+  - Started implementation of time stats for migration of tables and data
+    - Rationale: This will allow to better understand performance of the migration process and identify bottlenecks or situations when migration literally hangs because of some issues on the source database
+
 ## 0.9.1 - 2025.06.24
 
 - 2025.06.24:
+
   - Add project logo and architecture diagram to PyPI page (@mbanck)
 
 - 2025.06.19:

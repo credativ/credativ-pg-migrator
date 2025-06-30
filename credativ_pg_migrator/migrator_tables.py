@@ -66,6 +66,7 @@ class MigratorTables:
         self.create_table_for_tables()
         self.create_table_for_target_columns_alterations()
         self.create_table_for_data_migration()
+        self.create_table_for_batches_stats()
         # self.create_table_for_pk_ranges()
         self.create_table_for_indexes()
         self.create_table_for_constraints()
@@ -332,7 +333,7 @@ class MigratorTables:
             object_name TEXT,
             object_action TEXT,
             object_ddl TEXT,
-            insertion_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            insertion_timestamp TIMESTAMP DEFAULT clock_timestamp(),
             execution_timestamp TIMESTAMP,
             execution_success BOOLEAN,
             execution_error_message TEXT,
@@ -351,7 +352,7 @@ class MigratorTables:
             (id SERIAL PRIMARY KEY,
             task_name TEXT,
             subtask_name TEXT,
-            task_started TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            task_started TIMESTAMP DEFAULT clock_timestamp(),
             task_completed TIMESTAMP,
             success BOOLEAN,
             message TEXT
@@ -382,7 +383,7 @@ class MigratorTables:
         table_name = self.config_parser.get_protocol_name_main()
         query = f"""
             UPDATE "{self.protocol_schema}"."{table_name}"
-            SET task_completed = CURRENT_TIMESTAMP,
+            SET task_completed = clock_timestamp(),
             success = %s,
             message = %s
             WHERE task_name = %s
@@ -432,7 +433,7 @@ class MigratorTables:
             target_type_name TEXT,
             target_type_sql TEXT,
             type_comment TEXT,
-            task_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            task_created TIMESTAMP DEFAULT clock_timestamp(),
             task_started TIMESTAMP,
             task_completed TIMESTAMP,
             success BOOLEAN,
@@ -476,7 +477,7 @@ class MigratorTables:
         table_name = self.config_parser.get_protocol_name_user_defined_types()
         query = f"""
             UPDATE "{self.protocol_schema}"."{table_name}"
-            SET task_completed = CURRENT_TIMESTAMP,
+            SET task_completed = clock_timestamp(),
             success = %s,
             message = %s
             WHERE id = %s
@@ -537,7 +538,7 @@ class MigratorTables:
             target_domain_sql TEXT,
             migrated_as TEXT,
             domain_comment TEXT,
-            task_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            task_created TIMESTAMP DEFAULT clock_timestamp(),
             task_started TIMESTAMP,
             task_completed TIMESTAMP,
             success BOOLEAN,
@@ -584,7 +585,7 @@ class MigratorTables:
         table_name = self.config_parser.get_protocol_name_domains()
         query = f"""
             UPDATE "{self.protocol_schema}"."{table_name}"
-            SET task_completed = CURRENT_TIMESTAMP,
+            SET task_completed = clock_timestamp(),
             success = %s,
             message = %s
             WHERE id = %s
@@ -658,7 +659,7 @@ class MigratorTables:
             extracted_default_value TEXT,
             default_value_data_type TEXT,
             default_value_comment TEXT,
-            task_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            task_created TIMESTAMP DEFAULT clock_timestamp(),
             task_completed TIMESTAMP,
             success BOOLEAN,
             message TEXT
@@ -699,7 +700,7 @@ class MigratorTables:
         table_name = self.config_parser.get_protocol_name_default_values()
         query = f"""
             UPDATE "{self.protocol_schema}"."{table_name}"
-            SET task_completed = CURRENT_TIMESTAMP,
+            SET task_completed = clock_timestamp(),
             success = %s,
             message = %s
             WHERE id = %s
@@ -755,7 +756,7 @@ class MigratorTables:
             reason TEXT,
             original_data_type TEXT,
             altered_data_type TEXT,
-            task_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            task_created TIMESTAMP DEFAULT clock_timestamp(),
             task_completed TIMESTAMP,
             success BOOLEAN,
             message TEXT
@@ -848,13 +849,69 @@ class MigratorTables:
             target_schema TEXT,
             target_table TEXT,
             target_table_rows INTEGER,
-            task_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            task_started TIMESTAMP,
+            task_created TIMESTAMP DEFAULT clock_timestamp(),
+            task_started TIMESTAMP DEFAULT clock_timestamp(),
             task_completed TIMESTAMP,
             success BOOLEAN,
-            message TEXT
+            message TEXT,
+            batch_count INTEGER DEFAULT 0,
+            shortest_batch_seconds FLOAT DEFAULT 0,
+            longest_batch_seconds FLOAT DEFAULT 0,
+            average_batch_seconds FLOAT DEFAULT 0
             )
         """)
+
+    def create_table_for_batches_stats(self):
+        table_name = self.config_parser.get_protocol_name_batches_stats()
+        self.protocol_connection.execute_query(self.drop_table_sql.format(protocol_schema=self.protocol_schema, table_name=table_name))
+        self.protocol_connection.execute_query(f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."{table_name}"
+            (id SERIAL PRIMARY KEY,
+            source_schema TEXT,
+            source_table TEXT,
+            source_table_id INTEGER,
+            batch_number INTEGER,
+            batch_start TIMESTAMP,
+            batch_end TIMESTAMP,
+            batch_rows INTEGER,
+            batch_seconds FLOAT,
+            worker_id TEXT
+            )
+        """)
+
+    def insert_batches_stats(self, settings):
+        ## source_schema, source_table, source_table_id, batch_number, batch_start, batch_end, batch_rows, batch_seconds
+        source_schema = settings['source_schema']
+        source_table = settings['source_table']
+        source_table_id = settings['source_table_id']
+        batch_number = settings['batch_number']
+        batch_start = settings['batch_start']
+        batch_end = settings['batch_end']
+        batch_rows = settings['batch_rows']
+        batch_seconds = settings['batch_seconds']
+        worker_id = settings['worker_id']
+
+        table_name = self.config_parser.get_protocol_name_batches_stats()
+        query = f"""
+            INSERT INTO "{self.protocol_schema}"."{table_name}"
+            (source_schema, source_table, source_table_id, batch_number, batch_start, batch_end, batch_rows, batch_seconds, worker_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING *
+        """
+        params = (source_schema, source_table, source_table_id, batch_number,
+                  batch_start, batch_end, batch_rows, batch_seconds, str(worker_id))
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+
+            self.config_parser.print_log_message( 'DEBUG3', f"Returned row: {row}")
+            return row[0]  # Return the ID of the inserted row
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error inserting batches stats for {source_table} into {table_name}.")
+            self.config_parser.print_log_message('ERROR', e)
+            raise
 
     def insert_data_migration(self, settings):
         ## source_schema, source_table, source_table_id, source_table_rows, worker_id, target_schema, target_table, target_table_rows
@@ -889,18 +946,61 @@ class MigratorTables:
             self.config_parser.print_log_message('ERROR', e)
             raise
 
-    def update_data_migration_status(self, row_id, success, message, target_table_rows):
+    def update_data_migration_started(self, row_id):
         table_name = self.config_parser.get_protocol_name_data_migration()
         query = f"""
             UPDATE "{self.protocol_schema}"."{table_name}"
-            SET task_completed = CURRENT_TIMESTAMP,
-            success = %s,
-            message = %s,
-            target_table_rows = %s
+            SET task_started = clock_timestamp()
             WHERE id = %s
             RETURNING *
         """
-        params = ('TRUE' if success else 'FALSE', message, target_table_rows, row_id)
+        params = (row_id,)
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+
+            # if row:
+            #     data_migration_row = self.decode_data_migration_row(row)
+            #     self.update_protocol('data_migration', data_migration_row['id'], None, None, None)
+            # else:
+            #     self.config_parser.print_log_message('ERROR', f"Error updating started status for data migration {row_id} in {table_name}.")
+            #     self.config_parser.print_log_message('ERROR', f"Error: No protocol row returned.")
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error updating started status for data migration {row_id} in {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"Query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
+            raise
+
+    def update_data_migration_status(self, settings):
+        row_id = settings['row_id']
+        success = settings['success']
+        message = settings['message']
+        target_table_rows = settings['target_table_rows']
+        batch_count = settings.get('batch_count', 0)
+        shortest_batch_seconds = settings.get('shortest_batch_seconds', 0)
+        longest_batch_seconds = settings.get('longest_batch_seconds', 0)
+        average_batch_seconds = settings.get('average_batch_seconds', 0)
+        table_name = self.config_parser.get_protocol_name_data_migration()
+        query = f"""
+            UPDATE "{self.protocol_schema}"."{table_name}"
+            SET task_completed = clock_timestamp(),
+            success = %s,
+            message = %s,
+            target_table_rows = %s,
+            batch_count = %s,
+            shortest_batch_seconds = %s,
+            longest_batch_seconds = %s,
+            average_batch_seconds = %s
+            WHERE id = %s
+            RETURNING *
+        """
+        params = ('TRUE' if success else 'FALSE',
+                  message, target_table_rows,
+                  batch_count, shortest_batch_seconds,
+                  longest_batch_seconds, average_batch_seconds,
+                  row_id)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -929,7 +1029,16 @@ class MigratorTables:
             'worker_id': row[5],
             'target_schema': row[6],
             'target_table': row[7],
-            'target_table_rows': row[8]
+            'target_table_rows': row[8],
+            'task_created': row[9],
+            'task_started': row[10],
+            'task_completed': row[11],
+            'success': row[12],
+            'message': row[13],
+            'batch_count': row[14],
+            'shortest_batch_seconds': row[15],
+            'longest_batch_seconds': row[16],
+            'average_batch_seconds': row[17],
         }
 
     def create_table_for_pk_ranges(self):
@@ -1005,7 +1114,7 @@ class MigratorTables:
             object_comment TEXT,
             object_type TEXT,
             object_sql TEXT,
-            task_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            task_created TIMESTAMP DEFAULT clock_timestamp(),
             task_started TIMESTAMP,
             task_completed TIMESTAMP,
             success BOOLEAN,
@@ -1033,7 +1142,7 @@ class MigratorTables:
             partitioned_by TEXT,
             partitioning_columns TEXT,
             create_partitions_sql TEXT,
-            task_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            task_created TIMESTAMP DEFAULT clock_timestamp(),
             task_started TIMESTAMP,
             task_completed TIMESTAMP,
             success BOOLEAN,
@@ -1059,7 +1168,7 @@ class MigratorTables:
             index_columns TEXT,
             index_comment TEXT,
             is_function_based BOOLEAN DEFAULT FALSE,
-            task_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            task_created TIMESTAMP DEFAULT clock_timestamp(),
             task_started TIMESTAMP,
             task_completed TIMESTAMP,
             success BOOLEAN,
@@ -1081,7 +1190,7 @@ class MigratorTables:
             target_funcproc_name TEXT,
             target_funcproc_sql TEXT,
             funcproc_comment TEXT,
-            task_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            task_created TIMESTAMP DEFAULT clock_timestamp(),
             task_started TIMESTAMP,
             task_completed TIMESTAMP,
             success BOOLEAN,
@@ -1100,7 +1209,7 @@ class MigratorTables:
             column_name TEXT,
             sequence_name TEXT,
             set_sequence_sql TEXT,
-            task_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            task_created TIMESTAMP DEFAULT clock_timestamp(),
             task_started TIMESTAMP,
             task_completed TIMESTAMP,
             success BOOLEAN,
@@ -1128,7 +1237,7 @@ class MigratorTables:
             trigger_source_sql TEXT,
             trigger_target_sql TEXT,
             trigger_comment TEXT,
-            task_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            task_created TIMESTAMP DEFAULT clock_timestamp(),
             task_started TIMESTAMP,
             task_completed TIMESTAMP,
             success BOOLEAN,
@@ -1150,7 +1259,7 @@ class MigratorTables:
             target_view_name TEXT,
             target_view_sql TEXT,
             view_comment TEXT,
-            task_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            task_created TIMESTAMP DEFAULT clock_timestamp(),
             task_started TIMESTAMP,
             task_completed TIMESTAMP,
             success BOOLEAN,
@@ -1286,7 +1395,7 @@ class MigratorTables:
         SET execution_success = %s,
         execution_error_message = %s,
         execution_results = %s,
-        execution_timestamp = CURRENT_TIMESTAMP
+        execution_timestamp = clock_timestamp()
         WHERE object_protocol_id = %s
         AND object_type = %s
         """
@@ -1346,7 +1455,7 @@ class MigratorTables:
         table_name = self.config_parser.get_protocol_name_tables()
         query = f"""
             UPDATE "{self.protocol_schema}"."{table_name}"
-            SET task_completed = CURRENT_TIMESTAMP,
+            SET task_completed = clock_timestamp(),
             success = %s,
             message = %s
             WHERE id = %s
@@ -1401,7 +1510,7 @@ class MigratorTables:
         table_name = self.config_parser.get_protocol_name_indexes()
         query = f"""
             UPDATE "{self.protocol_schema}"."{table_name}"
-            SET task_completed = CURRENT_TIMESTAMP,
+            SET task_completed = clock_timestamp(),
             success = %s,
             message = %s
             WHERE id = %s
@@ -1449,7 +1558,7 @@ class MigratorTables:
             update_rule TEXT,
             constraint_comment TEXT,
             constraint_status TEXT,
-            task_created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            task_created TIMESTAMP DEFAULT clock_timestamp(),
             task_started TIMESTAMP,
             task_completed TIMESTAMP,
             success BOOLEAN,
@@ -1533,7 +1642,7 @@ class MigratorTables:
         table_name = self.config_parser.get_protocol_name_constraints()
         query = f"""
             UPDATE "{self.protocol_schema}"."{table_name}"
-            SET task_completed = CURRENT_TIMESTAMP,
+            SET task_completed = clock_timestamp(),
             success = %s,
             message = %s
             WHERE id = %s
@@ -1584,7 +1693,7 @@ class MigratorTables:
         table_name = self.config_parser.get_protocol_name_funcprocs()
         query = f"""
             UPDATE "{self.protocol_schema}"."{table_name}"
-            SET task_completed = CURRENT_TIMESTAMP,
+            SET task_completed = clock_timestamp(),
             success = %s,
             message = %s
             WHERE source_funcproc_id = %s
@@ -1635,7 +1744,7 @@ class MigratorTables:
         table_name = self.config_parser.get_protocol_name_sequences()
         query = f"""
             UPDATE "{self.protocol_schema}"."{table_name}"
-            SET task_completed = CURRENT_TIMESTAMP,
+            SET task_completed = clock_timestamp(),
             success = %s,
             message = %s
             WHERE sequence_id = %s
@@ -1686,7 +1795,7 @@ class MigratorTables:
         table_name = self.config_parser.get_protocol_name_triggers()
         query = f"""
             UPDATE "{self.protocol_schema}"."{table_name}"
-            SET task_completed = CURRENT_TIMESTAMP,
+            SET task_completed = clock_timestamp(),
             success = %s,
             message = %s
             WHERE id = %s
@@ -1767,7 +1876,7 @@ class MigratorTables:
         table_name = self.config_parser.get_protocol_name_views()
         query = f"""
             UPDATE "{self.protocol_schema}"."{table_name}"
-            SET task_completed = CURRENT_TIMESTAMP,
+            SET task_completed = clock_timestamp(),
             success = %s,
             message = %s
             WHERE id = %s
@@ -1893,6 +2002,7 @@ class MigratorTables:
         self.config_parser.print_log_message('INFO', "Table rows migration stats:")
         table_name = self.config_parser.get_protocol_name_data_migration()
         data_migration_table_name = self.config_parser.get_protocol_name_data_migration()
+        batches_stats_table_name = self.config_parser.get_protocol_name_batches_stats()
         query = f"""SELECT min(task_created) as min_time, max(task_completed) as max_time FROM "{self.protocol_schema}"."{table_name}" WHERE task_completed IS NOT NULL"""
         cursor = self.protocol_connection.connection.cursor()
         cursor.execute(query)
@@ -1925,48 +2035,86 @@ class MigratorTables:
         summary = cursor.fetchone()[0]
         self.config_parser.print_log_message('INFO', f"    Tables with data - fully migrated: {summary}")
 
-        query = f"""SELECT target_schema, target_table, source_table_rows, target_table_rows, task_completed - task_created as migration_time
-        FROM "{self.protocol_schema}"."{data_migration_table_name}" WHERE source_table_rows > 0 AND source_table_rows = target_table_rows
-        ORDER BY source_table_rows DESC LIMIT 10"""
-        cursor.execute(query)
-        rows = cursor.fetchall()
-        if rows:
-            self.config_parser.print_log_message('INFO', "        Tables with data - fully migrated (top 10):")
-            max_table_name_length = max(len(row[1]) for row in rows) if rows else 0
-            max_table_name_length += 1
-            for row in rows:
-                target_schema = row[0]
-                target_table = row[1]
-                source_table_rows = row[2]
-                target_table_rows = row[3]
-                migration_time = row[4]
-                formatted_source_rows = f"{source_table_rows:,}".rjust(15)
-                formatted_target_rows = f"{target_table_rows:,}".rjust(15)
-                self.config_parser.print_log_message('INFO', f"        {target_schema}.{target_table[:max_table_name_length].ljust(max_table_name_length)}| {formatted_source_rows} = {formatted_target_rows} | length: {str(migration_time)[:19]:<19}")
+        try:
+            query = f"""SELECT target_schema, target_table, source_table_rows, target_table_rows, task_completed - task_created as migration_time,
+            round(shortest_batch_seconds::numeric, 2) as shortest_batch_seconds,
+            round(longest_batch_seconds::numeric, 2) as longest_batch_seconds,
+            round(average_batch_seconds::numeric, 2) as average_batch_seconds,
+            batch_count
+            FROM "{self.protocol_schema}"."{data_migration_table_name}" WHERE source_table_rows > 0 AND source_table_rows = target_table_rows
+            ORDER BY source_table_rows DESC LIMIT 10"""
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            if rows:
+                self.config_parser.print_log_message('INFO', "        Tables with data - fully migrated (top 10):")
+                max_table_name_length = max(len(row[1]) for row in rows) if rows else 10
+                for row in rows:
+                    target_schema = row[0]
+                    target_table = row[1]
+                    source_table_rows = row[2]
+                    target_table_rows = row[3]
+                    migration_time = row[4]
+                    formatted_source_rows = f"{source_table_rows:,}".rjust(15)
+                    formatted_target_rows = f"{target_table_rows:,}".rjust(15)
+
+                    message = f"        {target_schema}.{target_table[:max_table_name_length].ljust(max_table_name_length)} |"
+                    message += f"{formatted_source_rows} = {formatted_target_rows} | length: {str(migration_time)[:19]:<19}"
+                    if row[8] == 1:
+                        message += " | 1 batch"
+                    else:
+                        message += f" | {row[8]:<6} batches | shortest: {row[5]:<6} | average: {row[7]:<6} | longest: {row[6]:<6}"
+                    self.config_parser.print_log_message('INFO', message)
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error fetching fully migrated tables.")
+            self.config_parser.print_log_message('ERROR', e)
 
         query = f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{table_name}" WHERE source_table_rows > 0 AND source_table_rows <> target_table_rows"""
         cursor.execute(query)
         summary = cursor.fetchone()[0]
         self.config_parser.print_log_message('INFO', f"    Tables with data - NOT fully migrated: {summary}")
 
-        query = f"""SELECT target_schema, target_table, source_table_rows, target_table_rows, task_completed - task_created as migration_time
-        FROM "{self.protocol_schema}"."{data_migration_table_name}" WHERE source_table_rows > 0 AND source_table_rows <> target_table_rows
-        ORDER BY source_table_rows DESC LIMIT 10"""
-        cursor.execute(query)
-        rows = cursor.fetchall()
-        if rows:
-            self.config_parser.print_log_message('INFO', "        Tables with data - NOT fully migrated (top 10):")
-            max_table_name_length = max(len(row[1]) for row in rows) if rows else 0
-            max_table_name_length += 1
-            for row in rows:
-                target_schema = row[0]
-                target_table = row[1]
-                source_table_rows = row[2]
-                target_table_rows = row[3]
-                migration_time = row[4]
-                formatted_source_rows = f"{source_table_rows:,}".rjust(12)
-                formatted_target_rows = f"{target_table_rows:,}".rjust(12)
-                self.config_parser.print_log_message('INFO', f"        {target_schema}.{target_table[:max_table_name_length].ljust(max_table_name_length)}| {formatted_source_rows} <> {formatted_target_rows} | length: {str(migration_time)[:19]:<19}")
+        try:
+            query = f"""SELECT target_schema, target_table, source_table_rows, target_table_rows, task_completed - task_created as migration_time
+            FROM "{self.protocol_schema}"."{data_migration_table_name}" WHERE source_table_rows > 0 AND source_table_rows <> target_table_rows
+            ORDER BY source_table_rows DESC LIMIT 10"""
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            if rows:
+                self.config_parser.print_log_message('INFO', "        Tables with data - NOT fully migrated (top 10):")
+                max_table_name_length = max(len(row[1]) for row in rows) if rows else 0
+                max_table_name_length += 1
+                for row in rows:
+                    target_schema = row[0]
+                    target_table = row[1]
+                    source_table_rows = row[2]
+                    target_table_rows = row[3]
+                    migration_time = row[4]
+                    formatted_source_rows = f"{source_table_rows:,}".rjust(12)
+                    formatted_target_rows = f"{target_table_rows:,}".rjust(12)
+                    self.config_parser.print_log_message('INFO', f"        {target_schema}.{target_table[:max_table_name_length].ljust(max_table_name_length)} | {formatted_source_rows} <> {formatted_target_rows} | length: {str(migration_time)[:19]:<19}")
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error fetching NOT fully migrated tables.")
+            self.config_parser.print_log_message('ERROR', e)
+
+
+        try:
+            query = f"""SELECT source_schema, source_table, batch_number, round(batch_seconds::numeric, 2) as batch_seconds
+            FROM "{self.protocol_schema}"."{batches_stats_table_name}"
+            ORDER BY batch_seconds DESC LIMIT 10"""
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            if rows:
+                self.config_parser.print_log_message('INFO', "    Longest migration batches (top 10):")
+                for row in rows:
+                    target_schema = row[0]
+                    target_table = row[1]
+                    batch_number = row[2]
+                    batch_seconds = row[3]
+                    formatted_batch_seconds = f"{batch_seconds:,}".rjust(15)
+                    self.config_parser.print_log_message('INFO', f"        {target_schema}.{target_table[:max_table_name_length].ljust(max_table_name_length)} | batch: {batch_number} | {formatted_batch_seconds} seconds")
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error fetching longest migration batch.")
+            self.config_parser.print_log_message('ERROR', e)
 
         cursor.close()
 

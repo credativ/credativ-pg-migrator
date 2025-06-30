@@ -24,6 +24,8 @@ import re
 import traceback
 from tabulate import tabulate
 import sqlglot
+import time
+import datetime
 
 class SybaseASEConnector(DatabaseConnector):
     def __init__(self, config_parser, source_or_target):
@@ -1054,13 +1056,20 @@ class SybaseASEConnector(DatabaseConnector):
                 self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Fetching data with cursor using query: {query}")
 
                 sybase_cursor = self.connection.cursor()
+
+                batch_start_time = time.time()
+                batch_end_time = None
+                batch_number = 0
+                batch_durations = []
+
                 sybase_cursor.execute(query)
                 total_inserted_rows = 0
                 while True:
                     records = sybase_cursor.fetchmany(batch_size)
                     if not records:
                         break
-                    self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Fetched {len(records)} rows from source table '{source_table}' using cursor")
+                    batch_number += 1
+                    self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Fetched {len(records)} rows (batch {batch_number}) from source table '{source_table}' using cursor")
 
                     # Convert records to a list of dictionaries
                     records = [
@@ -1088,11 +1097,57 @@ class SybaseASEConnector(DatabaseConnector):
                         'insert_columns': insert_columns,
                     })
                     total_inserted_rows += inserted_rows
-                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Inserted {inserted_rows} (total: {total_inserted_rows} from: {source_table_rows} ({round(total_inserted_rows/source_table_rows*100, 2)}%)) rows into target table '{target_table}'")
+
+                    batch_end_time = time.time()
+                    batch_duration = batch_end_time - batch_start_time
+                    batch_durations.append(batch_duration)
+                    percent_done = round(total_inserted_rows / source_table_rows * 100, 2)
+                    msg = (
+                        f"Worker {worker_id}: Inserted {inserted_rows} "
+                        f"(total: {total_inserted_rows} from: {source_table_rows} "
+                        f"({percent_done}%)) rows into target table '{target_table}': "
+                        f"Batch {batch_number} duration: {batch_duration:.2f} seconds"
+                    )
+                    self.config_parser.print_log_message('INFO', msg)
+
+                    batch_start_dt = datetime.datetime.fromtimestamp(batch_start_time)
+                    batch_end_dt = datetime.datetime.fromtimestamp(batch_end_time)
+                    batch_start_str = batch_start_dt.strftime('%Y-%m-%d %H:%M:%S.%f')
+                    batch_end_str = batch_end_dt.strftime('%Y-%m-%d %H:%M:%S.%f')
+                    migrator_tables.insert_batches_stats({
+                        'source_schema': source_schema,
+                        'source_table': source_table,
+                        'source_table_id': source_table_id,
+                        'batch_number': batch_number,
+                        'batch_start': batch_start_str,
+                        'batch_end': batch_end_str,
+                        'batch_rows': inserted_rows,
+                        'batch_seconds': batch_duration,
+                        'worker_id': worker_id,
+                    })
+                    batch_start_time = time.time()
 
                 target_table_rows = migrate_target_connection.get_rows_count(target_schema, target_table)
                 self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Target table {target_schema}.{target_table} has {target_table_rows} rows")
-                migrator_tables.update_data_migration_status(protocol_id, True, 'OK', target_table_rows)
+
+                shortest_batch_seconds = min(batch_durations) if batch_durations else 0
+                longest_batch_seconds = max(batch_durations) if batch_durations else 0
+                average_batch_seconds = sum(batch_durations) / len(batch_durations) if batch_durations else 0
+                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Migrated {total_inserted_rows} rows from {source_table} to {target_schema}.{target_table} in {batch_number} batches: "
+                                                        f"Shortest batch: {shortest_batch_seconds:.2f} seconds, "
+                                                        f"Longest batch: {longest_batch_seconds:.2f} seconds, "
+                                                        f"Average batch: {average_batch_seconds:.2f} seconds")
+
+                migrator_tables.update_data_migration_status({
+                    'row_id': protocol_id,
+                    'success': True,
+                    'message': 'OK',
+                    'target_table_rows': target_table_rows,
+                    'batch_count': batch_number,
+                    'shortest_batch_seconds': shortest_batch_seconds,
+                    'longest_batch_seconds': longest_batch_seconds,
+                    'average_batch_seconds': average_batch_seconds,
+                })
                 sybase_cursor.close()
 
         except Exception as e:

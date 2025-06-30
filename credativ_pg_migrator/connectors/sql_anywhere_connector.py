@@ -326,6 +326,7 @@ class SQLAnywhereConnector(DatabaseConnector):
                         f"Batch {batch_number} duration: {batch_duration:.2f} seconds"
                     )
                     self.config_parser.print_log_message('INFO', msg)
+                    batch_start_time = time.time()
 
                 target_table_rows = migrate_target_connection.get_rows_count(target_schema, target_table)
                 self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Target table {target_schema}.{target_table} has {target_table_rows} rows")

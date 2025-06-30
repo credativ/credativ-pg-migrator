@@ -1981,48 +1981,84 @@ class MigratorTables:
         summary = cursor.fetchone()[0]
         self.config_parser.print_log_message('INFO', f"    Tables with data - fully migrated: {summary}")
 
-        query = f"""SELECT target_schema, target_table, source_table_rows, target_table_rows, task_completed - task_created as migration_time
-        FROM "{self.protocol_schema}"."{data_migration_table_name}" WHERE source_table_rows > 0 AND source_table_rows = target_table_rows
-        ORDER BY source_table_rows DESC LIMIT 10"""
-        cursor.execute(query)
-        rows = cursor.fetchall()
-        if rows:
-            self.config_parser.print_log_message('INFO', "        Tables with data - fully migrated (top 10):")
-            max_table_name_length = max(len(row[1]) for row in rows) if rows else 0
-            max_table_name_length += 1
-            for row in rows:
-                target_schema = row[0]
-                target_table = row[1]
-                source_table_rows = row[2]
-                target_table_rows = row[3]
-                migration_time = row[4]
-                formatted_source_rows = f"{source_table_rows:,}".rjust(15)
-                formatted_target_rows = f"{target_table_rows:,}".rjust(15)
-                self.config_parser.print_log_message('INFO', f"        {target_schema}.{target_table[:max_table_name_length].ljust(max_table_name_length)}| {formatted_source_rows} = {formatted_target_rows} | length: {str(migration_time)[:19]:<19}")
+        try:
+            query = f"""SELECT target_schema, target_table, source_table_rows, target_table_rows, task_completed - task_created as migration_time,
+            round(shortest_batch_seconds::numeric, 2) as shortest_batch_seconds,
+            round(longest_batch_seconds::numeric, 2) as longest_batch_seconds,
+            round(average_batch_seconds::numeric, 2) as average_batch_seconds,
+            batch_count
+            FROM "{self.protocol_schema}"."{data_migration_table_name}" WHERE source_table_rows > 0 AND source_table_rows = target_table_rows
+            ORDER BY source_table_rows DESC LIMIT 10"""
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            if rows:
+                self.config_parser.print_log_message('INFO', "        Tables with data - fully migrated (top 10):")
+                max_table_name_length = max(len(row[1]) for row in rows) if rows else 10
+                for row in rows:
+                    target_schema = row[0]
+                    target_table = row[1]
+                    source_table_rows = row[2]
+                    target_table_rows = row[3]
+                    migration_time = row[4]
+                    formatted_source_rows = f"{source_table_rows:,}".rjust(15)
+                    formatted_target_rows = f"{target_table_rows:,}".rjust(15)
+
+                    message = f"        {target_schema}.{target_table[:max_table_name_length].ljust(max_table_name_length)} |"
+                    message += f"{formatted_source_rows} = {formatted_target_rows} | length: {str(migration_time)[:19]:<19}"
+                    if row[8] == 1:
+                        message += " | 1 batch"
+                    else:
+                        message += f" | {row[8]:<6} batches | shortest: {row[5]:<6} | average: {row[7]:<6} | longest: {row[6]:<6}"
+                    self.config_parser.print_log_message('INFO', message)
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error fetching fully migrated tables.")
+            self.config_parser.print_log_message('ERROR', e)
 
         query = f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{table_name}" WHERE source_table_rows > 0 AND source_table_rows <> target_table_rows"""
         cursor.execute(query)
         summary = cursor.fetchone()[0]
         self.config_parser.print_log_message('INFO', f"    Tables with data - NOT fully migrated: {summary}")
 
-        query = f"""SELECT target_schema, target_table, source_table_rows, target_table_rows, task_completed - task_created as migration_time
-        FROM "{self.protocol_schema}"."{data_migration_table_name}" WHERE source_table_rows > 0 AND source_table_rows <> target_table_rows
-        ORDER BY source_table_rows DESC LIMIT 10"""
-        cursor.execute(query)
-        rows = cursor.fetchall()
-        if rows:
-            self.config_parser.print_log_message('INFO', "        Tables with data - NOT fully migrated (top 10):")
-            max_table_name_length = max(len(row[1]) for row in rows) if rows else 0
-            max_table_name_length += 1
-            for row in rows:
-                target_schema = row[0]
-                target_table = row[1]
-                source_table_rows = row[2]
-                target_table_rows = row[3]
-                migration_time = row[4]
-                formatted_source_rows = f"{source_table_rows:,}".rjust(12)
-                formatted_target_rows = f"{target_table_rows:,}".rjust(12)
-                self.config_parser.print_log_message('INFO', f"        {target_schema}.{target_table[:max_table_name_length].ljust(max_table_name_length)}| {formatted_source_rows} <> {formatted_target_rows} | length: {str(migration_time)[:19]:<19}")
+        try:
+            query = f"""SELECT target_schema, target_table, source_table_rows, target_table_rows, task_completed - task_created as migration_time
+            FROM "{self.protocol_schema}"."{data_migration_table_name}" WHERE source_table_rows > 0 AND source_table_rows <> target_table_rows
+            ORDER BY source_table_rows DESC LIMIT 10"""
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            if rows:
+                self.config_parser.print_log_message('INFO', "        Tables with data - NOT fully migrated (top 10):")
+                max_table_name_length = max(len(row[1]) for row in rows) if rows else 0
+                max_table_name_length += 1
+                for row in rows:
+                    target_schema = row[0]
+                    target_table = row[1]
+                    source_table_rows = row[2]
+                    target_table_rows = row[3]
+                    migration_time = row[4]
+                    formatted_source_rows = f"{source_table_rows:,}".rjust(12)
+                    formatted_target_rows = f"{target_table_rows:,}".rjust(12)
+                    self.config_parser.print_log_message('INFO', f"        {target_schema}.{target_table[:max_table_name_length].ljust(max_table_name_length)} | {formatted_source_rows} <> {formatted_target_rows} | length: {str(migration_time)[:19]:<19}")
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error fetching NOT fully migrated tables.")
+            self.config_parser.print_log_message('ERROR', e)
+
+
+        try:
+            query = f"""SELECT target_schema, target_table, round(longest_batch_seconds::numeric, 6) as longest_batch_seconds
+            FROM "{self.protocol_schema}"."{data_migration_table_name}" WHERE source_table_rows > 0
+            ORDER BY longest_batch_seconds DESC LIMIT 1"""
+            cursor.execute(query)
+            rows = cursor.fetchone()
+            if rows:
+                self.config_parser.print_log_message('INFO', "    Longest migration batch:")
+                target_schema = rows[0]
+                target_table = rows[1]
+                longest_batch_seconds = rows[2]
+                formatted_longest_batch = f"{longest_batch_seconds:,}".rjust(15)
+                self.config_parser.print_log_message('INFO', f"        {target_schema}.{target_table[:max_table_name_length].ljust(max_table_name_length)} | {formatted_longest_batch} seconds")
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error fetching longest migration batch.")
+            self.config_parser.print_log_message('ERROR', e)
 
         cursor.close()
 

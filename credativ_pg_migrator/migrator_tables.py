@@ -2002,6 +2002,7 @@ class MigratorTables:
         self.config_parser.print_log_message('INFO', "Table rows migration stats:")
         table_name = self.config_parser.get_protocol_name_data_migration()
         data_migration_table_name = self.config_parser.get_protocol_name_data_migration()
+        batches_stats_table_name = self.config_parser.get_protocol_name_batches_stats()
         query = f"""SELECT min(task_created) as min_time, max(task_completed) as max_time FROM "{self.protocol_schema}"."{table_name}" WHERE task_completed IS NOT NULL"""
         cursor = self.protocol_connection.connection.cursor()
         cursor.execute(query)
@@ -2097,18 +2098,20 @@ class MigratorTables:
 
 
         try:
-            query = f"""SELECT target_schema, target_table, round(longest_batch_seconds::numeric, 6) as longest_batch_seconds
-            FROM "{self.protocol_schema}"."{data_migration_table_name}" WHERE source_table_rows > 0
-            ORDER BY longest_batch_seconds DESC LIMIT 1"""
+            query = f"""SELECT source_schema, source_table, batch_number, round(batch_seconds::numeric, 2) as batch_seconds
+            FROM "{self.protocol_schema}"."{batches_stats_table_name}"
+            ORDER BY batch_seconds DESC LIMIT 10"""
             cursor.execute(query)
-            rows = cursor.fetchone()
+            rows = cursor.fetchall()
             if rows:
-                self.config_parser.print_log_message('INFO', "    Longest migration batch:")
-                target_schema = rows[0]
-                target_table = rows[1]
-                longest_batch_seconds = rows[2]
-                formatted_longest_batch = f"{longest_batch_seconds:,}".rjust(15)
-                self.config_parser.print_log_message('INFO', f"        {target_schema}.{target_table[:max_table_name_length].ljust(max_table_name_length)} | {formatted_longest_batch} seconds")
+                self.config_parser.print_log_message('INFO', "    Longest migration batches (top 10):")
+                for row in rows:
+                    target_schema = row[0]
+                    target_table = row[1]
+                    batch_number = row[2]
+                    batch_seconds = row[3]
+                    formatted_batch_seconds = f"{batch_seconds:,}".rjust(15)
+                    self.config_parser.print_log_message('INFO', f"        {target_schema}.{target_table[:max_table_name_length].ljust(max_table_name_length)} | batch: {batch_number} | {formatted_batch_seconds} seconds")
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"Error fetching longest migration batch.")
             self.config_parser.print_log_message('ERROR', e)

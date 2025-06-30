@@ -3,8 +3,9 @@
 ## 0.9.2 - 2025.xx.xx
 
 - 2025.06.30:
-  - Started implementation of time stats for migration of tables and data
+  - Time stats for migration of tables and data added into all connectors, results are also stored in the protocol table for data migration
     - Rationale: This will allow to better understand performance of the migration process and identify bottlenecks or situations when migration literally hangs because of some issues on the source database
+  - Adjustments in running parallel workers for migration of tables, data, indexes and constraints to avoid delays in starting the next worker after some of the previous ones finished
 
 ## 0.9.1 - 2025.06.24
 

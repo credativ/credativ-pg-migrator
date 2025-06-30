@@ -693,6 +693,7 @@ class PostgreSQLConnector(DatabaseConnector):
 
                 # offset = 0
                 cursor = self.connection.cursor()
+
                 batch_start_time = time.time()
                 batch_end_time = None
                 batch_number = 0
@@ -701,19 +702,6 @@ class PostgreSQLConnector(DatabaseConnector):
                 cursor.execute(query)
                 total_inserted_rows = 0
                 while True:
-                    # part_name = f'prepare fetch data: {source_table} - {offset}'
-                    # if primary_key_columns:
-                    #     query = f"""SELECT * FROM "{source_schema}"."{source_table}" ORDER BY {primary_key_columns} LIMIT {batch_size} OFFSET {offset}"""
-                    # else:
-                    #     query = f"""SELECT * FROM "{source_schema}"."{source_table}" ORDER BY ctid LIMIT {batch_size} OFFSET {offset}"""
-                    # self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Fetching data with query: {query}")
-
-                    # part_name = f'do fetch data: {source_table} - {offset}'
-
-                    # cursor = self.connection.cursor()
-                    # cursor.execute(query)
-                    # rows = cursor.fetchall()
-                    # cursor.close()
                     records = cursor.fetchmany(batch_size)
                     if not records:
                         break
@@ -743,6 +731,7 @@ class PostgreSQLConnector(DatabaseConnector):
                         'insert_columns': insert_columns,
                     })
                     total_inserted_rows += inserted_rows
+
                     batch_end_time = time.time()
                     batch_duration = batch_end_time - batch_start_time
                     batch_durations.append(batch_duration)
@@ -753,10 +742,11 @@ class PostgreSQLConnector(DatabaseConnector):
                         f"({percent_done}%)) rows into target table '{target_table}': "
                         f"Batch {batch_number} duration: {batch_duration:.2f} seconds"
                     )
-                    self.config_parser.print_log_message('info', msg)
+                    self.config_parser.print_log_message('INFO', msg)
 
                 target_table_rows = migrate_target_connection.get_rows_count(target_schema, target_table)
                 self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Target table {target_schema}.{target_table} has {target_table_rows} rows")
+
                 shortest_batch_seconds = min(batch_durations) if batch_durations else 0
                 longest_batch_seconds = max(batch_durations) if batch_durations else 0
                 average_batch_seconds = sum(batch_durations) / len(batch_durations) if batch_durations else 0
@@ -764,6 +754,7 @@ class PostgreSQLConnector(DatabaseConnector):
                                                         f"Shortest batch: {shortest_batch_seconds:.2f} seconds, "
                                                         f"Longest batch: {longest_batch_seconds:.2f} seconds, "
                                                         f"Average batch: {average_batch_seconds:.2f} seconds")
+
                 migrator_tables.update_data_migration_status({
                     'row_id': protocol_id,
                     'success': True,

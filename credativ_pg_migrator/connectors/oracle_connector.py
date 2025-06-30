@@ -19,6 +19,7 @@ from credativ_pg_migrator.migrator_logging import MigratorLogger
 import cx_Oracle
 import traceback
 from tabulate import tabulate
+import time
 
 class OracleConnector(DatabaseConnector):
     def __init__(self, config_parser, source_or_target):

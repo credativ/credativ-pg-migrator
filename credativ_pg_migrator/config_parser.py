@@ -220,6 +220,9 @@ class ConfigParser:
     def get_protocol_name_data_migration(self):
         return f"{self.get_protocol_name()}_data_migration"
 
+    def get_protocol_name_batches_stats(self):
+        return f"{self.get_protocol_name()}_batches_stats"
+
     def get_protocol_name_indexes(self):
         return f"{self.get_protocol_name()}_indexes"
 

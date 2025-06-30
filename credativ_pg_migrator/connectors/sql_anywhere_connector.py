@@ -21,6 +21,7 @@ import pyodbc
 import traceback
 from tabulate import tabulate
 import time
+import datetime
 
 class SQLAnywhereConnector(DatabaseConnector):
     def __init__(self, config_parser, source_or_target):
@@ -326,6 +327,22 @@ class SQLAnywhereConnector(DatabaseConnector):
                         f"Batch {batch_number} duration: {batch_duration:.2f} seconds"
                     )
                     self.config_parser.print_log_message('INFO', msg)
+
+                    batch_start_dt = datetime.datetime.fromtimestamp(batch_start_time)
+                    batch_end_dt = datetime.datetime.fromtimestamp(batch_end_time)
+                    batch_start_str = batch_start_dt.strftime('%Y-%m-%d %H:%M:%S.%f')
+                    batch_end_str = batch_end_dt.strftime('%Y-%m-%d %H:%M:%S.%f')
+                    migrator_tables.insert_batches_stats({
+                        'source_schema': source_schema,
+                        'source_table': source_table,
+                        'source_table_id': source_table_id,
+                        'batch_number': batch_number,
+                        'batch_start': batch_start_str,
+                        'batch_end': batch_end_str,
+                        'batch_rows': inserted_rows,
+                        'batch_seconds': batch_duration,
+                        'worker_id': worker_id,
+                    })
                     batch_start_time = time.time()
 
                 target_table_rows = migrate_target_connection.get_rows_count(target_schema, target_table)

@@ -854,9 +854,9 @@ class MigratorTables:
             success BOOLEAN,
             message TEXT,
             batch_count INTEGER DEFAULT 0,
-            shortest_batch_seconds INTEGER DEFAULT 0,
-            longest_batch_seconds INTEGER DEFAULT 0,
-            average_batch_seconds INTEGER DEFAULT 0
+            shortest_batch_seconds FLOAT DEFAULT 0,
+            longest_batch_seconds FLOAT DEFAULT 0,
+            average_batch_seconds FLOAT DEFAULT 0
             )
         """)
 
@@ -943,10 +943,10 @@ class MigratorTables:
             WHERE id = %s
             RETURNING *
         """
-        params = ('TRUE' if success else 'FALSE', 
-                  message, target_table_rows, 
-                  batch_count, shortest_batch_seconds, 
-                  longest_batch_seconds, average_batch_seconds, 
+        params = ('TRUE' if success else 'FALSE',
+                  message, target_table_rows,
+                  batch_count, shortest_batch_seconds,
+                  longest_batch_seconds, average_batch_seconds,
                   row_id)
         try:
             cursor = self.protocol_connection.connection.cursor()

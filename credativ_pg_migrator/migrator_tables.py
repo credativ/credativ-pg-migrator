@@ -66,6 +66,7 @@ class MigratorTables:
         self.create_table_for_tables()
         self.create_table_for_target_columns_alterations()
         self.create_table_for_data_migration()
+        self.create_table_for_batches_stats()
         # self.create_table_for_pk_ranges()
         self.create_table_for_indexes()
         self.create_table_for_constraints()
@@ -859,6 +860,58 @@ class MigratorTables:
             average_batch_seconds FLOAT DEFAULT 0
             )
         """)
+
+    def create_table_for_batches_stats(self):
+        table_name = self.config_parser.get_protocol_name_batches_stats()
+        self.protocol_connection.execute_query(self.drop_table_sql.format(protocol_schema=self.protocol_schema, table_name=table_name))
+        self.protocol_connection.execute_query(f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."{table_name}"
+            (id SERIAL PRIMARY KEY,
+            source_schema TEXT,
+            source_table TEXT,
+            source_table_id INTEGER,
+            batch_number INTEGER,
+            batch_start TIMESTAMP,
+            batch_end TIMESTAMP,
+            batch_rows INTEGER,
+            batch_seconds FLOAT,
+            worker_id TEXT
+            )
+        """)
+
+    def insert_batches_stats(self, settings):
+        ## source_schema, source_table, source_table_id, batch_number, batch_start, batch_end, batch_rows, batch_seconds
+        source_schema = settings['source_schema']
+        source_table = settings['source_table']
+        source_table_id = settings['source_table_id']
+        batch_number = settings['batch_number']
+        batch_start = settings['batch_start']
+        batch_end = settings['batch_end']
+        batch_rows = settings['batch_rows']
+        batch_seconds = settings['batch_seconds']
+        worker_id = settings['worker_id']
+
+        table_name = self.config_parser.get_protocol_name_batches_stats()
+        query = f"""
+            INSERT INTO "{self.protocol_schema}"."{table_name}"
+            (source_schema, source_table, source_table_id, batch_number, batch_start, batch_end, batch_rows, batch_seconds, worker_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING *
+        """
+        params = (source_schema, source_table, source_table_id, batch_number,
+                  batch_start, batch_end, batch_rows, batch_seconds, str(worker_id))
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+
+            self.config_parser.print_log_message( 'DEBUG3', f"Returned row: {row}")
+            return row[0]  # Return the ID of the inserted row
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error inserting batches stats for {source_table} into {table_name}.")
+            self.config_parser.print_log_message('ERROR', e)
+            raise
 
     def insert_data_migration(self, settings):
         ## source_schema, source_table, source_table_id, source_table_rows, worker_id, target_schema, target_table, target_table_rows

@@ -36,6 +36,8 @@ source:
   # ibm_db2 - SYSCAT or SYSIBM - sysibm simulates the information_schema
   # mssql - SYS or INFORMATION_SCHEMA
   system_catalog: "SYSIBM"
+  # informix specific setting
+  db_locale: "en_US.utf8"  # locale for the Informix database, used for date and time formatting
 
 # target database connection - always postgresql
 target:

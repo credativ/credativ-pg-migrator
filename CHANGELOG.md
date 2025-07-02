@@ -2,6 +2,16 @@
 
 ## 0.9.2 - 2025.xx.xx
 
+add db_locale, add commits to protocol tables
+add detailed time stats - reads / writes
+log output sent to the file into migrator table to better catch long breaks
+
+- 2025.07.01:
+
+  - Added detection of deadlocks into Orchestrator - creation of constraints; If deadlock is detected, worker re-tries the action after a short delay
+    - Rationale: When only data model without data is migrated, deadlock can happen if multiple workers try to create at the same time constraints referencing the same table
+    - This happens only on some testing databases like Sakila, where data model heavily relies on constraints, but was seen repeatedly during tests
+
 - 2025.06.30:
   - Time stats for migration of tables and data added into all connectors, results are also stored in the protocol tables
     - Rationale: This will allow to better understand performance of the migration process and identify bottlenecks or situations when migration literally hangs because of some issues on the source database

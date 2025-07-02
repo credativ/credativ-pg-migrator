@@ -81,6 +81,14 @@ class ConfigParser:
     def get_source_connectivity(self):
         return self.get_connectivity('source').lower()
 
+    def get_source_db_locale(self):
+        """
+        Get the locale for the source database, used for date and time formatting.
+        Relevant only for some databases like Informix.
+        If not specified, defaults to 'en_US.utf8'.
+        """
+        return self.config['source'].get('db_locale', 'en_US.utf8')
+
     def get_target_config(self):
         return self.config['target']
 

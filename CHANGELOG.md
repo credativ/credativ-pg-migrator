@@ -2,16 +2,15 @@
 
 ## 0.9.2 - 2025.xx.xx
 
-add detailed time stats - reads / writes
-log output sent to the file into migrator table to better catch long breaks
-
 - 2025.07.03:
 
   - Added db_locale setting into config file for source database - currently used only for Informix
   - Added commits to protocol tables for better tracking of migration progress during long operations
-  - Added even more detailed time stats for reading, transforming and writing data inside the batch - currently only for Informix connector, but prepared for other connectors as well
+  - Added even more detailed time stats for reading, transforming and writing data inside the batch including their logging into the protocol tables
     - Rationale: On some legacy systems we see huge oscillations in performance of data migration, so we need to see where the time is spent
   - Reimplemented mistakenly missing migration of data into Oracle connector
+  - Repairs in implementation of names case conversion - added missing handling of column names in the INSERT statement in some connectors
+  - Repair in handling Oracle LOB data type during data migration - LOBs are now properly converted to bytes before inserting into the target database
 
 - 2025.07.01:
 

@@ -20,6 +20,7 @@ import cx_Oracle
 import traceback
 from tabulate import tabulate
 import time
+import datetime
 
 class OracleConnector(DatabaseConnector):
     def __init__(self, config_parser, source_or_target):
@@ -321,7 +322,7 @@ class OracleConnector(DatabaseConnector):
                 for order_num, col in source_columns.items():
                     self.config_parser.print_log_message('DEBUG2',
                                                          f"Worker {worker_id}: Table {source_schema}.{source_table}: Processing column {col['column_name']} ({order_num}) with data type {col['data_type']}")
-                    insert_columns = ', '.join([f'''"{col['column_name']}"''' for col in source_columns.values()])
+                    insert_columns = ', '.join([f'''"{self.config_parser.convert_names_case(col['column_name'])}"''' for col in source_columns.values()])
 
                     if col['data_type'].lower() == 'datetime':
                         select_columns_list.append(f"TO_CHAR({col['column_name']}, '%Y-%m-%d %H:%M:%S') as {col['column_name']}")
@@ -368,8 +369,10 @@ class OracleConnector(DatabaseConnector):
                         for order_num, column in source_columns.items():
                             column_name = column['column_name']
                             column_type = column['data_type']
-                            if column_type in ['bytea']:
-                                record[column_name] = record[column_name].tobytes()
+                            # self.config_parser.print_log_message('DEBUG3', f"Worker {worker_id}: Processing column {column_name} with data type {column_type} in record {record}")
+                            if column_type.lower() in ['blob', 'clob']:
+                                if record[column_name] is not None:
+                                    record[column_name] = record[column_name].read()
 
                     # Insert batch into target table
                     self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Starting insert of {len(records)} rows from source table {source_table}")

@@ -1001,8 +1001,8 @@ class SybaseASEConnector(DatabaseConnector):
             source_table = settings['source_table']
             source_table_id = settings['source_table_id']
             source_columns = settings['source_columns']
-            target_schema = settings['target_schema']
-            target_table = settings['target_table']
+            target_schema = self.config_parser.convert_names_case(settings['target_schema'])
+            target_table = self.config_parser.convert_names_case(settings['target_table'])
             target_columns = settings['target_columns']
             # primary_key_columns = settings['primary_key_columns']
             # primary_key_columns_count = settings['primary_key_columns_count']
@@ -1036,7 +1036,7 @@ class SybaseASEConnector(DatabaseConnector):
                 for order_num, col in source_columns.items():
                     self.config_parser.print_log_message('DEBUG2',
                                                          f"Worker {worker_id}: Table {source_schema}.{source_table}: Processing column {col['column_name']} ({order_num}) with data type {col['data_type']}")
-                    insert_columns = ', '.join([f'''"{col['column_name']}"''' for col in source_columns.values()])
+                    insert_columns = ', '.join([f'''"{self.config_parser.convert_names_case(col['column_name'])}"''' for col in source_columns.values()])
 
                     # if col['data_type'].lower() == 'datetime':
                     #     select_columns_list.append(f"TO_CHAR({col['column_name']}, '%Y-%m-%d %H:%M:%S') as {col['column_name']}")

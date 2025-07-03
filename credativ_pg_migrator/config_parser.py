@@ -463,6 +463,16 @@ class ConfigParser:
                 indent_level += 1
         return '\n'.join(indented_lines)
 
+    def get_table_batch_size(self, table_name):
+        """
+        Get the batch size for a specific table.
+        If not specified, returns the default batch size from the migration section.
+        """
+        batch_size = self.config.get('table_batch_size', [])
+        for entry in batch_size:
+            if isinstance(entry, dict) and entry.get('table_name') == table_name:
+                return entry.get('batch_size', self.get_batch_size())
+        return self.get_batch_size()
 
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

@@ -434,7 +434,7 @@ class Orchestrator:
                     # 'primary_key_columns': table_data['primary_key_columns'],
                     # 'primary_key_columns_count': table_data['primary_key_columns_count'],
                     # 'primary_key_columns_types': table_data['primary_key_columns_types'],
-                    'batch_size': settings['batch_size'],
+                    'batch_size': self.config_parser.get_table_batch_size(table_data['source_table']),
                     'migrator_tables': settings['migrator_tables'],
                     'migration_limitation': '',
                 }

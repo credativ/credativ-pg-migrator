@@ -1136,6 +1136,7 @@ class InformixConnector(DatabaseConnector):
                 cursor = self.connection.cursor()
 
                 batch_start_time = time.time()
+                reading_start_time = batch_start_time
                 batch_end_time = None
                 batch_number = 0
                 batch_durations = []
@@ -1147,8 +1148,11 @@ class InformixConnector(DatabaseConnector):
                     if not records:
                         break
                     batch_number += 1
+                    reading_end_time = time.time()
+                    reading_duration = reading_end_time - reading_start_time
                     self.config_parser.print_log_message('DEBUG',f"Worker {worker_id}: Fetched {len(records)} rows (batch {batch_number}) from source table {source_table}.")
 
+                    transforming_start_time = time.time()
                     records = [
                         {column['column_name']: value for column, value in zip(source_columns.values(), record)}
                         for record in records
@@ -1174,6 +1178,9 @@ class InformixConnector(DatabaseConnector):
 
                     # Insert batch into target table
                     self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Starting insert of {len(records)} rows from source table {source_table}")
+                    transforming_end_time = time.time()
+                    transforming_duration = transforming_end_time - transforming_start_time
+                    inserting_start_time = time.time()
                     inserted_rows = migrate_target_connection.insert_batch({
                         'target_schema': target_schema,
                         'target_table': target_table,
@@ -1184,18 +1191,13 @@ class InformixConnector(DatabaseConnector):
                         'insert_columns': insert_columns,
                     })
                     total_inserted_rows += inserted_rows
+                    inserting_end_time = time.time()
+                    inserting_duration = inserting_end_time - inserting_start_time
 
                     batch_end_time = time.time()
                     batch_duration = batch_end_time - batch_start_time
                     batch_durations.append(batch_duration)
                     percent_done = round(total_inserted_rows / source_table_rows * 100, 2)
-                    msg = (
-                        f"Worker {worker_id}: Inserted {inserted_rows} "
-                        f"(total: {total_inserted_rows} from: {source_table_rows} "
-                        f"({percent_done}%)) rows into target table '{target_table}': "
-                        f"Batch {batch_number} duration: {batch_duration:.2f} seconds"
-                    )
-                    self.config_parser.print_log_message('INFO', msg)
 
                     batch_start_dt = datetime.datetime.fromtimestamp(batch_start_time)
                     batch_end_dt = datetime.datetime.fromtimestamp(batch_end_time)
@@ -1211,8 +1213,22 @@ class InformixConnector(DatabaseConnector):
                         'batch_rows': inserted_rows,
                         'batch_seconds': batch_duration,
                         'worker_id': worker_id,
+                        'reading_seconds': reading_duration,
+                        'transforming_seconds': transforming_duration,
+                        'writing_seconds': inserting_duration,
                     })
+
+                    msg = (
+                        f"Worker {worker_id}: Inserted {inserted_rows} "
+                        f"(total: {total_inserted_rows} from: {source_table_rows} "
+                        f"({percent_done}%)) rows into target table '{target_table}': "
+                        f"Batch {batch_number} duration: {batch_duration:.2f} seconds "
+                        f"(r: {reading_duration:.2f}, t: {transforming_duration:.2f}, w: {inserting_duration:.2f})"
+                    )
+                    self.config_parser.print_log_message('INFO', msg)
+
                     batch_start_time = time.time()
+                    reading_start_time = batch_start_time
 
                 target_table_rows = migrate_target_connection.get_rows_count(target_schema, target_table)
                 self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Target table {target_schema}.{target_table} has {target_table_rows} rows")

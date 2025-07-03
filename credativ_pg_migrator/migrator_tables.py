@@ -875,6 +875,10 @@ class MigratorTables:
             batch_end TIMESTAMP,
             batch_rows INTEGER,
             batch_seconds FLOAT,
+            reading_seconds FLOAT,
+            transforming_seconds FLOAT,
+            writing_seconds FLOAT,
+            inserted_at TIMESTAMP DEFAULT clock_timestamp(),
             worker_id TEXT
             )
         """)
@@ -889,21 +893,28 @@ class MigratorTables:
         batch_end = settings['batch_end']
         batch_rows = settings['batch_rows']
         batch_seconds = settings['batch_seconds']
+        reading_seconds = settings.get('reading_seconds', 0)
+        transforming_seconds = settings.get('transforming_seconds', 0)
+        writing_seconds = settings.get('writing_seconds', 0)
         worker_id = settings['worker_id']
 
         table_name = self.config_parser.get_protocol_name_batches_stats()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
-            (source_schema, source_table, source_table_id, batch_number, batch_start, batch_end, batch_rows, batch_seconds, worker_id)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (source_schema, source_table, source_table_id, batch_number,
+            batch_start, batch_end, batch_rows, batch_seconds, worker_id,
+            reading_seconds, transforming_seconds, writing_seconds)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
         params = (source_schema, source_table, source_table_id, batch_number,
-                  batch_start, batch_end, batch_rows, batch_seconds, str(worker_id))
+                  batch_start, batch_end, batch_rows, batch_seconds, str(worker_id),
+                  reading_seconds, transforming_seconds, writing_seconds)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
             row = cursor.fetchone()
+            self.protocol_connection.connection.commit()  # Commit the transaction
             cursor.close()
 
             self.config_parser.print_log_message( 'DEBUG3', f"Returned row: {row}")
@@ -2098,7 +2109,11 @@ class MigratorTables:
 
 
         try:
-            query = f"""SELECT source_schema, source_table, batch_number, round(batch_seconds::numeric, 2) as batch_seconds
+            query = f"""SELECT source_schema, source_table, batch_number,
+            round(batch_seconds::numeric, 2) as batch_seconds,
+            round(reading_seconds::numeric, 2) as reading_seconds,
+            round(transforming_seconds::numeric, 2) as transforming_seconds,
+            round(writing_seconds::numeric, 2) as inserting_seconds
             FROM "{self.protocol_schema}"."{batches_stats_table_name}"
             ORDER BY batch_seconds DESC LIMIT 10"""
             cursor.execute(query)
@@ -2110,8 +2125,16 @@ class MigratorTables:
                     target_table = row[1]
                     batch_number = row[2]
                     batch_seconds = row[3]
+                    reading_seconds = row[4]
+                    transforming_seconds = row[5]
+                    inserting_seconds = row[6]
                     formatted_batch_seconds = f"{batch_seconds:,}".rjust(15)
-                    self.config_parser.print_log_message('INFO', f"        {target_schema}.{target_table[:max_table_name_length].ljust(max_table_name_length)} | batch: {batch_number} | {formatted_batch_seconds} seconds")
+                    formatted_reading_seconds = f"{reading_seconds:,}".rjust(15)
+                    formatted_transforming_seconds = f"{transforming_seconds:,}".rjust(15)
+                    formatted_inserting_seconds = f"{inserting_seconds:,}".rjust(15)
+                    self.config_parser.print_log_message('INFO', f"        {target_schema}.{target_table[:max_table_name_length].ljust(max_table_name_length)} | "
+                                                         f"batch: {batch_number} | {formatted_batch_seconds} sec | "
+                                                         f"r: {formatted_reading_seconds} | t: {formatted_transforming_seconds} | w: {formatted_inserting_seconds}")
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"Error fetching longest migration batch.")
             self.config_parser.print_log_message('ERROR', e)

@@ -59,6 +59,16 @@ def main():
         if args.log_level == 'DEBUG':
             logger.logger.debug(f"Parsed configuration: {config_parser.config}")
 
+        # Set environment variables if specified in the config
+        if 'env_variables' in config_parser.config:
+            for env_var in config_parser.config['env_variables']:
+                if 'name' in env_var and 'value' in env_var:
+                    os.environ[env_var['name']] = env_var['value']
+                    logger.logger.info(f"Set environment variable: {env_var['name']}={env_var['value']}")
+                else:
+                    logger.logger.warning(f"Invalid environment variable configuration: {env_var}")
+            logger.logger.info("Environment variables set from configuration.")
+
         logger.logger.info('Starting planner...')
         planner = Planner(config_parser)
         planner.create_plan()

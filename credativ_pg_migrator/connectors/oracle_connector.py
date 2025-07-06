@@ -342,7 +342,10 @@ class OracleConnector(DatabaseConnector):
 
                 # offset = 0
                 cursor = self.connection.cursor()
-                cursor.arraysize = batch_size
+                if batch_size > 10000:
+                    cursor.arraysize = 1000
+                else:
+                    cursor.arraysize = 100
 
                 batch_start_time = time.time()
                 reading_start_time = batch_start_time

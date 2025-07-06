@@ -81,6 +81,23 @@ class ConfigParser:
     def get_source_connectivity(self):
         return self.get_connectivity('source').lower()
 
+    def get_source_db_locale(self):
+        """
+        Get the locale for the source database, used for date and time formatting.
+        Relevant only for some databases like Informix.
+        If not specified, defaults to 'en_US.utf8'.
+        """
+        return self.config['source'].get('db_locale', 'en_US.utf8')
+
+    def get_source_client_locale(self):
+        """
+        In this moment method is only prepared for future use.
+        Get the client locale for the source database, used for date and time formatting.
+        Relevant only for some databases like Informix.
+        If not specified, defaults to 'en_US.utf8'.
+        """
+        return self.config['source'].get('client_locale', 'en_US.utf8')
+
     def get_target_config(self):
         return self.config['target']
 
@@ -99,6 +116,8 @@ class ConfigParser:
             raise ValueError(f"Invalid source_or_target: {source_or_target}")
         connectivity = self.get_connectivity(source_or_target)
         db_config = self.config[source_or_target]
+        db_locale = self.get_source_db_locale() if source_or_target == 'source' else None
+        # client_locale = self.get_source_client_locale() if source_or_target == 'source' else None
         if db_config['type'] == 'postgresql':
             if connectivity == 'native' or connectivity is None:
                 return f"""postgres://{db_config['username']}:{db_config['password']}@{db_config.get('host', 'localhost')}:{db_config['port']}/{db_config['database']}?sslmode={db_config.get('sslmode', 'prefer')}"""
@@ -110,7 +129,8 @@ class ConfigParser:
                 return f"DRIVER={db_config['odbc']['driver']};SERVER={db_config['server']};UID={db_config['username']};PWD={db_config['password']}"
             elif connectivity == 'jdbc':
                 # ;user={db_config['username']};password={db_config['password']}
-                return f"jdbc:informix-sqli://{db_config['host']}:{db_config['port']}/{db_config['database']}:INFORMIXSERVER={db_config['server']}"
+                return f"jdbc:informix-sqli://{db_config['host']}:{db_config['port']}/{db_config['database']}:INFORMIXSERVER={db_config['server']};DB_LOCALE={db_locale}"
+                # ;CLIENT_LOCALE={client_locale}
             else:
                 raise ValueError(f"Unsupported Informix connectivity: {connectivity}")
         elif db_config['type'] == 'sybase_ase':
@@ -443,6 +463,16 @@ class ConfigParser:
                 indent_level += 1
         return '\n'.join(indented_lines)
 
+    def get_table_batch_size(self, table_name):
+        """
+        Get the batch size for a specific table.
+        If not specified, returns the default batch size from the migration section.
+        """
+        batch_size = self.config.get('table_batch_size', [])
+        for entry in batch_size:
+            if isinstance(entry, dict) and entry.get('table_name') == table_name:
+                return entry.get('batch_size', self.get_batch_size())
+        return self.get_batch_size()
 
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

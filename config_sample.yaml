@@ -1,5 +1,14 @@
 # File contains muster configuration file for credativ-pg-migrator
 
+env_variables:
+  # List of environment variables to set before running the migration
+  # This is useful for setting up libraries that require specific environment variables
+  # Example: setting up library paths or locale settings
+  - name: "LD_LIBRARY_PATH"
+    value: "/usr/local/lib:/usr/lib:/lib"
+  - name: "LANG"
+    value: "en_US.UTF-8"
+
 # Migrator database connection for metadata storage
 # Migrator created multiple tables in the database
 # In most cases we presume migrator database is the same as target database, just with different schema
@@ -36,6 +45,8 @@ source:
   # ibm_db2 - SYSCAT or SYSIBM - sysibm simulates the information_schema
   # mssql - SYS or INFORMATION_SCHEMA
   system_catalog: "SYSIBM"
+  # informix specific setting
+  db_locale: "en_US.utf8"  # locale for the Informix database, used for date and time formatting
 
 # target database connection - always postgresql
 target:
@@ -80,6 +91,14 @@ migration:
   # 0 = always change to text, -1 = never change to text, always migrate as varchar, >0 = convert varchar to text if length is >= this value
   # if parameter is missing, default is -1 -> migrate all varchars as varchars as they are
   varchar_to_text_length: 4000
+
+table_batch_size:
+  # Specify batch size for a table
+  # If not specified, the default batch size from the migration section will be used
+  - table_name: "table1"
+    batch_size: 50000
+  - table_name: "table2"
+    batch_size: 20000
 
 # Specify tables to include in the migration - list of table names or regular expressions
 # Empty list means all tables will be included

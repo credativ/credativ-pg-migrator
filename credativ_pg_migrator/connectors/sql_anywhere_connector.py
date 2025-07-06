@@ -243,6 +243,7 @@ class SQLAnywhereConnector(DatabaseConnector):
                 offset = 0
                 total_inserted_rows = 0
                 cursor = self.connection.cursor()
+                cursor.arraysize = batch_size
 
                 select_columns_list = []
                 for order_num, col in source_columns.items():

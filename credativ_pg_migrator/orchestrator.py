@@ -552,13 +552,29 @@ class Orchestrator:
                 worker_target_connection.connect()
 
                 query = f'''SET SESSION search_path TO {constraint_data['target_schema']};'''
+
                 worker_target_connection.execute_query(query)
 
                 if worker_target_connection.session_settings:
                     self.config_parser.print_log_message( 'DEBUG', f"Worker {worker_id}: Executing session settings: {worker_target_connection.session_settings}")
                     worker_target_connection.execute_query(worker_target_connection.session_settings)
 
-                worker_target_connection.execute_query(create_constraint_sql)
+                creation_try = 0
+                while True:
+                    try:
+                        worker_target_connection.execute_query(create_constraint_sql)
+                        break  # Exit loop if successful
+                    except Exception as e:
+                        self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Error creating constraint {constraint_name}: {e}")
+                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Retrying ({creation_try}) to create constraint {constraint_name}...")
+                        if creation_try > 5:
+                            self.handle_error(e, f"constraint_worker {worker_id}: Failed to create {constraint_name} after {creation_try} attempts.")
+                            self.migrator_tables.update_constraint_status(constraint_data['id'], False, f'ERROR: {e}')
+                            worker_target_connection.disconnect()
+                            return False
+                        creation_try += 1
+                        time.sleep(5)  # Wait before retrying
+
                 query = 'RESET search_path;'
                 worker_target_connection.execute_query(query)
                 self.config_parser.print_log_message('INFO', f"""Worker {worker_id}: Constraint "{constraint_name}" created successfully.""")
@@ -566,10 +582,10 @@ class Orchestrator:
                 return True
             else:
                 self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Constraint {constraint_name} does not have a SQL statement - skipping.")
+                worker_target_connection.disconnect()
                 return False
 
         except Exception as e:
-            self.migrator_tables.update_constraint_status(constraint_data['id'], False, f'ERROR: {e}')
             self.handle_error(e, f"constraint_worker {worker_id} {constraint_name}")
             return False
 

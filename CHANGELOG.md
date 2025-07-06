@@ -12,14 +12,14 @@
   - Repairs in implementation of names case conversion - added missing handling of column names in the INSERT statement in some connectors
   - Repair in handling Oracle LOB data type during data migration - LOBs are now properly converted to bytes before inserting into the target database
   - Added general section into config file for setting of environmental variables
-    - Rationale: some libraries might require setting of environmental variables, and this must be done in a transparent, documented and configurable way
+    - Rationale: some libraries might require setting of environmental variables, and this must be done in a transparent, documented and easily configurable way
   - Implemented possibility to set individual batch size for a table in the config file
     - Rationale: Some tables might benefit from different batch size than the default one, either smaller or larger, depending on the size of the table and performance of the source database
     - Usual use case is to set smaller batch size for tables with LOBs or other special data types, but user can also set larger batch size for large tables with simple data types and very small rows
 
 - 2025.07.01:
 
-  - Added detection of deadlocks into Orchestrator - creation of constraints; If deadlock is detected, worker re-tries the action after a short delay
+  - Added detection of errors (including deadlocks) into Orchestrator - creation of constraints; If creation of constraints fails, worker re-tries the action after a short delay
     - Rationale: When only data model without data is migrated, deadlock can happen if multiple workers try to create at the same time constraints referencing the same table
     - This happens only on some testing databases like Sakila, where data model heavily relies on constraints, but was seen repeatedly during tests
 

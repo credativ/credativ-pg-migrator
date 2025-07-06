@@ -37,11 +37,7 @@ class InformixConnector(DatabaseConnector):
     def connect(self):
         if self.config_parser.get_connectivity(self.source_or_target) == 'odbc':
             connection_string = self.config_parser.get_connect_string(self.source_or_target)
-            username = self.config_parser.get_db_config(self.source_or_target)['username']
-            password = self.config_parser.get_db_config(self.source_or_target)['password']
-            self.connection = pyodbc.connect(
-                f"DRIVER={{IBM INFORMIX ODBC DRIVER}};SERVER={connection_string};UID={username};PWD={password}"
-            )
+            self.connection = pyodbc.connect(connection_string)
         elif self.config_parser.get_connectivity(self.source_or_target) == 'jdbc':
             connection_string = self.config_parser.get_connect_string(self.source_or_target)
             username = self.config_parser.get_db_config(self.source_or_target)['username']

@@ -694,6 +694,7 @@ class PostgreSQLConnector(DatabaseConnector):
 
                 # offset = 0
                 cursor = self.connection.cursor()
+                cursor.arraysize = batch_size
 
                 batch_start_time = time.time()
                 reading_start_time = batch_start_time

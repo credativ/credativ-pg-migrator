@@ -7,6 +7,7 @@
   - Adjusted setting of cursor.arraysize in all connectors based on the batch size defined in the config file
     - Rationale: According to documentation, this should allow to better control the performance of data migration, influence in local tests was small, but measurable
     - Only Oracle needs special handling, performance degrades significantly with too high arraysize, so we set it to 1000 for larger batch sizes
+  - Started to add simple wiki pages describing how to set up connectivity
 
 - 2025.07.03:
 

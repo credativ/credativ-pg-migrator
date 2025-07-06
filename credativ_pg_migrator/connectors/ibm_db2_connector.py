@@ -304,6 +304,7 @@ class IBMDB2Connector(DatabaseConnector):
                 self.config_parser.print_log_message( 'DEBUG', f"Worker {worker_id}: Fetching data with cursor using query: {query}")
 
                 cursor = self.connection.cursor()
+                cursor.arraysize = batch_size
 
                 batch_start_time = time.time()
                 reading_start_time = batch_start_time

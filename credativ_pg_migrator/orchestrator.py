@@ -566,6 +566,14 @@ class Orchestrator:
                         break  # Exit loop if successful
                     except Exception as e:
                         self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Error creating constraint {constraint_name}: {e}")
+                        error_texts = [
+                            "no unique constraint matching",
+                            "is violated by some row",
+                        ]
+                        if any(txt in str(e).lower() for txt in error_texts):
+                            self.migrator_tables.update_constraint_status(constraint_data['id'], False, f'ERROR: {e}')
+                            worker_target_connection.disconnect()
+                            return False
                         self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Retrying ({creation_try}) to create constraint {constraint_name}...")
                         if creation_try > 5:
                             self.handle_error(e, f"constraint_worker {worker_id}: Failed to create {constraint_name} after {creation_try} attempts.")

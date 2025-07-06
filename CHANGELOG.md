@@ -2,6 +2,11 @@
 
 ## 0.9.2 - 2025.xx.xx
 
+- 2025.07.06:
+
+  - Adjusted setting of cursor.arraysize in all connectors based on the batch size defined in the config file
+    - Rationale: According to documentation, this should allow to better control the performance of data migration, influence in local tests was small, but measurable
+
 - 2025.07.03:
 
   - Added db_locale setting into config file for source database - currently used only for Informix

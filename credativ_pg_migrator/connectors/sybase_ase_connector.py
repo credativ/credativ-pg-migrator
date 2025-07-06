@@ -1056,6 +1056,7 @@ class SybaseASEConnector(DatabaseConnector):
                 self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Fetching data with cursor using query: {query}")
 
                 sybase_cursor = self.connection.cursor()
+                sybase_cursor.arraysize = batch_size
 
                 batch_start_time = time.time()
                 reading_start_time = batch_start_time

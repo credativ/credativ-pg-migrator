@@ -1134,6 +1134,7 @@ class InformixConnector(DatabaseConnector):
 
                 part_name = 'execute query'
                 cursor = self.connection.cursor()
+                cursor.arraysize = batch_size
 
                 batch_start_time = time.time()
                 reading_start_time = batch_start_time

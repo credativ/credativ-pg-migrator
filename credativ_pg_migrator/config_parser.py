@@ -126,11 +126,13 @@ class ConfigParser:
                 raise ValueError(f"Unsupported Postgres connectivity: {connectivity}")
         elif db_config['type'] == 'informix':
             if connectivity == 'odbc':
-                return f"DRIVER={db_config['odbc']['driver']};SERVER={db_config['server']};UID={db_config['username']};PWD={db_config['password']}"
+                return f"DRIVER={db_config['odbc']['driver']};SERVER={db_config['server']};HOST={db_config['host']};SERVICE={db_config['port']};UID={db_config['username']};PWD={db_config['password']};DATABASE={db_config['database']};DB_LOCALE={db_locale};CLIENT_LOCALE={db_locale}"
             elif connectivity == 'jdbc':
                 # ;user={db_config['username']};password={db_config['password']}
                 return f"jdbc:informix-sqli://{db_config['host']}:{db_config['port']}/{db_config['database']}:INFORMIXSERVER={db_config['server']};DB_LOCALE={db_locale}"
                 # ;CLIENT_LOCALE={client_locale}
+            elif connectivity == 'native':
+                return f"SERVER={db_config['server']};DATABASE={db_config['database']};HOST={db_config['host']};SERVICE={db_config['port']};UID={db_config['username']};PWD={db_config['password']};DB_LOCALE={db_locale};CLIENT_LOCALE={db_locale}"
             else:
                 raise ValueError(f"Unsupported Informix connectivity: {connectivity}")
         elif db_config['type'] == 'sybase_ase':

@@ -22,6 +22,7 @@ import traceback
 import pyodbc
 import time
 import datetime
+import IfxPy
 
 class InformixConnector(DatabaseConnector):
     def __init__(self, config_parser, source_or_target):
@@ -37,13 +38,21 @@ class InformixConnector(DatabaseConnector):
     def connect(self):
         if self.config_parser.get_connectivity(self.source_or_target) == 'odbc':
             connection_string = self.config_parser.get_connect_string(self.source_or_target)
+            self.config_parser.print_log_message( 'DEBUG3', f"Connecting to Informix via ODBC with connection string: {connection_string}")
             self.connection = pyodbc.connect(connection_string)
+        elif self.config_parser.get_connectivity(self.source_or_target) == 'native':
+            connection_string = self.config_parser.get_connect_string(self.source_or_target)
+            username = self.config_parser.get_db_config(self.source_or_target)['username']
+            password = self.config_parser.get_db_config(self.source_or_target)['password']
+            self.config_parser.print_log_message( 'DEBUG3', f"Connecting to Informix via native driver with connection string: {connection_string}, username: {username}")
+            self.connection = IfxPy.connect(connection_string, username, password)
         elif self.config_parser.get_connectivity(self.source_or_target) == 'jdbc':
             connection_string = self.config_parser.get_connect_string(self.source_or_target)
             username = self.config_parser.get_db_config(self.source_or_target)['username']
             password = self.config_parser.get_db_config(self.source_or_target)['password']
             jdbc_driver = self.config_parser.get_db_config(self.source_or_target)['jdbc']['driver']
             jdbc_libraries = self.config_parser.get_db_config(self.source_or_target)['jdbc']['libraries']
+            self.config_parser.print_log_message( 'DEBUG3', f"Connecting to Informix via JDBC with connection string: {connection_string}, driver: {jdbc_driver}, libraries: {jdbc_libraries}")
             self.connection = jaydebeapi.connect(
                 jdbc_driver,
                 connection_string,
@@ -51,7 +60,7 @@ class InformixConnector(DatabaseConnector):
                 jdbc_libraries
             )
         else:
-            raise ValueError(f"Unsupported connectivity: {self.config_parser.get_connectivity(self.source_or_target)}")
+            raise ValueError(f"[informix_connector] Unsupported connectivity: {self.config_parser.get_connectivity(self.source_or_target)}")
 
     def disconnect(self):
         try:

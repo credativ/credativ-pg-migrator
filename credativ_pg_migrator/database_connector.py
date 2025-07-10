@@ -625,5 +625,22 @@ class DatabaseConnector(ABC):
         """
         pass
 
+    def get_top_fk_dependencies(self, settings):
+        """
+        Fetch top foreign key dependencies in the specified schema.
+        settings - dictionary with the following keys
+            - source_schema: str - schema name of the tables to be checked
+        Returns a dictionary with the top foreign key dependencies.
+        Each of these keys contains a dictionary with structure like this:
+        { ordinary_number: {
+            'owner': owner_name,
+            'table_name': table_name,
+            'fk_count': foreign_key_count,
+            'dependencies: list of source tables that have foreign key references to this table
+            }
+        }
+        """
+        pass
+
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

@@ -218,13 +218,14 @@ class Planner:
                                 f"{table['table_size']:,}"
                             ])
                     elif metric == 'by_constraints':
-                        headers = ["#", "Owner", "Table Name", "Constraints", "Rows", "Row Size", "Table Size"]
+                        headers = ["#", "Owner", "Table Name", "Type", "Constraints", "Rows", "Row Size", "Table Size"]
                         table_rows.append(headers)
                         for idx, table in tables.items():
                             table_rows.append([
                                 idx,
                                 table['owner'],
                                 table['table_name'],
+                                table['constraint_type'],
                                 f"{table.get('constraint_count', 0):,}",
                                 f"{table['row_count']:,}",
                                 f"{table['row_size']:,}",

@@ -1856,11 +1856,12 @@ class InformixConnector(DatabaseConnector):
             if top_n > 0:
                 query = f"""
                     select
-                        t.owner, tabname, count(*) as constraint_count, rowsize, nrows, rowsize*nrows as size
+                        t.owner, tabname, count(*) as constraint_count, rowsize, nrows, rowsize*nrows as size, constrtype
                     from systables t
                     join sysconstraints c on t.tabid = c.tabid
                     where t.owner = '{settings['source_schema']}' {exclude_clause}
-                    group by t.owner, tabname, rowsize, nrows, size
+                    AND constrtype IN ('R', 'C')
+                    group by t.owner, tabname, rowsize, nrows, size, constrtype
                     order by constraint_count desc limit {top_n}
                 """
                 self.config_parser.print_log_message('DEBUG2', f"Fetching top {top_n} tables BY CONSTRAINTS for schema {settings['source_schema']} with query: {query}")
@@ -1874,6 +1875,7 @@ class InformixConnector(DatabaseConnector):
                     top_tables['by_constraints'][order_num] = {
                         'owner': row[0].strip(),
                         'table_name': row[1].strip(),
+                        'constraint_type': 'FOREIGN KEY' if row[6].strip() == 'R' else 'CHECK',
                         'constraint_count': row[2],
                         'row_size': row[3],
                         'row_count': row[4],
@@ -1887,6 +1889,80 @@ class InformixConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', f"Error fetching top tables by constraints: {e}")
 
         return top_tables
+
+    def get_top_fk_dependencies(self, settings):
+        top_fk_dependencies = {}
+        source_schema = settings['source_schema']
+
+        # exclude_tables can be a list of table names or regex patterns
+        exclude_tables = self.config_parser.get_exclude_tables()
+        exclude_clause = ""
+        if exclude_tables:
+            clauses = []
+            for value in exclude_tables:
+                if value.startswith('^') or any(c in value for c in ['*', '.', '$', '[', ']', '?', '+', '|', '(', ')']):
+                    # Treat as regex pattern
+                    clauses.append(f"tabname NOT MATCHES '{value}'")
+                else:
+                    # Treat as exact table name
+                    clauses.append(f"tabname <> '{value}'")
+                if clauses:
+                    exclude_clause = " AND " + " AND ".join(clauses)
+
+        try:
+            order_num = 1
+            top_n = self.config_parser.get_top_n_fk_dependencies_by_tables()
+            if top_n > 0:
+                query = f"""
+                    SELECT
+                        t.owner, t.tabname, COUNT(*) AS fk_count
+                    FROM systables t
+                    JOIN sysconstraints c ON t.tabid = c.tabid
+                    WHERE c.constrtype = 'R' AND t.owner = '{source_schema}' {exclude_clause}
+                    GROUP BY t.owner, t.tabname
+                    ORDER BY fk_count DESC LIMIT {top_n}
+                """
+                self.config_parser.print_log_message('DEBUG2', f"Fetching top {top_n} foreign key dependencies BY TABLES for schema {settings['source_schema']} with query: {query}")
+                self.connect()
+                cursor = self.connection.cursor()
+                cursor.execute(query)
+                tables = cursor.fetchall()
+                for row in tables:
+                    top_fk_dependencies[order_num] = {
+                        'owner': row[0].strip(),
+                        'table_name': row[1].strip(),
+                        'fk_count': row[2],
+                    }
+                    order_num += 1
+
+                    query = f"""
+                    SELECT
+                        t.tabname || '.' || col.colname || ' -> ' || rt.tabname || '.' || rcol.colname AS dependency_columns
+                    FROM sysconstraints c
+                    JOIN systables t ON c.tabid = t.tabid
+                    JOIN sysindexes i ON c.idxname = i.idxname
+                    JOIN syscolumns col ON t.tabid = col.tabid AND col.colno IN (i.part1, i.part2, i.part3, i.part4, i.part5, i.part6, i.part7, i.part8, i.part9, i.part10, i.part11, i.part12, i.part13, i.part14, i.part15, i.part16)
+                    JOIN sysreferences r ON c.constrid = r.constrid
+                    JOIN systables rt ON r.ptabid = rt.tabid
+                    JOIN sysconstraints pc ON r."primary" = pc.constrid
+                    JOIN sysindexes pi ON pc.idxname = pi.idxname
+                    JOIN syscolumns rcol ON rt.tabid = rcol.tabid AND rcol.colno IN (pi.part1, pi.part2, pi.part3, pi.part4, pi.part5, pi.part6, pi.part7, pi.part8, pi.part9, pi.part10, pi.part11, pi.part12, pi.part13, pi.part14, pi.part15, pi.part16)
+                    WHERE c.constrtype = 'R' and rt.owner = '{row[0].strip()}' and rt.tabname = '{row[1].strip()}'
+                    """
+                    cursor.execute(query)
+                    dependencies = cursor.fetchall()
+                    dependency_columns = ', '.join([dep[0] for dep in dependencies])
+                    top_fk_dependencies[order_num - 1]['dependencies'] = dependency_columns
+
+                cursor.close()
+                self.disconnect()
+                self.config_parser.print_log_message('DEBUG2', f"Top {top_n} foreign key dependencies BY TABLES: {top_fk_dependencies}")
+            else:
+                self.config_parser.print_log_message('INFO', "Skipping fetching top foreign key dependencies by tables as the setting is not defined or set to 0")
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error fetching top foreign key dependencies by tables: {e}")
+
+        return top_fk_dependencies
 
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

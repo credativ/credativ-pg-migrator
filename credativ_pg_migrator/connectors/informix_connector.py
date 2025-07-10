@@ -1911,7 +1911,7 @@ class InformixConnector(DatabaseConnector):
 
         try:
             order_num = 1
-            top_n = self.config_parser.get_top_n_fk_dependencies_by_tables()
+            top_n = 10 # self.config_parser.get_top_n_fk_dependencies_by_tables()
             if top_n > 0:
                 query = f"""
                     SELECT
@@ -1928,13 +1928,6 @@ class InformixConnector(DatabaseConnector):
                 cursor.execute(query)
                 tables = cursor.fetchall()
                 for row in tables:
-                    top_fk_dependencies[order_num] = {
-                        'owner': row[0].strip(),
-                        'table_name': row[1].strip(),
-                        'fk_count': row[2],
-                    }
-                    order_num += 1
-
                     query = f"""
                     SELECT
                         t.tabname || '.' || col.colname || ' -> ' || rt.tabname || '.' || rcol.colname AS dependency_columns
@@ -1947,12 +1940,20 @@ class InformixConnector(DatabaseConnector):
                     JOIN sysconstraints pc ON r."primary" = pc.constrid
                     JOIN sysindexes pi ON pc.idxname = pi.idxname
                     JOIN syscolumns rcol ON rt.tabid = rcol.tabid AND rcol.colno IN (pi.part1, pi.part2, pi.part3, pi.part4, pi.part5, pi.part6, pi.part7, pi.part8, pi.part9, pi.part10, pi.part11, pi.part12, pi.part13, pi.part14, pi.part15, pi.part16)
-                    WHERE c.constrtype = 'R' and rt.owner = '{row[0].strip()}' and rt.tabname = '{row[1].strip()}'
+                    WHERE c.constrtype = 'R' and t.owner = '{row[0].strip()}' and t.tabname = '{row[1].strip()}'
                     """
                     cursor.execute(query)
                     dependencies = cursor.fetchall()
                     dependency_columns = ', '.join([dep[0] for dep in dependencies])
-                    top_fk_dependencies[order_num - 1]['dependencies'] = dependency_columns
+
+                    top_fk_dependencies[order_num] = {
+                        'owner': row[0].strip(),
+                        'table_name': row[1].strip(),
+                        'fk_count': row[2],
+                        'dependencies': dependency_columns,
+                    }
+
+                    order_num += 1
 
                 cursor.close()
                 self.disconnect()

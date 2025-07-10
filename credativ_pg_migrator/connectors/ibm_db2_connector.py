@@ -707,28 +707,44 @@ class IBMDB2Connector(DatabaseConnector):
         top_tables['by_constraints'] = {}
 
         source_schema = settings['source_schema']
-        query = f"""
-            SELECT
-                TABSCHEMA,
-                TABNAME,
-                SUM(DATA_OBJECT_P_SIZE + INDEX_OBJECT_P_SIZE) AS TOTAL_SIZE
-            FROM SYSIBMADM.ADMINTABINFO
-            WHERE TABSCHEMA = upper('{source_schema}')
-            GROUP BY TABSCHEMA, TABNAME
-            ORDER BY TOTAL_SIZE DESC
-            FETCH FIRST 10 ROWS ONLY
-        """
-        self.config_parser.print_log_message('DEBUG', f"Fetching top 10 biggest tables for schema {source_schema} with query: {query}")
         try:
-            cursor = self.connection.cursor()
-            cursor.execute(query)
-            tables = cursor.fetchall()
-            cursor.close()
-            return tables
+            order_num = 1
+            top_n = self.config_parser.get_top_n_tables_by_rows()
+            if top_n > 0:
+                query = f"""
+                    SELECT
+                    TABSCHEMA,
+                    TABNAME,
+                    CARD,
+                    SUM(DATA_OBJECT_P_SIZE + INDEX_OBJECT_P_SIZE) AS TOTAL_SIZE
+                    FROM SYSIBMADM.ADMINTABINFO
+                    WHERE TABSCHEMA = upper('{source_schema}')
+                    GROUP BY TABSCHEMA, TABNAME, CARD
+                    ORDER BY CARD DESC
+                    FETCH FIRST {top_n} ROWS ONLY
+                """
+                self.config_parser.print_log_message('DEBUG', f"Fetching top {top_n} tables by row count for schema {source_schema} with query: {query}")
+                cursor = self.connection.cursor()
+                cursor.execute(query)
+                tables = cursor.fetchall()
+                cursor.close()
+                order_num = 1
+                for row in tables:
+                    top_tables['by_rows'][order_num] = {
+                        'owner': row[0].strip(),
+                        'table_name': row[1].strip(),
+                        'row_count': row[2],
+                        'row_size': row[3],
+                    }
+                    order_num += 1
+                self.config_parser.print_log_message('DEBUG2', f"Top {top_n} tables BY ROWS: {top_tables}")
+            else:
+                self.config_parser.print_log_message('DEBUG', f"Top N tables by rows is set to 0, skipping fetching top tables by row count.")
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error fetching top 10 biggest tables: {e}")
-            raise
-#        return top_tables
+            self.config_parser.print_log_message('ERROR', f"Error fetching top {top_n} tables by row count: {e}")
+
+        return top_tables
+
 
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

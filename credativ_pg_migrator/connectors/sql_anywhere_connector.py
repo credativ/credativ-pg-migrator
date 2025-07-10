@@ -730,34 +730,44 @@ class SQLAnywhereConnector(DatabaseConnector):
         top_tables['by_columns'] = {}
         top_tables['by_indexes'] = {}
         top_tables['by_constraints'] = {}
-        # return top_tables
 
-        query = f"""
-            SELECT TOP 10
-                t.table_name,
-                table_page_count
-            FROM sys.systable t
-            WHERE creator in (SELECT DISTINCT user_id
-            FROM sys.SYSUSERPERM where user_name = '{settings.get('source_schema', 'public')}')
-            ORDER BY table_page_count DESC
-        """
+        source_schema = settings.get('source_schema', 'public')
         try:
-            self.connect()
-            cursor = self.connection.cursor()
-            cursor.execute(query)
-            tables = []
-            for row in cursor.fetchall():
-                tables.append({
-                    'table_name': row[0],
-                    'table_size_pages': row[1]
-                })
-            cursor.close()
-            self.disconnect()
-            return tables
+            order_num = 1
+            top_n = self.config_parser.get_top_n_tables_by_rows()
+            if top_n > 0:
+                query = f"""
+                    SELECT TOP {top_n}
+                    u.user_name AS owner,
+                    t.table_name,
+                    t.table_row_count AS row_count,
+                    t.table_page_count AS row_size
+                    FROM sys.systable t
+                    JOIN sys.sysuserperm u ON t.creator = u.user_id
+                    WHERE u.user_name = '{source_schema}'
+                    ORDER BY t.table_row_count DESC
+                """
+                self.connect()
+                cursor = self.connection.cursor()
+                cursor.execute(query)
+                order_num = 1
+                cursor.close()
+                self.disconnect()
+                for row in cursor.fetchall():
+                    top_tables['by_rows'][order_num] = {
+                        'owner': row[0].strip(),
+                        'table_name': row[1].strip(),
+                        'row_count': row[2],
+                        'row_size': row[3],
+                    }
+                    order_num += 1
+                self.config_parser.print_log_message('DEBUG', f"Top {top_n} tables by rows fetched successfully")
+            else:
+                self.config_parser.print_log_message('DEBUG', "Top N tables by rows is not configured or set to 0")
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
-            self.config_parser.print_log_message('ERROR', e)
-            raise
+            self.config_parser.print_log_message('ERROR', f"Error fetching top tables by rows: {e}")
+
+        return top_tables
 
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

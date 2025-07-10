@@ -1195,35 +1195,50 @@ class PostgreSQLConnector(DatabaseConnector):
         # return top_tables
 
         source_schema = settings.get('source_schema', 'public')
-        query = f"""
-            SELECT
-                c.relname AS table_name,
-                pg_total_relation_size(c.oid) AS table_size
-            FROM
-                pg_class c
-            JOIN
-                pg_namespace n ON n.oid = c.relnamespace
-            WHERE
-                c.relkind = 'r' AND n.nspname = '{source_schema}'
-            ORDER BY
-                pg_total_relation_size(c.oid) DESC
-            LIMIT 10;
-        """
-        self.connect()
-        cursor = self.connection.cursor()
-        cursor.execute(query)
-        results = cursor.fetchall()
-        cursor.close()
+        try:
+            order_num = 1
+            top_n = self.config_parser.get_top_n_tables_by_rows()
+            if top_n > 0:
+                query = f"""
+                    SELECT
+                    n.nspname AS owner,
+                    c.relname AS table_name,
+                    pg_class.reltuples::bigint AS row_count,
+                    pg_total_relation_size(c.oid) AS row_size
+                    FROM
+                    pg_class c
+                    JOIN
+                    pg_namespace n ON n.oid = c.relnamespace
+                    WHERE
+                    c.relkind = 'r' AND n.nspname = '{source_schema}'
+                    ORDER BY
+                    pg_class.reltuples DESC
+                    LIMIT {top_n};
+                """
+                self.connect()
+                cursor = self.connection.cursor()
+                cursor.execute(query)
+                results = cursor.fetchall()
+                cursor.close()
+                self.disconnect()
 
-        top_tables = {}
-        for ordinal_number, (table_name, table_size) in enumerate(results, start=1):
-            top_tables[ordinal_number] = {
-                'table_name': table_name,
-                'size_bytes': table_size,
-                'total_rows': ''
-            }
+                order_num = 1
+                for row in results:
+                    top_tables['by_rows'][order_num] = {
+                    'owner': row[0].strip(),
+                    'table_name': row[1].strip(),
+                    'row_count': row[2],
+                    'row_size': row[3],
+                    }
+                    order_num += 1
 
-        self.disconnect()
+                self.config_parser.print_log_message('DEBUG2', f"Top {top_n} tables by rows: {top_tables['by_rows']}")
+            else:
+                self.config_parser.print_log_message('DEBUG', "Top N tables by rows is not configured or set to 0, skipping this part.")
+
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error fetching top tables by rows: {e}")
+
         return top_tables
 
 if __name__ == "__main__":

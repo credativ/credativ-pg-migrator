@@ -9,7 +9,8 @@
     - Old function get_top10_biggest_tables was refactored to get_top_n_tables, which returns a dictionary with all TOP N tables based on the defined criteria - this way we also standarize the output of the function across all connectors
     - Function skips tables which are excluded from migration (exclude_tables parameter in the config file)
   - Added new part of pre-migration analysis - function get_top_fk_dependencies which returns details about foreign key dependencies for the tables with the biggest count of foreign keys
-    - Rationale: This is very useful in case we need to migrate only some parts of data - allows to identify tables which are heavily dependent on other tables and have therefore the biggest probability of breaking foreign key constraints during migration
+    - This is very useful in case we need to migrate only some parts of data - allows to identify tables which are heavily dependent on other tables and have therefore the biggest probability of breaking foreign key constraints during migration
+  - Improved usage of dry-run command line parameter - if "--dry-run" is used, migrator will do pre-migration analysis of the source database, read all objects of the data model and store them in protocol tables but will not migrate any data - this allows to better understand the source database and its structure before starting the actual migration
 
 - 2025.07.06:
 

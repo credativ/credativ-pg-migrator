@@ -172,10 +172,13 @@ remote_objects_substitution:
 
 # Limitations for data migration
 # "Table name (or pattern)", "condition for limiting data (without WHERE)", "column name (or pattern) - use condition when column is present in the table"
+# condition can contain placeholders {source_schema} and {source_table} to reference schema and table name for which condition will be applied
+# placeholders will be replaced with proper values during migration
 data_migration_limitation:
   - [".*", "date >= '2000-01-01'", "date"]
   - [".*", "movie_id in (select id from movies where date >= '2000-01-01')", "movie_id"]
   - ["movie_references", "referenced_id in (select id from movies where date >= '2000-01-01')", "referenced_id"]
+  - [".*", "id >= (select max(id) from {source_schema}.{source_table})", "id"]
 
 # Configurable partitioning for target tables
 # partitioning:

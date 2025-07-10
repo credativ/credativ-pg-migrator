@@ -449,6 +449,7 @@ class Orchestrator:
                     self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Found data migration limitations matching table {target_table}: {rows_migration_limitations}")
                     for limitation in rows_migration_limitations:
                         where_clause = limitation[0]
+                        where_clause = where_clause.replace('{source_schema}', table_data['source_schema']).replace('{source_table}', table_data['source_table'])
                         use_when_column_name = limitation[1]
                         for col_order_num, column_info in table_data['source_columns'].items():
                             column_name = column_info['column_name']

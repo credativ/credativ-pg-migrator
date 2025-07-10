@@ -1705,7 +1705,7 @@ class InformixConnector(DatabaseConnector):
             if top_n > 0:
                 query = f"""
                     select
-                        owner, tabname, nrows, rowsize
+                        owner, tabname, nrows, rowsize, rowsize*nrows as size
                     from systables where owner = '{settings['source_schema']}'
                     order by nrows desc limit {top_n}
                 """
@@ -1722,6 +1722,7 @@ class InformixConnector(DatabaseConnector):
                         'table_name': row[1].strip(),
                         'row_count': row[2],
                         'row_size': row[3],
+                        'table_size': row[4],
                     }
                     order_num += 1
                 self.config_parser.print_log_message('DEBUG2', f"Top {top_n} tables BY ROWS: {top_tables}")
@@ -1768,11 +1769,11 @@ class InformixConnector(DatabaseConnector):
             if top_n > 0:
                 query = f"""
                     select
-                        t.owner, tabname, count(*) as column_count
+                        t.owner, tabname, count(*) as column_count, rowsize, nrows, rowsize*nrows as size
                     from systables t
                     join syscolumns c on t.tabid = c.tabid
                     where t.owner = '{settings['source_schema']}'
-                    group by t.owner, tabname
+                    group by t.owner, tabname, rowsize, nrows, size
                     order by column_count desc limit {top_n}
                 """
                 self.config_parser.print_log_message('DEBUG2', f"Fetching top {top_n} tables BY COLUMNS for schema {settings['source_schema']} with query: {query}")
@@ -1787,6 +1788,9 @@ class InformixConnector(DatabaseConnector):
                         'owner': row[0].strip(),
                         'table_name': row[1].strip(),
                         'column_count': row[2],
+                        'row_size': row[3],
+                        'row_count': row[4],
+                        'table_size': row[5],
                     }
                     order_num += 1
                 self.config_parser.print_log_message('DEBUG2', f"Top {top_n} tables BY COLUMNS: {top_tables}")
@@ -1801,11 +1805,11 @@ class InformixConnector(DatabaseConnector):
             if top_n > 0:
                 query = f"""
                     select
-                        t.owner, tabname, count(*) as index_count
+                        t.owner, tabname, count(*) as index_count, rowsize, nrows, rowsize*nrows as size
                     from systables t
                     join sysindexes i on t.tabid = i.tabid
                     where t.owner = '{settings['source_schema']}'
-                    group by t.owner, tabname
+                    group by t.owner, tabname, rowsize, nrows, size
                     order by index_count desc limit {top_n}
                 """
                 self.config_parser.print_log_message('DEBUG2', f"Fetching top {top_n} tables BY INDEXES for schema {settings['source_schema']} with query: {query}")
@@ -1820,6 +1824,9 @@ class InformixConnector(DatabaseConnector):
                         'owner': row[0].strip(),
                         'table_name': row[1].strip(),
                         'index_count': row[2],
+                        'row_size': row[3],
+                        'row_count': row[4],
+                        'table_size': row[5],
                     }
                     order_num += 1
                 self.config_parser.print_log_message('DEBUG2', f"Top {top_n} tables BY INDEXES: {top_tables}")
@@ -1834,11 +1841,11 @@ class InformixConnector(DatabaseConnector):
             if top_n > 0:
                 query = f"""
                     select
-                        t.owner, tabname, count(*) as constraint_count
+                        t.owner, tabname, count(*) as constraint_count, rowsize, nrows, rowsize*nrows as size
                     from systables t
                     join sysconstraints c on t.tabid = c.tabid
                     where t.owner = '{settings['source_schema']}'
-                    group by t.owner, tabname
+                    group by t.owner, tabname, rowsize, nrows, size
                     order by constraint_count desc limit {top_n}
                 """
                 self.config_parser.print_log_message('DEBUG2', f"Fetching top {top_n} tables BY CONSTRAINTS for schema {settings['source_schema']} with query: {query}")
@@ -1853,6 +1860,9 @@ class InformixConnector(DatabaseConnector):
                         'owner': row[0].strip(),
                         'table_name': row[1].strip(),
                         'constraint_count': row[2],
+                        'row_size': row[3],
+                        'row_count': row[4],
+                        'table_size': row[5],
                     }
                     order_num += 1
                 self.config_parser.print_log_message('DEBUG2', f"Top {top_n} tables BY CONSTRAINTS: {top_tables}")

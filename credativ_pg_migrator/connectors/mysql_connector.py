@@ -826,7 +826,15 @@ class MySQLConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', f"Error fetching database size: {e}")
             raise
 
-    def get_top10_biggest_tables(self, settings):
+    def get_top_n_tables(self, settings):
+        top_tables = {}
+        top_tables['by_rows'] = {}
+        top_tables['by_size'] = {}
+        top_tables['by_columns'] = {}
+        top_tables['by_indexes'] = {}
+        top_tables['by_constraints'] = {}
+        # return top_tables
+
         query = f"""
             SELECT
                 TABLE_NAME,

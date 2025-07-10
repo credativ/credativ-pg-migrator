@@ -1,5 +1,17 @@
 # File contains muster configuration file for credativ-pg-migrator
 
+## Configuration for the pre migration analysis
+pre_migration_analysis:
+  # Section for listing TOP N tables from the source database
+  # by_rows - list tables by number of rows in the table - value is the number of TOP N tables to list
+  # part set to 0 is skipped, not listed
+  top_n_tables:
+    by_rows: 10
+    by_size: 10
+    by_columns: 10
+    by_indexes: 10
+    by_constraints: 10
+
 env_variables:
   # List of environment variables to set before running the migration
   # This is useful for setting up libraries that require specific environment variables
@@ -91,6 +103,10 @@ migration:
   # 0 = always change to text, -1 = never change to text, always migrate as varchar, >0 = convert varchar to text if length is >= this value
   # if parameter is missing, default is -1 -> migrate all varchars as varchars as they are
   varchar_to_text_length: 4000
+  # migrate_lob_values - if true, migrate LOB values (BLOB, CLOB) as text or bytea
+  # if false, LOB values will be skipped (migrated as NULL)
+  # if missing, default is true - LOB values will be migrated
+  migrate_lob_values: false
 
 table_batch_size:
   # Specify batch size for a table

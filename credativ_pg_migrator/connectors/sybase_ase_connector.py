@@ -1575,7 +1575,7 @@ class SybaseASEConnector(DatabaseConnector):
         self.disconnect()
         return size
 
-    def get_top10_biggest_tables(self, settings):
+    def get_top_n_tables(self, settings):
         """
         //TODO
         what about this query?:
@@ -1588,6 +1588,14 @@ class SybaseASEConnector(DatabaseConnector):
         where type = 'U'
         order by kbs DESC, table_name ASC
         """
+        top_tables = {}
+        top_tables['by_rows'] = {}
+        top_tables['by_size'] = {}
+        top_tables['by_columns'] = {}
+        top_tables['by_indexes'] = {}
+        top_tables['by_constraints'] = {}
+        # return top_tables
+
         source_schema = settings['source_schema']
         try:
             self.connect()

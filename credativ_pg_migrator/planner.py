@@ -250,7 +250,7 @@ class Planner:
                     col_widths = [max(len(str(row[i])) for row in table_rows) for i in range(len(table_rows[0]))]
                     for row in table_rows:
                         formatted_row = " | ".join(
-                            str(cell).ljust(col_widths[i]) if i < 3 else str(cell).rjust(col_widths[i])
+                            str(cell).ljust(col_widths[i]) if i < 3 or i == len(row) - 1 else str(cell).rjust(col_widths[i])
                             for i, cell in enumerate(row)
                         )
                         self.config_parser.print_log_message('INFO', f"  {formatted_row}")

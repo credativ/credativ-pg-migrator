@@ -2,6 +2,12 @@
 
 ## 0.9.2 - 2025.xx.xx
 
+- 2025.07.10
+
+  - Added config file part for configuring pre-migration analysis of the source database, added section for TOP N tables - user can define how many TOP N tables should be listed in the output based on row count, total size, column count, index count and constraint count
+    - Rationale: This will allow to better understand the source database and its structure, and to identify tables which might need special handling during migration
+    - Old function get_top10_biggest_tables was refactored to get_top_n_tables, which returns a dictionary with all TOP N tables based on the defined criteria - this way we also standarize the output of the function across all connectors
+
 - 2025.07.06:
 
   - Adjusted setting of cursor.arraysize in all connectors based on the batch size defined in the config file

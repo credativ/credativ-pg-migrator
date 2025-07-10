@@ -1115,6 +1115,8 @@ class InformixConnector(DatabaseConnector):
 
                     if col['data_type'].lower() == 'datetime':
                         select_columns_list.append(f"TO_CHAR({col['column_name']}, '%Y-%m-%d %H:%M:%S') as {col['column_name']}")
+                    elif col['data_type'].lower() in ['clob', 'blob'] and not self.config_parser.should_migrate_lob_values():
+                        select_columns_list.append(f"CAST(NULL as {col['data_type']}) as {col['column_name']}")
                     #     select_columns_list.append(f"ST_asText(`{col['column_name']}`) as `{col['column_name']}`")
                     # elif col['data_type'].lower() == 'set':
                     #     select_columns_list.append(f"cast(`{col['column_name']}` as char(4000)) as `{col['column_name']}`")
@@ -1162,9 +1164,9 @@ class InformixConnector(DatabaseConnector):
                             column_type = column['data_type']
                             target_column_type = target_columns[order_num]['data_type']
                             # if column_type.lower() in ['binary', 'bytea']:
-                            if column_type.lower() in ['blob']:
+                            if column_type.lower() in ['blob'] and record[column_name] is not None:
                                 record[column_name] = bytes(record[column_name].getBytes(1, int(record[column_name].length())))  # Convert 'com.informix.jdbc.IfxCblob' to bytes
-                            elif column_type.lower() in ['clob']:
+                            elif column_type.lower() in ['clob'] and record[column_name] is not None:
                                 # elif isinstance(record[column_name], IfxCblob):
                                 record[column_name] = record[column_name].getSubString(1, int(record[column_name].length()))  # Convert IfxCblob to string
                                 # record[column_name] = bytes(record[column_name].getBytes(1, int(record[column_name].length())))  # Convert IfxBblob to bytes
@@ -1689,32 +1691,176 @@ class InformixConnector(DatabaseConnector):
     def get_database_size(self):
         return None
 
-    def get_top10_biggest_tables(self, settings):
-        query = f"""
-            select
-                owner, tabname, rowsize, nrows, rowsize*nrows as size
-            from systables where owner = '{settings['source_schema']}'
-            order by size desc limit 10
-        """
-        self.config_parser.print_log_message('DEBUG', f"Fetching top 10 biggest tables for schema {settings['source_schema']} with query: {query}")
-        self.connect()
-        cursor = self.connection.cursor()
-        cursor.execute(query)
-        tables = cursor.fetchall()
-        cursor.close()
-        self.disconnect()
+    def get_top_n_tables(self, settings):
         top_tables = {}
-        order_num = 1
-        for row in tables:
-            top_tables[order_num] = {
-                'owner': row[0].strip(),
-                'table_name': row[1].strip(),
-                'row_size': row[2],
-                'row_count': row[3],
-                'size': row[4]
-            }
-            order_num += 1
-        self.config_parser.print_log_message('DEBUG', f"Top 10 biggest tables: {top_tables}")
+        top_tables['by_rows'] = {}
+        top_tables['by_size'] = {}
+        top_tables['by_columns'] = {}
+        top_tables['by_indexes'] = {}
+        top_tables['by_constraints'] = {}
+
+        try:
+            order_num = 1
+            top_n = self.config_parser.get_top_n_tables_by_rows()
+            if top_n > 0:
+                query = f"""
+                    select
+                        owner, tabname, nrows, rowsize
+                    from systables where owner = '{settings['source_schema']}'
+                    order by nrows desc limit {top_n}
+                """
+                self.config_parser.print_log_message('DEBUG2', f"Fetching top {top_n} tables BY ROWS for schema {settings['source_schema']} with query: {query}")
+                self.connect()
+                cursor = self.connection.cursor()
+                cursor.execute(query)
+                tables = cursor.fetchall()
+                cursor.close()
+                self.disconnect()
+                for row in tables:
+                    top_tables['by_rows'][order_num] = {
+                        'owner': row[0].strip(),
+                        'table_name': row[1].strip(),
+                        'row_count': row[2],
+                        'row_size': row[3],
+                    }
+                    order_num += 1
+                self.config_parser.print_log_message('DEBUG2', f"Top {top_n} tables BY ROWS: {top_tables}")
+            else:
+                self.config_parser.print_log_message('INFO', "Skipping fetching top tables by rows as the setting is not defined or set to 0")
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error fetching top tables by rows: {e}")
+
+        try:
+            order_num = 1
+            top_n = self.config_parser.get_top_n_tables_by_size()
+            if top_n > 0:
+                query = f"""
+                    select
+                        owner, tabname, rowsize, nrows, rowsize*nrows as size
+                    from systables where owner = '{settings['source_schema']}'
+                    order by size desc limit {top_n}
+                """
+                self.config_parser.print_log_message('DEBUG2', f"Fetching top {top_n} tables BY SIZE for schema {settings['source_schema']} with query: {query}")
+                self.connect()
+                cursor = self.connection.cursor()
+                cursor.execute(query)
+                tables = cursor.fetchall()
+                cursor.close()
+                self.disconnect()
+                for row in tables:
+                    top_tables['by_size'][order_num] = {
+                        'owner': row[0].strip(),
+                        'table_name': row[1].strip(),
+                        'table_size': row[4],
+                        'row_count': row[3],
+                        'row_size': row[2],
+                    }
+                    order_num += 1
+                self.config_parser.print_log_message('DEBUG2', f"Top {top_n} tables BY SIZE: {top_tables}")
+            else:
+                self.config_parser.print_log_message('INFO', "Skipping fetching top tables by size as the setting is not defined or set to 0")
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error fetching top tables by size: {e}")
+
+        try:
+            order_num = 1
+            top_n = self.config_parser.get_top_n_tables_by_columns()
+            if top_n > 0:
+                query = f"""
+                    select
+                        t.owner, tabname, count(*) as column_count
+                    from systables t
+                    join syscolumns c on t.tabid = c.tabid
+                    where t.owner = '{settings['source_schema']}'
+                    group by t.owner, tabname
+                    order by column_count desc limit {top_n}
+                """
+                self.config_parser.print_log_message('DEBUG2', f"Fetching top {top_n} tables BY COLUMNS for schema {settings['source_schema']} with query: {query}")
+                self.connect()
+                cursor = self.connection.cursor()
+                cursor.execute(query)
+                tables = cursor.fetchall()
+                cursor.close()
+                self.disconnect()
+                for row in tables:
+                    top_tables['by_columns'][order_num] = {
+                        'owner': row[0].strip(),
+                        'table_name': row[1].strip(),
+                        'column_count': row[2],
+                    }
+                    order_num += 1
+                self.config_parser.print_log_message('DEBUG2', f"Top {top_n} tables BY COLUMNS: {top_tables}")
+            else:
+                self.config_parser.print_log_message('INFO', "Skipping fetching top tables by columns as the setting is not defined or set to 0")
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error fetching top tables by columns: {e}")
+
+        try:
+            order_num = 1
+            top_n = self.config_parser.get_top_n_tables_by_indexes()
+            if top_n > 0:
+                query = f"""
+                    select
+                        t.owner, tabname, count(*) as index_count
+                    from systables t
+                    join sysindexes i on t.tabid = i.tabid
+                    where t.owner = '{settings['source_schema']}'
+                    group by t.owner, tabname
+                    order by index_count desc limit {top_n}
+                """
+                self.config_parser.print_log_message('DEBUG2', f"Fetching top {top_n} tables BY INDEXES for schema {settings['source_schema']} with query: {query}")
+                self.connect()
+                cursor = self.connection.cursor()
+                cursor.execute(query)
+                tables = cursor.fetchall()
+                cursor.close()
+                self.disconnect()
+                for row in tables:
+                    top_tables['by_indexes'][order_num] = {
+                        'owner': row[0].strip(),
+                        'table_name': row[1].strip(),
+                        'index_count': row[2],
+                    }
+                    order_num += 1
+                self.config_parser.print_log_message('DEBUG2', f"Top {top_n} tables BY INDEXES: {top_tables}")
+            else:
+                self.config_parser.print_log_message('INFO', "Skipping fetching top tables by indexes as the setting is not defined or set to 0")
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error fetching top tables by indexes: {e}")
+
+        try:
+            order_num = 1
+            top_n = self.config_parser.get_top_n_tables_by_constraints()
+            if top_n > 0:
+                query = f"""
+                    select
+                        t.owner, tabname, count(*) as constraint_count
+                    from systables t
+                    join sysconstraints c on t.tabid = c.tabid
+                    where t.owner = '{settings['source_schema']}'
+                    group by t.owner, tabname
+                    order by constraint_count desc limit {top_n}
+                """
+                self.config_parser.print_log_message('DEBUG2', f"Fetching top {top_n} tables BY CONSTRAINTS for schema {settings['source_schema']} with query: {query}")
+                self.connect()
+                cursor = self.connection.cursor()
+                cursor.execute(query)
+                tables = cursor.fetchall()
+                cursor.close()
+                self.disconnect()
+                for row in tables:
+                    top_tables['by_constraints'][order_num] = {
+                        'owner': row[0].strip(),
+                        'table_name': row[1].strip(),
+                        'constraint_count': row[2],
+                    }
+                    order_num += 1
+                self.config_parser.print_log_message('DEBUG2', f"Top {top_n} tables BY CONSTRAINTS: {top_tables}")
+            else:
+                self.config_parser.print_log_message('INFO', "Skipping fetching top tables by constraints as the setting is not defined or set to 0")
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error fetching top tables by constraints: {e}")
+
         return top_tables
 
 if __name__ == "__main__":

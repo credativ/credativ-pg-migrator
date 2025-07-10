@@ -824,7 +824,15 @@ class MsSQLConnector(DatabaseConnector):
         self.disconnect()
         return size
 
-    def get_top10_biggest_tables(self, settings):
+    def get_top_n_tables(self, settings):
+        top_tables = {}
+        top_tables['by_rows'] = {}
+        top_tables['by_size'] = {}
+        top_tables['by_columns'] = {}
+        top_tables['by_indexes'] = {}
+        top_tables['by_constraints'] = {}
+        # return top_tables
+
         source_schema = settings['source_schema']
         query = """
             SELECT TOP 10

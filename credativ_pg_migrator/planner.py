@@ -180,19 +180,6 @@ class Planner:
                                 f"{table['table_size']:,}"
                             ])
                     elif metric == 'by_size':
-                        headers = ["#", "Owner", "Table Name", "Size", "Rows", "Row Size", "Table Size"]
-                        table_rows.append(headers)
-                        for idx, table in tables.items():
-                            table_rows.append([
-                                idx,
-                                table['owner'],
-                                table['table_name'],
-                                f"{table['table_size']:,}",
-                                f"{table['row_count']:,}",
-                                f"{table['row_size']:,}",
-                                f"{table['table_size']:,}"
-                            ])
-                    elif metric == 'by_size':
                         headers = ["#", "Owner", "Table Name", "Size", "Rows", "Row Size"]
                         table_rows.append(headers)
                         for idx, table in tables.items():

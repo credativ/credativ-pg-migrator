@@ -1084,7 +1084,7 @@ class InformixConnector(DatabaseConnector):
             migrator_tables = settings['migrator_tables']
             migration_limitation = settings['migration_limitation']
 
-            source_table_rows = self.get_rows_count(source_schema, source_table)
+            source_table_rows = self.get_rows_count(source_schema, source_table, migration_limitation)
             target_table_rows = 0
 
             ## source_schema, source_table, source_table_id, source_table_rows, worker_id, target_schema, target_table, target_table_rows
@@ -1638,8 +1638,10 @@ class InformixConnector(DatabaseConnector):
         else:
             pass
 
-    def get_rows_count(self, table_schema: str, table_name: str):
+    def get_rows_count(self, table_schema: str, table_name: str, migration_limitation: str = None):
         query = f"""SELECT COUNT(*) FROM "{table_schema}".{table_name} """
+        if migration_limitation:
+            query += f" WHERE {migration_limitation}"
         self.config_parser.print_log_message('DEBUG3', f"get_rows_count query: {query}")
         cursor = self.connection.cursor()
         cursor.execute(query)
@@ -1728,6 +1730,34 @@ class InformixConnector(DatabaseConnector):
         date_time_columns = cursor.fetchall()
         return ', '.join([f"{col[1]} ({col[2]})" for col in date_time_columns]) if date_time_columns else None
 
+    def get_pk_columns(self, cursor, table_schema: str, table_name: str):
+        query = f"""
+            SELECT
+                coalesce(c.constrname, i.idxname) as index_name,
+                (SELECT colname FROM syscolumns ic WHERE ic.colno = i.part1 AND ic.tabid = i.tabid) as col1,
+                (SELECT colname FROM syscolumns ic WHERE ic.colno = i.part2 AND ic.tabid = i.tabid) as col2,
+                (SELECT colname FROM syscolumns ic WHERE ic.colno = i.part3 AND ic.tabid = i.tabid) as col3,
+                (SELECT colname FROM syscolumns ic WHERE ic.colno = i.part4 AND ic.tabid = i.tabid) as col4
+            FROM sysindexes i
+            LEFT JOIN sysconstraints c
+            ON i.tabid = c.tabid and i.idxname = c.idxname
+            LEFT JOIN sysindices i2
+            ON i.tabid = i2.tabid and i.idxname = i2.idxname
+            WHERE coalesce(c.constrtype, i.idxtype) = 'P'
+            AND i.tabid = (SELECT tabid FROM systables
+                WHERE tabname = '{table_name.strip()}'
+                AND owner = '{table_schema.strip()}')
+        """
+        self.config_parser.print_log_message('DEBUG3', f"Fetching PK columns for table {table_name.strip()} with query: {query}")
+        cursor.execute(query)
+        pk_columns = cursor.fetchall()
+        pk_column_names = []
+        for row in pk_columns:
+            for col in row[1:]:
+                if col:
+                    pk_column_names.append(col.strip())
+        return ', '.join(pk_column_names)
+
     def get_top_n_tables(self, settings):
         top_tables = {}
         top_tables['by_rows'] = {}
@@ -1757,7 +1787,10 @@ class InformixConnector(DatabaseConnector):
                 query = f"""
                     select
                         owner, tabname, nrows, rowsize, rowsize*nrows as size,
-                        (select count(*) from sysconstraints c where t.tabid = c.tabid and constrtype = 'R') as fk_count
+                        (select count(*) from sysconstraints c where t.tabid = c.tabid and constrtype = 'R') as fk_count,
+                        CASE WHEN bitand(flags, 1) = 1 THEN 'YES' ELSE 'NO' END AS has_rowid,
+                        (select count(*) FROM sysconstraints ic JOIN systables it ON ic.tabid = it.tabid JOIN sysreferences ir ON ic.constrid = ir.constrid
+                        JOIN systables irt ON ir.ptabid = irt.tabid JOIN sysconstraints ipc ON ir."primary" = ipc.constrid WHERE ic.constrtype = 'R' and irt.owner = t.owner and irt.tabname = t.tabname) as ref_fk_count
                     from systables t where owner = '{settings['source_schema']}' {exclude_clause}
                     order by nrows desc limit {top_n}
                 """
@@ -1775,7 +1808,10 @@ class InformixConnector(DatabaseConnector):
                         'row_size': row[3],
                         'table_size': row[4],
                         'fk_count': row[5],
-                        'date_time_columns': self.get_date_time_columns(cursor, row[0].strip(), row[1].strip())
+                        'date_time_columns': self.get_date_time_columns(cursor, row[0].strip(), row[1].strip()),
+                        'pk_columns': self.get_pk_columns(cursor, row[0].strip(), row[1].strip()),
+                        'has_rowid': row[6],
+                        'ref_fk_count': row[7],
                     }
                     order_num += 1
 
@@ -1794,7 +1830,10 @@ class InformixConnector(DatabaseConnector):
                 query = f"""
                     select
                         owner, tabname, rowsize, nrows, rowsize*nrows as size,
-                        (select count(*) from sysconstraints c where t.tabid = c.tabid and constrtype = 'R') as fk_count
+                        (select count(*) from sysconstraints c where t.tabid = c.tabid and constrtype = 'R') as fk_count,
+                        CASE WHEN bitand(flags, 1) = 1 THEN 'YES' ELSE 'NO' END AS has_rowid,
+                        (select count(*) FROM sysconstraints ic JOIN systables it ON ic.tabid = it.tabid JOIN sysreferences ir ON ic.constrid = ir.constrid
+                        JOIN systables irt ON ir.ptabid = irt.tabid JOIN sysconstraints ipc ON ir."primary" = ipc.constrid WHERE ic.constrtype = 'R' and irt.owner = t.owner and irt.tabname = t.tabname) as ref_fk_count
                     from systables t where owner = '{settings['source_schema']}' {exclude_clause}
                     order by size desc limit {top_n}
                 """
@@ -1811,7 +1850,10 @@ class InformixConnector(DatabaseConnector):
                         'row_count': row[3],
                         'row_size': row[2],
                         'fk_count': row[5],
-                        'date_time_columns': self.get_date_time_columns(cursor, row[0].strip(), row[1].strip())
+                        'date_time_columns': self.get_date_time_columns(cursor, row[0].strip(), row[1].strip()),
+                        'pk_columns': self.get_pk_columns(cursor, row[0].strip(), row[1].strip()),
+                        'has_rowid': row[6],
+                        'ref_fk_count': row[7],
                     }
                     order_num += 1
                 cursor.close()
@@ -1829,12 +1871,15 @@ class InformixConnector(DatabaseConnector):
                 query = f"""
                     select
                         t.owner, tabname, count(*) as column_count, rowsize, nrows, rowsize*nrows as size,
-                        (select count(*) from sysconstraints c where t.tabid = c.tabid and constrtype = 'R') as fk_count
+                        (select count(*) from sysconstraints c where t.tabid = c.tabid and constrtype = 'R') as fk_count,
+                        CASE WHEN bitand(flags, 1) = 1 THEN 'YES' ELSE 'NO' END AS has_rowid,
+                        (select count(*) FROM sysconstraints ic JOIN systables it ON ic.tabid = it.tabid JOIN sysreferences ir ON ic.constrid = ir.constrid
+                        JOIN systables irt ON ir.ptabid = irt.tabid JOIN sysconstraints ipc ON ir."primary" = ipc.constrid WHERE ic.constrtype = 'R' and irt.owner = t.owner and irt.tabname = t.tabname) as ref_fk_count
                     from systables t
                     join syscolumns c on t.tabid = c.tabid
                     where t.owner = '{settings['source_schema']}' {exclude_clause}
                     and c.colno > 0
-                    group by t.owner, tabname, rowsize, nrows, size, fk_count
+                    group by t.owner, tabname, rowsize, nrows, size, fk_count, has_rowid
                     order by column_count desc limit {top_n}
                 """
                 self.config_parser.print_log_message('DEBUG2', f"Fetching top {top_n} tables BY COLUMNS for schema {settings['source_schema']} with query: {query}")
@@ -1851,7 +1896,10 @@ class InformixConnector(DatabaseConnector):
                         'row_count': row[4],
                         'table_size': row[5],
                         'fk_count': row[6],
-                        'date_time_columns': self.get_date_time_columns(cursor, row[0].strip(), row[1].strip())
+                        'date_time_columns': self.get_date_time_columns(cursor, row[0].strip(), row[1].strip()),
+                        'pk_columns': self.get_pk_columns(cursor, row[0].strip(), row[1].strip()),
+                        'has_rowid': row[7],
+                        'ref_fk_count': row[8],
                     }
                     order_num += 1
                 cursor.close()
@@ -1869,11 +1917,14 @@ class InformixConnector(DatabaseConnector):
                 query = f"""
                     select
                         t.owner, tabname, count(*) as index_count, rowsize, nrows, rowsize*nrows as size,
-                        (select count(*) from sysconstraints c where t.tabid = c.tabid and constrtype = 'R') as fk_count
+                        (select count(*) from sysconstraints c where t.tabid = c.tabid and constrtype = 'R') as fk_count,
+                        CASE WHEN bitand(flags, 1) = 1 THEN 'YES' ELSE 'NO' END AS has_rowid,
+                        (select count(*) FROM sysconstraints ic JOIN systables it ON ic.tabid = it.tabid JOIN sysreferences ir ON ic.constrid = ir.constrid
+                        JOIN systables irt ON ir.ptabid = irt.tabid JOIN sysconstraints ipc ON ir."primary" = ipc.constrid WHERE ic.constrtype = 'R' and irt.owner = t.owner and irt.tabname = t.tabname) as ref_fk_count
                     from systables t
                     join sysindexes i on t.tabid = i.tabid
                     where t.owner = '{settings['source_schema']}' {exclude_clause}
-                    group by t.owner, tabname, rowsize, nrows, size, fk_count
+                    group by t.owner, tabname, rowsize, nrows, size, fk_count, has_rowid
                     order by index_count desc limit {top_n}
                 """
                 self.config_parser.print_log_message('DEBUG2', f"Fetching top {top_n} tables BY INDEXES for schema {settings['source_schema']} with query: {query}")
@@ -1890,7 +1941,10 @@ class InformixConnector(DatabaseConnector):
                         'row_count': row[4],
                         'table_size': row[5],
                         'fk_count': row[6],
-                        'date_time_columns': self.get_date_time_columns(cursor, row[0].strip(), row[1].strip())
+                        'date_time_columns': self.get_date_time_columns(cursor, row[0].strip(), row[1].strip()),
+                        'pk_columns': self.get_pk_columns(cursor, row[0].strip(), row[1].strip()),
+                        'has_rowid': row[7],
+                        'ref_fk_count': row[8],
                     }
                     order_num += 1
                 cursor.close()
@@ -1907,12 +1961,15 @@ class InformixConnector(DatabaseConnector):
             if top_n > 0:
                 query = f"""
                     select
-                        t.owner, tabname, count(*) as constraint_count, rowsize, nrows, rowsize*nrows as size, constrtype
+                        t.owner, tabname, count(*) as constraint_count, rowsize, nrows, rowsize*nrows as size, constrtype,
+                        CASE WHEN bitand(flags, 1) = 1 THEN 'YES' ELSE 'NO' END AS has_rowid,
+                        (select count(*) FROM sysconstraints ic JOIN systables it ON ic.tabid = it.tabid JOIN sysreferences ir ON ic.constrid = ir.constrid
+                        JOIN systables irt ON ir.ptabid = irt.tabid JOIN sysconstraints ipc ON ir."primary" = ipc.constrid WHERE ic.constrtype = 'R' and irt.owner = t.owner and irt.tabname = t.tabname) as ref_fk_count
                     from systables t
                     join sysconstraints c on t.tabid = c.tabid
                     where t.owner = '{settings['source_schema']}' {exclude_clause}
                     AND constrtype IN ('R', 'C')
-                    group by t.owner, tabname, rowsize, nrows, size, constrtype
+                    group by t.owner, tabname, rowsize, nrows, size, constrtype, has_rowid
                     order by constraint_count desc limit {top_n}
                 """
                 self.config_parser.print_log_message('DEBUG2', f"Fetching top {top_n} tables BY CONSTRAINTS for schema {settings['source_schema']} with query: {query}")
@@ -1929,7 +1986,10 @@ class InformixConnector(DatabaseConnector):
                         'row_size': row[3],
                         'row_count': row[4],
                         'table_size': row[5],
-                        'date_time_columns': self.get_date_time_columns(cursor, row[0].strip(), row[1].strip())
+                        'date_time_columns': self.get_date_time_columns(cursor, row[0].strip(), row[1].strip()),
+                        'pk_columns': self.get_pk_columns(cursor, row[0].strip(), row[1].strip()),
+                        'has_rowid': row[7],
+                        'ref_fk_count': row[8],
                     }
                     order_num += 1
                 cursor.close()

@@ -11,6 +11,8 @@
   - Added new part of pre-migration analysis - function get_top_fk_dependencies which returns details about foreign key dependencies for the tables with the biggest count of foreign keys
     - This is very useful in case we need to migrate only some parts of data - allows to identify tables which are heavily dependent on other tables and have therefore the biggest probability of breaking foreign key constraints during migration
   - Improved usage of dry-run command line parameter - if "--dry-run" is used, migrator will do pre-migration analysis of the source database, read all objects of the data model and store them in protocol tables but will not migrate any data - this allows to better understand the source database and its structure before starting the actual migration
+  - Added listing of FK and PK columns in the output of the Informix pre-migration analysis - this is useful for further analysis / setting migration limitations
+  - Added check if table contains ROWID column in the pre-migration analysis of Informix
 
 - 2025.07.06:
 

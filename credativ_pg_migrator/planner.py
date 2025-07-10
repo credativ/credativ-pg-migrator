@@ -161,14 +161,14 @@ class Planner:
             self.config_parser.print_log_message('INFO', f"Size: {source_db_size}")
 
             source_db_top10_tables = self.source_connection.get_top_n_tables({'source_schema': self.source_schema})
-            self.config_parser.print_log_message('INFO', "Top 10 tables in source database (by various metrics):")
+            self.config_parser.print_log_message('INFO', "Top tables in source database (by various metrics):")
             if source_db_top10_tables:
                 for metric, tables in source_db_top10_tables.items():
-                    self.config_parser.print_log_message('INFO', f"Top 10 tables by {metric}:")
+                    self.config_parser.print_log_message('INFO', f"Top tables by {metric}:")
                     # Collect rows for table output
                     table_rows = []
                     if metric == 'by_rows':
-                        headers = ["#", "Owner", "Table Name", "Rows", "Row Size", "Table Size", "FK Count", "Date/Time Columns"]
+                        headers = ["#", "Owner", "Table Name", "Rows", "Row Size", "Table Size", "FK", "Date/Time Columns", "PK Columns", "RowID", "Ref FK"]
                         table_rows.append(headers)
                         for idx, table in tables.items():
                             table_rows.append([
@@ -179,10 +179,13 @@ class Planner:
                                 f"{table['row_size']:,}",
                                 f"{table['table_size']:,}",
                                 f"{table['fk_count']:,}" if table['fk_count'] != 0 else '',
-                                f"{table['date_time_columns']}" if table['date_time_columns'] is not None else ''
+                                f"{table['date_time_columns']}" if table['date_time_columns'] is not None else '',
+                                f"{table['pk_columns']}" if table['pk_columns'] is not None else '',
+                                f"{table['has_rowid']}" if table['has_rowid'] is not None else '',
+                                f"{table['ref_fk_count']}" if table['ref_fk_count'] != 0 else '',
                             ])
                     elif metric == 'by_size':
-                        headers = ["#", "Owner", "Table Name", "Size", "Rows", "Row Size", "FK Count", "Date/Time Columns"]
+                        headers = ["#", "Owner", "Table Name", "Size", "Rows", "Row Size", "FK", "Date/Time Columns", "PK Columns", "RowID", "Ref FK"]
                         table_rows.append(headers)
                         for idx, table in tables.items():
                             table_rows.append([
@@ -193,10 +196,13 @@ class Planner:
                                 f"{table['row_count']:,}",
                                 f"{table['row_size']:,}",
                                 f"{table['fk_count']:,}" if table['fk_count'] != 0 else '',
-                                f"{table['date_time_columns']}" if table['date_time_columns'] is not None else ''
+                                f"{table['date_time_columns']}" if table['date_time_columns'] is not None else '',
+                                f"{table['pk_columns']}" if table['pk_columns'] is not None else '',
+                                f"{table['has_rowid']}" if table['has_rowid'] is not None else '',
+                                f"{table['ref_fk_count']}" if table['ref_fk_count'] != 0 else '',
                             ])
                     elif metric == 'by_columns':
-                        headers = ["#", "Owner", "Table Name", "Columns", "Rows", "Row Size", "Table Size", "FK Count", "Date/Time Columns"]
+                        headers = ["#", "Owner", "Table Name", "Columns", "Rows", "Row Size", "Table Size", "FK", "Date/Time Columns", "PK Columns", "RowID", "Ref FK"]
                         table_rows.append(headers)
                         for idx, table in tables.items():
                             table_rows.append([
@@ -208,10 +214,13 @@ class Planner:
                                 f"{table['row_size']:,}",
                                 f"{table['table_size']:,}",
                                 f"{table['fk_count']:,}" if table['fk_count'] != 0 else '',
-                                f"{table['date_time_columns']}" if table['date_time_columns'] is not None else ''
+                                f"{table['date_time_columns']}" if table['date_time_columns'] is not None else '',
+                                f"{table['pk_columns']}" if table['pk_columns'] is not None else '',
+                                f"{table['has_rowid']}" if table['has_rowid'] is not None else '',
+                                f"{table['ref_fk_count']}" if table['ref_fk_count'] != 0 else '',
                             ])
                     elif metric == 'by_indexes':
-                        headers = ["#", "Owner", "Table Name", "Indexes", "Rows", "Row Size", "Table Size", "FK Count", "Date/Time Columns"]
+                        headers = ["#", "Owner", "Table Name", "Indexes", "Rows", "Row Size", "Table Size", "FK", "Date/Time Columns", "PK Columns", "RowID", "Ref FK"]
                         table_rows.append(headers)
                         for idx, table in tables.items():
                             table_rows.append([
@@ -223,10 +232,13 @@ class Planner:
                                 f"{table['row_size']:,}",
                                 f"{table['table_size']:,}",
                                 f"{table['fk_count']:,}" if table['fk_count'] != 0 else '',
-                                f"{table['date_time_columns']}" if table['date_time_columns'] is not None else ''
+                                f"{table['date_time_columns']}" if table['date_time_columns'] is not None else '',
+                                f"{table['pk_columns']}" if table['pk_columns'] is not None else '',
+                                f"{table['has_rowid']}" if table['has_rowid'] is not None else '',
+                                f"{table['ref_fk_count']}" if table['ref_fk_count'] != 0 else '',
                             ])
                     elif metric == 'by_constraints':
-                        headers = ["#", "Owner", "Table Name", "Type", "Constraints", "Rows", "Row Size", "Table Size", "Date/Time Columns"]
+                        headers = ["#", "Owner", "Table Name", "Type", "Constraints", "Rows", "Row Size", "Table Size", "Date/Time Columns", "PK Columns", "RowID", "Ref FK"]
                         table_rows.append(headers)
                         for idx, table in tables.items():
                             table_rows.append([
@@ -238,7 +250,10 @@ class Planner:
                                 f"{table['row_count']:,}",
                                 f"{table['row_size']:,}",
                                 f"{table['table_size']:,}",
-                                f"{table['date_time_columns']}" if table['date_time_columns'] is not None else ''
+                                f"{table['date_time_columns']}" if table['date_time_columns'] is not None else '',
+                                f"{table['pk_columns']}" if table['pk_columns'] is not None else '',
+                                f"{table['has_rowid']}" if table['has_rowid'] is not None else '',
+                                f"{table['ref_fk_count']}" if table['ref_fk_count'] != 0 else '',
                             ])
                     else:
                         headers = ["#", "Table"]
@@ -250,14 +265,14 @@ class Planner:
                     col_widths = [max(len(str(row[i])) for row in table_rows) for i in range(len(table_rows[0]))]
                     for row in table_rows:
                         formatted_row = " | ".join(
-                            str(cell).ljust(col_widths[i]) if i < 3 or i == len(row) - 1 else str(cell).rjust(col_widths[i])
+                            str(cell).ljust(col_widths[i]) if i < 3 or i >= len(row) - 3 else str(cell).rjust(col_widths[i])
                             for i, cell in enumerate(row)
                         )
                         self.config_parser.print_log_message('INFO', f"  {formatted_row}")
             else:
                 self.config_parser.print_log_message('INFO', "No top tables data available.")
 
-            # list top 10 foreign key dependencies
+            # list Top foreign key dependencies
             source_db_top_fk_dependencies = self.source_connection.get_top_fk_dependencies({'source_schema': self.source_schema})
             self.config_parser.print_log_message('INFO', "Top foreign key dependencies in source database:")
             if source_db_top_fk_dependencies:
@@ -287,8 +302,8 @@ class Planner:
             target_db_size = self.target_connection.get_database_size()
             # self.config_parser.print_log_message('INFO', f"Size: {target_db_size}")
             # target_db_top10_tables = self.target_connection.get_top_n_tables({'source_schema': self.target_schema})
-            # self.config_parser.print_log_message('INFO', "Top 10 largest tables in target database:")
-            # self.config_parser.print_log_message('DEBUG', f"Target database top 10 tables: {target_db_top10_tables}")
+            # self.config_parser.print_log_message('INFO', "Top largest tables in target database:")
+            # self.config_parser.print_log_message('DEBUG', f"Target database Top tables: {target_db_top10_tables}")
             # for ord_num, table in target_db_top10_tables.items():
             #     self.config_parser.print_log_message('INFO', f"Table: {table['table_name']}, Size: {table['size_bytes']}, Rows: {table['total_rows'] if 'total_rows' in table else 'N/A'}")
 

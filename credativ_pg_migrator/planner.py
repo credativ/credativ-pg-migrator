@@ -168,7 +168,7 @@ class Planner:
                     # Collect rows for table output
                     table_rows = []
                     if metric == 'by_rows':
-                        headers = ["#", "Owner", "Table Name", "Rows", "Row Size"]
+                        headers = ["#", "Owner", "Table Name", "Rows", "Row Size", "Table Size"]
                         table_rows.append(headers)
                         for idx, table in tables.items():
                             table_rows.append([
@@ -176,7 +176,21 @@ class Planner:
                                 table['owner'],
                                 table['table_name'],
                                 f"{table['row_count']:,}",
-                                f"{table['row_size']:,}"
+                                f"{table['row_size']:,}",
+                                f"{table['table_size']:,}"
+                            ])
+                    elif metric == 'by_size':
+                        headers = ["#", "Owner", "Table Name", "Size", "Rows", "Row Size", "Table Size"]
+                        table_rows.append(headers)
+                        for idx, table in tables.items():
+                            table_rows.append([
+                                idx,
+                                table['owner'],
+                                table['table_name'],
+                                f"{table['table_size']:,}",
+                                f"{table['row_count']:,}",
+                                f"{table['row_size']:,}",
+                                f"{table['table_size']:,}"
                             ])
                     elif metric == 'by_size':
                         headers = ["#", "Owner", "Table Name", "Size", "Rows", "Row Size"]
@@ -188,37 +202,46 @@ class Planner:
                                 table['table_name'],
                                 f"{table['table_size']:,}",
                                 f"{table['row_count']:,}",
-                                f"{table['row_size']:,}"
+                                f"{table['row_size']:,}",
                             ])
                     elif metric == 'by_columns':
-                        headers = ["#", "Owner", "Table Name", "Columns"]
+                        headers = ["#", "Owner", "Table Name", "Columns", "Rows", "Row Size", "Table Size"]
                         table_rows.append(headers)
                         for idx, table in tables.items():
                             table_rows.append([
                                 idx,
                                 table['owner'],
                                 table['table_name'],
-                                f"{table['column_count']:,}"
+                                f"{table['column_count']:,}",
+                                f"{table['row_count']:,}",
+                                f"{table['row_size']:,}",
+                                f"{table['table_size']:,}"
                             ])
                     elif metric == 'by_indexes':
-                        headers = ["#", "Owner", "Table Name", "Indexes"]
+                        headers = ["#", "Owner", "Table Name", "Indexes", "Rows", "Row Size", "Table Size"]
                         table_rows.append(headers)
                         for idx, table in tables.items():
                             table_rows.append([
                                 idx,
                                 table['owner'],
                                 table['table_name'],
-                                f"{table['index_count']:,}"
+                                f"{table['index_count']:,}",
+                                f"{table['row_count']:,}",
+                                f"{table['row_size']:,}",
+                                f"{table['table_size']:,}"
                             ])
                     elif metric == 'by_constraints':
-                        headers = ["#", "Owner", "Table Name", "Constraints"]
+                        headers = ["#", "Owner", "Table Name", "Constraints", "Rows", "Row Size", "Table Size"]
                         table_rows.append(headers)
                         for idx, table in tables.items():
                             table_rows.append([
                                 idx,
                                 table['owner'],
                                 table['table_name'],
-                                f"{table.get('constraint_count', 0):,}"
+                                f"{table.get('constraint_count', 0):,}",
+                                f"{table['row_count']:,}",
+                                f"{table['row_size']:,}",
+                                f"{table['table_size']:,}"
                             ])
                     else:
                         headers = ["#", "Table"]
@@ -229,7 +252,10 @@ class Planner:
                     # Format as a table (simple padding)
                     col_widths = [max(len(str(row[i])) for row in table_rows) for i in range(len(table_rows[0]))]
                     for row in table_rows:
-                        formatted_row = " | ".join(str(cell).ljust(col_widths[i]) for i, cell in enumerate(row))
+                        formatted_row = " | ".join(
+                            str(cell).ljust(col_widths[i]) if i < 3 else str(cell).rjust(col_widths[i])
+                            for i, cell in enumerate(row)
+                        )
                         self.config_parser.print_log_message('INFO', f"  {formatted_row}")
             else:
                 self.config_parser.print_log_message('INFO', "No top tables data available.")

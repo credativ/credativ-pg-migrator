@@ -875,5 +875,9 @@ class MySQLConnector(DatabaseConnector):
 
         return top_tables
 
+    def get_top_fk_dependencies(self, settings):
+        top_fk_dependencies = {}
+        return top_fk_dependencies
+
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

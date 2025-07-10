@@ -49,16 +49,20 @@ class Orchestrator:
             ## But in Sybase ASE they are defined as sort of additional check constraint on the column
             # self.run_create_domains()
 
-            self.run_migrate_tables()
-            self.run_migrate_indexes('standard')
-            self.run_migrate_constraints()
-            self.run_migrate_views()
-            self.run_migrate_funcprocs()
-            self.run_migrate_triggers()
-            self.run_migrate_indexes('function_based')
-            self.run_migrate_comments()
+            if not self.config_parser.is_dry_run():
+                self.run_migrate_tables()
+                self.run_migrate_indexes('standard')
+                self.run_migrate_constraints()
+                self.run_migrate_views()
+                self.run_migrate_funcprocs()
+                self.run_migrate_triggers()
+                self.run_migrate_indexes('function_based')
+                self.run_migrate_comments()
 
-            self.run_post_migration_script()
+                self.run_post_migration_script()
+            else:
+                self.config_parser.print_log_message('INFO', "Dry run mode enabled. No data migration performed.")
+
             self.config_parser.print_log_message('INFO', "Orchestration complete.")
             self.migrator_tables.update_main_status('Orchestrator', '', True, 'finished OK')
 

@@ -434,6 +434,8 @@ class ConfigParser:
             else:
                 self.logger.info(message)
 
+    def is_dry_run(self):
+        return bool(self.args.dry_run)
 
     def get_indent(self):
         return self.config.get('migrator', {}).get('indent', MigratorConstants.get_default_indent())

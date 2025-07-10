@@ -1691,6 +1691,43 @@ class InformixConnector(DatabaseConnector):
     def get_database_size(self):
         return None
 
+    def get_date_time_columns(self, cursor, table_schema: str, table_name: str):
+        query = f"""
+            SELECT
+                c.colno,
+                c.colname,
+                CASE
+                    WHEN c.extended_id = 0 THEN
+                        CASE (CASE WHEN c.coltype >= 256 THEN c.coltype - 256 ELSE c.coltype END)
+                            WHEN 7 THEN 'DATE'
+                            WHEN 10 THEN 'DATETIME'
+                            -- Add other time-related types if needed
+                            ELSE NULL
+                        END
+                    ELSE
+                        CASE WHEN x.name IS NOT NULL THEN upper(x.name)
+                        ELSE NULL END
+                END AS coltype,
+                c.collength
+            FROM syscolumns c
+            LEFT JOIN sysxtdtypes x ON c.extended_id = x.extended_id
+            WHERE c.tabid = (
+                SELECT t.tabid
+                FROM systables t
+                WHERE t.tabname = '{table_name.strip()}'
+                AND t.owner = '{table_schema.strip()}'
+            )
+            AND (
+                (c.extended_id = 0 AND (c.coltype IN (7, 10) OR (c.coltype - 256) IN (7, 10)))
+                OR (c.extended_id <> 0 AND (UPPER(x.name) LIKE '%DATE%' OR UPPER(x.name) LIKE '%TIME%'))
+            )
+            ORDER BY c.colno
+            """
+        self.config_parser.print_log_message('DEBUG3', f"Fetching date/time columns for table {table_name.strip()} with query: {query}")
+        cursor.execute(query)
+        date_time_columns = cursor.fetchall()
+        return ', '.join([f"{col[1]} ({col[2]})" for col in date_time_columns]) if date_time_columns else None
+
     def get_top_n_tables(self, settings):
         top_tables = {}
         top_tables['by_rows'] = {}
@@ -1719,8 +1756,9 @@ class InformixConnector(DatabaseConnector):
             if top_n > 0:
                 query = f"""
                     select
-                        owner, tabname, nrows, rowsize, rowsize*nrows as size
-                    from systables where owner = '{settings['source_schema']}' {exclude_clause}
+                        owner, tabname, nrows, rowsize, rowsize*nrows as size,
+                        (select count(*) from sysconstraints c where t.tabid = c.tabid and constrtype = 'R') as fk_count
+                    from systables t where owner = '{settings['source_schema']}' {exclude_clause}
                     order by nrows desc limit {top_n}
                 """
                 self.config_parser.print_log_message('DEBUG2', f"Fetching top {top_n} tables BY ROWS for schema {settings['source_schema']} with query: {query}")
@@ -1728,17 +1766,21 @@ class InformixConnector(DatabaseConnector):
                 cursor = self.connection.cursor()
                 cursor.execute(query)
                 tables = cursor.fetchall()
-                cursor.close()
-                self.disconnect()
                 for row in tables:
+
                     top_tables['by_rows'][order_num] = {
                         'owner': row[0].strip(),
                         'table_name': row[1].strip(),
                         'row_count': row[2],
                         'row_size': row[3],
                         'table_size': row[4],
+                        'fk_count': row[5],
+                        'date_time_columns': self.get_date_time_columns(cursor, row[0].strip(), row[1].strip())
                     }
                     order_num += 1
+
+                cursor.close()
+                self.disconnect()
                 self.config_parser.print_log_message('DEBUG2', f"Top {top_n} tables BY ROWS: {top_tables}")
             else:
                 self.config_parser.print_log_message('INFO', "Skipping fetching top tables by rows as the setting is not defined or set to 0")
@@ -1751,8 +1793,9 @@ class InformixConnector(DatabaseConnector):
             if top_n > 0:
                 query = f"""
                     select
-                        owner, tabname, rowsize, nrows, rowsize*nrows as size
-                    from systables where owner = '{settings['source_schema']}' {exclude_clause}
+                        owner, tabname, rowsize, nrows, rowsize*nrows as size,
+                        (select count(*) from sysconstraints c where t.tabid = c.tabid and constrtype = 'R') as fk_count
+                    from systables t where owner = '{settings['source_schema']}' {exclude_clause}
                     order by size desc limit {top_n}
                 """
                 self.config_parser.print_log_message('DEBUG2', f"Fetching top {top_n} tables BY SIZE for schema {settings['source_schema']} with query: {query}")
@@ -1760,8 +1803,6 @@ class InformixConnector(DatabaseConnector):
                 cursor = self.connection.cursor()
                 cursor.execute(query)
                 tables = cursor.fetchall()
-                cursor.close()
-                self.disconnect()
                 for row in tables:
                     top_tables['by_size'][order_num] = {
                         'owner': row[0].strip(),
@@ -1769,8 +1810,12 @@ class InformixConnector(DatabaseConnector):
                         'table_size': row[4],
                         'row_count': row[3],
                         'row_size': row[2],
+                        'fk_count': row[5],
+                        'date_time_columns': self.get_date_time_columns(cursor, row[0].strip(), row[1].strip())
                     }
                     order_num += 1
+                cursor.close()
+                self.disconnect()
                 self.config_parser.print_log_message('DEBUG2', f"Top {top_n} tables BY SIZE: {top_tables}")
             else:
                 self.config_parser.print_log_message('INFO', "Skipping fetching top tables by size as the setting is not defined or set to 0")
@@ -1783,12 +1828,13 @@ class InformixConnector(DatabaseConnector):
             if top_n > 0:
                 query = f"""
                     select
-                        t.owner, tabname, count(*) as column_count, rowsize, nrows, rowsize*nrows as size
+                        t.owner, tabname, count(*) as column_count, rowsize, nrows, rowsize*nrows as size,
+                        (select count(*) from sysconstraints c where t.tabid = c.tabid and constrtype = 'R') as fk_count
                     from systables t
                     join syscolumns c on t.tabid = c.tabid
                     where t.owner = '{settings['source_schema']}' {exclude_clause}
                     and c.colno > 0
-                    group by t.owner, tabname, rowsize, nrows, size
+                    group by t.owner, tabname, rowsize, nrows, size, fk_count
                     order by column_count desc limit {top_n}
                 """
                 self.config_parser.print_log_message('DEBUG2', f"Fetching top {top_n} tables BY COLUMNS for schema {settings['source_schema']} with query: {query}")
@@ -1796,8 +1842,6 @@ class InformixConnector(DatabaseConnector):
                 cursor = self.connection.cursor()
                 cursor.execute(query)
                 tables = cursor.fetchall()
-                cursor.close()
-                self.disconnect()
                 for row in tables:
                     top_tables['by_columns'][order_num] = {
                         'owner': row[0].strip(),
@@ -1806,8 +1850,12 @@ class InformixConnector(DatabaseConnector):
                         'row_size': row[3],
                         'row_count': row[4],
                         'table_size': row[5],
+                        'fk_count': row[6],
+                        'date_time_columns': self.get_date_time_columns(cursor, row[0].strip(), row[1].strip())
                     }
                     order_num += 1
+                cursor.close()
+                self.disconnect()
                 self.config_parser.print_log_message('DEBUG2', f"Top {top_n} tables BY COLUMNS: {top_tables}")
             else:
                 self.config_parser.print_log_message('INFO', "Skipping fetching top tables by columns as the setting is not defined or set to 0")
@@ -1820,11 +1868,12 @@ class InformixConnector(DatabaseConnector):
             if top_n > 0:
                 query = f"""
                     select
-                        t.owner, tabname, count(*) as index_count, rowsize, nrows, rowsize*nrows as size
+                        t.owner, tabname, count(*) as index_count, rowsize, nrows, rowsize*nrows as size,
+                        (select count(*) from sysconstraints c where t.tabid = c.tabid and constrtype = 'R') as fk_count
                     from systables t
                     join sysindexes i on t.tabid = i.tabid
                     where t.owner = '{settings['source_schema']}' {exclude_clause}
-                    group by t.owner, tabname, rowsize, nrows, size
+                    group by t.owner, tabname, rowsize, nrows, size, fk_count
                     order by index_count desc limit {top_n}
                 """
                 self.config_parser.print_log_message('DEBUG2', f"Fetching top {top_n} tables BY INDEXES for schema {settings['source_schema']} with query: {query}")
@@ -1832,8 +1881,6 @@ class InformixConnector(DatabaseConnector):
                 cursor = self.connection.cursor()
                 cursor.execute(query)
                 tables = cursor.fetchall()
-                cursor.close()
-                self.disconnect()
                 for row in tables:
                     top_tables['by_indexes'][order_num] = {
                         'owner': row[0].strip(),
@@ -1842,8 +1889,12 @@ class InformixConnector(DatabaseConnector):
                         'row_size': row[3],
                         'row_count': row[4],
                         'table_size': row[5],
+                        'fk_count': row[6],
+                        'date_time_columns': self.get_date_time_columns(cursor, row[0].strip(), row[1].strip())
                     }
                     order_num += 1
+                cursor.close()
+                self.disconnect()
                 self.config_parser.print_log_message('DEBUG2', f"Top {top_n} tables BY INDEXES: {top_tables}")
             else:
                 self.config_parser.print_log_message('INFO', "Skipping fetching top tables by indexes as the setting is not defined or set to 0")
@@ -1869,8 +1920,6 @@ class InformixConnector(DatabaseConnector):
                 cursor = self.connection.cursor()
                 cursor.execute(query)
                 tables = cursor.fetchall()
-                cursor.close()
-                self.disconnect()
                 for row in tables:
                     top_tables['by_constraints'][order_num] = {
                         'owner': row[0].strip(),
@@ -1880,8 +1929,11 @@ class InformixConnector(DatabaseConnector):
                         'row_size': row[3],
                         'row_count': row[4],
                         'table_size': row[5],
+                        'date_time_columns': self.get_date_time_columns(cursor, row[0].strip(), row[1].strip())
                     }
                     order_num += 1
+                cursor.close()
+                self.disconnect()
                 self.config_parser.print_log_message('DEBUG2', f"Top {top_n} tables BY CONSTRAINTS: {top_tables}")
             else:
                 self.config_parser.print_log_message('INFO', "Skipping fetching top tables by constraints as the setting is not defined or set to 0")

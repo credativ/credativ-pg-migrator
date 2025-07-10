@@ -247,8 +247,30 @@ class Planner:
                         self.config_parser.print_log_message('INFO', f"  {formatted_row}")
             else:
                 self.config_parser.print_log_message('INFO', "No top tables data available.")
-            # for ord_num, table in source_db_top10_tables.items():
-            #     self.config_parser.print_log_message('INFO', f"Table: {table['table_name']}, Size: {table['size_bytes']}, Rows: {table['total_rows'] if 'total_rows' in table else 'N/A'}")
+
+            # list top 10 foreign key dependencies
+            source_db_top_fk_dependencies = self.source_connection.get_top_fk_dependencies({'source_schema': self.source_schema})
+            self.config_parser.print_log_message('INFO', "Top foreign key dependencies in source database:")
+            if source_db_top_fk_dependencies:
+                # Print as a nice table
+                headers = ["#", "Table Name", "Foreign Keys", "Dependencies"]
+                table_rows = [headers]
+                for ord_num, fk_deps in source_db_top_fk_dependencies.items():
+                    table_rows.append([
+                        ord_num,
+                        fk_deps['table_name'],
+                        fk_deps['fk_count'],
+                        fk_deps['dependencies']
+                    ])
+                # Calculate column widths
+                col_widths = [max(len(str(row[i])) for row in table_rows) for i in range(len(headers))]
+                for row in table_rows:
+                    formatted_row = " | ".join(
+                        str(cell).ljust(col_widths[i]) for i, cell in enumerate(row)
+                    )
+                    self.config_parser.print_log_message('INFO', f"  {formatted_row}")
+            else:
+                self.config_parser.print_log_message('INFO', "No foreign key dependencies found in source database.")
 
             self.config_parser.print_log_message('INFO', "***** Target database *****")
             target_db_version = self.target_connection.get_database_version()

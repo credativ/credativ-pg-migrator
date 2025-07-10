@@ -13,6 +13,7 @@
   - Improved usage of dry-run command line parameter - if "--dry-run" is used, migrator will do pre-migration analysis of the source database, read all objects of the data model and store them in protocol tables but will not migrate any data - this allows to better understand the source database and its structure before starting the actual migration
   - Added listing of FK and PK columns in the output of the Informix pre-migration analysis - this is useful for further analysis / setting migration limitations
   - Added check if table contains ROWID column in the pre-migration analysis of Informix
+  - Migration limitations in config file now allow placeholders {source_schema} and {source_table}
 
 - 2025.07.06:
 

@@ -1699,6 +1699,20 @@ class InformixConnector(DatabaseConnector):
         top_tables['by_indexes'] = {}
         top_tables['by_constraints'] = {}
 
+        # exclude_tables can be a list of table names or regex patterns
+        exclude_tables = self.config_parser.get_exclude_tables()
+        exclude_clause = ""
+        if exclude_tables:
+            clauses = []
+            for value in exclude_tables:
+                if value.startswith('^') or any(c in value for c in ['*', '.', '$', '[', ']', '?', '+', '|', '(', ')']):
+                    # Treat as regex pattern
+                    clauses.append(f"tabname NOT MATCHES '{value}'")
+                else:
+                    # Treat as exact table name
+                    clauses.append(f"tabname <> '{value}'")
+                if clauses:
+                    exclude_clause = " AND " + " AND ".join(clauses)
         try:
             order_num = 1
             top_n = self.config_parser.get_top_n_tables_by_rows()
@@ -1706,7 +1720,7 @@ class InformixConnector(DatabaseConnector):
                 query = f"""
                     select
                         owner, tabname, nrows, rowsize, rowsize*nrows as size
-                    from systables where owner = '{settings['source_schema']}'
+                    from systables where owner = '{settings['source_schema']}' {exclude_clause}
                     order by nrows desc limit {top_n}
                 """
                 self.config_parser.print_log_message('DEBUG2', f"Fetching top {top_n} tables BY ROWS for schema {settings['source_schema']} with query: {query}")
@@ -1738,7 +1752,7 @@ class InformixConnector(DatabaseConnector):
                 query = f"""
                     select
                         owner, tabname, rowsize, nrows, rowsize*nrows as size
-                    from systables where owner = '{settings['source_schema']}'
+                    from systables where owner = '{settings['source_schema']}' {exclude_clause}
                     order by size desc limit {top_n}
                 """
                 self.config_parser.print_log_message('DEBUG2', f"Fetching top {top_n} tables BY SIZE for schema {settings['source_schema']} with query: {query}")
@@ -1772,7 +1786,8 @@ class InformixConnector(DatabaseConnector):
                         t.owner, tabname, count(*) as column_count, rowsize, nrows, rowsize*nrows as size
                     from systables t
                     join syscolumns c on t.tabid = c.tabid
-                    where t.owner = '{settings['source_schema']}'
+                    where t.owner = '{settings['source_schema']}' {exclude_clause}
+                    and c.colno > 0
                     group by t.owner, tabname, rowsize, nrows, size
                     order by column_count desc limit {top_n}
                 """
@@ -1808,7 +1823,7 @@ class InformixConnector(DatabaseConnector):
                         t.owner, tabname, count(*) as index_count, rowsize, nrows, rowsize*nrows as size
                     from systables t
                     join sysindexes i on t.tabid = i.tabid
-                    where t.owner = '{settings['source_schema']}'
+                    where t.owner = '{settings['source_schema']}' {exclude_clause}
                     group by t.owner, tabname, rowsize, nrows, size
                     order by index_count desc limit {top_n}
                 """
@@ -1844,7 +1859,7 @@ class InformixConnector(DatabaseConnector):
                         t.owner, tabname, count(*) as constraint_count, rowsize, nrows, rowsize*nrows as size
                     from systables t
                     join sysconstraints c on t.tabid = c.tabid
-                    where t.owner = '{settings['source_schema']}'
+                    where t.owner = '{settings['source_schema']}' {exclude_clause}
                     group by t.owner, tabname, rowsize, nrows, size
                     order by constraint_count desc limit {top_n}
                 """

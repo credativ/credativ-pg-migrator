@@ -8,6 +8,12 @@
     - Rationale: Some legacy databases handle CHAR columns with large length slightly differently, therefore we need to convert them to TEXT only if they exceed the defined length
   - Due to many changes and longer time since the last release, we skip versioning directly to 0.9.5
   - Small repairs in pre-migration analysis in multiple connectors
+  - Improvements in migration limitations - added support for row limit - only tables with more than this number of rows will be limited by the condition
+    - Intended for special use cases, when we need to limit only big tables, but not small ones
+    - If row limit is not specified, limitation will be applied to all tables matching the pattern and having the specified column
+  - Debugging of real migration cases showed that migrator always runs requested number of parallel workers (unless only smaller than requested number of tables are not migrated yet), but there is a delay between start of the worker and insertion of new record into the protocol table. If database is extremely slow, this delay can be significant
+  - Config file option "table_batch_size" renamed to "table_settings" and additional options beside of batch_size have been allowed - table name can now be specified as a full name or regular expression
+    - Rationale: This is necessary for better control of the migration process - some tables should be created on the target database but we do not want to migrate data, or we want to skip indexes/constraints/triggers for some tables, or we want to set different batch size for some tables because of limitations on the source database
 
 - 2025.07.10
 

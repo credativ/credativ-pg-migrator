@@ -16,6 +16,7 @@
 
 import yaml
 from credativ_pg_migrator.constants import MigratorConstants
+import re
 
 class ConfigParser:
     def __init__(self, args, logger):
@@ -306,14 +307,40 @@ class ConfigParser:
     def should_create_tables(self):
         return self.config.get('migration', {}).get('create_tables', False)
 
-    def should_migrate_data(self):
+    def should_migrate_data(self, table_name=None):
+        if table_name:
+            table_settings = self.config.get('table_settings', {})
+            # table_settings is expected to be a list of dicts with 'table_name' and settings
+            if isinstance(table_settings, list):
+                for entry in table_settings:
+                    pattern = entry.get('table_name')
+                    # self.print_log_message('DEBUG3', f"should_migrate_data: checking table {table_name} with pattern {pattern}, setting is {entry.get('migrate_data', False)}")
+                    if pattern and re.fullmatch(pattern, table_name, re.IGNORECASE):
+                        # self.print_log_message('DEBUG3', f"should_migrate_data: table {table_name} matched pattern {pattern}, setting is {entry.get('migrate_data', False)}")
+                        return entry.get('migrate_data', False)
+        # self.print_log_message('DEBUG3', f"should_migrate_data: table {table_name} returned default setting {self.config.get('migration', {}).get('migrate_data', False)}")
         return self.config.get('migration', {}).get('migrate_data', False)
 
-    def should_migrate_indexes(self):
-        return self.config.get('migration', {}).get('migrate_indexes', False) # Default to False
+    def should_migrate_indexes(self, table_name=None):
+        if table_name:
+            table_settings = self.config.get('table_settings', {})
+            if isinstance(table_settings, list):
+                for entry in table_settings:
+                    pattern = entry.get('table_name')
+                    if pattern and re.fullmatch(pattern, table_name, re.IGNORECASE):
+                        return entry.get('migrate_indexes', False)
+        return self.config.get('migration', {}).get('migrate_indexes', False)
 
-    def should_migrate_constraints(self):
-        return self.config.get('migration', {}).get('migrate_constraints', False) # Default to False
+    def should_migrate_constraints(self, table_name=None):
+        if table_name:
+            table_settings = self.config.get('table_settings', {})
+            # table_settings is expected to be a list of dicts with 'table_name' and settings
+            if isinstance(table_settings, list):
+                for entry in table_settings:
+                    pattern = entry.get('table_name')
+                    if pattern and re.fullmatch(pattern, table_name, re.IGNORECASE):
+                        return entry.get('migrate_constraints', False)
+        return self.config.get('migration', {}).get('migrate_constraints', False)
 
     def should_migrate_funcprocs(self):
         return self.config.get('migration', {}).get('migrate_funcprocs', False)
@@ -321,7 +348,15 @@ class ConfigParser:
     def should_set_sequences(self):
         return self.config.get('migration', {}).get('set_sequences', False)
 
-    def should_migrate_triggers(self):
+    def should_migrate_triggers(self, table_name=None):
+        if table_name:
+            table_settings = self.config.get('table_settings', {})
+            # table_settings is expected to be a list of dicts with 'table_name' and settings
+            if isinstance(table_settings, list):
+                for entry in table_settings:
+                    pattern = entry.get('table_name')
+                    if pattern and re.fullmatch(pattern, table_name, re.IGNORECASE):
+                        return entry.get('migrate_triggers', False)
         return self.config.get('migration', {}).get('migrate_triggers', False)
 
     def should_migrate_views(self):

@@ -109,11 +109,22 @@ migration:
   # if missing, default is true - LOB values will be migrated
   migrate_lob_values: false
 
-table_batch_size:
-  # Specify batch size for a table
-  # If not specified, the default batch size from the migration section will be used
+table_settings:
+  # Specify individual table settings for the migration process - there override the global settings for the specific table matching the table_name
+  # table_name can be full table name or regular expression
+  # available settings:
+  # - batch_size: number of rows to migrate in one batch, default is 100000
+  # - migrate_data: true/false - if data should be migrated, default is true
+  # - migrate_indexes: true/false - if indexes should be migrated, default is true
+  # - migrate_constraints: true/false - if constraints should be migrated, default is true
+  # - migrate_triggers: true/false - if triggers should be migrated, default is true
   - table_name: "table1"
     batch_size: 50000
+    migrate_data: true
+    migrate_indexes: false
+    migrate_constraints: true
+    migrate_triggers: false
+
   - table_name: "table2"
     batch_size: 20000
 
@@ -172,14 +183,19 @@ remote_objects_substitution:
   - ["remotedb:dbo.table1", "remote_db.table1"]
 
 # Limitations for data migration
-# "Table name (or pattern)", "condition for limiting data (without WHERE)", "column name (or pattern) - use condition when column is present in the table"
-# condition can contain placeholders {source_schema} and {source_table} to reference schema and table name for which condition will be applied
-# placeholders will be replaced with proper values during migration
+# "Table name (or pattern)", "condition for limiting data (without WHERE)", "column name (or pattern) - use condition when column is present in the table", "row limit"
+#   - condition can contain placeholders {source_schema} and {source_table} to reference schema and table name for which condition will be applied
+#   - placeholders will be replaced with proper values during migration
+# row limit is optional, if specified, limitation will be applied only to tables with more than this number of rows
+#   - if row limit is not specified, limitation will be applied to all tables matching the pattern and having the specified column
 data_migration_limitation:
-  - [".*", "date >= '2000-01-01'", "date"]
-  - [".*", "movie_id in (select id from movies where date >= '2000-01-01')", "movie_id"]
-  - ["movie_references", "referenced_id in (select id from movies where date >= '2000-01-01')", "referenced_id"]
-  - [".*", "id >= (select max(id) from {source_schema}.{source_table})", "id"]
+  - [".*", "date >= '2000-01-01'", "date", 1000000]
+  - [".*", "movie_id in (select id from movies where date >= '2000-01-01')", "movie_id", 1000000]
+  - ["movie_references", "referenced_id in (select id from movies where date >= '2000-01-01')", "referenced_id", 1000000]
+  - [".*", "id >= (select max(id) from {source_schema}.{source_table})", "id", 1000000]
+
+
+  - ["PK_RANGE", ".*", 1000000]
 
 # Configurable partitioning for target tables
 # partitioning:

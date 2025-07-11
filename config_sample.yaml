@@ -119,7 +119,8 @@ migration:
   migrate_lob_values: false
   # automatic scheduled actions for the migration process
   # - list of actions to be performed at specific times during the migration process
-  # action can be scheduled based on time of day or after timer started at the beginning reaches set number of hours(minutes, seconds) - HH:MM:SS
+  # action can be scheduled based on date and time or based on timer - in hours
+  # timer is currently not implemented, so only datetime is used
   # actions:
   # - "pause" - pause the migration process at the specified time,
   # - "stop" - stop the migration process at the specified time,
@@ -127,7 +128,7 @@ migration:
   # if time is not specified, action is ignored
   scheduled_actions:
     - name: "pause at 1:00 in the morning"
-      time_of_day: "01:00"
+      datetime: "2025.07.11 01:00"
       # timer_hours: xx
       action: "pause"  # pause, stop, continue
 

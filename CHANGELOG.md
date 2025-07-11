@@ -21,6 +21,10 @@
     - Dividing migration of huge tables into chunks requires ordering of the rows in the source database, so it can lead to performance issues on some source databases
     - Ordering is done either by primary key or by columns used in some unique index, if non of these is available, then by all columns in the table in the order as they are defined in the source database
     - currently implemented only for Infomix and PostgreSQL connectors, support for other connectors will be added on demand
+  - Implemented option to pause and resume migration of data - added new section into migration part of config file - "scheduled_actions" - see description in the config file example
+    - Orchestrator checks before running migration of next data chunk if there is a scheduled action to pause the migration, and if so, it waits until the pause is removed
+    - Migrator will continue with migration of the next data chunk only after work is resumed - this is done by creating file "resume_migration" in the working directory - info message about pausing the migration contains the whole path and name of the file, so simle "touch" command with this full name will resume the migration
+    - Migrator immediately deletes the file "resume_migration" after resuming the migration, so it can later pause again based on other pause actions
 
 - 2025.07.10
 

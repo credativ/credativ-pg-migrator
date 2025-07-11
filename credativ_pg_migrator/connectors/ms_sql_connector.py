@@ -824,44 +824,59 @@ class MsSQLConnector(DatabaseConnector):
         self.disconnect()
         return size
 
-    def get_top10_biggest_tables(self, settings):
+    def get_top_n_tables(self, settings):
+        top_tables = {}
+        top_tables['by_rows'] = {}
+        top_tables['by_size'] = {}
+        top_tables['by_columns'] = {}
+        top_tables['by_indexes'] = {}
+        top_tables['by_constraints'] = {}
+
         source_schema = settings['source_schema']
-        query = """
-            SELECT TOP 10
-                s.name AS schema_name,
-                t.name AS table_name,
-                SUM(p.rows) AS row_count,
-                SUM(a.total_pages) * 8 AS total_size_kb
-            FROM sys.tables t
-            JOIN sys.schemas s ON t.schema_id = s.schema_id
-            JOIN sys.partitions p ON t.object_id = p.object_id AND p.index_id IN (0, 1)
-            JOIN sys.allocation_units a ON p.partition_id = a.container_id
-            WHERE s.name = '{source_schema}'
-            GROUP BY s.name, t.name
-            ORDER BY total_size_kb DESC
-        """
         try:
-            self.connect()
-            cursor = self.connection.cursor()
-            cursor.execute(query.format(source_schema=source_schema))
-            rows = cursor.fetchall()
-            biggest_tables = {}
             order_num = 1
-            for row in rows:
-                biggest_tables[order_num] = {
-                    'schema_name': row[0],
-                    'table_name': row[1],
-                    'row_count': row[2],
-                    'total_size_kb': row[3]
-                }
-                order_num += 1
-            cursor.close()
-            self.disconnect()
-            return biggest_tables
+            top_n = self.config_parser.get_top_n_tables_by_rows()
+            if top_n > 0:
+                query = f"""
+                    SELECT TOP {top_n}
+                    s.name AS schema_name,
+                    t.name AS table_name,
+                    SUM(p.rows) AS row_count,
+                    SUM(a.total_pages) * 8 * 1024 AS total_size
+                    FROM sys.tables t
+                    JOIN sys.schemas s ON t.schema_id = s.schema_id
+                    JOIN sys.partitions p ON t.object_id = p.object_id AND p.index_id IN (0, 1)
+                    JOIN sys.allocation_units a ON p.partition_id = a.container_id
+                    WHERE s.name = '{source_schema}'
+                    GROUP BY s.name, t.name
+                    ORDER BY total_size DESC
+                """
+                self.connect()
+                cursor = self.connection.cursor()
+                cursor.execute(query.format(source_schema=source_schema))
+                rows = cursor.fetchall()
+                cursor.close()
+                self.disconnect()
+                order_num = 1
+                for row in rows:
+                    top_tables['by_rows'][order_num] = {
+                        'owner': row[0].strip(),
+                        'table_name': row[1].strip(),
+                        'row_count': row[2],
+                        'table_size': row[3],
+                    }
+                    order_num += 1
+                self.config_parser.print_log_message('DEBUG', f"Top {top_n} tables by rows: {top_tables['by_rows']}")
+            else:
+                self.config_parser.print_log_message('DEBUG', "Top N tables by rows is not configured or set to 0, skipping this part.")
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
-            self.config_parser.print_log_message('ERROR', e)
-            raise e
+            self.config_parser.print_log_message('ERROR', f"Error fetching top tables by rows: {e}")
+
+        return top_tables
+
+    def get_top_fk_dependencies(self, settings):
+        top_fk_dependencies = {}
+        return top_fk_dependencies
 
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

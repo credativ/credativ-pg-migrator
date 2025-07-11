@@ -1,6 +1,26 @@
 # Changelog
 
-## 0.9.2 - 2025.xx.xx
+## 0.9.5 - 2025.07.xx
+
+- 2025.07.11
+
+  - Added migration parameter migration.char_to_text_length, similar to migration.varchar_to_text_length - allows to set the length of CHAR columns which should be migrated as TEXT
+    - Rationale: Some legacy databases handle CHAR columns with large length slightly differently, therefore we need to convert them to TEXT only if they exceed the defined length
+  - Due to many changes and longer time since the last release, we skip versioning directly to 0.9.5
+  - Small repairs in pre-migration analysis in multiple connectors
+
+- 2025.07.10
+
+  - Added config file part for configuring pre-migration analysis of the source database, added section for TOP N tables - user can define how many TOP N tables should be listed in the output based on row count, total size, column count, index count and constraint count
+    - Rationale: This will allow to better understand the source database and its structure, and to identify tables which might need special handling during migration
+    - Old function get_top10_biggest_tables was refactored to get_top_n_tables, which returns a dictionary with all TOP N tables based on the defined criteria - this way we also standarize the output of the function across all connectors
+    - Function skips tables which are excluded from migration (exclude_tables parameter in the config file)
+  - Added new part of pre-migration analysis - function get_top_fk_dependencies which returns details about foreign key dependencies for the tables with the biggest count of foreign keys
+    - This is very useful in case we need to migrate only some parts of data - allows to identify tables which are heavily dependent on other tables and have therefore the biggest probability of breaking foreign key constraints during migration
+  - Improved usage of dry-run command line parameter - if "--dry-run" is used, migrator will do pre-migration analysis of the source database, read all objects of the data model and store them in protocol tables but will not migrate any data - this allows to better understand the source database and its structure before starting the actual migration
+  - Added listing of FK and PK columns in the output of the Informix pre-migration analysis - this is useful for further analysis / setting migration limitations
+  - Added check if table contains ROWID column in the pre-migration analysis of Informix
+  - Migration limitations in config file now allow placeholders {source_schema} and {source_table} - referencing current table to which the limitation applies
 
 - 2025.07.06:
 

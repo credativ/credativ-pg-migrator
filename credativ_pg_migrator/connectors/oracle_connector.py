@@ -940,39 +940,58 @@ class OracleConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', e)
             raise
 
-    def get_top10_biggest_tables(self, settings):
-        query = f"""
-            SELECT
-                owner,
-                segment_name,
-                ROUND(SUM(bytes) / 1024 / 1024, 2) AS size_mb
-            FROM dba_segments
-            WHERE owner = '{settings['source_schema'].upper()}'
-            AND segment_type = 'TABLE'
-            GROUP BY owner, segment_name
-            ORDER BY size_mb DESC
-            FETCH FIRST 10 ROWS ONLY
-        """
-        try:
-            self.connect()
-            cursor = self.connection.cursor()
-            cursor.execute(query)
-            tables = cursor.fetchall()
-            cursor.close()
-            self.disconnect()
+    def get_top_n_tables(self, settings):
+        top_tables = {}
+        top_tables['by_rows'] = {}
+        top_tables['by_size'] = {}
+        top_tables['by_columns'] = {}
+        top_tables['by_indexes'] = {}
+        top_tables['by_constraints'] = {}
 
-            result = {}
-            for order_num, row in enumerate(tables, start=1):
-                result[order_num] = {
-                    'owner': row[0],
-                    'table_name': row[1],
-                    'size_mb': row[2]
-                }
-            return result
+        source_schema = settings.get('source_schema', None)
+        try:
+            order_num = 1
+            top_n = self.config_parser.get_top_n_tables_by_rows()
+            if top_n > 0:
+                query = f"""
+                    SELECT
+                    t.owner,
+                    t.table_name,
+                    nvl(num_rows, 0) AS row_count,
+                    ROUND((s.bytes / 1024 / 1024), 2) AS row_size
+                    FROM all_tables t
+                    LEFT JOIN dba_segments s
+                    ON t.owner = s.owner AND t.table_name = s.segment_name AND s.segment_type = 'TABLE'
+                    WHERE t.owner = '{source_schema.upper()}' OR '{source_schema.upper()}' IS NULL
+                    ORDER BY nvl(num_rows, 0) DESC
+                    FETCH FIRST {top_n} ROWS ONLY
+                """
+                self.connect()
+                cursor = self.connection.cursor()
+                cursor.execute(query)
+                tables = cursor.fetchall()
+                cursor.close()
+                self.disconnect()
+
+                for order_num, row in enumerate(tables, start=1):
+                    top_tables['by_rows'][order_num] = {
+                        'owner': row[0].strip(),
+                        'table_name': row[1].strip(),
+                        'row_count': row[2],
+                        'row_size': row[3],
+                    }
+                self.config_parser.print_log_message('DEBUG2', f"Top {top_n} tables by rows: {top_tables['by_rows']}")
+            else:
+                self.config_parser.print_log_message('DEBUG', "Top N tables by rows is not configured or set to 0, skipping this part.")
+
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
-            self.config_parser.print_log_message('ERROR', e)
-            raise
+
+        return top_tables
+
+    def get_top_fk_dependencies(self, settings):
+        top_fk_dependencies = {}
+        return top_fk_dependencies
 
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

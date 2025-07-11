@@ -1185,38 +1185,65 @@ class PostgreSQLConnector(DatabaseConnector):
         self.disconnect()
         return size
 
-    def get_top10_biggest_tables(self, settings):
-        source_schema = settings.get('source_schema', 'public')
-        query = f"""
-            SELECT
-                c.relname AS table_name,
-                pg_total_relation_size(c.oid) AS table_size
-            FROM
-                pg_class c
-            JOIN
-                pg_namespace n ON n.oid = c.relnamespace
-            WHERE
-                c.relkind = 'r' AND n.nspname = '{source_schema}'
-            ORDER BY
-                pg_total_relation_size(c.oid) DESC
-            LIMIT 10;
-        """
-        self.connect()
-        cursor = self.connection.cursor()
-        cursor.execute(query)
-        results = cursor.fetchall()
-        cursor.close()
-
+    def get_top_n_tables(self, settings):
         top_tables = {}
-        for ordinal_number, (table_name, table_size) in enumerate(results, start=1):
-            top_tables[ordinal_number] = {
-                'table_name': table_name,
-                'size_bytes': table_size,
-                'total_rows': ''
-            }
+        top_tables['by_rows'] = {}
+        top_tables['by_size'] = {}
+        top_tables['by_columns'] = {}
+        top_tables['by_indexes'] = {}
+        top_tables['by_constraints'] = {}
+        # return top_tables
 
-        self.disconnect()
+        source_schema = settings.get('source_schema', 'public')
+        try:
+            order_num = 1
+            top_n = self.config_parser.get_top_n_tables_by_rows()
+            if top_n > 0:
+                query = f"""
+                    SELECT
+                    n.nspname AS owner,
+                    c.relname AS table_name,
+                    c.reltuples::bigint AS row_count,
+                    pg_total_relation_size(c.oid) AS row_size
+                    FROM
+                    pg_class c
+                    JOIN
+                    pg_namespace n ON n.oid = c.relnamespace
+                    WHERE
+                    c.relkind = 'r' AND n.nspname = '{source_schema}'
+                    ORDER BY
+                    c.reltuples DESC
+                    LIMIT {top_n};
+                """
+                self.connect()
+                cursor = self.connection.cursor()
+                cursor.execute(query)
+                results = cursor.fetchall()
+                cursor.close()
+                self.disconnect()
+
+                order_num = 1
+                for row in results:
+                    top_tables['by_rows'][order_num] = {
+                    'owner': row[0].strip(),
+                    'table_name': row[1].strip(),
+                    'row_count': row[2],
+                    'table_size': row[3],
+                    }
+                    order_num += 1
+
+                self.config_parser.print_log_message('DEBUG2', f"Top {top_n} tables by rows: {top_tables['by_rows']}")
+            else:
+                self.config_parser.print_log_message('DEBUG', "Top N tables by rows is not configured or set to 0, skipping this part.")
+
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error fetching top tables by rows: {e}")
+
         return top_tables
+
+    def get_top_fk_dependencies(self, settings):
+        top_fk_dependencies = {}
+        return top_fk_dependencies
 
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

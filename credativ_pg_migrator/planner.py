@@ -160,20 +160,150 @@ class Planner:
             source_db_size = self.source_connection.get_database_size()
             self.config_parser.print_log_message('INFO', f"Size: {source_db_size}")
 
-            source_db_top10_tables = self.source_connection.get_top10_biggest_tables({'source_schema': self.source_schema})
-            self.config_parser.print_log_message('INFO', "Top 10 largest tables in source database:")
-            self.config_parser.print_log_message('DEBUG', f"Source database top 10 tables: {source_db_top10_tables}")
-            # for ord_num, table in source_db_top10_tables.items():
-            #     self.config_parser.print_log_message('INFO', f"Table: {table['table_name']}, Size: {table['size_bytes']}, Rows: {table['total_rows'] if 'total_rows' in table else 'N/A'}")
+            source_db_top10_tables = self.source_connection.get_top_n_tables({'source_schema': self.source_schema})
+            self.config_parser.print_log_message('INFO', "Top tables in source database (by various metrics):")
+            if source_db_top10_tables:
+                for metric, tables in source_db_top10_tables.items():
+                    self.config_parser.print_log_message('INFO', f"Top tables by {metric}:")
+                    # Collect rows for table output
+                    table_rows = []
+                    if metric == 'by_rows':
+                        headers = ["#", "Owner", "Table Name", "Rows", "Row Size", "Table Size", "FK", "Date/Time Columns", "PK Columns", "RowID", "Ref FK"]
+                        table_rows.append(headers)
+                        for idx, table in tables.items():
+                            table_rows.append([
+                                idx,
+                                table['owner'],
+                                table['table_name'],
+                                f"{table['row_count']:,}" if 'row_count' in table and table['row_count'] is not None else '',
+                                f"{table['row_size']:,}" if 'row_size' in table and table['row_size'] is not None else '',
+                                f"{table['table_size']:,}" if 'table_size' in table and table['table_size'] is not None else '',
+                                f"{table['fk_count']:,}" if 'fk_count' in table and (table['fk_count'] is not None or table['fk_count'] != 0) else '',
+                                f"{table['date_time_columns']}" if 'date_time_columns' in table and table['date_time_columns'] is not None else '',
+                                f"{table['pk_columns']}" if 'pk_columns' in table and table['pk_columns'] is not None else '',
+                                f"{table['has_rowid']}" if 'has_rowid' in table and table['has_rowid'] is not None else '',
+                                f"{table['ref_fk_count']}" if 'ref_fk_count' in table and (table['ref_fk_count'] is not None or table['ref_fk_count'] != 0) else '',
+                            ])
+                    elif metric == 'by_size':
+                        headers = ["#", "Owner", "Table Name", "Size", "Rows", "Row Size", "FK", "Date/Time Columns", "PK Columns", "RowID", "Ref FK"]
+                        table_rows.append(headers)
+                        for idx, table in tables.items():
+                            table_rows.append([
+                                idx,
+                                table['owner'],
+                                table['table_name'],
+                                f"{table['table_size']:,}",
+                                f"{table['row_count']:,}",
+                                f"{table['row_size']:,}",
+                                f"{table['fk_count']:,}" if table['fk_count'] != 0 else '',
+                                f"{table['date_time_columns']}" if table['date_time_columns'] is not None else '',
+                                f"{table['pk_columns']}" if table['pk_columns'] is not None else '',
+                                f"{table['has_rowid']}" if table['has_rowid'] is not None else '',
+                                f"{table['ref_fk_count']}" if table['ref_fk_count'] != 0 else '',
+                            ])
+                    elif metric == 'by_columns':
+                        headers = ["#", "Owner", "Table Name", "Columns", "Rows", "Row Size", "Table Size", "FK", "Date/Time Columns", "PK Columns", "RowID", "Ref FK"]
+                        table_rows.append(headers)
+                        for idx, table in tables.items():
+                            table_rows.append([
+                                idx,
+                                table['owner'],
+                                table['table_name'],
+                                f"{table['column_count']:,}",
+                                f"{table['row_count']:,}",
+                                f"{table['row_size']:,}",
+                                f"{table['table_size']:,}",
+                                f"{table['fk_count']:,}" if table['fk_count'] != 0 else '',
+                                f"{table['date_time_columns']}" if table['date_time_columns'] is not None else '',
+                                f"{table['pk_columns']}" if table['pk_columns'] is not None else '',
+                                f"{table['has_rowid']}" if table['has_rowid'] is not None else '',
+                                f"{table['ref_fk_count']}" if table['ref_fk_count'] != 0 else '',
+                            ])
+                    elif metric == 'by_indexes':
+                        headers = ["#", "Owner", "Table Name", "Indexes", "Rows", "Row Size", "Table Size", "FK", "Date/Time Columns", "PK Columns", "RowID", "Ref FK"]
+                        table_rows.append(headers)
+                        for idx, table in tables.items():
+                            table_rows.append([
+                                idx,
+                                table['owner'],
+                                table['table_name'],
+                                f"{table['index_count']:,}",
+                                f"{table['row_count']:,}",
+                                f"{table['row_size']:,}",
+                                f"{table['table_size']:,}",
+                                f"{table['fk_count']:,}" if table['fk_count'] != 0 else '',
+                                f"{table['date_time_columns']}" if table['date_time_columns'] is not None else '',
+                                f"{table['pk_columns']}" if table['pk_columns'] is not None else '',
+                                f"{table['has_rowid']}" if table['has_rowid'] is not None else '',
+                                f"{table['ref_fk_count']}" if table['ref_fk_count'] != 0 else '',
+                            ])
+                    elif metric == 'by_constraints':
+                        headers = ["#", "Owner", "Table Name", "Type", "Constraints", "Rows", "Row Size", "Table Size", "Date/Time Columns", "PK Columns", "RowID", "Ref FK"]
+                        table_rows.append(headers)
+                        for idx, table in tables.items():
+                            table_rows.append([
+                                idx,
+                                table['owner'],
+                                table['table_name'],
+                                table['constraint_type'],
+                                f"{table.get('constraint_count', 0):,}",
+                                f"{table['row_count']:,}",
+                                f"{table['row_size']:,}",
+                                f"{table['table_size']:,}",
+                                f"{table['date_time_columns']}" if table['date_time_columns'] is not None else '',
+                                f"{table['pk_columns']}" if table['pk_columns'] is not None else '',
+                                f"{table['has_rowid']}" if table['has_rowid'] is not None else '',
+                                f"{table['ref_fk_count']}" if table['ref_fk_count'] != 0 else '',
+                            ])
+                    else:
+                        headers = ["#", "Table"]
+                        table_rows.append(headers)
+                        for idx, table in tables.items():
+                            table_rows.append([idx, str(table)])
+
+                    # Format as a table (simple padding)
+                    col_widths = [max(len(str(row[i])) for row in table_rows) for i in range(len(table_rows[0]))]
+                    for row in table_rows:
+                        formatted_row = " | ".join(
+                            str(cell).ljust(col_widths[i]) if i < 3 or i >= len(row) - 3 else str(cell).rjust(col_widths[i])
+                            for i, cell in enumerate(row)
+                        )
+                        self.config_parser.print_log_message('INFO', f"  {formatted_row}")
+            else:
+                self.config_parser.print_log_message('INFO', "No top tables data available.")
+
+            # list Top foreign key dependencies
+            source_db_top_fk_dependencies = self.source_connection.get_top_fk_dependencies({'source_schema': self.source_schema})
+            self.config_parser.print_log_message('INFO', "Top foreign key dependencies in source database:")
+            if source_db_top_fk_dependencies:
+                # Print as a nice table
+                headers = ["#", "Table Name", "Foreign Keys", "Dependencies"]
+                table_rows = [headers]
+                for ord_num, fk_deps in source_db_top_fk_dependencies.items():
+                    table_rows.append([
+                        ord_num,
+                        fk_deps['table_name'],
+                        fk_deps['fk_count'],
+                        fk_deps['dependencies']
+                    ])
+                # Calculate column widths
+                col_widths = [max(len(str(row[i])) for row in table_rows) for i in range(len(headers))]
+                for row in table_rows:
+                    formatted_row = " | ".join(
+                        str(cell).ljust(col_widths[i]) for i, cell in enumerate(row)
+                    )
+                    self.config_parser.print_log_message('INFO', f"  {formatted_row}")
+            else:
+                self.config_parser.print_log_message('INFO', "No foreign key dependencies found in source database.")
 
             self.config_parser.print_log_message('INFO', "***** Target database *****")
             target_db_version = self.target_connection.get_database_version()
             self.config_parser.print_log_message('INFO', f"Version: {target_db_version}")
             target_db_size = self.target_connection.get_database_size()
             # self.config_parser.print_log_message('INFO', f"Size: {target_db_size}")
-            # target_db_top10_tables = self.target_connection.get_top10_biggest_tables({'source_schema': self.target_schema})
-            # self.config_parser.print_log_message('INFO', "Top 10 largest tables in target database:")
-            # self.config_parser.print_log_message('DEBUG', f"Target database top 10 tables: {target_db_top10_tables}")
+            # target_db_top10_tables = self.target_connection.get_top_n_tables({'source_schema': self.target_schema})
+            # self.config_parser.print_log_message('INFO', "Top largest tables in target database:")
+            # self.config_parser.print_log_message('DEBUG', f"Target database Top tables: {target_db_top10_tables}")
             # for ord_num, table in target_db_top10_tables.items():
             #     self.config_parser.print_log_message('INFO', f"Table: {table['table_name']}, Size: {table['size_bytes']}, Rows: {table['total_rows'] if 'total_rows' in table else 'N/A'}")
 
@@ -545,8 +675,14 @@ class Planner:
 
                     coltype = types_mapping.get(coltype, 'TEXT').upper()
 
-                    if self.config_parser.get_varchar_to_text_length() >= 0:
-                        if self.source_connection.is_string_type(coltype) and character_maximum_length >= self.config_parser.get_varchar_to_text_length():
+                    if self.config_parser.get_varchar_to_text_length() >= 0 or self.config_parser.get_char_to_text_length() >= 0:
+                        if (self.source_connection.is_string_type(coltype)
+                            and 'VARCHAR' in coltype.upper()
+                            and character_maximum_length >= self.config_parser.get_varchar_to_text_length()):
+                            coltype = 'TEXT'
+                        elif (self.source_connection.is_string_type(coltype)
+                              and 'CHAR' in coltype.upper()
+                              and character_maximum_length >= self.config_parser.get_char_to_text_length()):
                             coltype = 'TEXT'
 
                 self.config_parser.print_log_message( 'DEBUG', f"Column {column_info['column_name']} - using data type: {coltype}")

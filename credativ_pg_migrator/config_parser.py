@@ -17,6 +17,9 @@
 import yaml
 from credativ_pg_migrator.constants import MigratorConstants
 import re
+from datetime import datetime
+import os
+import time
 
 class ConfigParser:
     def __init__(self, args, logger):
@@ -589,6 +592,40 @@ class ConfigParser:
         If not specified, returns None.
         """
         return self.config.get('pre_migration_analysis', {}).get('top_n_tables', {}).get('by_constraints', 0)
+
+
+    ## scheduled actions
+
+    def pause_migration_fired(self):
+        scheduled_actions = self.config.get('migration', {}).get('scheduled_actions', [])
+        self.print_log_message('DEBUG3', f"pause_migration_fired: Checking for scheduled actions: {scheduled_actions}")
+
+        now = datetime.now()
+        for action in scheduled_actions:
+            self.print_log_message('DEBUG3', f"pause_migration_fired: Checking action: {action}")
+            if action.get('action') == 'pause' and 'time_of_day' in action:
+                time_of_day = action['time_of_day']
+                try:
+                    action_time = datetime.strptime(time_of_day, "%H:%M").time()
+                    self.print_log_message('DEBUG3', f"pause_migration_fired: Parsed action time: {action_time}, current time: {now.time()}")
+                except ValueError:
+                    self.logger.error(f"pause_migration_fired: Invalid time format in scheduled action: {time_of_day}. Expected format is HH:MM.")
+                    continue  # skip invalid time format
+                if now.time() >= action_time:
+                    self.print_log_message('INFO', f"""pause_migration_fired: Pausing migration with scheduled action "{action.get('name')}" as current time {now.time()} is past scheduled action time {action_time}.""")
+                    return True
+        return False
+
+    def wait_for_resume(self):
+        config_dir = os.path.dirname(os.path.abspath(self.args.config))
+        resume_file = os.path.join(config_dir, "resume_migration")
+        self.print_log_message('INFO', f"Migration paused. Waiting for '{resume_file}' to exist to resume...")
+        while not os.path.exists(resume_file):
+            time.sleep(15)
+        self.print_log_message('INFO', f"Resuming migration as '{resume_file}' was found.")
+        os.remove(resume_file)
+
+### Main entry point
 
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

@@ -433,8 +433,6 @@ class Orchestrator:
                 part_name = 'migrate data'
                 self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Migrating data for table {target_table} from source database.")
 
-                worker_source_connection.connect()
-
                 settings = {
                     'worker_id': worker_id,
                     'source_schema': table_data['source_schema'],
@@ -473,13 +471,20 @@ class Orchestrator:
                         self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Migration limitations for table {target_table}: {migration_limitations}")
 
                 while True:
+                    if self.config_parser.pause_migration_fired():
+                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Migration paused for table {target_table}.")
+                        self.config_parser.wait_for_resume()
+                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Resuming migration for table {target_table}.")
+                    # proper pausing / stopping of the migration requires to connect and disconnect for each chunk
+                    worker_source_connection.connect()
                     migration_stats = worker_source_connection.migrate_table(worker_target_connection, settings)
+                    worker_source_connection.disconnect()
+
                     rows_migrated += migration_stats['rows_migrated']
                     if migration_stats['finished']:
                         break
                     settings['chunk_number'] += 1
 
-                worker_source_connection.disconnect()
 
                 if rows_migrated > 0:
                     # sequences setting

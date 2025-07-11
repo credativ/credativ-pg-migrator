@@ -715,12 +715,12 @@ class IBMDB2Connector(DatabaseConnector):
                     SELECT
                     TABSCHEMA,
                     TABNAME,
-                    CARD,
+                    STATS_ROWS_MODIFIED,
                     SUM(DATA_OBJECT_P_SIZE + INDEX_OBJECT_P_SIZE) AS TOTAL_SIZE
                     FROM SYSIBMADM.ADMINTABINFO
                     WHERE TABSCHEMA = upper('{source_schema}')
-                    GROUP BY TABSCHEMA, TABNAME, CARD
-                    ORDER BY CARD DESC
+                    GROUP BY TABSCHEMA, TABNAME, STATS_ROWS_MODIFIED
+                    ORDER BY STATS_ROWS_MODIFIED DESC
                     FETCH FIRST {top_n} ROWS ONLY
                 """
                 self.config_parser.print_log_message('DEBUG', f"Fetching top {top_n} tables by row count for schema {source_schema} with query: {query}")
@@ -734,7 +734,8 @@ class IBMDB2Connector(DatabaseConnector):
                         'owner': row[0].strip(),
                         'table_name': row[1].strip(),
                         'row_count': row[2],
-                        'row_size': row[3],
+                        'row_size': None,
+                        'table_size': row[3],
                     }
                     order_num += 1
                 self.config_parser.print_log_message('DEBUG2', f"Top {top_n} tables BY ROWS: {top_tables}")

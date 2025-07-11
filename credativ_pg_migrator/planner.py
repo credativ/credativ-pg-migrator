@@ -175,14 +175,14 @@ class Planner:
                                 idx,
                                 table['owner'],
                                 table['table_name'],
-                                f"{table['row_count']:,}",
-                                f"{table['row_size']:,}",
-                                f"{table['table_size']:,}",
-                                f"{table['fk_count']:,}" if table['fk_count'] != 0 else '',
-                                f"{table['date_time_columns']}" if table['date_time_columns'] is not None else '',
-                                f"{table['pk_columns']}" if table['pk_columns'] is not None else '',
-                                f"{table['has_rowid']}" if table['has_rowid'] is not None else '',
-                                f"{table['ref_fk_count']}" if table['ref_fk_count'] != 0 else '',
+                                f"{table['row_count']:,}" if table['row_count'] is not None else '',
+                                f"{table['row_size']:,}" if table['row_size'] is not None else '',
+                                f"{table['table_size']:,}" if table['table_size'] is not None else '',
+                                f"{table['fk_count']:,}" if 'fk_count' in table and (table['fk_count'] is not None or table['fk_count'] != 0) else '',
+                                f"{table['date_time_columns']}" if 'date_time_columns' in table and table['date_time_columns'] is not None else '',
+                                f"{table['pk_columns']}" if 'pk_columns' in table and table['pk_columns'] is not None else '',
+                                f"{table['has_rowid']}" if 'has_rowid' in table and table['has_rowid'] is not None else '',
+                                f"{table['ref_fk_count']}" if 'ref_fk_count' in table and (table['ref_fk_count'] is not None or table['ref_fk_count'] != 0) else '',
                             ])
                     elif metric == 'by_size':
                         headers = ["#", "Owner", "Table Name", "Size", "Rows", "Row Size", "FK", "Date/Time Columns", "PK Columns", "RowID", "Ref FK"]

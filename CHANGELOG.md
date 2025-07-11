@@ -1,13 +1,13 @@
 # Changelog
 
-## 0.9.5 - 2025.xx.xx
+## 0.9.5 - 2025.07.xx
 
 - 2025.07.11
 
   - Added migration parameter migration.char_to_text_length, similar to migration.varchar_to_text_length - allows to set the length of CHAR columns which should be migrated as TEXT
     - Rationale: Some legacy databases handle CHAR columns with large length slightly differently, therefore we need to convert them to TEXT only if they exceed the defined length
   - Due to many changes and longer time since the last release, we skip versioning directly to 0.9.5
-  - Small repairs in pre-migration analysis for multiple connectors
+  - Small repairs in pre-migration analysis in multiple connectors
 
 - 2025.07.10
 

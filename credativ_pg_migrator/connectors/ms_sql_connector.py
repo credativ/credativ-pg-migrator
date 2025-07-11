@@ -842,14 +842,14 @@ class MsSQLConnector(DatabaseConnector):
                     s.name AS schema_name,
                     t.name AS table_name,
                     SUM(p.rows) AS row_count,
-                    SUM(a.total_pages) * 8 AS total_size_kb
+                    SUM(a.total_pages) * 8 * 1024 AS total_size
                     FROM sys.tables t
                     JOIN sys.schemas s ON t.schema_id = s.schema_id
                     JOIN sys.partitions p ON t.object_id = p.object_id AND p.index_id IN (0, 1)
                     JOIN sys.allocation_units a ON p.partition_id = a.container_id
                     WHERE s.name = '{source_schema}'
                     GROUP BY s.name, t.name
-                    ORDER BY total_size_kb DESC
+                    ORDER BY total_size DESC
                 """
                 self.connect()
                 cursor = self.connection.cursor()
@@ -863,7 +863,7 @@ class MsSQLConnector(DatabaseConnector):
                         'owner': row[0].strip(),
                         'table_name': row[1].strip(),
                         'row_count': row[2],
-                        'row_size': row[3],
+                        'table_size': row[3],
                     }
                     order_num += 1
                 self.config_parser.print_log_message('DEBUG', f"Top {top_n} tables by rows: {top_tables['by_rows']}")

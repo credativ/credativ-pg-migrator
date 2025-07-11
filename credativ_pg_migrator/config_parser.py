@@ -363,6 +363,13 @@ class ConfigParser:
         else:
             return -1 # migrate varchars as they are
 
+    def get_char_to_text_length(self):
+        char_to_text_length = self.config.get('migration', {}).get('char_to_text_length', None)
+        if char_to_text_length is not None:
+            return int(char_to_text_length)
+        else:
+            return -1
+
     def should_migrate_lob_values(self):
         """
         Check if LOB values (BLOB, CLOB) should be migrated.

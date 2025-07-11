@@ -36,6 +36,8 @@
   - Implemented possibility to set individual batch size for a table in the config file
     - Rationale: Some tables might benefit from different batch size than the default one, either smaller or larger, depending on the size of the table and performance of the source database
     - Usual use case is to set smaller batch size for tables with LOBs or other special data types, but user can also set larger batch size for large tables with simple data types and very small rows
+  - Added migration parameter migration.char_to_text_length, similar to migration.varchar_to_text_length - allows to set the length of CHAR columns which should be migrated as TEXT
+    - Rationale: Some legacy databases handle CHAR columns with large length slightly differently, therefore we need to convert them to TEXT only if they exceed the defined length
 
 - 2025.07.01:
 

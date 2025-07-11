@@ -1203,7 +1203,7 @@ class PostgreSQLConnector(DatabaseConnector):
                     SELECT
                     n.nspname AS owner,
                     c.relname AS table_name,
-                    pg_class.reltuples::bigint AS row_count,
+                    c.reltuples::bigint AS row_count,
                     pg_total_relation_size(c.oid) AS row_size
                     FROM
                     pg_class c
@@ -1212,7 +1212,7 @@ class PostgreSQLConnector(DatabaseConnector):
                     WHERE
                     c.relkind = 'r' AND n.nspname = '{source_schema}'
                     ORDER BY
-                    pg_class.reltuples DESC
+                    c.reltuples DESC
                     LIMIT {top_n};
                 """
                 self.connect()
@@ -1228,7 +1228,7 @@ class PostgreSQLConnector(DatabaseConnector):
                     'owner': row[0].strip(),
                     'table_name': row[1].strip(),
                     'row_count': row[2],
-                    'row_size': row[3],
+                    'table_size': row[3],
                     }
                     order_num += 1
 

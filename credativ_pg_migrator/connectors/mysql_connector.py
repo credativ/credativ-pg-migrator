@@ -843,29 +843,26 @@ class MySQLConnector(DatabaseConnector):
                     TABLE_SCHEMA,
                     TABLE_NAME,
                     TABLE_ROWS,
-                    (DATA_LENGTH + INDEX_LENGTH) AS row_size
-                    FROM
-                    information_schema.tables
-                    WHERE
-                    TABLE_SCHEMA = '{settings['source_schema']}'
-                    ORDER BY
-                    TABLE_ROWS DESC
+                    (DATA_LENGTH + INDEX_LENGTH) AS table_size
+                    FROM information_schema.tables
+                    WHERE TABLE_SCHEMA = '{settings['source_schema']}'
+                    ORDER BY TABLE_ROWS DESC
                     LIMIT {top_n}
                 """
                 self.connect()
                 cursor = self.connection.cursor()
                 cursor.execute(query)
-                cursor.close()
-                self.disconnect()
                 order_num = 1
                 for row in cursor.fetchall():
                     top_tables['by_rows'][order_num] = {
                         'owner': row[0].strip() if row[0] else '',
                         'table_name': row[1].strip() if row[1] else '',
                         'row_count': row[2],
-                        'row_size': row[3],
+                        'table_size': row[3],
                     }
                     order_num += 1
+                cursor.close()
+                self.disconnect()
                 self.config_parser.print_log_message('DEBUG2', f"Top {top_n} tables by rows: {top_tables['by_rows']}")
             else:
                 self.config_parser.print_log_message('DEBUG', "Top N tables by rows is not configured or set to 0, skipping this part.")

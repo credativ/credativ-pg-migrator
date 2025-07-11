@@ -228,12 +228,17 @@ class Orchestrator:
                 futures = {}
                 for index_row in migrate_indexes:
                     index_data = self.migrator_tables.decode_index_row(index_row)
+
                     if run_mode == 'function_based' and not index_data['is_function_based']:
                         self.config_parser.print_log_message( 'DEBUG3', f"Function based run mode: Skipping index {index_data['index_name']} as it is not a function based index.")
                         continue
                     elif run_mode == 'standard' and index_data['is_function_based']:
                         self.config_parser.print_log_message( 'INFO', f"Standard run mode: Skipping function based index {index_data['index_name']} ")
                         continue
+                    if not self.config_parser.should_migrate_indexes(index_data['source_table']):
+                        self.config_parser.print_log_message('DEBUG3', f"Skipping index {index_data['index_name']} as it is not configured for migration.")
+                        continue
+
                     self.config_parser.print_log_message('DEBUG3', f"run_migrate_indexes: futures running count: {len(futures)}")
                     while len(futures) >= workers_requested:
                         done, _ = concurrent.futures.wait(futures, return_when=concurrent.futures.FIRST_COMPLETED)
@@ -279,6 +284,11 @@ class Orchestrator:
                 for constraint_row in migrate_constraints:
                     constraint_data = self.migrator_tables.decode_constraint_row(constraint_row)
                     self.config_parser.print_log_message('DEBUG3', f"run_migrate_constraints: futures running count: {len(futures)}")
+
+                    if not self.config_parser.should_migrate_constraints(constraint_data['source_table']):
+                        self.config_parser.print_log_message('DEBUG3', f"Skipping constraint {constraint_data['constraint_name']} as it is not configured for migration.")
+                        continue
+
                     while len(futures) >= workers_requested:
                         done, _ = concurrent.futures.wait(futures, return_when=concurrent.futures.FIRST_COMPLETED)
                         for future in done:
@@ -415,7 +425,7 @@ class Orchestrator:
                             time.sleep(10)
                 self.config_parser.print_log_message('INFO', f"""Worker {worker_id}: Table "{target_table}" truncated successfully.""")
 
-            if settings['migrate_data']:
+            if self.config_parser.should_migrate_data(table_data['source_table']):
                 # data migration
                 part_name = 'connect source'
                 worker_source_connection = self.load_connector('source')
@@ -489,7 +499,7 @@ class Orchestrator:
                 else:
                     self.config_parser.print_log_message('INFO', f"Worker {worker_id}: No data found for table {target_table} - skipping sequences.")
             else:
-                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Skipping data migration for table {target_table}.")
+                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Skipping data migration for table {target_table} based on configuration")
 
             worker_end_time = time.time()
             elapsed_time = worker_end_time - worker_start_time
@@ -701,36 +711,40 @@ class Orchestrator:
                 if all_triggers:
                     for one_trigger in all_triggers:
                         trigger_detail = self.migrator_tables.decode_trigger_row(one_trigger)
-                        self.config_parser.print_log_message('INFO', f"Processing trigger {trigger_detail['trigger_name']}")
-                        self.config_parser.print_log_message( 'DEBUG', f"Trigger details: {trigger_detail}")
 
-                        converted_code = trigger_detail['trigger_target_sql']
+                        if self.config_parser.should_migrate_trigger(trigger_detail['source_table']):
+                            self.config_parser.print_log_message('INFO', f"Processing trigger {trigger_detail['trigger_name']}")
+                            self.config_parser.print_log_message( 'DEBUG', f"Trigger details: {trigger_detail}")
 
-                        self.config_parser.print_log_message( 'DEBUG', "Checking for remote objects substitution in triggers...")
-                        rows = self.migrator_tables.get_records_remote_objects_substitution()
-                        if rows:
-                            for row in rows:
-                                self.config_parser.print_log_message( 'DEBUG', f"Triggers - remote objects substituting {row[0]} with {row[1]}")
-                                converted_code = re.sub(re.escape(row[0]), row[1], converted_code, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
+                            converted_code = trigger_detail['trigger_target_sql']
 
-                        try:
-                            if converted_code is not None and converted_code.strip():
-                                self.config_parser.print_log_message('INFO', f"Creating trigger {trigger_detail['trigger_name']} in target database.")
-                                self.target_connection.connect()
-                                self.target_connection.execute_query(converted_code)
-                                self.config_parser.print_log_message( 'DEBUG', f"[OK] Source code for {trigger_detail['trigger_name']}: {trigger_detail['trigger_source_sql']}")
-                                self.config_parser.print_log_message( 'DEBUG', f"[OK] Converted code for {trigger_detail['trigger_name']}: {converted_code}")
-                                self.migrator_tables.update_trigger_status(trigger_detail['id'], True, 'migrated OK')
-                            else:
-                                self.config_parser.print_log_message('INFO', f"Skipping trigger {trigger_detail['trigger_name']} - no conversion.")
-                                self.migrator_tables.update_trigger_status(trigger_detail['id'], False, 'no conversion')
-                            self.target_connection.disconnect()
-                        except Exception as e:
-                            self.config_parser.print_log_message( 'DEBUG', f"[ERROR] Migrating trigger {trigger_detail['trigger_name']}.")
-                            self.config_parser.print_log_message( 'DEBUG', f"[ERROR] Source code for {trigger_detail['trigger_name']}: {trigger_detail['trigger_source_sql']}")
-                            self.config_parser.print_log_message( 'DEBUG', f"[ERROR] Converted code for {trigger_detail['trigger_name']}: {converted_code}")
-                            self.migrator_tables.update_trigger_status(trigger_detail['id'], False, f'ERROR: {e}')
-                            self.handle_error(e, f"migrate_trigger {trigger_detail['trigger_name']}")
+                            self.config_parser.print_log_message( 'DEBUG', "Checking for remote objects substitution in triggers...")
+                            rows = self.migrator_tables.get_records_remote_objects_substitution()
+                            if rows:
+                                for row in rows:
+                                    self.config_parser.print_log_message( 'DEBUG', f"Triggers - remote objects substituting {row[0]} with {row[1]}")
+                                    converted_code = re.sub(re.escape(row[0]), row[1], converted_code, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
+
+                            try:
+                                if converted_code is not None and converted_code.strip():
+                                    self.config_parser.print_log_message('INFO', f"Creating trigger {trigger_detail['trigger_name']} in target database.")
+                                    self.target_connection.connect()
+                                    self.target_connection.execute_query(converted_code)
+                                    self.config_parser.print_log_message( 'DEBUG', f"[OK] Source code for {trigger_detail['trigger_name']}: {trigger_detail['trigger_source_sql']}")
+                                    self.config_parser.print_log_message( 'DEBUG', f"[OK] Converted code for {trigger_detail['trigger_name']}: {converted_code}")
+                                    self.migrator_tables.update_trigger_status(trigger_detail['id'], True, 'migrated OK')
+                                else:
+                                    self.config_parser.print_log_message('INFO', f"Skipping trigger {trigger_detail['trigger_name']} - no conversion.")
+                                    self.migrator_tables.update_trigger_status(trigger_detail['id'], False, 'no conversion')
+                                self.target_connection.disconnect()
+                            except Exception as e:
+                                self.config_parser.print_log_message( 'DEBUG', f"[ERROR] Migrating trigger {trigger_detail['trigger_name']}.")
+                                self.config_parser.print_log_message( 'DEBUG', f"[ERROR] Source code for {trigger_detail['trigger_name']}: {trigger_detail['trigger_source_sql']}")
+                                self.config_parser.print_log_message( 'DEBUG', f"[ERROR] Converted code for {trigger_detail['trigger_name']}: {converted_code}")
+                                self.migrator_tables.update_trigger_status(trigger_detail['id'], False, f'ERROR: {e}')
+                                self.handle_error(e, f"migrate_trigger {trigger_detail['trigger_name']}")
+                        else:
+                            self.config_parser.print_log_message('INFO', f"Skipping trigger {trigger_detail['trigger_name']} for table {trigger_detail['table_name']} based on the migration configuration.")
 
                     self.config_parser.print_log_message('INFO', "Triggers migrated successfully.")
                 else:

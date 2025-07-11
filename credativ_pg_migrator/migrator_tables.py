@@ -66,6 +66,7 @@ class MigratorTables:
         self.create_table_for_tables()
         self.create_table_for_target_columns_alterations()
         self.create_table_for_data_migration()
+        self.create_table_for_data_chunks()
         self.create_table_for_batches_stats()
         # self.create_table_for_pk_ranges()
         self.create_table_for_indexes()
@@ -882,6 +883,132 @@ class MigratorTables:
             worker_id TEXT
             )
         """)
+
+    def create_table_for_data_chunks(self):
+        try:
+            table_name = self.config_parser.get_protocol_name_data_chunks()
+            self.protocol_connection.execute_query(self.drop_table_sql.format(protocol_schema=self.protocol_schema, table_name=table_name))
+            self.protocol_connection.execute_query(f"""
+                CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."{table_name}"
+                (
+                    id SERIAL PRIMARY KEY,
+                    worker_id TEXT,
+                    source_table_id INTEGER,
+                    source_schema TEXT,
+                    source_table TEXT,
+                    target_schema TEXT,
+                    target_table TEXT,
+                    source_table_rows BIGINT,
+                    target_table_rows BIGINT,
+                    chunk_number INTEGER,
+                    chunk_size BIGINT,
+                    migration_limitation TEXT,
+                    chunk_start BIGINT,
+                    chunk_end BIGINT,
+                    order_by_clause TEXT,
+                    inserted_rows BIGINT,
+                    batch_size BIGINT,
+                    total_batches INTEGER,
+                    task_started TIMESTAMP,
+                    task_completed TIMESTAMP
+                )
+            """)
+            self.config_parser.print_log_message('DEBUG3', f"Table {table_name} created successfully.")
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error creating table {table_name}.")
+            self.config_parser.print_log_message('ERROR', e)
+            raise
+
+    def insert_data_chunk(self, settings):
+        ## worker_id, source_table_id, source_schema, source_table, target_schema, target_table,
+        ## source_table_rows, target_table_rows, chunk_number, chunk_size, migration_limitation,
+        ## chunk_start, chunk_end, inserted_rows, batch_size, total_batches
+        worker_id = settings['worker_id']
+        source_table_id = settings['source_table_id']
+        source_schema = settings['source_schema']
+        source_table = settings['source_table']
+        target_schema = settings['target_schema']
+        target_table = settings['target_table']
+        source_table_rows = settings['source_table_rows']
+        target_table_rows = settings['target_table_rows']
+        chunk_number = settings['chunk_number']
+        chunk_size = settings['chunk_size']
+        migration_limitation = settings.get('migration_limitation', '')
+        chunk_start = settings.get('chunk_start', 0)
+        chunk_end = settings.get('chunk_end', 0)
+        inserted_rows = settings.get('inserted_rows', 0)
+        batch_size = settings.get('batch_size', 0)
+        total_batches = settings.get('total_batches', 0)
+        task_started = settings.get('task_started', None)
+        task_completed = settings.get('task_completed', None)
+        order_by_clause = settings.get('order_by_clause', '')
+
+        table_name = self.config_parser.get_protocol_name_data_chunks()
+        query = f"""
+            INSERT INTO "{self.protocol_schema}"."{table_name}"
+            (worker_id, source_table_id, source_schema, source_table,
+            target_schema, target_table, source_table_rows, target_table_rows,
+            chunk_number, chunk_size, migration_limitation,
+            chunk_start, chunk_end, order_by_clause, inserted_rows, batch_size, total_batches,
+            task_started, task_completed)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s)
+            RETURNING *
+        """
+        params = (str(worker_id), source_table_id, source_schema,
+                  source_table, target_schema,
+                  target_table,
+                  source_table_rows,
+                  target_table_rows,
+                  chunk_number,
+                  chunk_size,
+                  migration_limitation,
+                  chunk_start,
+                  chunk_end,
+                  order_by_clause,
+                  inserted_rows,
+                  batch_size,
+                  total_batches,
+                  task_started,
+                  task_completed)
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+
+            data_chunk_row = self.decode_data_chunk_row(row)
+            self.insert_protocol('data_chunk', f"{target_table}.{chunk_number}", 'create', None, None, None, None, 'info', None, data_chunk_row['id'])
+            return data_chunk_row['id']
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error inserting data chunk for {target_table} into {table_name}.")
+            self.config_parser.print_log_message('ERROR', e)
+            raise
+
+    def decode_data_chunk_row(self, row):
+        return {
+            'id': row[0],
+            'worker_id': row[1],
+            'source_table_id': row[2],
+            'source_schema': row[3],
+            'source_table': row[4],
+            'target_schema': row[5],
+            'target_table': row[6],
+            'source_table_rows': row[7],
+            'target_table_rows': row[8],
+            'chunk_number': row[9],
+            'chunk_size': row[10],
+            'migration_limitation': row[11],
+            'chunk_start': row[12],
+            'chunk_end': row[13],
+            'order_by_clause': row[14],
+            'inserted_rows': row[15],
+            'batch_size': row[16],
+            'total_batches': row[17],
+            'task_started': row[18],
+            'task_completed': row[19]
+        }
 
     def insert_batches_stats(self, settings):
         ## source_schema, source_table, source_table_id, batch_number, batch_start, batch_end, batch_rows, batch_seconds
@@ -1913,33 +2040,30 @@ class MigratorTables:
             self.config_parser.print_log_message('ERROR', e)
             raise
 
-    # def select_primary_key(self, target_schema, target_table):
-    #     tables_table = self.config_parser.get_protocol_name_tables()
-    #     indexes_table = self.config_parser.get_protocol_name_indexes()
-    #     query = f"""
-    #         SELECT
-    #             i.index_columns
-    #         FROM "{self.protocol_schema}"."{tables_table}" t
-    #         JOIN "{self.protocol_schema}"."{indexes_table}" i ON i.source_table_id = t.source_table_id
-    #         WHERE t.target_schema = '{target_schema}' AND
-    #             t.target_table = '{target_table}' AND
-    #             index_type in ('PRIMARY KEY', 'UNIQUE')
-    #         ORDER BY CASE WHEN i.index_type = 'PRIMARY KEY' THEN 1 ELSE 2 END
-    #         LIMIT 1
-    #     """
-    #     try:
-    #         cursor = self.protocol_connection.connection.cursor()
-    #         cursor.execute(query)
-    #         index_columns = cursor.fetchone()
-    #         cursor.close()
-    #         if index_columns:
-    #             return index_columns[0]
-    #         else:
-    #             return None
-    #     except Exception as e:
-    #         self.config_parser.print_log_message('ERROR', f"Error selecting primary key for {target_schema}.{target_table}.")
-    #         self.config_parser.print_log_message('ERROR', e)
-    #         return None
+    def select_primary_key(self, source_schema, source_table):
+        query = f"""
+            SELECT
+                i.index_columns
+            FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_indexes()}" i
+            WHERE i.source_schema = '{source_schema}' AND
+                i.source_table = '{source_table}' AND
+                i.index_type in ('PRIMARY KEY', 'UNIQUE')
+            ORDER BY CASE WHEN i.index_type = 'PRIMARY KEY' THEN 1 ELSE 2 END
+            LIMIT 1
+        """
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query)
+            index_columns = cursor.fetchone()
+            cursor.close()
+            if index_columns:
+                return index_columns[0]
+            else:
+                return None
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error selecting primary key for {source_schema}.{source_table}.")
+            self.config_parser.print_log_message('ERROR', e)
+            return None
 
     def print_summary(self, objects, migrator_table_name, additional_columns=None):
         try:

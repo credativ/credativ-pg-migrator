@@ -244,6 +244,9 @@ class ConfigParser:
     def get_protocol_name_batches_stats(self):
         return f"{self.get_protocol_name()}_batches_stats"
 
+    def get_protocol_name_data_chunks(self):
+        return f"{self.get_protocol_name()}_data_chunks"
+
     def get_protocol_name_indexes(self):
         return f"{self.get_protocol_name()}_indexes"
 
@@ -364,6 +367,9 @@ class ConfigParser:
 
     def get_batch_size(self):
         return int(self.config.get('migration', {}).get('batch_size', 100000))
+
+    def get_chunk_size(self):
+        return int(self.config.get('migration', {}).get('data_chunk_size', 10000))
 
     def get_parallel_workers_count(self):
         return int(self.config.get('migration', {}).get('parallel_workers', 1)) # Default to 1
@@ -514,17 +520,25 @@ class ConfigParser:
                 indent_level += 1
         return '\n'.join(indented_lines)
 
-    def get_table_batch_size(self, table_name):
-        """
-        Get the batch size for a specific table.
-        If not specified, returns the default batch size from the migration section.
-        """
-        batch_size = self.config.get('table_batch_size', [])
-        for entry in batch_size:
-            if isinstance(entry, dict) and entry.get('table_name') == table_name:
-                return entry.get('batch_size', self.get_batch_size())
+    def get_table_batch_size(self, table_name=None):
+        if table_name:
+            table_settings = self.config.get('table_settings', [])
+            if isinstance(table_settings, list):
+                for entry in table_settings:
+                    pattern = entry.get('table_name')
+                    if pattern and re.fullmatch(pattern, table_name, re.IGNORECASE):
+                        return entry.get('batch_size', self.get_batch_size())
         return self.get_batch_size()
 
+    def get_table_chunk_size(self, table_name=None):
+        if table_name:
+            table_settings = self.config.get('table_settings', [])
+            if isinstance(table_settings, list):
+                for entry in table_settings:
+                    pattern = entry.get('table_name')
+                    if pattern and re.fullmatch(pattern, table_name, re.IGNORECASE):
+                        return entry.get('chunk_size', self.get_chunk_size())
+        return self.get_chunk_size()
 
     ## pre-migration analysis
     def get_pre_migration_analysis(self):

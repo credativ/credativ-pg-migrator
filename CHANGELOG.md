@@ -14,6 +14,13 @@
   - Debugging of real migration cases showed that migrator always runs requested number of parallel workers (unless only smaller than requested number of tables are not migrated yet), but there is a delay between start of the worker and insertion of new record into the protocol table. If database is extremely slow, this delay can be significant
   - Config file option "table_batch_size" renamed to "table_settings" and additional options beside of batch_size have been allowed - table name can now be specified as a full name or regular expression
     - Rationale: This is necessary for better control of the migration process - some tables should be created on the target database but we do not want to migrate data, or we want to skip indexes/constraints/triggers for some tables, or we want to set different batch size for some tables because of limitations on the source database
+  - Added config file option "migration.data_chunk_size" - this allows to set the size of the data chunk which will be migrated in one go, default is 1000000 rows
+    - Rationale: This allows to divide migration of huge tables into smaller independent parts - chunks are logged and processed separately
+    - Intention is to allow to pause the migration process and continue later, in case if the source database contains really huge tables or if maintenance window is limited only to some daily hours
+    - Chunk is processed in batches of batch_size, so batch_size is supposed to be smaller than data_chunk_size
+    - Dividing migration of huge tables into chunks requires ordering of the rows in the source database, so it can lead to performance issues on some source databases
+    - Ordering is done either by primary key or by columns used in some unique index, if non of these is available, then by all columns in the table in the order as they are defined in the source database
+    - currently implemented only for Infomix and PostgreSQL connectors, support for other connectors will be added on demand
 
 - 2025.07.10
 

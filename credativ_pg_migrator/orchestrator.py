@@ -451,6 +451,8 @@ class Orchestrator:
                     'batch_size': self.config_parser.get_table_batch_size(table_data['source_table']),
                     'migrator_tables': settings['migrator_tables'],
                     'migration_limitation': '',
+                    'data_chunk_size': self.config_parser.get_table_chunk_size(table_data['source_table']),
+                    'chunk_number': 1,
                 }
 
                 rows_migration_limitations = settings['migrator_tables'].get_records_data_migration_limitation(table_data['source_table'])
@@ -469,7 +471,14 @@ class Orchestrator:
                     if migration_limitations:
                         settings['migration_limitation'] = f"{' AND '.join(migration_limitations)}" if migration_limitations else ''
                         self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Migration limitations for table {target_table}: {migration_limitations}")
-                rows_migrated = worker_source_connection.migrate_table(worker_target_connection, settings)
+
+                while True:
+                    migration_stats = worker_source_connection.migrate_table(worker_target_connection, settings)
+                    rows_migrated += migration_stats['rows_migrated']
+                    if migration_stats['finished']:
+                        break
+                    settings['chunk_number'] += 1
+
                 worker_source_connection.disconnect()
 
                 if rows_migrated > 0:
@@ -584,6 +593,7 @@ class Orchestrator:
                         error_texts = [
                             "no unique constraint matching",
                             "is violated by some row",
+                            "violates foreign key constraint",
                         ]
                         if any(txt in str(e).lower() for txt in error_texts):
                             self.migrator_tables.update_constraint_status(constraint_data['id'], False, f'ERROR: {e}')

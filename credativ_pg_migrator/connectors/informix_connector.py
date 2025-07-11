@@ -1070,6 +1070,7 @@ class InformixConnector(DatabaseConnector):
     def migrate_table(self, migrate_target_connection, settings):
         part_name = 'initialize'
         target_table_rows = 0
+        migration_stats = {}
         try:
             worker_id = settings['worker_id']
             source_schema = settings['source_schema']
@@ -1083,10 +1084,20 @@ class InformixConnector(DatabaseConnector):
             batch_size = settings['batch_size']
             migrator_tables = settings['migrator_tables']
             migration_limitation = settings['migration_limitation']
+            data_chunk_size = settings['data_chunk_size']
+            chunk_number = settings['chunk_number']
 
             source_table_rows = self.get_rows_count(source_schema, source_table, migration_limitation)
             target_table_rows = 0
 
+            migration_stats = {
+                'rows_migrated': 0,
+                'chunk_number': chunk_number,
+                'total_chunks': int((source_table_rows / data_chunk_size) + 0.5),
+                'source_table_rows': source_table_rows,
+                'target_table_rows': target_table_rows,
+                'finished': True if source_table_rows == 0 else False,
+            }
             ## source_schema, source_table, source_table_id, source_table_rows, worker_id, target_schema, target_table, target_table_rows
             protocol_id = migrator_tables.insert_data_migration({
                 'worker_id': worker_id,
@@ -1101,7 +1112,7 @@ class InformixConnector(DatabaseConnector):
 
             if source_table_rows == 0:
                 self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {source_table} is empty - skipping data migration.")
-                return 0
+                return migration_stats
             else:
                 self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {source_table} has {source_table_rows} rows - starting data migration.")
                 # Fetch the data in batches
@@ -1112,6 +1123,7 @@ class InformixConnector(DatabaseConnector):
                     self.config_parser.print_log_message('DEBUG2',
                                                          f"Worker {worker_id}: Table {source_schema}.{source_table}: Processing column {col['column_name']} ({order_num}) with data type {col['data_type']}")
                     insert_columns = ', '.join([f'''"{self.config_parser.convert_names_case(col['column_name'])}"''' for col in source_columns.values()])
+                    orderby_columns = ', '.join([f'''"{col['column_name']}"''' for col in target_columns.values()])
 
                     if col['data_type'].lower() == 'datetime':
                         select_columns_list.append(f"TO_CHAR({col['column_name']}, '%Y-%m-%d %H:%M:%S') as {col['column_name']}")
@@ -1124,9 +1136,25 @@ class InformixConnector(DatabaseConnector):
                         select_columns_list.append(f"{col['column_name']}")
                 select_columns = ', '.join(select_columns_list)
 
-                query = f'''SELECT {select_columns} FROM "{source_schema}".{source_table}'''
-                if migration_limitation:
-                    query += f" WHERE {migration_limitation}"
+                chunk_start_row_number = (chunk_number - 1) * data_chunk_size
+                chunk_end_row_number = chunk_start_row_number + data_chunk_size
+                self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Migrating table {source_schema}.{source_table}: chunk {chunk_number}, data chunk size {data_chunk_size}, batch size {batch_size}, chunk start row number {chunk_start_row_number}, chunk end row number {chunk_end_row_number}, source table rows {source_table_rows}")
+                order_by_clause = ''
+
+                if data_chunk_size > source_table_rows:
+                    query = f'''SELECT {select_columns} FROM "{source_schema}".{source_table}'''
+                    if migration_limitation:
+                        query += f" WHERE {migration_limitation}"
+                else:
+                    query = f'''SELECT SKIP {chunk_start_row_number} {select_columns} FROM "{source_schema}".{source_table}'''
+                    if migration_limitation:
+                        query += f" WHERE {migration_limitation}"
+                    primary_key_columns = migrator_tables.select_primary_key(source_schema, source_table)
+                    self.config_parser.print_log_message('DEBUG2', f"Worker {worker_id}: Primary key columns for {source_schema}.{source_table}: {primary_key_columns}")
+                    if primary_key_columns:
+                        orderby_columns = primary_key_columns
+                    order_by_clause = f""" ORDER BY {orderby_columns}"""
+                    query += order_by_clause + f" LIMIT {data_chunk_size}"
 
                 self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Fetching data with cursor using query: {query}")
 
@@ -1136,6 +1164,7 @@ class InformixConnector(DatabaseConnector):
 
                 batch_start_time = time.time()
                 reading_start_time = batch_start_time
+                processing_start_time = batch_start_time
                 batch_end_time = None
                 batch_number = 0
                 batch_durations = []
@@ -1240,18 +1269,52 @@ class InformixConnector(DatabaseConnector):
                                                         f"Longest batch: {longest_batch_seconds:.2f} seconds, "
                                                         f"Average batch: {average_batch_seconds:.2f} seconds")
 
-                migrator_tables.update_data_migration_status({
-                    'row_id': protocol_id,
-                    'success': True,
-                    'message': 'OK',
+                migration_stats = {
+                    'rows_migrated': total_inserted_rows,
+                    'chunk_number': chunk_number,
+                    'total_chunks': int((source_table_rows / data_chunk_size) + 0.5),
+                    'source_table_rows': source_table_rows,
                     'target_table_rows': target_table_rows,
-                    'batch_count': batch_number,
-                    'shortest_batch_seconds': shortest_batch_seconds,
-                    'longest_batch_seconds': longest_batch_seconds,
-                    'average_batch_seconds': average_batch_seconds,
+                }
+
+                migration_stats['finished'] = True if source_table_rows == target_table_rows or chunk_number == migration_stats['total_chunks'] else False
+
+                if migration_stats['finished']:
+                    migrator_tables.update_data_migration_status({
+                        'row_id': protocol_id,
+                        'success': True,
+                        'message': 'OK',
+                        'target_table_rows': target_table_rows,
+                        'batch_count': batch_number,
+                        'shortest_batch_seconds': shortest_batch_seconds,
+                        'longest_batch_seconds': longest_batch_seconds,
+                        'average_batch_seconds': average_batch_seconds,
+                    })
+
+                migrator_tables.insert_data_chunk({
+                    'worker_id': worker_id,
+                    'source_table_id': source_table_id,
+                    'source_schema': source_schema,
+                    'source_table': source_table,
+                    'target_schema': target_schema,
+                    'target_table': target_table,
+                    'source_table_rows': source_table_rows,
+                    'target_table_rows': target_table_rows,
+                    'chunk_number': chunk_number,
+                    'chunk_size': data_chunk_size,
+                    'migration_limitation': migration_limitation,
+                    'chunk_start': chunk_start_row_number,
+                    'chunk_end': chunk_end_row_number,
+                    'inserted_rows': total_inserted_rows,
+                    'batch_size': batch_size,
+                    'total_batches': batch_number,
+                    'task_started': datetime.datetime.fromtimestamp(processing_start_time).strftime('%Y-%m-%d %H:%M:%S.%f'),
+                    'task_completed': datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S.%f'),
+                    'order_by_clause': order_by_clause,
                 })
                 cursor.close()
-                return target_table_rows
+
+                return migration_stats
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Error during {part_name} -> {e}")
             self.config_parser.print_log_message('ERROR', "Full stack trace:")

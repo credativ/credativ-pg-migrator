@@ -93,7 +93,16 @@ migration:
   set_sequnces: true
   on_error: continue # stop, continue
   parallel_workers: 8
-  batch_size: 100000
+  # batch_size: number of rows to migrate in one batch during data migration, default is 100000
+  # batch size is used when data are repeatedly read from source database and written to the target database
+  batch_size: 10000
+  # data_chunk_size: number of rows to migrate in one chunk during data migration, default is 1000000
+  # must be bigger than batch_size
+  # chunk size is used to divide migration of huge tables into smaller independent parts - chunks are logged and processed separately
+  # intention is to allow to pause the migration process and continue later, in case if the source database contains really huge tables
+  # or if maintenance window is limited only to some daily hours
+  # chunk is processed in batches of batch_size
+  data_chunk_size: 1000000
   # PostgreSQL scripts for the migration process
   # Both run on the target database, before and after the migration
   # pre_migration_script: pre_migration.sql
@@ -108,18 +117,33 @@ migration:
   # if false, LOB values will be skipped (migrated as NULL)
   # if missing, default is true - LOB values will be migrated
   migrate_lob_values: false
+  # automatic scheduled actions for the migration process
+  # - list of actions to be performed at specific times during the migration process
+  # action can be scheduled based on time of day or after timer started at the beginning reaches set number of hours(minutes, seconds) - HH:MM:SS
+  # actions:
+  # - "pause" - pause the migration process at the specified time,
+  # - "stop" - stop the migration process at the specified time,
+  # - "continue" - continue the migration process at the specified time, if it was paused
+  # if time is not specified, action is ignored
+  scheduled_actions:
+    - name: "pause at 1:00 in the morning"
+      time_of_day: "01:00"
+      # timer_hours: xx
+      action: "pause"  # pause, stop, continue
 
 table_settings:
   # Specify individual table settings for the migration process - there override the global settings for the specific table matching the table_name
   # table_name can be full table name or regular expression
   # available settings:
   # - batch_size: number of rows to migrate in one batch, default is 100000
+  # - data_chunk_size: number of rows to migrate in one chunk, default is 1000000
   # - migrate_data: true/false - if data should be migrated, default is true
   # - migrate_indexes: true/false - if indexes should be migrated, default is true
   # - migrate_constraints: true/false - if constraints should be migrated, default is true
   # - migrate_triggers: true/false - if triggers should be migrated, default is true
   - table_name: "table1"
     batch_size: 50000
+    data_chunk_size: 1000000
     migrate_data: true
     migrate_indexes: false
     migrate_constraints: true

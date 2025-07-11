@@ -738,30 +738,28 @@ class SQLAnywhereConnector(DatabaseConnector):
             if top_n > 0:
                 query = f"""
                     SELECT TOP {top_n}
-                    u.user_name AS owner,
-                    t.table_name,
-                    t.table_row_count AS row_count,
-                    t.table_page_count AS row_size
+                        t.table_name,
+                        table_page_count
                     FROM sys.systable t
-                    JOIN sys.sysuserperm u ON t.creator = u.user_id
-                    WHERE u.user_name = '{source_schema}'
-                    ORDER BY t.table_row_count DESC
+                    WHERE creator in (SELECT DISTINCT user_id
+                    FROM sys.SYSUSERPERM where user_name = '{source_schema}')
+                    ORDER BY table_page_count DESC
                 """
+                self.config_parser.print_log_message('DEBUG3', f"Fetching top {top_n} tables by rows for schema {source_schema} with query: {query}")
                 self.connect()
                 cursor = self.connection.cursor()
                 cursor.execute(query)
                 order_num = 1
-                cursor.close()
-                self.disconnect()
                 for row in cursor.fetchall():
                     top_tables['by_rows'][order_num] = {
-                        'owner': row[0].strip(),
-                        'table_name': row[1].strip(),
-                        'row_count': row[2],
-                        'row_size': row[3],
+                        'owner': source_schema,
+                        'table_name': row[0].strip(),
+                        'table_size': row[1]
                     }
                     order_num += 1
-                self.config_parser.print_log_message('DEBUG', f"Top {top_n} tables by rows fetched successfully")
+                cursor.close()
+                self.disconnect()
+                self.config_parser.print_log_message('DEBUG3', f"Top {top_n} tables by rows fetched successfully {top_tables['by_rows']}")
             else:
                 self.config_parser.print_log_message('DEBUG', "Top N tables by rows is not configured or set to 0")
         except Exception as e:

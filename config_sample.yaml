@@ -103,6 +103,7 @@ migration:
   # 0 = always change to text, -1 = never change to text, always migrate as varchar, >0 = convert varchar to text if length is >= this value
   # if parameter is missing, default is -1 -> migrate all varchars as varchars as they are
   varchar_to_text_length: 4000
+  char_to_text_length: 10
   # migrate_lob_values - if true, migrate LOB values (BLOB, CLOB) as text or bytea
   # if false, LOB values will be skipped (migrated as NULL)
   # if missing, default is true - LOB values will be migrated

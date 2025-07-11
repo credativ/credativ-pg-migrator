@@ -603,16 +603,17 @@ class ConfigParser:
         now = datetime.now()
         for action in scheduled_actions:
             self.print_log_message('DEBUG3', f"pause_migration_fired: Checking action: {action}")
-            if action.get('action') == 'pause' and 'time_of_day' in action:
-                time_of_day = action['time_of_day']
+            if action.get('action') == 'pause' and 'datetime' in action:
+                action_datetime_str = action['datetime']
                 try:
-                    action_time = datetime.strptime(time_of_day, "%H:%M").time()
-                    self.print_log_message('DEBUG3', f"pause_migration_fired: Parsed action time: {action_time}, current time: {now.time()}")
+                    # Expected format: "YYYY.DD.MM HH:MM"
+                    action_datetime = datetime.strptime(action_datetime_str, "%Y.%d.%m %H:%M")
+                    self.print_log_message('DEBUG3', f"pause_migration_fired: Parsed action datetime: {action_datetime}, current datetime: {now}")
                 except ValueError:
-                    self.logger.error(f"pause_migration_fired: Invalid time format in scheduled action: {time_of_day}. Expected format is HH:MM.")
-                    continue  # skip invalid time format
-                if now.time() >= action_time:
-                    self.print_log_message('INFO', f"""pause_migration_fired: Pausing migration with scheduled action "{action.get('name')}" as current time {now.time()} is past scheduled action time {action_time}.""")
+                    self.logger.error(f"pause_migration_fired: Invalid datetime format in scheduled action: {action_datetime_str}. Expected format is YYYY.DD.MM HH:MM.")
+                    continue  # skip invalid datetime format
+                if now >= action_datetime:
+                    self.print_log_message('INFO', f"""pause_migration_fired: Pausing migration with scheduled action "{action.get('name')}" as current datetime {now} is past scheduled action datetime {action_datetime}.""")
                     return True
         return False
 

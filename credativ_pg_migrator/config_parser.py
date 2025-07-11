@@ -363,6 +363,20 @@ class ConfigParser:
         else:
             return -1 # migrate varchars as they are
 
+    def get_char_to_text_length(self):
+        char_to_text_length = self.config.get('migration', {}).get('char_to_text_length', None)
+        if char_to_text_length is not None:
+            return int(char_to_text_length)
+        else:
+            return -1
+
+    def should_migrate_lob_values(self):
+        """
+        Check if LOB values (BLOB, CLOB) should be migrated.
+        If not specified, defaults to False.
+        """
+        return self.config.get('migration', {}).get('migrate_lob_values', True)
+
     def get_include_tables(self):
         include_tables = self.config.get('include_tables', None)
         if (include_tables is None or (type(include_tables) is str and include_tables.lower() == 'all')):
@@ -427,6 +441,8 @@ class ConfigParser:
             else:
                 self.logger.info(message)
 
+    def is_dry_run(self):
+        return bool(self.args.dry_run)
 
     def get_indent(self):
         return self.config.get('migrator', {}).get('indent', MigratorConstants.get_default_indent())
@@ -473,6 +489,57 @@ class ConfigParser:
             if isinstance(entry, dict) and entry.get('table_name') == table_name:
                 return entry.get('batch_size', self.get_batch_size())
         return self.get_batch_size()
+
+
+    ## pre-migration analysis
+    def get_pre_migration_analysis(self):
+        """
+        Get the pre-migration analysis settings.
+        If not specified, returns an empty dictionary.
+        """
+        return self.config.get('pre_migration_analysis', {})
+
+    def get_top_n_tables(self):
+        """
+        Get the TOP N tables settings.
+        If not specified, returns an empty dictionary.
+        """
+        return self.config.get('top_n_tables', {})
+
+    def get_top_n_tables_by_rows(self):
+        """
+        Get the TOP N tables by rows setting from pre_migration_analysis.
+        If not specified, returns None.
+        """
+        return self.config.get('pre_migration_analysis', {}).get('top_n_tables', {}).get('by_rows', 0)
+
+    def get_top_n_tables_by_size(self):
+        """
+        Get the TOP N tables by total size setting from pre_migration_analysis.
+        If not specified, returns None.
+        """
+        return self.config.get('pre_migration_analysis', {}).get('top_n_tables', {}).get('by_size', 0)
+
+    def get_top_n_tables_by_columns(self):
+        """
+        Get the TOP N tables by column count setting from pre_migration_analysis.
+        If not specified, returns None.
+        """
+        return self.config.get('pre_migration_analysis', {}).get('top_n_tables', {}).get('by_columns', 0)
+
+    def get_top_n_tables_by_indexes(self):
+        """
+        Get the TOP N tables by index count setting from pre_migration_analysis.
+        If not specified, returns None.
+        """
+        return self.config.get('pre_migration_analysis', {}).get('top_n_tables', {}).get('by_indexes', 0)
+
+    def get_top_n_tables_by_constraints(self):
+        """
+        Get the TOP N tables by constraint count setting from pre_migration_analysis.
+        If not specified, returns None.
+        """
+        return self.config.get('pre_migration_analysis', {}).get('top_n_tables', {}).get('by_constraints', 0)
 
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

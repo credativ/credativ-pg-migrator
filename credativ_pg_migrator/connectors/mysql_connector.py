@@ -826,35 +826,55 @@ class MySQLConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', f"Error fetching database size: {e}")
             raise
 
-    def get_top10_biggest_tables(self, settings):
-        query = f"""
-            SELECT
-                TABLE_NAME,
-                (DATA_LENGTH + INDEX_LENGTH) AS total_size
-            FROM
-                information_schema.tables
-            WHERE
-                TABLE_SCHEMA = '{settings['source_schema']}'
-            ORDER BY
-                total_size DESC
-            LIMIT 10
-        """
+    def get_top_n_tables(self, settings):
+        top_tables = {}
+        top_tables['by_rows'] = {}
+        top_tables['by_size'] = {}
+        top_tables['by_columns'] = {}
+        top_tables['by_indexes'] = {}
+        top_tables['by_constraints'] = {}
+
         try:
-            self.connect()
-            cursor = self.connection.cursor()
-            cursor.execute(query)
-            tables = {}
-            for i, row in enumerate(cursor.fetchall()):
-                tables[i + 1] = {
-                    'table_name': row[0],
-                    'total_size': row[1]
-                }
-            cursor.close()
-            self.disconnect()
-            return tables
+            order_num = 1
+            top_n = self.config_parser.get_top_n_tables_by_rows()
+            if top_n > 0:
+                query = f"""
+                    SELECT
+                    TABLE_SCHEMA,
+                    TABLE_NAME,
+                    TABLE_ROWS,
+                    (DATA_LENGTH + INDEX_LENGTH) AS table_size
+                    FROM information_schema.tables
+                    WHERE TABLE_SCHEMA = '{settings['source_schema']}'
+                    ORDER BY TABLE_ROWS DESC
+                    LIMIT {top_n}
+                """
+                self.connect()
+                cursor = self.connection.cursor()
+                cursor.execute(query)
+                order_num = 1
+                for row in cursor.fetchall():
+                    top_tables['by_rows'][order_num] = {
+                        'owner': row[0].strip() if row[0] else '',
+                        'table_name': row[1].strip() if row[1] else '',
+                        'row_count': row[2],
+                        'table_size': row[3],
+                    }
+                    order_num += 1
+                cursor.close()
+                self.disconnect()
+                self.config_parser.print_log_message('DEBUG2', f"Top {top_n} tables by rows: {top_tables['by_rows']}")
+            else:
+                self.config_parser.print_log_message('DEBUG', "Top N tables by rows is not configured or set to 0, skipping this part.")
+
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error fetching top 10 biggest tables: {e}")
-            raise
+            self.config_parser.print_log_message('ERROR', f"Error fetching top {top_n} tables by rows: {e}")
+
+        return top_tables
+
+    def get_top_fk_dependencies(self, settings):
+        top_fk_dependencies = {}
+        return top_fk_dependencies
 
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

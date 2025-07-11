@@ -49,16 +49,20 @@ class Orchestrator:
             ## But in Sybase ASE they are defined as sort of additional check constraint on the column
             # self.run_create_domains()
 
-            self.run_migrate_tables()
-            self.run_migrate_indexes('standard')
-            self.run_migrate_constraints()
-            self.run_migrate_views()
-            self.run_migrate_funcprocs()
-            self.run_migrate_triggers()
-            self.run_migrate_indexes('function_based')
-            self.run_migrate_comments()
+            if not self.config_parser.is_dry_run():
+                self.run_migrate_tables()
+                self.run_migrate_indexes('standard')
+                self.run_migrate_constraints()
+                self.run_migrate_views()
+                self.run_migrate_funcprocs()
+                self.run_migrate_triggers()
+                self.run_migrate_indexes('function_based')
+                self.run_migrate_comments()
 
-            self.run_post_migration_script()
+                self.run_post_migration_script()
+            else:
+                self.config_parser.print_log_message('INFO', "Dry run mode enabled. No data migration performed.")
+
             self.config_parser.print_log_message('INFO', "Orchestration complete.")
             self.migrator_tables.update_main_status('Orchestrator', '', True, 'finished OK')
 
@@ -445,6 +449,7 @@ class Orchestrator:
                     self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Found data migration limitations matching table {target_table}: {rows_migration_limitations}")
                     for limitation in rows_migration_limitations:
                         where_clause = limitation[0]
+                        where_clause = where_clause.replace('{source_schema}', table_data['source_schema']).replace('{source_table}', table_data['source_table'])
                         use_when_column_name = limitation[1]
                         for col_order_num, column_info in table_data['source_columns'].items():
                             column_name = column_info['column_name']

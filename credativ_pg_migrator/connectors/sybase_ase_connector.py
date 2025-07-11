@@ -1575,7 +1575,7 @@ class SybaseASEConnector(DatabaseConnector):
         self.disconnect()
         return size
 
-    def get_top10_biggest_tables(self, settings):
+    def get_top_n_tables(self, settings):
         """
         //TODO
         what about this query?:
@@ -1588,41 +1588,61 @@ class SybaseASEConnector(DatabaseConnector):
         where type = 'U'
         order by kbs DESC, table_name ASC
         """
+        top_tables = {}
+        top_tables['by_rows'] = {}
+        top_tables['by_size'] = {}
+        top_tables['by_columns'] = {}
+        top_tables['by_indexes'] = {}
+        top_tables['by_constraints'] = {}
+        # return top_tables
+
         source_schema = settings['source_schema']
         try:
-            self.connect()
-            cursor = self.connection.cursor()
-            top_n = 10
-            query = f"""
-            SELECT TOP {top_n}
-                o.name,
-                row_count(db_id(), o.id) as total_rows,
-                data_pages(db_id(), o.id, 0)*b.blocksize as size_kb
-            FROM {source_schema}.sysobjects o,
-                (SELECT low/1024 as blocksize
-                 FROM master.{source_schema}.spt_values d
-                 WHERE d.number = 1 AND d.type = 'E') b
-            WHERE type='U'
-            ORDER BY size_kb DESC
-            """
-            self.config_parser.print_log_message('DEBUG', f"Executing query to get top {top_n} biggest tables: {query}")
-            cursor.execute(query)
-            result = {}
             order_num = 1
-            rows = cursor.fetchall()
-            for row in rows:
-                result[order_num] = {
-                    'table_name': row[0],
-                    'total_rows': row[1],
-                    'size_bytes': int(row[2]) * 1024
-                }
-                order_num += 1
-            cursor.close()
-            self.disconnect()
-            return result
+            top_n = self.config_parser.get_top_n_tables_by_rows()
+            if top_n > 0:
+                self.connect()
+                cursor = self.connection.cursor()
+                top_n = 10
+                query = f"""
+                SELECT TOP {top_n}
+                user_name(o.uid) as owner,
+                o.name as table_name,
+                row_count(db_id(), o.id) as row_count,
+                data_pages(db_id(), o.id, 0)*b.blocksize as row_size
+                FROM {source_schema}.sysobjects o,
+                (SELECT low/1024 as blocksize
+                FROM master.{source_schema}.spt_values d
+                WHERE d.number = 1 AND d.type = 'E') b
+                WHERE type='U'
+                ORDER BY row_count DESC
+                """
+                self.config_parser.print_log_message('DEBUG', f"Executing query to get top {top_n} tables by rows: {query}")
+                cursor.execute(query)
+                order_num = 1
+                rows = cursor.fetchall()
+                cursor.close()
+                self.disconnect()
+                for row in rows:
+                    top_tables['by_rows'][order_num] = {
+                        'owner': row[0].strip(),
+                        'table_name': row[1].strip(),
+                        'row_count': row[2],
+                        'row_size': row[3],
+                    }
+                    order_num += 1
+                self.config_parser.print_log_message('DEBUG', f"Top tables by rows: {top_tables['by_rows']}")
+            else:
+                self.config_parser.print_log_message('DEBUG', f"Skipping top tables by rows check, top_n is set to 0")
+
         except Exception as error:
-            self.config_parser.print_log_message('ERROR', f"Warning: cannot check top biggest tables - error: {error}")
-            return []
+            self.config_parser.print_log_message('ERROR', f"Warning: cannot check top tables by rows - error: {error}")
+
+        return top_tables
+
+    def get_top_fk_dependencies(self, settings):
+        top_fk_dependencies = {}
+        return top_fk_dependencies
 
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

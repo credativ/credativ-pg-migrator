@@ -1084,7 +1084,7 @@ class InformixConnector(DatabaseConnector):
             migrator_tables = settings['migrator_tables']
             migration_limitation = settings['migration_limitation']
 
-            source_table_rows = self.get_rows_count(source_schema, source_table)
+            source_table_rows = self.get_rows_count(source_schema, source_table, migration_limitation)
             target_table_rows = 0
 
             ## source_schema, source_table, source_table_id, source_table_rows, worker_id, target_schema, target_table, target_table_rows
@@ -1115,6 +1115,8 @@ class InformixConnector(DatabaseConnector):
 
                     if col['data_type'].lower() == 'datetime':
                         select_columns_list.append(f"TO_CHAR({col['column_name']}, '%Y-%m-%d %H:%M:%S') as {col['column_name']}")
+                    elif col['data_type'].lower() in ['clob', 'blob'] and not self.config_parser.should_migrate_lob_values():
+                        select_columns_list.append(f"CAST(NULL as {col['data_type']}) as {col['column_name']}")
                     #     select_columns_list.append(f"ST_asText(`{col['column_name']}`) as `{col['column_name']}`")
                     # elif col['data_type'].lower() == 'set':
                     #     select_columns_list.append(f"cast(`{col['column_name']}` as char(4000)) as `{col['column_name']}`")
@@ -1162,9 +1164,9 @@ class InformixConnector(DatabaseConnector):
                             column_type = column['data_type']
                             target_column_type = target_columns[order_num]['data_type']
                             # if column_type.lower() in ['binary', 'bytea']:
-                            if column_type.lower() in ['blob']:
+                            if column_type.lower() in ['blob'] and record[column_name] is not None:
                                 record[column_name] = bytes(record[column_name].getBytes(1, int(record[column_name].length())))  # Convert 'com.informix.jdbc.IfxCblob' to bytes
-                            elif column_type.lower() in ['clob']:
+                            elif column_type.lower() in ['clob'] and record[column_name] is not None:
                                 # elif isinstance(record[column_name], IfxCblob):
                                 record[column_name] = record[column_name].getSubString(1, int(record[column_name].length()))  # Convert IfxCblob to string
                                 # record[column_name] = bytes(record[column_name].getBytes(1, int(record[column_name].length())))  # Convert IfxBblob to bytes
@@ -1636,8 +1638,10 @@ class InformixConnector(DatabaseConnector):
         else:
             pass
 
-    def get_rows_count(self, table_schema: str, table_name: str):
+    def get_rows_count(self, table_schema: str, table_name: str, migration_limitation: str = None):
         query = f"""SELECT COUNT(*) FROM "{table_schema}".{table_name} """
+        if migration_limitation:
+            query += f" WHERE {migration_limitation}"
         self.config_parser.print_log_message('DEBUG3', f"get_rows_count query: {query}")
         cursor = self.connection.cursor()
         cursor.execute(query)
@@ -1689,33 +1693,389 @@ class InformixConnector(DatabaseConnector):
     def get_database_size(self):
         return None
 
-    def get_top10_biggest_tables(self, settings):
+    def get_date_time_columns(self, cursor, table_schema: str, table_name: str):
         query = f"""
-            select
-                owner, tabname, rowsize, nrows, rowsize*nrows as size
-            from systables where owner = '{settings['source_schema']}'
-            order by size desc limit 10
-        """
-        self.config_parser.print_log_message('DEBUG', f"Fetching top 10 biggest tables for schema {settings['source_schema']} with query: {query}")
-        self.connect()
-        cursor = self.connection.cursor()
+            SELECT
+                c.colno,
+                c.colname,
+                CASE
+                    WHEN c.extended_id = 0 THEN
+                        CASE (CASE WHEN c.coltype >= 256 THEN c.coltype - 256 ELSE c.coltype END)
+                            WHEN 7 THEN 'DATE'
+                            WHEN 10 THEN 'DATETIME'
+                            -- Add other time-related types if needed
+                            ELSE NULL
+                        END
+                    ELSE
+                        CASE WHEN x.name IS NOT NULL THEN upper(x.name)
+                        ELSE NULL END
+                END AS coltype,
+                c.collength
+            FROM syscolumns c
+            LEFT JOIN sysxtdtypes x ON c.extended_id = x.extended_id
+            WHERE c.tabid = (
+                SELECT t.tabid
+                FROM systables t
+                WHERE t.tabname = '{table_name.strip()}'
+                AND t.owner = '{table_schema.strip()}'
+            )
+            AND (
+                (c.extended_id = 0 AND (c.coltype IN (7, 10) OR (c.coltype - 256) IN (7, 10)))
+                OR (c.extended_id <> 0 AND (UPPER(x.name) LIKE '%DATE%' OR UPPER(x.name) LIKE '%TIME%'))
+            )
+            ORDER BY c.colno
+            """
+        self.config_parser.print_log_message('DEBUG3', f"Fetching date/time columns for table {table_name.strip()} with query: {query}")
         cursor.execute(query)
-        tables = cursor.fetchall()
-        cursor.close()
-        self.disconnect()
+        date_time_columns = cursor.fetchall()
+        return ', '.join([f"{col[1]} ({col[2]})" for col in date_time_columns]) if date_time_columns else None
+
+    def get_pk_columns(self, cursor, table_schema: str, table_name: str):
+        query = f"""
+            SELECT
+                coalesce(c.constrname, i.idxname) as index_name,
+                (SELECT colname FROM syscolumns ic WHERE ic.colno = i.part1 AND ic.tabid = i.tabid) as col1,
+                (SELECT colname FROM syscolumns ic WHERE ic.colno = i.part2 AND ic.tabid = i.tabid) as col2,
+                (SELECT colname FROM syscolumns ic WHERE ic.colno = i.part3 AND ic.tabid = i.tabid) as col3,
+                (SELECT colname FROM syscolumns ic WHERE ic.colno = i.part4 AND ic.tabid = i.tabid) as col4
+            FROM sysindexes i
+            LEFT JOIN sysconstraints c
+            ON i.tabid = c.tabid and i.idxname = c.idxname
+            LEFT JOIN sysindices i2
+            ON i.tabid = i2.tabid and i.idxname = i2.idxname
+            WHERE coalesce(c.constrtype, i.idxtype) = 'P'
+            AND i.tabid = (SELECT tabid FROM systables
+                WHERE tabname = '{table_name.strip()}'
+                AND owner = '{table_schema.strip()}')
+        """
+        self.config_parser.print_log_message('DEBUG3', f"Fetching PK columns for table {table_name.strip()} with query: {query}")
+        cursor.execute(query)
+        pk_columns = cursor.fetchall()
+        pk_column_names = []
+        for row in pk_columns:
+            for col in row[1:]:
+                if col:
+                    pk_column_names.append(col.strip())
+        return ', '.join(pk_column_names)
+
+    def get_top_n_tables(self, settings):
         top_tables = {}
-        order_num = 1
-        for row in tables:
-            top_tables[order_num] = {
-                'owner': row[0].strip(),
-                'table_name': row[1].strip(),
-                'row_size': row[2],
-                'row_count': row[3],
-                'size': row[4]
-            }
-            order_num += 1
-        self.config_parser.print_log_message('DEBUG', f"Top 10 biggest tables: {top_tables}")
+        top_tables['by_rows'] = {}
+        top_tables['by_size'] = {}
+        top_tables['by_columns'] = {}
+        top_tables['by_indexes'] = {}
+        top_tables['by_constraints'] = {}
+
+        # exclude_tables can be a list of table names or regex patterns
+        exclude_tables = self.config_parser.get_exclude_tables()
+        exclude_clause = ""
+        if exclude_tables:
+            clauses = []
+            for value in exclude_tables:
+                if value.startswith('^') or any(c in value for c in ['*', '.', '$', '[', ']', '?', '+', '|', '(', ')']):
+                    # Treat as regex pattern
+                    clauses.append(f"tabname NOT MATCHES '{value}'")
+                else:
+                    # Treat as exact table name
+                    clauses.append(f"tabname <> '{value}'")
+                if clauses:
+                    exclude_clause = " AND " + " AND ".join(clauses)
+        try:
+            order_num = 1
+            top_n = self.config_parser.get_top_n_tables_by_rows()
+            if top_n > 0:
+                query = f"""
+                    select
+                        owner, tabname, nrows, rowsize, rowsize*nrows as size,
+                        (select count(*) from sysconstraints c where t.tabid = c.tabid and constrtype = 'R') as fk_count,
+                        CASE WHEN bitand(flags, 1) = 1 THEN 'YES' ELSE 'NO' END AS has_rowid,
+                        (select count(*) FROM sysconstraints ic JOIN systables it ON ic.tabid = it.tabid JOIN sysreferences ir ON ic.constrid = ir.constrid
+                        JOIN systables irt ON ir.ptabid = irt.tabid JOIN sysconstraints ipc ON ir."primary" = ipc.constrid WHERE ic.constrtype = 'R' and irt.owner = t.owner and irt.tabname = t.tabname) as ref_fk_count
+                    from systables t where owner = '{settings['source_schema']}' {exclude_clause}
+                    order by nrows desc limit {top_n}
+                """
+                self.config_parser.print_log_message('DEBUG2', f"Fetching top {top_n} tables BY ROWS for schema {settings['source_schema']} with query: {query}")
+                self.connect()
+                cursor = self.connection.cursor()
+                cursor.execute(query)
+                tables = cursor.fetchall()
+                for row in tables:
+
+                    top_tables['by_rows'][order_num] = {
+                        'owner': row[0].strip(),
+                        'table_name': row[1].strip(),
+                        'row_count': row[2],
+                        'row_size': row[3],
+                        'table_size': row[4],
+                        'fk_count': row[5],
+                        'date_time_columns': self.get_date_time_columns(cursor, row[0].strip(), row[1].strip()),
+                        'pk_columns': self.get_pk_columns(cursor, row[0].strip(), row[1].strip()),
+                        'has_rowid': row[6],
+                        'ref_fk_count': row[7],
+                    }
+                    order_num += 1
+
+                cursor.close()
+                self.disconnect()
+                self.config_parser.print_log_message('DEBUG2', f"Top {top_n} tables BY ROWS: {top_tables}")
+            else:
+                self.config_parser.print_log_message('INFO', "Skipping fetching top tables by rows as the setting is not defined or set to 0")
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error fetching top tables by rows: {e}")
+
+        try:
+            order_num = 1
+            top_n = self.config_parser.get_top_n_tables_by_size()
+            if top_n > 0:
+                query = f"""
+                    select
+                        owner, tabname, rowsize, nrows, rowsize*nrows as size,
+                        (select count(*) from sysconstraints c where t.tabid = c.tabid and constrtype = 'R') as fk_count,
+                        CASE WHEN bitand(flags, 1) = 1 THEN 'YES' ELSE 'NO' END AS has_rowid,
+                        (select count(*) FROM sysconstraints ic JOIN systables it ON ic.tabid = it.tabid JOIN sysreferences ir ON ic.constrid = ir.constrid
+                        JOIN systables irt ON ir.ptabid = irt.tabid JOIN sysconstraints ipc ON ir."primary" = ipc.constrid WHERE ic.constrtype = 'R' and irt.owner = t.owner and irt.tabname = t.tabname) as ref_fk_count
+                    from systables t where owner = '{settings['source_schema']}' {exclude_clause}
+                    order by size desc limit {top_n}
+                """
+                self.config_parser.print_log_message('DEBUG2', f"Fetching top {top_n} tables BY SIZE for schema {settings['source_schema']} with query: {query}")
+                self.connect()
+                cursor = self.connection.cursor()
+                cursor.execute(query)
+                tables = cursor.fetchall()
+                for row in tables:
+                    top_tables['by_size'][order_num] = {
+                        'owner': row[0].strip(),
+                        'table_name': row[1].strip(),
+                        'table_size': row[4],
+                        'row_count': row[3],
+                        'row_size': row[2],
+                        'fk_count': row[5],
+                        'date_time_columns': self.get_date_time_columns(cursor, row[0].strip(), row[1].strip()),
+                        'pk_columns': self.get_pk_columns(cursor, row[0].strip(), row[1].strip()),
+                        'has_rowid': row[6],
+                        'ref_fk_count': row[7],
+                    }
+                    order_num += 1
+                cursor.close()
+                self.disconnect()
+                self.config_parser.print_log_message('DEBUG2', f"Top {top_n} tables BY SIZE: {top_tables}")
+            else:
+                self.config_parser.print_log_message('INFO', "Skipping fetching top tables by size as the setting is not defined or set to 0")
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error fetching top tables by size: {e}")
+
+        try:
+            order_num = 1
+            top_n = self.config_parser.get_top_n_tables_by_columns()
+            if top_n > 0:
+                query = f"""
+                    select
+                        t.owner, tabname, count(*) as column_count, rowsize, nrows, rowsize*nrows as size,
+                        (select count(*) from sysconstraints c where t.tabid = c.tabid and constrtype = 'R') as fk_count,
+                        CASE WHEN bitand(flags, 1) = 1 THEN 'YES' ELSE 'NO' END AS has_rowid,
+                        (select count(*) FROM sysconstraints ic JOIN systables it ON ic.tabid = it.tabid JOIN sysreferences ir ON ic.constrid = ir.constrid
+                        JOIN systables irt ON ir.ptabid = irt.tabid JOIN sysconstraints ipc ON ir."primary" = ipc.constrid WHERE ic.constrtype = 'R' and irt.owner = t.owner and irt.tabname = t.tabname) as ref_fk_count
+                    from systables t
+                    join syscolumns c on t.tabid = c.tabid
+                    where t.owner = '{settings['source_schema']}' {exclude_clause}
+                    and c.colno > 0
+                    group by t.owner, tabname, rowsize, nrows, size, fk_count, has_rowid
+                    order by column_count desc limit {top_n}
+                """
+                self.config_parser.print_log_message('DEBUG2', f"Fetching top {top_n} tables BY COLUMNS for schema {settings['source_schema']} with query: {query}")
+                self.connect()
+                cursor = self.connection.cursor()
+                cursor.execute(query)
+                tables = cursor.fetchall()
+                for row in tables:
+                    top_tables['by_columns'][order_num] = {
+                        'owner': row[0].strip(),
+                        'table_name': row[1].strip(),
+                        'column_count': row[2],
+                        'row_size': row[3],
+                        'row_count': row[4],
+                        'table_size': row[5],
+                        'fk_count': row[6],
+                        'date_time_columns': self.get_date_time_columns(cursor, row[0].strip(), row[1].strip()),
+                        'pk_columns': self.get_pk_columns(cursor, row[0].strip(), row[1].strip()),
+                        'has_rowid': row[7],
+                        'ref_fk_count': row[8],
+                    }
+                    order_num += 1
+                cursor.close()
+                self.disconnect()
+                self.config_parser.print_log_message('DEBUG2', f"Top {top_n} tables BY COLUMNS: {top_tables}")
+            else:
+                self.config_parser.print_log_message('INFO', "Skipping fetching top tables by columns as the setting is not defined or set to 0")
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error fetching top tables by columns: {e}")
+
+        try:
+            order_num = 1
+            top_n = self.config_parser.get_top_n_tables_by_indexes()
+            if top_n > 0:
+                query = f"""
+                    select
+                        t.owner, tabname, count(*) as index_count, rowsize, nrows, rowsize*nrows as size,
+                        (select count(*) from sysconstraints c where t.tabid = c.tabid and constrtype = 'R') as fk_count,
+                        CASE WHEN bitand(flags, 1) = 1 THEN 'YES' ELSE 'NO' END AS has_rowid,
+                        (select count(*) FROM sysconstraints ic JOIN systables it ON ic.tabid = it.tabid JOIN sysreferences ir ON ic.constrid = ir.constrid
+                        JOIN systables irt ON ir.ptabid = irt.tabid JOIN sysconstraints ipc ON ir."primary" = ipc.constrid WHERE ic.constrtype = 'R' and irt.owner = t.owner and irt.tabname = t.tabname) as ref_fk_count
+                    from systables t
+                    join sysindexes i on t.tabid = i.tabid
+                    where t.owner = '{settings['source_schema']}' {exclude_clause}
+                    group by t.owner, tabname, rowsize, nrows, size, fk_count, has_rowid
+                    order by index_count desc limit {top_n}
+                """
+                self.config_parser.print_log_message('DEBUG2', f"Fetching top {top_n} tables BY INDEXES for schema {settings['source_schema']} with query: {query}")
+                self.connect()
+                cursor = self.connection.cursor()
+                cursor.execute(query)
+                tables = cursor.fetchall()
+                for row in tables:
+                    top_tables['by_indexes'][order_num] = {
+                        'owner': row[0].strip(),
+                        'table_name': row[1].strip(),
+                        'index_count': row[2],
+                        'row_size': row[3],
+                        'row_count': row[4],
+                        'table_size': row[5],
+                        'fk_count': row[6],
+                        'date_time_columns': self.get_date_time_columns(cursor, row[0].strip(), row[1].strip()),
+                        'pk_columns': self.get_pk_columns(cursor, row[0].strip(), row[1].strip()),
+                        'has_rowid': row[7],
+                        'ref_fk_count': row[8],
+                    }
+                    order_num += 1
+                cursor.close()
+                self.disconnect()
+                self.config_parser.print_log_message('DEBUG2', f"Top {top_n} tables BY INDEXES: {top_tables}")
+            else:
+                self.config_parser.print_log_message('INFO', "Skipping fetching top tables by indexes as the setting is not defined or set to 0")
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error fetching top tables by indexes: {e}")
+
+        try:
+            order_num = 1
+            top_n = self.config_parser.get_top_n_tables_by_constraints()
+            if top_n > 0:
+                query = f"""
+                    select
+                        t.owner, tabname, count(*) as constraint_count, rowsize, nrows, rowsize*nrows as size, constrtype,
+                        CASE WHEN bitand(flags, 1) = 1 THEN 'YES' ELSE 'NO' END AS has_rowid,
+                        (select count(*) FROM sysconstraints ic JOIN systables it ON ic.tabid = it.tabid JOIN sysreferences ir ON ic.constrid = ir.constrid
+                        JOIN systables irt ON ir.ptabid = irt.tabid JOIN sysconstraints ipc ON ir."primary" = ipc.constrid WHERE ic.constrtype = 'R' and irt.owner = t.owner and irt.tabname = t.tabname) as ref_fk_count
+                    from systables t
+                    join sysconstraints c on t.tabid = c.tabid
+                    where t.owner = '{settings['source_schema']}' {exclude_clause}
+                    AND constrtype IN ('R', 'C')
+                    group by t.owner, tabname, rowsize, nrows, size, constrtype, has_rowid
+                    order by constraint_count desc limit {top_n}
+                """
+                self.config_parser.print_log_message('DEBUG2', f"Fetching top {top_n} tables BY CONSTRAINTS for schema {settings['source_schema']} with query: {query}")
+                self.connect()
+                cursor = self.connection.cursor()
+                cursor.execute(query)
+                tables = cursor.fetchall()
+                for row in tables:
+                    top_tables['by_constraints'][order_num] = {
+                        'owner': row[0].strip(),
+                        'table_name': row[1].strip(),
+                        'constraint_type': 'FOREIGN KEY' if row[6].strip() == 'R' else 'CHECK',
+                        'constraint_count': row[2],
+                        'row_size': row[3],
+                        'row_count': row[4],
+                        'table_size': row[5],
+                        'date_time_columns': self.get_date_time_columns(cursor, row[0].strip(), row[1].strip()),
+                        'pk_columns': self.get_pk_columns(cursor, row[0].strip(), row[1].strip()),
+                        'has_rowid': row[7],
+                        'ref_fk_count': row[8],
+                    }
+                    order_num += 1
+                cursor.close()
+                self.disconnect()
+                self.config_parser.print_log_message('DEBUG2', f"Top {top_n} tables BY CONSTRAINTS: {top_tables}")
+            else:
+                self.config_parser.print_log_message('INFO', "Skipping fetching top tables by constraints as the setting is not defined or set to 0")
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error fetching top tables by constraints: {e}")
+
         return top_tables
+
+    def get_top_fk_dependencies(self, settings):
+        top_fk_dependencies = {}
+        source_schema = settings['source_schema']
+
+        # exclude_tables can be a list of table names or regex patterns
+        exclude_tables = self.config_parser.get_exclude_tables()
+        exclude_clause = ""
+        if exclude_tables:
+            clauses = []
+            for value in exclude_tables:
+                if value.startswith('^') or any(c in value for c in ['*', '.', '$', '[', ']', '?', '+', '|', '(', ')']):
+                    # Treat as regex pattern
+                    clauses.append(f"tabname NOT MATCHES '{value}'")
+                else:
+                    # Treat as exact table name
+                    clauses.append(f"tabname <> '{value}'")
+                if clauses:
+                    exclude_clause = " AND " + " AND ".join(clauses)
+
+        try:
+            order_num = 1
+            top_n = 10 # self.config_parser.get_top_n_fk_dependencies_by_tables()
+            if top_n > 0:
+                query = f"""
+                    SELECT
+                        t.owner, t.tabname, COUNT(*) AS fk_count
+                    FROM systables t
+                    JOIN sysconstraints c ON t.tabid = c.tabid
+                    WHERE c.constrtype = 'R' AND t.owner = '{source_schema}' {exclude_clause}
+                    GROUP BY t.owner, t.tabname
+                    ORDER BY fk_count DESC LIMIT {top_n}
+                """
+                self.config_parser.print_log_message('DEBUG2', f"Fetching top {top_n} foreign key dependencies BY TABLES for schema {settings['source_schema']} with query: {query}")
+                self.connect()
+                cursor = self.connection.cursor()
+                cursor.execute(query)
+                tables = cursor.fetchall()
+                for row in tables:
+                    query = f"""
+                    SELECT
+                        t.tabname || '.' || col.colname || ' -> ' || rt.tabname || '.' || rcol.colname AS dependency_columns
+                    FROM sysconstraints c
+                    JOIN systables t ON c.tabid = t.tabid
+                    JOIN sysindexes i ON c.idxname = i.idxname
+                    JOIN syscolumns col ON t.tabid = col.tabid AND col.colno IN (i.part1, i.part2, i.part3, i.part4, i.part5, i.part6, i.part7, i.part8, i.part9, i.part10, i.part11, i.part12, i.part13, i.part14, i.part15, i.part16)
+                    JOIN sysreferences r ON c.constrid = r.constrid
+                    JOIN systables rt ON r.ptabid = rt.tabid
+                    JOIN sysconstraints pc ON r."primary" = pc.constrid
+                    JOIN sysindexes pi ON pc.idxname = pi.idxname
+                    JOIN syscolumns rcol ON rt.tabid = rcol.tabid AND rcol.colno IN (pi.part1, pi.part2, pi.part3, pi.part4, pi.part5, pi.part6, pi.part7, pi.part8, pi.part9, pi.part10, pi.part11, pi.part12, pi.part13, pi.part14, pi.part15, pi.part16)
+                    WHERE c.constrtype = 'R' and t.owner = '{row[0].strip()}' and t.tabname = '{row[1].strip()}'
+                    """
+                    cursor.execute(query)
+                    dependencies = cursor.fetchall()
+                    dependency_columns = ', '.join([dep[0] for dep in dependencies])
+
+                    top_fk_dependencies[order_num] = {
+                        'owner': row[0].strip(),
+                        'table_name': row[1].strip(),
+                        'fk_count': row[2],
+                        'dependencies': dependency_columns,
+                    }
+
+                    order_num += 1
+
+                cursor.close()
+                self.disconnect()
+                self.config_parser.print_log_message('DEBUG2', f"Top {top_n} foreign key dependencies BY TABLES: {top_fk_dependencies}")
+            else:
+                self.config_parser.print_log_message('INFO', "Skipping fetching top foreign key dependencies by tables as the setting is not defined or set to 0")
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error fetching top foreign key dependencies by tables: {e}")
+
+        return top_fk_dependencies
 
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

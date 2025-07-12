@@ -871,6 +871,7 @@ class MigratorTables:
             source_schema TEXT,
             source_table TEXT,
             source_table_id INTEGER,
+            chunk_number INTEGER,
             batch_number INTEGER,
             batch_start TIMESTAMP,
             batch_end TIMESTAMP,
@@ -1015,6 +1016,7 @@ class MigratorTables:
         source_schema = settings['source_schema']
         source_table = settings['source_table']
         source_table_id = settings['source_table_id']
+        chunk_number = settings['chunk_number']
         batch_number = settings['batch_number']
         batch_start = settings['batch_start']
         batch_end = settings['batch_end']
@@ -1028,13 +1030,13 @@ class MigratorTables:
         table_name = self.config_parser.get_protocol_name_batches_stats()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
-            (source_schema, source_table, source_table_id, batch_number,
+            (source_schema, source_table, source_table_id, chunk_number, batch_number,
             batch_start, batch_end, batch_rows, batch_seconds, worker_id,
             reading_seconds, transforming_seconds, writing_seconds)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (source_schema, source_table, source_table_id, batch_number,
+        params = (source_schema, source_table, source_table_id, chunk_number, batch_number,
                   batch_start, batch_end, batch_rows, batch_seconds, str(worker_id),
                   reading_seconds, transforming_seconds, writing_seconds)
         try:

@@ -24,12 +24,14 @@ import time
 class ConfigParser:
     def __init__(self, args, logger):
         self.args = args
-        self.config = self.load_config(args.config)
         self.logger = logger
+        self.config = self.load_config(args.config)
         self.validate_config()
 
     def load_config(self, config_file):
         """Load the configuration file."""
+        self.print_log_message('INFO', f"Working directory: {os.path.dirname(os.path.abspath(self.args.config))}")
+        self.print_log_message('INFO', f"Loading configuration from {config_file}")
         with open(config_file, 'r') as file:
             return yaml.safe_load(file)
 
@@ -597,8 +599,11 @@ class ConfigParser:
     ## scheduled actions
 
     def pause_migration_fired(self):
+        config_dir = os.path.dirname(os.path.abspath(self.args.config))
+
         scheduled_actions = self.config.get('migration', {}).get('scheduled_actions', [])
         self.print_log_message('DEBUG3', f"pause_migration_fired: Checking for scheduled actions: {scheduled_actions}")
+        resume_file = os.path.join(config_dir, "resume_migration")
 
         now = datetime.now()
         for action in scheduled_actions:
@@ -606,15 +611,34 @@ class ConfigParser:
             if action.get('action') == 'pause' and 'datetime' in action:
                 action_datetime_str = action['datetime']
                 try:
-                    # Expected format: "YYYY.DD.MM HH:MM"
-                    action_datetime = datetime.strptime(action_datetime_str, "%Y.%d.%m %H:%M")
+                    # Expected format: "YYYY.MM.DD HH:MM"
+                    action_datetime = datetime.strptime(action_datetime_str, "%Y.%m.%d %H:%M")
                     self.print_log_message('DEBUG3', f"pause_migration_fired: Parsed action datetime: {action_datetime}, current datetime: {now}")
                 except ValueError:
-                    self.logger.error(f"pause_migration_fired: Invalid datetime format in scheduled action: {action_datetime_str}. Expected format is YYYY.DD.MM HH:MM.")
+                    self.logger.error(f"pause_migration_fired: Invalid datetime format in scheduled action: {action_datetime_str}. Expected format is YYYY.MM.DD HH:MM.")
                     continue  # skip invalid datetime format
-                if now >= action_datetime:
-                    self.print_log_message('INFO', f"""pause_migration_fired: Pausing migration with scheduled action "{action.get('name')}" as current datetime {now} is past scheduled action datetime {action_datetime}.""")
+                if now >= action_datetime and not action.get('fired', False):
+                    self.print_log_message('INFO', f"""**** Pausing migration with scheduled action "{action.get('name')}" as current datetime {now} is past scheduled action datetime {action_datetime}. ****""")
+                    self.print_log_message('INFO', f"**** To resume migration, create a file '{resume_file}' in the working directory. ****")
+                    action['fired'] = True
                     return True
+
+        pause_file = os.path.join(config_dir, "pause_migration")
+        self.print_log_message('DEBUG', f"Checking for pause file '{pause_file}' to pause migration...")
+        if os.path.exists(pause_file):
+            os.remove(pause_file)
+            self.print_log_message('INFO', f"**** Pause file '{pause_file}' found. Pausing migration. ****")
+            self.print_log_message('INFO', f"**** To resume migration, create a file '{resume_file}' in the working directory. ****")
+            return True
+
+        cancel_file = os.path.join(config_dir, "cancel_migration")
+        self.print_log_message('DEBUG', f"Checking for cancel file '{cancel_file}' to cancel migration...")
+        if os.path.exists(cancel_file):
+            self.print_log_message('INFO', f"Cancel file '{cancel_file}' found. Exiting migration.")
+            os.remove(cancel_file)
+            self.print_log_message('INFO', "**** Migration canceled on user request ****")
+            exit(1)
+
         return False
 
     def wait_for_resume(self):
@@ -622,7 +646,7 @@ class ConfigParser:
         resume_file = os.path.join(config_dir, "resume_migration")
         self.print_log_message('INFO', f"Migration paused. Waiting for '{resume_file}' to exist to resume...")
         while not os.path.exists(resume_file):
-            time.sleep(15)
+            time.sleep(5)
         self.print_log_message('INFO', f"Resuming migration as '{resume_file}' was found.")
         os.remove(resume_file)
 

@@ -43,6 +43,7 @@ class Orchestrator:
             self.config_parser.print_log_message('INFO', "Starting orchestration...")
 
             self.run_create_user_defined_types()
+            self.check_pausing_resuming()
 
             ## migration of domains is a bit unclear currently
             ## domains in PostgreSQL are special data types
@@ -51,13 +52,28 @@ class Orchestrator:
 
             if not self.config_parser.is_dry_run():
                 self.run_migrate_tables()
+                self.check_pausing_resuming()
+
                 self.run_migrate_indexes('standard')
+                self.check_pausing_resuming()
+
                 self.run_migrate_constraints()
+                self.check_pausing_resuming()
+
                 self.run_migrate_views()
+                self.check_pausing_resuming()
+
                 self.run_migrate_funcprocs()
+                self.check_pausing_resuming()
+
                 self.run_migrate_triggers()
+                self.check_pausing_resuming()
+
                 self.run_migrate_indexes('function_based')
+                self.check_pausing_resuming()
+
                 self.run_migrate_comments()
+                self.check_pausing_resuming()
 
                 self.run_post_migration_script()
             else:
@@ -895,6 +911,12 @@ class Orchestrator:
         if self.on_error_action == 'stop':
             self.config_parser.print_log_message('ERROR', "Stopping due to error.")
             exit(1)
+
+    def check_pausing_resuming(self):
+        if self.config_parser.pause_migration_fired():
+            self.config_parser.print_log_message('INFO', f"Orchestrator paused. Waiting for resume signal...")
+            self.config_parser.wait_for_resume()
+            self.config_parser.print_log_message('INFO', f"Orchestrator resumed.")
 
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

@@ -1089,11 +1089,12 @@ class InformixConnector(DatabaseConnector):
 
             source_table_rows = self.get_rows_count(source_schema, source_table, migration_limitation)
             target_table_rows = 0
+            total_chunks = int((source_table_rows / data_chunk_size) + 0.5)
 
             migration_stats = {
                 'rows_migrated': 0,
                 'chunk_number': chunk_number,
-                'total_chunks': int((source_table_rows / data_chunk_size) + 0.5),
+                'total_chunks': total_chunks,
                 'source_table_rows': source_table_rows,
                 'target_table_rows': target_table_rows,
                 'finished': True if source_table_rows == 0 else False,
@@ -1112,6 +1113,17 @@ class InformixConnector(DatabaseConnector):
 
             if source_table_rows == 0:
                 self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {source_table} is empty - skipping data migration.")
+                migrator_tables.update_data_migration_status({
+                        'row_id': protocol_id,
+                        'success': True,
+                        'message': 'Skipped',
+                        'target_table_rows': 0,
+                        'batch_count': 0,
+                        'shortest_batch_seconds': 0,
+                        'longest_batch_seconds': 0,
+                        'average_batch_seconds': 0,
+                    })
+
                 return migration_stats
             else:
                 self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {source_table} has {source_table_rows} rows - starting data migration.")
@@ -1235,6 +1247,7 @@ class InformixConnector(DatabaseConnector):
                         'source_schema': source_schema,
                         'source_table': source_table,
                         'source_table_id': source_table_id,
+                        'chunk_number': chunk_number,
                         'batch_number': batch_number,
                         'batch_start': batch_start_str,
                         'batch_end': batch_end_str,
@@ -1272,14 +1285,16 @@ class InformixConnector(DatabaseConnector):
                 migration_stats = {
                     'rows_migrated': total_inserted_rows,
                     'chunk_number': chunk_number,
-                    'total_chunks': int((source_table_rows / data_chunk_size) + 0.5),
+                    'total_chunks': total_chunks,
                     'source_table_rows': source_table_rows,
                     'target_table_rows': target_table_rows,
+                    'finished': False,
                 }
 
-                migration_stats['finished'] = True if source_table_rows == target_table_rows or chunk_number == migration_stats['total_chunks'] else False
-
-                if migration_stats['finished']:
+                self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Migration stats: {migration_stats}")
+                if source_table_rows == target_table_rows or chunk_number == total_chunks:
+                    self.config_parser.print_log_message('DEBUG3', f"Worker {worker_id}: Setting migration status to finished for table {source_table} (chunk {chunk_number}/{total_chunks})")
+                    migration_stats['finished'] = True
                     migrator_tables.update_data_migration_status({
                         'row_id': protocol_id,
                         'success': True,

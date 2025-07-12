@@ -44,14 +44,21 @@ class Planner:
     def create_plan(self):
         try:
             self.pre_planning()
+            self.check_pausing_resuming()
 
             self.run_premigration_analysis()
+            self.check_pausing_resuming()
 
             self.run_prepare_user_defined_types()
             self.run_prepare_domains()
             self.run_prepare_defaults()
+            self.check_pausing_resuming()
+
             self.run_prepare_tables()
+            self.check_pausing_resuming()
+
             self.run_prepare_views()
+            self.check_pausing_resuming()
 
             self.migrator_tables.update_main_status('Planner', '', True, 'finished OK')
 
@@ -900,6 +907,12 @@ class Planner:
         if self.on_error_action == 'stop':
             self.config_parser.print_log_message('ERROR', "Stopping due to error.")
             exit(1)
+
+    def check_pausing_resuming(self):
+        if self.config_parser.pause_migration_fired():
+            self.config_parser.print_log_message('INFO', f"Planner paused. Waiting for resume signal...")
+            self.config_parser.wait_for_resume()
+            self.config_parser.print_log_message('INFO', f"Planner resumed.")
 
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

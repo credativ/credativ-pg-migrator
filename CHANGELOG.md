@@ -2,6 +2,13 @@
 
 ## 0.9.5 - 2025.07.xx
 
+- 2025.07.12
+
+  - Improvements in pausing and canceling actions - migration can now be paused or canceled on demand by creating a file "pause_migration" or "cancel_migration" in the working directory
+    - This makes pausing and canceling more flexible, allows to react to unexpected situations
+    - Migration can be resumed by creating a file "resume_migration" in the working directory
+  - Improvements in logging - log empty tables as successfully migrated with message "Skipped"
+
 - 2025.07.11
 
   - Added migration parameter migration.char_to_text_length, similar to migration.varchar_to_text_length - allows to set the length of CHAR columns which should be migrated as TEXT

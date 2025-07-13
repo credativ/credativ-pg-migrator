@@ -36,20 +36,32 @@ class Orchestrator:
         self.on_error_action = self.config_parser.get_on_error_action()
         self.source_schema = self.config_parser.get_source_schema()
         self.target_schema = self.config_parser.get_target_schema()
-        self.migrator_tables.insert_main('Orchestrator','')
+        if self.config_parser.is_resume_after_crash():
+            self.migrator_tables.insert_main('Orchestrator', 'Resume after crash')
+            self.config_parser.print_log_message('INFO', "#############################################################################")
+            self.config_parser.print_log_message('INFO', "Orchestration: Resuming migration after crash - stats from crashed migration:")
+            self.migrator_tables.print_migration_summary()
+            self.config_parser.print_log_message('INFO', "#############################################################################")
+            self.config_parser.print_log_message('INFO', "Orchestration: Continuing migration...")
+        else:
+            self.migrator_tables.insert_main('Orchestrator', '')
 
     def run(self):
         try:
-            self.config_parser.print_log_message('INFO', "Starting orchestration...")
+            self.config_parser.print_log_message('INFO', "Starting Orchestrator...")
 
-            self.run_create_user_defined_types()
-            self.check_pausing_resuming()
+            if self.config_parser.is_resume_after_crash():
+                self.config_parser.print_log_message('INFO', "Orchestrator: In current version of crash recovery we assume user defined types and domains already exist, so we skip them.")
+            else:
+                self.run_create_user_defined_types()
+                self.check_pausing_resuming()
 
-            ## migration of domains is a bit unclear currently
-            ## domains in PostgreSQL are special data types
-            ## But in Sybase ASE they are defined as sort of additional check constraint on the column
-            # self.run_create_domains()
+                ## migration of domains is a bit unclear currently
+                ## domains in PostgreSQL are special data types
+                ## But in Sybase ASE they are defined as sort of additional check constraint on the column
+                # self.run_create_domains()
 
+            # In case of crash recovery, we currently continue from this point as in normal migration
             if not self.config_parser.is_dry_run():
                 self.run_migrate_tables()
                 self.check_pausing_resuming()
@@ -141,10 +153,14 @@ class Orchestrator:
             'migrate_data': self.config_parser.should_migrate_data(),
             'batch_size': self.config_parser.get_batch_size(),
             'migrator_tables': self.migrator_tables,
+            'resume_after_crash': self.config_parser.is_resume_after_crash(),
         }
 
         self.config_parser.print_log_message('INFO', f"Starting {workers_requested} parallel workers to create tables in target database.")
-        migrate_tables = self.migrator_tables.fetch_all_tables()
+
+        ## in case of crash recovery, we only migrate tables that are not yet migrated -> success is not True
+        migrate_tables = self.migrator_tables.fetch_all_tables(self.config_parser.is_resume_after_crash())
+
         if len(migrate_tables) > 0:
             with concurrent.futures.ThreadPoolExecutor(max_workers=workers_requested) as executor:
                 futures = {}
@@ -368,7 +384,7 @@ class Orchestrator:
                 self.config_parser.print_log_message( 'DEBUG', f"Worker {worker_id}: Executing session settings: {worker_target_connection.session_settings}")
                 worker_target_connection.execute_query(worker_target_connection.session_settings)
 
-            if settings['drop_tables']:
+            if settings['drop_tables'] or settings['resume_after_crash']:
                 self.config_parser.print_log_message( 'DEBUG', f"Worker {worker_id}: Dropping table {target_table}...")
                 part_name = 'drop table'
                 repeat_count = 0
@@ -389,7 +405,7 @@ class Orchestrator:
                             time.sleep(10)
                 self.config_parser.print_log_message('INFO', f"""Worker {worker_id}: Table "{target_table}" dropped successfully.""")
 
-            if settings['create_tables']:
+            if settings['create_tables'] or settings['resume_after_crash']:
                 self.config_parser.print_log_message( 'DEBUG', f"Worker {worker_id}: Creating table with SQL: {create_table_sql}")
                 part_name = 'create table'
                 worker_target_connection.execute_query(create_table_sql)
@@ -419,7 +435,7 @@ class Orchestrator:
                     worker_target_connection.execute_query(alter_column_sql)
                     self.config_parser.print_log_message('INFO', f"""Worker {worker_id}: Column "{result['target_column']}" altered successfully.""")
 
-            if settings['truncate_tables']:
+            if settings['truncate_tables'] or settings['resume_after_crash']:
                 self.config_parser.print_log_message( 'DEBUG', f"Worker {worker_id}: Truncating table {target_table}...")
                 part_name = 'truncate table'
                 repeat_count = 0
@@ -523,6 +539,7 @@ class Orchestrator:
                                 self.migrator_tables.update_sequence_status(sequence_id, True, 'migrated OK')
                             except Exception as e:
                                 self.migrator_tables.update_sequence_status(sequence_id, False, f'ERROR: {e}')
+                                self.migrator_tables.update_table_status(table_data['id'], False, f'ERROR: {e}')
                                 self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Error setting sequence {sequence_name} for table {target_table}: {e}")
                     else:
                         self.config_parser.print_log_message('INFO', f"Worker {worker_id}: No sequences found for table {target_table}.")

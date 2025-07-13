@@ -56,6 +56,14 @@ class ConfigParser:
 
         return True
 
+    ## General config
+
+    def is_dry_run(self):
+        return bool(self.args.dry_run)
+
+    def is_resume_after_crash(self):
+        return bool(self.args.resume_after_crash)
+
     ## Databases
     def get_db_config(self, source_or_target):
         return self.config[source_or_target]
@@ -486,9 +494,6 @@ class ConfigParser:
                 self.logger.debug('DEBUG3: ' + message)
             else:
                 self.logger.info(message)
-
-    def is_dry_run(self):
-        return bool(self.args.dry_run)
 
     def get_indent(self):
         return self.config.get('migrator', {}).get('indent', MigratorConstants.get_default_indent())

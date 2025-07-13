@@ -233,3 +233,8 @@ data_migration_limitation:
 # integer - by range or list
 # hash - even data distribution
 
+# Section for resuming the migration process in case of crash
+# If the migration process crashed, it can be resumed with command line option --resume-after-crash
+resume_after_crash:
+  finished_tables: skip
+  unfinished_tables: drop

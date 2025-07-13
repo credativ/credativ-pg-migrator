@@ -36,6 +36,11 @@ class CommandLine:
             help="Run the tool in dry-run mode")
 
         self.parser.add_argument(
+            '--resume-after-crash',
+            action='store_true',
+            help="Resume the migration process after a crash")
+
+        self.parser.add_argument(
             '--config',
             type=str,
             help='Path/name of the configuration file')
@@ -62,10 +67,11 @@ class CommandLine:
     def print_all(self, logger):
         if self.args.log_level:
             logger.info("Commmand line parameters:")
-            logger.info("log_level    = {}".format(self.args.log_level))
-            logger.info("dry_run      = {}".format(self.args.dry_run))
-            logger.info("config       = {}".format(self.args.config))
-            logger.info("log          = {}".format(self.args.log_file))
+            logger.info("log_level            = {}".format(self.args.log_level))
+            logger.info("dry_run              = {}".format(self.args.dry_run))
+            logger.info("config               = {}".format(self.args.config))
+            logger.info("log                  = {}".format(self.args.log_file))
+            logger.info("resume_after_crash   = {}".format(self.args.resume_after_crash))
             # logger.info("migrator_dir = {}".format(self.args.migrator_dir))
 
     def get_parameter_value(self, param_name):

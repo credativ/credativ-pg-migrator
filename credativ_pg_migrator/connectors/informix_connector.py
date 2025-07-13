@@ -15,6 +15,7 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import jaydebeapi
+# import jpype
 from credativ_pg_migrator.database_connector import DatabaseConnector
 from credativ_pg_migrator.migrator_logging import MigratorLogger
 import re
@@ -44,6 +45,9 @@ class InformixConnector(DatabaseConnector):
             password = self.config_parser.get_db_config(self.source_or_target)['password']
             jdbc_driver = self.config_parser.get_db_config(self.source_or_target)['jdbc']['driver']
             jdbc_libraries = self.config_parser.get_db_config(self.source_or_target)['jdbc']['libraries']
+
+            # if not jpype.isJVMStarted():
+            #     jpype.startJVM(jpype.getDefaultJVMPath(), f"-Djava.class.path={jdbc_libraries}")
             self.connection = jaydebeapi.connect(
                 jdbc_driver,
                 connection_string,
@@ -593,7 +597,7 @@ class InformixConnector(DatabaseConnector):
         procbody = cursor.fetchall()
         cursor.close()
         self.disconnect()
-        procbody_str = ''.join([body[0] for body in procbody])
+        procbody_str = ''.join([str(body[0]) for body in procbody])
         return procbody_str
 
     def convert_funcproc_code(self, settings):
@@ -1089,7 +1093,9 @@ class InformixConnector(DatabaseConnector):
 
             source_table_rows = self.get_rows_count(source_schema, source_table, migration_limitation)
             target_table_rows = 0
-            total_chunks = int((source_table_rows / data_chunk_size) + 0.5)
+            total_chunks = int(source_table_rows / data_chunk_size)
+            if (source_table_rows / data_chunk_size) > total_chunks:
+                total_chunks += 1
 
             migration_stats = {
                 'rows_migrated': 0,

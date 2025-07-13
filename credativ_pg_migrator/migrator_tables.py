@@ -861,6 +861,11 @@ class MigratorTables:
             average_batch_seconds FLOAT DEFAULT 0
             )
         """)
+        self.protocol_connection.execute_query(f"""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_data_migration_unique1
+            ON "{self.protocol_schema}"."{self.config_parser.get_protocol_name_data_migration()}"
+            (source_schema, source_table, source_table_id, target_schema, target_table)
+        """)
 
     def create_table_for_batches_stats(self):
         table_name = self.config_parser.get_protocol_name_batches_stats()
@@ -1069,9 +1074,17 @@ class MigratorTables:
             INSERT INTO "{self.protocol_schema}"."{table_name}"
             (source_schema, source_table, source_table_id, source_table_rows, worker_id, target_schema, target_table, target_table_rows)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (source_schema, source_table, source_table_id, target_schema, target_table)
+            DO UPDATE SET source_table_rows = EXCLUDED.source_table_rows,
+            target_table_rows = EXCLUDED.target_table_rows,
+            task_created = clock_timestamp(),
+            worker_id = EXCLUDED.worker_id,
+            success = NULL,
+            message = NULL
             RETURNING *
         """
         params = (source_schema, source_table, source_table_id, source_table_rows, str(worker_id), target_schema, target_table, target_table_rows)
+        self.config_parser.print_log_message('DEBUG3', f"Inserting data migration record for table {target_table} with params: {params}")
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -2296,8 +2309,11 @@ class MigratorTables:
         if self.config_parser.is_dry_run():
             self.config_parser.print_log_message('INFO', "! Dry run mode enabled. No migration performed !")
 
-    def fetch_all_tables(self):
-        query = f"""SELECT * FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_tables()}" ORDER BY id"""
+    def fetch_all_tables(self, only_unfinished=False):
+        if only_unfinished:
+            query = f"""SELECT * FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_tables()}" WHERE success IS NOT TRUE ORDER BY id"""
+        else:
+            query = f"""SELECT * FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_tables()}" ORDER BY id"""
         # self.protocol_connection.connect()
         cursor = self.protocol_connection.connection.cursor()
         cursor.execute(query)

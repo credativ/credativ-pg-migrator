@@ -55,6 +55,9 @@ def main():
         logger.logger.info('Starting configuration parser...')
         config_parser = ConfigParser(args, logger.logger)
 
+        if config_parser.is_resume_after_crash():
+            logger.logger.info("###### Resuming migration after crash ######")
+
         # Print the parsed configuration
         if args.log_level == 'DEBUG':
             logger.logger.debug(f"Parsed configuration: {config_parser.config}")

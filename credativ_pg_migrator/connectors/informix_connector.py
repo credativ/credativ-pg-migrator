@@ -1093,9 +1093,8 @@ class InformixConnector(DatabaseConnector):
 
             source_table_rows = self.get_rows_count(source_schema, source_table, migration_limitation)
             target_table_rows = 0
-            total_chunks = int(source_table_rows / data_chunk_size)
-            if (source_table_rows / data_chunk_size) > total_chunks:
-                total_chunks += 1
+
+            total_chunks = self.config_parser.get_total_chunks(source_table_rows, data_chunk_size)
 
             migration_stats = {
                 'rows_migrated': 0,
@@ -1154,9 +1153,10 @@ class InformixConnector(DatabaseConnector):
                         select_columns_list.append(f"{col['column_name']}")
                 select_columns = ', '.join(select_columns_list)
 
-                chunk_start_row_number = (chunk_number - 1) * data_chunk_size
-                chunk_end_row_number = chunk_start_row_number + data_chunk_size
-                self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Migrating table {source_schema}.{source_table}: chunk {chunk_number}, data chunk size {data_chunk_size}, batch size {batch_size}, chunk start row number {chunk_start_row_number}, chunk end row number {chunk_end_row_number}, source table rows {source_table_rows}")
+                chunk_offset = (chunk_number - 1) * data_chunk_size
+                chunk_start_row_number = chunk_offset + 1
+                chunk_end_row_number = chunk_offset + data_chunk_size
+                self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Migrating table {source_schema}.{source_table}: chunk {chunk_number}, data chunk size {data_chunk_size}, batch size {batch_size}, chunk offset {chunk_offset}, chunk end row number {chunk_end_row_number}, source table rows {source_table_rows}")
                 order_by_clause = ''
 
                 if data_chunk_size > source_table_rows:
@@ -1164,7 +1164,7 @@ class InformixConnector(DatabaseConnector):
                     if migration_limitation:
                         query += f" WHERE {migration_limitation}"
                 else:
-                    query = f'''SELECT SKIP {chunk_start_row_number} {select_columns} FROM "{source_schema}".{source_table}'''
+                    query = f'''SELECT SKIP {chunk_offset} {select_columns} FROM "{source_schema}".{source_table}'''
                     if migration_limitation:
                         query += f" WHERE {migration_limitation}"
                     primary_key_columns = migrator_tables.select_primary_key(source_schema, source_table)
@@ -1298,7 +1298,7 @@ class InformixConnector(DatabaseConnector):
                 }
 
                 self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Migration stats: {migration_stats}")
-                if source_table_rows == target_table_rows or chunk_number == total_chunks:
+                if source_table_rows == target_table_rows or chunk_number >= total_chunks:
                     self.config_parser.print_log_message('DEBUG3', f"Worker {worker_id}: Setting migration status to finished for table {source_table} (chunk {chunk_number}/{total_chunks})")
                     migration_stats['finished'] = True
                     migrator_tables.update_data_migration_status({
@@ -1334,7 +1334,6 @@ class InformixConnector(DatabaseConnector):
                     'order_by_clause': order_by_clause,
                 })
                 cursor.close()
-
                 return migration_stats
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Error during {part_name} -> {e}")

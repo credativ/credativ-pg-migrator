@@ -382,7 +382,13 @@ class ConfigParser:
         return int(self.config.get('migration', {}).get('batch_size', 100000))
 
     def get_chunk_size(self):
-        return int(self.config.get('migration', {}).get('data_chunk_size', 10000))
+        return int(self.config.get('migration', {}).get('data_chunk_size', self.get_batch_size() * 10))
+
+    def get_total_chunks(self, source_table_rows, data_chunk_size):
+        total_chunks = int(source_table_rows / data_chunk_size)
+        if (source_table_rows / data_chunk_size) > total_chunks:
+            total_chunks += 1
+        return total_chunks
 
     def get_parallel_workers_count(self):
         return int(self.config.get('migration', {}).get('parallel_workers', 1)) # Default to 1

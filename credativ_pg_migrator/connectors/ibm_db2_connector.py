@@ -768,6 +768,25 @@ class IBMDB2Connector(DatabaseConnector):
 
         return top_tables
 
+    def target_table_exists(self, target_schema, target_table):
+        exists = False
+        query = f"""
+            SELECT COUNT(*)
+            FROM SYSCAT.TABLES
+            WHERE TABSCHEMA = upper('{target_schema}') AND TABNAME = '{target_table}'
+        """
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            exists = cursor.fetchone()[0] > 0
+            cursor.close()
+            self.disconnect()
+            return exists
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error checking if target table exists: {query}")
+            self.config_parser.print_log_message('ERROR', e)
+            raise
 
     def get_top_fk_dependencies(self, settings):
         top_fk_dependencies = {}

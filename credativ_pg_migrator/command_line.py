@@ -38,7 +38,12 @@ class CommandLine:
         self.parser.add_argument(
             '--resume-after-crash',
             action='store_true',
-            help="Resume the migration process after a crash")
+            help="Resume the migration process after a crash (default: False = start from scratch)")
+
+        self.parser.add_argument(
+            '--drop-unfinished-tables',
+            action='store_true',
+            help="Drop and recreate unfinished tables when resuming after a crash. Works only together with --resume-after-crash parameter (default: False = continue with partially migrated tables without dropping them)")
 
         self.parser.add_argument(
             '--config',
@@ -67,11 +72,12 @@ class CommandLine:
     def print_all(self, logger):
         if self.args.log_level:
             logger.info("Commmand line parameters:")
-            logger.info("log_level            = {}".format(self.args.log_level))
-            logger.info("dry_run              = {}".format(self.args.dry_run))
-            logger.info("config               = {}".format(self.args.config))
-            logger.info("log                  = {}".format(self.args.log_file))
-            logger.info("resume_after_crash   = {}".format(self.args.resume_after_crash))
+            logger.info("log_level              = {}".format(self.args.log_level))
+            logger.info("dry_run                = {}".format(self.args.dry_run))
+            logger.info("config                 = {}".format(self.args.config))
+            logger.info("log                    = {}".format(self.args.log_file))
+            logger.info("resume_after_crash     = {}".format(self.args.resume_after_crash))
+            logger.info("drop_unfinished_tables = {}".format(self.args.drop_unfinished_tables))
             # logger.info("migrator_dir = {}".format(self.args.migrator_dir))
 
     def get_parameter_value(self, param_name):

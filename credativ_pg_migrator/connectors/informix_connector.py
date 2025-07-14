@@ -863,7 +863,7 @@ class InformixConnector(DatabaseConnector):
             self.config_parser.print_log_message('DEBUG3', f'Processing step 7: Replacing source schema and table names with target schema and table names ({len(table_list)} tables)')
 
             for table in table_list:
-                self.config_parser.print_log_message('DEBUG3', f'Replacing table {table} from schema {source_schema} to {target_schema}')
+                # self.config_parser.print_log_message('DEBUG3', f'Replacing table {table} from schema {source_schema} to {target_schema}')
 
                 source_table_pattern = re.compile(rf'("{source_schema}"\.)?"{table}"')
                 target_table = f'"{target_schema}"."{table}"'
@@ -873,7 +873,7 @@ class InformixConnector(DatabaseConnector):
                 postgresql_code = source_table_pattern.sub(target_table, postgresql_code)
 
             for view in view_list:
-                self.config_parser.print_log_message('DEBUG3', f'Replacing view {view} from schema {source_schema} to {target_schema}')
+                # self.config_parser.print_log_message('DEBUG3', f'Replacing view {view} from schema {source_schema} to {target_schema}')
 
                 source_view_pattern = re.compile(rf'("{source_schema}"\.)?"{view}"')
                 target_view = f'"{target_schema}"."{view}"'
@@ -1090,14 +1090,16 @@ class InformixConnector(DatabaseConnector):
             migration_limitation = settings['migration_limitation']
             data_chunk_size = settings['data_chunk_size']
             chunk_number = settings['chunk_number']
+            resume_after_crash = settings['resume_after_crash']
+            drop_unfinished_tables = settings['drop_unfinished_tables']
 
             source_table_rows = self.get_rows_count(source_schema, source_table, migration_limitation)
-            target_table_rows = 0
+            target_table_rows = migrate_target_connection.get_rows_count(target_schema, target_table)
 
             total_chunks = self.config_parser.get_total_chunks(source_table_rows, data_chunk_size)
 
             migration_stats = {
-                'rows_migrated': 0,
+                'rows_migrated': target_table_rows,
                 'chunk_number': chunk_number,
                 'total_chunks': total_chunks,
                 'source_table_rows': source_table_rows,
@@ -1131,9 +1133,8 @@ class InformixConnector(DatabaseConnector):
 
                 return migration_stats
             else:
-                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {source_table} has {source_table_rows} rows - starting data migration.")
-                # Fetch the data in batches
-                # Open a cursor and fetch rows in batches
+                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Source table {source_table}: {source_table_rows} rows / Target table {target_table}: {target_table_rows} rows - starting data migration.")
+
 
                 select_columns_list = []
                 for order_num, col in source_columns.items():
@@ -1153,9 +1154,16 @@ class InformixConnector(DatabaseConnector):
                         select_columns_list.append(f"{col['column_name']}")
                 select_columns = ', '.join(select_columns_list)
 
-                chunk_offset = (chunk_number - 1) * data_chunk_size
+                if resume_after_crash and not drop_unfinished_tables:
+                    chunk_number = self.config_parser.get_total_chunks(target_table_rows, data_chunk_size)
+                    self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Resuming migration for table {source_schema}.{source_table} from chunk {chunk_number} with data chunk size {data_chunk_size}.")
+                    chunk_offset = target_table_rows
+                else:
+                    chunk_offset = (chunk_number - 1) * data_chunk_size
+
                 chunk_start_row_number = chunk_offset + 1
                 chunk_end_row_number = chunk_offset + data_chunk_size
+
                 self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Migrating table {source_schema}.{source_table}: chunk {chunk_number}, data chunk size {data_chunk_size}, batch size {batch_size}, chunk offset {chunk_offset}, chunk end row number {chunk_end_row_number}, source table rows {source_table_rows}")
                 order_by_clause = ''
 
@@ -2159,6 +2167,23 @@ class InformixConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', f"Error fetching top foreign key dependencies by tables: {e}")
 
         return top_fk_dependencies
+
+    def target_table_exists(self, target_schema, target_table):
+        try:
+            query = f"""
+                SELECT COUNT(*)
+                FROM systables
+                WHERE owner = '{target_schema}' AND tabname = '{target_table}' AND tabtype = 'T'
+            """
+            self.config_parser.print_log_message('DEBUG3', f"Checking if target table exists with query: {query}")
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            exists = cursor.fetchone()[0]
+            cursor.close()
+            return exists
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error checking if target table exists: {e}")
+            return False
 
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

@@ -40,6 +40,7 @@ class Orchestrator:
             self.migrator_tables.insert_main('Orchestrator', 'Resume after crash')
             self.config_parser.print_log_message('INFO', "#############################################################################")
             self.config_parser.print_log_message('INFO', "Orchestration: Resuming migration after crash - stats from crashed migration:")
+            self.config_parser.print_log_message('INFO', f"Orchestration: drop_unfinished-tables set to: {self.config_parser.should_drop_unfinished_tables()}")
             self.migrator_tables.print_migration_summary()
             self.config_parser.print_log_message('INFO', "#############################################################################")
             self.config_parser.print_log_message('INFO', "Orchestration: Continuing migration...")
@@ -154,6 +155,7 @@ class Orchestrator:
             'batch_size': self.config_parser.get_batch_size(),
             'migrator_tables': self.migrator_tables,
             'resume_after_crash': self.config_parser.is_resume_after_crash(),
+            'drop_unfinished_tables': self.config_parser.should_drop_unfinished_tables(),
         }
 
         self.config_parser.print_log_message('INFO', f"Starting {workers_requested} parallel workers to create tables in target database.")
@@ -384,7 +386,9 @@ class Orchestrator:
                 self.config_parser.print_log_message( 'DEBUG', f"Worker {worker_id}: Executing session settings: {worker_target_connection.session_settings}")
                 worker_target_connection.execute_query(worker_target_connection.session_settings)
 
-            if settings['drop_tables'] or settings['resume_after_crash']:
+            if ((settings['drop_tables'] and not settings['resume_after_crash'])
+                or (settings['resume_after_crash'] and settings['drop_unfinished_tables'])
+                or (settings['resume_after_crash'] and not worker_target_connection.target_table_exists(target_schema, target_table))):
                 self.config_parser.print_log_message( 'DEBUG', f"Worker {worker_id}: Dropping table {target_table}...")
                 part_name = 'drop table'
                 repeat_count = 0
@@ -405,7 +409,9 @@ class Orchestrator:
                             time.sleep(10)
                 self.config_parser.print_log_message('INFO', f"""Worker {worker_id}: Table "{target_table}" dropped successfully.""")
 
-            if settings['create_tables'] or settings['resume_after_crash']:
+            if ((settings['create_tables'] and not settings['resume_after_crash'])
+                or (settings['resume_after_crash'] and settings['drop_unfinished_tables'])
+                or (settings['resume_after_crash'] and not worker_target_connection.target_table_exists(target_schema, target_table))):
                 self.config_parser.print_log_message( 'DEBUG', f"Worker {worker_id}: Creating table with SQL: {create_table_sql}")
                 part_name = 'create table'
                 worker_target_connection.execute_query(create_table_sql)
@@ -435,7 +441,8 @@ class Orchestrator:
                     worker_target_connection.execute_query(alter_column_sql)
                     self.config_parser.print_log_message('INFO', f"""Worker {worker_id}: Column "{result['target_column']}" altered successfully.""")
 
-            if settings['truncate_tables'] or settings['resume_after_crash']:
+            if ((settings['truncate_tables'] and not settings['resume_after_crash'])
+                or (settings['resume_after_crash'] and settings['drop_unfinished_tables']) ):
                 self.config_parser.print_log_message( 'DEBUG', f"Worker {worker_id}: Truncating table {target_table}...")
                 part_name = 'truncate table'
                 repeat_count = 0
@@ -465,7 +472,7 @@ class Orchestrator:
                 part_name = 'migrate data'
                 self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Migrating data for table {target_table} from source database.")
 
-                settings = {
+                table_settings = {
                     'worker_id': worker_id,
                     'source_schema': table_data['source_schema'],
                     'source_table': table_data['source_table'],
@@ -483,6 +490,8 @@ class Orchestrator:
                     'migration_limitation': '',
                     'data_chunk_size': self.config_parser.get_table_chunk_size(table_data['source_table']),
                     'chunk_number': 1,
+                    'resume_after_crash': settings['resume_after_crash'],
+                    'drop_unfinished_tables': settings['drop_unfinished_tables'],
                 }
 
                 rows_migration_limitations = settings['migrator_tables'].get_records_data_migration_limitation(table_data['source_table'])
@@ -499,7 +508,7 @@ class Orchestrator:
                                 self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Column {column_name} matches migration limitation.")
                                 migration_limitations.append(where_clause)
                     if migration_limitations:
-                        settings['migration_limitation'] = f"{' AND '.join(migration_limitations)}" if migration_limitations else ''
+                        table_settings['migration_limitation'] = f"{' AND '.join(migration_limitations)}" if migration_limitations else ''
                         self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Migration limitations for table {target_table}: {migration_limitations}")
 
                 while True:
@@ -509,13 +518,13 @@ class Orchestrator:
                         self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Resuming migration for table {target_table}.")
                     # proper pausing / stopping of the migration requires to connect and disconnect for each chunk
                     worker_source_connection.connect()
-                    migration_stats = worker_source_connection.migrate_table(worker_target_connection, settings)
+                    migration_stats = worker_source_connection.migrate_table(worker_target_connection, table_settings)
                     worker_source_connection.disconnect()
 
                     rows_migrated += migration_stats['rows_migrated']
                     if migration_stats['finished']:
                         break
-                    settings['chunk_number'] += 1
+                    table_settings['chunk_number'] += 1
 
 
                 if rows_migrated > 0:
@@ -632,6 +641,8 @@ class Orchestrator:
                             "no unique constraint matching",
                             "is violated by some row",
                             "violates foreign key constraint",
+                            "does not exist",
+                            "violates check constraint",
                         ]
                         if any(txt in str(e).lower() for txt in error_texts):
                             self.migrator_tables.update_constraint_status(constraint_data['id'], False, f'ERROR: {e}')

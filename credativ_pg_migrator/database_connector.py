@@ -633,6 +633,7 @@ class DatabaseConnector(ABC):
         """
         pass
 
+    @abstractmethod
     def get_top_fk_dependencies(self, settings):
         """
         Fetch top foreign key dependencies in the specified schema.
@@ -647,6 +648,14 @@ class DatabaseConnector(ABC):
             'dependencies: list of source tables that have foreign key references to this table
             }
         }
+        """
+        pass
+
+    @abstractmethod
+    def target_table_exists(self, target_schema, target_table):
+        """
+        Check if the target table exists in the target database.
+        Returns True if the table exists, False otherwise.
         """
         pass
 

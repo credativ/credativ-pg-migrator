@@ -1644,5 +1644,25 @@ class SybaseASEConnector(DatabaseConnector):
         top_fk_dependencies = {}
         return top_fk_dependencies
 
+    def target_table_exists(self, target_schema, target_table):
+        """
+        Check if the target table exists in the target schema.
+        """
+        query = f"""
+            SELECT COUNT(*)
+            FROM sysobjects o
+            WHERE user_name(o.uid) = '{target_schema}'
+              AND o.name = '{target_table}'
+              AND o.type = 'U'
+              AND (o.sysstat & 2048 <> 2048)
+        """
+        self.connect()
+        cursor = self.connection.cursor()
+        cursor.execute(query)
+        exists = cursor.fetchone()[0] > 0
+        cursor.close()
+        self.disconnect()
+        return exists
+
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

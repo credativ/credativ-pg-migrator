@@ -861,7 +861,7 @@ class PostgreSQLConnector(DatabaseConnector):
                 }
 
                 self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Migration stats: {migration_stats}")
-                if source_table_rows == target_table_rows or chunk_number >= total_chunks:
+                if source_table_rows <= target_table_rows or chunk_number >= total_chunks:
                     self.config_parser.print_log_message('DEBUG3', f"Worker {worker_id}: Setting migration status to finished for table {source_table} (chunk {chunk_number}/{total_chunks})")
                     migration_stats['finished'] = True
                     migrator_tables.update_data_migration_status({

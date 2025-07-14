@@ -1216,8 +1216,6 @@ class InformixConnector(DatabaseConnector):
                             {column['column_name']: value for column, value in zip(source_columns.values(), record)}
                             for record in records
                         ]
-
-                        # Adjust binary or bytea types
                         for record in records:
                             for order_num, column in source_columns.items():
                                 column_name = column['column_name']

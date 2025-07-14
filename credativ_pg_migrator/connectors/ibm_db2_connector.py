@@ -324,7 +324,7 @@ class IBMDB2Connector(DatabaseConnector):
                         self.config_parser.print_log_message('DEBUG2',
                                                             f"Worker {worker_id}: Table {source_schema}.{source_table}: Processing column {col['column_name']} ({order_num}) with data type {col['data_type']}")
                         insert_columns = ', '.join([f'''"{self.config_parser.convert_names_case(col['column_name'])}"''' for col in source_columns.values()])
-                        orderby_columns = ', '.join([f'''"{col['column_name']}"''' for col in target_columns.values()])
+                        orderby_columns = ', '.join([f'''"{col['column_name']}"''' for col in source_columns.values()])
 
 			            # if col['data_type'].lower() == 'datetime':
 			            #     select_columns_list.append(f"TO_CHAR({col['column_name']}, '%Y-%m-%d %H:%M:%S') as {col['column_name']}")

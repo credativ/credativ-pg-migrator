@@ -519,11 +519,18 @@ class MsSQLConnector(DatabaseConnector):
 
     def migrate_table(self, migrate_target_connection, settings):
         part_name = 'initialize'
-        target_table_rows = 0
-        inserted_rows = 0
-        migration_stats = {}
         source_table_rows = 0
+        target_table_rows = 0
         total_inserted_rows = 0
+        migration_stats = {}
+        batch_number = 0
+        shortest_batch_seconds = 0
+        longest_batch_seconds = 0
+        average_batch_seconds = 0
+        chunk_start_row_number = 0
+        chunk_end_row_number = 0
+        processing_start_time = time.time()
+        order_by_clause = ''
         try:
             worker_id = settings['worker_id']
             source_schema = settings['source_schema']
@@ -582,12 +589,9 @@ class MsSQLConnector(DatabaseConnector):
                 return migration_stats
 
             else:
-                part_name = 'migrate_table in batches using cursor'
-                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {source_table} has {source_table_rows} rows - starting data migration.")
 
                 if source_table_rows > target_table_rows:
 
-                    part_name = 'migrate_table in batches using cursor'
                     self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Source table {source_table}: {source_table_rows} rows / Target table {target_table}: {target_table_rows} rows - starting data migration.")
 
                     select_columns_list = []
@@ -634,7 +638,7 @@ class MsSQLConnector(DatabaseConnector):
                     if primary_key_columns:
                         orderby_columns = primary_key_columns
                     order_by_clause = f""" ORDER BY {orderby_columns}"""
-                    query += order_by_clause + f" LIMIT {data_chunk_size}"
+                    query += order_by_clause + f" OFFSET {chunk_offset} ROWS FETCH NEXT {data_chunk_size} ROWS ONLY;"
 
                     self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Fetching data with cursor using query: {query}")
 
@@ -650,6 +654,7 @@ class MsSQLConnector(DatabaseConnector):
                     batch_durations = []
 
                     cursor.execute(query)
+                    total_inserted_rows = 0
                     while True:
                         records = cursor.fetchmany(batch_size)
                         if not records:
@@ -657,9 +662,8 @@ class MsSQLConnector(DatabaseConnector):
                         batch_number += 1
                         reading_end_time = time.time()
                         reading_duration = reading_end_time - reading_start_time
-                        self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Fetched {len(records)} rows from source table '{source_table}' using cursor")
+                        self.config_parser.print_log_message('DEBUG',f"Worker {worker_id}: Fetched {len(records)} rows (batch {batch_number}) from source table {source_table}.")
 
-                        # Convert records to a list of dictionaries
                         transforming_start_time = time.time()
                         records = [
                             {column['column_name']: value for column, value in zip(source_columns.values(), record)}
@@ -674,71 +678,73 @@ class MsSQLConnector(DatabaseConnector):
                                 elif column_type.lower() in ['datetime', 'smalldatetime', 'date', 'time', 'timestamp']:
                                     record[column_name] = str(record[column_name]) if record[column_name] is not None else None
 
-                            # Insert batch into target table
-                            self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Starting insert of {len(records)} rows from source table {source_table}")
-                            transforming_end_time = time.time()
-                            transforming_duration = transforming_end_time - transforming_start_time
-                            inserting_start_time = time.time()
-                            inserted_rows = migrate_target_connection.insert_batch({
-                                'target_schema': target_schema,
-                                'target_table': target_table,
-                                'target_columns': target_columns,
-                                'data': records,
-                                'worker_id': worker_id,
-                                'migrator_tables': migrator_tables,
-                                'insert_columns': insert_columns,
-                            })
-                            total_inserted_rows += inserted_rows
-                            inserting_end_time = time.time()
-                            inserting_duration = inserting_end_time - inserting_start_time
+                        # Insert batch into target table
+                        self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Starting insert of {len(records)} rows from source table {source_table}")
+                        transforming_end_time = time.time()
+                        transforming_duration = transforming_end_time - transforming_start_time
+                        inserting_start_time = time.time()
+                        inserted_rows = migrate_target_connection.insert_batch({
+                            'target_schema': target_schema,
+                            'target_table': target_table,
+                            'target_columns': target_columns,
+                            'data': records,
+                            'worker_id': worker_id,
+                            'migrator_tables': migrator_tables,
+                            'insert_columns': insert_columns,
+                        })
+                        total_inserted_rows += inserted_rows
+                        inserting_end_time = time.time()
+                        inserting_duration = inserting_end_time - inserting_start_time
 
-                            batch_end_time = time.time()
-                            batch_duration = batch_end_time - batch_start_time
-                            batch_durations.append(batch_duration)
-                            percent_done = round(total_inserted_rows / source_table_rows * 100, 2)
+                        batch_end_time = time.time()
+                        batch_duration = batch_end_time - batch_start_time
+                        batch_durations.append(batch_duration)
+                        percent_done = round(total_inserted_rows / source_table_rows * 100, 2)
 
-                            batch_start_dt = datetime.datetime.fromtimestamp(batch_start_time)
-                            batch_end_dt = datetime.datetime.fromtimestamp(batch_end_time)
-                            batch_start_str = batch_start_dt.strftime('%Y-%m-%d %H:%M:%S.%f')
-                            batch_end_str = batch_end_dt.strftime('%Y-%m-%d %H:%M:%S.%f')
-                            migrator_tables.insert_batches_stats({
-                                'source_schema': source_schema,
-                                'source_table': source_table,
-                                'source_table_id': source_table_id,
-                                'chunk_number': chunk_number,
-                                'batch_number': batch_number,
-                                'batch_start': batch_start_str,
-                                'batch_end': batch_end_str,
-                                'batch_rows': inserted_rows,
-                                'batch_seconds': batch_duration,
-                                'worker_id': worker_id,
-                                'reading_seconds': reading_duration,
-                                'transforming_seconds': transforming_duration,
-                                'writing_seconds': inserting_duration,
-                            })
+                        batch_start_dt = datetime.datetime.fromtimestamp(batch_start_time)
+                        batch_end_dt = datetime.datetime.fromtimestamp(batch_end_time)
+                        batch_start_str = batch_start_dt.strftime('%Y-%m-%d %H:%M:%S.%f')
+                        batch_end_str = batch_end_dt.strftime('%Y-%m-%d %H:%M:%S.%f')
+                        migrator_tables.insert_batches_stats({
+                            'source_schema': source_schema,
+                            'source_table': source_table,
+                            'source_table_id': source_table_id,
+                            'chunk_number': chunk_number,
+                            'batch_number': batch_number,
+                            'batch_start': batch_start_str,
+                            'batch_end': batch_end_str,
+                            'batch_rows': inserted_rows,
+                            'batch_seconds': batch_duration,
+                            'worker_id': worker_id,
+                            'reading_seconds': reading_duration,
+                            'transforming_seconds': transforming_duration,
+                            'writing_seconds': inserting_duration,
+                        })
 
-                            msg = (
-                                f"Worker {worker_id}: Inserted {inserted_rows} "
-                                f"(total: {total_inserted_rows} from: {source_table_rows} "
-                                f"({percent_done}%)) rows into target table '{target_table}': "
-                                f"Batch {batch_number} duration: {batch_duration:.2f} seconds "
-                                f"(r: {reading_duration:.2f}, t: {transforming_duration:.2f}, w: {inserting_duration:.2f})"
-                            )
-                            self.config_parser.print_log_message('INFO', msg)
+                        msg = (
+                            f"Worker {worker_id}: Inserted {inserted_rows} "
+                            f"(total: {total_inserted_rows} from: {source_table_rows} "
+                            f"({percent_done}%)) rows into target table '{target_table}': "
+                            f"Batch {batch_number} duration: {batch_duration:.2f} seconds "
+                            f"(r: {reading_duration:.2f}, t: {transforming_duration:.2f}, w: {inserting_duration:.2f})"
+                        )
+                        self.config_parser.print_log_message('INFO', msg)
 
-                            batch_start_time = time.time()
-                            reading_start_time = batch_start_time
+                        batch_start_time = time.time()
+                        reading_start_time = batch_start_time
 
-                        target_table_rows = migrate_target_connection.get_rows_count(target_schema, target_table)
-                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Target table {target_schema}.{target_table} has {target_table_rows} rows")
+                    target_table_rows = migrate_target_connection.get_rows_count(target_schema, target_table)
+                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Target table {target_schema}.{target_table} has {target_table_rows} rows")
 
-                        shortest_batch_seconds = min(batch_durations) if batch_durations else 0
-                        longest_batch_seconds = max(batch_durations) if batch_durations else 0
-                        average_batch_seconds = sum(batch_durations) / len(batch_durations) if batch_durations else 0
-                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Migrated {total_inserted_rows} rows from {source_table} to {target_schema}.{target_table} in {batch_number} batches: "
-                                                                f"Shortest batch: {shortest_batch_seconds:.2f} seconds, "
-                                                                f"Longest batch: {longest_batch_seconds:.2f} seconds, "
-                                                                f"Average batch: {average_batch_seconds:.2f} seconds")
+                    shortest_batch_seconds = min(batch_durations) if batch_durations else 0
+                    longest_batch_seconds = max(batch_durations) if batch_durations else 0
+                    average_batch_seconds = sum(batch_durations) / len(batch_durations) if batch_durations else 0
+                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Migrated {total_inserted_rows} rows from {source_table} to {target_schema}.{target_table} in {batch_number} batches: "
+                                                            f"Shortest batch: {shortest_batch_seconds:.2f} seconds, "
+                                                            f"Longest batch: {longest_batch_seconds:.2f} seconds, "
+                                                            f"Average batch: {average_batch_seconds:.2f} seconds")
+
+                    cursor.close()
 
                 elif source_table_rows <= target_table_rows:
                     self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Source table {source_table} has {source_table_rows} rows, which is less than or equal to target table {target_table} with {target_table_rows} rows. No data migration needed.")
@@ -753,7 +759,7 @@ class MsSQLConnector(DatabaseConnector):
                 }
 
                 self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Migration stats: {migration_stats}")
-                if source_table_rows == target_table_rows or chunk_number >= total_chunks:
+                if source_table_rows <= target_table_rows or chunk_number >= total_chunks:
                     self.config_parser.print_log_message('DEBUG3', f"Worker {worker_id}: Setting migration status to finished for table {source_table} (chunk {chunk_number}/{total_chunks})")
                     migration_stats['finished'] = True
                     migrator_tables.update_data_migration_status({
@@ -788,7 +794,6 @@ class MsSQLConnector(DatabaseConnector):
                     'task_completed': datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S.%f'),
                     'order_by_clause': order_by_clause,
                 })
-                cursor.close()
                 return migration_stats
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Error during {part_name} -> {e}")

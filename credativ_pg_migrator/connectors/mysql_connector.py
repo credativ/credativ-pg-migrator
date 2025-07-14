@@ -207,6 +207,7 @@ class MySQLConnector(DatabaseConnector):
         part_name = 'initialize'
         source_table_rows = 0
         target_table_rows = 0
+        total_inserted_rows = 0
         try:
             worker_id = settings['worker_id']
             source_schema = settings['source_schema']
@@ -706,8 +707,10 @@ class MySQLConnector(DatabaseConnector):
     def rollback_transaction(self):
         self.connection.rollback()
 
-    def get_rows_count(self, table_schema: str, table_name: str):
+    def get_rows_count(self, table_schema: str, table_name: str, migration_limitation: str = None):
         query = f"SELECT COUNT(*) FROM {table_schema}.{table_name}"
+        if migration_limitation:
+            query += f" WHERE {migration_limitation}"
         try:
             cursor = self.connection.cursor()
             cursor.execute(query)

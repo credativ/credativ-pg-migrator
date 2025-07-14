@@ -632,7 +632,9 @@ class PostgreSQLConnector(DatabaseConnector):
 
     def migrate_table(self, migrate_target_connection, settings):
         part_name = 'initialize'
-        source_table_rows = 0
+        target_table_rows = 0
+        migration_stats = {}
+        total_inserted_rows = 0
         try:
             worker_id = settings['worker_id']
             source_schema = settings['source_schema']
@@ -645,14 +647,13 @@ class PostgreSQLConnector(DatabaseConnector):
             # primary_key_columns = settings['primary_key_columns']
             batch_size = settings['batch_size']
             migrator_tables = settings['migrator_tables']
-            batch_size = settings['batch_size']
             migration_limitation = settings['migration_limitation']
             data_chunk_size = settings['data_chunk_size']
             chunk_number = settings['chunk_number']
             resume_after_crash = settings['resume_after_crash']
             drop_unfinished_tables = settings['drop_unfinished_tables']
 
-            source_table_rows = self.get_rows_count(source_schema, source_table)
+            source_table_rows = self.get_rows_count(source_schema, source_table, migration_limitation)
             target_table_rows = migrate_target_connection.get_rows_count(target_schema, target_table)
 
             total_chunks = self.config_parser.get_total_chunks(source_table_rows, data_chunk_size)
@@ -691,12 +692,13 @@ class PostgreSQLConnector(DatabaseConnector):
                     })
 
                 return migration_stats
+
             else:
 
                 if source_table_rows > target_table_rows:
 
                     part_name = 'migrate_table in batches using cursor'
-                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {source_table} has {source_table_rows} rows - starting data migration.")
+                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Source table {source_table}: {source_table_rows} rows / Target table {target_table}: {target_table_rows} rows - starting data migration.")
 
                     select_columns_list = []
                     for order_num, col in source_columns.items():
@@ -766,7 +768,7 @@ class PostgreSQLConnector(DatabaseConnector):
                         batch_number += 1
                         reading_end_time = time.time()
                         reading_duration = reading_end_time - reading_start_time
-                        self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Fetched {len(records)} rows (batch {batch_number}) from source table '{source_table}' using cursor")
+                        self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Fetched {len(records)} rows (batch {batch_number}) from source table {source_table}.")
 
                         transforming_start_time = time.time()
                         records = [
@@ -897,7 +899,7 @@ class PostgreSQLConnector(DatabaseConnector):
                 cursor.close()
                 return migration_stats
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Woker {worker_id}: Error in {part_name}: {e}")
+            self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Error during {part_name} -> {e}")
             self.config_parser.print_log_message('ERROR', "Full stack trace:")
             self.config_parser.print_log_message('ERROR', traceback.format_exc())
             raise e
@@ -1068,8 +1070,10 @@ class PostgreSQLConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', e)
             raise
 
-    def get_rows_count(self, table_schema: str, table_name: str):
+    def get_rows_count(self, table_schema: str, table_name: str, migration_limitation: str = None):
         query = f"""SELECT count(*) FROM "{table_schema}"."{table_name}" """
+        if migration_limitation:
+            query += f" WHERE {migration_limitation}"
         self.config_parser.print_log_message('DEBUG3', f"postgresql: get_rows_count query: {query}")
         cursor = self.connection.cursor()
         cursor.execute(query)

@@ -1094,7 +1094,6 @@ class InformixConnector(DatabaseConnector):
             target_schema = self.config_parser.convert_names_case(settings['target_schema'])
             target_table = self.config_parser.convert_names_case(settings['target_table'])
             target_columns = settings['target_columns']
-            # primary_key_columns = settings['primary_key_columns']
             batch_size = settings['batch_size']
             migrator_tables = settings['migrator_tables']
             migration_limitation = settings['migration_limitation']
@@ -1116,7 +1115,7 @@ class InformixConnector(DatabaseConnector):
                 'target_table_rows': target_table_rows,
                 'finished': True if source_table_rows == 0 else False,
             }
-            ## source_schema, source_table, source_table_id, source_table_rows, worker_id, target_schema, target_table, target_table_rows
+
             protocol_id = migrator_tables.insert_data_migration({
                 'worker_id': worker_id,
                 'source_table_id': source_table_id,
@@ -1154,7 +1153,7 @@ class InformixConnector(DatabaseConnector):
                         self.config_parser.print_log_message('DEBUG2',
                                                             f"Worker {worker_id}: Table {source_schema}.{source_table}: Processing column {col['column_name']} ({order_num}) with data type {col['data_type']}")
                         insert_columns = ', '.join([f'''"{self.config_parser.convert_names_case(col['column_name'])}"''' for col in source_columns.values()])
-                        orderby_columns = ', '.join([f'''"{col['column_name']}"''' for col in target_columns.values()])
+                        orderby_columns = ', '.join([f'''"{col['column_name']}"''' for col in source_columns.values()])
 
                         if col['data_type'].lower() == 'datetime':
                             select_columns_list.append(f"TO_CHAR({col['column_name']}, '%Y-%m-%d %H:%M:%S') as {col['column_name']}")
@@ -1179,13 +1178,6 @@ class InformixConnector(DatabaseConnector):
 
                     self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Migrating table {source_schema}.{source_table}: chunk {chunk_number}, data chunk size {data_chunk_size}, batch size {batch_size}, chunk offset {chunk_offset}, chunk end row number {chunk_end_row_number}, source table rows {source_table_rows}")
                     order_by_clause = ''
-
-                    # if table is small, skipping ordering does not make sense because it will not speed up the migration
-                    # if data_chunk_size > source_table_rows:
-                    #     query = f'''SELECT {select_columns} FROM "{source_schema}".{source_table}'''
-                    #     if migration_limitation:
-                    #         query += f" WHERE {migration_limitation}"
-                    # else:
 
                     query = f'''SELECT SKIP {chunk_offset} {select_columns} FROM "{source_schema}".{source_table}'''
                     if migration_limitation:

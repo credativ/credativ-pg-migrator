@@ -13,7 +13,7 @@
 
 - 2025.07.13
 
-  - Implemented very basic "resume after crash" functionality - if a migration crashes, is killed, instance was restarted or similar, then it can be resumed with command line option "--resume-after-crash"
+  - Implemented very basic "resume after crash" functionality - if a migration crashes, is killed, instance was restarted or similar, then it can be resumed with command line option "--resume"
     - How it works: currently migrator implements only "optimistic" approach - it assumes that all important protocol tables already exist and migrator was interrupted during migration of data
     - Fully migrated tables are skipped, partially migrated tables are truncated and re-migrated - this can be repeated multiple times
     - After the data migration is finished, migrator will continue as usual with migration of indexes, constraints, triggers, views and functions/procedures

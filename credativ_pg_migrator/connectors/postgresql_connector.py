@@ -1038,10 +1038,7 @@ class PostgreSQLConnector(DatabaseConnector):
             sequence_data = cursor.fetchone()
             sequence_name = f"{sequence_data[0]}"
 
-            query = f"""
-                SELECT last_value
-                FROM {sequence_name}
-            """
+            query = f"""SELECT last_value FROM {sequence_name}"""
             self.connect()
             cursor = self.connection.cursor()
             cursor.execute(query)
@@ -1055,11 +1052,8 @@ class PostgreSQLConnector(DatabaseConnector):
             raise
 
     def get_rows_count(self, table_schema: str, table_name: str):
-        query = f"""
-            SELECT count(*)
-            FROM "{table_schema}"."{table_name}"
-        """
-        self.config_parser.print_log_message('DEBUG3', f"get_rows_count query: {query}")
+        query = f"""SELECT count(*) FROM "{table_schema}"."{table_name}" """
+        self.config_parser.print_log_message('DEBUG3', f"postgresql: get_rows_count query: {query}")
         cursor = self.connection.cursor()
         cursor.execute(query)
         count = cursor.fetchone()[0]
@@ -1067,9 +1061,7 @@ class PostgreSQLConnector(DatabaseConnector):
         return count
 
     def get_table_size(self, table_schema: str, table_name: str):
-        query = f"""
-            SELECT pg_total_relation_size('{table_schema}.{table_name}')
-        """
+        query = f"""SELECT pg_total_relation_size('{table_schema}.{table_name}')"""
         cursor = self.connection.cursor()
         cursor.execute(query)
         size = cursor.fetchone()[0]

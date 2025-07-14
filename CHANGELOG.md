@@ -2,6 +2,15 @@
 
 ## 0.9.5 - 2025.07.xx
 
+- 2025.07.14:
+
+  - Implemented "optimistic variant" of resuming migration of partially copied tables - code now resumes migration based on row count in the target table, does not check if data in the source table changed
+    - This is possible because select of data from the source database is now done with defined sort order - option was implemented together with migration chunks
+    - Tables are sorted either by primary key column(s), or by column(s) used in some unique index, or by all columns in the table
+    - This sorting of course slows down the migration a bit, but gives us the advantage to pause and resume migration or continue migration after crash
+    - Using sorting by all columns is similar to the PostgreSQL idea of "replica identity full" - it is reasonable to presume that combination of values in the all columns is unique - if not, then having some additional duplicates would most likely not cause any issues and such cases can be fixed later
+    - Explicit Warning: this "optimistic variant" is usable only when data in the source table did not change since the crash
+
 - 2025.07.13
 
   - Implemented very basic "resume after crash" functionality - if a migration crashes, is killed, instance was restarted or similar, then it can be resumed with command line option "--resume-after-crash"

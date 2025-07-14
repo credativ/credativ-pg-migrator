@@ -36,14 +36,14 @@ class CommandLine:
             help="Run the tool in dry-run mode")
 
         self.parser.add_argument(
-            '--resume-after-crash',
+            '--resume',
             action='store_true',
-            help="Resume the migration process after a crash (default: False = start from scratch)")
+            help="Resume the migration process after a crash / kill etc. (default: False = start from scratch)")
 
         self.parser.add_argument(
             '--drop-unfinished-tables',
             action='store_true',
-            help="Drop and recreate unfinished tables when resuming after a crash. Works only together with --resume-after-crash parameter (default: False = continue with partially migrated tables without dropping them)")
+            help="Drop and recreate unfinished tables when resuming after a crash. Works only together with --resume parameter (default: False = continue with partially migrated tables without dropping them)")
 
         self.parser.add_argument(
             '--config',
@@ -76,7 +76,7 @@ class CommandLine:
             logger.info("dry_run                = {}".format(self.args.dry_run))
             logger.info("config                 = {}".format(self.args.config))
             logger.info("log                    = {}".format(self.args.log_file))
-            logger.info("resume_after_crash     = {}".format(self.args.resume_after_crash))
+            logger.info("resume (after crash)   = {}".format(self.args.resume))
             logger.info("drop_unfinished_tables = {}".format(self.args.drop_unfinished_tables))
             # logger.info("migrator_dir = {}".format(self.args.migrator_dir))
 

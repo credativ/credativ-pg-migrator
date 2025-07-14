@@ -62,7 +62,7 @@ class ConfigParser:
         return bool(self.args.dry_run)
 
     def is_resume_after_crash(self):
-        return bool(self.args.resume_after_crash)
+        return bool(self.args.resume)
 
     def should_drop_unfinished_tables(self):
         return bool(self.args.drop_unfinished_tables)

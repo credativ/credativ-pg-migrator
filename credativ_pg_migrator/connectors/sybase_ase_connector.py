@@ -763,8 +763,10 @@ class SybaseASEConnector(DatabaseConnector):
         else:
             pass
 
-    def get_rows_count(self, table_schema: str, table_name: str):
+    def get_rows_count(self, table_schema: str, table_name: str, migration_limitation: str = None):
         query = f"""SELECT COUNT(*) FROM {table_schema}.{table_name} """
+        if migration_limitation:
+            query += f" WHERE {migration_limitation} "
         self.config_parser.print_log_message('DEBUG3',f"get_rows_count query: {query}")
         cursor = self.connection.cursor()
         cursor.execute(query)
@@ -995,6 +997,7 @@ class SybaseASEConnector(DatabaseConnector):
         part_name = 'migrate_table initialize'
         inserted_rows = 0
         target_table_rows = 0
+        total_inserted_rows = 0
         try:
             worker_id = settings['worker_id']
             source_schema = settings['source_schema']

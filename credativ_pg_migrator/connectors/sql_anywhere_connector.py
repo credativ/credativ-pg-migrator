@@ -207,6 +207,7 @@ class SQLAnywhereConnector(DatabaseConnector):
 
     def migrate_table(self, migrate_target_connection, settings):
         part_name = 'initialize'
+        total_inserted_rows = 0
         try:
             worker_id = settings['worker_id']
             source_schema = settings['source_schema']
@@ -644,8 +645,10 @@ class SQLAnywhereConnector(DatabaseConnector):
     def rollback_transaction(self):
         self.connection.rollback()
 
-    def get_rows_count(self, table_schema: str, table_name: str):
+    def get_rows_count(self, table_schema: str, table_name: str, migration_limitation: str = None):
         query = f"SELECT COUNT(*) FROM \"{table_schema}\".\"{table_name}\""
+        if migration_limitation:
+            query += f" WHERE {migration_limitation}"
         cursor = self.connection.cursor()
         cursor.execute(query)
         count = cursor.fetchone()[0]

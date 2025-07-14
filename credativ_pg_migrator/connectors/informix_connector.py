@@ -1132,46 +1132,51 @@ class InformixConnector(DatabaseConnector):
                     })
 
                 return migration_stats
+
             else:
-                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Source table {source_table}: {source_table_rows} rows / Target table {target_table}: {target_table_rows} rows - starting data migration.")
 
+                if source_table_rows > target_table_rows:
 
-                select_columns_list = []
-                for order_num, col in source_columns.items():
-                    self.config_parser.print_log_message('DEBUG2',
-                                                         f"Worker {worker_id}: Table {source_schema}.{source_table}: Processing column {col['column_name']} ({order_num}) with data type {col['data_type']}")
-                    insert_columns = ', '.join([f'''"{self.config_parser.convert_names_case(col['column_name'])}"''' for col in source_columns.values()])
-                    orderby_columns = ', '.join([f'''"{col['column_name']}"''' for col in target_columns.values()])
+                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Source table {source_table}: {source_table_rows} rows / Target table {target_table}: {target_table_rows} rows - starting data migration.")
 
-                    if col['data_type'].lower() == 'datetime':
-                        select_columns_list.append(f"TO_CHAR({col['column_name']}, '%Y-%m-%d %H:%M:%S') as {col['column_name']}")
-                    elif col['data_type'].lower() in ['clob', 'blob'] and not self.config_parser.should_migrate_lob_values():
-                        select_columns_list.append(f"CAST(NULL as {col['data_type']}) as {col['column_name']}")
-                    #     select_columns_list.append(f"ST_asText(`{col['column_name']}`) as `{col['column_name']}`")
-                    # elif col['data_type'].lower() == 'set':
-                    #     select_columns_list.append(f"cast(`{col['column_name']}` as char(4000)) as `{col['column_name']}`")
+                    select_columns_list = []
+                    for order_num, col in source_columns.items():
+                        self.config_parser.print_log_message('DEBUG2',
+                                                            f"Worker {worker_id}: Table {source_schema}.{source_table}: Processing column {col['column_name']} ({order_num}) with data type {col['data_type']}")
+                        insert_columns = ', '.join([f'''"{self.config_parser.convert_names_case(col['column_name'])}"''' for col in source_columns.values()])
+                        orderby_columns = ', '.join([f'''"{col['column_name']}"''' for col in target_columns.values()])
+
+                        if col['data_type'].lower() == 'datetime':
+                            select_columns_list.append(f"TO_CHAR({col['column_name']}, '%Y-%m-%d %H:%M:%S') as {col['column_name']}")
+                        elif col['data_type'].lower() in ['clob', 'blob'] and not self.config_parser.should_migrate_lob_values():
+                            select_columns_list.append(f"CAST(NULL as {col['data_type']}) as {col['column_name']}")
+                        #     select_columns_list.append(f"ST_asText(`{col['column_name']}`) as `{col['column_name']}`")
+                        # elif col['data_type'].lower() == 'set':
+                        #     select_columns_list.append(f"cast(`{col['column_name']}` as char(4000)) as `{col['column_name']}`")
+                        else:
+                            select_columns_list.append(f"{col['column_name']}")
+                    select_columns = ', '.join(select_columns_list)
+
+                    if resume_after_crash and not drop_unfinished_tables:
+                        chunk_number = self.config_parser.get_total_chunks(target_table_rows, data_chunk_size)
+                        self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Resuming migration for table {source_schema}.{source_table} from chunk {chunk_number} with data chunk size {data_chunk_size}.")
+                        chunk_offset = target_table_rows
                     else:
-                        select_columns_list.append(f"{col['column_name']}")
-                select_columns = ', '.join(select_columns_list)
+                        chunk_offset = (chunk_number - 1) * data_chunk_size
 
-                if resume_after_crash and not drop_unfinished_tables:
-                    chunk_number = self.config_parser.get_total_chunks(target_table_rows, data_chunk_size)
-                    self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Resuming migration for table {source_schema}.{source_table} from chunk {chunk_number} with data chunk size {data_chunk_size}.")
-                    chunk_offset = target_table_rows
-                else:
-                    chunk_offset = (chunk_number - 1) * data_chunk_size
+                    chunk_start_row_number = chunk_offset + 1
+                    chunk_end_row_number = chunk_offset + data_chunk_size
 
-                chunk_start_row_number = chunk_offset + 1
-                chunk_end_row_number = chunk_offset + data_chunk_size
+                    self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Migrating table {source_schema}.{source_table}: chunk {chunk_number}, data chunk size {data_chunk_size}, batch size {batch_size}, chunk offset {chunk_offset}, chunk end row number {chunk_end_row_number}, source table rows {source_table_rows}")
+                    order_by_clause = ''
 
-                self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Migrating table {source_schema}.{source_table}: chunk {chunk_number}, data chunk size {data_chunk_size}, batch size {batch_size}, chunk offset {chunk_offset}, chunk end row number {chunk_end_row_number}, source table rows {source_table_rows}")
-                order_by_clause = ''
+                    # if table is small, skipping ordering does not make sense because it will not speed up the migration
+                    # if data_chunk_size > source_table_rows:
+                    #     query = f'''SELECT {select_columns} FROM "{source_schema}".{source_table}'''
+                    #     if migration_limitation:
+                    #         query += f" WHERE {migration_limitation}"
+                    # else:
 
-                if data_chunk_size > source_table_rows:
-                    query = f'''SELECT {select_columns} FROM "{source_schema}".{source_table}'''
-                    if migration_limitation:
-                        query += f" WHERE {migration_limitation}"
-                else:
                     query = f'''SELECT SKIP {chunk_offset} {select_columns} FROM "{source_schema}".{source_table}'''
                     if migration_limitation:
                         query += f" WHERE {migration_limitation}"
@@ -1182,119 +1187,122 @@ class InformixConnector(DatabaseConnector):
                     order_by_clause = f""" ORDER BY {orderby_columns}"""
                     query += order_by_clause + f" LIMIT {data_chunk_size}"
 
-                self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Fetching data with cursor using query: {query}")
+                    self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Fetching data with cursor using query: {query}")
 
-                part_name = 'execute query'
-                cursor = self.connection.cursor()
-                cursor.arraysize = batch_size
-
-                batch_start_time = time.time()
-                reading_start_time = batch_start_time
-                processing_start_time = batch_start_time
-                batch_end_time = None
-                batch_number = 0
-                batch_durations = []
-
-                cursor.execute(query)
-                total_inserted_rows = 0
-                while True:
-                    records = cursor.fetchmany(batch_size)
-                    if not records:
-                        break
-                    batch_number += 1
-                    reading_end_time = time.time()
-                    reading_duration = reading_end_time - reading_start_time
-                    self.config_parser.print_log_message('DEBUG',f"Worker {worker_id}: Fetched {len(records)} rows (batch {batch_number}) from source table {source_table}.")
-
-                    transforming_start_time = time.time()
-                    records = [
-                        {column['column_name']: value for column, value in zip(source_columns.values(), record)}
-                        for record in records
-                    ]
-
-                    # Adjust binary or bytea types
-                    for record in records:
-                        for order_num, column in source_columns.items():
-                            column_name = column['column_name']
-                            column_type = column['data_type']
-                            target_column_type = target_columns[order_num]['data_type']
-                            # if column_type.lower() in ['binary', 'bytea']:
-                            if column_type.lower() in ['blob'] and record[column_name] is not None:
-                                record[column_name] = bytes(record[column_name].getBytes(1, int(record[column_name].length())))  # Convert 'com.informix.jdbc.IfxCblob' to bytes
-                            elif column_type.lower() in ['clob'] and record[column_name] is not None:
-                                # elif isinstance(record[column_name], IfxCblob):
-                                record[column_name] = record[column_name].getSubString(1, int(record[column_name].length()))  # Convert IfxCblob to string
-                                # record[column_name] = bytes(record[column_name].getBytes(1, int(record[column_name].length())))  # Convert IfxBblob to bytes
-                                # record[column_name] = record[column_name].read()  # Convert IfxBblob to bytes
-                            elif column_type.lower() in ['integer', 'smallint', 'tinyint', 'bit', 'boolean'] and target_column_type.lower() in ['boolean']:
-                                # Convert integer to boolean
-                                record[column_name] = bool(record[column_name])
-
-                    # Insert batch into target table
-                    self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Starting insert of {len(records)} rows from source table {source_table}")
-                    transforming_end_time = time.time()
-                    transforming_duration = transforming_end_time - transforming_start_time
-                    inserting_start_time = time.time()
-                    inserted_rows = migrate_target_connection.insert_batch({
-                        'target_schema': target_schema,
-                        'target_table': target_table,
-                        'target_columns': target_columns,
-                        'data': records,
-                        'worker_id': worker_id,
-                        'migrator_tables': migrator_tables,
-                        'insert_columns': insert_columns,
-                    })
-                    total_inserted_rows += inserted_rows
-                    inserting_end_time = time.time()
-                    inserting_duration = inserting_end_time - inserting_start_time
-
-                    batch_end_time = time.time()
-                    batch_duration = batch_end_time - batch_start_time
-                    batch_durations.append(batch_duration)
-                    percent_done = round(total_inserted_rows / source_table_rows * 100, 2)
-
-                    batch_start_dt = datetime.datetime.fromtimestamp(batch_start_time)
-                    batch_end_dt = datetime.datetime.fromtimestamp(batch_end_time)
-                    batch_start_str = batch_start_dt.strftime('%Y-%m-%d %H:%M:%S.%f')
-                    batch_end_str = batch_end_dt.strftime('%Y-%m-%d %H:%M:%S.%f')
-                    migrator_tables.insert_batches_stats({
-                        'source_schema': source_schema,
-                        'source_table': source_table,
-                        'source_table_id': source_table_id,
-                        'chunk_number': chunk_number,
-                        'batch_number': batch_number,
-                        'batch_start': batch_start_str,
-                        'batch_end': batch_end_str,
-                        'batch_rows': inserted_rows,
-                        'batch_seconds': batch_duration,
-                        'worker_id': worker_id,
-                        'reading_seconds': reading_duration,
-                        'transforming_seconds': transforming_duration,
-                        'writing_seconds': inserting_duration,
-                    })
-
-                    msg = (
-                        f"Worker {worker_id}: Inserted {inserted_rows} "
-                        f"(total: {total_inserted_rows} from: {source_table_rows} "
-                        f"({percent_done}%)) rows into target table '{target_table}': "
-                        f"Batch {batch_number} duration: {batch_duration:.2f} seconds "
-                        f"(r: {reading_duration:.2f}, t: {transforming_duration:.2f}, w: {inserting_duration:.2f})"
-                    )
-                    self.config_parser.print_log_message('INFO', msg)
+                    part_name = 'execute query'
+                    cursor = self.connection.cursor()
+                    cursor.arraysize = batch_size
 
                     batch_start_time = time.time()
                     reading_start_time = batch_start_time
+                    processing_start_time = batch_start_time
+                    batch_end_time = None
+                    batch_number = 0
+                    batch_durations = []
 
-                target_table_rows = migrate_target_connection.get_rows_count(target_schema, target_table)
-                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Target table {target_schema}.{target_table} has {target_table_rows} rows")
+                    cursor.execute(query)
+                    total_inserted_rows = 0
+                    while True:
+                        records = cursor.fetchmany(batch_size)
+                        if not records:
+                            break
+                        batch_number += 1
+                        reading_end_time = time.time()
+                        reading_duration = reading_end_time - reading_start_time
+                        self.config_parser.print_log_message('DEBUG',f"Worker {worker_id}: Fetched {len(records)} rows (batch {batch_number}) from source table {source_table}.")
 
-                shortest_batch_seconds = min(batch_durations) if batch_durations else 0
-                longest_batch_seconds = max(batch_durations) if batch_durations else 0
-                average_batch_seconds = sum(batch_durations) / len(batch_durations) if batch_durations else 0
-                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Migrated {total_inserted_rows} rows from {source_table} to {target_schema}.{target_table} in {batch_number} batches: "
-                                                        f"Shortest batch: {shortest_batch_seconds:.2f} seconds, "
-                                                        f"Longest batch: {longest_batch_seconds:.2f} seconds, "
-                                                        f"Average batch: {average_batch_seconds:.2f} seconds")
+                        transforming_start_time = time.time()
+                        records = [
+                            {column['column_name']: value for column, value in zip(source_columns.values(), record)}
+                            for record in records
+                        ]
+
+                        # Adjust binary or bytea types
+                        for record in records:
+                            for order_num, column in source_columns.items():
+                                column_name = column['column_name']
+                                column_type = column['data_type']
+                                target_column_type = target_columns[order_num]['data_type']
+                                # if column_type.lower() in ['binary', 'bytea']:
+                                if column_type.lower() in ['blob'] and record[column_name] is not None:
+                                    record[column_name] = bytes(record[column_name].getBytes(1, int(record[column_name].length())))  # Convert 'com.informix.jdbc.IfxCblob' to bytes
+                                elif column_type.lower() in ['clob'] and record[column_name] is not None:
+                                    # elif isinstance(record[column_name], IfxCblob):
+                                    record[column_name] = record[column_name].getSubString(1, int(record[column_name].length()))  # Convert IfxCblob to string
+                                    # record[column_name] = bytes(record[column_name].getBytes(1, int(record[column_name].length())))  # Convert IfxBblob to bytes
+                                    # record[column_name] = record[column_name].read()  # Convert IfxBblob to bytes
+                                elif column_type.lower() in ['integer', 'smallint', 'tinyint', 'bit', 'boolean'] and target_column_type.lower() in ['boolean']:
+                                    # Convert integer to boolean
+                                    record[column_name] = bool(record[column_name])
+
+                        # Insert batch into target table
+                        self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Starting insert of {len(records)} rows from source table {source_table}")
+                        transforming_end_time = time.time()
+                        transforming_duration = transforming_end_time - transforming_start_time
+                        inserting_start_time = time.time()
+                        inserted_rows = migrate_target_connection.insert_batch({
+                            'target_schema': target_schema,
+                            'target_table': target_table,
+                            'target_columns': target_columns,
+                            'data': records,
+                            'worker_id': worker_id,
+                            'migrator_tables': migrator_tables,
+                            'insert_columns': insert_columns,
+                        })
+                        total_inserted_rows += inserted_rows
+                        inserting_end_time = time.time()
+                        inserting_duration = inserting_end_time - inserting_start_time
+
+                        batch_end_time = time.time()
+                        batch_duration = batch_end_time - batch_start_time
+                        batch_durations.append(batch_duration)
+                        percent_done = round(total_inserted_rows / source_table_rows * 100, 2)
+
+                        batch_start_dt = datetime.datetime.fromtimestamp(batch_start_time)
+                        batch_end_dt = datetime.datetime.fromtimestamp(batch_end_time)
+                        batch_start_str = batch_start_dt.strftime('%Y-%m-%d %H:%M:%S.%f')
+                        batch_end_str = batch_end_dt.strftime('%Y-%m-%d %H:%M:%S.%f')
+                        migrator_tables.insert_batches_stats({
+                            'source_schema': source_schema,
+                            'source_table': source_table,
+                            'source_table_id': source_table_id,
+                            'chunk_number': chunk_number,
+                            'batch_number': batch_number,
+                            'batch_start': batch_start_str,
+                            'batch_end': batch_end_str,
+                            'batch_rows': inserted_rows,
+                            'batch_seconds': batch_duration,
+                            'worker_id': worker_id,
+                            'reading_seconds': reading_duration,
+                            'transforming_seconds': transforming_duration,
+                            'writing_seconds': inserting_duration,
+                        })
+
+                        msg = (
+                            f"Worker {worker_id}: Inserted {inserted_rows} "
+                            f"(total: {total_inserted_rows} from: {source_table_rows} "
+                            f"({percent_done}%)) rows into target table '{target_table}': "
+                            f"Batch {batch_number} duration: {batch_duration:.2f} seconds "
+                            f"(r: {reading_duration:.2f}, t: {transforming_duration:.2f}, w: {inserting_duration:.2f})"
+                        )
+                        self.config_parser.print_log_message('INFO', msg)
+
+                        batch_start_time = time.time()
+                        reading_start_time = batch_start_time
+
+                    target_table_rows = migrate_target_connection.get_rows_count(target_schema, target_table)
+                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Target table {target_schema}.{target_table} has {target_table_rows} rows")
+
+                    shortest_batch_seconds = min(batch_durations) if batch_durations else 0
+                    longest_batch_seconds = max(batch_durations) if batch_durations else 0
+                    average_batch_seconds = sum(batch_durations) / len(batch_durations) if batch_durations else 0
+                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Migrated {total_inserted_rows} rows from {source_table} to {target_schema}.{target_table} in {batch_number} batches: "
+                                                            f"Shortest batch: {shortest_batch_seconds:.2f} seconds, "
+                                                            f"Longest batch: {longest_batch_seconds:.2f} seconds, "
+                                                            f"Average batch: {average_batch_seconds:.2f} seconds")
+
+                elif source_table_rows <= target_table_rows:
+                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Source table {source_table} has {source_table_rows} rows, which is less than or equal to target table {target_table} with {target_table_rows} rows. No data migration needed.")
 
                 migration_stats = {
                     'rows_migrated': total_inserted_rows,
@@ -1733,7 +1741,7 @@ class InformixConnector(DatabaseConnector):
         query = f"""SELECT COUNT(*) FROM "{table_schema}".{table_name} """
         if migration_limitation:
             query += f" WHERE {migration_limitation}"
-        self.config_parser.print_log_message('DEBUG3', f"get_rows_count query: {query}")
+        self.config_parser.print_log_message('DEBUG3', f"informix: get_rows_count query: {query}")
         cursor = self.connection.cursor()
         cursor.execute(query)
         count = cursor.fetchone()[0]

@@ -2227,7 +2227,7 @@ class MigratorTables:
             query = f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{table_name}" WHERE source_table_rows > 0 AND source_table_rows <> target_table_rows"""
             cursor.execute(query)
             summary = cursor.fetchone()[0]
-            self.config_parser.print_log_message('INFO', f"    Tables with data - NOT fully migrated: {summary}")
+            self.config_parser.print_log_message('INFO', f"    Tables with differences in row counts: {summary}")
 
             try:
                 query = f"""SELECT target_schema, target_table, source_table_rows, target_table_rows, task_completed - task_created as migration_time
@@ -2236,7 +2236,7 @@ class MigratorTables:
                 cursor.execute(query)
                 rows = cursor.fetchall()
                 if rows:
-                    self.config_parser.print_log_message('INFO', "        Tables with data - NOT fully migrated (top 10):")
+                    self.config_parser.print_log_message('INFO', "        Tables with different row counts (top 10):")
                     max_table_name_length = max(len(row[1]) for row in rows) if rows else 0
                     max_table_name_length += 1
                     for row in rows:
@@ -2249,7 +2249,7 @@ class MigratorTables:
                         formatted_target_rows = f"{target_table_rows:,}".rjust(12)
                         self.config_parser.print_log_message('INFO', f"        {target_schema}.{target_table[:max_table_name_length].ljust(max_table_name_length)} | {formatted_source_rows} <> {formatted_target_rows} | length: {str(migration_time)[:19]:<19}")
             except Exception as e:
-                self.config_parser.print_log_message('ERROR', f"Error fetching NOT fully migrated tables.")
+                self.config_parser.print_log_message('ERROR', f"Error fetching migrated tables with different row counts.")
                 self.config_parser.print_log_message('ERROR', e)
 
 

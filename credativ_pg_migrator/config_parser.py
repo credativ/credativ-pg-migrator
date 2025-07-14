@@ -56,13 +56,17 @@ class ConfigParser:
 
         return True
 
-    ## General config
 
+    ## General config
     def is_dry_run(self):
         return bool(self.args.dry_run)
 
     def is_resume_after_crash(self):
         return bool(self.args.resume_after_crash)
+
+    def should_drop_unfinished_tables(self):
+        return bool(self.args.drop_unfinished_tables)
+
 
     ## Databases
     def get_db_config(self, source_or_target):

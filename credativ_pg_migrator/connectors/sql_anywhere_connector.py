@@ -771,5 +771,25 @@ class SQLAnywhereConnector(DatabaseConnector):
         top_fk_dependencies = {}
         return top_fk_dependencies
 
+    def target_table_exists(self, target_schema, target_table):
+        query = f"""
+            SELECT COUNT(*)
+            FROM sys.systable
+            WHERE creator in (SELECT DISTINCT user_id
+            FROM sys.SYSUSERPERM where user_name = '{target_schema}')
+            AND table_name = '{target_table}'
+        """
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            exists = cursor.fetchone()[0] > 0
+            cursor.close()
+            self.disconnect()
+            return exists
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error checking if target table exists: {e}")
+            raise
+
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

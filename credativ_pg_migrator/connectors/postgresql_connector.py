@@ -1059,6 +1059,7 @@ class PostgreSQLConnector(DatabaseConnector):
             SELECT count(*)
             FROM "{table_schema}"."{table_name}"
         """
+        self.config_parser.print_log_message('DEBUG3', f"get_rows_count query: {query}")
         cursor = self.connection.cursor()
         cursor.execute(query)
         count = cursor.fetchone()[0]
@@ -1321,6 +1322,21 @@ class PostgreSQLConnector(DatabaseConnector):
     def get_top_fk_dependencies(self, settings):
         top_fk_dependencies = {}
         return top_fk_dependencies
+
+    def target_table_exists(self, target_schema, target_table):
+        query = f"""
+            SELECT EXISTS (
+                SELECT 1
+                FROM information_schema.tables
+                WHERE table_schema = '{target_schema}'
+                AND table_name = '{target_table}'
+            )
+        """
+        cursor = self.connection.cursor()
+        cursor.execute(query)
+        exists = cursor.fetchone()[0]
+        cursor.close()
+        return exists
 
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

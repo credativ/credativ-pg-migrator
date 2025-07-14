@@ -876,5 +876,21 @@ class MySQLConnector(DatabaseConnector):
         top_fk_dependencies = {}
         return top_fk_dependencies
 
+    def target_table_exists(self, target_schema, target_table):
+        query = f"""
+            SELECT COUNT(*)
+            FROM INFORMATION_SCHEMA.TABLES
+            WHERE TABLE_SCHEMA = '{target_schema}' AND TABLE_NAME = '{target_table}'
+        """
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            exists = cursor.fetchone()[0] > 0
+            cursor.close()
+            return exists
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error checking if target table exists: {e}")
+            raise
+
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

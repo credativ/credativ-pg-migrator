@@ -1351,7 +1351,9 @@ class InformixConnector(DatabaseConnector):
                     'task_completed': datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S.%f'),
                     'order_by_clause': order_by_clause,
                 })
+
                 return migration_stats
+
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Error during {part_name} -> {e}")
             self.config_parser.print_log_message('ERROR', "Full stack trace:")

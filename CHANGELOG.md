@@ -5,6 +5,8 @@
 - 2025.07.15:
 
   - Repaired issue #11 - exiting with 0 when error is caught in the main function - now it exits with 1 as expected
+  - Updated debug3 messages in migrator_tables.py - added more debug messages for better tracking of the migration process
+  - Repair in logging data migration - if database did not expose internal table ID like MySQL, logging created duplicates
 
 - 2025.07.14:
 

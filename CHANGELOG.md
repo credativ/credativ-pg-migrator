@@ -2,6 +2,10 @@
 
 ## 0.9.5 - 2025.07.xx
 
+- 2025.07.15:
+
+  - Repaired issue #11 - exiting with 0 when error is caught in the main function - now it exits with 1 as expected
+
 - 2025.07.14:
 
   - Implemented "optimistic variant" of resuming migration of partially copied tables - code now resumes migration based on row count in the target table, does not check if data in the source table changed

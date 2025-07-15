@@ -81,19 +81,18 @@ def main():
         orchestrator.run()
 
         logger.logger.info("Migration Done")
+        logger.stop_logging()
 
     except Exception as e:
         logger.logger.error(f"An error in the main: {e}")
+        logger.stop_logging()
         sys.exit(1)
 
-    finally:
-        logger.stop_logging()
-        exit()
 
 def ctrlc_signal_handler(sig, frame):
     print("Program interrupted with Ctrl+C")
     traceback.print_stack(frame)
-    sys.exit(0)
+    sys.exit(1)
 
 if __name__ == "__main__":
     main()

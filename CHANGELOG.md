@@ -2,12 +2,60 @@
 
 ## 0.9.5 - 2025.07.xx
 
+- 2025.07.15:
+
+  - Repaired issue #11 - exiting with 0 when error is caught in the main function - now it exits with 1 as expected
+  - Updated debug3 messages in migrator_tables.py - added more debug messages for better tracking of the migration process
+  - Repair in logging data migration - if database did not expose internal table ID like MySQL, logging created duplicates
+  - Improvements in error messages in the migrate table function
+  - Unfortunately, we cannot fully implement "resume after crash" functionality for Sybase ASE, because it does not support LIMIT with OFFSET in older versions. Therefore partially migrated tables must be always dropped and restarted. I.e. Sybase ASE in the "--resume" mode will always set "--drop-unfinished-tables" option to True.
+
+- 2025.07.14:
+
+  - Implemented "optimistic variant" of resuming migration of partially copied tables - code now resumes migration based on row count in the target table, does not check if data in the source table changed
+    - This is possible because select of data from the source database is now done with defined sort order - option was implemented together with migration chunks
+    - Tables are sorted either by primary key column(s), or by column(s) used in some unique index, or by all columns in the table
+    - This sorting of course slows down the migration a bit, but gives us the advantage to pause and resume migration or continue migration after crash
+    - Using sorting by all columns is similar to the PostgreSQL idea of "replica identity full" - it is reasonable to presume that combination of values in the all columns is unique - if not, then having some additional duplicates would most likely not cause any issues and such cases can be fixed later
+    - Explicit Warning: this "optimistic variant" of "resume" is usable only when data in the source table did not change since the crash
+
+- 2025.07.13
+
+  - Implemented very basic "resume after crash" functionality - if a migration crashes, is killed, instance was restarted or similar, then it can be resumed with command line option "--resume"
+    - How it works: currently migrator implements only "optimistic" approach - it assumes that all important protocol tables already exist and migrator was interrupted during migration of data
+    - Fully migrated tables are skipped, partially migrated tables are truncated and re-migrated - this can be repeated multiple times
+    - After the data migration is finished, migrator will continue as usual with migration of indexes, constraints, triggers, views and functions/procedures
+
+- 2025.07.12
+
+  - Improvements in pausing and canceling actions - migration can now be paused or canceled on demand by creating a file "pause_migration" or "cancel_migration" in the working directory
+    - This makes pausing and canceling more flexible, allows to react to unexpected situations
+    - Migration can be resumed by creating a file "resume_migration" in the working directory
+  - Improvements in logging - log empty tables as successfully migrated with message "Skipped"
+
 - 2025.07.11
 
   - Added migration parameter migration.char_to_text_length, similar to migration.varchar_to_text_length - allows to set the length of CHAR columns which should be migrated as TEXT
     - Rationale: Some legacy databases handle CHAR columns with large length slightly differently, therefore we need to convert them to TEXT only if they exceed the defined length
   - Due to many changes and longer time since the last release, we skip versioning directly to 0.9.5
   - Small repairs in pre-migration analysis in multiple connectors
+  - Improvements in migration limitations - added support for row limit - only tables with more than this number of rows will be limited by the condition
+    - Intended for special use cases, when we need to limit only big tables, but not small ones
+    - If row limit is not specified, limitation will be applied to all tables matching the pattern and having the specified column
+  - Debugging of real migration cases showed that migrator always runs requested number of parallel workers (unless only smaller than requested number of tables are not migrated yet), but there is a delay between start of the worker and insertion of new record into the protocol table. If database is extremely slow, this delay can be significant
+  - Config file option "table_batch_size" renamed to "table_settings" and additional options beside of batch_size have been allowed - table name can now be specified as a full name or regular expression
+    - Rationale: This is necessary for better control of the migration process - some tables should be created on the target database but we do not want to migrate data, or we want to skip indexes/constraints/triggers for some tables, or we want to set different batch size for some tables because of limitations on the source database
+  - Added config file option "migration.data_chunk_size" - this allows to set the size of the data chunk which will be migrated in one go, default is 1000000 rows
+    - Rationale: This allows to divide migration of huge tables into smaller independent parts - chunks are logged and processed separately
+    - Intention is to allow to pause the migration process and continue later, in case if the source database contains really huge tables or if maintenance window is limited only to some daily hours
+    - Chunk is processed in batches of batch_size, so batch_size is supposed to be smaller than data_chunk_size
+    - Dividing migration of huge tables into chunks requires ordering of the rows in the source database, so it can lead to performance issues on some source databases
+    - Ordering is done either by primary key or by columns used in some unique index, if non of these is available, then by all columns in the table in the order as they are defined in the source database
+    - currently implemented only for Infomix and PostgreSQL connectors, support for other connectors will be added on demand
+  - Implemented option to pause and resume migration of data - added new section into migration part of config file - "scheduled_actions" - see description in the config file example
+    - Orchestrator checks before running migration of next data chunk if there is a scheduled action to pause the migration, and if so, it waits until the pause is removed
+    - Migrator will continue with migration of the next data chunk only after work is resumed - this is done by creating file "resume_migration" in the working directory - info message about pausing the migration contains the whole path and name of the file, so simle "touch" command with this full name will resume the migration
+    - Migrator immediately deletes the file "resume_migration" after resuming the migration, so it can later pause again based on other pause actions
 
 - 2025.07.10
 

@@ -42,32 +42,50 @@ class Planner:
         })
 
     def create_plan(self):
-        try:
-            self.pre_planning()
+        if self.config_parser.is_resume_after_crash():
+            self.migrator_tables.insert_main('Planner', 'Resume after crash')
+            self.config_parser.print_log_message('INFO', "Planner: Resuming migration after crash...")
+            self.config_parser.print_log_message('INFO', "Planner: In current version of crash recovery, we skip planner phase, assuming all protocol tables already exist.")
 
-            self.run_premigration_analysis()
+            self.config_parser.print_log_message( 'INFO', "Connecting to source and target databases...")
+            self.check_database_connection(self.source_connection, "Source Database")
+            self.check_database_connection(self.target_connection, "Target Database")
 
-            self.run_prepare_user_defined_types()
-            self.run_prepare_domains()
-            self.run_prepare_defaults()
-            self.run_prepare_tables()
-            self.run_prepare_views()
-
-            self.migrator_tables.update_main_status('Planner', '', True, 'finished OK')
-
+            self.migrator_tables.update_main_status('Planner', 'Resume after crash', True, 'finished OK')
+        else:
             try:
-                self.source_connection.disconnect()
-            except Exception as e:
-                pass
-            try:
-                self.target_connection.disconnect()
-            except Exception as e:
-                pass
+                self.pre_planning()
+                self.check_pausing_resuming()
 
-            self.config_parser.print_log_message('INFO', "Planner phase done successfully.")
-        except Exception as e:
-            self.migrator_tables.update_main_status('Planner', '', False, f'ERROR: {e}')
-            self.handle_error(e, "Planner")
+                self.run_premigration_analysis()
+                self.check_pausing_resuming()
+
+                self.run_prepare_user_defined_types()
+                self.run_prepare_domains()
+                self.run_prepare_defaults()
+                self.check_pausing_resuming()
+
+                self.run_prepare_tables()
+                self.check_pausing_resuming()
+
+                self.run_prepare_views()
+                self.check_pausing_resuming()
+
+                self.migrator_tables.update_main_status('Planner', '', True, 'finished OK')
+
+                try:
+                    self.source_connection.disconnect()
+                except Exception as e:
+                    pass
+                try:
+                    self.target_connection.disconnect()
+                except Exception as e:
+                    pass
+
+                self.config_parser.print_log_message('INFO', "Planner phase done successfully.")
+            except Exception as e:
+                self.migrator_tables.update_main_status('Planner', '', False, f'ERROR: {e}')
+                self.handle_error(e, "Planner")
 
     def load_connector(self, source_or_target):
         """Dynamically load the database connector."""
@@ -96,7 +114,6 @@ class Planner:
             self.config_parser.print_log_message( 'DEBUG', f"Target schema: {self.target_schema}")
             self.config_parser.print_log_message( 'DEBUG', f"Pre migration script: {self.pre_script}")
             self.config_parser.print_log_message( 'DEBUG', f"Post migration script: {self.post_script}")
-
 
             self.config_parser.print_log_message( 'DEBUG', "Connecting to source and target databases...")
             self.check_database_connection(self.source_connection, "Source Database")
@@ -900,6 +917,12 @@ class Planner:
         if self.on_error_action == 'stop':
             self.config_parser.print_log_message('ERROR', "Stopping due to error.")
             exit(1)
+
+    def check_pausing_resuming(self):
+        if self.config_parser.pause_migration_fired():
+            self.config_parser.print_log_message('INFO', f"Planner paused. Waiting for resume signal...")
+            self.config_parser.wait_for_resume()
+            self.config_parser.print_log_message('INFO', f"Planner resumed.")
 
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

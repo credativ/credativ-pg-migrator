@@ -7,6 +7,7 @@
   - Repaired issue #11 - exiting with 0 when error is caught in the main function - now it exits with 1 as expected
   - Updated debug3 messages in migrator_tables.py - added more debug messages for better tracking of the migration process
   - Repair in logging data migration - if database did not expose internal table ID like MySQL, logging created duplicates
+  - Improvements in error messages in the migrate table function
   - Unfortunately, we cannot fully implement "resume after crash" functionality for Sybase ASE, because it does not support LIMIT with OFFSET in older versions. Therefore partially migrated tables must be always dropped and restarted. I.e. Sybase ASE in the "--resume" mode will always set "--drop-unfinished-tables" option to True.
 
 - 2025.07.14:

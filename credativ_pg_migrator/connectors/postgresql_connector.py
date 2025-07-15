@@ -911,8 +911,7 @@ class PostgreSQLConnector(DatabaseConnector):
 
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Error during {part_name} -> {e}")
-            self.config_parser.print_log_message('ERROR', "Full stack trace:")
-            self.config_parser.print_log_message('ERROR', traceback.format_exc())
+            self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Full stack trace: {traceback.format_exc()}")
             raise e
 
     def insert_batch(self, settings):

@@ -16,16 +16,22 @@
 
 import yaml
 from credativ_pg_migrator.constants import MigratorConstants
+import re
+from datetime import datetime
+import os
+import time
 
 class ConfigParser:
     def __init__(self, args, logger):
         self.args = args
-        self.config = self.load_config(args.config)
         self.logger = logger
+        self.config = self.load_config(args.config)
         self.validate_config()
 
     def load_config(self, config_file):
         """Load the configuration file."""
+        self.print_log_message('INFO', f"Working directory: {os.path.dirname(os.path.abspath(self.args.config))}")
+        self.print_log_message('INFO', f"Loading configuration from {config_file}")
         with open(config_file, 'r') as file:
             return yaml.safe_load(file)
 
@@ -49,6 +55,23 @@ class ConfigParser:
                     raise ValueError("Please update your config file. Each entry in data_types_substitution must have 5 elements - [table_name, column_name, source_type, target_type, comment].")
 
         return True
+
+
+    ## General config
+    def is_dry_run(self):
+        return bool(self.args.dry_run)
+
+    def is_resume_after_crash(self):
+        return bool(self.args.resume)
+
+    def should_drop_unfinished_tables(self):
+        if self.get_source_db_type() == 'sybase_ase':
+            # Sybase ASE does not support LIMIT with OFFSET in older versions, so we cannot resume after crash
+            # and must drop unfinished tables
+            self.print_log_message('INFO', "##### Sybase ASE does not support LIMIT with OFFSET in older versions, dropping unfinished tables. #####")
+            return True
+        return bool(self.args.drop_unfinished_tables)
+
 
     ## Databases
     def get_db_config(self, source_or_target):
@@ -243,6 +266,9 @@ class ConfigParser:
     def get_protocol_name_batches_stats(self):
         return f"{self.get_protocol_name()}_batches_stats"
 
+    def get_protocol_name_data_chunks(self):
+        return f"{self.get_protocol_name()}_data_chunks"
+
     def get_protocol_name_indexes(self):
         return f"{self.get_protocol_name()}_indexes"
 
@@ -306,14 +332,40 @@ class ConfigParser:
     def should_create_tables(self):
         return self.config.get('migration', {}).get('create_tables', False)
 
-    def should_migrate_data(self):
+    def should_migrate_data(self, table_name=None):
+        if table_name:
+            table_settings = self.config.get('table_settings', {})
+            # table_settings is expected to be a list of dicts with 'table_name' and settings
+            if isinstance(table_settings, list):
+                for entry in table_settings:
+                    pattern = entry.get('table_name')
+                    # self.print_log_message('DEBUG3', f"should_migrate_data: checking table {table_name} with pattern {pattern}, setting is {entry.get('migrate_data', False)}")
+                    if pattern and re.fullmatch(pattern, table_name, re.IGNORECASE):
+                        # self.print_log_message('DEBUG3', f"should_migrate_data: table {table_name} matched pattern {pattern}, setting is {entry.get('migrate_data', False)}")
+                        return entry.get('migrate_data', False)
+        # self.print_log_message('DEBUG3', f"should_migrate_data: table {table_name} returned default setting {self.config.get('migration', {}).get('migrate_data', False)}")
         return self.config.get('migration', {}).get('migrate_data', False)
 
-    def should_migrate_indexes(self):
-        return self.config.get('migration', {}).get('migrate_indexes', False) # Default to False
+    def should_migrate_indexes(self, table_name=None):
+        if table_name:
+            table_settings = self.config.get('table_settings', {})
+            if isinstance(table_settings, list):
+                for entry in table_settings:
+                    pattern = entry.get('table_name')
+                    if pattern and re.fullmatch(pattern, table_name, re.IGNORECASE):
+                        return entry.get('migrate_indexes', False)
+        return self.config.get('migration', {}).get('migrate_indexes', False)
 
-    def should_migrate_constraints(self):
-        return self.config.get('migration', {}).get('migrate_constraints', False) # Default to False
+    def should_migrate_constraints(self, table_name=None):
+        if table_name:
+            table_settings = self.config.get('table_settings', {})
+            # table_settings is expected to be a list of dicts with 'table_name' and settings
+            if isinstance(table_settings, list):
+                for entry in table_settings:
+                    pattern = entry.get('table_name')
+                    if pattern and re.fullmatch(pattern, table_name, re.IGNORECASE):
+                        return entry.get('migrate_constraints', False)
+        return self.config.get('migration', {}).get('migrate_constraints', False)
 
     def should_migrate_funcprocs(self):
         return self.config.get('migration', {}).get('migrate_funcprocs', False)
@@ -321,7 +373,15 @@ class ConfigParser:
     def should_set_sequences(self):
         return self.config.get('migration', {}).get('set_sequences', False)
 
-    def should_migrate_triggers(self):
+    def should_migrate_triggers(self, table_name=None):
+        if table_name:
+            table_settings = self.config.get('table_settings', {})
+            # table_settings is expected to be a list of dicts with 'table_name' and settings
+            if isinstance(table_settings, list):
+                for entry in table_settings:
+                    pattern = entry.get('table_name')
+                    if pattern and re.fullmatch(pattern, table_name, re.IGNORECASE):
+                        return entry.get('migrate_triggers', False)
         return self.config.get('migration', {}).get('migrate_triggers', False)
 
     def should_migrate_views(self):
@@ -329,6 +389,15 @@ class ConfigParser:
 
     def get_batch_size(self):
         return int(self.config.get('migration', {}).get('batch_size', 100000))
+
+    def get_chunk_size(self):
+        return int(self.config.get('migration', {}).get('data_chunk_size', self.get_batch_size() * 10))
+
+    def get_total_chunks(self, source_table_rows, data_chunk_size):
+        total_chunks = int(source_table_rows / data_chunk_size)
+        if (source_table_rows / data_chunk_size) > total_chunks:
+            total_chunks += 1
+        return total_chunks
 
     def get_parallel_workers_count(self):
         return int(self.config.get('migration', {}).get('parallel_workers', 1)) # Default to 1
@@ -441,9 +510,6 @@ class ConfigParser:
             else:
                 self.logger.info(message)
 
-    def is_dry_run(self):
-        return bool(self.args.dry_run)
-
     def get_indent(self):
         return self.config.get('migrator', {}).get('indent', MigratorConstants.get_default_indent())
 
@@ -479,17 +545,25 @@ class ConfigParser:
                 indent_level += 1
         return '\n'.join(indented_lines)
 
-    def get_table_batch_size(self, table_name):
-        """
-        Get the batch size for a specific table.
-        If not specified, returns the default batch size from the migration section.
-        """
-        batch_size = self.config.get('table_batch_size', [])
-        for entry in batch_size:
-            if isinstance(entry, dict) and entry.get('table_name') == table_name:
-                return entry.get('batch_size', self.get_batch_size())
+    def get_table_batch_size(self, table_name=None):
+        if table_name:
+            table_settings = self.config.get('table_settings', [])
+            if isinstance(table_settings, list):
+                for entry in table_settings:
+                    pattern = entry.get('table_name')
+                    if pattern and re.fullmatch(pattern, table_name, re.IGNORECASE):
+                        return entry.get('batch_size', self.get_batch_size())
         return self.get_batch_size()
 
+    def get_table_chunk_size(self, table_name=None):
+        if table_name:
+            table_settings = self.config.get('table_settings', [])
+            if isinstance(table_settings, list):
+                for entry in table_settings:
+                    pattern = entry.get('table_name')
+                    if pattern and re.fullmatch(pattern, table_name, re.IGNORECASE):
+                        return entry.get('chunk_size', self.get_chunk_size())
+        return self.get_chunk_size()
 
     ## pre-migration analysis
     def get_pre_migration_analysis(self):
@@ -540,6 +614,63 @@ class ConfigParser:
         If not specified, returns None.
         """
         return self.config.get('pre_migration_analysis', {}).get('top_n_tables', {}).get('by_constraints', 0)
+
+
+    ## scheduled actions
+
+    def pause_migration_fired(self):
+        config_dir = os.path.dirname(os.path.abspath(self.args.config))
+
+        scheduled_actions = self.config.get('migration', {}).get('scheduled_actions', [])
+        self.print_log_message('DEBUG3', f"pause_migration_fired: Checking for scheduled actions: {scheduled_actions}")
+        resume_file = os.path.join(config_dir, "resume_migration")
+
+        now = datetime.now()
+        for action in scheduled_actions:
+            self.print_log_message('DEBUG3', f"pause_migration_fired: Checking action: {action}")
+            if action.get('action') == 'pause' and 'datetime' in action:
+                action_datetime_str = action['datetime']
+                try:
+                    # Expected format: "YYYY.MM.DD HH:MM"
+                    action_datetime = datetime.strptime(action_datetime_str, "%Y.%m.%d %H:%M")
+                    self.print_log_message('DEBUG3', f"pause_migration_fired: Parsed action datetime: {action_datetime}, current datetime: {now}")
+                except ValueError:
+                    self.logger.error(f"pause_migration_fired: Invalid datetime format in scheduled action: {action_datetime_str}. Expected format is YYYY.MM.DD HH:MM.")
+                    continue  # skip invalid datetime format
+                if now >= action_datetime and not action.get('fired', False):
+                    self.print_log_message('INFO', f"""**** Pausing migration with scheduled action "{action.get('name')}" as current datetime {now} is past scheduled action datetime {action_datetime}. ****""")
+                    self.print_log_message('INFO', f"**** To resume migration, create a file '{resume_file}' in the working directory. ****")
+                    action['fired'] = True
+                    return True
+
+        pause_file = os.path.join(config_dir, "pause_migration")
+        self.print_log_message('DEBUG', f"Checking for pause file '{pause_file}' to pause migration...")
+        if os.path.exists(pause_file):
+            os.remove(pause_file)
+            self.print_log_message('INFO', f"**** Pause file '{pause_file}' found. Pausing migration. ****")
+            self.print_log_message('INFO', f"**** To resume migration, create a file '{resume_file}' in the working directory. ****")
+            return True
+
+        cancel_file = os.path.join(config_dir, "cancel_migration")
+        self.print_log_message('DEBUG', f"Checking for cancel file '{cancel_file}' to cancel migration...")
+        if os.path.exists(cancel_file):
+            self.print_log_message('INFO', f"Cancel file '{cancel_file}' found. Exiting migration.")
+            os.remove(cancel_file)
+            self.print_log_message('INFO', "**** Migration canceled on user request ****")
+            exit(1)
+
+        return False
+
+    def wait_for_resume(self):
+        config_dir = os.path.dirname(os.path.abspath(self.args.config))
+        resume_file = os.path.join(config_dir, "resume_migration")
+        self.print_log_message('INFO', f"Migration paused. Waiting for '{resume_file}' to exist to resume...")
+        while not os.path.exists(resume_file):
+            time.sleep(5)
+        self.print_log_message('INFO', f"Resuming migration as '{resume_file}' was found.")
+        os.remove(resume_file)
+
+### Main entry point
 
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

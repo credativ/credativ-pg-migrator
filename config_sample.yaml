@@ -93,7 +93,16 @@ migration:
   set_sequnces: true
   on_error: continue # stop, continue
   parallel_workers: 8
-  batch_size: 100000
+  # batch_size: number of rows to migrate in one batch during data migration, default is 100000
+  # batch size is used when data are repeatedly read from source database and written to the target database
+  batch_size: 10000
+  # data_chunk_size: number of rows to migrate in one chunk during data migration, default is 1000000
+  # must be bigger than batch_size
+  # chunk size is used to divide migration of huge tables into smaller independent parts - chunks are logged and processed separately
+  # intention is to allow to pause the migration process and continue later, in case if the source database contains really huge tables
+  # or if maintenance window is limited only to some daily hours
+  # chunk is processed in batches of batch_size
+  data_chunk_size: 1000000
   # PostgreSQL scripts for the migration process
   # Both run on the target database, before and after the migration
   # pre_migration_script: pre_migration.sql
@@ -108,12 +117,39 @@ migration:
   # if false, LOB values will be skipped (migrated as NULL)
   # if missing, default is true - LOB values will be migrated
   migrate_lob_values: false
+  # automatic scheduled actions for the migration process
+  # - list of actions to be performed at specific times during the migration process
+  # action can be scheduled based on date and time or based on timer - in hours
+  # timer is currently not implemented, so only datetime is used
+  # actions:
+  # - "pause" - pause the migration process at the specified time,
+  # - "stop" - stop the migration process at the specified time,
+  # - "continue" - continue the migration process at the specified time, if it was paused
+  # if time is not specified, action is ignored
+  scheduled_actions:
+    - name: "pause at 1:00 in the morning"
+      datetime: "2025.07.11 01:00"
+      # timer_hours: xx
+      action: "pause"  # pause, stop, continue
 
-table_batch_size:
-  # Specify batch size for a table
-  # If not specified, the default batch size from the migration section will be used
+table_settings:
+  # Specify individual table settings for the migration process - there override the global settings for the specific table matching the table_name
+  # table_name can be full table name or regular expression
+  # available settings:
+  # - batch_size: number of rows to migrate in one batch, default is 100000
+  # - data_chunk_size: number of rows to migrate in one chunk, default is 1000000
+  # - migrate_data: true/false - if data should be migrated, default is true
+  # - migrate_indexes: true/false - if indexes should be migrated, default is true
+  # - migrate_constraints: true/false - if constraints should be migrated, default is true
+  # - migrate_triggers: true/false - if triggers should be migrated, default is true
   - table_name: "table1"
     batch_size: 50000
+    data_chunk_size: 1000000
+    migrate_data: true
+    migrate_indexes: false
+    migrate_constraints: true
+    migrate_triggers: false
+
   - table_name: "table2"
     batch_size: 20000
 
@@ -172,14 +208,19 @@ remote_objects_substitution:
   - ["remotedb:dbo.table1", "remote_db.table1"]
 
 # Limitations for data migration
-# "Table name (or pattern)", "condition for limiting data (without WHERE)", "column name (or pattern) - use condition when column is present in the table"
-# condition can contain placeholders {source_schema} and {source_table} to reference schema and table name for which condition will be applied
-# placeholders will be replaced with proper values during migration
+# "Table name (or pattern)", "condition for limiting data (without WHERE)", "column name (or pattern) - use condition when column is present in the table", "row limit"
+#   - condition can contain placeholders {source_schema} and {source_table} to reference schema and table name for which condition will be applied
+#   - placeholders will be replaced with proper values during migration
+# row limit is optional, if specified, limitation will be applied only to tables with more than this number of rows
+#   - if row limit is not specified, limitation will be applied to all tables matching the pattern and having the specified column
 data_migration_limitation:
-  - [".*", "date >= '2000-01-01'", "date"]
-  - [".*", "movie_id in (select id from movies where date >= '2000-01-01')", "movie_id"]
-  - ["movie_references", "referenced_id in (select id from movies where date >= '2000-01-01')", "referenced_id"]
-  - [".*", "id >= (select max(id) from {source_schema}.{source_table})", "id"]
+  - [".*", "date >= '2000-01-01'", "date", 1000000]
+  - [".*", "movie_id in (select id from movies where date >= '2000-01-01')", "movie_id", 1000000]
+  - ["movie_references", "referenced_id in (select id from movies where date >= '2000-01-01')", "referenced_id", 1000000]
+  - [".*", "id >= (select max(id) from {source_schema}.{source_table})", "id", 1000000]
+
+
+  - ["PK_RANGE", ".*", 1000000]
 
 # Configurable partitioning for target tables
 # partitioning:
@@ -192,3 +233,8 @@ data_migration_limitation:
 # integer - by range or list
 # hash - even data distribution
 
+# Section for resuming the migration process in case of crash
+# If the migration process crashed, it can be resumed with command line option --resume-after-crash
+resume_after_crash:
+  finished_tables: skip
+  unfinished_tables: drop

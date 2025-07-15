@@ -36,28 +36,57 @@ class Orchestrator:
         self.on_error_action = self.config_parser.get_on_error_action()
         self.source_schema = self.config_parser.get_source_schema()
         self.target_schema = self.config_parser.get_target_schema()
-        self.migrator_tables.insert_main('Orchestrator','')
+        if self.config_parser.is_resume_after_crash():
+            self.migrator_tables.insert_main('Orchestrator', 'Resume after crash')
+            self.config_parser.print_log_message('INFO', "#############################################################################")
+            self.config_parser.print_log_message('INFO', "Orchestration: Resuming migration after crash - stats from crashed migration:")
+            self.config_parser.print_log_message('INFO', f"Orchestration: drop_unfinished-tables set to: {self.config_parser.should_drop_unfinished_tables()}")
+            self.migrator_tables.print_migration_summary()
+            self.config_parser.print_log_message('INFO', "#############################################################################")
+            self.config_parser.print_log_message('INFO', "Orchestration: Continuing migration...")
+        else:
+            self.migrator_tables.insert_main('Orchestrator', '')
 
     def run(self):
         try:
-            self.config_parser.print_log_message('INFO', "Starting orchestration...")
+            self.config_parser.print_log_message('INFO', "Starting Orchestrator...")
 
-            self.run_create_user_defined_types()
+            if self.config_parser.is_resume_after_crash():
+                self.config_parser.print_log_message('INFO', "Orchestrator: In current version of crash recovery we assume user defined types and domains already exist, so we skip them.")
+            else:
+                self.run_create_user_defined_types()
+                self.check_pausing_resuming()
 
-            ## migration of domains is a bit unclear currently
-            ## domains in PostgreSQL are special data types
-            ## But in Sybase ASE they are defined as sort of additional check constraint on the column
-            # self.run_create_domains()
+                ## migration of domains is a bit unclear currently
+                ## domains in PostgreSQL are special data types
+                ## But in Sybase ASE they are defined as sort of additional check constraint on the column
+                # self.run_create_domains()
 
+            # In case of crash recovery, we currently continue from this point as in normal migration
             if not self.config_parser.is_dry_run():
                 self.run_migrate_tables()
+                self.check_pausing_resuming()
+
                 self.run_migrate_indexes('standard')
+                self.check_pausing_resuming()
+
                 self.run_migrate_constraints()
+                self.check_pausing_resuming()
+
                 self.run_migrate_views()
+                self.check_pausing_resuming()
+
                 self.run_migrate_funcprocs()
+                self.check_pausing_resuming()
+
                 self.run_migrate_triggers()
+                self.check_pausing_resuming()
+
                 self.run_migrate_indexes('function_based')
+                self.check_pausing_resuming()
+
                 self.run_migrate_comments()
+                self.check_pausing_resuming()
 
                 self.run_post_migration_script()
             else:
@@ -125,10 +154,15 @@ class Orchestrator:
             'migrate_data': self.config_parser.should_migrate_data(),
             'batch_size': self.config_parser.get_batch_size(),
             'migrator_tables': self.migrator_tables,
+            'resume_after_crash': self.config_parser.is_resume_after_crash(),
+            'drop_unfinished_tables': self.config_parser.should_drop_unfinished_tables(),
         }
 
         self.config_parser.print_log_message('INFO', f"Starting {workers_requested} parallel workers to create tables in target database.")
-        migrate_tables = self.migrator_tables.fetch_all_tables()
+
+        ## in case of crash recovery, we only migrate tables that are not yet migrated -> success is not True
+        migrate_tables = self.migrator_tables.fetch_all_tables(self.config_parser.is_resume_after_crash())
+
         if len(migrate_tables) > 0:
             with concurrent.futures.ThreadPoolExecutor(max_workers=workers_requested) as executor:
                 futures = {}
@@ -228,12 +262,17 @@ class Orchestrator:
                 futures = {}
                 for index_row in migrate_indexes:
                     index_data = self.migrator_tables.decode_index_row(index_row)
+
                     if run_mode == 'function_based' and not index_data['is_function_based']:
                         self.config_parser.print_log_message( 'DEBUG3', f"Function based run mode: Skipping index {index_data['index_name']} as it is not a function based index.")
                         continue
                     elif run_mode == 'standard' and index_data['is_function_based']:
                         self.config_parser.print_log_message( 'INFO', f"Standard run mode: Skipping function based index {index_data['index_name']} ")
                         continue
+                    if not self.config_parser.should_migrate_indexes(index_data['source_table']):
+                        self.config_parser.print_log_message('DEBUG3', f"Skipping index {index_data['index_name']} as it is not configured for migration.")
+                        continue
+
                     self.config_parser.print_log_message('DEBUG3', f"run_migrate_indexes: futures running count: {len(futures)}")
                     while len(futures) >= workers_requested:
                         done, _ = concurrent.futures.wait(futures, return_when=concurrent.futures.FIRST_COMPLETED)
@@ -279,6 +318,11 @@ class Orchestrator:
                 for constraint_row in migrate_constraints:
                     constraint_data = self.migrator_tables.decode_constraint_row(constraint_row)
                     self.config_parser.print_log_message('DEBUG3', f"run_migrate_constraints: futures running count: {len(futures)}")
+
+                    if not self.config_parser.should_migrate_constraints(constraint_data['source_table']):
+                        self.config_parser.print_log_message('DEBUG3', f"Skipping constraint {constraint_data['constraint_name']} as it is not configured for migration.")
+                        continue
+
                     while len(futures) >= workers_requested:
                         done, _ = concurrent.futures.wait(futures, return_when=concurrent.futures.FIRST_COMPLETED)
                         for future in done:
@@ -342,7 +386,9 @@ class Orchestrator:
                 self.config_parser.print_log_message( 'DEBUG', f"Worker {worker_id}: Executing session settings: {worker_target_connection.session_settings}")
                 worker_target_connection.execute_query(worker_target_connection.session_settings)
 
-            if settings['drop_tables']:
+            if ((settings['drop_tables'] and not settings['resume_after_crash'])
+                or (settings['resume_after_crash'] and settings['drop_unfinished_tables'])
+                or (settings['resume_after_crash'] and not worker_target_connection.target_table_exists(target_schema, target_table))):
                 self.config_parser.print_log_message( 'DEBUG', f"Worker {worker_id}: Dropping table {target_table}...")
                 part_name = 'drop table'
                 repeat_count = 0
@@ -363,7 +409,9 @@ class Orchestrator:
                             time.sleep(10)
                 self.config_parser.print_log_message('INFO', f"""Worker {worker_id}: Table "{target_table}" dropped successfully.""")
 
-            if settings['create_tables']:
+            if ((settings['create_tables'] and not settings['resume_after_crash'])
+                or (settings['resume_after_crash'] and settings['drop_unfinished_tables'])
+                or (settings['resume_after_crash'] and not worker_target_connection.target_table_exists(target_schema, target_table))):
                 self.config_parser.print_log_message( 'DEBUG', f"Worker {worker_id}: Creating table with SQL: {create_table_sql}")
                 part_name = 'create table'
                 worker_target_connection.execute_query(create_table_sql)
@@ -393,7 +441,8 @@ class Orchestrator:
                     worker_target_connection.execute_query(alter_column_sql)
                     self.config_parser.print_log_message('INFO', f"""Worker {worker_id}: Column "{result['target_column']}" altered successfully.""")
 
-            if settings['truncate_tables']:
+            if ((settings['truncate_tables'] and not settings['resume_after_crash'])
+                or (settings['resume_after_crash'] and settings['drop_unfinished_tables']) ):
                 self.config_parser.print_log_message( 'DEBUG', f"Worker {worker_id}: Truncating table {target_table}...")
                 part_name = 'truncate table'
                 repeat_count = 0
@@ -415,7 +464,7 @@ class Orchestrator:
                             time.sleep(10)
                 self.config_parser.print_log_message('INFO', f"""Worker {worker_id}: Table "{target_table}" truncated successfully.""")
 
-            if settings['migrate_data']:
+            if self.config_parser.should_migrate_data(table_data['source_table']):
                 # data migration
                 part_name = 'connect source'
                 worker_source_connection = self.load_connector('source')
@@ -423,9 +472,7 @@ class Orchestrator:
                 part_name = 'migrate data'
                 self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Migrating data for table {target_table} from source database.")
 
-                worker_source_connection.connect()
-
-                settings = {
+                table_settings = {
                     'worker_id': worker_id,
                     'source_schema': table_data['source_schema'],
                     'source_table': table_data['source_table'],
@@ -441,6 +488,10 @@ class Orchestrator:
                     'batch_size': self.config_parser.get_table_batch_size(table_data['source_table']),
                     'migrator_tables': settings['migrator_tables'],
                     'migration_limitation': '',
+                    'data_chunk_size': self.config_parser.get_table_chunk_size(table_data['source_table']),
+                    'chunk_number': 1,
+                    'resume_after_crash': settings['resume_after_crash'],
+                    'drop_unfinished_tables': settings['drop_unfinished_tables'],
                 }
 
                 rows_migration_limitations = settings['migrator_tables'].get_records_data_migration_limitation(table_data['source_table'])
@@ -457,10 +508,24 @@ class Orchestrator:
                                 self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Column {column_name} matches migration limitation.")
                                 migration_limitations.append(where_clause)
                     if migration_limitations:
-                        settings['migration_limitation'] = f"{' AND '.join(migration_limitations)}" if migration_limitations else ''
+                        table_settings['migration_limitation'] = f"{' AND '.join(migration_limitations)}" if migration_limitations else ''
                         self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Migration limitations for table {target_table}: {migration_limitations}")
-                rows_migrated = worker_source_connection.migrate_table(worker_target_connection, settings)
-                worker_source_connection.disconnect()
+
+                while True:
+                    if self.config_parser.pause_migration_fired():
+                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Migration paused for table {target_table}.")
+                        self.config_parser.wait_for_resume()
+                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Resuming migration for table {target_table}.")
+                    # proper pausing / stopping of the migration requires to connect and disconnect for each chunk
+                    worker_source_connection.connect()
+                    migration_stats = worker_source_connection.migrate_table(worker_target_connection, table_settings)
+                    worker_source_connection.disconnect()
+
+                    rows_migrated += migration_stats['rows_migrated']
+                    if migration_stats['finished']:
+                        break
+                    table_settings['chunk_number'] += 1
+
 
                 if rows_migrated > 0:
                     # sequences setting
@@ -483,13 +548,14 @@ class Orchestrator:
                                 self.migrator_tables.update_sequence_status(sequence_id, True, 'migrated OK')
                             except Exception as e:
                                 self.migrator_tables.update_sequence_status(sequence_id, False, f'ERROR: {e}')
+                                self.migrator_tables.update_table_status(table_data['id'], False, f'ERROR: {e}')
                                 self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Error setting sequence {sequence_name} for table {target_table}: {e}")
                     else:
                         self.config_parser.print_log_message('INFO', f"Worker {worker_id}: No sequences found for table {target_table}.")
                 else:
                     self.config_parser.print_log_message('INFO', f"Worker {worker_id}: No data found for table {target_table} - skipping sequences.")
             else:
-                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Skipping data migration for table {target_table}.")
+                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Skipping data migration for table {target_table} based on configuration")
 
             worker_end_time = time.time()
             elapsed_time = worker_end_time - worker_start_time
@@ -574,6 +640,9 @@ class Orchestrator:
                         error_texts = [
                             "no unique constraint matching",
                             "is violated by some row",
+                            "violates foreign key constraint",
+                            "does not exist",
+                            "violates check constraint",
                         ]
                         if any(txt in str(e).lower() for txt in error_texts):
                             self.migrator_tables.update_constraint_status(constraint_data['id'], False, f'ERROR: {e}')
@@ -701,36 +770,40 @@ class Orchestrator:
                 if all_triggers:
                     for one_trigger in all_triggers:
                         trigger_detail = self.migrator_tables.decode_trigger_row(one_trigger)
-                        self.config_parser.print_log_message('INFO', f"Processing trigger {trigger_detail['trigger_name']}")
-                        self.config_parser.print_log_message( 'DEBUG', f"Trigger details: {trigger_detail}")
 
-                        converted_code = trigger_detail['trigger_target_sql']
+                        if self.config_parser.should_migrate_triggers(trigger_detail['source_table']):
+                            self.config_parser.print_log_message('INFO', f"Processing trigger {trigger_detail['trigger_name']}")
+                            self.config_parser.print_log_message( 'DEBUG', f"Trigger details: {trigger_detail}")
 
-                        self.config_parser.print_log_message( 'DEBUG', "Checking for remote objects substitution in triggers...")
-                        rows = self.migrator_tables.get_records_remote_objects_substitution()
-                        if rows:
-                            for row in rows:
-                                self.config_parser.print_log_message( 'DEBUG', f"Triggers - remote objects substituting {row[0]} with {row[1]}")
-                                converted_code = re.sub(re.escape(row[0]), row[1], converted_code, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
+                            converted_code = trigger_detail['trigger_target_sql']
 
-                        try:
-                            if converted_code is not None and converted_code.strip():
-                                self.config_parser.print_log_message('INFO', f"Creating trigger {trigger_detail['trigger_name']} in target database.")
-                                self.target_connection.connect()
-                                self.target_connection.execute_query(converted_code)
-                                self.config_parser.print_log_message( 'DEBUG', f"[OK] Source code for {trigger_detail['trigger_name']}: {trigger_detail['trigger_source_sql']}")
-                                self.config_parser.print_log_message( 'DEBUG', f"[OK] Converted code for {trigger_detail['trigger_name']}: {converted_code}")
-                                self.migrator_tables.update_trigger_status(trigger_detail['id'], True, 'migrated OK')
-                            else:
-                                self.config_parser.print_log_message('INFO', f"Skipping trigger {trigger_detail['trigger_name']} - no conversion.")
-                                self.migrator_tables.update_trigger_status(trigger_detail['id'], False, 'no conversion')
-                            self.target_connection.disconnect()
-                        except Exception as e:
-                            self.config_parser.print_log_message( 'DEBUG', f"[ERROR] Migrating trigger {trigger_detail['trigger_name']}.")
-                            self.config_parser.print_log_message( 'DEBUG', f"[ERROR] Source code for {trigger_detail['trigger_name']}: {trigger_detail['trigger_source_sql']}")
-                            self.config_parser.print_log_message( 'DEBUG', f"[ERROR] Converted code for {trigger_detail['trigger_name']}: {converted_code}")
-                            self.migrator_tables.update_trigger_status(trigger_detail['id'], False, f'ERROR: {e}')
-                            self.handle_error(e, f"migrate_trigger {trigger_detail['trigger_name']}")
+                            self.config_parser.print_log_message( 'DEBUG', "Checking for remote objects substitution in triggers...")
+                            rows = self.migrator_tables.get_records_remote_objects_substitution()
+                            if rows:
+                                for row in rows:
+                                    self.config_parser.print_log_message( 'DEBUG', f"Triggers - remote objects substituting {row[0]} with {row[1]}")
+                                    converted_code = re.sub(re.escape(row[0]), row[1], converted_code, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
+
+                            try:
+                                if converted_code is not None and converted_code.strip():
+                                    self.config_parser.print_log_message('INFO', f"Creating trigger {trigger_detail['trigger_name']} in target database.")
+                                    self.target_connection.connect()
+                                    self.target_connection.execute_query(converted_code)
+                                    self.config_parser.print_log_message( 'DEBUG', f"[OK] Source code for {trigger_detail['trigger_name']}: {trigger_detail['trigger_source_sql']}")
+                                    self.config_parser.print_log_message( 'DEBUG', f"[OK] Converted code for {trigger_detail['trigger_name']}: {converted_code}")
+                                    self.migrator_tables.update_trigger_status(trigger_detail['id'], True, 'migrated OK')
+                                else:
+                                    self.config_parser.print_log_message('INFO', f"Skipping trigger {trigger_detail['trigger_name']} - no conversion.")
+                                    self.migrator_tables.update_trigger_status(trigger_detail['id'], False, 'no conversion')
+                                self.target_connection.disconnect()
+                            except Exception as e:
+                                self.config_parser.print_log_message( 'DEBUG', f"[ERROR] Migrating trigger {trigger_detail['trigger_name']}.")
+                                self.config_parser.print_log_message( 'DEBUG', f"[ERROR] Source code for {trigger_detail['trigger_name']}: {trigger_detail['trigger_source_sql']}")
+                                self.config_parser.print_log_message( 'DEBUG', f"[ERROR] Converted code for {trigger_detail['trigger_name']}: {converted_code}")
+                                self.migrator_tables.update_trigger_status(trigger_detail['id'], False, f'ERROR: {e}')
+                                self.handle_error(e, f"migrate_trigger {trigger_detail['trigger_name']}")
+                        else:
+                            self.config_parser.print_log_message('INFO', f"Skipping trigger {trigger_detail['trigger_name']} for table {trigger_detail['table_name']} based on the migration configuration.")
 
                     self.config_parser.print_log_message('INFO', "Triggers migrated successfully.")
                 else:
@@ -866,6 +939,12 @@ class Orchestrator:
         if self.on_error_action == 'stop':
             self.config_parser.print_log_message('ERROR', "Stopping due to error.")
             exit(1)
+
+    def check_pausing_resuming(self):
+        if self.config_parser.pause_migration_fired():
+            self.config_parser.print_log_message('INFO', f"Orchestrator paused. Waiting for resume signal...")
+            self.config_parser.wait_for_resume()
+            self.config_parser.print_log_message('INFO', f"Orchestrator resumed.")
 
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

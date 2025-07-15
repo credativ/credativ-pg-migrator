@@ -55,6 +55,9 @@ def main():
         logger.logger.info('Starting configuration parser...')
         config_parser = ConfigParser(args, logger.logger)
 
+        if config_parser.is_resume_after_crash():
+            logger.logger.info("###### Resuming migration after crash ######")
+
         # Print the parsed configuration
         if args.log_level == 'DEBUG':
             logger.logger.debug(f"Parsed configuration: {config_parser.config}")
@@ -78,19 +81,18 @@ def main():
         orchestrator.run()
 
         logger.logger.info("Migration Done")
+        logger.stop_logging()
 
     except Exception as e:
         logger.logger.error(f"An error in the main: {e}")
+        logger.stop_logging()
         sys.exit(1)
 
-    finally:
-        logger.stop_logging()
-        exit()
 
 def ctrlc_signal_handler(sig, frame):
     print("Program interrupted with Ctrl+C")
     traceback.print_stack(frame)
-    sys.exit(0)
+    sys.exit(1)
 
 if __name__ == "__main__":
     main()

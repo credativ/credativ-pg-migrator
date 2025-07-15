@@ -232,7 +232,15 @@ class DatabaseConnector(ABC):
         """
         Migrate a table from source to target database.
         Procedure is used inside a worker thread.
-        Returns number of rows migrated.
+        Returns dictionary migration_stats:
+        {
+            'finished': bool - True if whole migration of this table is fully finished, False if not
+            'rows_migrated': int - number of rows migrated in this chunk
+            'source_table_rows': int - total number of rows in the source table
+            'target_table_rows': int - total number of rows in the target table after this chunk
+            'chunk_number': int - current chunk number
+            'total_chunks': int - total number of chunks for this table
+        }
         """
         pass
 
@@ -625,6 +633,7 @@ class DatabaseConnector(ABC):
         """
         pass
 
+    @abstractmethod
     def get_top_fk_dependencies(self, settings):
         """
         Fetch top foreign key dependencies in the specified schema.
@@ -639,6 +648,14 @@ class DatabaseConnector(ABC):
             'dependencies: list of source tables that have foreign key references to this table
             }
         }
+        """
+        pass
+
+    @abstractmethod
+    def target_table_exists(self, target_schema, target_table):
+        """
+        Check if the target table exists in the target database.
+        Returns True if the table exists, False otherwise.
         """
         pass
 

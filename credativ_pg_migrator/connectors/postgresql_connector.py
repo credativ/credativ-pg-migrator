@@ -632,9 +632,18 @@ class PostgreSQLConnector(DatabaseConnector):
 
     def migrate_table(self, migrate_target_connection, settings):
         part_name = 'initialize'
+        source_table_rows = 0
         target_table_rows = 0
-        migration_stats = {}
         total_inserted_rows = 0
+        migration_stats = {}
+        batch_number = 0
+        shortest_batch_seconds = 0
+        longest_batch_seconds = 0
+        average_batch_seconds = 0
+        chunk_start_row_number = 0
+        chunk_end_row_number = 0
+        processing_start_time = time.time()
+        order_by_clause = ''
         try:
             worker_id = settings['worker_id']
             source_schema = settings['source_schema']
@@ -734,13 +743,6 @@ class PostgreSQLConnector(DatabaseConnector):
 
                     self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Migrating table {source_schema}.{source_table}: chunk {chunk_number}, data chunk size {data_chunk_size}, batch size {batch_size}, chunk offset {chunk_offset}, chunk end row number {chunk_end_row_number}, source table rows {source_table_rows}")
                     order_by_clause = ''
-
-                    # if table is small, skipping ordering does not make sense because it will not speed up the migration
-                    # if data_chunk_size > source_table_rows:
-                    #     query = f'''SELECT {select_columns} FROM "{source_schema}"."{source_table}"'''
-                    #     if migration_limitation:
-                    #         query += f" WHERE {migration_limitation}"
-                    # else:
 
                     query = f'''SELECT {select_columns} FROM "{source_schema}"."{source_table}" '''
                     if migration_limitation:
@@ -854,6 +856,8 @@ class PostgreSQLConnector(DatabaseConnector):
                                                             f"Longest batch: {longest_batch_seconds:.2f} seconds, "
                                                             f"Average batch: {average_batch_seconds:.2f} seconds")
 
+                    cursor.close()
+
                 elif source_table_rows <= target_table_rows:
                     self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Source table {source_table} has {source_table_rows} rows, which is less than or equal to target table {target_table} with {target_table_rows} rows. No data migration needed.")
 
@@ -902,8 +906,9 @@ class PostgreSQLConnector(DatabaseConnector):
                     'task_completed': datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S.%f'),
                     'order_by_clause': order_by_clause,
                 })
-                cursor.close()
+
                 return migration_stats
+
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Error during {part_name} -> {e}")
             self.config_parser.print_log_message('ERROR', "Full stack trace:")

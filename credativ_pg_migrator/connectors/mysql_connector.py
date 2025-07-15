@@ -281,11 +281,12 @@ class MySQLConnector(DatabaseConnector):
                     self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Source table {source_table}: {source_table_rows} rows / Target table {target_table}: {target_table_rows} rows - starting data migration.")
 
                     select_columns_list = []
+                    orderby_columns_list = []
+                    insert_columns_list = []
+
                     for order_num, col in source_columns.items():
                         self.config_parser.print_log_message('DEBUG2',
                                                             f"Worker {worker_id}: Table {source_schema}.{source_table}: Processing column {col['column_name']} ({order_num}) with data type {col['data_type']}")
-                        insert_columns = ', '.join([f'''"{self.config_parser.convert_names_case(col['column_name'])}"''' for col in source_columns.values()])
-                        orderby_columns = ', '.join([f'''`{col['column_name']}`''' for col in source_columns.values()])
 
                         if col['data_type'].lower() == 'geometry':
                             select_columns_list.append(f"ST_asText(`{col['column_name']}`) as `{col['column_name']}`")
@@ -293,7 +294,13 @@ class MySQLConnector(DatabaseConnector):
                             select_columns_list.append(f"cast(`{col['column_name']}` as char(4000)) as `{col['column_name']}`")
                         else:
                             select_columns_list.append(f"`{col['column_name']}`")
+
+                        insert_columns_list.append(f'''"{self.config_parser.convert_names_case(col['column_name'])}"''')
+                        orderby_columns_list.append(f'''`{col['column_name']}`''')
+
                     select_columns = ', '.join(select_columns_list)
+                    orderby_columns = ', '.join(orderby_columns_list)
+                    insert_columns = ', '.join(insert_columns_list)
 
                     if resume_after_crash and not drop_unfinished_tables:
                         chunk_number = self.config_parser.get_total_chunks(target_table_rows, data_chunk_size)

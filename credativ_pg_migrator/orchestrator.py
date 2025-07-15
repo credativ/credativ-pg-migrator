@@ -771,7 +771,7 @@ class Orchestrator:
                     for one_trigger in all_triggers:
                         trigger_detail = self.migrator_tables.decode_trigger_row(one_trigger)
 
-                        if self.config_parser.should_migrate_trigger(trigger_detail['source_table']):
+                        if self.config_parser.should_migrate_triggers(trigger_detail['source_table']):
                             self.config_parser.print_log_message('INFO', f"Processing trigger {trigger_detail['trigger_name']}")
                             self.config_parser.print_log_message( 'DEBUG', f"Trigger details: {trigger_detail}")
 

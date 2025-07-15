@@ -65,6 +65,11 @@ class ConfigParser:
         return bool(self.args.resume)
 
     def should_drop_unfinished_tables(self):
+        if self.get_source_db_type() == 'sybase_ase':
+            # Sybase ASE does not support LIMIT with OFFSET in older versions, so we cannot resume after crash
+            # and must drop unfinished tables
+            self.print_log_message('INFO', "##### Sybase ASE does not support LIMIT with OFFSET in older versions, dropping unfinished tables. #####")
+            return True
         return bool(self.args.drop_unfinished_tables)
 
 

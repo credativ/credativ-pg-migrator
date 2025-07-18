@@ -391,11 +391,20 @@ class ConfigParser:
         return int(self.config.get('migration', {}).get('batch_size', 100000))
 
     def get_chunk_size(self):
-        return int(self.config.get('migration', {}).get('data_chunk_size', self.get_batch_size() * 10))
+        chunk_size = self.config.get('migration', {}).get('chunk_size', -1)
+        if chunk_size == -1:
+            self.print_log_message('DEBUG', "Chunk size is set to -1, which means no chunking will be done.")
+            return -1
+        if chunk_size < self.get_batch_size():
+            self.print_log_message('WARNING', f"Chunk size {chunk_size} is smaller than batch size {self.get_batch_size()}. Disabling chunking.")
+            return -1 ##self.get_batch_size() * 10
+        return int(chunk_size)
 
-    def get_total_chunks(self, source_table_rows, data_chunk_size):
-        total_chunks = int(source_table_rows / data_chunk_size)
-        if (source_table_rows / data_chunk_size) > total_chunks:
+    def get_total_chunks(self, source_table_rows, chunk_size):
+        if chunk_size == -1:
+            return 1
+        total_chunks = int(source_table_rows / chunk_size)
+        if (source_table_rows / chunk_size) > total_chunks:
             total_chunks += 1
         return total_chunks
 
@@ -556,14 +565,20 @@ class ConfigParser:
         return self.get_batch_size()
 
     def get_table_chunk_size(self, table_name=None):
+        chunk_size = self.get_chunk_size()
         if table_name:
             table_settings = self.config.get('table_settings', [])
             if isinstance(table_settings, list):
                 for entry in table_settings:
                     pattern = entry.get('table_name')
                     if pattern and re.fullmatch(pattern, table_name, re.IGNORECASE):
-                        return entry.get('chunk_size', self.get_chunk_size())
-        return self.get_chunk_size()
+                        chunk_size = entry.get('chunk_size', self.get_chunk_size())
+                        if chunk_size == -1:
+                            self.print_log_message('DEBUG', f"Chunk size for table {table_name} is set to -1, which means no chunking will be done.")
+                        if chunk_size < self.get_table_batch_size(table_name):
+                            self.print_log_message('WARNING', f"Chunk size {chunk_size} for table {table_name} is smaller than batch size {self.get_table_batch_size(table_name)}. Disabling chunking.")
+                            chunk_size = -1
+        return chunk_size
 
     ## pre-migration analysis
     def get_pre_migration_analysis(self):

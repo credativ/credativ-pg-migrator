@@ -488,7 +488,7 @@ class Orchestrator:
                     'batch_size': self.config_parser.get_table_batch_size(table_data['source_table']),
                     'migrator_tables': settings['migrator_tables'],
                     'migration_limitation': '',
-                    'data_chunk_size': self.config_parser.get_table_chunk_size(table_data['source_table']),
+                    'chunk_size': self.config_parser.get_table_chunk_size(table_data['source_table']),
                     'chunk_number': 1,
                     'resume_after_crash': settings['resume_after_crash'],
                     'drop_unfinished_tables': settings['drop_unfinished_tables'],

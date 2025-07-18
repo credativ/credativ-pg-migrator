@@ -265,7 +265,7 @@ class IBMDB2Connector(DatabaseConnector):
             batch_size = settings['batch_size']
             migrator_tables = settings['migrator_tables']
             migration_limitation = settings['migration_limitation']
-            data_chunk_size = settings['data_chunk_size']
+            chunk_size = settings['chunk_size']
             chunk_number = settings['chunk_number']
             resume_after_crash = settings['resume_after_crash']
             drop_unfinished_tables = settings['drop_unfinished_tables']
@@ -273,7 +273,9 @@ class IBMDB2Connector(DatabaseConnector):
             source_table_rows = self.get_rows_count(source_schema, source_table, migration_limitation)
             target_table_rows = migrate_target_connection.get_rows_count(target_schema, target_table)
 
-            total_chunks = self.config_parser.get_total_chunks(source_table_rows, data_chunk_size)
+            total_chunks = self.config_parser.get_total_chunks(source_table_rows, chunk_size)
+            if chunk_size == -1:
+                chunk_size = source_table_rows + 1
 
             migration_stats = {
                 'rows_migrated': target_table_rows,
@@ -342,16 +344,16 @@ class IBMDB2Connector(DatabaseConnector):
                     insert_columns = ', '.join(insert_columns_list)
 
                     if resume_after_crash and not drop_unfinished_tables:
-                        chunk_number = self.config_parser.get_total_chunks(target_table_rows, data_chunk_size)
-                        self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Resuming migration for table {source_schema}.{source_table} from chunk {chunk_number} with data chunk size {data_chunk_size}.")
+                        chunk_number = self.config_parser.get_total_chunks(target_table_rows, chunk_size)
+                        self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Resuming migration for table {source_schema}.{source_table} from chunk {chunk_number} with data chunk size {chunk_size}.")
                         chunk_offset = target_table_rows
                     else:
-                        chunk_offset = (chunk_number - 1) * data_chunk_size
+                        chunk_offset = (chunk_number - 1) * chunk_size
 
                     chunk_start_row_number = chunk_offset + 1
-                    chunk_end_row_number = chunk_offset + data_chunk_size
+                    chunk_end_row_number = chunk_offset + chunk_size
 
-                    self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Migrating table {source_schema}.{source_table}: chunk {chunk_number}, data chunk size {data_chunk_size}, batch size {batch_size}, chunk offset {chunk_offset}, chunk end row number {chunk_end_row_number}, source table rows {source_table_rows}")
+                    self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Migrating table {source_schema}.{source_table}: chunk {chunk_number}, data chunk size {chunk_size}, batch size {batch_size}, chunk offset {chunk_offset}, chunk end row number {chunk_end_row_number}, source table rows {source_table_rows}")
                     order_by_clause = ''
 
                     # if table is small, skipping ordering does not make sense because it will not speed up the migration
@@ -364,7 +366,7 @@ class IBMDB2Connector(DatabaseConnector):
                     if primary_key_columns:
                         orderby_columns = primary_key_columns
                     order_by_clause = f""" ORDER BY {orderby_columns}"""
-                    query += order_by_clause + f" LIMIT {data_chunk_size} OFFSET {chunk_offset}"
+                    query += order_by_clause + f" LIMIT {chunk_size} OFFSET {chunk_offset}"
 
                     self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Fetching data with cursor using query: {query}")
 
@@ -507,7 +509,7 @@ class IBMDB2Connector(DatabaseConnector):
                     'source_table_rows': source_table_rows,
                     'target_table_rows': target_table_rows,
                     'chunk_number': chunk_number,
-                    'chunk_size': data_chunk_size,
+                    'chunk_size': chunk_size,
                     'migration_limitation': migration_limitation,
                     'chunk_start': chunk_start_row_number,
                     'chunk_end': chunk_end_row_number,

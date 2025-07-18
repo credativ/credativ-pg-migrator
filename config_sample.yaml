@@ -96,13 +96,15 @@ migration:
   # batch_size: number of rows to migrate in one batch during data migration, default is 100000
   # batch size is used when data are repeatedly read from source database and written to the target database
   batch_size: 10000
-  # data_chunk_size: number of rows to migrate in one chunk during data migration, default is 1000000
-  # must be bigger than batch_size
+  # chunk_size: number of rows to migrate in one chunk during data migration, default is 1000000
+  # must be bigger than batch_size, best options are 10x, 20x not more
   # chunk size is used to divide migration of huge tables into smaller independent parts - chunks are logged and processed separately
   # intention is to allow to pause the migration process and continue later, in case if the source database contains really huge tables
   # or if maintenance window is limited only to some daily hours
   # chunk is processed in batches of batch_size
-  data_chunk_size: 1000000
+  # if chunk size is not specified, or is smaller than batch size, chunking will not be done (the same as -1)
+  # value -1 means no chunking will be done, all data will be migrated in one chunk (i.e. chunk as big as the table)
+  chunk_size: 1000000
   # PostgreSQL scripts for the migration process
   # Both run on the target database, before and after the migration
   # pre_migration_script: pre_migration.sql
@@ -137,14 +139,14 @@ table_settings:
   # table_name can be full table name or regular expression
   # available settings:
   # - batch_size: number of rows to migrate in one batch, default is 100000
-  # - data_chunk_size: number of rows to migrate in one chunk, default is 1000000
+  # - chunk_size: number of rows to migrate in one chunk, default is -1 (no chunking)
   # - migrate_data: true/false - if data should be migrated, default is true
   # - migrate_indexes: true/false - if indexes should be migrated, default is true
   # - migrate_constraints: true/false - if constraints should be migrated, default is true
   # - migrate_triggers: true/false - if triggers should be migrated, default is true
   - table_name: "table1"
     batch_size: 50000
-    data_chunk_size: 1000000
+    chunk_size: -1
     migrate_data: true
     migrate_indexes: false
     migrate_constraints: true

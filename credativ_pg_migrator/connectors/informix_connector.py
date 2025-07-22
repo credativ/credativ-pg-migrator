@@ -1161,6 +1161,9 @@ class InformixConnector(DatabaseConnector):
                             select_columns_list.append(f"TO_CHAR({col['column_name']}, '%Y-%m-%d %H:%M:%S') as {col['column_name']}")
                         elif col['data_type'].lower() in ['clob', 'blob'] and not self.config_parser.should_migrate_lob_values():
                             select_columns_list.append(f"CAST(NULL as {col['data_type']}) as {col['column_name']}")
+                        elif col['data_type'].lower() in ['char', 'nchar']:
+                            ## compensate for Informix's fixed-length char columns
+                            select_columns_list.append(f"trim({col['column_name']}) as {col['column_name']}")
                         #     select_columns_list.append(f"ST_asText(`{col['column_name']}`) as `{col['column_name']}`")
                         # elif col['data_type'].lower() == 'set':
                         #     select_columns_list.append(f"cast(`{col['column_name']}` as char(4000)) as `{col['column_name']}`")

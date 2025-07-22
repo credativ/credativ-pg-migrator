@@ -2,6 +2,15 @@
 
 ## 0.9.5 - 2025.07.xx
 
+- 2025.07.22:
+
+  - Trim CHAR and NCHAR columns in Informix connector - these columns are fixed-length, so we need to trim them to avoid issues with trailing spaces
+
+- 2025.07.18 - bugfixing party:
+
+  - Config parameter migration.data_chunk_size renamed to migration.chunk_size - this is more obvious intuitive name. Renaming also all internal variables and functions.
+  - Properly implemented option chunk_size = -1 to disable chunking - this means that all data will be migrated in one chunk, i.e. chunk as big as the table
+
 - 2025.07.15:
 
   - Repaired issue #11 - exiting with 0 when error is caught in the main function - now it exits with 1 as expected

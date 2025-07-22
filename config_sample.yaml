@@ -96,13 +96,15 @@ migration:
   # batch_size: number of rows to migrate in one batch during data migration, default is 100000
   # batch size is used when data are repeatedly read from source database and written to the target database
   batch_size: 10000
-  # data_chunk_size: number of rows to migrate in one chunk during data migration, default is 1000000
-  # must be bigger than batch_size
+  # chunk_size: number of rows to migrate in one chunk during data migration, default is 1000000
+  # must be bigger than batch_size, best options are 10x, 20x not more
   # chunk size is used to divide migration of huge tables into smaller independent parts - chunks are logged and processed separately
   # intention is to allow to pause the migration process and continue later, in case if the source database contains really huge tables
   # or if maintenance window is limited only to some daily hours
   # chunk is processed in batches of batch_size
-  data_chunk_size: 1000000
+  # if chunk size is not specified, or is smaller than batch size, chunking will not be done (the same as -1)
+  # value -1 means no chunking will be done, all data will be migrated in one chunk (i.e. chunk as big as the table)
+  chunk_size: 1000000
   # PostgreSQL scripts for the migration process
   # Both run on the target database, before and after the migration
   # pre_migration_script: pre_migration.sql
@@ -112,7 +114,7 @@ migration:
   # 0 = always change to text, -1 = never change to text, always migrate as varchar, >0 = convert varchar to text if length is >= this value
   # if parameter is missing, default is -1 -> migrate all varchars as varchars as they are
   varchar_to_text_length: 4000
-  char_to_text_length: 10
+
   # migrate_lob_values - if true, migrate LOB values (BLOB, CLOB) as text or bytea
   # if false, LOB values will be skipped (migrated as NULL)
   # if missing, default is true - LOB values will be migrated
@@ -137,14 +139,14 @@ table_settings:
   # table_name can be full table name or regular expression
   # available settings:
   # - batch_size: number of rows to migrate in one batch, default is 100000
-  # - data_chunk_size: number of rows to migrate in one chunk, default is 1000000
+  # - chunk_size: number of rows to migrate in one chunk, default is -1 (no chunking)
   # - migrate_data: true/false - if data should be migrated, default is true
   # - migrate_indexes: true/false - if indexes should be migrated, default is true
   # - migrate_constraints: true/false - if constraints should be migrated, default is true
   # - migrate_triggers: true/false - if triggers should be migrated, default is true
   - table_name: "table1"
     batch_size: 50000
-    data_chunk_size: 1000000
+    chunk_size: -1
     migrate_data: true
     migrate_indexes: false
     migrate_constraints: true
@@ -219,9 +221,6 @@ data_migration_limitation:
   - ["movie_references", "referenced_id in (select id from movies where date >= '2000-01-01')", "referenced_id", 1000000]
   - [".*", "id >= (select max(id) from {source_schema}.{source_table})", "id", 1000000]
 
-
-  - ["PK_RANGE", ".*", 1000000]
-
 # Configurable partitioning for target tables
 # partitioning:
 #   - description: "partitioning for table1 by date"
@@ -232,9 +231,3 @@ data_migration_limitation:
 # date - by range, select unique values from the column from source table
 # integer - by range or list
 # hash - even data distribution
-
-# Section for resuming the migration process in case of crash
-# If the migration process crashed, it can be resumed with command line option --resume-after-crash
-resume_after_crash:
-  finished_tables: skip
-  unfinished_tables: drop

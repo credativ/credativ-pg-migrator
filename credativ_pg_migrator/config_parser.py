@@ -528,45 +528,45 @@ class ConfigParser:
     def get_target_partitioning(self):
         return self.config.get('target_partitioning', {})
 
-    def get_source_data_export(self):
+    def get_source_database_export(self):
         source_config = self.get_source_config()
-        return source_config.get('data_export', {})
+        return source_config.get('database_export', {})
 
-    def get_source_data_export_format(self):
-        return self.get_source_data_export().get('format', None)
+    def get_source_database_export_format(self):
+        return self.get_source_database_export().get('format', None)
 
-    def get_source_data_export_delimiter(self):
-        return self.get_source_data_export().get('delimiter', None)
+    def get_source_database_export_delimiter(self):
+        return self.get_source_database_export().get('delimiter', None)
 
-    def get_source_data_export_path(self):
-        return self.get_source_data_export().get('path', None)
+    def get_source_database_export_path(self):
+        return self.get_source_database_export().get('path', None)
 
-    def get_source_data_export_name(self):
-        return self.get_source_data_export().get('name', None)
+    def get_source_database_export_name(self):
+        return self.get_source_database_export().get('name', None)
 
-    def get_source_data_export_big_files_split(self):
-        return self.get_source_data_export().get('big_files_split', None)
+    def get_source_database_export_big_files_split(self):
+        return self.get_source_database_export().get('big_files_split', None)
 
-    def get_source_data_export_big_files_split_enabled(self):
-        big_files_split = self.get_source_data_export_big_files_split()
+    def get_source_database_export_big_files_split_enabled(self):
+        big_files_split = self.get_source_database_export_big_files_split()
         if big_files_split and isinstance(big_files_split, dict):
             return big_files_split.get('enabled', False)
         return False
 
-    def get_source_data_export_big_files_split_threshold_bytes(self):
-        big_files_split = self.get_source_data_export_big_files_split()
+    def get_source_database_export_big_files_split_threshold_bytes(self):
+        big_files_split = self.get_source_database_export_big_files_split()
         if big_files_split and isinstance(big_files_split, dict):
             return self.convert_size_to_bytes(big_files_split.get('split_threshold', None))
         return None
 
-    def get_source_data_export_big_files_split_chunk_size_bytes(self):
-        big_files_split = self.get_source_data_export_big_files_split()
+    def get_source_database_export_big_files_split_chunk_size_bytes(self):
+        big_files_split = self.get_source_database_export_big_files_split()
         if big_files_split and isinstance(big_files_split, dict):
             return self.convert_size_to_bytes(big_files_split.get('chunk_size', None))
         return None
 
-    def get_source_data_export_lob_columns(self):
-        return self.get_source_data_export().get('lob_columns', [])
+    def get_source_database_export_lob_columns(self):
+        return self.get_source_database_export().get('lob_columns', [])
 
 
     # another service functions
@@ -646,22 +646,22 @@ class ConfigParser:
                             chunk_size = -1
         return chunk_size
 
-    def get_table_data_export(self, schema_name, table_name):
-        data_export = self.get_source_data_export()
+    def get_table_database_export(self, schema_name, table_name):
+        database_export = self.get_source_database_export()
         if table_name:
             table_settings = self.config.get('table_settings', [])
             if isinstance(table_settings, list):
                 for entry in table_settings:
                     pattern = entry.get('table_name')
                     if pattern and re.fullmatch(pattern, table_name, re.IGNORECASE):
-                        return entry.get('data_export', data_export)
-        return data_export
+                        return entry.get('database_export', database_export)
+        return database_export
 
     def get_table_data_source(self, schema_name, table_name):
-        data_export = self.get_table_data_export(schema_name, table_name)
-        if data_export:
-            name = data_export.get('name', None)
-            path = data_export.get('path', None)
+        database_export = self.get_table_database_export(schema_name, table_name)
+        if database_export:
+            name = database_export.get('name', None)
+            path = database_export.get('path', None)
             if name and path:
                 schema_name = self.get_source_schema()
                 table_file_name = name.replace("{{schema_name}}", schema_name).replace("{{table_name}}", table_name)
@@ -670,20 +670,20 @@ class ConfigParser:
                     return file_path
         return MigratorConstants.get_default_data_source()
 
-    def get_table_data_export_format(self, schema_name, table_name):
-        return self.get_table_data_export(schema_name, table_name).get('format', None)
+    def get_table_database_export_format(self, schema_name, table_name):
+        return self.get_table_database_export(schema_name, table_name).get('format', None)
 
-    def get_table_data_export_delimiter(self, schema_name, table_name):
-        return self.get_table_data_export(schema_name, table_name).get('delimiter', None)
+    def get_table_database_export_delimiter(self, schema_name, table_name):
+        return self.get_table_database_export(schema_name, table_name).get('delimiter', None)
 
-    def get_table_data_export_path(self, schema_name, table_name):
-        return self.get_table_data_export(schema_name, table_name).get('path', None)
+    def get_table_database_export_path(self, schema_name, table_name):
+        return self.get_table_database_export(schema_name, table_name).get('path', None)
 
-    def get_table_data_export_name(self, schema_name, table_name):
-        return self.get_table_data_export(schema_name, table_name).get('name', None)
+    def get_table_database_export_name(self, schema_name, table_name):
+        return self.get_table_database_export(schema_name, table_name).get('name', None)
 
-    def get_table_data_export_lob_columns(self, schema_name, table_name):
-        return self.get_table_data_export(schema_name, table_name).get('lob_columns', [])
+    def get_table_database_export_lob_columns(self, schema_name, table_name):
+        return self.get_table_database_export(schema_name, table_name).get('lob_columns', [])
 
 
     ## pre-migration analysis

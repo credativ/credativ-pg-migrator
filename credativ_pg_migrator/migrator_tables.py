@@ -16,6 +16,7 @@
 
 import json
 import psycopg2
+from credativ_pg_migrator.constants import MigratorConstants
 
 class ProtocolPostgresConnection:
     def __init__(self, config_parser):
@@ -1358,6 +1359,7 @@ class MigratorTables:
             partitioned_by TEXT,
             partitioning_columns TEXT,
             create_partitions_sql TEXT,
+            data_source TEXT DEFAULT '{MigratorConstants.get_default_data_source()}',
             task_created TIMESTAMP DEFAULT clock_timestamp(),
             task_started TIMESTAMP,
             task_completed TIMESTAMP,
@@ -1520,7 +1522,8 @@ class MigratorTables:
             'partitioned': row[11],
             'partitioned_by': row[12],
             'partitioning_columns': row[13],
-            'create_partitions_sql': row[14]
+            'create_partitions_sql': row[14],
+            'data_source': row[15],
         }
 
     def decode_index_row(self, row):
@@ -1646,6 +1649,7 @@ class MigratorTables:
         partitioned_by = settings['partitioned_by']
         partitioning_columns = settings['partitioning_columns']
         create_partitions_sql = settings['create_partitions_sql']
+        data_source = settings.get('data_source', MigratorConstants.get_default_data_source())
 
         table_name = self.config_parser.get_protocol_name_tables()
         source_columns_str = json.dumps(source_columns)
@@ -1654,13 +1658,13 @@ class MigratorTables:
             INSERT INTO "{self.protocol_schema}"."{table_name}"
             (source_schema, source_table, source_table_id, source_columns, source_table_description,
             target_schema, target_table, target_columns, target_table_sql, table_comment,
-            partitioned, partitioned_by, partitioning_columns, create_partitions_sql)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            partitioned, partitioned_by, partitioning_columns, create_partitions_sql, data_source)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
         params = (source_schema, source_table, source_table_id, source_columns_str, source_table_description,
                   target_schema, target_table, target_columns_str, target_table_sql, table_comment,
-                  partitioned, partitioned_by, partitioning_columns, create_partitions_sql)
+                  partitioned, partitioned_by, partitioning_columns, create_partitions_sql, data_source)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)

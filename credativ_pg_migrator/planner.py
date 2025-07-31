@@ -493,6 +493,10 @@ class Planner:
                                             self.target_connection.disconnect()
                                             self.config_parser.print_log_message( 'DEBUG', f"Create partitions SQL: {create_partitions_sql}")
 
+                table_data_source = self.config_parser.get_table_data_source(self.source_schema, table_info['table_name'])
+                if table_data_source != MigratorConstants.get_default_data_source():
+                    self.config_parser.print_log_message( 'DEBUG', f"Table {table_info['table_name']} data source: {table_data_source}")
+
                 self.migrator_tables.insert_tables({
                     'source_schema': self.source_schema,
                     'source_table': table_info['table_name'],
@@ -508,6 +512,7 @@ class Planner:
                     'partitioned_by': table_partitioned_by,
                     'partitioning_columns': table_partitioning_columns,
                     'create_partitions_sql': create_partitions_sql,
+                    'data_source': table_data_source,
                 })
 
             except Exception as e:
@@ -526,6 +531,7 @@ class Planner:
                     'partitioned_by': '',
                     'partitioning_columns': '',
                     'create_partitions_sql': '',
+                    'data_source': '',
                 })
                 self.handle_error(e, f"Table {table_info['table_name']}")
                 continue

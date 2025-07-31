@@ -6,6 +6,12 @@
 
   - Fix in "resume" functionality - planner must check row counts of fully migrated tables to ensure they were not mistakenly marked as fully migrated
     - Implementation still covers only optimistic variant of resuming migration, i.e. it presumes original planning phase was done correctly and data in the source database did not change since the interruption of the migration
+  - Added experimental support for Informix text dump UNL files as data source for inserting data into target tables.
+    - This is necessary because Informix database can be extremely slow in reading data from tables - depends on license and underlying hardware
+    - UNLOAD dump can be slow too, but still faster than batch select-insert from the source Informix database into the target PostgreSQL database
+    - Includes conversion of UNL format into proper PostgreSQL readable CSV format, compensates for NULL values vs empty strings, and multiline text values
+    - Includes import of LOB values from secondary text/binary files referenced in the UNL file
+    - Includes splitting of UNL files into smaller chunks for parallel processing
 
 - 2025.07.22:
 

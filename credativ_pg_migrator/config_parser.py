@@ -544,7 +544,57 @@ class ConfigParser:
     def get_source_data_export_name(self):
         return self.get_source_data_export().get('name', None)
 
+    def get_source_data_export_big_files_split(self):
+        return self.get_source_data_export().get('big_files_split', None)
+
+    def get_source_data_export_big_files_split_enabled(self):
+        big_files_split = self.get_source_data_export_big_files_split()
+        if big_files_split and isinstance(big_files_split, dict):
+            return big_files_split.get('enabled', False)
+        return False
+
+    def get_source_data_export_big_files_split_threshold_bytes(self):
+        big_files_split = self.get_source_data_export_big_files_split()
+        if big_files_split and isinstance(big_files_split, dict):
+            return self.convert_size_to_bytes(big_files_split.get('split_threshold', None))
+        return None
+
+    def get_source_data_export_big_files_split_chunk_size_bytes(self):
+        big_files_split = self.get_source_data_export_big_files_split()
+        if big_files_split and isinstance(big_files_split, dict):
+            return self.convert_size_to_bytes(big_files_split.get('chunk_size', None))
+        return None
+
+    def get_source_data_export_lob_columns(self):
+        return self.get_source_data_export().get('lob_columns', [])
+
+
     # another service functions
+
+    def convert_size_to_bytes(self, size_str):
+        if size_str is None:
+            return None
+        size_str = size_str.strip().upper()
+        if size_str.endswith('TB'):
+            return int(size_str[:-2]) * 1024 * 1024 * 1024 * 1024
+        elif size_str.endswith('T'):
+            return int(size_str[:-1]) * 1024 * 1024 * 1024 * 1024
+        elif size_str.endswith('GB'):
+            return int(size_str[:-2]) * 1024 * 1024 * 1024
+        elif size_str.endswith('G'):
+            return int(size_str[:-1]) * 1024 * 1024 * 1024
+        elif size_str.endswith('MB'):
+            return int(size_str[:-2]) * 1024 * 1024
+        elif size_str.endswith('M'):
+            return int(size_str[:-1]) * 1024 * 1024
+        elif size_str.endswith('KB'):
+            return int(size_str[:-2]) * 1024
+        elif size_str.endswith('K'):
+            return int(size_str[:-1]) * 1024
+        elif size_str.endswith('B'):
+            return int(size_str[:-1])
+        else:
+            raise ValueError(f"Invalid size format: {size_str}")
 
     def indent_code(self, code):
         lines = code.split('\n')
@@ -596,7 +646,7 @@ class ConfigParser:
                             chunk_size = -1
         return chunk_size
 
-    def get_table_data_export(self, table_name=None):
+    def get_table_data_export(self, schema_name, table_name):
         data_export = self.get_source_data_export()
         if table_name:
             table_settings = self.config.get('table_settings', [])
@@ -607,17 +657,33 @@ class ConfigParser:
                         return entry.get('data_export', data_export)
         return data_export
 
-    def get_table_data_export_format(self, table_name=None):
-        return self.get_table_data_export(table_name).get('format', None)
+    def get_table_data_source(self, schema_name, table_name):
+        data_export = self.get_table_data_export(schema_name, table_name)
+        if data_export:
+            name = data_export.get('name', None)
+            path = data_export.get('path', None)
+            if name and path:
+                schema_name = self.get_source_schema()
+                table_file_name = name.replace("{{schema_name}}", schema_name).replace("{{table_name}}", table_name)
+                file_path = os.path.join(path, table_file_name)
+                if os.path.exists(file_path):
+                    return file_path
+        return MigratorConstants.get_default_data_source()
 
-    def get_table_data_export_delimiter(self, table_name=None):
-        return self.get_table_data_export(table_name).get('delimiter', None)
+    def get_table_data_export_format(self, schema_name, table_name):
+        return self.get_table_data_export(schema_name, table_name).get('format', None)
 
-    def get_table_data_export_path(self, table_name=None):
-        return self.get_table_data_export(table_name).get('path', None)
+    def get_table_data_export_delimiter(self, schema_name, table_name):
+        return self.get_table_data_export(schema_name, table_name).get('delimiter', None)
 
-    def get_table_data_export_name(self, table_name=None):
-        return self.get_table_data_export(table_name).get('name', None)
+    def get_table_data_export_path(self, schema_name, table_name):
+        return self.get_table_data_export(schema_name, table_name).get('path', None)
+
+    def get_table_data_export_name(self, schema_name, table_name):
+        return self.get_table_data_export(schema_name, table_name).get('name', None)
+
+    def get_table_data_export_lob_columns(self, schema_name, table_name):
+        return self.get_table_data_export(schema_name, table_name).get('lob_columns', [])
 
 
     ## pre-migration analysis

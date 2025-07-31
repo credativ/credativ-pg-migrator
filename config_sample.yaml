@@ -4,7 +4,7 @@
 pre_migration_analysis:
   # Section for listing TOP N tables from the source database
   # by_rows - list tables by number of rows in the table - value is the number of TOP N tables to list
-  # part set to 0 is skipped, not listed
+  # part set to 0 is skipped, not listed, some huge number like 9999999 means all tables will be listed
   top_n_tables:
     by_rows: 10
     by_size: 10
@@ -24,8 +24,9 @@ env_variables:
 # Migrator database connection for metadata storage
 # Migrator created multiple tables in the database
 # In most cases we presume migrator database is the same as target database, just with different schema
+# Idea is to have migration metadata as close to the target database as possible
 migrator:
-  type: "postgresql"
+  type: "postgresql" # only postgresql is currently supported
   host: "localhost"
   port: 5432
   username: "postgres"
@@ -34,7 +35,7 @@ migrator:
   schema: "migration"
 
 # source database connection
-# type: "informix", "sybase_ase", "mssql", "ibm_db2", "mysql", "sql_anywhere", "postgresql"
+# type: "informix", "sybase_ase", "mssql", "ibm_db2", "mysql", "sql_anywhere", "postgresql", "oracle"
 source:
   type: "sybase_ase"
   host: "localhost"
@@ -42,7 +43,7 @@ source:
   username: "sa"
   password: "password"
   database: "source_database"
-  # schema or owner - depending on the source database - not both
+  # schema or owner (these are synonyms depending on the source database - but only one can be used, not both)
   schema: "dbo"
   # connectivity type - "jdbc", "odbc", "native"
   # "native" does not have any additional section
@@ -98,15 +99,16 @@ source:
     format: "SQL"  # format of the data files - see above
     delimiter: "|"  # delimiter for related UNL files, default is pipe "|"
 
+    ## Currently not implemented, just a preparation for the future
     # split of big files for parallel processing
     # if missing, default is not to split files
     # If enabled, chunks are processed in parallel by multiple workers
     # split_threshold - threshold for splitting files, if file is bigger than this value, it will be split into smaller chunks
     # chunk_size - size of the chunks, if not specified, default is 2GB
-    big_files_split:
-      enabled: true
-      split_threshold: '5GB'
-      chunk_size: '2GB'
+    # big_files_split:
+    #   enabled: true
+    #   split_threshold: '5GB'
+    #   chunk_size: '2GB'
 
 # target database connection - always postgresql
 target:
@@ -119,6 +121,8 @@ target:
   schema: "target_schema"
   # settings for the migration process
   # are optional, if present they will override the default settings in every connection
+  # key is the name of the setting, value is the value of the setting
+  # key is checked against the list of allowed settings, if not present, it will be ignored
   settings:
     work_mem: '32MB'
     maintenance_work_mem: '512MB'
@@ -162,6 +166,8 @@ migration:
   # 0 = always change to text, -1 = never change to text, always migrate as varchar, >0 = convert varchar to text if length is >= this value
   # if parameter is missing, default is -1 -> migrate all varchars as varchars as they are
   varchar_to_text_length: 4000
+  # the same as varchar_to_text_length, but for char (nchar etc) data type
+  char_to_text_length: 5
 
   # migrate_lob_values - if true, migrate LOB values (BLOB, CLOB) as text or bytea
   # if false, LOB values will be skipped (migrated as NULL)
@@ -210,9 +216,9 @@ table_settings:
     migrate_constraints: true
     migrate_triggers: false
 
-    # individual data export settings for the table
+    # individual data export settings for the table - only CSV and UNL formats are supported
     database_export:
-      file: "/some/other/path/to/data/files/some_specific_name.dump"  # path to the directory with data files
+      file: "/some/other/path/to/data/files/some_specific_name.dump"  # path to the data file
       format: "CSV"  # currently only CSV and UNL formats are supported
       delimiter: "|"  # delimiter for CSV and UNL files, default is comma resp. "|"
 

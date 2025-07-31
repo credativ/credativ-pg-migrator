@@ -257,6 +257,9 @@ class ConfigParser:
     def get_protocol_name_tables(self):
         return f"{self.get_protocol_name()}_tables"
 
+    def get_protocol_name_data_sources(self):
+        return f"{self.get_protocol_name()}_data_sources"
+
     def get_protocol_name_pk_ranges(self):
         return f"{self.get_protocol_name()}_pk_ranges"
 
@@ -660,14 +663,12 @@ class ConfigParser:
     def get_table_data_source(self, schema_name, table_name):
         database_export = self.get_table_database_export(schema_name, table_name)
         if database_export:
-            name = database_export.get('name', None)
-            path = database_export.get('path', None)
-            if name and path:
+            file_name = database_export.get('file', None)
+            if file_name:
                 schema_name = self.get_source_schema()
-                table_file_name = name.replace("{{schema_name}}", schema_name).replace("{{table_name}}", table_name)
-                file_path = os.path.join(path, table_file_name)
-                if os.path.exists(file_path):
-                    return file_path
+                table_file_name = file_name.replace("{{schema_name}}", schema_name).replace("{{table_name}}", table_name)
+                if os.path.exists(table_file_name):
+                    return table_file_name
         return MigratorConstants.get_default_data_source()
 
     def get_table_database_export_format(self, schema_name, table_name):

@@ -65,6 +65,7 @@ class MigratorTables:
         self.create_table_for_domains()
         self.create_table_for_new_objects()
         self.create_table_for_tables()
+        self.create_table_for_data_sources()
         self.create_table_for_target_columns_alterations()
         self.create_table_for_data_migration()
         self.create_table_for_data_chunks()
@@ -1359,7 +1360,6 @@ class MigratorTables:
             partitioned_by TEXT,
             partitioning_columns TEXT,
             create_partitions_sql TEXT,
-            data_source TEXT DEFAULT '{MigratorConstants.get_default_data_source()}',
             task_created TIMESTAMP DEFAULT clock_timestamp(),
             task_started TIMESTAMP,
             task_completed TIMESTAMP,
@@ -1368,6 +1368,92 @@ class MigratorTables:
             )
         """)
         self.config_parser.print_log_message('DEBUG', f"Created protocol table {table_name} for tables.")
+
+    def create_table_for_data_sources(self):
+        table_name = self.config_parser.get_protocol_name_data_sources()
+        self.protocol_connection.execute_query(self.drop_table_sql.format(protocol_schema=self.protocol_schema, table_name=table_name))
+        self.protocol_connection.execute_query(f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."{table_name}"
+            (id SERIAL PRIMARY KEY,
+            source_schema TEXT,
+            source_table TEXT,
+            source_table_id INTEGER,
+            lob_columns TEXT,
+            file_name TEXT,
+            format_options TEXT,
+            task_created TIMESTAMP DEFAULT clock_timestamp(),
+            task_started TIMESTAMP,
+            task_completed TIMESTAMP,
+            success BOOLEAN,
+            message TEXT
+            )
+        """)
+        self.config_parser.print_log_message('DEBUG', f"Created protocol table {table_name} for data sources.")
+
+    def insert_data_source(self, settings):
+        ## source_schema, source_table, source_table_id, clob_columns, blob_columns, file_name, format_options
+        source_schema = settings['source_schema']
+        source_table = settings['source_table']
+        source_table_id = settings['source_table_id']
+        lob_columns = settings.get('lob_columns', '')
+        file_name = settings.get('file_name', '')
+        format_options = settings.get('format_options', '')
+
+        table_name = self.config_parser.get_protocol_name_data_sources()
+        query = f"""
+            INSERT INTO "{self.protocol_schema}"."{table_name}"
+            (source_schema, source_table, source_table_id, lob_columns, file_name, format_options)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            RETURNING *
+        """
+        params = (source_schema, source_table, source_table_id,
+                  lob_columns, file_name, format_options)
+
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+
+            data_source_row = self.decode_data_source_row(row)
+            self.config_parser.print_log_message('DEBUG3', f"insert_data_source: Returned row: {data_source_row}")
+            self.insert_protocol('data_source', f"{source_table} ({file_name})", 'create', None, None, None, None, 'info', None, data_source_row['id'])
+            return data_source_row['id']
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"insert_data_source: Error inserting data source {source_table} into {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"insert_data_source: Exception: {e}")
+            raise
+
+    def get_data_sources(self, source_schema, source_table):
+        table_name = self.config_parser.get_protocol_name_data_sources()
+        query = f"""
+            SELECT * FROM "{self.protocol_schema}"."{table_name}"
+            WHERE source_schema = %s AND source_table = %s
+        """
+        params = (source_schema, source_table)
+        cursor = self.protocol_connection.connection.cursor()
+        cursor.execute(query, params)
+        row = cursor.fetchone()
+        cursor.close()
+        if row:
+            return self.decode_data_source_row(row)
+        return None
+
+    def decode_data_source_row(self, row):
+        return {
+            'id': row[0],
+            'source_schema': row[1],
+            'source_table': row[2],
+            'source_table_id': row[3],
+            'lob_columns': row[4],
+            'file_name': row[5],
+            'format_options': row[6],
+            'task_created': row[7],
+            'task_started': row[8],
+            'task_completed': row[9],
+            'success': row[10],
+            'message': row[11]
+        }
 
     def create_table_for_indexes(self):
         table_name = self.config_parser.get_protocol_name_indexes()
@@ -1523,7 +1609,6 @@ class MigratorTables:
             'partitioned_by': row[12],
             'partitioning_columns': row[13],
             'create_partitions_sql': row[14],
-            'data_source': row[15],
         }
 
     def decode_index_row(self, row):
@@ -1649,7 +1734,6 @@ class MigratorTables:
         partitioned_by = settings['partitioned_by']
         partitioning_columns = settings['partitioning_columns']
         create_partitions_sql = settings['create_partitions_sql']
-        data_source = settings.get('data_source', MigratorConstants.get_default_data_source())
 
         table_name = self.config_parser.get_protocol_name_tables()
         source_columns_str = json.dumps(source_columns)
@@ -1658,13 +1742,13 @@ class MigratorTables:
             INSERT INTO "{self.protocol_schema}"."{table_name}"
             (source_schema, source_table, source_table_id, source_columns, source_table_description,
             target_schema, target_table, target_columns, target_table_sql, table_comment,
-            partitioned, partitioned_by, partitioning_columns, create_partitions_sql, data_source)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            partitioned, partitioned_by, partitioning_columns, create_partitions_sql)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
         params = (source_schema, source_table, source_table_id, source_columns_str, source_table_description,
                   target_schema, target_table, target_columns_str, target_table_sql, table_comment,
-                  partitioned, partitioned_by, partitioning_columns, create_partitions_sql, data_source)
+                  partitioned, partitioned_by, partitioning_columns, create_partitions_sql)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -2411,7 +2495,20 @@ class MigratorTables:
         cursor = self.protocol_connection.connection.cursor()
         cursor.execute(query)
         tables = cursor.fetchall()
-        return tables
+        return self.decode_table_row(tables)
+
+    def fetch_table(self, source_schema_name, source_table_name):
+        query = f"""
+                SELECT *
+                FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_tables()}"
+                WHERE source_schema = '{source_schema_name}'
+                AND source_table = '{source_table_name}'
+                """
+        # self.protocol_connection.connect()
+        cursor = self.protocol_connection.connection.cursor()
+        cursor.execute(query)
+        table = cursor.fetchone()
+        return table
 
     def fetch_all_target_table_names(self):
         tables = self.fetch_all_tables()

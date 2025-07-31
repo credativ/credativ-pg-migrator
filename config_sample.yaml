@@ -58,41 +58,44 @@ source:
   # mssql - SYS or INFORMATION_SCHEMA
   system_catalog: "SYSIBM"
 
-  # informix specific setting
-  db_locale: "en_US.utf8"  # locale for the Informix database, used for date and time formatting
+  # database locale - used for date and time formatting
+  # currently working only for Informix
+  db_locale: "en_US.utf8"
 
   # Global settings for using data files as source of data for the migration, otherwise source table in the source database is used
+  # This option is currently supported only for Informix
+  #
   # If data files is found, it will be used instead of the source database
   #   path - path to the data file(s), can contain placeholders for source_schema and source_table
   #
-  #   format - format of the data files, currently CSV, INFORMIX_UNL, INFORMIX_SQL formats are supported
-  #            CSV is directly processed by the PostgreSQL COPY command,
-  #            INFORMIX_UNL means separately manually exported files for specific tables, require first to be converted to CSV
-  #                         if UNL files are small, conversion during the migration is quick,
-  #                         individual differences for specific tables must be set in table_settings section for each table separately
-  #            INFORMIX_SQL means Informix SQL schema dump file with SQL DDL commands for database objects, data files in UNL format are expected in the same directory
-  #                         informix_sql require analysis of the SQL file to extract table names and corresponding names of data files
-  #                         this option currently cannot read the whole data model from the SQL dump file, it still requires to have the source database connection
+  #   format - format of the data files, currently CSV, UNL, SQL formats are supported
+  #            individual differences in names or settings for specific tables must be set in table_settings section for each table separately
   #
-  #   name - name of the data file, can contain placeholders for source_schema and source_table, or just source_table
-  #         e.g. "{{source_schema}}.{{source_table}}.csv" - this will be replaced with the actual schema and table name during the migration
+  #            CSV - is directly processed by the PostgreSQL COPY command,
+  #            UNL - means separately manually exported files in Informix UNL format for specific tables, require first to be converted to CSV
+  #                  if UNL files are small, conversion during the migration is quick,
+  #            SQL - means SQL schema dump file with SQL DDL commands for database objects, where are data, it depends on the type of source database
+  #                  this option currently cannot read the whole data model from the SQL dump file, it still requires to have the source database connection
+  #                  Informix - data files in UNL format are expected in the same directory
+  #
+  #   delimiter - delimiter for CSV and UNL files, default is comma for CSV and pipe "|" for UNL
+  #
   # In case of Informix, if source table contains CLOB or BLOB columns, import follows different processing path to properly handle LOB values
-  # See also migration.target_lob_storage for the target database, or table_settings.target_lob_storage for individual tables
-  data_export:
+  database_export:
 
-    # CSV example:
+    # CSV example - separate CSV files for some or all table are expected in the specified directory
     file: "/path/to/data/files/{{source_schema}}.{{source_table}}.csv"
-    format: "csv"
+    format: "CSV"
     delimiter: ","
 
-    # informix_unl example:
+    # UNL example - separate UNL files for some or all table are expected in the specified directory
     file: "/path/to/data/files/{{source_schema}}.{{source_table}}.unl"  # path to the data file(s), can contain placeholders for source_schema and source_table
-    format: "informix_unl"  # format of the data files - see above
-    delimiter: ","  # delimiter for CSV and INFORMIX_UNL files, default is comma resp. "|"
+    format: "UNL"  # format of the data files - see above
+    delimiter: ","  # delimiter for CSV and UNL files, default is comma resp. "|"
 
-    # informix_sql example:
+    # SQL example - complete SQL dump file with DDL commands for the database objects is expected, where are data depends on the type of source database
     file: "/path/to/data/files/mydb.sql"
-    format: "informix_sql"  # format of the data files - see above
+    format: "SQL"  # format of the data files - see above
     delimiter: "|"  # delimiter for related UNL files, default is pipe "|"
 
     # split of big files for parallel processing
@@ -104,16 +107,6 @@ source:
       enabled: true
       split_threshold: '5GB'
       chunk_size: '2GB'
-
-    # list of columns that contain pointers to LOB values in external files
-    # only full precise column names are supported, no regular expressions
-    # this is global setting, so if table contains column with some name from the list, it will be handled as LOB column
-    # which means migrator will expect LOB pointers in the main data files in this column
-    # and will use different migration process for tables with LOB columns
-    # target columns must be either TEXT or BYTEA, depending on the source LOB type - BLOB or CLOB
-    lob_columns:
-      - "lob_column1"
-      - "lob_column2"
 
 # target database connection - always postgresql
 target:
@@ -218,24 +211,18 @@ table_settings:
     migrate_triggers: false
 
     # individual data export settings for the table
-    data_export:
-      path: "/some/other/path/to/data/files"  # path to the directory with data files
-      format: "csv"  # currently only CSV and INFORMIX_UNL formats are supported
-      delimiter: ","  # delimiter for CSV and INFORMIX_UNL files, default is comma resp. "|"
-      name: "some_other_very_specific_name.abc"  # name of the data file, here we expect name without placeholders
-      # list of columns that contain pointers to LOB values in external files
-      # only full precise column names are supported, no regular expressions
-      # here code expects precise column names valid for the table, if some name does not match, error will be raised
-      lob_columns:
-        - "lob_column1"
-        - "lob_column2"
+    database_export:
+      file: "/some/other/path/to/data/files/some_specific_name.dump"  # path to the directory with data files
+      format: "CSV"  # currently only CSV and UNL formats are supported
+      delimiter: "|"  # delimiter for CSV and UNL files, default is comma resp. "|"
 
+    ## currently not implemented, just a preparation for the future
     # individual target LOB storage settings for the table
     # for example global settings can be set to database, but for this table we want to store LOB values in files
-    target_lob_storage:
-      storage: database # database, file
-      path: "/path/to/lob/files"  # path to the directory with LOB files, used only if storage is set to file
-      name: "{{source_schema}}.{{source_table}}.lob"  # name of the LOB file, can contain placeholders for source_schema and source_table
+    # target_lob_storage:
+    #   storage: database # database, file
+    #   path: "/path/to/lob/files"  # path to the directory with LOB files, used only if storage is set to file
+    #   name: "{{source_schema}}.{{source_table}}.lob"  # name of the LOB file, can contain placeholders for source_schema and source_table
 
   - table_name: "table2"
     batch_size: 20000

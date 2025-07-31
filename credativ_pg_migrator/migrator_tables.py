@@ -1200,6 +1200,38 @@ class MigratorTables:
             self.config_parser.print_log_message('ERROR', f"update_data_migration_status: Exception: {e}")
             raise
 
+    def update_data_migration_rows(self, settings):
+        row_id = settings['row_id']
+        source_table_rows = settings['source_table_rows']
+        target_table_rows = settings['target_table_rows']
+        table_name = self.config_parser.get_protocol_name_data_migration()
+        query = f"""
+            UPDATE "{self.protocol_schema}"."{table_name}"
+            SET source_table_rows = %s,
+            target_table_rows = %s
+            WHERE id = %s
+            RETURNING *
+        """
+        params = (source_table_rows, target_table_rows, row_id)
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+
+            if row:
+                data_migration_row = self.decode_data_migration_row(row)
+                self.config_parser.print_log_message('DEBUG3', f"update_data_migration_rows: Returned row: {data_migration_row}")
+                self.update_protocol('data_migration', data_migration_row['id'], None, None, None)
+            else:
+                self.config_parser.print_log_message('ERROR', f"update_data_migration_rows: Error updating rows for data migration {row_id} in {table_name}.")
+                self.config_parser.print_log_message('ERROR', f"update_data_migration_rows: Error: No protocol row returned.")
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"update_data_migration_rows: Error updating rows for data migration {row_id} in {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"update_data_migration_rows: Query: {query}")
+            self.config_parser.print_log_message('ERROR', f"update_data_migration_rows: Exception: {e}")
+            raise
+
     def decode_data_migration_row(self, row):
         return {
             'id': row[0],
@@ -2384,6 +2416,19 @@ class MigratorTables:
             values = self.decode_table_row(table)
             table_names.append(values['target_table'])
         return table_names
+
+    def fetch_all_data_migrations(self, source_schema_name=None, source_table_name=None):
+        if source_schema_name and source_table_name:
+            query = f"""SELECT * FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_data_migration()}" WHERE source_schema = '{source_schema_name}' AND source_table = '{source_table_name}' ORDER BY id"""
+        else:
+            query = f"""SELECT * FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_data_migration()}" ORDER BY id"""
+        # self.protocol_connection.connect()
+        self.config_parser.print_log_message('DEBUG3', f"fetch_all_data_migrations: Executing query: {query}")
+        cursor = self.protocol_connection.connection.cursor()
+        cursor.execute(query)
+        data_migrations = cursor.fetchall()
+        self.config_parser.print_log_message('DEBUG3', f"fetch_all_data_migrations: Fetched {len(data_migrations)} rows.")
+        return data_migrations
 
     def fetch_all_views(self):
         query = f"""SELECT * FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_views()}" ORDER BY id"""

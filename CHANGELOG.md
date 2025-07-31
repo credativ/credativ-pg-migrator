@@ -2,6 +2,11 @@
 
 ## 0.9.5 - 2025.07.xx
 
+- 2025.07.31:
+
+  - Fix in "resume" functionality - planner must check row counts of fully migrated tables to ensure they were not mistakenly marked as fully migrated
+    - Implementation still covers only optimistic variant of resuming migration, i.e. it presumes original planning phase was done correctly and data in the source database did not change since the interruption of the migration
+
 - 2025.07.22:
 
   - Trim CHAR and NCHAR columns in Informix connector - these columns are fixed-length, so we need to trim them to avoid issues with trailing spaces

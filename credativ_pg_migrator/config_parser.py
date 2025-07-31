@@ -528,6 +528,22 @@ class ConfigParser:
     def get_target_partitioning(self):
         return self.config.get('target_partitioning', {})
 
+    def get_source_data_export(self):
+        source_config = self.get_source_config()
+        return source_config.get('data_export', {})
+
+    def get_source_data_export_format(self):
+        return self.get_source_data_export().get('format', None)
+
+    def get_source_data_export_delimiter(self):
+        return self.get_source_data_export().get('delimiter', None)
+
+    def get_source_data_export_path(self):
+        return self.get_source_data_export().get('path', None)
+
+    def get_source_data_export_name(self):
+        return self.get_source_data_export().get('name', None)
+
     # another service functions
 
     def indent_code(self, code):
@@ -579,6 +595,30 @@ class ConfigParser:
                             self.print_log_message('WARNING', f"Chunk size {chunk_size} for table {table_name} is smaller than batch size {self.get_table_batch_size(table_name)}. Disabling chunking.")
                             chunk_size = -1
         return chunk_size
+
+    def get_table_data_export(self, table_name=None):
+        data_export = self.get_source_data_export()
+        if table_name:
+            table_settings = self.config.get('table_settings', [])
+            if isinstance(table_settings, list):
+                for entry in table_settings:
+                    pattern = entry.get('table_name')
+                    if pattern and re.fullmatch(pattern, table_name, re.IGNORECASE):
+                        return entry.get('data_export', data_export)
+        return data_export
+
+    def get_table_data_export_format(self, table_name=None):
+        return self.get_table_data_export(table_name).get('format', None)
+
+    def get_table_data_export_delimiter(self, table_name=None):
+        return self.get_table_data_export(table_name).get('delimiter', None)
+
+    def get_table_data_export_path(self, table_name=None):
+        return self.get_table_data_export(table_name).get('path', None)
+
+    def get_table_data_export_name(self, table_name=None):
+        return self.get_table_data_export(table_name).get('name', None)
+
 
     ## pre-migration analysis
     def get_pre_migration_analysis(self):

@@ -51,6 +51,8 @@ class Planner:
             self.check_database_connection(self.source_connection, "Source Database")
             self.check_database_connection(self.target_connection, "Target Database")
 
+            self.run_check_tables_migration_status()
+
             self.migrator_tables.update_main_status('Planner', 'Resume after crash', True, 'finished OK')
         else:
             try:
@@ -923,6 +925,77 @@ class Planner:
             self.config_parser.print_log_message('INFO', f"Planner paused. Waiting for resume signal...")
             self.config_parser.wait_for_resume()
             self.config_parser.print_log_message('INFO', f"Planner resumed.")
+
+    def run_check_tables_migration_status(self):
+        self.config_parser.print_log_message('INFO', "Resume: Checking tables migration status...")
+
+        try:
+            part_name = 'fetch_all_tables'
+            tables = self.migrator_tables.fetch_all_tables()
+            self.source_connection.connect()
+            self.target_connection.connect()
+            self.config_parser.print_log_message('DEBUG', f"Fetched all tables - found: {len(tables)}")
+            for table in tables:
+                table_info = self.migrator_tables.decode_table_row(table)
+                part_name = 'fetch data migrations for table ' + table_info['source_table']
+                self.config_parser.print_log_message('DEBUG', f"Checking migration status for table {table_info['source_table']}...")
+                data_migration_rows = self.migrator_tables.fetch_all_data_migrations(table_info['source_schema'], table_info['source_table'])
+                self.config_parser.print_log_message('DEBUG', f"Data migration rows for table {table_info['source_table']}: {data_migration_rows}")
+                for record in data_migration_rows:
+                    data_migration_info = self.migrator_tables.decode_data_migration_row(record)
+
+                    part_name = 'check row counts for table ' + data_migration_info['source_table']
+                    source_table_rows = self.source_connection.get_rows_count(
+                        data_migration_info['source_schema'],
+                        data_migration_info['source_table']
+                    )
+                    target_table_rows = self.target_connection.get_rows_count(
+                        data_migration_info['target_schema'],
+                        data_migration_info['target_table']
+                    )
+                    self.config_parser.print_log_message('DEBUG', f"Row counts for table {data_migration_info['source_table']}: source={source_table_rows}, target={target_table_rows}")
+
+                    if source_table_rows != target_table_rows:
+                        self.config_parser.print_log_message('INFO', f"Row counts do not match for table {data_migration_info['source_table']}: source={source_table_rows}, target={target_table_rows}. Marking as not fully migrated.")
+                        self.migrator_tables.update_table_status(table_info['id'], False, '')
+                        self.migrator_tables.update_data_migration_rows({
+                            "row_id": data_migration_info['id'],
+                            "source_table_rows": source_table_rows,
+                            "target_table_rows": target_table_rows,
+                        } )
+                        self.migrator_tables.update_data_migration_status({
+                            "row_id": data_migration_info['id'],
+                            "success": False,
+                            "message": '',
+                            'target_table_rows': target_table_rows,
+                        })
+                    else:
+                        self.config_parser.print_log_message('DEBUG', f"Row counts match for table {data_migration_info['source_table']}: source={source_table_rows}, target={target_table_rows}. Marking as fully migrated.")
+                        self.migrator_tables.update_table_status(table_info['id'], True, 'Fully migrated')
+                        self.migrator_tables.update_data_migration_rows({
+                            "row_id": data_migration_info['id'],
+                            "source_table_rows": source_table_rows,
+                            "target_table_rows": target_table_rows,
+                        } )
+                        self.migrator_tables.update_data_migration_status({
+                            "row_id": data_migration_info['id'],
+                            "success": True,
+                            "message": 'Fully migrated',
+                            'target_table_rows': target_table_rows,
+                        })
+
+            self.config_parser.print_log_message('INFO', "Resume: Tables migration status check completed.")
+            self.source_connection.disconnect()
+            self.target_connection.disconnect()
+
+        except Exception as e:
+            self.source_connection.disconnect()
+            self.target_connection.disconnect()
+            self.config_parser.print_log_message('ERROR', f"An error occurred while checking tables migration status - part: {part_name}: {e}")
+            self.config_parser.print_log_message('ERROR', traceback.format_exc())
+            if self.on_error_action == 'stop':
+                self.config_parser.print_log_message('ERROR', "Stopping due to error.")
+                exit(1)
 
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

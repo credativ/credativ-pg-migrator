@@ -467,6 +467,10 @@ class Orchestrator:
             if self.config_parser.should_migrate_data(table_data['source_table']):
                 # data migration
 
+                part_name = 'connect source'
+                worker_source_connection = self.load_connector('source')
+                worker_source_connection.connect()
+
                 data_source = self.migrator_tables.fetch_data_source(table_data['source_schema'], table_data['source_table'])
                 self.config_parser.print_log_message('DEBUG3', f"Worker {worker_id}: Checking data source for table {table_data['source_schema']}.{table_data['source_table']}: {data_source}")
                 if data_source is not None:
@@ -479,48 +483,78 @@ class Orchestrator:
                         DELIMITER '{data_source['format_options']['delimiter']}')"""
                         ## , QUOTE '{data_source['format_options']['quote']}'
 
-                    if data_source['format_options']['format'].upper() == 'CSV':
+                    if data_source['format_options']['format'].upper() in ('CSV', 'UNL'):
+
+                        source_table_rows = worker_source_connection.get_rows_count(table_data['source_schema'], table_data['source_table'])
+                        target_table_rows = worker_target_connection.get_rows_count(target_schema, target_table)
+
+                        protocol_id = migrator_tables.insert_data_migration({
+                            'worker_id': worker_id,
+                            'source_table_id': table_data['source_table_id'],
+                            'source_schema': table_data['source_schema'],
+                            'source_table': table_data['source_table'],
+                            'target_schema': table_data['target_schema'],
+                            'target_table': table_data['target_table'],
+                            'source_table_rows': source_table_rows,
+                            'target_table_rows': target_table_rows,
+                            })
+
                         if data_source['file_size'] == 0:
-                            self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data source for table {target_table} is CSV format, but file size is 0. Skipping data migration.")
+                            self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data source for table {target_table} is {data_source['format_options']['format'].upper()} format, but file size is 0. Skipping data migration.")
                             # self.migrator_tables.update_table_status(table_data['id'], True, 'migrated OK (0 rows)')
+
+                            migrator_tables.update_data_migration_status({
+                                'row_id': protocol_id,
+                                'success': True,
+                                'message': 'OK',
+                                'target_table_rows': target_table_rows,
+                                'batch_count': 0,
+                                'shortest_batch_seconds': 0,
+                                'longest_batch_seconds': 0,
+                                'average_batch_seconds': 0,
+                            })
                         else:
-                            # CSV data source - directly import into target database
-                            part_name = 'copy data from CSV [1]'
-                            # target_cursor = worker_target_connection.cursor()
-                            # with open(data_source['file_name'], 'r') as csv_file:
-                            self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Executing COPY command: {copy_command}")
-                            worker_target_connection.copy_from_file(copy_command, data_source['file_name'])
-                            # worker_target_connection.commit()
-                            # target_cursor.close()
-                            self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data copied successfully from CSV file {data_source['file_name']} to table {target_table}.")
-                            rows_migrated = worker_target_connection.get_rows_count(target_schema, target_table)
-                            # self.migrator_tables.update_table_status(table_data['id'], True, f'migrated OK ({rows_migrated} rows)')
 
-                    elif data_source['format_options']['format'].upper() == 'UNL':
-                        if data_source['file_size'] == 0:
-                            self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data source for table {target_table} is UNL format, but file size is 0. Skipping data migration.")
-                            # self.migrator_tables.update_table_status(table_data['id'], True, 'migrated OK (0 rows)')
-                        else:
-                            # UNL data source - must be converted to CSV first
-                            self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data source for table {target_table} is UNL format. Converting to CSV.")
-                            part_name = 'convert UNL to CSV'
-                            csv_file_name = self.config_parser.convert_unl_to_csv(data_source)
+                            try:
+                                data_import_start_time = time.time()
+                                if data_source['format_options']['format'].upper() == 'UNL':
+                                    # UNL data source - must be converted to CSV first
+                                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data source for table {target_table} is UNL format. Converting to CSV.")
+                                    part_name = 'convert UNL to CSV'
+                                    csv_file_name = self.config_parser.convert_unl_to_csv(data_source)
+                                elif data_source['format_options']['format'].upper() == 'CSV':
+                                    # CSV data source - use the file directly
+                                    csv_file_name = data_source['file_name']
+                                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data source for table {target_table} is CSV format. Using file {csv_file_name}.")
+                                # CSV data source - directly import into target database
+                                part_name = 'copy data from CSV'
+                                self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Executing COPY command: {copy_command}")
+                                worker_target_connection.copy_from_file(copy_command, csv_file_name)
 
-                            # target_cursor = worker_target_connection.cursor()
-                            # with open(csv_file_name, 'r') as csv_file:
-                            part_name = 'copy data from CSV [2]'
-                            self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Executing COPY command: {copy_command}")
-                            worker_target_connection.copy_from_file(copy_command, csv_file_name)
-                            # worker_target_connection.commit()
-                            # target_cursor.close()
+                                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data copied successfully from CSV file {csv_file_name} to table {target_table}.")
 
-                            self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data copied successfully from CSV file {csv_file_name} to table {target_table}.")
-                            rows_migrated = worker_target_connection.get_rows_count(target_schema, target_table)
-                            # self.migrator_tables.update_table_status(table_data['id'], True, f'migrated OK ({rows_migrated} rows)')
+                                target_table_rows = worker_target_connection.get_rows_count(target_schema, target_table)
+                                data_import_end_time = time.time()
+                                data_import_duration = data_import_end_time - data_import_start_time
+                                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data import duration: {data_import_duration:.2f} seconds, rows migrated: {target_table_rows}.")
+
+                                # self.migrator_tables.update_table_status(table_data['id'], True, f'migrated OK ({rows_migrated} rows)')
+                                migrator_tables.update_data_migration_status({
+                                    'row_id': protocol_id,
+                                    'success': True,
+                                    'message': 'OK',
+                                    'target_table_rows': target_table_rows,
+                                    'batch_count': 0,
+                                    'shortest_batch_seconds': data_import_duration,
+                                    'longest_batch_seconds': data_import_duration,
+                                    'average_batch_seconds': data_import_duration,
+                                })
+
+                            except Exception as e:
+                                self.migrator_tables.update_table_status(table_data['id'], False, f'ERROR: {e}')
+                                self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Error copying data from CSV file {csv_file_name} to table {target_table}: {e}")
+                                return False
                 else:
-                    part_name = 'connect source'
-                    worker_source_connection = self.load_connector('source')
-
                     part_name = 'migrate data'
                     self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Migrating data for table {target_table} from source database.")
 
@@ -569,15 +603,14 @@ class Orchestrator:
                             self.config_parser.wait_for_resume()
                             self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Resuming migration for table {target_table}.")
                         # proper pausing / stopping of the migration requires to connect and disconnect for each chunk
-                        worker_source_connection.connect()
                         migration_stats = worker_source_connection.migrate_table(worker_target_connection, table_settings)
-                        worker_source_connection.disconnect()
 
                         rows_migrated += migration_stats['rows_migrated']
                         if migration_stats['finished']:
                             break
                         table_settings['chunk_number'] += 1
 
+                worker_source_connection.disconnect()
 
                 if rows_migrated > 0:
                     # sequences setting

@@ -466,65 +466,117 @@ class Orchestrator:
 
             if self.config_parser.should_migrate_data(table_data['source_table']):
                 # data migration
-                part_name = 'connect source'
-                worker_source_connection = self.load_connector('source')
 
-                part_name = 'migrate data'
-                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Migrating data for table {target_table} from source database.")
+                data_source = self.migrator_tables.fetch_data_source(table_data['source_schema'], table_data['source_table'])
+                self.config_parser.print_log_message('DEBUG3', f"Worker {worker_id}: Checking data source for table {table_data['source_schema']}.{table_data['source_table']}: {data_source}")
+                if data_source is not None:
+                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data source for table {table_data['source_schema']}.{table_data['source_table']} is {data_source}.")
 
-                table_settings = {
-                    'worker_id': worker_id,
-                    'source_schema': table_data['source_schema'],
-                    'source_table': table_data['source_table'],
-                    'source_table_id': table_data['source_table_id'],
-                    'source_columns': table_data['source_columns'],
-                    'target_schema': target_schema,
-                    'target_table': target_table,
-                    'target_columns': table_data['target_columns'],
-                    'table_comment': table_data['table_comment'],
-                    # 'primary_key_columns': table_data['primary_key_columns'],
-                    # 'primary_key_columns_count': table_data['primary_key_columns_count'],
-                    # 'primary_key_columns_types': table_data['primary_key_columns_types'],
-                    'batch_size': self.config_parser.get_table_batch_size(table_data['source_table']),
-                    'migrator_tables': settings['migrator_tables'],
-                    'migration_limitation': '',
-                    'chunk_size': self.config_parser.get_table_chunk_size(table_data['source_table']),
-                    'chunk_number': 1,
-                    'resume_after_crash': settings['resume_after_crash'],
-                    'drop_unfinished_tables': settings['drop_unfinished_tables'],
-                }
+                    copy_command = f"""COPY "{target_schema}"."{target_table}"
+                        FROM STDIN WITH
+                        (FORMAT CSV, HEADER {data_source['format_options']['header']},
+                        NULL '\\N',
+                        DELIMITER '{data_source['format_options']['delimiter']}')"""
+                        ## , QUOTE '{data_source['format_options']['quote']}'
 
-                rows_migration_limitations = settings['migrator_tables'].get_records_data_migration_limitation(table_data['source_table'])
-                migration_limitations = []
-                if rows_migration_limitations:
-                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Found data migration limitations matching table {target_table}: {rows_migration_limitations}")
-                    for limitation in rows_migration_limitations:
-                        where_clause = limitation[0]
-                        where_clause = where_clause.replace('{source_schema}', table_data['source_schema']).replace('{source_table}', table_data['source_table'])
-                        use_when_column_name = limitation[1]
-                        for col_order_num, column_info in table_data['source_columns'].items():
-                            column_name = column_info['column_name']
-                            if column_name == use_when_column_name or re.match(use_when_column_name, column_name):
-                                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Column {column_name} matches migration limitation.")
-                                migration_limitations.append(where_clause)
-                    if migration_limitations:
-                        table_settings['migration_limitation'] = f"{' AND '.join(migration_limitations)}" if migration_limitations else ''
-                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Migration limitations for table {target_table}: {migration_limitations}")
+                    if data_source['format_options']['format'].upper() == 'CSV':
+                        if data_source['file_size'] == 0:
+                            self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data source for table {target_table} is CSV format, but file size is 0. Skipping data migration.")
+                            # self.migrator_tables.update_table_status(table_data['id'], True, 'migrated OK (0 rows)')
+                        else:
+                            # CSV data source - directly import into target database
+                            part_name = 'copy data from CSV [1]'
+                            # target_cursor = worker_target_connection.cursor()
+                            # with open(data_source['file_name'], 'r') as csv_file:
+                            self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Executing COPY command: {copy_command}")
+                            worker_target_connection.copy_from_file(copy_command, data_source['file_name'])
+                            # worker_target_connection.commit()
+                            # target_cursor.close()
+                            self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data copied successfully from CSV file {data_source['file_name']} to table {target_table}.")
+                            rows_migrated = worker_target_connection.get_rows_count(target_schema, target_table)
+                            # self.migrator_tables.update_table_status(table_data['id'], True, f'migrated OK ({rows_migrated} rows)')
 
-                while True:
-                    if self.config_parser.pause_migration_fired():
-                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Migration paused for table {target_table}.")
-                        self.config_parser.wait_for_resume()
-                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Resuming migration for table {target_table}.")
-                    # proper pausing / stopping of the migration requires to connect and disconnect for each chunk
-                    worker_source_connection.connect()
-                    migration_stats = worker_source_connection.migrate_table(worker_target_connection, table_settings)
-                    worker_source_connection.disconnect()
+                    elif data_source['format_options']['format'].upper() == 'UNL':
+                        if data_source['file_size'] == 0:
+                            self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data source for table {target_table} is UNL format, but file size is 0. Skipping data migration.")
+                            # self.migrator_tables.update_table_status(table_data['id'], True, 'migrated OK (0 rows)')
+                        else:
+                            # UNL data source - must be converted to CSV first
+                            self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data source for table {target_table} is UNL format. Converting to CSV.")
+                            part_name = 'convert UNL to CSV'
+                            csv_file_name = self.config_parser.convert_unl_to_csv(data_source)
 
-                    rows_migrated += migration_stats['rows_migrated']
-                    if migration_stats['finished']:
-                        break
-                    table_settings['chunk_number'] += 1
+                            # target_cursor = worker_target_connection.cursor()
+                            # with open(csv_file_name, 'r') as csv_file:
+                            part_name = 'copy data from CSV [2]'
+                            self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Executing COPY command: {copy_command}")
+                            worker_target_connection.copy_from_file(copy_command, csv_file_name)
+                            # worker_target_connection.commit()
+                            # target_cursor.close()
+
+                            self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data copied successfully from CSV file {csv_file_name} to table {target_table}.")
+                            rows_migrated = worker_target_connection.get_rows_count(target_schema, target_table)
+                            # self.migrator_tables.update_table_status(table_data['id'], True, f'migrated OK ({rows_migrated} rows)')
+                else:
+                    part_name = 'connect source'
+                    worker_source_connection = self.load_connector('source')
+
+                    part_name = 'migrate data'
+                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Migrating data for table {target_table} from source database.")
+
+                    table_settings = {
+                        'worker_id': worker_id,
+                        'source_schema': table_data['source_schema'],
+                        'source_table': table_data['source_table'],
+                        'source_table_id': table_data['source_table_id'],
+                        'source_columns': table_data['source_columns'],
+                        'target_schema': target_schema,
+                        'target_table': target_table,
+                        'target_columns': table_data['target_columns'],
+                        'table_comment': table_data['table_comment'],
+                        # 'primary_key_columns': table_data['primary_key_columns'],
+                        # 'primary_key_columns_count': table_data['primary_key_columns_count'],
+                        # 'primary_key_columns_types': table_data['primary_key_columns_types'],
+                        'batch_size': self.config_parser.get_table_batch_size(table_data['source_table']),
+                        'migrator_tables': settings['migrator_tables'],
+                        'migration_limitation': '',
+                        'chunk_size': self.config_parser.get_table_chunk_size(table_data['source_table']),
+                        'chunk_number': 1,
+                        'resume_after_crash': settings['resume_after_crash'],
+                        'drop_unfinished_tables': settings['drop_unfinished_tables'],
+                    }
+
+                    rows_migration_limitations = settings['migrator_tables'].get_records_data_migration_limitation(table_data['source_table'])
+                    migration_limitations = []
+                    if rows_migration_limitations:
+                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Found data migration limitations matching table {target_table}: {rows_migration_limitations}")
+                        for limitation in rows_migration_limitations:
+                            where_clause = limitation[0]
+                            where_clause = where_clause.replace('{source_schema}', table_data['source_schema']).replace('{source_table}', table_data['source_table'])
+                            use_when_column_name = limitation[1]
+                            for col_order_num, column_info in table_data['source_columns'].items():
+                                column_name = column_info['column_name']
+                                if column_name == use_when_column_name or re.match(use_when_column_name, column_name):
+                                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Column {column_name} matches migration limitation.")
+                                    migration_limitations.append(where_clause)
+                        if migration_limitations:
+                            table_settings['migration_limitation'] = f"{' AND '.join(migration_limitations)}" if migration_limitations else ''
+                            self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Migration limitations for table {target_table}: {migration_limitations}")
+
+                    while True:
+                        if self.config_parser.pause_migration_fired():
+                            self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Migration paused for table {target_table}.")
+                            self.config_parser.wait_for_resume()
+                            self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Resuming migration for table {target_table}.")
+                        # proper pausing / stopping of the migration requires to connect and disconnect for each chunk
+                        worker_source_connection.connect()
+                        migration_stats = worker_source_connection.migrate_table(worker_target_connection, table_settings)
+                        worker_source_connection.disconnect()
+
+                        rows_migrated += migration_stats['rows_migrated']
+                        if migration_stats['finished']:
+                            break
+                        table_settings['chunk_number'] += 1
 
 
                 if rows_migrated > 0:

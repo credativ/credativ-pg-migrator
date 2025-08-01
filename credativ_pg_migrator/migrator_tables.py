@@ -1380,6 +1380,9 @@ class MigratorTables:
             source_table_id INTEGER,
             lob_columns TEXT,
             file_name TEXT,
+            file_size BIGINT,
+            file_lines INTEGER,
+            file_found BOOLEAN,
             format_options TEXT,
             task_created TIMESTAMP DEFAULT clock_timestamp(),
             task_started TIMESTAMP,
@@ -1397,17 +1400,22 @@ class MigratorTables:
         source_table_id = settings['source_table_id']
         lob_columns = settings.get('lob_columns', '')
         file_name = settings.get('file_name', '')
-        format_options = settings.get('format_options', '')
+        file_size = settings.get('file_size', 0)
+        file_lines = settings.get('file_lines', 0)
+        file_found = settings.get('file_found', False)
+        format_options = json.dumps(settings.get('format_options', ''))
 
         table_name = self.config_parser.get_protocol_name_data_sources()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
-            (source_schema, source_table, source_table_id, lob_columns, file_name, format_options)
-            VALUES (%s, %s, %s, %s, %s, %s)
+            (source_schema, source_table, source_table_id, lob_columns, 
+            file_name, file_size, file_lines, file_found, format_options)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
         params = (source_schema, source_table, source_table_id,
-                  lob_columns, file_name, format_options)
+                  lob_columns, file_name, file_size, file_lines, file_found, format_options)
+        self.config_parser.print_log_message('DEBUG3', f"insert_data_source: Query: {query} / Params: {params}")
 
         try:
             cursor = self.protocol_connection.connection.cursor()
@@ -1447,12 +1455,15 @@ class MigratorTables:
             'source_table_id': row[3],
             'lob_columns': row[4],
             'file_name': row[5],
-            'format_options': row[6],
-            'task_created': row[7],
-            'task_started': row[8],
-            'task_completed': row[9],
-            'success': row[10],
-            'message': row[11]
+            'file_size': row[6],
+            'file_lines': row[7],
+            'file_found': row[8],
+            'format_options': json.loads(row[9]),
+            'task_created': row[10],
+            'task_started': row[11],
+            'task_completed': row[12],
+            'success': row[13],
+            'message': row[14]
         }
 
     def create_table_for_indexes(self):
@@ -1775,6 +1786,7 @@ class MigratorTables:
             RETURNING *
         """
         params = ('TRUE' if success else 'FALSE', message, row_id)
+        self.config_parser.print_log_message('DEBUG3', f"update_table_status: Executing query with params: {params}")
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -2495,7 +2507,7 @@ class MigratorTables:
         cursor = self.protocol_connection.connection.cursor()
         cursor.execute(query)
         tables = cursor.fetchall()
-        return self.decode_table_row(tables)
+        return tables
 
     def fetch_table(self, source_schema_name, source_table_name):
         query = f"""
@@ -2508,7 +2520,21 @@ class MigratorTables:
         cursor = self.protocol_connection.connection.cursor()
         cursor.execute(query)
         table = cursor.fetchone()
-        return table
+        if not table:
+            return None
+        return self.decode_table_row(table)
+
+    def fetch_data_source(self, source_schema_name, source_table_name):
+        query = f"""SELECT * FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_data_sources()}"
+            WHERE source_schema = '{source_schema_name}' AND source_table = '{source_table_name}'"""
+        self.config_parser.print_log_message('DEBUG3', f"fetch_data_source: Executing query: {query}")
+        # self.protocol_connection.connect()
+        cursor = self.protocol_connection.connection.cursor()
+        cursor.execute(query)
+        data_source = cursor.fetchone()
+        if not data_source:
+            return None
+        return self.decode_data_source_row(data_source)
 
     def fetch_all_target_table_names(self):
         tables = self.fetch_all_tables()
@@ -2562,6 +2588,18 @@ class MigratorTables:
         cursor.execute(query)
         constraints = cursor.fetchall()
         return constraints
+
+    def get_table_data_source(self, schema_name, table_name):
+        database_export = self.get_table_database_export(schema_name, table_name)
+        if database_export:
+            file_name = database_export.get('file', None)
+            if file_name:
+                schema_name = self.get_source_schema()
+                table_file_name = file_name.replace("{{schema_name}}", schema_name).replace("{{table_name}}", table_name)
+                if os.path.exists(table_file_name):
+                    return table_file_name
+        return MigratorConstants.get_default_data_source()
+
 
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

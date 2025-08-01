@@ -1066,16 +1066,27 @@ class Planner:
                             file_name = unload_match.group(1)
 
                             unl_dump_file = os.path.join(os.path.dirname(sql_dump_path), file_name)
+                            unl_dump_file_found = True
                             if not os.path.exists(unl_dump_file):
                                 self.config_parser.print_log_message('ERROR', f"UNL dump file {unl_dump_file} for table {schema}.{table} does not exist or is not accessible.")
-                                exit(1)
+                                unl_dump_file_found = False
 
                             table_info = self.migrator_tables.fetch_table(schema, table)
+                            # dump might contain tables that are not in protocol
+                            # But we still want to insert data source for them for debugging purposes
+                            if table_info:
+                                table_id = table_info['id']
+                            else:
+                                table_id = None
+
                             data_source = {
                                 'source_schema': schema,
                                 'source_table': table,
-                                'source_table_id': table_info['id'],
-                                'file_name': file_name,
+                                'source_table_id': table_id,
+                                'file_name': unl_dump_file,
+                                'file_size': os.path.getsize(unl_dump_file) if unl_dump_file_found else -1,
+                                'file_lines': sum(1 for _ in open(unl_dump_file, 'r', encoding='utf-8')) if unl_dump_file_found else -1,
+                                'file_found': unl_dump_file_found,
                                 'format_options': {
                                     'format': 'UNL',
                                     'delimiter': database_export.get('delimiter', '|'),
@@ -1083,7 +1094,7 @@ class Planner:
                                 }
                             }
                             self.migrator_tables.insert_data_source(data_source)
-                            self.config_parser.print_log_message('DEBUG', f"Table {table_info['source_table']} data source: {data_source}")
+                            self.config_parser.print_log_message('DEBUG', f"Table {schema}.{table} data source: {data_source}")
 
                             break
                         # Stop if another { TABLE is found before { unload
@@ -1093,6 +1104,8 @@ class Planner:
                     i = j
                 else:
                     i += 1
+
+        self.config_parser.print_log_message('INFO', "Planner - Data sources prepared successfully.")
 
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

@@ -605,6 +605,20 @@ class PostgreSQLConnector(DatabaseConnector):
         with self.connection.cursor() as cursor:
             cursor.execute(query, params)
 
+    def copy_from_file(self, sql: str, file_path: str):
+        with open(file_path, 'r') as file:
+            with self.connection.cursor() as cursor:
+                try:
+                    cursor.copy_expert(sql, file)
+                    for notice in cursor.connection.notices:
+                        self.config_parser.print_log_message('INFO', notice)
+                    cursor.connection.commit()
+                except Exception as e:
+                    for notice in cursor.connection.notices:
+                        self.config_parser.print_log_message('INFO', notice)
+                    self.config_parser.print_log_message('ERROR', f"Error executing copy_expert: {e}")
+                    raise
+
     def execute_sql_script(self, script_path: str):
         with open(script_path, 'r') as file:
             script = file.read()

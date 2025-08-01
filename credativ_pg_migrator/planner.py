@@ -1087,6 +1087,7 @@ class Planner:
                                 'file_size': os.path.getsize(unl_dump_file) if unl_dump_file_found else -1,
                                 'file_lines': sum(1 for _ in open(unl_dump_file, 'r', encoding='utf-8')) if unl_dump_file_found else -1,
                                 'file_found': unl_dump_file_found,
+                                'lob_columns': self.config_parser.get_table_lob_columns(table_info['source_columns']) if table_info else '',
                                 'format_options': {
                                     'format': 'UNL',
                                     'delimiter': database_export.get('delimiter', '|'),

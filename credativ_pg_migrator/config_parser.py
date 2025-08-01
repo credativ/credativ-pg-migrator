@@ -786,7 +786,14 @@ class ConfigParser:
 
     ### Other utility methods
 
-    def convert_unl_to_csv(self, data_source):
+    def get_table_lob_columns(self, source_columns):
+        lob_columns_list = []
+        for _, column_info in source_columns.items():
+            if column_info.get('data_type', '').upper() in ['BLOB', 'CLOB', 'NCLOB']:
+                lob_columns_list.append(column_info['column_name'])
+        return ','.join(lob_columns_list)
+
+    def convert_unl_to_csv(self, data_source, source_columns, target_columns):
         input_unl_data_file = data_source['file_name']
         output_csv_data_file = input_unl_data_file + '.csv'
 

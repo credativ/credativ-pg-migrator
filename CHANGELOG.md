@@ -2,6 +2,10 @@
 
 ## 0.9.5 - 2025.07.xx
 
+- 2025.08.05:
+
+  - Significant improvements in UNL to CSV conversion - added check for expected target data types for better validation of processed data
+
 - 2025.07.31:
 
   - Fix in "resume" functionality - planner must check row counts of fully migrated tables to ensure they were not mistakenly marked as fully migrated

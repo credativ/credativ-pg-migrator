@@ -541,13 +541,26 @@ class ConfigParser:
         return self.get_source_database_export().get('format', None)
 
     def get_source_database_export_delimiter(self):
-        return self.get_source_database_export().get('delimiter', None)
+        return self.get_source_database_export().get('delimiter', "|")
 
-    def get_source_database_export_path(self):
-        return self.get_source_database_export().get('path', None)
+    def get_source_database_export_file(self):
+        return self.get_source_database_export().get('file', None)
 
-    def get_source_database_export_name(self):
-        return self.get_source_database_export().get('name', None)
+    def get_source_database_export_header(self):
+        return self.get_source_database_export().get('header', None)
+
+    def get_source_database_export_conversion_path(self):
+        conversion_path = self.get_source_database_export().get('conversion_path', None)
+        if conversion_path is None:
+            # If conversion_path is not set, try to extract the directory from the export file path
+            export_file = self.get_source_database_export_file()
+            if export_file:
+                return os.path.dirname(os.path.abspath(export_file))
+            return None
+        return conversion_path
+
+    def get_source_database_export_clean(self):
+        return self.get_source_database_export().get('clean', False)
 
     def get_source_database_export_big_files_split(self):
         return self.get_source_database_export().get('big_files_split', None)
@@ -569,6 +582,12 @@ class ConfigParser:
         if big_files_split and isinstance(big_files_split, dict):
             return self.convert_size_to_bytes(big_files_split.get('chunk_size', None))
         return None
+
+    def get_source_database_export_big_files_split_workers(self):
+        big_files_split = self.get_source_database_export_big_files_split()
+        if big_files_split and isinstance(big_files_split, dict):
+            return big_files_split.get('workers', 4)
+        return -1  ## by default do not use parallel workers if splitting or workers are not specified
 
     def get_source_database_export_lob_columns(self):
         return self.get_source_database_export().get('lob_columns', [])
@@ -816,7 +835,7 @@ class ConfigParser:
                 if s == '\ ':
                     return ''
                 try:
-                    if '.' in s:
+                    if re.fullmatch(r'[0-9]+([.,][0-9]+)', s):
                         return float(s)
                     return int(s)
                 except ValueError:

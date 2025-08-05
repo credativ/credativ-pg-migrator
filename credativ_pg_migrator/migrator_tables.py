@@ -1383,6 +1383,7 @@ class MigratorTables:
             file_size BIGINT,
             file_lines INTEGER,
             file_found BOOLEAN,
+            converted_file_name TEXT,
             format_options TEXT,
             task_created TIMESTAMP DEFAULT clock_timestamp(),
             task_started TIMESTAMP,
@@ -1403,18 +1404,19 @@ class MigratorTables:
         file_size = settings.get('file_size', 0)
         file_lines = settings.get('file_lines', 0)
         file_found = settings.get('file_found', False)
+        converted_file_name = settings.get('converted_file_name', '')
         format_options = json.dumps(settings.get('format_options', ''))
 
         table_name = self.config_parser.get_protocol_name_data_sources()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
-            (source_schema, source_table, source_table_id, lob_columns, 
-            file_name, file_size, file_lines, file_found, format_options)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (source_schema, source_table, source_table_id, lob_columns,
+            file_name, file_size, file_lines, file_found, converted_file_name, format_options)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
         params = (source_schema, source_table, source_table_id,
-                  lob_columns, file_name, file_size, file_lines, file_found, format_options)
+                  lob_columns, file_name, file_size, file_lines, file_found, converted_file_name, format_options)
         self.config_parser.print_log_message('DEBUG3', f"insert_data_source: Query: {query} / Params: {params}")
 
         try:
@@ -1458,12 +1460,13 @@ class MigratorTables:
             'file_size': row[6],
             'file_lines': row[7],
             'file_found': row[8],
-            'format_options': json.loads(row[9]),
-            'task_created': row[10],
-            'task_started': row[11],
-            'task_completed': row[12],
-            'success': row[13],
-            'message': row[14]
+            'converted_file_name': row[9],
+            'format_options': json.loads(row[10]),
+            'task_created': row[11],
+            'task_started': row[12],
+            'task_completed': row[13],
+            'success': row[14],
+            'message': row[15]
         }
 
     def create_table_for_indexes(self):

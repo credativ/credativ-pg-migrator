@@ -526,12 +526,49 @@ class Orchestrator:
                                     # CSV data source - use the file directly
                                     csv_file_name = data_source['file_name']
                                     self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data source for table {target_table} is CSV format. Using file {csv_file_name}.")
-                                # CSV data source - directly import into target database
-                                part_name = 'copy data from CSV'
-                                self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Executing COPY command: {copy_command}")
-                                worker_target_connection.copy_from_file(copy_command, csv_file_name)
 
-                                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data copied successfully from CSV file {csv_file_name} to table {target_table}.")
+                                if data_source['lob_columns'] != '':
+                                    # LOB data migration - use the file directly
+                                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data source for table {target_table} has LOB columns: {data_source['lob_columns']}. Migrating LOB data.")
+
+                                    # create intermediate table for rows without LOB data
+                                    create_import_table_sql = re.sub(
+                                        target_table,
+                                        f"{target_table}_import",
+                                        table_data['target_table_sql'],
+                                        flags=re.IGNORECASE
+                                    )
+                                    create_import_table_sql = re.sub( 'bytea', 'text', create_import_table_sql, flags=re.IGNORECASE)
+                                    self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Creating intermediate import table with SQL: {create_import_table_sql}")
+                                    worker_target_connection.execute_query(create_import_table_sql)
+                                    imp_table_copy_command = f"""COPY "{target_schema}"."{target_table}_import" FROM STDIN WITH
+                                        (FORMAT CSV, HEADER {data_source['format_options']['header']},
+                                        NULL '\\N',
+                                        DELIMITER '{data_source['format_options']['delimiter']}')"""
+                                    worker_target_connection.copy_lob_data_from_file(imp_table_copy_command, csv_file_name, csv_file_name)
+
+                                    # Loop over import table row by row, select all columns, find column(s) specified in lob_columns and read their content
+                                    lob_columns = [col.strip() for col in data_source['lob_columns'].split(',') if col.strip()]
+                                    select_sql = f'SELECT * FROM "{target_schema}"."{target_table}_import"'
+                                    rows = worker_target_connection.fetch_all_rows(select_sql)
+                                    for row in rows:
+                                        row_dict = dict(zip([col['column_name'] for col in table_data['target_columns'].values()], row))
+                                        for lob_col in lob_columns:
+                                            lob_value = row_dict.get(lob_col)
+                                            if lob_value is not None:
+                                                # Read LOB content from file or source as needed
+                                                # This is a placeholder for actual LOB handling logic
+                                                self.config_parser.print_log_message('DEBUG3', f"Worker {worker_id}: Read LOB column '{lob_col}' value for table {target_table}: {str(lob_value)[:100]}...")
+                                    # After processing, you may want to insert the row into the final table or update as needed
+
+                                else:
+                                    # No LOB columns - standard CSV import
+                                    # CSV data source - directly import into target database
+                                    part_name = 'copy data from CSV'
+                                    self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Executing COPY command: {copy_command}")
+                                    worker_target_connection.copy_from_file(copy_command, csv_file_name)
+
+                                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data copied successfully from CSV file {csv_file_name} to table {target_table}.")
 
                                 target_table_rows = worker_target_connection.get_rows_count(target_schema, target_table)
                                 data_import_end_time = time.time()

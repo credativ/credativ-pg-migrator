@@ -1001,5 +1001,16 @@ class MsSQLConnector(DatabaseConnector):
         self.disconnect()
         return exists
 
+    def fetch_all_rows(self, query):
+        """
+        Fetch all rows from the database using the provided query.
+        This method is used to fetch data in a way that is compatible with the MS SQL Server connector.
+        """
+        cursor = self.connection.cursor()
+        cursor.execute(query)
+        rows = cursor.fetchall()
+        cursor.close()
+        return rows
+
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

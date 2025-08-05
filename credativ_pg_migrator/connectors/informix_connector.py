@@ -2206,5 +2206,17 @@ class InformixConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', f"Error checking if target table exists: {e}")
             return False
 
+    def fetch_all_rows(self, query):
+        try:
+            self.config_parser.print_log_message('DEBUG3', f"Executing query to fetch all rows: {query}")
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            cursor.close()
+            return rows
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error fetching all rows: {e}")
+            return []
+
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

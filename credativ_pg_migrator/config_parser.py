@@ -814,7 +814,7 @@ class ConfigParser:
 
     def convert_unl_to_csv(self, data_source, source_columns, target_columns):
         input_unl_data_file = data_source['file_name']
-        output_csv_data_file = input_unl_data_file + '.csv'
+        output_csv_data_file = data_source['converted_file_name']
 
         unl_delimiter = data_source['format_options'].get('delimiter', '|')
         null_symbol = data_source.get('null_symbol', '\\N')
@@ -917,8 +917,6 @@ class ConfigParser:
                     buffer = ""
 
             self.print_log_message('INFO', f"Processed {counter} lines from {input_unl_data_file} and wrote to {output_csv_data_file}")
-
-            return output_csv_data_file
 
         except Exception as e:
             self.print_log_message('ERROR', f"Error converting UNL to CSV: {e}")

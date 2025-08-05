@@ -521,7 +521,8 @@ class Orchestrator:
                                     # UNL data source - must be converted to CSV first
                                     self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data source for table {target_table} is UNL format. Converting to CSV.")
                                     part_name = 'convert UNL to CSV'
-                                    csv_file_name = self.config_parser.convert_unl_to_csv(data_source, table_data['source_columns'], table_data['target_columns'])
+                                    csv_file_name = data_source['converted_file_name']
+                                    self.config_parser.convert_unl_to_csv(data_source, table_data['source_columns'], table_data['target_columns'])
                                 elif data_source['format_options']['format'].upper() == 'CSV':
                                     # CSV data source - use the file directly
                                     csv_file_name = data_source['file_name']
@@ -545,7 +546,7 @@ class Orchestrator:
                                         (FORMAT CSV, HEADER {data_source['format_options']['header']},
                                         NULL '\\N',
                                         DELIMITER '{data_source['format_options']['delimiter']}')"""
-                                    worker_target_connection.copy_lob_data_from_file(imp_table_copy_command, csv_file_name, csv_file_name)
+                                    worker_target_connection.copy_from_file(imp_table_copy_command, csv_file_name)
 
                                     # Loop over import table row by row, select all columns, find column(s) specified in lob_columns and read their content
                                     lob_columns = [col.strip() for col in data_source['lob_columns'].split(',') if col.strip()]

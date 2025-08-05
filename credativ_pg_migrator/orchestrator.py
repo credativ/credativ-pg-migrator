@@ -556,6 +556,7 @@ class Orchestrator:
                                     rows = worker_target_connection.fetch_all_rows(select_sql)
                                     part_name = 'process LOB data'
                                     for row in rows:
+                                        row = list(row)  # Convert tuple to list for mutability
                                         row_dict = dict(zip([col['column_name'] for col in table_data['target_columns'].values()], row))
                                         for lob_col in lob_columns:
                                             for lob_col_index, col_info in table_data['target_columns'].items():

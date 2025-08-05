@@ -1019,24 +1019,33 @@ class Planner:
                 if file_name:
                     table_file_name = file_name.replace("{{schema_name}}", table_info['source_schema']).replace("{{table_name}}", table_info['source_table'])
                     if os.path.exists(table_file_name):
-                        converted_file_name = os.path.join(
-                            self.config_parser.get_source_database_export_conversion_path(),
-                            os.path.basename(table_file_name) + ".csv"
-                        )
-                        data_source = {
-                            'source_schema': table_info['source_schema'],
-                            'source_table': table_info['source_table'],
-                            'source_table_id': table_info['id'],
-                            'file_name': table_file_name,
-                            'converted_file_name': converted_file_name,
-                            'format_options': {
-                                'format': self.config_parser.get_source_database_export_format(),
-                                'delimiter': self.config_parser.get_source_database_export_delimiter(),
-                                'header': self.config_parser.get_source_database_export_header(),
-                            }
+                        data_file_found = True
+                    else:
+                        self.config_parser.print_log_message('ERROR', f"Data source file {table_file_name} does not exist or is not accessible.")
+                        data_file_found = False
+
+                    converted_file_name = os.path.join(
+                        self.config_parser.get_source_database_export_conversion_path(),
+                        os.path.basename(table_file_name) + ".csv"
+                    )
+                    data_source = {
+                        'source_schema': table_info['source_schema'],
+                        'source_table': table_info['source_table'],
+                        'source_table_id': table_info['id'],
+                        'file_name': True,
+                        'file_size': os.path.getsize(unl_dump_file) if data_file_found else -1,
+                        'file_lines': sum(1 for _ in open(unl_dump_file, 'r', encoding='utf-8')) if data_file_found else -1,
+                        'file_found': data_file_found,
+                        'lob_columns': self.config_parser.get_table_lob_columns(table_info['source_columns']) if table_info else '',
+                        'converted_file_name': converted_file_name,
+                        'format_options': {
+                            'format': self.config_parser.get_source_database_export_format(),
+                            'delimiter': self.config_parser.get_source_database_export_delimiter(),
+                            'header': self.config_parser.get_source_database_export_header(),
                         }
-                        self.migrator_tables.insert_data_source(data_source)
-                        self.config_parser.print_log_message('DEBUG', f"Table {table_info['source_table']} data source: {data_source}")
+                    }
+                    self.migrator_tables.insert_data_source(data_source)
+                    self.config_parser.print_log_message('DEBUG', f"Table {table_info['source_table']} data source: {data_source}")
 
         elif database_export['format'] == 'SQL':
             if self.config_parser.get_source_db_type() not in ('informix',):
@@ -1071,10 +1080,15 @@ class Planner:
                             file_name = unload_match.group(1)
 
                             unl_dump_file = os.path.join(os.path.dirname(sql_dump_path), file_name)
-                            unl_dump_file_found = True
+                            data_file_found = True
                             if not os.path.exists(unl_dump_file):
                                 self.config_parser.print_log_message('ERROR', f"UNL dump file {unl_dump_file} for table {schema}.{table} does not exist or is not accessible.")
-                                unl_dump_file_found = False
+                                data_file_found = False
+
+                            converted_file_name = os.path.join(
+                                self.config_parser.get_source_database_export_conversion_path(),
+                                file_name + ".csv"
+                            )
 
                             table_info = self.migrator_tables.fetch_table(schema, table)
                             # dump might contain tables that are not in protocol
@@ -1089,10 +1103,11 @@ class Planner:
                                 'source_table': table,
                                 'source_table_id': table_id,
                                 'file_name': unl_dump_file,
-                                'file_size': os.path.getsize(unl_dump_file) if unl_dump_file_found else -1,
-                                'file_lines': sum(1 for _ in open(unl_dump_file, 'r', encoding='utf-8')) if unl_dump_file_found else -1,
-                                'file_found': unl_dump_file_found,
+                                'file_size': os.path.getsize(unl_dump_file) if data_file_found else -1,
+                                'file_lines': sum(1 for _ in open(unl_dump_file, 'r', encoding='utf-8')) if data_file_found else -1,
+                                'file_found': data_file_found,
                                 'lob_columns': self.config_parser.get_table_lob_columns(table_info['source_columns']) if table_info else '',
+                                'converted_file_name': converted_file_name,
                                 'format_options': {
                                     'format': 'UNL',
                                     'delimiter': database_export.get('delimiter', '|'),

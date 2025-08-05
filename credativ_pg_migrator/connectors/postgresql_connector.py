@@ -1377,5 +1377,12 @@ class PostgreSQLConnector(DatabaseConnector):
         cursor.close()
         return exists
 
+    def fetch_all_rows(self, query):
+        cursor = self.connection.cursor()
+        cursor.execute(query)
+        rows = cursor.fetchall()
+        cursor.close()
+        return rows
+
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

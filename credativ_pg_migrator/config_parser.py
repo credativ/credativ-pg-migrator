@@ -815,9 +815,14 @@ class ConfigParser:
     def convert_unl_to_csv(self, data_source, source_columns, target_columns):
         input_unl_data_file = data_source['file_name']
         output_csv_data_file = data_source['converted_file_name']
+        source_table = data_source['source_table']
 
         unl_delimiter = data_source['format_options'].get('delimiter', '|')
         null_symbol = data_source.get('null_symbol', '\\N')
+
+        expected_types = []
+        for ord_num, column_info in target_columns.items():
+            expected_types.append(column_info['data_type'].upper())
 
         if not input_unl_data_file or not output_csv_data_file:
             self.print_log_message('ERROR', "Both 'unl_data_file' and 'csv_data_file' must be specified in the settings.")
@@ -827,19 +832,71 @@ class ConfigParser:
             raise FileNotFoundError(f"Input UNL data file '{input_unl_data_file}' does not exist.")
         try:
 
-            def conversion(s):
-                if re.match(r'^0+\d+$', s):
-                    return str(s)
+            def conversion(s, expected_type=None):
                 if s == '':
                     return None
-                if s == '\ ':
-                    return ''
-                try:
-                    if re.fullmatch(r'[0-9]+([.,][0-9]+)', s):
-                        return float(s)
-                    return int(s)
-                except ValueError:
+                if expected_type in ('TEXT', 'VARCHAR', 'CHAR'):
+                    if s == '\ ':
+                        return ''
                     return str(s)
+                if expected_type in ('INT', 'INTEGER', 'SMALLINT', 'BIGINT'):
+                    try:
+                        return int(s)
+                    except ValueError:
+                        return str(s)
+                if expected_type in ('FLOAT', 'REAL', 'DOUBLE', 'DECIMAL', 'NUMERIC'):
+                    # try:
+                    #     return float(s)
+                    # except ValueError:
+                    return str(s).replace(',', '.')
+                if expected_type in ('TIMESTAMP', 'DATETIME'):
+                    if isinstance(s, datetime):
+                        return s
+                    else:
+                        try:
+                            return datetime.strptime(s, '%Y-%m-%d %H:%M:%S.%f')
+                        except ValueError:
+                            try:
+                                return datetime.strptime(s, '%Y-%m-%d %H:%M:%S')
+                            except ValueError:
+                                try:
+                                    return datetime.strptime(s, '%d-%m-%Y %H:%M:%S.%f')
+                                except ValueError:
+                                    try:
+                                        return datetime.strptime(s, '%d-%m-%Y %H:%M:%S')
+                                    except ValueError:
+                                        return str(s)
+                if expected_type in ('DATE', 'TIME'):
+                    if isinstance(s, datetime):
+                        return s
+                    else:
+                        try:
+                            return datetime.strptime(s, '%Y-%m-%d').date()
+                        except ValueError:
+                            try:
+                                return datetime.strptime(s, '%Y.%m.%d').date()
+                            except ValueError:
+                                try:
+                                    return datetime.strptime(s, '%d-%m-%Y').date()
+                                except ValueError:
+                                    try:
+                                        return datetime.strptime(s, '%d.%m.%Y').date()
+                                    except ValueError:
+                                        return str(s)
+                if expected_type in ('BOOLEAN', 'BOOL'):
+                    if s.lower() in ('true', '1', 'yes', 't'):
+                        return True
+                    elif s.lower() in ('false', '0', 'no', 'f'):
+                        return False
+                    else:
+                        return str(s)
+                # if re.match(r'^0+\d+$', s):
+                # try:
+                #     if re.fullmatch(r'[0-9]+([.,][0-9]+)', s):
+                #         return float(s)
+                #     return int(s)
+                # except ValueError:
+                return s
 
 
             def determine_expected_delimiters():
@@ -910,8 +967,15 @@ class ConfigParser:
                     # Restore '\\' (better separately to avoid confusion with escaped pipes)
                     fields = [field.replace('<<BACKSLASH>>', '\\') for field in fields]
 
-                    processed_fields = [conversion(field) for field in fields]
+                    processed_fields = [conversion(field, expected_types[i]) if i < len(expected_types) else conversion(field) for i, field in enumerate(fields)]
                     processed_fields = [null_symbol if field is None and field != '' else field for field in processed_fields]
+
+                    if counter <=10 and "DATE" in expected_types:
+                        if counter == 1:
+                            types_str = ','.join([type(field).__name__ for field in processed_fields])
+                            self.print_log_message('DEBUG3', f"convert_unl_to_csv: Table {source_table}: Field types: {types_str}")
+                            self.print_log_message('DEBUG3', f"convert_unl_to_csv: Table {source_table}: Expected types: {expected_types}")
+                        self.print_log_message('DEBUG3', f"convert_unl_to_csv: Table {source_table}: row: {counter}: Processed fields: {processed_fields}")
 
                     csv_writer.writerow(processed_fields)
                     buffer = ""

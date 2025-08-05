@@ -25,6 +25,7 @@ import fnmatch
 import re
 import time
 import json
+import os
 
 class Orchestrator:
     def __init__(self, config_parser):
@@ -517,6 +518,7 @@ class Orchestrator:
 
                             try:
                                 data_import_start_time = time.time()
+                                database_export_path = os.path.dirname(data_source['file_name'])
                                 if data_source['format_options']['format'].upper() == 'UNL':
                                     # UNL data source - must be converted to CSV first
                                     self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data source for table {target_table} is UNL format. Converting to CSV.")
@@ -552,15 +554,43 @@ class Orchestrator:
                                     lob_columns = [col.strip() for col in data_source['lob_columns'].split(',') if col.strip()]
                                     select_sql = f'SELECT * FROM "{target_schema}"."{target_table}_import"'
                                     rows = worker_target_connection.fetch_all_rows(select_sql)
+                                    part_name = 'process LOB data'
                                     for row in rows:
                                         row_dict = dict(zip([col['column_name'] for col in table_data['target_columns'].values()], row))
                                         for lob_col in lob_columns:
+                                            for lob_col_index, col_info in table_data['target_columns'].items():
+                                                if col_info['column_name'].lower() == lob_col.lower():
+                                                    part_name = 'lob column index'
+                                                    lob_col_index = int(lob_col_index)
+                                                    break
                                             lob_value = row_dict.get(lob_col)
                                             if lob_value is not None:
-                                                # Read LOB content from file or source as needed
-                                                # This is a placeholder for actual LOB handling logic
-                                                self.config_parser.print_log_message('DEBUG3', f"Worker {worker_id}: Read LOB column '{lob_col}' value for table {target_table}: {str(lob_value)[:100]}...")
-                                    # After processing, you may want to insert the row into the final table or update as needed
+                                                parts = lob_value.split(',')
+                                                start = int(parts[0], 16)
+                                                length = int(parts[1], 16)
+                                                filename = parts[2]
+                                                filepath = os.path.join(database_export_path, filename)
+
+                                                part_name = 'read LOB data'
+                                                with open(filepath, 'rb') as f:
+                                                    f.seek(start)
+                                                    chunk = f.read(length)
+
+                                                if chunk:
+                                                    part_name = 'update LOB data'
+                                                    row[lob_col_index - 1] = chunk
+
+                                        # Insert the row into the target table
+                                        insert_sql = f"""INSERT INTO "{target_schema}"."{target_table}" ({', '.join([col['column_name'] for col in table_data['target_columns'].values()])}) VALUES ({', '.join(['%s'] * len(row))})"""
+                                        worker_target_connection.execute_query(insert_sql, row)
+                                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data copied successfully from CSV file {csv_file_name} to table {target_table} with LOB columns.")
+                                    # Drop the intermediate import table
+                                    worker_target_connection.execute_query(f'DROP TABLE IF EXISTS "{target_schema}"."{target_table}_import" CASCADE')
+                                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Intermediate import table {target_table}_import dropped successfully.")
+                                    target_table_rows = worker_target_connection.get_rows_count(target_schema, target_table)
+                                    data_import_end_time = time.time()
+                                    data_import_duration = data_import_end_time - data_import_start_time
+                                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data import duration: {data_import_duration:.2f} seconds, rows migrated: {target_table_rows}.")
 
                                 else:
                                     # No LOB columns - standard CSV import
@@ -590,7 +620,7 @@ class Orchestrator:
 
                             except Exception as e:
                                 self.migrator_tables.update_table_status(table_data['id'], False, f'ERROR: {e}')
-                                self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Error copying data from CSV file {csv_file_name} to table {target_table}: {e}")
+                                self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: ({part_name}) Error copying data from CSV file {csv_file_name} to table {target_table}: {e}")
                                 return False
                 else:
                     part_name = 'migrate data'

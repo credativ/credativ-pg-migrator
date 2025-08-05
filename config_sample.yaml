@@ -93,24 +93,30 @@ source:
     # UNL example - separate UNL files for some or all table are expected in the specified directory
     format: "UNL"  # format of the data files - see above
     file: "/path/to/data/files/{{source_schema}}.{{source_table}}.unl"  # path to the data file(s), can contain placeholders for source_schema and source_table, extension does not need to fit format name
-    delimiter: ","  # delimiter for CSV and UNL files, default is comma resp. "|"
+    delimiter: "|"  # delimiter for CSV and UNL files, default is comma resp. "|"
+    conversion_path: "/path/to/data/files/conversion"  # directory where converted CSV files will be stored, if not specified, default is the same as for the data files
+    clean: false  # if true, remove converted CSV files after the migration, default is false
 
     # SQL example - complete SQL dump file with DDL commands for the database objects is expected, where are data depends on the type of source database
     # For Informix migrator expects specific file name without placeholders, one file for the whole database
     format: "SQL"  # format of the data files - see above
     file: "/path/to/data/files/mydb.sql"
     delimiter: "|"  # delimiter for related UNL files, default is pipe "|"
+    conversion_path: "/path/to/data/files/conversion"  # directory where converted CSV files will be stored, if not specified, default is the same as for the data files
+    clean: false  # if true, remove converted CSV files after the migration, default is false
 
-    ## Currently not implemented, just a preparation for the future
     # split of big files for parallel processing
     # if missing, default is not to split files
     # If enabled, chunks are processed in parallel by multiple workers
     # split_threshold - threshold for splitting files, if file is bigger than this value, it will be split into smaller chunks
     # chunk_size - size of the chunks, if not specified, default is 2GB
-    # big_files_split:
-    #   enabled: true
-    #   split_threshold: '5GB'
-    #   chunk_size: '2GB'
+    # relevant currently only for UNL files / SQL format and only for big UNL files exceeding the threshold
+    # import of big CSV files into PostgreSQL is reasonably fast, so splitting is not needed
+    # and PostgreSQL 18 will support parallel import of CSV files
+    big_files_split:
+      enabled: true
+      threshold: '5GB'
+      chunk_size: '2GB'
 
 # target database connection - always postgresql
 target:
@@ -221,8 +227,20 @@ table_settings:
     # individual data export settings for the table - only CSV and UNL formats are supported
     database_export:
       file: "/some/other/path/to/data/files/some_specific_name.dump"  # path to the data file
-      format: "CSV"  # currently only CSV and UNL formats are supported
+      format: "CSV" / "UNL"  # currently only CSV and UNL formats are supported
       delimiter: "|"  # delimiter for CSV and UNL files, default is comma resp. "|"
+      # header is used only for reading from already supplied CSV files
+      # CSV files converted from UNL files are always without header
+      header: true  # if CSV files contain header line with column names, default is false
+      # conversion_path is used only for UNL files, where converted CSV files will be stored
+      conversion_path: "/path/to/data/files/conversion"  # directory where converted CSV files will be stored, if not specified, default is the same as for the data files
+      # split of big files for parallel processing - local setting for the table
+      # if missing, global setting is used
+      big_files_split:
+        enabled: true
+        threshold: '5GB'
+        chunk_size: '2GB'
+        workers: 4  # number of workers to use for parallel processing of the chunks, default is 4
 
     ## currently not implemented, just a preparation for the future
     # individual target LOB storage settings for the table

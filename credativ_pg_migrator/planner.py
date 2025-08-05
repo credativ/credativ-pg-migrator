@@ -1019,15 +1019,20 @@ class Planner:
                 if file_name:
                     table_file_name = file_name.replace("{{schema_name}}", table_info['source_schema']).replace("{{table_name}}", table_info['source_table'])
                     if os.path.exists(table_file_name):
+                        converted_file_name = os.path.join(
+                            self.config_parser.get_source_database_export_conversion_path(),
+                            os.path.basename(table_file_name) + ".csv"
+                        )
                         data_source = {
                             'source_schema': table_info['source_schema'],
                             'source_table': table_info['source_table'],
                             'source_table_id': table_info['id'],
                             'file_name': table_file_name,
+                            'converted_file_name': converted_file_name,
                             'format_options': {
-                                'format': database_export['format'],
-                                'delimiter': database_export.get('delimiter', ',' if database_export['format'] == 'CSV' else '|'),
-                                'header': database_export.get('header', False)
+                                'format': self.config_parser.get_source_database_export_format(),
+                                'delimiter': self.config_parser.get_source_database_export_delimiter(),
+                                'header': self.config_parser.get_source_database_export_header(),
                             }
                         }
                         self.migrator_tables.insert_data_source(data_source)

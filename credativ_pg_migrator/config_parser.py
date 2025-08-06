@@ -821,11 +821,11 @@ class ConfigParser:
                 lob_columns_list.append(column_info['column_name'])
         return ','.join(lob_columns_list)
 
-    def convert_unl_to_csv(self, data_source, source_columns, target_columns):
-        input_unl_data_file = data_source['file_name']
-        output_csv_data_file = data_source['converted_file_name']
-        source_table = data_source['source_table']
-        file_size_bytes = data_source.get('file_size', None)
+    def convert_unl_to_csv(self, data_source_settings, source_columns, target_columns):
+        input_unl_data_file = data_source_settings['file_name']
+        output_csv_data_file = data_source_settings['converted_file_name']
+        source_table = data_source_settings['source_table']
+        file_size_bytes = data_source_settings.get('file_size', None)
         if file_size_bytes is not None:
             try:
                 file_size_bytes = int(file_size_bytes)
@@ -836,9 +836,9 @@ class ConfigParser:
         else:
             source_file_size = "Unknown"
 
-        unl_delimiter = data_source['format_options'].get('delimiter', '|')
-        null_symbol = data_source.get('null_symbol', '\\N')
-        processing_start_time = data_source.get('processing_start_time', datetime.now())
+        unl_delimiter = data_source_settings['format_options'].get('delimiter', '|')
+        null_symbol = data_source_settings.get('null_symbol', '\\N')
+        processing_start_time = data_source_settings.get('processing_start_time', datetime.now())
 
         expected_types = []
         for ord_num, column_info in target_columns.items():
@@ -1004,6 +1004,71 @@ class ConfigParser:
         except Exception as e:
             self.print_log_message('ERROR', f"convert_unl_to_csv: Error converting UNL to CSV: {e}")
             raise e
+
+    def split_big_unl_file(self, data_source_settings):
+        split_threshold_bytes = self.get_source_database_export_big_files_split_threshold_bytes()
+        chunk_size_bytes = self.get_source_database_export_big_files_split_chunk_size_bytes()
+        source_file_size = data_source_settings.get('file_size', None)
+        source_file_name = data_source_settings.get('file_name', None)
+        source_file_basename = os.path.basename(source_file_name)
+        converted_file_name = data_source_settings.get('converted_file_name', None)
+        converted_file_path = os.path.dirname(os.path.abspath(converted_file_name))
+        delimiter = data_source_settings.get('format_options', {}).get('delimiter', '|')
+        part_size_bytes = self.get_source_database_export_big_files_split_chunk_size_bytes()
+        continuation_seq = b'\r\\'
+        source_file_parts = []
+        converted_file_parts = []
+
+        if source_file_size is not None and source_file_size > split_threshold_bytes:
+
+            with open(source_file_name, 'rb') as infile:
+                part_num = 1
+                line_count = 0
+                part_bytes = 0
+
+                out_name = os.path.join(converted_file_path, f"{source_file_basename}.{str(part_num).zfill(4)}")
+                source_file_parts.append(out_name)
+                converted_file_part = f"{converted_file_name}.{str(part_num).zfill(4)}"
+                converted_file_parts.append(converted_file_part)
+
+                outfile = open(out_name, 'wb')
+                buffer = b''
+                for line in infile:
+                    buffer += line
+                    if buffer.rstrip(b'\n').endswith(delimiter):
+                        row_bytes = len(buffer)
+                        if part_bytes + row_bytes > part_size_bytes and line_count > 0:
+                            self.print_log_message('INFO', f"split_big_unl_file: Writing part {part_num} to {out_name} - logical rows: {line_count}, bytes: {part_bytes}")
+                            outfile.close()
+                            part_num += 1
+                            out_name = os.path.join(converted_file_path, f"{source_file_basename}.{str(part_num).zfill(4)}")
+                            source_file_parts.append(out_name)
+                            converted_file_part = f"{converted_file_name}.{str(part_num).zfill(4)}"
+                            converted_file_parts.append(converted_file_part)
+
+                            self.print_log_message('DEBUG', f"split_big_unl_file: Creating new output file {out_name} for part {part_num} - size: {part_size_bytes} bytes")
+                            outfile = open(out_name, 'wb')
+                            part_bytes = 0
+                            line_count = 0
+                        outfile.write(buffer)
+                        part_bytes += row_bytes
+                        buffer = b''
+                        line_count += 1
+                    elif buffer.rstrip(b'\n').endswith(continuation_seq):
+                        continue
+                    else:
+                        continue
+                if buffer:
+                    self.print_log_message('INFO', f"split_big_unl_file: Writing remaining part {part_num} to {out_name} - logical rows: {line_count + 1}, bytes: {part_bytes + len(buffer)}")
+                    outfile.write(buffer)
+                outfile.close()
+
+        else:
+            self.print_log_message('DEBUG', f"split_big_unl_file: Source file {source_file_name} is smaller than split threshold {split_threshold_bytes} bytes. No splitting needed.")
+            source_file_parts.append(source_file_name)
+            converted_file_parts.append(converted_file_name)
+
+        return source_file_parts, converted_file_parts
 
 ### Main entry point
 

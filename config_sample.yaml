@@ -124,6 +124,7 @@ source:
       enabled: true
       threshold: '5GB'
       chunk_size: '2GB'
+      workers: 4  # number of workers to use for parallel processing of the chunks, default is 4
 
 # target database connection - always postgresql
 target:
@@ -242,13 +243,15 @@ table_settings:
       header: true  # if CSV files contain header line with column names, default is false
       # conversion_path is used only for UNL files, where converted CSV files will be stored
       conversion_path: "/path/to/data/files/conversion"  # directory where converted CSV files will be stored, if not specified, default is the same as for the data files
+
+      ## currently not implemented, just a preparation for the future
       # split of big files for parallel processing - local setting for the table
       # if missing, global setting is used
-      big_files_split:
-        enabled: true
-        threshold: '5GB'
-        chunk_size: '2GB'
-        workers: 4  # number of workers to use for parallel processing of the chunks, default is 4
+      # big_files_split:
+      #   enabled: true
+      #   threshold: '5GB'
+      #   chunk_size: '2GB'
+      #   workers: 4  # number of workers to use for parallel processing of the chunks, default is 4
 
     ## currently not implemented, just a preparation for the future
     # individual target LOB storage settings for the table

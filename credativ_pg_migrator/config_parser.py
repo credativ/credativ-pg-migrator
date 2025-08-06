@@ -825,19 +825,30 @@ class ConfigParser:
         input_unl_data_file = data_source['file_name']
         output_csv_data_file = data_source['converted_file_name']
         source_table = data_source['source_table']
+        file_size_bytes = data_source.get('file_size', None)
+        if file_size_bytes is not None:
+            try:
+                file_size_bytes = int(file_size_bytes)
+                file_size_gb = file_size_bytes / (1024 ** 3)
+                source_file_size = f"{file_size_bytes} B / {file_size_gb:.2f} GB"
+            except Exception:
+                source_file_size = str(file_size_bytes)
+        else:
+            source_file_size = "Unknown"
 
         unl_delimiter = data_source['format_options'].get('delimiter', '|')
         null_symbol = data_source.get('null_symbol', '\\N')
+        processing_start_time = data_source.get('processing_start_time', datetime.now())
 
         expected_types = []
         for ord_num, column_info in target_columns.items():
             expected_types.append(column_info['data_type'].upper())
 
         if not input_unl_data_file or not output_csv_data_file:
-            self.print_log_message('ERROR', "Both 'unl_data_file' and 'csv_data_file' must be specified in the settings.")
+            self.print_log_message('ERROR', "convert_unl_to_csv: Both 'unl_data_file' and 'csv_data_file' must be specified in the settings.")
             raise ValueError("Both 'unl_data_file' and 'csv_data_file' must be specified in the settings.")
         if not os.path.exists(input_unl_data_file):
-            self.print_log_message('ERROR', f"Input UNL data file '{input_unl_data_file}' does not exist.")
+            self.print_log_message('ERROR', f"convert_unl_to_csv: Input UNL data file '{input_unl_data_file}' does not exist.")
             raise FileNotFoundError(f"Input UNL data file '{input_unl_data_file}' does not exist.")
         try:
 
@@ -923,10 +934,10 @@ class ConfigParser:
                 most_common_count = Counter(delimiter_counts).most_common(1)
                 return most_common_count[0][0] if most_common_count else None
 
-            self.print_log_message('DEBUG', f"Converting UNL file '{input_unl_data_file}' to CSV file '{output_csv_data_file}' with delimiter '{unl_delimiter}'")
+            self.print_log_message('DEBUG', f"convert_unl_to_csv: Converting UNL file '{input_unl_data_file}' to CSV file '{output_csv_data_file}' with delimiter '{unl_delimiter}' - source file size: {source_file_size}")
             # First analyze the input file to determine the expected number of delimiters per line
             expected_delimiters = determine_expected_delimiters()
-            self.print_log_message('DEBUG', f"UNL file - found delimiters count: {expected_delimiters}")
+            self.print_log_message('DEBUG', f"convert_unl_to_csv: UNL file '{input_unl_data_file}' - found delimiters count: {expected_delimiters} - source file size: {source_file_size}")
 
             with open(input_unl_data_file, 'r', encoding='utf-8', newline='') as infile, \
                 open(output_csv_data_file, 'w', newline='', encoding='utf-8') as outfile:
@@ -979,20 +990,19 @@ class ConfigParser:
                     processed_fields = [conversion(field, expected_types[i]) if i < len(expected_types) else conversion(field) for i, field in enumerate(fields)]
                     processed_fields = [null_symbol if field is None and field != '' else field for field in processed_fields]
 
-                    if counter <=10 and "DATE" in expected_types:
-                        if counter == 1:
-                            types_str = ','.join([type(field).__name__ for field in processed_fields])
-                            self.print_log_message('DEBUG3', f"convert_unl_to_csv: Table {source_table}: Field types: {types_str}")
-                            self.print_log_message('DEBUG3', f"convert_unl_to_csv: Table {source_table}: Expected types: {expected_types}")
+                    if counter == 1:
+                        types_str = ','.join([type(field).__name__ for field in processed_fields])
+                        self.print_log_message('DEBUG3', f"convert_unl_to_csv: Table {source_table}: Field types: {types_str}")
+                        self.print_log_message('DEBUG3', f"convert_unl_to_csv: Table {source_table}: Expected types: {expected_types}")
                         self.print_log_message('DEBUG3', f"convert_unl_to_csv: Table {source_table}: row: {counter}: Processed fields: {processed_fields}")
 
                     csv_writer.writerow(processed_fields)
                     buffer = ""
 
-            self.print_log_message('INFO', f"Processed {counter} lines from {input_unl_data_file} and wrote to {output_csv_data_file}")
+            self.print_log_message('INFO', f"convert_unl_to_csv: Processed {counter} lines from {input_unl_data_file} and wrote to {output_csv_data_file} - source file size: {source_file_size} - processing time: {datetime.now() - processing_start_time}")
 
         except Exception as e:
-            self.print_log_message('ERROR', f"Error converting UNL to CSV: {e}")
+            self.print_log_message('ERROR', f"convert_unl_to_csv: Error converting UNL to CSV: {e}")
             raise e
 
 ### Main entry point

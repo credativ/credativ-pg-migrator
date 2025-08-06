@@ -1,10 +1,12 @@
 # Changelog
 
-## 0.9.5 - 2025.07.xx
+## 0.9.5 - 2025.08.xx
 
-- 2025.08.05:
+- 2025.08.06:
 
   - Significant improvements in UNL to CSV conversion - added check for expected target data types for better validation of processed data
+  - UNL import can now also skip import of LOB values based on migration.migrate_lob_values setting - LOB value will contain UNL pointer to external LOB data
+  - added missing option "table_schema" into individual table_settings in the config file
 
 - 2025.07.31:
 

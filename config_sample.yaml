@@ -217,6 +217,7 @@ table_settings:
   # - migrate_constraints: true/false - if constraints should be migrated, default is true
   # - migrate_triggers: true/false - if triggers should be migrated, default is true
   - table_name: "table1"
+    table_schema: "dbo"  # source schema for the table, if not specified, default is the source schema from the source database connection
     batch_size: 50000
     chunk_size: -1
     migrate_data: true

@@ -1005,7 +1005,9 @@ class Planner:
 
     def run_prepare_data_sources(self):
         self.config_parser.print_log_message('INFO', "Planner - Preparing data sources...")
+
         database_export = self.config_parser.get_source_database_export()
+
         if not database_export:
             self.config_parser.print_log_message('INFO', "No settings for database export found. Migrator will use source tables as data sources.")
             return
@@ -1013,9 +1015,17 @@ class Planner:
 
         if database_export['format'] in ('CSV', 'UNL'):
             for table in self.migrator_tables.fetch_all_tables():
+                settings_source = 'global'
                 table_info = self.migrator_tables.decode_table_row(table)
+                table_database_export = self.config_parser.get_table_database_export(table_info['source_schema'], table_info['source_table'])
+                if table_database_export:
+                    settings_source = 'table_specific'
+                    self.config_parser.print_log_message('DEBUG', f"Table {table_info['source_table']} has specific database export settings: {table_database_export}")
 
                 file_name = database_export.get('file', None)
+                if table_database_export and 'file' in table_database_export:
+                    file_name = table_database_export['file']
+
                 if file_name:
                     table_file_name = file_name.replace("{{schema_name}}", table_info['source_schema']).replace("{{table_name}}", table_info['source_table'])
                     if os.path.exists(table_file_name):
@@ -1024,24 +1034,42 @@ class Planner:
                         self.config_parser.print_log_message('ERROR', f"Data source file {table_file_name} does not exist or is not accessible.")
                         data_file_found = False
 
+                    conversion_path = self.config_parser.get_source_database_export_conversion_path()
+                    if table_database_export and 'conversion_path' in table_database_export:
+                        conversion_path = self.config_parser.get_table_database_export_conversion_path(table_info['source_schema'], table_info['source_table'])
+
                     converted_file_name = os.path.join(
-                        self.config_parser.get_source_database_export_conversion_path(),
+                        conversion_path,
                         os.path.basename(table_file_name) + ".csv"
                     )
+
+                    header = database_export.get('header', True)
+                    if table_database_export and 'header' in table_database_export:
+                        header = table_database_export['header']
+
+                    format = database_export.get('format', None)
+                    if table_database_export and 'format' in table_database_export:
+                        format = table_database_export['format']
+
+                    delimiter = database_export.get('delimiter', '|')
+                    if table_database_export and 'delimiter' in table_database_export:
+                        delimiter = table_database_export['delimiter']
+
                     data_source = {
                         'source_schema': table_info['source_schema'],
                         'source_table': table_info['source_table'],
                         'source_table_id': table_info['id'],
-                        'file_name': True,
-                        'file_size': os.path.getsize(unl_dump_file) if data_file_found else -1,
-                        'file_lines': sum(1 for _ in open(unl_dump_file, 'r', encoding='utf-8')) if data_file_found else -1,
+                        'file_name': table_file_name,
+                        'file_size': os.path.getsize(table_file_name) if data_file_found else -1,
+                        'file_lines': sum(1 for _ in open(table_file_name, 'r', encoding='utf-8')) if data_file_found else -1,
                         'file_found': data_file_found,
                         'lob_columns': self.config_parser.get_table_lob_columns(table_info['source_columns']) if table_info else '',
                         'converted_file_name': converted_file_name,
                         'format_options': {
-                            'format': self.config_parser.get_source_database_export_format(),
-                            'delimiter': self.config_parser.get_source_database_export_delimiter(),
-                            'header': self.config_parser.get_source_database_export_header(),
+                            'settings_source': settings_source,
+                            'format': format,
+                            'delimiter': delimiter,
+                            'header': header,
                         }
                     }
                     self.migrator_tables.insert_data_source(data_source)

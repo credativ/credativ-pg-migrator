@@ -1469,6 +1469,36 @@ class MigratorTables:
             'message': row[15]
         }
 
+    def update_status_data_source(self, row_id, success, message):
+        table_name = self.config_parser.get_protocol_name_data_sources()
+        query = f"""
+            UPDATE "{self.protocol_schema}"."{table_name}"
+            SET task_completed = clock_timestamp(),
+            success = %s,
+            message = %s
+            WHERE id = %s
+            RETURNING *
+        """
+        params = ('TRUE' if success else 'FALSE', message, row_id)
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+
+            if row:
+                data_source_row = self.decode_data_source_row(row)
+                self.config_parser.print_log_message('DEBUG3', f"update_status_data_source: Returned row: {data_source_row}")
+                self.update_protocol('data_source', data_source_row['id'], success, message, None)
+            else:
+                self.config_parser.print_log_message('ERROR', f"update_status_data_source: Error updating status for data source {row_id} in {table_name}.")
+                self.config_parser.print_log_message('ERROR', f"update_status_data_source: Error: No protocol row returned.")
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"update_status_data_source: Error updating status for data source {row_id} in {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"update_status_data_source: Query: {query}")
+            self.config_parser.print_log_message('ERROR', f"update_status_data_source: Exception: {e}")
+            raise
+
     def create_table_for_indexes(self):
         table_name = self.config_parser.get_protocol_name_indexes()
         self.protocol_connection.execute_query(self.drop_table_sql.format(protocol_schema=self.protocol_schema, table_name=table_name))
@@ -2591,17 +2621,6 @@ class MigratorTables:
         cursor.execute(query)
         constraints = cursor.fetchall()
         return constraints
-
-    def get_table_data_source(self, schema_name, table_name):
-        database_export = self.get_table_database_export(schema_name, table_name)
-        if database_export:
-            file_name = database_export.get('file', None)
-            if file_name:
-                schema_name = self.get_source_schema()
-                table_file_name = file_name.replace("{{schema_name}}", schema_name).replace("{{table_name}}", table_name)
-                if os.path.exists(table_file_name):
-                    return table_file_name
-        return MigratorConstants.get_default_data_source()
 
 
 if __name__ == "__main__":

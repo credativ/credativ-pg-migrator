@@ -537,6 +537,9 @@ class ConfigParser:
         source_config = self.get_source_config()
         return source_config.get('database_export', {})
 
+    def get_source_database_export_on_missing_data_file(self):
+        return self.get_source_database_export().get('on_missing_data_file', 'source_table')
+
     def get_source_database_export_format(self):
         return self.get_source_database_export().get('format', None)
 

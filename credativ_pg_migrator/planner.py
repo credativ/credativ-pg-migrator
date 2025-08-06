@@ -1015,12 +1015,13 @@ class Planner:
 
         if database_export['format'] in ('CSV', 'UNL'):
             for table in self.migrator_tables.fetch_all_tables():
+                self.config_parser.print_log_message('DEBUG', f"run_prepare_data_sources: Processing table: {table}")
                 settings_source = 'global'
                 table_info = self.migrator_tables.decode_table_row(table)
                 table_database_export = self.config_parser.get_table_database_export(table_info['source_schema'], table_info['source_table'])
                 if table_database_export:
                     settings_source = 'table_specific'
-                    self.config_parser.print_log_message('DEBUG', f"Table {table_info['source_table']} has specific database export settings: {table_database_export}")
+                    self.config_parser.print_log_message('DEBUG', f"run_prepare_data_sources: Table {table_info['source_table']} has specific database export settings: {table_database_export}")
 
                 file_name = database_export.get('file', None)
                 if table_database_export and 'file' in table_database_export:
@@ -1031,8 +1032,11 @@ class Planner:
                     if os.path.exists(table_file_name):
                         data_file_found = True
                     else:
-                        self.config_parser.print_log_message('ERROR', f"Data source file {table_file_name} does not exist or is not accessible.")
+                        self.config_parser.print_log_message('ERROR', f"run_prepare_data_sources: Data source file {table_file_name} does not exist or is not accessible.")
                         data_file_found = False
+                        if self.config_parser.get_source_database_export_on_missing_data_file() == 'error':
+                            self.config_parser.print_log_message('ERROR', f"run_prepare_data_sources: Data source file {table_file_name} does not exist or is not accessible. Stopping execution.")
+                            exit(1)
 
                     conversion_path = self.config_parser.get_source_database_export_conversion_path()
                     if table_database_export and 'conversion_path' in table_database_export:
@@ -1055,13 +1059,14 @@ class Planner:
                     if table_database_export and 'delimiter' in table_database_export:
                         delimiter = table_database_export['delimiter']
 
+                    self.config_parser.print_log_message('DEBUG3', f"run_prepare_data_sources: Table {table_info['source_table']} - file_name: {table_file_name}, converted_file_name: {converted_file_name}, data_file_found: {data_file_found}, format: {format}, delimiter: {delimiter}, header: {header}")
                     data_source = {
                         'source_schema': table_info['source_schema'],
                         'source_table': table_info['source_table'],
                         'source_table_id': table_info['id'],
                         'file_name': table_file_name,
                         'file_size': os.path.getsize(table_file_name) if data_file_found else -1,
-                        'file_lines': sum(1 for _ in open(table_file_name, 'r', encoding='utf-8')) if data_file_found else -1,
+                        'file_lines': None, ## count of lines was too slow - sum(1 for _ in open(table_file_name, 'r', encoding='utf-8')) if data_file_found else -1,
                         'file_found': data_file_found,
                         'lob_columns': self.config_parser.get_table_lob_columns(table_info['source_columns']) if table_info else '',
                         'converted_file_name': converted_file_name,
@@ -1073,7 +1078,7 @@ class Planner:
                         }
                     }
                     self.migrator_tables.insert_data_source(data_source)
-                    self.config_parser.print_log_message('DEBUG', f"Table {table_info['source_table']} data source: {data_source}")
+                    self.config_parser.print_log_message('DEBUG', f"run_prepare_data_sources: Table {table_info['source_table']} - inserted data source: {data_source}")
 
         elif database_export['format'] == 'SQL':
             if self.config_parser.get_source_db_type() not in ('informix',):

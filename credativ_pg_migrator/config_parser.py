@@ -577,7 +577,7 @@ class ConfigParser:
     def get_source_database_export_big_files_split_threshold_bytes(self):
         big_files_split = self.get_source_database_export_big_files_split()
         if big_files_split and isinstance(big_files_split, dict):
-            return self.convert_size_to_bytes(big_files_split.get('split_threshold', None))
+            return self.convert_size_to_bytes(big_files_split.get('threshold', None))
         return None
 
     def get_source_database_export_big_files_split_chunk_size_bytes(self):
@@ -1013,7 +1013,7 @@ class ConfigParser:
         source_file_basename = os.path.basename(source_file_name)
         converted_file_name = data_source_settings.get('converted_file_name', None)
         converted_file_path = os.path.dirname(os.path.abspath(converted_file_name))
-        delimiter = data_source_settings.get('format_options', {}).get('delimiter', '|')
+        delimiter = data_source_settings.get('format_options', {}).get('delimiter', '|').encode('utf-8')
         part_size_bytes = self.get_source_database_export_big_files_split_chunk_size_bytes()
         continuation_seq = b'\r\\'
         source_file_parts = []

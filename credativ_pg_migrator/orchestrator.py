@@ -479,6 +479,7 @@ class Orchestrator:
 
                 if data_source is not None:
                     self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data source for table {table_data['source_schema']}.{table_data['source_table']} is {data_source}.")
+                    clean_objects = self.config_parser.get_source_database_export_clean()
 
                     if data_source['file_found'] and data_source['file_name'] is not None:
                         self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Data source file found: {data_source['file_name']} - proceeding with data migration.")
@@ -527,16 +528,24 @@ class Orchestrator:
 
                                 big_files_split_enabled = self.config_parser.get_source_database_export_big_files_split_enabled()
                                 data_source_file_size = data_source['file_size']
+
+                                data_source_file_size_str = ""
+                                if data_source_file_size is not None:
+                                    data_source_file_size_str = f"{data_source_file_size} B ({data_source_file_size / (1024 ** 3):.2f} GB)"
                                 split_threshold_bytes = self.config_parser.get_source_database_export_big_files_split_threshold_bytes()
-                                self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Data source file size: {data_source_file_size} bytes, split threshold: {split_threshold_bytes} bytes, big files split enabled: {big_files_split_enabled}")
+                                split_threshold_bytes_str = ""
+                                if split_threshold_bytes is not None:
+                                    split_threshold_bytes_str = f"{split_threshold_bytes} B ({split_threshold_bytes / (1024 ** 3):.2f} GB)"
+
+                                self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Table: {target_table}: Data source file size: {data_source_file_size_str}, split threshold: {split_threshold_bytes_str}, big files split enabled: {big_files_split_enabled}")
 
                                 source_files_to_process = []
                                 converted_files_to_process = []
                                 if big_files_split_enabled and data_source_file_size > split_threshold_bytes:
                                     # Big files split enabled and file size exceeds threshold
-                                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data source for table {target_table} is a big file ({data_source_file_size} bytes). Splitting into smaller files.")
+                                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {target_table}: Data source for table {target_table} is a big file ({data_source_file_size} bytes). Splitting into smaller files.")
                                     source_files_to_process, converted_files_to_process = self.config_parser.split_big_unl_file(data_source)
-                                    self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Split source files: {source_files_to_process}, converted target file names: {converted_files_to_process}")
+                                    self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Table {target_table}: Split source files: {source_files_to_process}, converted target file names: {converted_files_to_process}")
                                 else:
                                     # Single file processing
                                     source_files_to_process.append(data_source['file_name'])
@@ -548,11 +557,11 @@ class Orchestrator:
                                 for source_file_index, source_file_name in enumerate(source_files_to_process):
                                     data_source_settings['file_name'] = source_file_name
                                     data_source_settings['converted_file_name'] = converted_files_to_process[source_file_index]
-                                    self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Processing source file: {data_source_settings['file_name']}")
+                                    self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Table {target_table}: Processing source file: {data_source_settings['file_name']}")
 
                                     if data_source_settings['format_options']['format'].upper() == 'UNL':
                                         # UNL data source - must be converted to CSV first
-                                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data source for table {target_table} is UNL format. Converting to CSV.")
+                                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {target_table}: Data source for table {target_table} is UNL format. Converting to CSV.")
                                         part_name = 'convert UNL to CSV'
                                         csv_file_name = data_source_settings['converted_file_name']
                                         self.config_parser.convert_unl_to_csv(data_source_settings, table_data['source_columns'], table_data['target_columns'])
@@ -655,6 +664,15 @@ class Orchestrator:
                                             'longest_batch_seconds': data_import_duration,
                                             'average_batch_seconds': data_import_duration,
                                         })
+
+                                        if data_source_settings['format_options']['format'].upper() == 'UNL' and clean_objects:
+                                            # Delete the converted CSV file after import if clean_objects is True
+                                            try:
+                                                if csv_file_name and os.path.exists(csv_file_name):
+                                                    os.remove(csv_file_name)
+                                                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Deleted temporary CSV file {csv_file_name}.")
+                                            except Exception as cleanup_exc:
+                                                self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Failed to delete temporary CSV file {csv_file_name}: {cleanup_exc}")
 
                                     except Exception as e:
                                         self.migrator_tables.update_table_status(table_data['id'], False, f'ERROR: {e}')

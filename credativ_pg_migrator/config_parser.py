@@ -671,15 +671,15 @@ class ConfigParser:
         return chunk_size
 
     def get_table_database_export(self, schema_name, table_name):
-        database_export = self.get_source_database_export()
         if table_name:
             table_settings = self.config.get('table_settings', [])
             if isinstance(table_settings, list):
                 for entry in table_settings:
                     pattern = entry.get('table_name')
-                    if pattern and re.fullmatch(pattern, table_name, re.IGNORECASE):
-                        return entry.get('database_export', database_export)
-        return database_export
+                    table_schema = entry.get('table_schema', schema_name)
+                    if pattern and re.fullmatch(pattern, table_name, re.IGNORECASE) and table_schema.lower() == schema_name.lower():
+                        return entry.get('database_export', None)
+        return None
 
     def get_table_database_export_format(self, schema_name, table_name):
         return self.get_table_database_export(schema_name, table_name).get('format', None)
@@ -687,15 +687,21 @@ class ConfigParser:
     def get_table_database_export_delimiter(self, schema_name, table_name):
         return self.get_table_database_export(schema_name, table_name).get('delimiter', None)
 
-    def get_table_database_export_path(self, schema_name, table_name):
-        return self.get_table_database_export(schema_name, table_name).get('path', None)
+    def get_table_database_export_file(self, schema_name, table_name):
+        return self.get_table_database_export(schema_name, table_name).get('file', None)
 
-    def get_table_database_export_name(self, schema_name, table_name):
-        return self.get_table_database_export(schema_name, table_name).get('name', None)
+    def get_table_database_export_header(self, schema_name, table_name):
+        return self.get_table_database_export(schema_name, table_name).get('header', None)
 
-    def get_table_database_export_lob_columns(self, schema_name, table_name):
-        return self.get_table_database_export(schema_name, table_name).get('lob_columns', [])
-
+    def get_table_database_export_conversion_path(self, schema_name, table_name):
+        conversion_path = self.get_table_database_export(schema_name, table_name).get('conversion_path', None)
+        if conversion_path is None:
+            # If conversion_path is not set, try to extract the directory from the export file path
+            export_file = self.get_table_database_export_file(schema_name, table_name)
+            if export_file:
+                return os.path.dirname(os.path.abspath(export_file))
+            return None
+        return conversion_path
 
     ## pre-migration analysis
     def get_pre_migration_analysis(self):

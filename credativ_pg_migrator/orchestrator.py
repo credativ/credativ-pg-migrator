@@ -525,12 +525,13 @@ class Orchestrator:
                                     part_name = 'convert UNL to CSV'
                                     csv_file_name = data_source['converted_file_name']
                                     self.config_parser.convert_unl_to_csv(data_source, table_data['source_columns'], table_data['target_columns'])
+
                                 elif data_source['format_options']['format'].upper() == 'CSV':
                                     # CSV data source - use the file directly
                                     csv_file_name = data_source['file_name']
                                     self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data source for table {target_table} is CSV format. Using file {csv_file_name}.")
 
-                                if data_source['lob_columns'] != '':
+                                if data_source['lob_columns'] != '' and self.config_parser.should_migrate_lob_values():
                                     # LOB data migration - use the file directly
                                     self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data source for table {target_table} has LOB columns: {data_source['lob_columns']}. Migrating LOB data.")
 
@@ -594,6 +595,10 @@ class Orchestrator:
                                     self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data import duration: {data_import_duration:.2f} seconds, rows migrated: {target_table_rows}.")
 
                                 else:
+
+                                    if data_source['lob_columns'] != '' and not self.config_parser.should_migrate_lob_values():
+                                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data source for table {target_table} has LOB columns: {data_source['lob_columns']}, but LOB migration is disabled. Skipping LOB data migration.")
+
                                     # No LOB columns - standard CSV import
                                     # CSV data source - directly import into target database
                                     part_name = 'copy data from CSV'

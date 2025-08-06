@@ -7,6 +7,8 @@
   - Significant improvements in UNL to CSV conversion - added check for expected target data types for better validation of processed data
   - UNL import can now also skip import of LOB values based on migration.migrate_lob_values setting - LOB value will contain UNL pointer to external LOB data
   - added missing option "table_schema" into individual table_settings in the config file
+  - added setting database_export.on_missing_data_file to define globally action on missing data files if database_export is specified in the config file
+    - Possible values: "error", "skip", "source_table" - use source table from the source database instead of the data file
 
 - 2025.07.31:
 

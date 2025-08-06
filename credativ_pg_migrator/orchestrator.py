@@ -474,161 +474,183 @@ class Orchestrator:
 
                 data_source = self.migrator_tables.fetch_data_source(table_data['source_schema'], table_data['source_table'])
                 self.config_parser.print_log_message('DEBUG3', f"Worker {worker_id}: Checking data source for table {table_data['source_schema']}.{table_data['source_table']}: {data_source}")
+
+                use_source_table = False
+
                 if data_source is not None:
                     self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data source for table {table_data['source_schema']}.{table_data['source_table']} is {data_source}.")
 
-                    copy_command = f"""COPY "{target_schema}"."{target_table}"
-                        FROM STDIN WITH
-                        (FORMAT CSV, HEADER {data_source['format_options']['header']},
-                        NULL '\\N',
-                        DELIMITER '{data_source['format_options']['delimiter']}')"""
-                        ## , QUOTE '{data_source['format_options']['quote']}'
+                    if data_source['file_found'] and data_source['file_name'] is not None:
+                        self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Data source file found: {data_source['file_name']} - proceeding with data migration.")
 
-                    if data_source['format_options']['format'].upper() in ('CSV', 'UNL'):
+                        copy_command = f"""COPY "{target_schema}"."{target_table}"
+                            FROM STDIN WITH
+                            (FORMAT CSV, HEADER {data_source['format_options']['header']},
+                            NULL '\\N',
+                            DELIMITER '{data_source['format_options']['delimiter']}')"""
+                            ## , QUOTE '{data_source['format_options']['quote']}'
 
-                        source_table_rows = worker_source_connection.get_rows_count(table_data['source_schema'], table_data['source_table'])
-                        target_table_rows = worker_target_connection.get_rows_count(target_schema, target_table)
+                        if data_source['format_options']['format'].upper() in ('CSV', 'UNL'):
 
-                        protocol_id = migrator_tables.insert_data_migration({
-                            'worker_id': worker_id,
-                            'source_table_id': table_data['source_table_id'],
-                            'source_schema': table_data['source_schema'],
-                            'source_table': table_data['source_table'],
-                            'target_schema': table_data['target_schema'],
-                            'target_table': table_data['target_table'],
-                            'source_table_rows': source_table_rows,
-                            'target_table_rows': target_table_rows,
-                            })
+                            source_table_rows = worker_source_connection.get_rows_count(table_data['source_schema'], table_data['source_table'])
+                            target_table_rows = worker_target_connection.get_rows_count(target_schema, target_table)
 
-                        if data_source['file_size'] == 0:
-                            self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data source for table {target_table} is {data_source['format_options']['format'].upper()} format, but file size is 0. Skipping data migration.")
-                            # self.migrator_tables.update_table_status(table_data['id'], True, 'migrated OK (0 rows)')
-
-                            migrator_tables.update_data_migration_status({
-                                'row_id': protocol_id,
-                                'success': True,
-                                'message': 'OK',
+                            protocol_id = migrator_tables.insert_data_migration({
+                                'worker_id': worker_id,
+                                'source_table_id': table_data['source_table_id'],
+                                'source_schema': table_data['source_schema'],
+                                'source_table': table_data['source_table'],
+                                'target_schema': table_data['target_schema'],
+                                'target_table': table_data['target_table'],
+                                'source_table_rows': source_table_rows,
                                 'target_table_rows': target_table_rows,
-                                'batch_count': 0,
-                                'shortest_batch_seconds': 0,
-                                'longest_batch_seconds': 0,
-                                'average_batch_seconds': 0,
-                            })
-                        else:
+                                })
 
-                            try:
-                                data_import_start_time = time.time()
-                                database_export_path = os.path.dirname(data_source['file_name'])
-                                if data_source['format_options']['format'].upper() == 'UNL':
-                                    # UNL data source - must be converted to CSV first
-                                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data source for table {target_table} is UNL format. Converting to CSV.")
-                                    part_name = 'convert UNL to CSV'
-                                    csv_file_name = data_source['converted_file_name']
-                                    self.config_parser.convert_unl_to_csv(data_source, table_data['source_columns'], table_data['target_columns'])
+                            if data_source['file_size'] == 0:
+                                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data source for table {target_table} is {data_source['format_options']['format'].upper()} format, but file size is 0. Skipping data migration.")
+                                # self.migrator_tables.update_table_status(table_data['id'], True, 'migrated OK (0 rows)')
 
-                                elif data_source['format_options']['format'].upper() == 'CSV':
-                                    # CSV data source - use the file directly
-                                    csv_file_name = data_source['file_name']
-                                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data source for table {target_table} is CSV format. Using file {csv_file_name}.")
-
-                                if data_source['lob_columns'] != '' and self.config_parser.should_migrate_lob_values():
-                                    # LOB data migration - use the file directly
-                                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data source for table {target_table} has LOB columns: {data_source['lob_columns']}. Migrating LOB data.")
-
-                                    # create intermediate table for rows without LOB data
-                                    create_import_table_sql = re.sub(
-                                        target_table,
-                                        f"{target_table}_import",
-                                        table_data['target_table_sql'],
-                                        flags=re.IGNORECASE
-                                    )
-                                    create_import_table_sql = re.sub( 'bytea', 'text', create_import_table_sql, flags=re.IGNORECASE)
-                                    self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Creating intermediate import table with SQL: {create_import_table_sql}")
-                                    worker_target_connection.execute_query(create_import_table_sql)
-                                    imp_table_copy_command = f"""COPY "{target_schema}"."{target_table}_import" FROM STDIN WITH
-                                        (FORMAT CSV, HEADER {data_source['format_options']['header']},
-                                        NULL '\\N',
-                                        DELIMITER '{data_source['format_options']['delimiter']}')"""
-                                    worker_target_connection.copy_from_file(imp_table_copy_command, csv_file_name)
-
-                                    # Loop over import table row by row, select all columns, find column(s) specified in lob_columns and read their content
-                                    lob_columns = [col.strip() for col in data_source['lob_columns'].split(',') if col.strip()]
-                                    select_sql = f'SELECT * FROM "{target_schema}"."{target_table}_import"'
-                                    rows = worker_target_connection.fetch_all_rows(select_sql)
-                                    part_name = 'process LOB data'
-                                    for row in rows:
-                                        row = list(row)  # Convert tuple to list for mutability
-                                        row_dict = dict(zip([col['column_name'] for col in table_data['target_columns'].values()], row))
-                                        for lob_col in lob_columns:
-                                            for lob_col_index, col_info in table_data['target_columns'].items():
-                                                if col_info['column_name'].lower() == lob_col.lower():
-                                                    part_name = 'lob column index'
-                                                    lob_col_index = int(lob_col_index)
-                                                    break
-                                            lob_value = row_dict.get(lob_col)
-                                            if lob_value is not None:
-                                                parts = lob_value.split(',')
-                                                start = int(parts[0], 16)
-                                                length = int(parts[1], 16)
-                                                filename = parts[2]
-                                                filepath = os.path.join(database_export_path, filename)
-
-                                                part_name = 'read LOB data'
-                                                with open(filepath, 'rb') as f:
-                                                    f.seek(start)
-                                                    chunk = f.read(length)
-
-                                                if chunk:
-                                                    part_name = 'update LOB data'
-                                                    row[lob_col_index - 1] = chunk
-
-                                        # Insert the row into the target table
-                                        insert_sql = f"""INSERT INTO "{target_schema}"."{target_table}" ({', '.join([col['column_name'] for col in table_data['target_columns'].values()])}) VALUES ({', '.join(['%s'] * len(row))})"""
-                                        worker_target_connection.execute_query(insert_sql, row)
-                                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data copied successfully from CSV file {csv_file_name} to table {target_table} with LOB columns.")
-                                    # Drop the intermediate import table
-                                    worker_target_connection.execute_query(f'DROP TABLE IF EXISTS "{target_schema}"."{target_table}_import" CASCADE')
-                                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Intermediate import table {target_table}_import dropped successfully.")
-                                    target_table_rows = worker_target_connection.get_rows_count(target_schema, target_table)
-                                    data_import_end_time = time.time()
-                                    data_import_duration = data_import_end_time - data_import_start_time
-                                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data import duration: {data_import_duration:.2f} seconds, rows migrated: {target_table_rows}.")
-
-                                else:
-
-                                    if data_source['lob_columns'] != '' and not self.config_parser.should_migrate_lob_values():
-                                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data source for table {target_table} has LOB columns: {data_source['lob_columns']}, but LOB migration is disabled. Skipping LOB data migration.")
-
-                                    # No LOB columns - standard CSV import
-                                    # CSV data source - directly import into target database
-                                    part_name = 'copy data from CSV'
-                                    self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Executing COPY command: {copy_command}")
-                                    worker_target_connection.copy_from_file(copy_command, csv_file_name)
-
-                                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data copied successfully from CSV file {csv_file_name} to table {target_table}.")
-
-                                target_table_rows = worker_target_connection.get_rows_count(target_schema, target_table)
-                                data_import_end_time = time.time()
-                                data_import_duration = data_import_end_time - data_import_start_time
-                                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data import duration: {data_import_duration:.2f} seconds, rows migrated: {target_table_rows}.")
-
-                                # self.migrator_tables.update_table_status(table_data['id'], True, f'migrated OK ({rows_migrated} rows)')
                                 migrator_tables.update_data_migration_status({
                                     'row_id': protocol_id,
                                     'success': True,
                                     'message': 'OK',
                                     'target_table_rows': target_table_rows,
                                     'batch_count': 0,
-                                    'shortest_batch_seconds': data_import_duration,
-                                    'longest_batch_seconds': data_import_duration,
-                                    'average_batch_seconds': data_import_duration,
+                                    'shortest_batch_seconds': 0,
+                                    'longest_batch_seconds': 0,
+                                    'average_batch_seconds': 0,
                                 })
+                            else:
 
-                            except Exception as e:
-                                self.migrator_tables.update_table_status(table_data['id'], False, f'ERROR: {e}')
-                                self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: ({part_name}) Error copying data from CSV file {csv_file_name} to table {target_table}: {e}")
-                                return False
+                                try:
+                                    data_import_start_time = time.time()
+                                    database_export_path = os.path.dirname(data_source['file_name'])
+                                    if data_source['format_options']['format'].upper() == 'UNL':
+                                        # UNL data source - must be converted to CSV first
+                                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data source for table {target_table} is UNL format. Converting to CSV.")
+                                        part_name = 'convert UNL to CSV'
+                                        csv_file_name = data_source['converted_file_name']
+                                        self.config_parser.convert_unl_to_csv(data_source, table_data['source_columns'], table_data['target_columns'])
+
+                                    elif data_source['format_options']['format'].upper() == 'CSV':
+                                        # CSV data source - use the file directly
+                                        csv_file_name = data_source['file_name']
+                                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data source for table {target_table} is CSV format. Using file {csv_file_name}.")
+
+                                    if data_source['lob_columns'] != '' and self.config_parser.should_migrate_lob_values():
+                                        # LOB data migration - use the file directly
+                                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data source for table {target_table} has LOB columns: {data_source['lob_columns']}. Migrating LOB data.")
+
+                                        # create intermediate table for rows without LOB data
+                                        create_import_table_sql = re.sub(
+                                            target_table,
+                                            f"{target_table}_import",
+                                            table_data['target_table_sql'],
+                                            flags=re.IGNORECASE
+                                        )
+                                        create_import_table_sql = re.sub( 'bytea', 'text', create_import_table_sql, flags=re.IGNORECASE)
+                                        self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Creating intermediate import table with SQL: {create_import_table_sql}")
+                                        worker_target_connection.execute_query(create_import_table_sql)
+                                        imp_table_copy_command = f"""COPY "{target_schema}"."{target_table}_import" FROM STDIN WITH
+                                            (FORMAT CSV, HEADER {data_source['format_options']['header']},
+                                            NULL '\\N',
+                                            DELIMITER '{data_source['format_options']['delimiter']}')"""
+                                        worker_target_connection.copy_from_file(imp_table_copy_command, csv_file_name)
+
+                                        # Loop over import table row by row, select all columns, find column(s) specified in lob_columns and read their content
+                                        lob_columns = [col.strip() for col in data_source['lob_columns'].split(',') if col.strip()]
+                                        select_sql = f'SELECT * FROM "{target_schema}"."{target_table}_import"'
+                                        rows = worker_target_connection.fetch_all_rows(select_sql)
+                                        part_name = 'process LOB data'
+                                        for row in rows:
+                                            row = list(row)  # Convert tuple to list for mutability
+                                            row_dict = dict(zip([col['column_name'] for col in table_data['target_columns'].values()], row))
+                                            for lob_col in lob_columns:
+                                                for lob_col_index, col_info in table_data['target_columns'].items():
+                                                    if col_info['column_name'].lower() == lob_col.lower():
+                                                        part_name = 'lob column index'
+                                                        lob_col_index = int(lob_col_index)
+                                                        break
+                                                lob_value = row_dict.get(lob_col)
+                                                if lob_value is not None:
+                                                    parts = lob_value.split(',')
+                                                    start = int(parts[0], 16)
+                                                    length = int(parts[1], 16)
+                                                    filename = parts[2]
+                                                    filepath = os.path.join(database_export_path, filename)
+
+                                                    part_name = 'read LOB data'
+                                                    with open(filepath, 'rb') as f:
+                                                        f.seek(start)
+                                                        chunk = f.read(length)
+
+                                                    if chunk:
+                                                        part_name = 'update LOB data'
+                                                        row[lob_col_index - 1] = chunk
+
+                                            # Insert the row into the target table
+                                            insert_sql = f"""INSERT INTO "{target_schema}"."{target_table}" ({', '.join([col['column_name'] for col in table_data['target_columns'].values()])}) VALUES ({', '.join(['%s'] * len(row))})"""
+                                            worker_target_connection.execute_query(insert_sql, row)
+                                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data copied successfully from CSV file {csv_file_name} to table {target_table} with LOB columns.")
+                                        # Drop the intermediate import table
+                                        worker_target_connection.execute_query(f'DROP TABLE IF EXISTS "{target_schema}"."{target_table}_import" CASCADE')
+                                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Intermediate import table {target_table}_import dropped successfully.")
+                                        target_table_rows = worker_target_connection.get_rows_count(target_schema, target_table)
+                                        data_import_end_time = time.time()
+                                        data_import_duration = data_import_end_time - data_import_start_time
+                                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data import duration: {data_import_duration:.2f} seconds, rows migrated: {target_table_rows}.")
+
+                                    else:
+
+                                        if data_source['lob_columns'] != '' and not self.config_parser.should_migrate_lob_values():
+                                            self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data source for table {target_table} has LOB columns: {data_source['lob_columns']}, but LOB migration is disabled. Skipping LOB data migration.")
+
+                                        # No LOB columns - standard CSV import
+                                        # CSV data source - directly import into target database
+                                        part_name = 'copy data from CSV'
+                                        self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Executing COPY command: {copy_command}")
+                                        worker_target_connection.copy_from_file(copy_command, csv_file_name)
+
+                                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data copied successfully from CSV file {csv_file_name} to table {target_table}.")
+
+                                    target_table_rows = worker_target_connection.get_rows_count(target_schema, target_table)
+                                    data_import_end_time = time.time()
+                                    data_import_duration = data_import_end_time - data_import_start_time
+                                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data import duration: {data_import_duration:.2f} seconds, rows migrated: {target_table_rows}.")
+
+                                    # self.migrator_tables.update_table_status(table_data['id'], True, f'migrated OK ({rows_migrated} rows)')
+                                    migrator_tables.update_data_migration_status({
+                                        'row_id': protocol_id,
+                                        'success': True,
+                                        'message': 'OK',
+                                        'target_table_rows': target_table_rows,
+                                        'batch_count': 0,
+                                        'shortest_batch_seconds': data_import_duration,
+                                        'longest_batch_seconds': data_import_duration,
+                                        'average_batch_seconds': data_import_duration,
+                                    })
+
+                                except Exception as e:
+                                    self.migrator_tables.update_table_status(table_data['id'], False, f'ERROR: {e}')
+                                    self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: ({part_name}) Error copying data from CSV file {csv_file_name} to table {target_table}: {e}")
+                                    return False
+                    else:
+                        if not data_source['file_found'] and data_source['file_name'] is not None:
+                            self.config_parser.print_log_message('INFO', f"Worker {worker_id}: ({part_name}) Data file {data_source['file_name']} not found for table {target_table}.")
+
+                            on_missing_data_file = self.config_parser.get_source_database_export_on_missing_data_file()
+                            if on_missing_data_file == 'skip':
+                                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Skipping data migration for table {target_table} due to missing data file.")
+                                use_source_table = False
+                                rows_migrated = 0
+                            else:
+                                self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Data file {data_source['file_name']} not found for table {target_table}. Switching to source table.")
+                                use_source_table = True
+
                 else:
+                    use_source_table = True
+
+                if use_source_table:
                     part_name = 'migrate data'
                     self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Migrating data for table {target_table} from source database.")
 

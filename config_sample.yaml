@@ -84,6 +84,13 @@ source:
   # In case of Informix, if source table contains CLOB or BLOB columns, import follows different processing path to properly handle LOB values
   database_export:
 
+    # action to take if data file is not found
+    #   error - raise an error and stop the migration
+    #   skip - skip the table and continue with the migration
+    #   source_table - use source table from the source database instead of the data file
+    # default is "source_table"
+    on_missing_data_file: skip
+
     # CSV example - separate CSV files for some or all table are expected in the specified directory
     format: "CSV"
     file: "/path/to/data/files/{{source_schema}}.{{source_table}}.csv"

@@ -2,6 +2,11 @@
 
 ## 0.9.5 - 2025.08.xx
 
+- 2025.08.14:
+
+  - Implemented parallel import of LOB values in Informix connector - table worker now starts in config file defined number of parallel workers to import LOB data in parallel. This option is necessary mainly for tables with several hundreds of clob* / blob* export files.
+    - Rationale: Informix UNLOAD / backup exports CLOB / BLOB values into separate files, each max 2 GB of size, and their names puts into pointers in the main UNL export data file. Simple sequential processing of these files is doable up to 10 distinct files. With higher counts, parallel processing is necessary to avoid long delays in the migration process and better use available resources.
+
 - 2025.08.06:
 
   - Significant improvements in UNL to CSV conversion - added check for expected target data types for better validation of processed data

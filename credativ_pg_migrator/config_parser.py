@@ -549,8 +549,17 @@ class ConfigParser:
     def get_source_database_export_file(self):
         return self.get_source_database_export().get('file', None)
 
+    def get_source_database_export_file_path(self):
+        export_file = self.get_source_database_export_file()
+        if export_file is None:
+            return None
+        return os.path.abspath(export_file)
+
     def get_source_database_export_header(self):
         return self.get_source_database_export().get('header', None)
+
+    def get_source_database_export_workers(self):
+        return self.get_source_database_export().get('workers', 4)
 
     def get_source_database_export_conversion_path(self):
         conversion_path = self.get_source_database_export().get('conversion_path', None)
@@ -594,6 +603,9 @@ class ConfigParser:
 
     def get_source_database_export_lob_columns(self):
         return self.get_source_database_export().get('lob_columns', [])
+
+    def get_table_name_for_lob_import(self, table_name):
+        return f"{table_name}_unllobimport"
 
 
     # another service functions

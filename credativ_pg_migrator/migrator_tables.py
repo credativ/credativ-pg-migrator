@@ -2553,6 +2553,7 @@ class MigratorTables:
         cursor = self.protocol_connection.connection.cursor()
         cursor.execute(query)
         table = cursor.fetchone()
+        cursor.close()
         if not table:
             return None
         return self.decode_table_row(table)

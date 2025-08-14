@@ -573,20 +573,29 @@ class Orchestrator:
 
                                     try:
                                         if data_source_settings['lob_columns'] != '' and self.config_parser.should_migrate_lob_values():
+
+                                            table_name_for_lob_import = self.config_parser.get_table_name_for_lob_import(target_table)
                                             # LOB data migration - use the file directly
                                             self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data source for table {target_table} has LOB columns: {data_source_settings['lob_columns']}. Migrating LOB data.")
+
+                                            # drop table for lob import if exists
+                                            drop_import_table_sql = f'DROP TABLE IF EXISTS "{target_schema}"."{table_name_for_lob_import}" CASCADE'
+                                            worker_target_connection.execute_query(drop_import_table_sql)
+                                            self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Intermediate import table {table_name_for_lob_import} dropped successfully.")
 
                                             # create intermediate table for rows without LOB data
                                             create_import_table_sql = re.sub(
                                                 target_table,
-                                                f"{target_table}_import",
+                                                f"{table_name_for_lob_import}",
                                                 table_data['target_table_sql'],
                                                 flags=re.IGNORECASE
                                             )
                                             create_import_table_sql = re.sub( 'bytea', 'text', create_import_table_sql, flags=re.IGNORECASE)
                                             self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Creating intermediate import table with SQL: {create_import_table_sql}")
                                             worker_target_connection.execute_query(create_import_table_sql)
-                                            imp_table_copy_command = f"""COPY "{target_schema}"."{target_table}_import" FROM STDIN WITH
+
+                                            # importing CSV (converted UNL) data into intermediate table
+                                            imp_table_copy_command = f"""COPY "{target_schema}"."{table_name_for_lob_import}" FROM STDIN WITH
                                                 (FORMAT CSV, HEADER {data_source_settings['format_options']['header']},
                                                 NULL '\\N',
                                                 DELIMITER '{data_source_settings['format_options']['delimiter']}')"""
@@ -594,42 +603,106 @@ class Orchestrator:
 
                                             # Loop over import table row by row, select all columns, find column(s) specified in lob_columns and read their content
                                             lob_columns = [col.strip() for col in data_source_settings['lob_columns'].split(',') if col.strip()]
-                                            select_sql = f'SELECT * FROM "{target_schema}"."{target_table}_import"'
-                                            rows = worker_target_connection.fetch_all_rows(select_sql)
-                                            part_name = 'process LOB data'
-                                            for row in rows:
-                                                row = list(row)  # Convert tuple to list for mutability
-                                                row_dict = dict(zip([col['column_name'] for col in table_data['target_columns'].values()], row))
-                                                for lob_col in lob_columns:
-                                                    for lob_col_index, col_info in table_data['target_columns'].items():
-                                                        if col_info['column_name'].lower() == lob_col.lower():
-                                                            part_name = 'lob column index'
-                                                            lob_col_index = int(lob_col_index)
-                                                            break
-                                                    lob_value = row_dict.get(lob_col)
-                                                    if lob_value is not None:
-                                                        parts = lob_value.split(',')
-                                                        start = int(parts[0], 16)
-                                                        length = int(parts[1], 16)
-                                                        filename = parts[2]
-                                                        filepath = os.path.join(database_export_path, filename)
+                                            lob_col_name = None
+                                            lob_col_index = None
+                                            lob_col_type = None
 
-                                                        part_name = 'read LOB data'
-                                                        with open(filepath, 'rb') as f:
-                                                            f.seek(start)
-                                                            chunk = f.read(length)
+                                            for lob_col in lob_columns:
+                                                lob_col_name = lob_col
+                                                for lob_col_ind, col_info in table_data['target_columns'].items():
+                                                    if col_info['column_name'].lower() == lob_col.lower():
+                                                        lob_col_index = int(lob_col_ind)
+                                                        lob_col_type = col_info['data_type']
+                                                        break
 
-                                                        if chunk:
-                                                            part_name = 'update LOB data'
-                                                            row[lob_col_index - 1] = chunk
+                                                if lob_col_name is not None and lob_col_index is not None:
+                                                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: LOB column {lob_col_name} found in target table {target_table} - index: {lob_col_index}, type: {lob_col_type}")
 
-                                                # Insert the row into the target table
-                                                insert_sql = f"""INSERT INTO "{target_schema}"."{target_table}" ({', '.join([col['column_name'] for col in table_data['target_columns'].values()])}) VALUES ({', '.join(['%s'] * len(row))})"""
-                                                worker_target_connection.execute_query(insert_sql, row)
+                                                    select_datafiles_sql = f"""SELECT DISTINCT split_part({lob_col_name},',',3) as datafile, count(*) as occurrences FROM {target_schema}.{table_name_for_lob_import} group by 1 order by 1;"""
+
+                                                    worker_target_connection.execute_query(select_datafiles_sql)
+                                                    datafiles = worker_target_connection.fetch_all()
+                                                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Found {len(datafiles)} distinct data files for LOB column {lob_col_name}")
+
+                                                    max_lob_parallel_workers = self.config_parser.get_source_database_export_workers()
+                                                    if len(datafiles) <= 10:
+                                                        max_lob_parallel_workers = 1
+                                                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Set max LOB parallel workers to {max_lob_parallel_workers} due to low data file count ({len(datafiles)})")
+                                                    if len(datafiles) > 10 and len(datafiles) <= 50:
+                                                        max_lob_parallel_workers = 2
+                                                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Set max LOB parallel workers to {max_lob_parallel_workers} due to medium data file count ({len(datafiles)})")
+                                                    if len(datafiles) > 200:
+                                                        max_lob_parallel_workers = max_lob_parallel_workers * 2
+                                                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Set max LOB parallel workers to {max_lob_parallel_workers} due to high data file count ({len(datafiles)})")
+
+                                                    if len(datafiles) > 0:
+
+                                                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Processing {len(datafiles)} data files for LOB column {lob_col_name}")
+                                                        current_datafile_num = 0
+
+                                                        with concurrent.futures.ThreadPoolExecutor(max_workers=max_lob_parallel_workers) as executor:
+                                                            futures = {}
+                                                            for datafile_row in datafiles:
+                                                                datafile = datafile_row[0]
+                                                                occurrences = datafile_row[1]
+                                                                current_datafile_num += 1
+
+                                                                settings = {
+                                                                    'target_schema': self.config_parser.get_target_schema(),
+                                                                    'target_table': self.config_parser.get_target_table(),
+                                                                    'lob_column': lob_col_name,
+                                                                    'lob_col_index': lob_col_index,
+                                                                    'lob_col_type': lob_col_type,
+                                                                    'target_columns': table_data['target_columns'],
+                                                                    'datafile': datafile,
+                                                                    'datafiles_count': len(datafiles),
+                                                                    'current_datafile_num': current_datafile_num,
+                                                                    'occurrences': occurrences,
+                                                                    'lob_files_path': self.config_parser.get_source_database_export_file_path(),
+                                                                }
+
+                                                                print(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: parallel LOB processing: futures running count: {len(futures)}")
+                                                                while len(futures) >= max_lob_parallel_workers:
+
+                                                                    done, _ = concurrent.futures.wait(futures, return_when=concurrent.futures.FIRST_COMPLETED)
+                                                                    for future in done:
+                                                                        datafile_done = futures.pop(future)
+                                                                        if future.result() == False:
+                                                                            if self.on_error_action == 'stop':
+                                                                                print(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: parallel LOB processing: Stopping execution due to error.")
+                                                                                exit(1)
+                                                                        else:
+                                                                            print(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: parallel LOB processing: {datafile_done} LOBs migrated OK")
+
+                                                                # Submit the next task
+                                                                future = executor.submit(self.lob_worker, settings)
+                                                                futures[future] = datafile
+
+                                                            # Process remaining futures
+                                                            print(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: parallel LOB processing: Processing remaining futures")
+                                                            for future in concurrent.futures.as_completed(futures):
+                                                                datafile_done = futures[future]
+                                                                if future.result() == False:
+                                                                    if self.on_error_action == 'stop':
+                                                                        print(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: parallel LOB processing: Stopping execution due to error.")
+                                                                        exit(1)
+                                                                else:
+                                                                    print(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: parallel LOB processing: {datafile_done} LOBs migrated OK")
+
+                                                        print(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: parallel LOB processing: All datafiles processed successfully.")
+                                                    else:
+                                                        print(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: parallel LOB processing: No datafiles to process.")
+
+
+                                                else:
+                                                    self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: LOB column {lob_col_name} not found in target table {target_table}. Skipping LOB data migration for this column.")
+                                                    continue
+
+
                                             self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data copied successfully from CSV file {csv_file_name} to table {target_table} with LOB columns.")
                                             # Drop the intermediate import table
-                                            worker_target_connection.execute_query(f'DROP TABLE IF EXISTS "{target_schema}"."{target_table}_import" CASCADE')
-                                            self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Intermediate import table {target_table}_import dropped successfully.")
+                                            worker_target_connection.execute_query(f'DROP TABLE IF EXISTS "{target_schema}"."{table_name_for_lob_import}" CASCADE')
+                                            self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Intermediate import table {table_name_for_lob_import} dropped successfully.")
                                             target_table_rows = worker_target_connection.get_rows_count(target_schema, target_table)
                                             data_import_end_time = time.time()
                                             data_import_duration = data_import_end_time - data_import_start_time
@@ -802,6 +875,111 @@ class Orchestrator:
             self.migrator_tables.update_table_status(table_data['id'], False, f'ERROR: {e_main}')
             self.handle_error(e_main, f"table_worker {worker_id} ({part_name}) {target_table}")
             return False
+
+    def lob_worker(self, settings):
+        target_schema = settings['target_schema']
+        target_table = settings['target_table']
+        unl_import_table = settings['unl_import_table']
+        lob_column = settings['lob_column']
+        lob_col_index = settings['lob_col_index']
+        lob_col_type = settings['lob_col_type']
+        target_columns = settings['target_columns']
+        datafile = settings['datafile']
+        datafiles_count = settings['datafiles_count']
+        current_datafile_num = settings['current_datafile_num']
+        occurrences = settings['occurrences']
+        lob_files_path = settings['lob_files_path']
+
+        worker_insert_connection = self.load_connector('target')
+        worker_insert_connection.connect()
+        worker_insert_connection.autocommit = True  # Enable autocommit for the insert connection
+
+        processing_start_time = time.time()
+        worker_id = uuid.uuid4()
+        self.config_parser.print_log_message('INFO', f"{time.strftime('%Y-%m-%d %H:%M:%S')}: Worker {worker_id}: started for LOB file: {datafile} - occurrences: {occurrences} - {current_datafile_num}/{datafiles_count}")
+
+        col_list = ', '.join([f'"{col}"' for col in columns])
+        placeholders = ', '.join(['%s'] * len(columns))
+        insert_sql = f'INSERT INTO "{target_schema}"."{target_table}" ({col_list}) VALUES ({placeholders})'
+
+        worker_select_connection = self.load_connector('target')
+        worker_select_connection.connect()
+        cur_select = worker_select_connection.cursor()
+
+        named_cur = worker_select_connection.cursor(name='lobcur_' + str(worker_id).replace('-', '_'))
+        select_sql = f"""SELECT {col_list} FROM "{target_schema}"."{unl_import_table}" WHERE split_part({lob_column},',',3) = '{datafile}'"""
+
+        self.config_parser.print_log_message('DEBUG', f"{time.strftime('%Y-%m-%d %H:%M:%S')}: Worker {worker_id}: Fetching rows from '{unl_import_table}' with query: {select_sql}")
+        counter = 0
+        read_lines = 0
+
+        named_cur.execute(select_sql)
+        row = named_cur.fetchone() # Fetch the first row
+        while row is not None:
+            row = list(row)
+            read_lines += 1
+            content = row[lob_col_index]
+            content_is_null = False
+
+            if content is not None and content != '' and content != '0,0,0':
+                parts = content.split(',')
+                start = int(parts[0], 16)
+                length = int(parts[1], 16)
+                datafile = parts[2]
+                filepath = os.path.join(lob_files_path, datafile)
+            else:
+                content_is_null = True
+                start = 0
+                length = 0
+                filepath = None
+
+            # if length > 1024*1024*1024:
+            #   self.config_parser.print_log_message('INFO', f"{time.strftime('%Y-%m-%d %H:%M:%S')}: Worker: {worker_id}: LOB size exceeds 1GB: {length} bytes ({length / 1024 / 1024 / 1024}) GB - in row: {row} - setting to NULL.")
+            #   content_is_null = True
+            # if args.test_sizes:
+            #   row = named_cur.fetchone() # Fetch in test mode
+            #   continue
+
+            if not content_is_null and os.path.exists(filepath):
+
+                if lob_col_type.lower() == 'bytea':
+                    # For BYTEA, read the file as binary
+                    with open(filepath, 'rb') as f:
+                        f.seek(start)
+                        chunk = f.read(length)
+
+                elif lob_col_type.lower() == 'text':
+                    # For TEXT, read the file as text
+                    with open(filepath, 'r', encoding='utf-8') as f:
+                        f.seek(start)
+                        chunk = f.read(length)
+
+                row[lob_col_index] = chunk
+
+            if content_is_null:
+                row[lob_col_index] = None
+
+            try:
+                cur_insert = worker_insert_connection.cursor()
+                cur_insert.execute(insert_sql, row)
+                cur_insert.close()
+                counter += 1
+            except Exception as e:
+                cur_insert.close()
+                self.config_parser.print_log_message('ERROR', f"Worker: {worker_id}: Error executing INSERT command for row: {row} (counter: {counter}), error: {e}")
+
+            row = named_cur.fetchone() # Fetch the next row
+
+        named_cur.close()
+        self.config_parser.print_log_message('INFO', f"{time.strftime('%Y-%m-%d %H:%M:%S')}: Worker: {worker_id}: Processed {read_lines} rows from '{unl_import_table}', datafile: {datafile}, occurrences: {occurrences} - inserted {counter} into '{target_schema}.{target_table}'.")
+
+        cur_select.close()
+        worker_select_connection.close()
+
+        worker_insert_connection.close()
+        self.config_parser.print_log_message('INFO', f"{time.strftime('%Y-%m-%d %H:%M:%S')}: Worker: {worker_id}: Processing completed in {time.time() - processing_start_time} seconds.")
+        return True  # Indicate successful processing of this datafile
+
 
     def index_worker(self, index_data, target_db_type):
         worker_id = uuid.uuid4()

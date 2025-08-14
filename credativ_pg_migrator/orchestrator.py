@@ -491,6 +491,8 @@ class Orchestrator:
                             DELIMITER '{data_source['format_options']['delimiter']}')"""
                             ## , QUOTE '{data_source['format_options']['quote']}'
 
+                        ## for other formats relevant to other databases we simply add new data types
+                        ## CSV format is common for all databases, but might be necessary to convert it to PostgreSQL CSV conventions
                         if data_source['format_options']['format'].upper() in ('CSV', 'UNL'):
 
                             source_table_rows = worker_source_connection.get_rows_count(table_data['source_schema'], table_data['source_table'])
@@ -524,28 +526,31 @@ class Orchestrator:
                             else:
 
                                 data_import_start_time = time.time()
-                                database_export_path = os.path.dirname(data_source['file_name'])
-
-                                big_files_split_enabled = self.config_parser.get_source_database_export_big_files_split_enabled()
-                                data_source_file_size = data_source['file_size']
-
-                                data_source_file_size_str = ""
-                                if data_source_file_size is not None:
-                                    data_source_file_size_str = f"{data_source_file_size} B ({data_source_file_size / (1024 ** 3):.2f} GB)"
-                                split_threshold_bytes = self.config_parser.get_source_database_export_big_files_split_threshold_bytes()
-                                split_threshold_bytes_str = ""
-                                if split_threshold_bytes is not None:
-                                    split_threshold_bytes_str = f"{split_threshold_bytes} B ({split_threshold_bytes / (1024 ** 3):.2f} GB)"
-
-                                self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Table: {target_table}: Data source file size: {data_source_file_size_str}, split threshold: {split_threshold_bytes_str}, big files split enabled: {big_files_split_enabled}")
-
                                 source_files_to_process = []
                                 converted_files_to_process = []
-                                if big_files_split_enabled and data_source_file_size > split_threshold_bytes:
-                                    # Big files split enabled and file size exceeds threshold
-                                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {target_table}: Data source for table {target_table} is a big file ({data_source_file_size} bytes). Splitting into smaller files.")
-                                    source_files_to_process, converted_files_to_process = self.config_parser.split_big_unl_file(data_source)
-                                    self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Table {target_table}: Split source files: {source_files_to_process}, converted target file names: {converted_files_to_process}")
+
+                                ## Split of big files is currently implemented only for Informix UNL data files
+                                ## And even here it can be not efficient if client uses slow disk(s)
+                                if self.config_parser.get_source_db_type() == 'informix' and data_source['format_options']['format'].upper() == 'UNL':
+                                    big_files_split_enabled = self.config_parser.get_source_database_export_big_files_split_enabled()
+                                    data_source_file_size = data_source['file_size']
+
+                                    data_source_file_size_str = ""
+                                    if data_source_file_size is not None:
+                                        data_source_file_size_str = f"{data_source_file_size} B ({data_source_file_size / (1024 ** 3):.2f} GB)"
+                                    split_threshold_bytes = self.config_parser.get_source_database_export_big_files_split_threshold_bytes()
+                                    split_threshold_bytes_str = ""
+                                    if split_threshold_bytes is not None:
+                                        split_threshold_bytes_str = f"{split_threshold_bytes} B ({split_threshold_bytes / (1024 ** 3):.2f} GB)"
+
+                                    self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Table: {target_table}: Data source file size: {data_source_file_size_str}, split threshold: {split_threshold_bytes_str}, big files split enabled: {big_files_split_enabled}")
+
+                                    if big_files_split_enabled and data_source_file_size > split_threshold_bytes:
+                                        # Big files split enabled and file size exceeds threshold
+                                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {target_table}: Data source for table {target_table} is a big file ({data_source_file_size} bytes). Splitting into smaller files.")
+                                        source_files_to_process, converted_files_to_process = self.config_parser.split_big_unl_file(data_source)
+                                        self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Table {target_table}: Split source files: {source_files_to_process}, converted target file names: {converted_files_to_process}")
+
                                 else:
                                     # Single file processing
                                     source_files_to_process.append(data_source['file_name'])

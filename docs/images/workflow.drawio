@@ -1,0 +1,160 @@
+<mxfile host="app.diagrams.net" agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36" version="27.1.6">
+  <diagram id="C5RBs43oDa-KdzZeNtuy" name="Page-1">
+    <mxGraphModel dx="2066" dy="2320" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="827" pageHeight="1169" math="0" shadow="0">
+      <root>
+        <mxCell id="WIyWlLk6GJQsqaUBKTNV-0" />
+        <mxCell id="WIyWlLk6GJQsqaUBKTNV-1" parent="WIyWlLk6GJQsqaUBKTNV-0" />
+        <mxCell id="ggtYC4HC-yzscba0IHGT-2" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" edge="1" parent="WIyWlLk6GJQsqaUBKTNV-1" source="ggtYC4HC-yzscba0IHGT-0" target="ggtYC4HC-yzscba0IHGT-1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="ggtYC4HC-yzscba0IHGT-0" value="Parse config file" style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;glass=0;strokeWidth=1;shadow=0;" vertex="1" parent="WIyWlLk6GJQsqaUBKTNV-1">
+          <mxGeometry x="354" y="40" width="120" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="ggtYC4HC-yzscba0IHGT-6" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" edge="1" parent="WIyWlLk6GJQsqaUBKTNV-1" source="ggtYC4HC-yzscba0IHGT-1" target="ggtYC4HC-yzscba0IHGT-3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="ggtYC4HC-yzscba0IHGT-1" value="Create protocol tables" style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;glass=0;strokeWidth=1;shadow=0;" vertex="1" parent="WIyWlLk6GJQsqaUBKTNV-1">
+          <mxGeometry x="354" y="110" width="120" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="ggtYC4HC-yzscba0IHGT-7" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" edge="1" parent="WIyWlLk6GJQsqaUBKTNV-1" source="ggtYC4HC-yzscba0IHGT-3" target="ggtYC4HC-yzscba0IHGT-4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="ggtYC4HC-yzscba0IHGT-8" value="Database" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];" vertex="1" connectable="0" parent="ggtYC4HC-yzscba0IHGT-7">
+          <mxGeometry x="-0.0508" y="-1" relative="1" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="ggtYC4HC-yzscba0IHGT-10" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" edge="1" parent="WIyWlLk6GJQsqaUBKTNV-1" source="ggtYC4HC-yzscba0IHGT-3" target="ggtYC4HC-yzscba0IHGT-9">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="ggtYC4HC-yzscba0IHGT-11" value="Dump file" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];" vertex="1" connectable="0" parent="ggtYC4HC-yzscba0IHGT-10">
+          <mxGeometry x="-0.0417" y="-1" relative="1" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="ggtYC4HC-yzscba0IHGT-3" value="Migration&amp;nbsp;&lt;div&gt;source&lt;/div&gt;" style="rhombus;whiteSpace=wrap;html=1;shadow=0;fontFamily=Helvetica;fontSize=12;align=center;strokeWidth=1;spacing=6;spacingTop=-4;" vertex="1" parent="WIyWlLk6GJQsqaUBKTNV-1">
+          <mxGeometry x="364" y="180" width="100" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="ggtYC4HC-yzscba0IHGT-14" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="WIyWlLk6GJQsqaUBKTNV-1" source="ggtYC4HC-yzscba0IHGT-4" target="ggtYC4HC-yzscba0IHGT-12">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="173" y="325" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="ggtYC4HC-yzscba0IHGT-4" value="Read metadata of all objects from source database" style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;glass=0;strokeWidth=1;shadow=0;" vertex="1" parent="WIyWlLk6GJQsqaUBKTNV-1">
+          <mxGeometry x="100" y="192.5" width="146" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="ggtYC4HC-yzscba0IHGT-13" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;entryX=1;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="WIyWlLk6GJQsqaUBKTNV-1" source="ggtYC4HC-yzscba0IHGT-9" target="ggtYC4HC-yzscba0IHGT-12">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="645" y="325" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="ggtYC4HC-yzscba0IHGT-9" value="Read SQL dump file, extract metadata of all objects" style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;glass=0;strokeWidth=1;shadow=0;" vertex="1" parent="WIyWlLk6GJQsqaUBKTNV-1">
+          <mxGeometry x="570" y="195" width="150" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="ggtYC4HC-yzscba0IHGT-17" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" edge="1" parent="WIyWlLk6GJQsqaUBKTNV-1" source="ggtYC4HC-yzscba0IHGT-12" target="ggtYC4HC-yzscba0IHGT-16">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="ggtYC4HC-yzscba0IHGT-12" value="&lt;div&gt;Convert data model objects&amp;nbsp;&lt;/div&gt;&lt;div&gt;to target syntax&lt;/div&gt;Store metadata of all objects&amp;nbsp;&lt;div&gt;in protocol tables&lt;/div&gt;" style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;glass=0;strokeWidth=1;shadow=0;" vertex="1" parent="WIyWlLk6GJQsqaUBKTNV-1">
+          <mxGeometry x="299" y="290" width="230" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="ggtYC4HC-yzscba0IHGT-22" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="WIyWlLk6GJQsqaUBKTNV-1" source="ggtYC4HC-yzscba0IHGT-15" target="ggtYC4HC-yzscba0IHGT-20">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="260" y="520" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="ggtYC4HC-yzscba0IHGT-15" value="Create target table" style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;glass=0;strokeWidth=1;shadow=0;" vertex="1" parent="WIyWlLk6GJQsqaUBKTNV-1">
+          <mxGeometry x="200" y="420" width="120" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="ggtYC4HC-yzscba0IHGT-18" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" edge="1" parent="WIyWlLk6GJQsqaUBKTNV-1" source="ggtYC4HC-yzscba0IHGT-16" target="ggtYC4HC-yzscba0IHGT-15">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="ggtYC4HC-yzscba0IHGT-19" value="YES" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];" vertex="1" connectable="0" parent="ggtYC4HC-yzscba0IHGT-18">
+          <mxGeometry x="-0.1364" relative="1" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="ggtYC4HC-yzscba0IHGT-21" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" edge="1" parent="WIyWlLk6GJQsqaUBKTNV-1" source="ggtYC4HC-yzscba0IHGT-16" target="ggtYC4HC-yzscba0IHGT-20">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="ggtYC4HC-yzscba0IHGT-16" value="Create&lt;div&gt;tables?&lt;/div&gt;" style="rhombus;whiteSpace=wrap;html=1;shadow=0;fontFamily=Helvetica;fontSize=12;align=center;strokeWidth=1;spacing=6;spacingTop=-4;" vertex="1" parent="WIyWlLk6GJQsqaUBKTNV-1">
+          <mxGeometry x="364" y="400" width="100" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="ggtYC4HC-yzscba0IHGT-25" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="WIyWlLk6GJQsqaUBKTNV-1" source="ggtYC4HC-yzscba0IHGT-20" target="ggtYC4HC-yzscba0IHGT-24">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="ggtYC4HC-yzscba0IHGT-26" value="YES" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];" vertex="1" connectable="0" parent="ggtYC4HC-yzscba0IHGT-25">
+          <mxGeometry x="-0.1892" y="-2" relative="1" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="ggtYC4HC-yzscba0IHGT-20" value="Migrate&lt;div&gt;data?&lt;/div&gt;" style="rhombus;whiteSpace=wrap;html=1;shadow=0;fontFamily=Helvetica;fontSize=12;align=center;strokeWidth=1;spacing=6;spacingTop=-4;" vertex="1" parent="WIyWlLk6GJQsqaUBKTNV-1">
+          <mxGeometry x="364" y="520" width="100" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="ggtYC4HC-yzscba0IHGT-23" value="Read data from source table" style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;glass=0;strokeWidth=1;shadow=0;" vertex="1" parent="WIyWlLk6GJQsqaUBKTNV-1">
+          <mxGeometry x="50" y="690" width="120" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="ggtYC4HC-yzscba0IHGT-27" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" edge="1" parent="WIyWlLk6GJQsqaUBKTNV-1" source="ggtYC4HC-yzscba0IHGT-24" target="ggtYC4HC-yzscba0IHGT-23">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="ggtYC4HC-yzscba0IHGT-28" value="Database" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];" vertex="1" connectable="0" parent="ggtYC4HC-yzscba0IHGT-27">
+          <mxGeometry x="-0.2444" y="1" relative="1" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="ggtYC4HC-yzscba0IHGT-24" value="Source of migrated&amp;nbsp;&lt;div&gt;data&lt;/div&gt;" style="rhombus;whiteSpace=wrap;html=1;shadow=0;fontFamily=Helvetica;fontSize=12;align=center;strokeWidth=1;spacing=6;spacingTop=-4;" vertex="1" parent="WIyWlLk6GJQsqaUBKTNV-1">
+          <mxGeometry x="180" y="585" width="100" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="ggtYC4HC-yzscba0IHGT-30" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" edge="1" parent="WIyWlLk6GJQsqaUBKTNV-1" source="ggtYC4HC-yzscba0IHGT-29">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="414" y="400" as="targetPoint" />
+            <Array as="points">
+              <mxPoint x="580" y="900" />
+              <mxPoint x="580" y="400" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="ggtYC4HC-yzscba0IHGT-31" value="NO" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];" vertex="1" connectable="0" parent="ggtYC4HC-yzscba0IHGT-30">
+          <mxGeometry x="-0.8338" y="1" relative="1" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="ggtYC4HC-yzscba0IHGT-29" value="All tables migrated?" style="rhombus;whiteSpace=wrap;html=1;shadow=0;fontFamily=Helvetica;fontSize=12;align=center;strokeWidth=1;spacing=6;spacingTop=-4;" vertex="1" parent="WIyWlLk6GJQsqaUBKTNV-1">
+          <mxGeometry x="364" y="860" width="100" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="ggtYC4HC-yzscba0IHGT-33" value="Migrate&lt;div&gt;indexes?&lt;/div&gt;" style="rhombus;whiteSpace=wrap;html=1;shadow=0;fontFamily=Helvetica;fontSize=12;align=center;strokeWidth=1;spacing=6;spacingTop=-4;" vertex="1" parent="WIyWlLk6GJQsqaUBKTNV-1">
+          <mxGeometry x="364" y="1000" width="100" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="ggtYC4HC-yzscba0IHGT-36" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" edge="1" parent="WIyWlLk6GJQsqaUBKTNV-1" source="ggtYC4HC-yzscba0IHGT-34" target="ggtYC4HC-yzscba0IHGT-35">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="ggtYC4HC-yzscba0IHGT-34" value="Parse config file" style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;glass=0;strokeWidth=1;shadow=0;" vertex="1" parent="WIyWlLk6GJQsqaUBKTNV-1">
+          <mxGeometry x="1110" y="40" width="120" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="ggtYC4HC-yzscba0IHGT-35" value="Create protocol tables" style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;glass=0;strokeWidth=1;shadow=0;" vertex="1" parent="WIyWlLk6GJQsqaUBKTNV-1">
+          <mxGeometry x="1110" y="110" width="120" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="ggtYC4HC-yzscba0IHGT-37" value="Normal run:&lt;div&gt;&lt;br&gt;&lt;div&gt;Migrate data model and data&lt;/div&gt;&lt;div&gt;from source to target table&lt;/div&gt;&lt;/div&gt;" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontSize=14;" vertex="1" parent="WIyWlLk6GJQsqaUBKTNV-1">
+          <mxGeometry x="314" y="-80" width="200" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="ggtYC4HC-yzscba0IHGT-38" value="Match data models run:&lt;div&gt;&lt;br&gt;&lt;div&gt;Data models exist in both&amp;nbsp;&lt;/div&gt;&lt;div&gt;source and target table&lt;/div&gt;&lt;div&gt;task is to migrate data&lt;/div&gt;&lt;div&gt;and other objects&lt;/div&gt;&lt;/div&gt;" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontSize=14;" vertex="1" parent="WIyWlLk6GJQsqaUBKTNV-1">
+          <mxGeometry x="1080" y="-95" width="180" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="ggtYC4HC-yzscba0IHGT-39" value="Read all data model objects from source and target databases" style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;glass=0;strokeWidth=1;shadow=0;" vertex="1" parent="WIyWlLk6GJQsqaUBKTNV-1">
+          <mxGeometry x="1090" y="180" width="160" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="ggtYC4HC-yzscba0IHGT-40" value="- add protocol tables - protocol_source_columns, protocol_target_columns&lt;div&gt;&amp;nbsp; - table name, column name, data type, ..... - all columns from json structure&lt;/div&gt;&lt;div&gt;&amp;nbsp; - match names case insensitive, try trigrams&lt;/div&gt;&lt;div&gt;&amp;nbsp; - report unmatched differences&lt;/div&gt;&lt;div&gt;&lt;br&gt;&lt;/div&gt;&lt;div&gt;- add matching section to config file:&lt;/div&gt;&lt;div&gt;&amp;nbsp; - match table name - 1:1 precise names, or regexp&lt;/div&gt;&lt;div&gt;&amp;nbsp; - match column names for table name / table regexp -&amp;gt; 1:1/regexp - for special cases&lt;/div&gt;&lt;div&gt;&amp;nbsp; - match indexes / constraints ???&lt;/div&gt;&lt;div&gt;&lt;br&gt;&lt;/div&gt;&lt;div&gt;- add protocol tables for matching:&lt;/div&gt;&lt;div&gt;&amp;nbsp; - protocol_match_tables&lt;/div&gt;&lt;div&gt;&amp;nbsp; - protocol_match_columns&lt;/div&gt;&lt;div&gt;&amp;nbsp; - contain IDs to main protocol tables but also names&amp;nbsp;&lt;/div&gt;&lt;div&gt;&amp;nbsp; - must show FULL OUTER JOIN - matched/unmatched on both sides&lt;/div&gt;&lt;div&gt;&amp;nbsp; - protocol_match_indexes&lt;/div&gt;&lt;div&gt;&amp;nbsp; - protocol_match_constraints&lt;/div&gt;" style="text;html=1;align=left;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontSize=13;" vertex="1" parent="WIyWlLk6GJQsqaUBKTNV-1">
+          <mxGeometry x="900" y="560" width="520" height="280" as="geometry" />
+        </mxCell>
+        <mxCell id="ggtYC4HC-yzscba0IHGT-41" value="Match:&lt;div&gt;- tables&lt;/div&gt;&lt;div&gt;- columns&lt;/div&gt;&lt;div&gt;- indexes&lt;/div&gt;&lt;div&gt;- constraints&lt;/div&gt;&lt;div&gt;&lt;br&gt;&lt;/div&gt;&lt;div&gt;report unmatched differences&lt;/div&gt;" style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;glass=0;strokeWidth=1;shadow=0;" vertex="1" parent="WIyWlLk6GJQsqaUBKTNV-1">
+          <mxGeometry x="1080" y="280" width="180" height="120" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

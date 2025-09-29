@@ -659,5 +659,12 @@ class DatabaseConnector(ABC):
         """
         pass
 
+    @abstractmethod
+    def fetch_all_rows(self, query):
+        """
+        Fetch all rows from the database using the provided query.
+        """
+        pass
+
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

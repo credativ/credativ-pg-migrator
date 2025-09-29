@@ -1,6 +1,31 @@
 # Changelog
 
-## 0.9.5 - 2025.07.xx
+## 0.9.9 - 2025.08.xx
+
+- 2025.08.14:
+
+  - Implemented parallel import of LOB values in Informix connector - table worker now starts in config file defined number of parallel workers to import LOB data in parallel. This option is necessary mainly for tables with several hundreds of clob* / blob* export files.
+    - Rationale: Informix UNLOAD / backup exports CLOB / BLOB values into separate files, each max 2 GB of size, and their names puts into pointers in the main UNL export data file. Simple sequential processing of these files is doable up to 10 distinct files. With higher counts, parallel processing is necessary to avoid long delays in the migration process and better use available resources.
+  - Split of big UNL files into multiple parts was tested on real live data and its effectiveness is questionable especially if client uses slow disks or all is processed on single disk with limited I/O bandwidth. So, although option is implemented, it may not provide the expected performance improvements in all cases.
+
+- 2025.08.06:
+
+  - Significant improvements in UNL to CSV conversion - added check for expected target data types for better validation of processed data
+  - UNL import can now also skip import of LOB values based on migration.migrate_lob_values setting - LOB value will contain UNL pointer to external LOB data
+  - added missing option "table_schema" into individual table_settings in the config file
+  - added setting database_export.on_missing_data_file to define globally action on missing data files if database_export is specified in the config file
+    - Possible values: "error", "skip", "source_table" - use source table from the source database instead of the data file
+
+- 2025.07.31:
+
+  - Fix in "resume" functionality - planner must check row counts of fully migrated tables to ensure they were not mistakenly marked as fully migrated
+    - Implementation still covers only optimistic variant of resuming migration, i.e. it presumes original planning phase was done correctly and data in the source database did not change since the interruption of the migration
+  - Added experimental support for Informix text dump UNL files as data source for inserting data into target tables.
+    - This is necessary because Informix database can be extremely slow in reading data from tables - depends on license and underlying hardware
+    - UNLOAD dump can be slow too, but still faster than batch select-insert from the source Informix database into the target PostgreSQL database
+    - Includes conversion of UNL format into proper PostgreSQL readable CSV format, compensates for NULL values vs empty strings, and multiline text values
+    - Includes import of LOB values from secondary text/binary files referenced in the UNL file
+    - Includes splitting of UNL files into smaller chunks for parallel processing
 
 - 2025.07.22:
 

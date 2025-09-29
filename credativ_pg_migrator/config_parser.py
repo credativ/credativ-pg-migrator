@@ -20,6 +20,8 @@ import re
 from datetime import datetime
 import os
 import time
+import csv
+from collections import Counter
 
 class ConfigParser:
     def __init__(self, args, logger):
@@ -256,6 +258,9 @@ class ConfigParser:
 
     def get_protocol_name_tables(self):
         return f"{self.get_protocol_name()}_tables"
+
+    def get_protocol_name_data_sources(self):
+        return f"{self.get_protocol_name()}_data_sources"
 
     def get_protocol_name_pk_ranges(self):
         return f"{self.get_protocol_name()}_pk_ranges"
@@ -528,7 +533,107 @@ class ConfigParser:
     def get_target_partitioning(self):
         return self.config.get('target_partitioning', {})
 
+    def get_source_database_export(self):
+        source_config = self.get_source_config()
+        return source_config.get('database_export', {})
+
+    def get_source_database_export_on_missing_data_file(self):
+        return self.get_source_database_export().get('on_missing_data_file', 'source_table')
+
+    def get_source_database_export_format(self):
+        return self.get_source_database_export().get('format', None)
+
+    def get_source_database_export_delimiter(self):
+        return self.get_source_database_export().get('delimiter', "|")
+
+    def get_source_database_export_file(self):
+        return self.get_source_database_export().get('file', None)
+
+    def get_source_database_export_file_path(self):
+        export_file = self.get_source_database_export_file()
+        if export_file is None:
+            return None
+        return os.path.abspath(export_file)
+
+    def get_source_database_export_header(self):
+        return self.get_source_database_export().get('header', None)
+
+    def get_source_database_export_workers(self):
+        return self.get_source_database_export().get('workers', 4)
+
+    def get_source_database_export_conversion_path(self):
+        conversion_path = self.get_source_database_export().get('conversion_path', None)
+        if conversion_path is None:
+            # If conversion_path is not set, try to extract the directory from the export file path
+            export_file = self.get_source_database_export_file()
+            if export_file:
+                return os.path.dirname(os.path.abspath(export_file))
+            return None
+        return conversion_path
+
+    def get_source_database_export_clean(self):
+        return self.get_source_database_export().get('clean', False)
+
+    def get_source_database_export_big_files_split(self):
+        return self.get_source_database_export().get('big_files_split', None)
+
+    def get_source_database_export_big_files_split_enabled(self):
+        big_files_split = self.get_source_database_export_big_files_split()
+        if big_files_split and isinstance(big_files_split, dict):
+            return big_files_split.get('enabled', False)
+        return False
+
+    def get_source_database_export_big_files_split_threshold_bytes(self):
+        big_files_split = self.get_source_database_export_big_files_split()
+        if big_files_split and isinstance(big_files_split, dict):
+            return self.convert_size_to_bytes(big_files_split.get('threshold', None))
+        return None
+
+    def get_source_database_export_big_files_split_chunk_size_bytes(self):
+        big_files_split = self.get_source_database_export_big_files_split()
+        if big_files_split and isinstance(big_files_split, dict):
+            return self.convert_size_to_bytes(big_files_split.get('chunk_size', None))
+        return None
+
+    def get_source_database_export_big_files_split_workers(self):
+        big_files_split = self.get_source_database_export_big_files_split()
+        if big_files_split and isinstance(big_files_split, dict):
+            return big_files_split.get('workers', 4)
+        return -1  ## by default do not use parallel workers if splitting or workers are not specified
+
+    def get_source_database_export_lob_columns(self):
+        return self.get_source_database_export().get('lob_columns', [])
+
+    def get_table_name_for_lob_import(self, table_name):
+        return f"{table_name}_unllobimport"
+
+
     # another service functions
+
+    def convert_size_to_bytes(self, size_str):
+        if size_str is None:
+            return None
+        size_str = size_str.strip().upper()
+        if size_str.endswith('TB'):
+            return int(size_str[:-2]) * 1024 * 1024 * 1024 * 1024
+        elif size_str.endswith('T'):
+            return int(size_str[:-1]) * 1024 * 1024 * 1024 * 1024
+        elif size_str.endswith('GB'):
+            return int(size_str[:-2]) * 1024 * 1024 * 1024
+        elif size_str.endswith('G'):
+            return int(size_str[:-1]) * 1024 * 1024 * 1024
+        elif size_str.endswith('MB'):
+            return int(size_str[:-2]) * 1024 * 1024
+        elif size_str.endswith('M'):
+            return int(size_str[:-1]) * 1024 * 1024
+        elif size_str.endswith('KB'):
+            return int(size_str[:-2]) * 1024
+        elif size_str.endswith('K'):
+            return int(size_str[:-1]) * 1024
+        elif size_str.endswith('B'):
+            return int(size_str[:-1])
+        else:
+            raise ValueError(f"Invalid size format: {size_str}")
 
     def indent_code(self, code):
         lines = code.split('\n')
@@ -579,6 +684,39 @@ class ConfigParser:
                             self.print_log_message('WARNING', f"Chunk size {chunk_size} for table {table_name} is smaller than batch size {self.get_table_batch_size(table_name)}. Disabling chunking.")
                             chunk_size = -1
         return chunk_size
+
+    def get_table_database_export(self, schema_name, table_name):
+        if table_name:
+            table_settings = self.config.get('table_settings', [])
+            if isinstance(table_settings, list):
+                for entry in table_settings:
+                    pattern = entry.get('table_name')
+                    table_schema = entry.get('table_schema', schema_name)
+                    if pattern and re.fullmatch(pattern, table_name, re.IGNORECASE) and table_schema.lower() == schema_name.lower():
+                        return entry.get('database_export', None)
+        return None
+
+    def get_table_database_export_format(self, schema_name, table_name):
+        return self.get_table_database_export(schema_name, table_name).get('format', None)
+
+    def get_table_database_export_delimiter(self, schema_name, table_name):
+        return self.get_table_database_export(schema_name, table_name).get('delimiter', None)
+
+    def get_table_database_export_file(self, schema_name, table_name):
+        return self.get_table_database_export(schema_name, table_name).get('file', None)
+
+    def get_table_database_export_header(self, schema_name, table_name):
+        return self.get_table_database_export(schema_name, table_name).get('header', None)
+
+    def get_table_database_export_conversion_path(self, schema_name, table_name):
+        conversion_path = self.get_table_database_export(schema_name, table_name).get('conversion_path', None)
+        if conversion_path is None:
+            # If conversion_path is not set, try to extract the directory from the export file path
+            export_file = self.get_table_database_export_file(schema_name, table_name)
+            if export_file:
+                return os.path.dirname(os.path.abspath(export_file))
+            return None
+        return conversion_path
 
     ## pre-migration analysis
     def get_pre_migration_analysis(self):
@@ -684,6 +822,265 @@ class ConfigParser:
             time.sleep(5)
         self.print_log_message('INFO', f"Resuming migration as '{resume_file}' was found.")
         os.remove(resume_file)
+
+
+    ### Other utility methods
+
+    def get_table_lob_columns(self, source_columns):
+        lob_columns_list = []
+        for _, column_info in source_columns.items():
+            if column_info.get('data_type', '').upper() in ['BLOB', 'CLOB', 'NCLOB']:
+                lob_columns_list.append(column_info['column_name'])
+        return ','.join(lob_columns_list)
+
+    def convert_unl_to_csv(self, data_source_settings, source_columns, target_columns):
+        input_unl_data_file = data_source_settings['file_name']
+        output_csv_data_file = data_source_settings['converted_file_name']
+        source_table = data_source_settings['source_table']
+        file_size_bytes = data_source_settings.get('file_size', None)
+        if file_size_bytes is not None:
+            try:
+                file_size_bytes = int(file_size_bytes)
+                file_size_gb = file_size_bytes / (1024 ** 3)
+                source_file_size = f"{file_size_bytes} B / {file_size_gb:.2f} GB"
+            except Exception:
+                source_file_size = str(file_size_bytes)
+        else:
+            source_file_size = "Unknown"
+
+        unl_delimiter = data_source_settings['format_options'].get('delimiter', '|')
+        null_symbol = data_source_settings.get('null_symbol', '\\N')
+        processing_start_time = data_source_settings.get('processing_start_time', datetime.now())
+
+        expected_types = []
+        for ord_num, column_info in target_columns.items():
+            expected_types.append(column_info['data_type'].upper())
+
+        if not input_unl_data_file or not output_csv_data_file:
+            self.print_log_message('ERROR', "convert_unl_to_csv: Both 'unl_data_file' and 'csv_data_file' must be specified in the settings.")
+            raise ValueError("Both 'unl_data_file' and 'csv_data_file' must be specified in the settings.")
+        if not os.path.exists(input_unl_data_file):
+            self.print_log_message('ERROR', f"convert_unl_to_csv: Input UNL data file '{input_unl_data_file}' does not exist.")
+            raise FileNotFoundError(f"Input UNL data file '{input_unl_data_file}' does not exist.")
+        try:
+
+            def conversion(s, expected_type=None):
+                if s == '':
+                    return None
+                if expected_type in ('TEXT', 'VARCHAR', 'CHAR'):
+                    if s == '\ ':
+                        return ''
+                    return str(s)
+                if expected_type in ('INT', 'INTEGER', 'SMALLINT', 'BIGINT'):
+                    try:
+                        return int(s)
+                    except ValueError:
+                        return str(s)
+                if expected_type in ('FLOAT', 'REAL', 'DOUBLE', 'DECIMAL', 'NUMERIC'):
+                    # try:
+                    #     return float(s)
+                    # except ValueError:
+                    return str(s).replace(',', '.')
+                if expected_type in ('TIMESTAMP', 'DATETIME'):
+                    if isinstance(s, datetime):
+                        return s
+                    else:
+                        try:
+                            return datetime.strptime(s, '%Y-%m-%d %H:%M:%S.%f')
+                        except ValueError:
+                            try:
+                                return datetime.strptime(s, '%Y-%m-%d %H:%M:%S')
+                            except ValueError:
+                                try:
+                                    return datetime.strptime(s, '%d-%m-%Y %H:%M:%S.%f')
+                                except ValueError:
+                                    try:
+                                        return datetime.strptime(s, '%d-%m-%Y %H:%M:%S')
+                                    except ValueError:
+                                        return str(s)
+                if expected_type in ('DATE', 'TIME'):
+                    if isinstance(s, datetime):
+                        return s
+                    else:
+                        try:
+                            return datetime.strptime(s, '%Y-%m-%d').date()
+                        except ValueError:
+                            try:
+                                return datetime.strptime(s, '%Y.%m.%d').date()
+                            except ValueError:
+                                try:
+                                    return datetime.strptime(s, '%d-%m-%Y').date()
+                                except ValueError:
+                                    try:
+                                        return datetime.strptime(s, '%d.%m.%Y').date()
+                                    except ValueError:
+                                        return str(s)
+                if expected_type in ('BOOLEAN', 'BOOL'):
+                    if s.lower() in ('true', '1', 'yes', 't'):
+                        return True
+                    elif s.lower() in ('false', '0', 'no', 'f'):
+                        return False
+                    else:
+                        return str(s)
+                # if re.match(r'^0+\d+$', s):
+                # try:
+                #     if re.fullmatch(r'[0-9]+([.,][0-9]+)', s):
+                #         return float(s)
+                #     return int(s)
+                # except ValueError:
+                return s
+
+
+            def determine_expected_delimiters():
+                sample_size = 100000
+                delimiter_counts = []
+
+                with open(input_unl_data_file, 'r', encoding='utf-8', newline='') as infile:
+                    for _, line in zip(range(sample_size), infile):
+                        delimiter_count=line.count(unl_delimiter)
+                        # Some columns can have documents with multiple lines without any delimiter
+                        # So we only consider cases where there is at least one delimiter
+                        # UNL format always has at least one delimiter per line - as the last character ending the record
+                        if delimiter_count>0:
+                            delimiter_counts.append(delimiter_count)
+                most_common_count = Counter(delimiter_counts).most_common(1)
+                return most_common_count[0][0] if most_common_count else None
+
+            self.print_log_message('DEBUG', f"convert_unl_to_csv: Converting UNL file '{input_unl_data_file}' to CSV file '{output_csv_data_file}' with delimiter '{unl_delimiter}' - source file size: {source_file_size}")
+            # First analyze the input file to determine the expected number of delimiters per line
+            expected_delimiters = determine_expected_delimiters()
+            self.print_log_message('DEBUG', f"convert_unl_to_csv: UNL file '{input_unl_data_file}' - found delimiters count: {expected_delimiters} - source file size: {source_file_size}")
+
+            with open(input_unl_data_file, 'r', encoding='utf-8', newline='') as infile, \
+                open(output_csv_data_file, 'w', newline='', encoding='utf-8') as outfile:
+
+                csv_writer = csv.writer(outfile, delimiter=unl_delimiter, quoting=csv.QUOTE_MINIMAL)
+                buffer = ""
+                counter = 0
+
+                for line in infile:
+                    # Remove any trailing whitespace characters
+                    # UNL lines have clear endings, so we can safely strip them
+                    line = line.rstrip()
+                    counter += 1
+
+                    # If line ends with a backslash, it means the line continues
+                    # We append it to the buffer without the backslash at the end and continue to the next line
+                    if line.endswith('\\'):
+                        buffer += line[:-1] + '\n'
+                        continue
+                    else:
+                        buffer += line
+
+                    # Check if buffer has expected number of delimiters
+                    if buffer.count(unl_delimiter) < expected_delimiters:
+                        continue
+
+                    # Remove only the last trailing '|' - this last '|' ends the record in UNL format
+                    # But in CSV format it would confuse the parser, it would expect another field
+                    # record = re.sub(r'\|$', '', buffer.rstrip())
+                    record = re.sub(re.escape(unl_delimiter) + r'$', '', buffer.rstrip())
+
+                    # Replace "^M" text with carriage return character (\r)
+                    record = record.replace('^M', '\r')
+
+                    # Temporarily replace '\\' (escaped backslash) with a unique placeholder
+                    # This happens when text in the column ends with a backslash
+                    record = record.replace('\\\\', '<<BACKSLASH>>')
+
+                    # Split on '|' not preceded by a backslash (escaped pipe inside text column)
+                    # fields = re.split(r'(?<!\\)\|', record)
+                    fields = re.split(rf'(?<!\\){re.escape(unl_delimiter)}', record, flags=re.MULTILINE)
+
+                    # Replace escaped unl_delimiter (e.g., '\|') inside texts with unl_delimiter
+                    # fields = [field.replace(r'\|', '|') for field in fields]
+                    fields = [field.replace(f'\\{unl_delimiter}', unl_delimiter) for field in fields]
+
+                    # Restore '\\' (better separately to avoid confusion with escaped pipes)
+                    fields = [field.replace('<<BACKSLASH>>', '\\') for field in fields]
+
+                    processed_fields = [conversion(field, expected_types[i]) if i < len(expected_types) else conversion(field) for i, field in enumerate(fields)]
+                    processed_fields = [null_symbol if field is None and field != '' else field for field in processed_fields]
+
+                    if counter == 1:
+                        types_str = ','.join([type(field).__name__ for field in processed_fields])
+                        self.print_log_message('DEBUG3', f"convert_unl_to_csv: Table {source_table}: Field types: {types_str}")
+                        self.print_log_message('DEBUG3', f"convert_unl_to_csv: Table {source_table}: Expected types: {expected_types}")
+                        self.print_log_message('DEBUG3', f"convert_unl_to_csv: Table {source_table}: row: {counter}: Processed fields: {processed_fields}")
+
+                    csv_writer.writerow(processed_fields)
+                    buffer = ""
+
+            self.print_log_message('INFO', f"convert_unl_to_csv: Processed {counter} lines from {input_unl_data_file} and wrote to {output_csv_data_file} - source file size: {source_file_size} - processing time: {datetime.now() - processing_start_time}")
+
+        except Exception as e:
+            self.print_log_message('ERROR', f"convert_unl_to_csv: Error converting UNL to CSV: {e}")
+            raise e
+
+    def split_big_unl_file(self, data_source_settings):
+        split_threshold_bytes = self.get_source_database_export_big_files_split_threshold_bytes()
+        chunk_size_bytes = self.get_source_database_export_big_files_split_chunk_size_bytes()
+        source_file_size = data_source_settings.get('file_size', None)
+        source_file_name = data_source_settings.get('file_name', None)
+        source_file_basename = os.path.basename(source_file_name)
+        converted_file_name = data_source_settings.get('converted_file_name', None)
+        converted_file_path = os.path.dirname(os.path.abspath(converted_file_name))
+        delimiter = data_source_settings.get('format_options', {}).get('delimiter', '|').encode('utf-8')
+        part_size_bytes = self.get_source_database_export_big_files_split_chunk_size_bytes()
+        continuation_seq = b'\r\\'
+        source_file_parts = []
+        converted_file_parts = []
+
+        if source_file_size is not None and source_file_size > split_threshold_bytes:
+
+            with open(source_file_name, 'rb') as infile:
+                part_num = 1
+                line_count = 0
+                part_bytes = 0
+
+                out_name = os.path.join(converted_file_path, f"{source_file_basename}.{str(part_num).zfill(4)}")
+                source_file_parts.append(out_name)
+                converted_file_part = f"{converted_file_name}.{str(part_num).zfill(4)}"
+                converted_file_parts.append(converted_file_part)
+
+                outfile = open(out_name, 'wb')
+                buffer = b''
+                for line in infile:
+                    buffer += line
+                    if buffer.rstrip(b'\n').endswith(delimiter):
+                        row_bytes = len(buffer)
+                        if part_bytes + row_bytes > part_size_bytes and line_count > 0:
+                            self.print_log_message('INFO', f"split_big_unl_file: Writing part {part_num} to {out_name} - logical rows: {line_count}, bytes: {part_bytes}")
+                            outfile.close()
+                            part_num += 1
+                            out_name = os.path.join(converted_file_path, f"{source_file_basename}.{str(part_num).zfill(4)}")
+                            source_file_parts.append(out_name)
+                            converted_file_part = f"{converted_file_name}.{str(part_num).zfill(4)}"
+                            converted_file_parts.append(converted_file_part)
+
+                            self.print_log_message('DEBUG', f"split_big_unl_file: Creating new output file {out_name} for part {part_num} - size: {part_size_bytes} bytes")
+                            outfile = open(out_name, 'wb')
+                            part_bytes = 0
+                            line_count = 0
+                        outfile.write(buffer)
+                        part_bytes += row_bytes
+                        buffer = b''
+                        line_count += 1
+                    elif buffer.rstrip(b'\n').endswith(continuation_seq):
+                        continue
+                    else:
+                        continue
+                if buffer:
+                    self.print_log_message('INFO', f"split_big_unl_file: Writing remaining part {part_num} to {out_name} - logical rows: {line_count + 1}, bytes: {part_bytes + len(buffer)}")
+                    outfile.write(buffer)
+                outfile.close()
+
+        else:
+            self.print_log_message('DEBUG', f"split_big_unl_file: Source file {source_file_name} is smaller than split threshold {split_threshold_bytes} bytes. No splitting needed.")
+            source_file_parts.append(source_file_name)
+            converted_file_parts.append(converted_file_name)
+
+        return source_file_parts, converted_file_parts
 
 ### Main entry point
 

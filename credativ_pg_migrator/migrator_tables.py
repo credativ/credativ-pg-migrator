@@ -16,6 +16,7 @@
 
 import json
 import psycopg2
+from credativ_pg_migrator.constants import MigratorConstants
 
 class ProtocolPostgresConnection:
     def __init__(self, config_parser):
@@ -64,6 +65,7 @@ class MigratorTables:
         self.create_table_for_domains()
         self.create_table_for_new_objects()
         self.create_table_for_tables()
+        self.create_table_for_data_sources()
         self.create_table_for_target_columns_alterations()
         self.create_table_for_data_migration()
         self.create_table_for_data_chunks()
@@ -1200,6 +1202,38 @@ class MigratorTables:
             self.config_parser.print_log_message('ERROR', f"update_data_migration_status: Exception: {e}")
             raise
 
+    def update_data_migration_rows(self, settings):
+        row_id = settings['row_id']
+        source_table_rows = settings['source_table_rows']
+        target_table_rows = settings['target_table_rows']
+        table_name = self.config_parser.get_protocol_name_data_migration()
+        query = f"""
+            UPDATE "{self.protocol_schema}"."{table_name}"
+            SET source_table_rows = %s,
+            target_table_rows = %s
+            WHERE id = %s
+            RETURNING *
+        """
+        params = (source_table_rows, target_table_rows, row_id)
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+
+            if row:
+                data_migration_row = self.decode_data_migration_row(row)
+                self.config_parser.print_log_message('DEBUG3', f"update_data_migration_rows: Returned row: {data_migration_row}")
+                self.update_protocol('data_migration', data_migration_row['id'], None, None, None)
+            else:
+                self.config_parser.print_log_message('ERROR', f"update_data_migration_rows: Error updating rows for data migration {row_id} in {table_name}.")
+                self.config_parser.print_log_message('ERROR', f"update_data_migration_rows: Error: No protocol row returned.")
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"update_data_migration_rows: Error updating rows for data migration {row_id} in {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"update_data_migration_rows: Query: {query}")
+            self.config_parser.print_log_message('ERROR', f"update_data_migration_rows: Exception: {e}")
+            raise
+
     def decode_data_migration_row(self, row):
         return {
             'id': row[0],
@@ -1334,6 +1368,136 @@ class MigratorTables:
             )
         """)
         self.config_parser.print_log_message('DEBUG', f"Created protocol table {table_name} for tables.")
+
+    def create_table_for_data_sources(self):
+        table_name = self.config_parser.get_protocol_name_data_sources()
+        self.protocol_connection.execute_query(self.drop_table_sql.format(protocol_schema=self.protocol_schema, table_name=table_name))
+        self.protocol_connection.execute_query(f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."{table_name}"
+            (id SERIAL PRIMARY KEY,
+            source_schema TEXT,
+            source_table TEXT,
+            source_table_id INTEGER,
+            lob_columns TEXT,
+            file_name TEXT,
+            file_size BIGINT,
+            file_lines INTEGER,
+            file_found BOOLEAN,
+            converted_file_name TEXT,
+            format_options TEXT,
+            task_created TIMESTAMP DEFAULT clock_timestamp(),
+            task_started TIMESTAMP,
+            task_completed TIMESTAMP,
+            success BOOLEAN,
+            message TEXT
+            )
+        """)
+        self.config_parser.print_log_message('DEBUG', f"Created protocol table {table_name} for data sources.")
+
+    def insert_data_source(self, settings):
+        ## source_schema, source_table, source_table_id, clob_columns, blob_columns, file_name, format_options
+        source_schema = settings['source_schema']
+        source_table = settings['source_table']
+        source_table_id = settings['source_table_id']
+        lob_columns = settings.get('lob_columns', '')
+        file_name = settings.get('file_name', '')
+        file_size = settings.get('file_size', 0)
+        file_lines = settings.get('file_lines', 0)
+        file_found = settings.get('file_found', False)
+        converted_file_name = settings.get('converted_file_name', '')
+        format_options = json.dumps(settings.get('format_options', ''))
+
+        table_name = self.config_parser.get_protocol_name_data_sources()
+        query = f"""
+            INSERT INTO "{self.protocol_schema}"."{table_name}"
+            (source_schema, source_table, source_table_id, lob_columns,
+            file_name, file_size, file_lines, file_found, converted_file_name, format_options)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING *
+        """
+        params = (source_schema, source_table, source_table_id,
+                  lob_columns, file_name, file_size, file_lines, file_found, converted_file_name, format_options)
+        self.config_parser.print_log_message('DEBUG3', f"insert_data_source: Query: {query} / Params: {params}")
+
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+
+            data_source_row = self.decode_data_source_row(row)
+            self.config_parser.print_log_message('DEBUG3', f"insert_data_source: Returned row: {data_source_row}")
+            self.insert_protocol('data_source', f"{source_table} ({file_name})", 'create', None, None, None, None, 'info', None, data_source_row['id'])
+            return data_source_row['id']
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"insert_data_source: Error inserting data source {source_table} into {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"insert_data_source: Exception: {e}")
+            raise
+
+    def get_data_sources(self, source_schema, source_table):
+        table_name = self.config_parser.get_protocol_name_data_sources()
+        query = f"""
+            SELECT * FROM "{self.protocol_schema}"."{table_name}"
+            WHERE source_schema = %s AND source_table = %s
+        """
+        params = (source_schema, source_table)
+        cursor = self.protocol_connection.connection.cursor()
+        cursor.execute(query, params)
+        row = cursor.fetchone()
+        cursor.close()
+        if row:
+            return self.decode_data_source_row(row)
+        return None
+
+    def decode_data_source_row(self, row):
+        return {
+            'id': row[0],
+            'source_schema': row[1],
+            'source_table': row[2],
+            'source_table_id': row[3],
+            'lob_columns': row[4],
+            'file_name': row[5],
+            'file_size': row[6],
+            'file_lines': row[7],
+            'file_found': row[8],
+            'converted_file_name': row[9],
+            'format_options': json.loads(row[10]),
+            'task_created': row[11],
+            'task_started': row[12],
+            'task_completed': row[13],
+            'success': row[14],
+            'message': row[15]
+        }
+
+    def update_status_data_source(self, row_id, success, message):
+        table_name = self.config_parser.get_protocol_name_data_sources()
+        query = f"""
+            UPDATE "{self.protocol_schema}"."{table_name}"
+            SET task_completed = clock_timestamp(),
+            success = %s,
+            message = %s
+            WHERE id = %s
+            RETURNING *
+        """
+        params = ('TRUE' if success else 'FALSE', message, row_id)
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+
+            if row:
+                data_source_row = self.decode_data_source_row(row)
+                self.config_parser.print_log_message('DEBUG3', f"update_status_data_source: Returned row: {data_source_row}")
+                self.update_protocol('data_source', data_source_row['id'], success, message, None)
+            else:
+                self.config_parser.print_log_message('ERROR', f"update_status_data_source: Error updating status for data source {row_id} in {table_name}.")
+                self.config_parser.print_log_message('ERROR', f"update_status_data_source: Error: No protocol row returned.")
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"update_status_data_source: Error updating status for data source {row_id} in {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"update_status_data_source: Query: {query}")
+            self.config_parser.print_log_message('ERROR', f"update_status_data_source: Exception: {e}")
+            raise
 
     def create_table_for_indexes(self):
         table_name = self.config_parser.get_protocol_name_indexes()
@@ -1488,7 +1652,7 @@ class MigratorTables:
             'partitioned': row[11],
             'partitioned_by': row[12],
             'partitioning_columns': row[13],
-            'create_partitions_sql': row[14]
+            'create_partitions_sql': row[14],
         }
 
     def decode_index_row(self, row):
@@ -1655,6 +1819,7 @@ class MigratorTables:
             RETURNING *
         """
         params = ('TRUE' if success else 'FALSE', message, row_id)
+        self.config_parser.print_log_message('DEBUG3', f"update_table_status: Executing query with params: {params}")
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -2377,6 +2542,34 @@ class MigratorTables:
         tables = cursor.fetchall()
         return tables
 
+    def fetch_table(self, source_schema_name, source_table_name):
+        query = f"""
+                SELECT *
+                FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_tables()}"
+                WHERE source_schema = '{source_schema_name}'
+                AND source_table = '{source_table_name}'
+                """
+        # self.protocol_connection.connect()
+        cursor = self.protocol_connection.connection.cursor()
+        cursor.execute(query)
+        table = cursor.fetchone()
+        cursor.close()
+        if not table:
+            return None
+        return self.decode_table_row(table)
+
+    def fetch_data_source(self, source_schema_name, source_table_name):
+        query = f"""SELECT * FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_data_sources()}"
+            WHERE source_schema = '{source_schema_name}' AND source_table = '{source_table_name}'"""
+        self.config_parser.print_log_message('DEBUG3', f"fetch_data_source: Executing query: {query}")
+        # self.protocol_connection.connect()
+        cursor = self.protocol_connection.connection.cursor()
+        cursor.execute(query)
+        data_source = cursor.fetchone()
+        if not data_source:
+            return None
+        return self.decode_data_source_row(data_source)
+
     def fetch_all_target_table_names(self):
         tables = self.fetch_all_tables()
         table_names = []
@@ -2384,6 +2577,19 @@ class MigratorTables:
             values = self.decode_table_row(table)
             table_names.append(values['target_table'])
         return table_names
+
+    def fetch_all_data_migrations(self, source_schema_name=None, source_table_name=None):
+        if source_schema_name and source_table_name:
+            query = f"""SELECT * FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_data_migration()}" WHERE source_schema = '{source_schema_name}' AND source_table = '{source_table_name}' ORDER BY id"""
+        else:
+            query = f"""SELECT * FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_data_migration()}" ORDER BY id"""
+        # self.protocol_connection.connect()
+        self.config_parser.print_log_message('DEBUG3', f"fetch_all_data_migrations: Executing query: {query}")
+        cursor = self.protocol_connection.connection.cursor()
+        cursor.execute(query)
+        data_migrations = cursor.fetchall()
+        self.config_parser.print_log_message('DEBUG3', f"fetch_all_data_migrations: Fetched {len(data_migrations)} rows.")
+        return data_migrations
 
     def fetch_all_views(self):
         query = f"""SELECT * FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_views()}" ORDER BY id"""
@@ -2416,6 +2622,7 @@ class MigratorTables:
         cursor.execute(query)
         constraints = cursor.fetchall()
         return constraints
+
 
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

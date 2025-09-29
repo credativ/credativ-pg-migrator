@@ -48,6 +48,10 @@ class MigratorConstants:
         return '    '
 
     @staticmethod
+    def get_default_data_source():
+        return 'SOURCE TABLE'
+
+    @staticmethod
     def get_internal_configuration():
         return {
             'migrate_domains_as': 'CHECK CONSTRAINT',

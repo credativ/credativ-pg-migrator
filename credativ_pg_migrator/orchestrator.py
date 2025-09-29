@@ -903,8 +903,8 @@ class Orchestrator:
         worker_id = uuid.uuid4()
         self.config_parser.print_log_message('INFO', f"{time.strftime('%Y-%m-%d %H:%M:%S')}: Worker {worker_id}: started for LOB file: {datafile} - occurrences: {occurrences} - {current_datafile_num}/{datafiles_count}")
 
-        col_list = ', '.join([f'"{col}"' for col in columns])
-        placeholders = ', '.join(['%s'] * len(columns))
+        col_list = ', '.join([f'"{col}"' for col in target_columns])
+        placeholders = ', '.join(['%s'] * len(target_columns))
         insert_sql = f'INSERT INTO "{target_schema}"."{target_table}" ({col_list}) VALUES ({placeholders})'
 
         worker_select_connection = self.load_connector('target')

@@ -1122,5 +1122,17 @@ class OracleConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', e)
             raise
 
+    def fetch_all_rows(self, query):
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            cursor.close()
+            return rows
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
+            raise
+
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

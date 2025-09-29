@@ -51,24 +51,32 @@ class Planner:
             self.check_database_connection(self.source_connection, "Source Database")
             self.check_database_connection(self.target_connection, "Target Database")
 
+            self.run_check_tables_migration_status()
+
             self.migrator_tables.update_main_status('Planner', 'Resume after crash', True, 'finished OK')
         else:
             try:
                 self.pre_planning()
+
                 self.check_pausing_resuming()
 
                 self.run_premigration_analysis()
+
                 self.check_pausing_resuming()
 
                 self.run_prepare_user_defined_types()
                 self.run_prepare_domains()
                 self.run_prepare_defaults()
+
                 self.check_pausing_resuming()
 
                 self.run_prepare_tables()
+                self.run_prepare_data_sources()
+
                 self.check_pausing_resuming()
 
                 self.run_prepare_views()
+
                 self.check_pausing_resuming()
 
                 self.migrator_tables.update_main_status('Planner', '', True, 'finished OK')
@@ -923,6 +931,235 @@ class Planner:
             self.config_parser.print_log_message('INFO', f"Planner paused. Waiting for resume signal...")
             self.config_parser.wait_for_resume()
             self.config_parser.print_log_message('INFO', f"Planner resumed.")
+
+    def run_check_tables_migration_status(self):
+        self.config_parser.print_log_message('INFO', "Resume: Checking tables migration status...")
+
+        try:
+            part_name = 'fetch_all_tables'
+            tables = self.migrator_tables.fetch_all_tables()
+            self.source_connection.connect()
+            self.target_connection.connect()
+            self.config_parser.print_log_message('DEBUG', f"Fetched all tables - found: {len(tables)}")
+            for table in tables:
+                table_info = self.migrator_tables.decode_table_row(table)
+                part_name = 'fetch data migrations for table ' + table_info['source_table']
+                self.config_parser.print_log_message('DEBUG', f"Checking migration status for table {table_info['source_table']}...")
+                data_migration_rows = self.migrator_tables.fetch_all_data_migrations(table_info['source_schema'], table_info['source_table'])
+                self.config_parser.print_log_message('DEBUG', f"Data migration rows for table {table_info['source_table']}: {data_migration_rows}")
+                for record in data_migration_rows:
+                    data_migration_info = self.migrator_tables.decode_data_migration_row(record)
+
+                    part_name = 'check row counts for table ' + data_migration_info['source_table']
+                    source_table_rows = self.source_connection.get_rows_count(
+                        data_migration_info['source_schema'],
+                        data_migration_info['source_table']
+                    )
+                    target_table_rows = self.target_connection.get_rows_count(
+                        data_migration_info['target_schema'],
+                        data_migration_info['target_table']
+                    )
+                    self.config_parser.print_log_message('DEBUG', f"Row counts for table {data_migration_info['source_table']}: source={source_table_rows}, target={target_table_rows}")
+
+                    if source_table_rows != target_table_rows:
+                        self.config_parser.print_log_message('INFO', f"Row counts do not match for table {data_migration_info['source_table']}: source={source_table_rows}, target={target_table_rows}. Marking as not fully migrated.")
+                        self.migrator_tables.update_table_status(table_info['id'], False, '')
+                        self.migrator_tables.update_data_migration_rows({
+                            "row_id": data_migration_info['id'],
+                            "source_table_rows": source_table_rows,
+                            "target_table_rows": target_table_rows,
+                        } )
+                        self.migrator_tables.update_data_migration_status({
+                            "row_id": data_migration_info['id'],
+                            "success": False,
+                            "message": '',
+                            'target_table_rows': target_table_rows,
+                        })
+                    else:
+                        self.config_parser.print_log_message('DEBUG', f"Row counts match for table {data_migration_info['source_table']}: source={source_table_rows}, target={target_table_rows}. Marking as fully migrated.")
+                        self.migrator_tables.update_table_status(table_info['id'], True, 'Fully migrated')
+                        self.migrator_tables.update_data_migration_rows({
+                            "row_id": data_migration_info['id'],
+                            "source_table_rows": source_table_rows,
+                            "target_table_rows": target_table_rows,
+                        } )
+                        self.migrator_tables.update_data_migration_status({
+                            "row_id": data_migration_info['id'],
+                            "success": True,
+                            "message": 'Fully migrated',
+                            'target_table_rows': target_table_rows,
+                        })
+
+            self.config_parser.print_log_message('INFO', "Resume: Tables migration status check completed.")
+            self.source_connection.disconnect()
+            self.target_connection.disconnect()
+
+        except Exception as e:
+            self.source_connection.disconnect()
+            self.target_connection.disconnect()
+            self.config_parser.print_log_message('ERROR', f"An error occurred while checking tables migration status - part: {part_name}: {e}")
+            self.config_parser.print_log_message('ERROR', traceback.format_exc())
+            if self.on_error_action == 'stop':
+                self.config_parser.print_log_message('ERROR', "Stopping due to error.")
+                exit(1)
+
+    def run_prepare_data_sources(self):
+        self.config_parser.print_log_message('INFO', "Planner - Preparing data sources...")
+
+        database_export = self.config_parser.get_source_database_export()
+
+        if not database_export:
+            self.config_parser.print_log_message('INFO', "No settings for database export found. Migrator will use source tables as data sources.")
+            return
+        self.config_parser.print_log_message('INFO', f"Using database export: {database_export}")
+
+        if database_export['format'] in ('CSV', 'UNL'):
+            for table in self.migrator_tables.fetch_all_tables():
+                self.config_parser.print_log_message('DEBUG', f"run_prepare_data_sources: Processing table: {table}")
+                settings_source = 'global'
+                table_info = self.migrator_tables.decode_table_row(table)
+                table_database_export = self.config_parser.get_table_database_export(table_info['source_schema'], table_info['source_table'])
+                if table_database_export:
+                    settings_source = 'table_specific'
+                    self.config_parser.print_log_message('DEBUG', f"run_prepare_data_sources: Table {table_info['source_table']} has specific database export settings: {table_database_export}")
+
+                file_name = database_export.get('file', None)
+                if table_database_export and 'file' in table_database_export:
+                    file_name = table_database_export['file']
+
+                if file_name:
+                    table_file_name = file_name.replace("{{schema_name}}", table_info['source_schema']).replace("{{table_name}}", table_info['source_table'])
+                    if os.path.exists(table_file_name):
+                        data_file_found = True
+                    else:
+                        self.config_parser.print_log_message('ERROR', f"run_prepare_data_sources: Data source file {table_file_name} does not exist or is not accessible.")
+                        data_file_found = False
+                        if self.config_parser.get_source_database_export_on_missing_data_file() == 'error':
+                            self.config_parser.print_log_message('ERROR', f"run_prepare_data_sources: Data source file {table_file_name} does not exist or is not accessible. Stopping execution.")
+                            exit(1)
+
+                    conversion_path = self.config_parser.get_source_database_export_conversion_path()
+                    if table_database_export and 'conversion_path' in table_database_export:
+                        conversion_path = self.config_parser.get_table_database_export_conversion_path(table_info['source_schema'], table_info['source_table'])
+
+                    converted_file_name = os.path.join(
+                        conversion_path,
+                        os.path.basename(table_file_name) + ".csv"
+                    )
+
+                    header = database_export.get('header', True)
+                    if table_database_export and 'header' in table_database_export:
+                        header = table_database_export['header']
+
+                    format = database_export.get('format', None)
+                    if table_database_export and 'format' in table_database_export:
+                        format = table_database_export['format']
+
+                    delimiter = database_export.get('delimiter', '|')
+                    if table_database_export and 'delimiter' in table_database_export:
+                        delimiter = table_database_export['delimiter']
+
+                    self.config_parser.print_log_message('DEBUG3', f"run_prepare_data_sources: Table {table_info['source_table']} - file_name: {table_file_name}, converted_file_name: {converted_file_name}, data_file_found: {data_file_found}, format: {format}, delimiter: {delimiter}, header: {header}")
+                    data_source = {
+                        'source_schema': table_info['source_schema'],
+                        'source_table': table_info['source_table'],
+                        'source_table_id': table_info['id'],
+                        'file_name': table_file_name,
+                        'file_size': os.path.getsize(table_file_name) if data_file_found else -1,
+                        'file_lines': None, ## count of lines was too slow - sum(1 for _ in open(table_file_name, 'r', encoding='utf-8')) if data_file_found else -1,
+                        'file_found': data_file_found,
+                        'lob_columns': self.config_parser.get_table_lob_columns(table_info['source_columns']) if table_info else '',
+                        'converted_file_name': converted_file_name,
+                        'format_options': {
+                            'settings_source': settings_source,
+                            'format': format,
+                            'delimiter': delimiter,
+                            'header': header,
+                        }
+                    }
+                    self.migrator_tables.insert_data_source(data_source)
+                    self.config_parser.print_log_message('DEBUG', f"run_prepare_data_sources: Table {table_info['source_table']} - inserted data source: {data_source}")
+
+        elif database_export['format'] == 'SQL':
+            if self.config_parser.get_source_db_type() not in ('informix',):
+                self.config_parser.print_log_message('ERROR', f"SQL data source is NOT supported for source database {self.config_parser.get_source_db_type()}")
+                exit(1)
+            sql_file = database_export.get('file', None)
+            if not sql_file:
+                self.config_parser.print_log_message('ERROR', f"SQL dump file is not specified.")
+                exit(1)
+            if not os.path.exists(sql_file):
+                self.config_parser.print_log_message('ERROR', f"SQL dump file {sql_file} does not exist or is not accessible.")
+                exit(1)
+
+            sql_dump_path = os.path.abspath(sql_file)
+            with open(sql_file, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+
+            table_re = re.compile(r'^\{\s*TABLE\s+"?([\w\d_]+)"?\."?([\w\d_]+)"?')
+            unload_re = re.compile(r'^\{\s*unload file name\s*=\s*([^\s]+)')
+
+            i = 0
+            while i < len(lines):
+                table_match = table_re.match(lines[i].strip())
+                if table_match:
+                    schema = table_match.group(1)
+                    table = table_match.group(2)
+                    # Look for the next unload line
+                    j = i + 1
+                    while j < len(lines):
+                        unload_match = unload_re.match(lines[j].strip())
+                        if unload_match:
+                            file_name = unload_match.group(1)
+
+                            unl_dump_file = os.path.join(os.path.dirname(sql_dump_path), file_name)
+                            data_file_found = True
+                            if not os.path.exists(unl_dump_file):
+                                self.config_parser.print_log_message('ERROR', f"UNL dump file {unl_dump_file} for table {schema}.{table} does not exist or is not accessible.")
+                                data_file_found = False
+
+                            converted_file_name = os.path.join(
+                                self.config_parser.get_source_database_export_conversion_path(),
+                                file_name + ".csv"
+                            )
+
+                            table_info = self.migrator_tables.fetch_table(schema, table)
+                            # dump might contain tables that are not in protocol
+                            # But we still want to insert data source for them for debugging purposes
+                            if table_info:
+                                table_id = table_info['id']
+                            else:
+                                table_id = None
+
+                            data_source = {
+                                'source_schema': schema,
+                                'source_table': table,
+                                'source_table_id': table_id,
+                                'file_name': unl_dump_file,
+                                'file_size': os.path.getsize(unl_dump_file) if data_file_found else -1,
+                                'file_lines': sum(1 for _ in open(unl_dump_file, 'r', encoding='utf-8')) if data_file_found else -1,
+                                'file_found': data_file_found,
+                                'lob_columns': self.config_parser.get_table_lob_columns(table_info['source_columns']) if table_info else '',
+                                'converted_file_name': converted_file_name,
+                                'format_options': {
+                                    'format': 'UNL',
+                                    'delimiter': database_export.get('delimiter', '|'),
+                                    'header': False
+                                }
+                            }
+                            self.migrator_tables.insert_data_source(data_source)
+                            self.config_parser.print_log_message('DEBUG', f"Table {schema}.{table} data source: {data_source}")
+
+                            break
+                        # Stop if another { TABLE is found before { unload
+                        if lines[j].strip().startswith('{ TABLE'):
+                            break
+                        j += 1
+                    i = j
+                else:
+                    i += 1
+
+        self.config_parser.print_log_message('INFO', "Planner - Data sources prepared successfully.")
 
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

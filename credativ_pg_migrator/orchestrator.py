@@ -25,6 +25,7 @@ import fnmatch
 import re
 import time
 import json
+import os
 
 class Orchestrator:
     def __init__(self, config_parser):
@@ -466,66 +467,368 @@ class Orchestrator:
 
             if self.config_parser.should_migrate_data(table_data['source_table']):
                 # data migration
+
                 part_name = 'connect source'
                 worker_source_connection = self.load_connector('source')
+                worker_source_connection.connect()
 
-                part_name = 'migrate data'
-                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Migrating data for table {target_table} from source database.")
+                data_source = self.migrator_tables.fetch_data_source(table_data['source_schema'], table_data['source_table'])
+                self.config_parser.print_log_message('DEBUG3', f"Worker {worker_id}: Checking data source for table {table_data['source_schema']}.{table_data['source_table']}: {data_source}")
 
-                table_settings = {
-                    'worker_id': worker_id,
-                    'source_schema': table_data['source_schema'],
-                    'source_table': table_data['source_table'],
-                    'source_table_id': table_data['source_table_id'],
-                    'source_columns': table_data['source_columns'],
-                    'target_schema': target_schema,
-                    'target_table': target_table,
-                    'target_columns': table_data['target_columns'],
-                    'table_comment': table_data['table_comment'],
-                    # 'primary_key_columns': table_data['primary_key_columns'],
-                    # 'primary_key_columns_count': table_data['primary_key_columns_count'],
-                    # 'primary_key_columns_types': table_data['primary_key_columns_types'],
-                    'batch_size': self.config_parser.get_table_batch_size(table_data['source_table']),
-                    'migrator_tables': settings['migrator_tables'],
-                    'migration_limitation': '',
-                    'chunk_size': self.config_parser.get_table_chunk_size(table_data['source_table']),
-                    'chunk_number': 1,
-                    'resume_after_crash': settings['resume_after_crash'],
-                    'drop_unfinished_tables': settings['drop_unfinished_tables'],
-                }
+                use_source_table = False
 
-                rows_migration_limitations = settings['migrator_tables'].get_records_data_migration_limitation(table_data['source_table'])
-                migration_limitations = []
-                if rows_migration_limitations:
-                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Found data migration limitations matching table {target_table}: {rows_migration_limitations}")
-                    for limitation in rows_migration_limitations:
-                        where_clause = limitation[0]
-                        where_clause = where_clause.replace('{source_schema}', table_data['source_schema']).replace('{source_table}', table_data['source_table'])
-                        use_when_column_name = limitation[1]
-                        for col_order_num, column_info in table_data['source_columns'].items():
-                            column_name = column_info['column_name']
-                            if column_name == use_when_column_name or re.match(use_when_column_name, column_name):
-                                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Column {column_name} matches migration limitation.")
-                                migration_limitations.append(where_clause)
-                    if migration_limitations:
-                        table_settings['migration_limitation'] = f"{' AND '.join(migration_limitations)}" if migration_limitations else ''
-                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Migration limitations for table {target_table}: {migration_limitations}")
+                if data_source is not None:
+                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data source for table {table_data['source_schema']}.{table_data['source_table']} is {data_source}.")
+                    clean_objects = self.config_parser.get_source_database_export_clean()
 
-                while True:
-                    if self.config_parser.pause_migration_fired():
-                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Migration paused for table {target_table}.")
-                        self.config_parser.wait_for_resume()
-                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Resuming migration for table {target_table}.")
-                    # proper pausing / stopping of the migration requires to connect and disconnect for each chunk
-                    worker_source_connection.connect()
-                    migration_stats = worker_source_connection.migrate_table(worker_target_connection, table_settings)
-                    worker_source_connection.disconnect()
+                    if data_source['file_found'] and data_source['file_name'] is not None:
+                        self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Data source file found: {data_source['file_name']} - proceeding with data migration.")
 
-                    rows_migrated += migration_stats['rows_migrated']
-                    if migration_stats['finished']:
-                        break
-                    table_settings['chunk_number'] += 1
+                        copy_command = f"""COPY "{target_schema}"."{target_table}"
+                            FROM STDIN WITH
+                            (FORMAT CSV, HEADER {data_source['format_options']['header']},
+                            NULL '\\N',
+                            DELIMITER '{data_source['format_options']['delimiter']}')"""
+                            ## , QUOTE '{data_source['format_options']['quote']}'
 
+                        ## for other formats relevant to other databases we simply add new data types
+                        ## CSV format is common for all databases, but might be necessary to convert it to PostgreSQL CSV conventions
+                        if data_source['format_options']['format'].upper() in ('CSV', 'UNL'):
+
+                            source_table_rows = worker_source_connection.get_rows_count(table_data['source_schema'], table_data['source_table'])
+                            target_table_rows = worker_target_connection.get_rows_count(target_schema, target_table)
+
+                            protocol_id = migrator_tables.insert_data_migration({
+                                'worker_id': worker_id,
+                                'source_table_id': table_data['source_table_id'],
+                                'source_schema': table_data['source_schema'],
+                                'source_table': table_data['source_table'],
+                                'target_schema': table_data['target_schema'],
+                                'target_table': table_data['target_table'],
+                                'source_table_rows': source_table_rows,
+                                'target_table_rows': target_table_rows,
+                                })
+
+                            if data_source['file_size'] == 0:
+                                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data source for table {target_table} is {data_source['format_options']['format'].upper()} format, but file size is 0. Skipping data migration.")
+                                # self.migrator_tables.update_table_status(table_data['id'], True, 'migrated OK (0 rows)')
+
+                                migrator_tables.update_data_migration_status({
+                                    'row_id': protocol_id,
+                                    'success': True,
+                                    'message': 'OK',
+                                    'target_table_rows': target_table_rows,
+                                    'batch_count': 0,
+                                    'shortest_batch_seconds': 0,
+                                    'longest_batch_seconds': 0,
+                                    'average_batch_seconds': 0,
+                                })
+                            else:
+
+                                data_import_start_time = time.time()
+                                source_files_to_process = []
+                                converted_files_to_process = []
+
+                                ## Split of big files is currently implemented only for Informix UNL data files
+                                ## And even here it can be not efficient if client uses slow disk(s)
+                                if self.config_parser.get_source_db_type() == 'informix' and data_source['format_options']['format'].upper() == 'UNL':
+                                    big_files_split_enabled = self.config_parser.get_source_database_export_big_files_split_enabled()
+                                    data_source_file_size = data_source['file_size']
+
+                                    data_source_file_size_str = ""
+                                    if data_source_file_size is not None:
+                                        data_source_file_size_str = f"{data_source_file_size} B ({data_source_file_size / (1024 ** 3):.2f} GB)"
+                                    split_threshold_bytes = self.config_parser.get_source_database_export_big_files_split_threshold_bytes()
+                                    split_threshold_bytes_str = ""
+                                    if split_threshold_bytes is not None:
+                                        split_threshold_bytes_str = f"{split_threshold_bytes} B ({split_threshold_bytes / (1024 ** 3):.2f} GB)"
+
+                                    self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Table: {target_table}: Data source file size: {data_source_file_size_str}, split threshold: {split_threshold_bytes_str}, big files split enabled: {big_files_split_enabled}")
+
+                                    if big_files_split_enabled and data_source_file_size > split_threshold_bytes:
+                                        # Big files split enabled and file size exceeds threshold
+                                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {target_table}: Data source for table {target_table} is a big file ({data_source_file_size} bytes). Splitting into smaller files.")
+                                        source_files_to_process, converted_files_to_process = self.config_parser.split_big_unl_file(data_source)
+                                        self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Table {target_table}: Split source files: {source_files_to_process}, converted target file names: {converted_files_to_process}")
+
+                                else:
+                                    # Single file processing
+                                    source_files_to_process.append(data_source['file_name'])
+                                    converted_files_to_process.append(data_source['converted_file_name'])
+
+                                data_source_settings = data_source.copy()
+                                csv_file_name = None
+
+                                for source_file_index, source_file_name in enumerate(source_files_to_process):
+                                    data_source_settings['file_name'] = source_file_name
+                                    data_source_settings['converted_file_name'] = converted_files_to_process[source_file_index]
+                                    self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Table {target_table}: Processing source file: {data_source_settings['file_name']}")
+
+                                    if data_source_settings['format_options']['format'].upper() == 'UNL':
+                                        # UNL data source - must be converted to CSV first
+                                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {target_table}: Data source for table {target_table} is UNL format. Converting to CSV.")
+                                        part_name = 'convert UNL to CSV'
+                                        csv_file_name = data_source_settings['converted_file_name']
+                                        self.config_parser.convert_unl_to_csv(data_source_settings, table_data['source_columns'], table_data['target_columns'])
+
+                                    elif data_source_settings['format_options']['format'].upper() == 'CSV':
+                                        # CSV data source - use the file directly
+                                        csv_file_name = data_source_settings['file_name']
+                                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data source for table {target_table} is CSV format. Using file {csv_file_name}.")
+
+                                    try:
+                                        if data_source_settings['lob_columns'] != '' and self.config_parser.should_migrate_lob_values():
+
+                                            table_name_for_lob_import = self.config_parser.get_table_name_for_lob_import(target_table)
+                                            # LOB data migration - use the file directly
+                                            self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data source for table {target_table} has LOB columns: {data_source_settings['lob_columns']}. Migrating LOB data.")
+
+                                            # drop table for lob import if exists
+                                            drop_import_table_sql = f'DROP TABLE IF EXISTS "{target_schema}"."{table_name_for_lob_import}" CASCADE'
+                                            worker_target_connection.execute_query(drop_import_table_sql)
+                                            self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Intermediate import table {table_name_for_lob_import} dropped successfully.")
+
+                                            # create intermediate table for rows without LOB data
+                                            create_import_table_sql = re.sub(
+                                                target_table,
+                                                f"{table_name_for_lob_import}",
+                                                table_data['target_table_sql'],
+                                                flags=re.IGNORECASE
+                                            )
+                                            create_import_table_sql = re.sub( 'bytea', 'text', create_import_table_sql, flags=re.IGNORECASE)
+                                            self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Creating intermediate import table with SQL: {create_import_table_sql}")
+                                            worker_target_connection.execute_query(create_import_table_sql)
+
+                                            # importing CSV (converted UNL) data into intermediate table
+                                            imp_table_copy_command = f"""COPY "{target_schema}"."{table_name_for_lob_import}" FROM STDIN WITH
+                                                (FORMAT CSV, HEADER {data_source_settings['format_options']['header']},
+                                                NULL '\\N',
+                                                DELIMITER '{data_source_settings['format_options']['delimiter']}')"""
+                                            worker_target_connection.copy_from_file(imp_table_copy_command, csv_file_name)
+
+                                            # Loop over import table row by row, select all columns, find column(s) specified in lob_columns and read their content
+                                            lob_columns = [col.strip() for col in data_source_settings['lob_columns'].split(',') if col.strip()]
+                                            lob_col_name = None
+                                            lob_col_index = None
+                                            lob_col_type = None
+
+                                            for lob_col in lob_columns:
+                                                lob_col_name = lob_col
+                                                for lob_col_ind, col_info in table_data['target_columns'].items():
+                                                    if col_info['column_name'].lower() == lob_col.lower():
+                                                        lob_col_index = int(lob_col_ind)
+                                                        lob_col_type = col_info['data_type']
+                                                        break
+
+                                                if lob_col_name is not None and lob_col_index is not None:
+                                                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: LOB column {lob_col_name} found in target table {target_table} - index: {lob_col_index}, type: {lob_col_type}")
+
+                                                    select_datafiles_sql = f"""SELECT DISTINCT split_part({lob_col_name},',',3) as datafile, count(*) as occurrences FROM {target_schema}.{table_name_for_lob_import} group by 1 order by 1;"""
+
+                                                    worker_target_connection.execute_query(select_datafiles_sql)
+                                                    datafiles = worker_target_connection.fetch_all()
+                                                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Found {len(datafiles)} distinct data files for LOB column {lob_col_name}")
+
+                                                    max_lob_parallel_workers = self.config_parser.get_source_database_export_workers()
+                                                    if len(datafiles) <= 10:
+                                                        max_lob_parallel_workers = 1
+                                                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Set max LOB parallel workers to {max_lob_parallel_workers} due to low data file count ({len(datafiles)})")
+                                                    if len(datafiles) > 10 and len(datafiles) <= 50:
+                                                        max_lob_parallel_workers = 2
+                                                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Set max LOB parallel workers to {max_lob_parallel_workers} due to medium data file count ({len(datafiles)})")
+                                                    if len(datafiles) > 200:
+                                                        max_lob_parallel_workers = max_lob_parallel_workers * 2
+                                                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Set max LOB parallel workers to {max_lob_parallel_workers} due to high data file count ({len(datafiles)})")
+
+                                                    if len(datafiles) > 0:
+
+                                                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Processing {len(datafiles)} data files for LOB column {lob_col_name}")
+                                                        current_datafile_num = 0
+
+                                                        with concurrent.futures.ThreadPoolExecutor(max_workers=max_lob_parallel_workers) as executor:
+                                                            futures = {}
+                                                            for datafile_row in datafiles:
+                                                                datafile = datafile_row[0]
+                                                                occurrences = datafile_row[1]
+                                                                current_datafile_num += 1
+
+                                                                settings = {
+                                                                    'target_schema': self.config_parser.get_target_schema(),
+                                                                    'target_table': self.config_parser.get_target_table(),
+                                                                    'lob_column': lob_col_name,
+                                                                    'lob_col_index': lob_col_index,
+                                                                    'lob_col_type': lob_col_type,
+                                                                    'target_columns': table_data['target_columns'],
+                                                                    'datafile': datafile,
+                                                                    'datafiles_count': len(datafiles),
+                                                                    'current_datafile_num': current_datafile_num,
+                                                                    'occurrences': occurrences,
+                                                                    'lob_files_path': self.config_parser.get_source_database_export_file_path(),
+                                                                }
+
+                                                                print(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: parallel LOB processing: futures running count: {len(futures)}")
+                                                                while len(futures) >= max_lob_parallel_workers:
+
+                                                                    done, _ = concurrent.futures.wait(futures, return_when=concurrent.futures.FIRST_COMPLETED)
+                                                                    for future in done:
+                                                                        datafile_done = futures.pop(future)
+                                                                        if future.result() == False:
+                                                                            if self.on_error_action == 'stop':
+                                                                                print(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: parallel LOB processing: Stopping execution due to error.")
+                                                                                exit(1)
+                                                                        else:
+                                                                            print(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: parallel LOB processing: {datafile_done} LOBs migrated OK")
+
+                                                                # Submit the next task
+                                                                future = executor.submit(self.lob_worker, settings)
+                                                                futures[future] = datafile
+
+                                                            # Process remaining futures
+                                                            print(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: parallel LOB processing: Processing remaining futures")
+                                                            for future in concurrent.futures.as_completed(futures):
+                                                                datafile_done = futures[future]
+                                                                if future.result() == False:
+                                                                    if self.on_error_action == 'stop':
+                                                                        print(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: parallel LOB processing: Stopping execution due to error.")
+                                                                        exit(1)
+                                                                else:
+                                                                    print(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: parallel LOB processing: {datafile_done} LOBs migrated OK")
+
+                                                        print(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: parallel LOB processing: All datafiles processed successfully.")
+                                                    else:
+                                                        print(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: parallel LOB processing: No datafiles to process.")
+
+
+                                                else:
+                                                    self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: LOB column {lob_col_name} not found in target table {target_table}. Skipping LOB data migration for this column.")
+                                                    continue
+
+
+                                            self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data copied successfully from CSV file {csv_file_name} to table {target_table} with LOB columns.")
+                                            # Drop the intermediate import table
+                                            worker_target_connection.execute_query(f'DROP TABLE IF EXISTS "{target_schema}"."{table_name_for_lob_import}" CASCADE')
+                                            self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Intermediate import table {table_name_for_lob_import} dropped successfully.")
+                                            target_table_rows = worker_target_connection.get_rows_count(target_schema, target_table)
+                                            data_import_end_time = time.time()
+                                            data_import_duration = data_import_end_time - data_import_start_time
+                                            self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data import duration: {data_import_duration:.2f} seconds, rows migrated: {target_table_rows}.")
+
+                                        else:
+
+                                            if data_source_settings['lob_columns'] != '' and not self.config_parser.should_migrate_lob_values():
+                                                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data source for table {target_table} has LOB columns: {data_source_settings['lob_columns']}, but LOB migration is disabled. Skipping LOB data migration.")
+
+                                            # No LOB columns - standard CSV import
+                                            # CSV data source - directly import into target database
+                                            part_name = 'copy data from CSV'
+                                            self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Executing COPY command: {copy_command}")
+                                            worker_target_connection.copy_from_file(copy_command, csv_file_name)
+
+                                            self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data copied successfully from CSV file {csv_file_name} to table {target_table}.")
+
+                                        target_table_rows = worker_target_connection.get_rows_count(target_schema, target_table)
+                                        data_import_end_time = time.time()
+                                        data_import_duration = data_import_end_time - data_import_start_time
+                                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data import duration: {data_import_duration:.2f} seconds, rows migrated: {target_table_rows}.")
+
+                                        # self.migrator_tables.update_table_status(table_data['id'], True, f'migrated OK ({rows_migrated} rows)')
+                                        migrator_tables.update_data_migration_status({
+                                            'row_id': protocol_id,
+                                            'success': True,
+                                            'message': 'OK',
+                                            'target_table_rows': target_table_rows,
+                                            'batch_count': 0,
+                                            'shortest_batch_seconds': data_import_duration,
+                                            'longest_batch_seconds': data_import_duration,
+                                            'average_batch_seconds': data_import_duration,
+                                        })
+
+                                        if data_source_settings['format_options']['format'].upper() == 'UNL' and clean_objects:
+                                            # Delete the converted CSV file after import if clean_objects is True
+                                            try:
+                                                if csv_file_name and os.path.exists(csv_file_name):
+                                                    os.remove(csv_file_name)
+                                                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Deleted temporary CSV file {csv_file_name}.")
+                                            except Exception as cleanup_exc:
+                                                self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Failed to delete temporary CSV file {csv_file_name}: {cleanup_exc}")
+
+                                    except Exception as e:
+                                        self.migrator_tables.update_table_status(table_data['id'], False, f'ERROR: {e}')
+                                        self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: ({part_name}) Error copying data from CSV file {csv_file_name} to table {target_table}: {e}")
+                                        return False
+                    else:
+                        if not data_source['file_found'] and data_source['file_name'] is not None:
+                            self.config_parser.print_log_message('INFO', f"Worker {worker_id}: ({part_name}) Data file {data_source['file_name']} not found for table {target_table}.")
+
+                            on_missing_data_file = self.config_parser.get_source_database_export_on_missing_data_file()
+                            if on_missing_data_file == 'skip':
+                                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Skipping data migration for table {target_table} due to missing data file.")
+                                use_source_table = False
+                                rows_migrated = 0
+                            else:
+                                self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Data file {data_source['file_name']} not found for table {target_table}. Switching to source table.")
+                                use_source_table = True
+
+                else:
+                    use_source_table = True
+
+                if use_source_table:
+                    part_name = 'migrate data'
+                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Migrating data for table {target_table} from source database.")
+
+                    table_settings = {
+                        'worker_id': worker_id,
+                        'source_schema': table_data['source_schema'],
+                        'source_table': table_data['source_table'],
+                        'source_table_id': table_data['source_table_id'],
+                        'source_columns': table_data['source_columns'],
+                        'target_schema': target_schema,
+                        'target_table': target_table,
+                        'target_columns': table_data['target_columns'],
+                        'table_comment': table_data['table_comment'],
+                        # 'primary_key_columns': table_data['primary_key_columns'],
+                        # 'primary_key_columns_count': table_data['primary_key_columns_count'],
+                        # 'primary_key_columns_types': table_data['primary_key_columns_types'],
+                        'batch_size': self.config_parser.get_table_batch_size(table_data['source_table']),
+                        'migrator_tables': settings['migrator_tables'],
+                        'migration_limitation': '',
+                        'chunk_size': self.config_parser.get_table_chunk_size(table_data['source_table']),
+                        'chunk_number': 1,
+                        'resume_after_crash': settings['resume_after_crash'],
+                        'drop_unfinished_tables': settings['drop_unfinished_tables'],
+                    }
+
+                    rows_migration_limitations = settings['migrator_tables'].get_records_data_migration_limitation(table_data['source_table'])
+                    migration_limitations = []
+                    if rows_migration_limitations:
+                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Found data migration limitations matching table {target_table}: {rows_migration_limitations}")
+                        for limitation in rows_migration_limitations:
+                            where_clause = limitation[0]
+                            where_clause = where_clause.replace('{source_schema}', table_data['source_schema']).replace('{source_table}', table_data['source_table'])
+                            use_when_column_name = limitation[1]
+                            for col_order_num, column_info in table_data['source_columns'].items():
+                                column_name = column_info['column_name']
+                                if column_name == use_when_column_name or re.match(use_when_column_name, column_name):
+                                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Column {column_name} matches migration limitation.")
+                                    migration_limitations.append(where_clause)
+                        if migration_limitations:
+                            table_settings['migration_limitation'] = f"{' AND '.join(migration_limitations)}" if migration_limitations else ''
+                            self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Migration limitations for table {target_table}: {migration_limitations}")
+
+                    while True:
+                        if self.config_parser.pause_migration_fired():
+                            self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Migration paused for table {target_table}.")
+                            self.config_parser.wait_for_resume()
+                            self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Resuming migration for table {target_table}.")
+                        # proper pausing / stopping of the migration requires to connect and disconnect for each chunk
+                        migration_stats = worker_source_connection.migrate_table(worker_target_connection, table_settings)
+
+                        rows_migrated += migration_stats['rows_migrated']
+                        if migration_stats['finished']:
+                            break
+                        table_settings['chunk_number'] += 1
+
+                worker_source_connection.disconnect()
 
                 if rows_migrated > 0:
                     # sequences setting
@@ -577,6 +880,111 @@ class Orchestrator:
             self.migrator_tables.update_table_status(table_data['id'], False, f'ERROR: {e_main}')
             self.handle_error(e_main, f"table_worker {worker_id} ({part_name}) {target_table}")
             return False
+
+    def lob_worker(self, settings):
+        target_schema = settings['target_schema']
+        target_table = settings['target_table']
+        unl_import_table = settings['unl_import_table']
+        lob_column = settings['lob_column']
+        lob_col_index = settings['lob_col_index']
+        lob_col_type = settings['lob_col_type']
+        target_columns = settings['target_columns']
+        datafile = settings['datafile']
+        datafiles_count = settings['datafiles_count']
+        current_datafile_num = settings['current_datafile_num']
+        occurrences = settings['occurrences']
+        lob_files_path = settings['lob_files_path']
+
+        worker_insert_connection = self.load_connector('target')
+        worker_insert_connection.connect()
+        worker_insert_connection.autocommit = True  # Enable autocommit for the insert connection
+
+        processing_start_time = time.time()
+        worker_id = uuid.uuid4()
+        self.config_parser.print_log_message('INFO', f"{time.strftime('%Y-%m-%d %H:%M:%S')}: Worker {worker_id}: started for LOB file: {datafile} - occurrences: {occurrences} - {current_datafile_num}/{datafiles_count}")
+
+        col_list = ', '.join([f'"{col}"' for col in target_columns])
+        placeholders = ', '.join(['%s'] * len(target_columns))
+        insert_sql = f'INSERT INTO "{target_schema}"."{target_table}" ({col_list}) VALUES ({placeholders})'
+
+        worker_select_connection = self.load_connector('target')
+        worker_select_connection.connect()
+        cur_select = worker_select_connection.cursor()
+
+        named_cur = worker_select_connection.cursor(name='lobcur_' + str(worker_id).replace('-', '_'))
+        select_sql = f"""SELECT {col_list} FROM "{target_schema}"."{unl_import_table}" WHERE split_part({lob_column},',',3) = '{datafile}'"""
+
+        self.config_parser.print_log_message('DEBUG', f"{time.strftime('%Y-%m-%d %H:%M:%S')}: Worker {worker_id}: Fetching rows from '{unl_import_table}' with query: {select_sql}")
+        counter = 0
+        read_lines = 0
+
+        named_cur.execute(select_sql)
+        row = named_cur.fetchone() # Fetch the first row
+        while row is not None:
+            row = list(row)
+            read_lines += 1
+            content = row[lob_col_index]
+            content_is_null = False
+
+            if content is not None and content != '' and content != '0,0,0':
+                parts = content.split(',')
+                start = int(parts[0], 16)
+                length = int(parts[1], 16)
+                datafile = parts[2]
+                filepath = os.path.join(lob_files_path, datafile)
+            else:
+                content_is_null = True
+                start = 0
+                length = 0
+                filepath = None
+
+            # if length > 1024*1024*1024:
+            #   self.config_parser.print_log_message('INFO', f"{time.strftime('%Y-%m-%d %H:%M:%S')}: Worker: {worker_id}: LOB size exceeds 1GB: {length} bytes ({length / 1024 / 1024 / 1024}) GB - in row: {row} - setting to NULL.")
+            #   content_is_null = True
+            # if args.test_sizes:
+            #   row = named_cur.fetchone() # Fetch in test mode
+            #   continue
+
+            if not content_is_null and os.path.exists(filepath):
+
+                if lob_col_type.lower() == 'bytea':
+                    # For BYTEA, read the file as binary
+                    with open(filepath, 'rb') as f:
+                        f.seek(start)
+                        chunk = f.read(length)
+
+                elif lob_col_type.lower() == 'text':
+                    # For TEXT, read the file as text
+                    with open(filepath, 'r', encoding='utf-8') as f:
+                        f.seek(start)
+                        chunk = f.read(length)
+
+                row[lob_col_index] = chunk
+
+            if content_is_null:
+                row[lob_col_index] = None
+
+            try:
+                cur_insert = worker_insert_connection.cursor()
+                cur_insert.execute(insert_sql, row)
+                cur_insert.close()
+                counter += 1
+            except Exception as e:
+                cur_insert.close()
+                self.config_parser.print_log_message('ERROR', f"Worker: {worker_id}: Error executing INSERT command for row: {row} (counter: {counter}), error: {e}")
+
+            row = named_cur.fetchone() # Fetch the next row
+
+        named_cur.close()
+        self.config_parser.print_log_message('INFO', f"{time.strftime('%Y-%m-%d %H:%M:%S')}: Worker: {worker_id}: Processed {read_lines} rows from '{unl_import_table}', datafile: {datafile}, occurrences: {occurrences} - inserted {counter} into '{target_schema}.{target_table}'.")
+
+        cur_select.close()
+        worker_select_connection.close()
+
+        worker_insert_connection.close()
+        self.config_parser.print_log_message('INFO', f"{time.strftime('%Y-%m-%d %H:%M:%S')}: Worker: {worker_id}: Processing completed in {time.time() - processing_start_time} seconds.")
+        return True  # Indicate successful processing of this datafile
+
 
     def index_worker(self, index_data, target_db_type):
         worker_id = uuid.uuid4()

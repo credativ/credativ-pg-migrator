@@ -4,7 +4,7 @@
 pre_migration_analysis:
   # Section for listing TOP N tables from the source database
   # by_rows - list tables by number of rows in the table - value is the number of TOP N tables to list
-  # part set to 0 is skipped, not listed
+  # part set to 0 is skipped, not listed, some huge number like 9999999 means all tables will be listed
   top_n_tables:
     by_rows: 10
     by_size: 10
@@ -24,8 +24,9 @@ env_variables:
 # Migrator database connection for metadata storage
 # Migrator created multiple tables in the database
 # In most cases we presume migrator database is the same as target database, just with different schema
+# Idea is to have migration metadata as close to the target database as possible
 migrator:
-  type: "postgresql"
+  type: "postgresql" # only postgresql is currently supported
   host: "localhost"
   port: 5432
   username: "postgres"
@@ -34,7 +35,7 @@ migrator:
   schema: "migration"
 
 # source database connection
-# type: "informix", "sybase_ase", "mssql", "ibm_db2", "mysql", "sql_anywhere", "postgresql"
+# type: "informix", "sybase_ase", "mssql", "ibm_db2", "mysql", "sql_anywhere", "postgresql", "oracle"
 source:
   type: "sybase_ase"
   host: "localhost"
@@ -42,7 +43,7 @@ source:
   username: "sa"
   password: "password"
   database: "source_database"
-  # schema or owner - depending on the source database - not both
+  # schema or owner (these are synonyms depending on the source database - but only one can be used, not both)
   schema: "dbo"
   # connectivity type - "jdbc", "odbc", "native"
   # "native" does not have any additional section
@@ -57,8 +58,73 @@ source:
   # ibm_db2 - SYSCAT or SYSIBM - sysibm simulates the information_schema
   # mssql - SYS or INFORMATION_SCHEMA
   system_catalog: "SYSIBM"
-  # informix specific setting
-  db_locale: "en_US.utf8"  # locale for the Informix database, used for date and time formatting
+
+  # database locale - used for date and time formatting
+  # currently working only for Informix
+  db_locale: "en_US.utf8"
+
+  # Global settings for using database export files as source of data for the migration, otherwise source table in the source database is used
+  # This option is currently supported only for Informix
+  #
+  # If data files is found, it will be used instead of the source database
+  #   path - path to the data file(s), can contain placeholders for source_schema and source_table
+  #
+  #   format - format of the data files, currently CSV, UNL, SQL formats are supported
+  #            individual differences in names or settings for specific tables must be set in table_settings section for each table separately
+  #
+  #            CSV - is directly processed by the PostgreSQL COPY command,
+  #            UNL - means separately manually exported files in Informix UNL format for specific tables, require first to be converted to CSV
+  #                  if UNL files are small, conversion during the migration is quick,
+  #            SQL - means SQL schema dump file with SQL DDL commands for database objects, where are data, it depends on the type of source database
+  #                  this option currently cannot read the whole data model from the SQL dump file, it still requires to have the source database connection
+  #                  Informix - data files in UNL format are expected in the same directory
+  #
+  #   delimiter - delimiter for CSV and UNL files, default is comma for CSV and pipe "|" for UNL
+  #
+  # In case of Informix, if source table contains CLOB or BLOB columns, import follows different processing path to properly handle LOB values
+  database_export:
+
+    # action to take if data file is not found
+    #   error - raise an error and stop the migration
+    #   skip - skip the table and continue with the migration
+    #   source_table - use source table from the source database instead of the data file
+    # default is "source_table"
+    on_missing_data_file: skip
+
+    # CSV example - separate CSV files for some or all table are expected in the specified directory
+    format: "CSV"
+    file: "/path/to/data/files/{{source_schema}}.{{source_table}}.csv"
+    delimiter: ","
+    header: true  # if CSV files contain header line with column names, default is false
+
+    # UNL example - separate UNL files for some or all table are expected in the specified directory
+    format: "UNL"  # format of the data files - see above
+    file: "/path/to/data/files/{{source_schema}}.{{source_table}}.unl"  # path to the data file(s), can contain placeholders for source_schema and source_table, extension does not need to fit format name
+    delimiter: "|"  # delimiter for CSV and UNL files, default is comma resp. "|"
+    conversion_path: "/path/to/data/files/conversion"  # directory where converted CSV files will be stored, if not specified, default is the same as for the data files
+    clean: false  # if true, remove converted CSV files after the migration, default is false
+
+    # SQL example - complete SQL dump file with DDL commands for the database objects is expected, where are data depends on the type of source database
+    # For Informix migrator expects specific file name without placeholders, one file for the whole database
+    format: "SQL"  # format of the data files - see above
+    file: "/path/to/data/files/mydb.sql"
+    delimiter: "|"  # delimiter for related UNL files, default is pipe "|"
+    conversion_path: "/path/to/data/files/conversion"  # directory where converted CSV files will be stored, if not specified, default is the same as for the data files
+    clean: false  # if true, remove converted CSV files after the migration, default is false
+
+    # split of big files for parallel processing
+    # if missing, default is not to split files
+    # If enabled, chunks are processed in parallel by multiple workers
+    # split_threshold - threshold for splitting files, if file is bigger than this value, it will be split into smaller chunks
+    # chunk_size - size of the chunks, if not specified, default is 2GB
+    # relevant currently only for UNL files / SQL format and only for big UNL files exceeding the threshold
+    # import of big CSV files into PostgreSQL is reasonably fast, so splitting is not needed
+    # and PostgreSQL 18 will support parallel import of CSV files
+    big_files_split:
+      enabled: true
+      threshold: '5GB'
+      chunk_size: '2GB'
+      workers: 4  # number of workers to use for parallel processing of the chunks, default is 4
 
 # target database connection - always postgresql
 target:
@@ -71,6 +137,8 @@ target:
   schema: "target_schema"
   # settings for the migration process
   # are optional, if present they will override the default settings in every connection
+  # key is the name of the setting, value is the value of the setting
+  # key is checked against the list of allowed settings, if not present, it will be ignored
   settings:
     work_mem: '32MB'
     maintenance_work_mem: '512MB'
@@ -90,7 +158,7 @@ migration:
   migrate_funcprocs: true
   migrate_triggers: true
   migrate_views: true
-  set_sequnces: true
+  set_sequences: true
   on_error: continue # stop, continue
   parallel_workers: 8
   # batch_size: number of rows to migrate in one batch during data migration, default is 100000
@@ -114,11 +182,23 @@ migration:
   # 0 = always change to text, -1 = never change to text, always migrate as varchar, >0 = convert varchar to text if length is >= this value
   # if parameter is missing, default is -1 -> migrate all varchars as varchars as they are
   varchar_to_text_length: 4000
+  # the same as varchar_to_text_length, but for char (nchar etc) data type
+  char_to_text_length: 5
 
   # migrate_lob_values - if true, migrate LOB values (BLOB, CLOB) as text or bytea
   # if false, LOB values will be skipped (migrated as NULL)
   # if missing, default is true - LOB values will be migrated
   migrate_lob_values: false
+
+  ## this is just a preparation for the future, not implemented yet
+  # target_lob_storage - if source database contains CLOB or BLOB columns, this setting defines how to store them in the target database
+  # this is global setting for the whole migration process - if missing, default is to store LOB values in the target database in bytea or text columns
+  # "path" and "name" are used only if storage is set to "file"
+  # target_lob_storage:
+  #   storage: database # database, file
+  #   path: "/path/to/lob/files"  # path to the directory with LOB files, used only if storage is set to file
+  #   name: "{{source_schema}}.{{source_table}}.lob"  # name of the LOB file, can contain placeholders for source_schema and source_table
+
   # automatic scheduled actions for the migration process
   # - list of actions to be performed at specific times during the migration process
   # action can be scheduled based on date and time or based on timer - in hours
@@ -145,12 +225,41 @@ table_settings:
   # - migrate_constraints: true/false - if constraints should be migrated, default is true
   # - migrate_triggers: true/false - if triggers should be migrated, default is true
   - table_name: "table1"
+    table_schema: "dbo"  # source schema for the table, if not specified, default is the source schema from the source database connection
     batch_size: 50000
     chunk_size: -1
     migrate_data: true
     migrate_indexes: false
     migrate_constraints: true
     migrate_triggers: false
+
+    # individual data export settings for the table - only CSV and UNL formats are supported
+    database_export:
+      file: "/some/other/path/to/data/files/some_specific_name.dump"  # path to the data file
+      format: "CSV" / "UNL"  # currently only CSV and UNL formats are supported
+      delimiter: "|"  # delimiter for CSV and UNL files, default is comma resp. "|"
+      # header is used only for reading from already supplied CSV files
+      # CSV files converted from UNL files are always without header
+      header: true  # if CSV files contain header line with column names, default is false
+      # conversion_path is used only for UNL files, where converted CSV files will be stored
+      conversion_path: "/path/to/data/files/conversion"  # directory where converted CSV files will be stored, if not specified, default is the same as for the data files
+
+      ## currently not implemented, just a preparation for the future
+      # split of big files for parallel processing - local setting for the table
+      # if missing, global setting is used
+      # big_files_split:
+      #   enabled: true
+      #   threshold: '5GB'
+      #   chunk_size: '2GB'
+      #   workers: 4  # number of workers to use for parallel processing of the chunks, default is 4
+
+    ## currently not implemented, just a preparation for the future
+    # individual target LOB storage settings for the table
+    # for example global settings can be set to database, but for this table we want to store LOB values in files
+    # target_lob_storage:
+    #   storage: database # database, file
+    #   path: "/path/to/lob/files"  # path to the directory with LOB files, used only if storage is set to file
+    #   name: "{{source_schema}}.{{source_table}}.lob"  # name of the LOB file, can contain placeholders for source_schema and source_table
 
   - table_name: "table2"
     batch_size: 20000

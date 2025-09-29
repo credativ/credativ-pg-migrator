@@ -973,7 +973,7 @@ class ConfigParser:
                         buffer += line
 
                     # Check if buffer has expected number of delimiters
-                    if buffer.count('|') < expected_delimiters:
+                    if buffer.count(unl_delimiter) < expected_delimiters:
                         continue
 
                     # Remove only the last trailing '|' - this last '|' ends the record in UNL format

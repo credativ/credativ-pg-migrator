@@ -138,7 +138,6 @@ class MigratorTables:
                 OR lower(trim(%s)) ILIKE lower(trim(column_name))
                 OR nullif(lower(trim(column_name)), '') IS NULL
             )''')
-            # params.append(trimmed_column_name)
             params.extend([trimmed_column_name, trimmed_column_name, trimmed_column_name])
 
         where_clauses.append("""(

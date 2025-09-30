@@ -7,6 +7,8 @@
   - Bug fixing party
   - Version updated to 0.9.9dev
   - Fix in check_data_types_substitution function - repaired construction of select query, it now covers all cases of defining table name and/or column name including global replacements (empty table name and/or column name)
+  - Skip creation of foreign key constraint if either target table or referenced table do not exist in the target database - migrator now tests existence of both tables before attempting to create the constraint
+  - Fix in Informix data import from UNL files - repaired misplaced else statement in the block handling splitting of big UNL files into smaller parts for parallel processing
 
 - 2025.08.14:
 

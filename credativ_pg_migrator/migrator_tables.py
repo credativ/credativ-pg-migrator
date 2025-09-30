@@ -126,7 +126,6 @@ class MigratorTables:
                 OR lower(trim(%s)) ILIKE lower(trim(table_name))
                 OR nullif(lower(trim(table_name)), '') IS NULL
             )''')
-            # params.append(trimmed_table_name)
             params.extend([trimmed_table_name, trimmed_table_name, trimmed_table_name])
 
         trimmed_column_name = column_name.strip()

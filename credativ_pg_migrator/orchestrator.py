@@ -935,6 +935,10 @@ class Orchestrator:
                 read_lines += 1
 
                 part_name = 'read lob pointer'
+                if lob_col_index <= 0 or lob_col_index > len(row):
+                    self.config_parser.print_log_message('ERROR', f"Worker: {worker_id}: Invalid lob_col_index {lob_col_index} for row of length {len(row)}. Skipping row.")
+                    row = select_cur.fetchone()
+                    continue
                 content = row[lob_col_index-1]
                 content_is_null = False
 

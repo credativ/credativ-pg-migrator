@@ -625,8 +625,10 @@ class Orchestrator:
 
                                                     select_datafiles_sql = f"""SELECT DISTINCT split_part({lob_col_name},',',3) as datafile, count(*) as occurrences FROM {target_schema}.{table_name_for_lob_import} group by 1 order by 1;"""
 
-                                                    worker_target_connection.execute_query(select_datafiles_sql)
-                                                    datafiles = worker_target_connection.fetch_all()
+                                                    datafiles_cursor = worker_target_connection.connection.cursor()
+                                                    datafiles_cursor.execute(select_datafiles_sql)
+                                                    datafiles = datafiles_cursor.fetchall()
+                                                    datafiles_cursor.close()
                                                     self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Found {len(datafiles)} distinct data files for LOB column {lob_col_name}")
 
                                                     max_lob_parallel_workers = self.config_parser.get_source_database_export_workers()
@@ -653,8 +655,9 @@ class Orchestrator:
                                                                 current_datafile_num += 1
 
                                                                 settings = {
-                                                                    'target_schema': self.config_parser.get_target_schema(),
-                                                                    'target_table': self.config_parser.get_target_table(),
+                                                                    'target_schema': table_data['target_schema'],
+                                                                    'target_table': table_data['target_table'],
+                                                                    'unl_import_table': table_name_for_lob_import,
                                                                     'lob_column': lob_col_name,
                                                                     'lob_col_index': lob_col_index,
                                                                     'lob_col_type': lob_col_type,
@@ -909,9 +912,9 @@ class Orchestrator:
 
         worker_select_connection = self.load_connector('target')
         worker_select_connection.connect()
-        cur_select = worker_select_connection.cursor()
+        # cur_select = worker_select_connection.connection.cursor()
 
-        named_cur = worker_select_connection.cursor(name='lobcur_' + str(worker_id).replace('-', '_'))
+        named_cur = worker_select_connection.connection.cursor(name='lobcur_' + str(worker_id).replace('-', '_'))
         select_sql = f"""SELECT {col_list} FROM "{target_schema}"."{unl_import_table}" WHERE split_part({lob_column},',',3) = '{datafile}'"""
 
         self.config_parser.print_log_message('DEBUG', f"{time.strftime('%Y-%m-%d %H:%M:%S')}: Worker {worker_id}: Fetching rows from '{unl_import_table}' with query: {select_sql}")
@@ -965,7 +968,7 @@ class Orchestrator:
                 row[lob_col_index] = None
 
             try:
-                cur_insert = worker_insert_connection.cursor()
+                cur_insert = worker_insert_connection.connection.cursor()
                 cur_insert.execute(insert_sql, row)
                 cur_insert.close()
                 counter += 1
@@ -978,7 +981,7 @@ class Orchestrator:
         named_cur.close()
         self.config_parser.print_log_message('INFO', f"{time.strftime('%Y-%m-%d %H:%M:%S')}: Worker: {worker_id}: Processed {read_lines} rows from '{unl_import_table}', datafile: {datafile}, occurrences: {occurrences} - inserted {counter} into '{target_schema}.{target_table}'.")
 
-        cur_select.close()
+        # cur_select.close()
         worker_select_connection.close()
 
         worker_insert_connection.close()

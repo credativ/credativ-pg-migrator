@@ -116,18 +116,35 @@ class MigratorTables:
         where_clauses = []
         params = []
 
-        if table_name != '':
-            where_clauses.append(f'trim(%s) = trim(table_name)')
-            params.append(table_name)
+        trimmed_table_name = table_name.strip()
+        if trimmed_table_name == '':
+            trimmed_table_name = None
+        if trimmed_table_name is not None:
+            where_clauses.append(f'''(
+                lower(trim(%s)) = lower(trim(table_name))
+                OR lower(trim(%s)) ~ lower(trim(table_name))
+                OR lower(trim(%s)) ILIKE lower(trim(table_name))
+                OR nullif(lower(trim(table_name)), '') IS NULL
+            )''')
+            # params.append(trimmed_table_name)
+            params.extend([trimmed_table_name, trimmed_table_name, trimmed_table_name])
 
-        if column_name != '':
-            where_clauses.append(f'trim(%s) = trim(column_name)')
-            params.append(column_name)
+        trimmed_column_name = column_name.strip()
+        if trimmed_column_name == '':
+            trimmed_column_name = None
+        if trimmed_column_name is not None:
+            where_clauses.append(f'''(
+                lower(trim(%s)) = lower(trim(column_name))
+                OR lower(trim(%s)) ~ lower(trim(column_name))
+                OR lower(trim(%s)) ILIKE lower(trim(column_name))
+                OR nullif(lower(trim(column_name)), '') IS NULL
+            )''')
+            # params.append(trimmed_column_name)
+            params.extend([trimmed_column_name, trimmed_column_name, trimmed_column_name])
 
-        where_clauses.append("""
-            (
+        where_clauses.append("""(
             lower(trim(%s)) = lower(trim(source_type))
-            OR trim(%s) ILIKE trim(source_type)
+            OR lower(trim(%s)) ILIKE lower(trim(source_type))
             OR lower(trim(%s)) ~ lower(trim(source_type))
             )
         """)

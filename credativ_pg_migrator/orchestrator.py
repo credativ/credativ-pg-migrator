@@ -551,10 +551,10 @@ class Orchestrator:
                                         source_files_to_process, converted_files_to_process = self.config_parser.split_big_unl_file(data_source)
                                         self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Table {target_table}: Split source files: {source_files_to_process}, converted target file names: {converted_files_to_process}")
 
-                                else:
-                                    # Single file processing
-                                    source_files_to_process.append(data_source['file_name'])
-                                    converted_files_to_process.append(data_source['converted_file_name'])
+                                    else:
+                                        # Single file processing
+                                        source_files_to_process.append(data_source['file_name'])
+                                        converted_files_to_process.append(data_source['converted_file_name'])
 
                                 data_source_settings = data_source.copy()
                                 csv_file_name = None
@@ -1022,13 +1022,28 @@ class Orchestrator:
             self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Creating constraint {constraint_name} in target database.")
             create_constraint_sql = constraint_data['constraint_sql']
 
+            target_schema = constraint_data['target_schema']
+            target_table = constraint_data['target_table']
+            referenced_table_schema = constraint_data['referenced_table_schema']
+            referenced_table_name = constraint_data['referenced_table_name']
+
             if create_constraint_sql:
+
                 # Each worker uses its own separate connection to the target database
                 worker_target_connection = self.load_connector('target')
+                worker_target_connection.connect()
+
+                if not worker_target_connection.target_table_exists(target_schema, target_table):
+                    self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Target table {target_schema}.{target_table} for constraint {constraint_name} does not exist - skipping constraint creation.")
+                    self.migrator_tables.update_constraint_status(constraint_data['id'], False, f'ERROR: target table {target_schema}.{target_table} does not exist')
+                    return False
+
+                if not worker_target_connection.target_table_exists(referenced_table_schema, referenced_table_name):
+                    self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Referenced table {referenced_table_schema}.{referenced_table_name} for constraint {constraint_name} does not exist - skipping constraint creation.")
+                    self.migrator_tables.update_constraint_status(constraint_data['id'], False, f'ERROR: referenced table {referenced_table_schema}.{referenced_table_name} does not exist')
+                    return False
 
                 self.config_parser.print_log_message( 'DEBUG', f"Worker {worker_id}: Creating constraint with SQL: {create_constraint_sql}")
-
-                worker_target_connection.connect()
 
                 query = f'''SET SESSION search_path TO {constraint_data['target_schema']};'''
 

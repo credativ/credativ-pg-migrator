@@ -1,6 +1,12 @@
 # Changelog
 
-## 0.9.9 - 2025.08.xx
+## 0.9.9 - 2025.10.xx
+
+- 2025.09.30:
+
+  - Bug fixing party
+  - Version updated to 0.9.9dev
+  - Fix in check_data_types_substitution function - repaired construction of select query, it now covers all cases of defining table name and/or column name including global replacements (empty table name and/or column name)
 
 - 2025.08.14:
 

@@ -1028,7 +1028,7 @@ class Planner:
                     file_name = table_database_export['file']
 
                 if file_name:
-                    table_file_name = file_name.replace("{{schema_name}}", table_info['source_schema']).replace("{{table_name}}", table_info['source_table'])
+                    table_file_name = file_name.replace("{{source_schema}}", table_info['source_schema']).replace("{{source_table}}", table_info['source_table'])
                     if os.path.exists(table_file_name):
                         data_file_found = True
                     else:

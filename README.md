@@ -4,7 +4,6 @@
 
 `credativ-pg-migrator` is a solution for the migration of databases from legacy systems to PostgreSQL.
 It is is written in Python in multiple classes and modules.
-For practical usage and examples refer to the [tests](./tests/) directory. There you can find working examples of the migration process for different databases.
 
 ## Main features
 
@@ -61,7 +60,7 @@ credativ-pg-migrator --config=./test_database.yaml --log-file=./test_database_$(
 
 ## Source databases
 
-- Source database connector must implement DatabaseConnector class from the [credativ-pg-migrator.database_connector](./credativ-pg-migrator/database_connector.py) module
+- Source database connector must implement DatabaseConnector class from the [credativ_pg_migrator.database_connector](./credativ_pg_migrator/database_connector.py) module
 - Methods of this class contain descriptions of actions and return values that are expected by the migrator tool
 - Supported databases should be accessed via ODBC, JDBC or native python libraries. Not all options are available for all databases.
 - See feature matrix in [FEATURE MATRIX](./FEATURE_MATRIX.md) for supported features in different database connectors.
@@ -81,10 +80,6 @@ credativ-pg-migrator --config=./test_database.yaml --log-file=./test_database_$(
 ## Changes
 
 See [CHANGELOG](./CHANGELOG.md).
-
-## Known issues
-
-See [ISSUESLOG](./ISSUESLOG.md)
 
 ## Authors
 

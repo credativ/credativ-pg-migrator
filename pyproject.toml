@@ -27,6 +27,7 @@ dependencies = [
     "psycopg2",
     "pyodbc",
     "pyyaml",
+    "sqlglot",
     "tabulate",
 ]
 

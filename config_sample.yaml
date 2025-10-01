@@ -236,7 +236,7 @@ table_settings:
     # individual data export settings for the table - only CSV and UNL formats are supported
     database_export:
       file: "/some/other/path/to/data/files/some_specific_name.dump"  # path to the data file
-      format: "CSV" / "UNL"  # currently only CSV and UNL formats are supported
+      format: "CSV" # currently only CSV and UNL formats are supported
       delimiter: "|"  # delimiter for CSV and UNL files, default is comma resp. "|"
       # header is used only for reading from already supplied CSV files
       # CSV files converted from UNL files are always without header

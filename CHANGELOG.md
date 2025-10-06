@@ -5,7 +5,7 @@
 - 2025.10.06:
 
   - Fix in Orchestrator - in case of data import from CSV/UNL files, row counts were not checked because source database can be inaccessible - initial row counts simply set to 0. When migrating using batch inserts, row counts are still checked because source database must be accessible and parity of row counts must be verified.
-  - Fixes is UNL to CSV conversion - improved handling of escaped delimiters in text values, repaired processing of text values with multiple lines with the first line containing only new line character, repair is setting sequences after data import from UNL/CSV files
+  - Fixes in UNL to CSV conversion - improved handling of escaped delimiters in text values, repaired processing of text values with multiple lines with the first line containing only new line character, repair is setting sequences after data import from UNL/CSV files
 
 ## 0.10.0 - 2025.10.01
 

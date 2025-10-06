@@ -300,9 +300,9 @@ exclude_funcprocs:
 data_types_substitution:
   - ["", "", "TypMacAdresse", "TEXT", 'Does not have direct equivalent in PostgreSQL, using TEXT']
   - ["", "", "TypID", "BIGINT", 'Numeric PK is not supported in PostgreSQL, using BIGINT']
-  - ["", "", "numeric(_,0)", "INTEGER", 'Sybase numeric type with no decimal places, using INTEGER']
-  - ["", "", "numeric(1_,0)", "BIGINT", 'Sybase numeric type with no decimal places, using BIGINT']
-  - ["", "", "numeric(2_,0)", "NUMERIC", 'Sybase Integer bigger than 32 bits, using NUMERIC - will probably need to change to BIGINT later']
+  - ["", "", "decimal(_,0)", "INTEGER", 'Sybase numeric type with no decimal places, using INTEGER']
+  - ["", "", "decimal(1_,0)", "BIGINT", 'Sybase numeric type with no decimal places, using BIGINT']
+  - ["", "", "decimal(2_,0)", "NUMERIC", 'Sybase Integer bigger than 32 bits, using NUMERIC - will probably need to change to BIGINT later']
   - ["staff", "password", "varchar(40)", "TEXT", 'Password in the staff table is varchar(40) but migrated value exceeds this length, using TEXT']
 
 # Default values substitution

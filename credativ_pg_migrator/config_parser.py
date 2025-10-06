@@ -939,11 +939,12 @@ class ConfigParser:
 
                     with open(input_unl_data_file, 'r', encoding='utf-8', newline='') as infile:
                         for _, line in zip(range(sample_size), infile):
-                            delimiter_count=line.count(unl_delimiter)
+                            # Count only unescaped delimiters (not preceded by a backslash)
+                            delimiter_count = len(re.findall(rf'(?<!\\){re.escape(unl_delimiter)}', line))
                             # Some columns can have documents with multiple lines without any delimiter
                             # So we only consider cases where there is at least one delimiter
                             # UNL format always has at least one delimiter per line - as the last character ending the record
-                            if delimiter_count>0:
+                            if delimiter_count > 0:
                                 delimiter_counts.append(delimiter_count)
                     most_common_count = Counter(delimiter_counts).most_common(1)
                     return most_common_count[0][0] if most_common_count else None
@@ -976,8 +977,9 @@ class ConfigParser:
                         else:
                             buffer += line
 
-                        # Check if buffer has expected number of delimiters
-                        if buffer.count(unl_delimiter) < expected_delimiters:
+                        # Check if buffer has expected number of unescaped delimiters
+                        unescaped_delimiters = len(re.findall(rf'(?<!\\){re.escape(unl_delimiter)}', buffer))
+                        if unescaped_delimiters < expected_delimiters:
                             continue
 
                         # Remove only the last trailing '|' - this last '|' ends the record in UNL format

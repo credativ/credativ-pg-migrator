@@ -740,6 +740,7 @@ class Orchestrator:
                                             self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data copied successfully from CSV file {csv_file_name} to table {target_table}.")
 
                                         target_table_rows = worker_target_connection.get_rows_count(target_schema, target_table)
+                                        rows_migrated = target_table_rows
                                         data_import_end_time = time.time()
                                         data_import_duration = data_import_end_time - data_import_start_time
                                         self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data import duration: {data_import_duration:.2f} seconds, rows migrated: {target_table_rows}.")

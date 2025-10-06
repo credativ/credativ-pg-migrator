@@ -495,8 +495,12 @@ class Orchestrator:
                         ## CSV format is common for all databases, but might be necessary to convert it to PostgreSQL CSV conventions
                         if data_source['format_options']['format'].upper() in ('CSV', 'UNL'):
 
-                            source_table_rows = worker_source_connection.get_rows_count(table_data['source_schema'], table_data['source_table'])
-                            target_table_rows = worker_target_connection.get_rows_count(target_schema, target_table)
+                            # Migration from CSV/UNL data file is considered as offline, source database can be inaccessible
+                            # source_table_rows = worker_source_connection.get_rows_count(table_data['source_schema'], table_data['source_table'])
+                            # target_table_rows = worker_target_connection.get_rows_count(target_schema, target_table)
+
+                            source_table_rows = 0
+                            target_table_rows = 0
 
                             protocol_id = migrator_tables.insert_data_migration({
                                 'worker_id': worker_id,
@@ -715,10 +719,12 @@ class Orchestrator:
                                             # Drop the intermediate import table
                                             worker_target_connection.execute_query(f'DROP TABLE IF EXISTS "{target_schema}"."{table_name_for_lob_import}" CASCADE')
                                             self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Intermediate import table {table_name_for_lob_import} dropped successfully.")
-                                            target_table_rows = worker_target_connection.get_rows_count(target_schema, target_table)
-                                            data_import_end_time = time.time()
-                                            data_import_duration = data_import_end_time - data_import_start_time
-                                            self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data import duration: {data_import_duration:.2f} seconds, rows migrated: {target_table_rows}.")
+
+                                            # the same as below after the if/else
+                                            # target_table_rows = worker_target_connection.get_rows_count(target_schema, target_table)
+                                            # data_import_end_time = time.time()
+                                            # data_import_duration = data_import_end_time - data_import_start_time
+                                            # self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data import duration: {data_import_duration:.2f} seconds, rows migrated: {target_table_rows}.")
 
                                         else:
 

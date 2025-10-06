@@ -982,10 +982,12 @@ class ConfigParser:
                         if unescaped_delimiters < expected_delimiters:
                             continue
 
-                        # Remove only the last trailing '|' - this last '|' ends the record in UNL format
-                        # But in CSV format it would confuse the parser, it would expect another field
-                        # record = re.sub(r'\|$', '', buffer.rstrip())
-                        record = re.sub(re.escape(unl_delimiter) + r'$', '', buffer.rstrip())
+                        # Remove only the last trailing unl_delimiter
+                        # only at the end of the last line in the buffer
+                        lines = buffer.rstrip('\n').split('\n')
+                        if lines and lines[-1].endswith(unl_delimiter):
+                            lines[-1] = re.sub(re.escape(unl_delimiter) + r'$', '', lines[-1])
+                        record = '\n'.join(lines)
 
                         # Replace "^M" text with carriage return character (\r)
                         record = record.replace('^M', '\r')

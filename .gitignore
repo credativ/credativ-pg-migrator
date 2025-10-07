@@ -187,7 +187,8 @@ notes
 poc
 scripts
 sql
-tests
+# tests ## we need some testing code
 utils
 
 TODO1.txt
+data/*

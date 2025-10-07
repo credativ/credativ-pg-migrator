@@ -4,13 +4,14 @@
 # This script allows you to test the convert_unl_to_csv method from ConfigParser.
 # Usage: python main_tests.py --unl-file <input.unl> --csv-file <output.csv> --dummy-config <dummy_config.yaml> --table-json <table_info.json>
 
-import sys
+# import sys
 import argparse
+import ast
+import os
 from credativ_pg_migrator.config_parser import ConfigParser
 from credativ_pg_migrator.migrator_logging import MigratorLogger
 
 def main():
-	import ast
 	parser = argparse.ArgumentParser(description="Test convert_unl_to_csv from ConfigParser.")
 	parser.add_argument('--unl-file', required=True, help='Path to the input UNL file')
 	parser.add_argument('--csv-file', required=True, help='Path to the output CSV file')
@@ -44,7 +45,11 @@ def main():
 	target_columns = columns_dict_to_list(target_columns_dict)
 
 	# Minimal logger for ConfigParser
-	logger = MigratorLogger('test_convert_unl_to_csv.log')
+	LOG_FILE = 'test_convert_unl_to_csv.log'
+	if os.path.exists(LOG_FILE):
+		os.remove(LOG_FILE)
+
+	logger = MigratorLogger(LOG_FILE)
 	# Dummy args for ConfigParser
 	class DummyArgs:
 		def __init__(self, config):
@@ -52,8 +57,8 @@ def main():
 			self.dry_run = False
 			self.resume = False
 			self.drop_unfinished_tables = False
-			self.log_file = 'test_convert_unl_to_csv.log'
-			self.log_level = 'INFO'
+			self.log_file = LOG_FILE
+			self.log_level = 'DEBUG3'
 	dummy_args = DummyArgs(args.config)
 
 	config_parser = ConfigParser(dummy_args, logger.logger)

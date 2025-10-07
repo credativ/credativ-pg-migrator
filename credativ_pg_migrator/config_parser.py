@@ -556,7 +556,7 @@ class ConfigParser:
         return os.path.abspath(export_file)
 
     def get_source_database_export_header(self):
-        return self.get_source_database_export().get('header', None)
+        return self.get_source_database_export().get('header', False)
 
     def get_source_database_export_workers(self):
         return self.get_source_database_export().get('workers', 4)
@@ -706,7 +706,7 @@ class ConfigParser:
         return self.get_table_database_export(schema_name, table_name).get('file', None)
 
     def get_table_database_export_header(self, schema_name, table_name):
-        return self.get_table_database_export(schema_name, table_name).get('header', None)
+        return self.get_table_database_export(schema_name, table_name).get('header', False)
 
     def get_table_database_export_conversion_path(self, schema_name, table_name):
         conversion_path = self.get_table_database_export(schema_name, table_name).get('conversion_path', None)

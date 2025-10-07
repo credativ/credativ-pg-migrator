@@ -1,6 +1,10 @@
 # Changelog
 
-## 0.10.1 - 2025.10.06
+## 0.10.1 - 2025.10.07
+
+- 2025.10.07:
+
+  - Fix in UNL to CSV conversion - repair for the cases when text value ends with backslash - these cases are exported as escaped backslash followed by delimiter, e.g. `\\|` - after yesterday's fix this was mistakenly interpreted as escaped delimiter, now it is properly handled
 
 - 2025.10.06:
 

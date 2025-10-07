@@ -939,11 +939,19 @@ class ConfigParser:
 
                     with open(input_unl_data_file, 'r', encoding='utf-8', newline='') as infile:
                         for _, line in zip(range(sample_size), infile):
-                            # Count only unescaped delimiters (not preceded by a backslash)
-                            delimiter_count = len(re.findall(rf'(?<!\\){re.escape(unl_delimiter)}', line))
-                            # Some columns can have documents with multiple lines without any delimiter
-                            # So we only consider cases where there is at least one delimiter
-                            # UNL format always has at least one delimiter per line - as the last character ending the record
+                            # Replace double backslash (escaped backslash) with a placeholder
+                            backslash_placeholder = "<<ESCAPED_BACKSLASH>>"
+                            line_processed = line.replace('\\\\', backslash_placeholder)
+
+                            # Replace escaped unl delimiter (e.g., \|) with a placeholder
+                            delimiter_placeholder = "<<ESCAPED_DELIMITER>>"
+                            escaped_delim_pattern = rf'\\{re.escape(unl_delimiter)}'
+                            line_processed = re.sub(escaped_delim_pattern, delimiter_placeholder, line_processed)
+
+                            # Now simply count the occurrences of the unl delimiter
+                            delimiter_count = line_processed.count(unl_delimiter)
+
+                            # Only count lines with at least one delimiter
                             if delimiter_count > 0:
                                 delimiter_counts.append(delimiter_count)
                     most_common_count = Counter(delimiter_counts).most_common(1)
@@ -964,6 +972,19 @@ class ConfigParser:
 
                     for line in infile:
                         part_name = f"process inline {counter}"
+
+                        # Must be done in this order - first escape backslashes, then escaped delimiters
+                        # Due to a corner case - backslash at the end of the text column, which is stored as '\\|' in UNL
+
+                        # Temporarily replace '\\' (escaped backslash) with a unique placeholder
+                        # This happens when text in the column ends with a backslash
+                        line = line.replace('\\\\', '<<ESCAPED_BACKSLASH>>')
+
+                        # Replace escaped unl delimiter (e.g., \|) with a unique placeholder to avoid splitting inside text fields
+                        delimiter_placeholder = "<<ESCAPED_DELIMITER>>"
+                        escaped_delim_pattern = rf'\\{re.escape(unl_delimiter)}'
+                        line = re.sub(escaped_delim_pattern, delimiter_placeholder, line)
+
                         # Remove any trailing whitespace characters
                         # UNL lines have clear endings, so we can safely strip them
                         line = line.rstrip()
@@ -992,10 +1013,6 @@ class ConfigParser:
                         # Replace "^M" text with carriage return character (\r)
                         record = record.replace('^M', '\r')
 
-                        # Temporarily replace '\\' (escaped backslash) with a unique placeholder
-                        # This happens when text in the column ends with a backslash
-                        record = record.replace('\\\\', '<<BACKSLASH>>')
-
                         # Split on '|' not preceded by a backslash (escaped pipe inside text column)
                         # fields = re.split(r'(?<!\\)\|', record)
                         fields = re.split(rf'(?<!\\){re.escape(unl_delimiter)}', record, flags=re.MULTILINE)
@@ -1004,8 +1021,11 @@ class ConfigParser:
                         # fields = [field.replace(r'\|', '|') for field in fields]
                         fields = [field.replace(f'\\{unl_delimiter}', unl_delimiter) for field in fields]
 
-                        # Restore '\\' (better separately to avoid confusion with escaped pipes)
-                        fields = [field.replace('<<BACKSLASH>>', '\\') for field in fields]
+                        # Restore escaped backslash characters '\\'
+                        fields = [field.replace('<<ESCAPED_BACKSLASH>>', '\\') for field in fields]
+
+                        # Restore escaped unl_delimiter characters
+                        fields = [field.replace('<<ESCAPED_DELIMITER>>', unl_delimiter) for field in fields]
 
                         processed_fields = [conversion(field, expected_types[i]) if i < len(expected_types) else conversion(field) for i, field in enumerate(fields)]
                         processed_fields = [null_symbol if field is None and field != '' else field for field in processed_fields]

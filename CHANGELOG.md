@@ -5,6 +5,8 @@
 - 2025.10.07:
 
   - Fix in UNL to CSV conversion - repair for the cases when text value ends with backslash - these cases are exported as escaped backslash followed by delimiter, e.g. `\\|` - after yesterday's fix this was mistakenly interpreted as escaped delimiter, now it is properly handled
+  - Added new script in tests directory for manual testing of UNL to CSV conversion - see details in tests/README.md
+    - This code can be used also for manual conversion of UNL files into CSV files for further processing outside of the migrator
 
 - 2025.10.06:
 

@@ -937,25 +937,49 @@ class ConfigParser:
                     sample_size = 100000
                     delimiter_counts = []
 
-                    with open(input_unl_data_file, 'r', encoding='utf-8', newline='') as infile:
+                    with open(input_unl_data_file, 'r', encoding='utf-8', newline='\n') as infile:
+                        buffer = ""
                         for _, line in zip(range(sample_size), infile):
+                            # self.print_log_message('DEBUG3', f"convert_unl_to_csv - determine_expected_delimiters: Reading line for sample: {line}")
+                            if '\r' in line:
+                                line = line.replace('\r', '')
+                            line = line.rstrip('\n')
+                            if line.endswith('\\'):
+                                line = line.rstrip('\\')
+                                line = line.rstrip('\r')  # remove windows and unix line endings
+                                buffer += line
+                                continue
+                            else:
+                                buffer += line.rstrip('\n').rstrip('\r')  # remove windows and unix line endings
+
+                            # Record is complete when line does not end with backslash
                             # Replace double backslash (escaped backslash) with a placeholder
                             backslash_placeholder = "<<ESCAPED_BACKSLASH>>"
-                            line_processed = line.replace('\\\\', backslash_placeholder)
+                            record_processed = buffer.replace('\\\\', backslash_placeholder)
 
                             # Replace escaped unl delimiter (e.g., \|) with a placeholder
                             delimiter_placeholder = "<<ESCAPED_DELIMITER>>"
                             escaped_delim_pattern = rf'\\{re.escape(unl_delimiter)}'
-                            line_processed = re.sub(escaped_delim_pattern, delimiter_placeholder, line_processed)
+                            record_processed = re.sub(escaped_delim_pattern, delimiter_placeholder, record_processed)
 
                             # Now simply count the occurrences of the unl delimiter
-                            delimiter_count = line_processed.count(unl_delimiter)
+                            delimiter_count = record_processed.count(unl_delimiter)
+                            # self.print_log_message('DEBUG3', f"convert_unl_to_csv - determine_expected_delimiters: Processed record: {record_processed}, Delimiter count: {delimiter_count}")
 
-                            # Only count lines with at least one delimiter
+                            # Only count records with at least one delimiter
                             if delimiter_count > 0:
                                 delimiter_counts.append(delimiter_count)
-                    most_common_count = Counter(delimiter_counts).most_common(1)
-                    return most_common_count[0][0] if most_common_count else None
+                            buffer = ""
+                    # self.print_log_message('DEBUG3', f"convert_unl_to_csv - determine_expected_delimiters: Sampled delimiter counts: {delimiter_counts}")
+                    if not delimiter_counts:
+                        return None
+                    count_freq = Counter(delimiter_counts)
+                    max_occurrence = max(count_freq.values())
+                    self.print_log_message('DEBUG3', f"convert_unl_to_csv - determine_expected_delimiters: Delimiter counts frequency: {count_freq}, Max occurrence: {max_occurrence}")
+                    # Find all delimiter counts with the highest occurrence
+                    candidates = [count for count, freq in count_freq.items() if freq == max_occurrence]
+                    # Return the largest delimiter count among the candidates
+                    return max(candidates)
 
                 self.print_log_message('DEBUG', f"convert_unl_to_csv: ({part_name}): Converting UNL file '{input_unl_data_file}' to CSV file '{output_csv_data_file}' with delimiter '{unl_delimiter}' - source file size: {source_file_size}")
                 # First analyze the input file to determine the expected number of delimiters per line
@@ -963,8 +987,8 @@ class ConfigParser:
                 expected_delimiters = determine_expected_delimiters()
                 self.print_log_message('DEBUG', f"convert_unl_to_csv: ({part_name}): UNL file '{input_unl_data_file}' - found delimiters count: {expected_delimiters} - source file size: {source_file_size}")
 
-                with open(input_unl_data_file, 'r', encoding='utf-8', newline='') as infile, \
-                    open(output_csv_data_file, 'w', newline='', encoding='utf-8') as outfile:
+                with open(input_unl_data_file, 'r', encoding='utf-8', newline='\n') as infile, \
+                    open(output_csv_data_file, 'w', newline='\n', encoding='utf-8') as outfile:
 
                     csv_writer = csv.writer(outfile, delimiter=unl_delimiter, quoting=csv.QUOTE_MINIMAL)
                     buffer = ""
@@ -990,6 +1014,9 @@ class ConfigParser:
                         line = line.rstrip()
                         counter += 1
 
+                        # self.print_log_message('DEBUG3', f"convert_unl_to_csv: ({part_name}): line: {line}")
+                        # self.print_log_message('DEBUG3', f"convert_unl_to_csv: ({part_name}): buffer: {buffer}")
+
                         # If line ends with a backslash, it means the line continues
                         # We append it to the buffer without the backslash at the end and continue to the next line
                         if line.endswith('\\'):
@@ -998,10 +1025,12 @@ class ConfigParser:
                         else:
                             buffer += line
 
-                        # Check if buffer has expected number of unescaped delimiters
-                        unescaped_delimiters = len(re.findall(rf'(?<!\\){re.escape(unl_delimiter)}', buffer))
-                        if unescaped_delimiters < expected_delimiters:
+                        # Count the number of unl delimiters (escaped delimiters are already replaced with placeholders)
+                        delimiter_count = buffer.count(unl_delimiter)
+                        if delimiter_count < expected_delimiters:
                             continue
+
+                        # self.print_log_message('DEBUG3', f"convert_unl_to_csv: ({part_name}): AFTER buffer: {buffer}")
 
                         # Remove only the last trailing unl_delimiter
                         # only at the end of the last line in the buffer
@@ -1010,8 +1039,10 @@ class ConfigParser:
                             lines[-1] = re.sub(re.escape(unl_delimiter) + r'$', '', lines[-1])
                         record = '\n'.join(lines)
 
-                        # Replace "^M" text with carriage return character (\r)
+                        # Replace "^M" text with carriage return character (\r) if present
                         record = record.replace('^M', '\r')
+                        # replace "\r" characters with empty string to avoid breaking CSV format
+                        record = record.replace('\r', '')
 
                         # Split on '|' not preceded by a backslash (escaped pipe inside text column)
                         # fields = re.split(r'(?<!\\)\|', record)

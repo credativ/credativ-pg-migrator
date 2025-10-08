@@ -1047,7 +1047,7 @@ class Planner:
                         os.path.basename(table_file_name) + ".csv"
                     )
 
-                    header = database_export.get('header', True)
+                    header = database_export.get('header', False)
                     if table_database_export and 'header' in table_database_export:
                         header = table_database_export['header']
 

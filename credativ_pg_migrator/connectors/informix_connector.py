@@ -1598,7 +1598,7 @@ class InformixConnector(DatabaseConnector):
 
                         actions = actions_match.group(1).split(',')
                         for action in actions:
-                            print(f"action: {action.strip()}")
+                            self.config_parser.print_log_message('INFO', f"action: {action.strip()}")
                             if "execute procedure" in action:
                                 # action = re.sub("execute procedure", "", action, flags=re.IGNORECASE) ## keep it for further processing
                                 action = re.sub("with trigger references", "", action, flags=re.IGNORECASE)

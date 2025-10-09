@@ -716,9 +716,13 @@ class Orchestrator:
 
 
                                             self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data copied successfully from CSV file {csv_file_name} to table {target_table} with LOB columns.")
-                                            # Drop the intermediate import table
-                                            worker_target_connection.execute_query(f'DROP TABLE IF EXISTS "{target_schema}"."{table_name_for_lob_import}" CASCADE')
-                                            self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Intermediate import table {table_name_for_lob_import} dropped successfully.")
+                                            # Drop the intermediate import table if clean objects is True
+                                            if clean_objects:
+                                                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Dropping intermediate import table {table_name_for_lob_import} as clean_objects is True.")
+                                                worker_target_connection.execute_query(f'DROP TABLE IF EXISTS "{target_schema}"."{table_name_for_lob_import}" CASCADE')
+                                                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Intermediate import table {table_name_for_lob_import} dropped successfully.")
+                                            else:
+                                                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Keeping intermediate import table {table_name_for_lob_import} as clean_objects is False.")
 
                                             # the same as below after the if/else
                                             # target_table_rows = worker_target_connection.get_rows_count(target_schema, target_table)
@@ -971,23 +975,27 @@ class Orchestrator:
 
                 if not content_is_null and os.path.exists(filepath):
 
-                    part_name = 'read LOB file'
-                    if lob_col_type.lower() == 'bytea':
-                        # For BYTEA, read the file as binary
-                        with open(filepath, 'rb') as f:
-                            f.seek(start)
-                            chunk = f.read(length)
+                    try:
+                        part_name = 'read LOB file'
+                        if lob_col_type.lower() == 'bytea':
+                            # For BYTEA, read the file as binary
+                            with open(filepath, 'rb') as f:
+                                f.seek(start)
+                                chunk = f.read(length)
 
-                    elif lob_col_type.lower() == 'text':
-                        # For TEXT, read the file as text
-                        with open(filepath, 'r', encoding='utf-8') as f:
-                            f.seek(start)
-                            chunk = f.read(length)
+                        elif lob_col_type.lower() == 'text':
+                            # For TEXT, read the file as text
+                            with open(filepath, 'r', encoding='utf-8') as f:
+                                f.seek(start)
+                                chunk = f.read(length)
 
-                    row[lob_col_index-1] = chunk
+                        row[lob_col_index-1] = chunk
+                    except Exception as e:
+                        self.config_parser.print_log_message('ERROR', f"Worker: {worker_id}: Error reading LOB file: {filepath} (start: {start}, length: {length}) in row: {row} - setting LOB value to NULL. Error: {e}")
+                        content_is_null = True
 
                 elif not content_is_null and not os.path.exists(filepath):
-                    self.config_parser.print_log_message('ERROR', f"Worker: {worker_id}: LOB file not found: {filepath} - in row: {row} - setting to NULL.")
+                    self.config_parser.print_log_message('ERROR', f"Worker: {worker_id}: LOB file not found: {filepath} - in row: {row} - setting LOB value to NULL.")
                     content_is_null = True
 
                 if content_is_null:

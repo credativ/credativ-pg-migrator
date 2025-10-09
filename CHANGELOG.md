@@ -1,6 +1,10 @@
 # Changelog
 
-## 0.10.1 - 2025.10.07
+## 0.10.1 - 2025.10.09
+
+- 2025.10.09:
+
+  - Fix in Informix connector - repaired import of LOB values from clob*/blob* files - NULL values indicated by placeholder 0,0,0 in UNL export were not handled properly, causing errors during import
 
 - 2025.10.07:
 

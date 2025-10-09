@@ -4,7 +4,7 @@
 
 - 2025.10.09:
 
-  - Fix in Informix connector - repaired import of LOB values from clob*/blob* files - NULL values indicated by placeholder 0,0,0 in UNL export were not handled properly, causing errors during import
+  - Fix in Informix connector - repaired import of LOB values from clob*/blob* files - NULL values indicated by placeholder 0,0,0 in UNL export were not handled properly, causing errors during import; added catch of reading error for clob/blob files - if file cannot be read, LOB value is set to NULL and error is logged; intermediate import table for UNL import with LOBs is now dropped only if data export clean objects is set to True in config file, otherwise it is kept for further analysis
 
 - 2025.10.07:
 

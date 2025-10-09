@@ -642,13 +642,13 @@ class Orchestrator:
                                                     max_lob_parallel_workers = self.config_parser.get_source_database_export_workers()
                                                     if len(datafiles) <= 10:
                                                         max_lob_parallel_workers = 1
-                                                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Set max LOB parallel workers to {max_lob_parallel_workers} due to low data file count ({len(datafiles)})")
+                                                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {target_table}: Set max LOB parallel workers to {max_lob_parallel_workers} due to low data file count ({len(datafiles)})")
                                                     if len(datafiles) > 10 and len(datafiles) <= 50:
                                                         max_lob_parallel_workers = 2
-                                                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Set max LOB parallel workers to {max_lob_parallel_workers} due to medium data file count ({len(datafiles)})")
+                                                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {target_table}: Set max LOB parallel workers to {max_lob_parallel_workers} due to medium data file count ({len(datafiles)})")
                                                     if len(datafiles) > 200:
                                                         max_lob_parallel_workers = max_lob_parallel_workers * 2
-                                                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Set max LOB parallel workers to {max_lob_parallel_workers} due to high data file count ({len(datafiles)})")
+                                                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {target_table}: Set max LOB parallel workers to {max_lob_parallel_workers} due to high data file count ({len(datafiles)})")
 
                                                     if len(datafiles) > 0:
 
@@ -663,8 +663,8 @@ class Orchestrator:
                                                                 current_datafile_num += 1
 
                                                                 settings = {
-                                                                    'target_schema': table_data['target_schema'],
-                                                                    'target_table': table_data['target_table'],
+                                                                    'target_schema': target_schema,
+                                                                    'target_table': target_table,
                                                                     'unl_import_table': table_name_for_lob_import,
                                                                     'lob_column': lob_col_name,
                                                                     'lob_col_index': lob_col_index,
@@ -677,7 +677,7 @@ class Orchestrator:
                                                                     'lob_files_path': self.config_parser.get_source_database_export_file_path(),
                                                                 }
 
-                                                                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: parallel LOB processing: futures running count: {len(futures)}")
+                                                                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {target_table}: parallel LOB processing: futures running count: {len(futures)}")
                                                                 while len(futures) >= max_lob_parallel_workers:
 
                                                                     done, _ = concurrent.futures.wait(futures, return_when=concurrent.futures.FIRST_COMPLETED)
@@ -685,29 +685,29 @@ class Orchestrator:
                                                                         datafile_done = futures.pop(future)
                                                                         if future.result() == False:
                                                                             if self.on_error_action == 'stop':
-                                                                                self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: parallel LOB processing: Stopping execution due to error.")
+                                                                                self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Table {target_table}: parallel LOB processing: Stopping execution due to error.")
                                                                                 exit(1)
                                                                         else:
-                                                                            self.config_parser.print_log_message('INFO', f"Worker {worker_id}: parallel LOB processing: {datafile_done} LOBs migrated OK")
+                                                                            self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {target_table}: parallel LOB processing: {datafile_done} LOBs migrated OK")
 
                                                                 # Submit the next task
                                                                 future = executor.submit(self.lob_worker, settings)
                                                                 futures[future] = datafile
 
                                                             # Process remaining futures
-                                                            self.config_parser.print_log_message('INFO', f"Worker {worker_id}: parallel LOB processing: Processing remaining futures")
+                                                            self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {target_table}: parallel LOB processing: Processing remaining futures")
                                                             for future in concurrent.futures.as_completed(futures):
                                                                 datafile_done = futures[future]
                                                                 if future.result() == False:
                                                                     if self.on_error_action == 'stop':
-                                                                        self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: parallel LOB processing: Stopping execution due to error.")
+                                                                        self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Table {target_table}: parallel LOB processing: Stopping execution due to error.")
                                                                         exit(1)
                                                                 else:
-                                                                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: parallel LOB processing: {datafile_done} LOBs migrated OK")
+                                                                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {target_table}: parallel LOB processing: {datafile_done} LOBs migrated OK")
 
-                                                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: parallel LOB processing: All datafiles processed successfully.")
+                                                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {target_table}: parallel LOB processing: All datafiles processed successfully.")
                                                     else:
-                                                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: parallel LOB processing: No datafiles to process.")
+                                                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {target_table}: parallel LOB processing: No datafiles to process.")
 
 
                                                 else:
@@ -747,7 +747,7 @@ class Orchestrator:
                                         rows_migrated = target_table_rows
                                         data_import_end_time = time.time()
                                         data_import_duration = data_import_end_time - data_import_start_time
-                                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data import duration: {data_import_duration:.2f} seconds, rows migrated: {target_table_rows}.")
+                                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {target_table}: Data import duration: {data_import_duration:.2f} seconds, rows migrated: {target_table_rows}.")
 
                                         # self.migrator_tables.update_table_status(table_data['id'], True, f'migrated OK ({rows_migrated} rows)')
                                         migrator_tables.update_data_migration_status({

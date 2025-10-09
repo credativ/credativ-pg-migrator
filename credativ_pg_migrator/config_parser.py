@@ -553,6 +553,9 @@ class ConfigParser:
         export_file = self.get_source_database_export_file()
         if export_file is None:
             return None
+        # Remove the file name from the export_file and leave just the path
+        if os.path.basename(export_file):
+            export_file = os.path.dirname(export_file)
         return os.path.abspath(export_file)
 
     def get_source_database_export_header(self):

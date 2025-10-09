@@ -627,7 +627,7 @@ class Orchestrator:
                                                         lob_col_type = col_info['data_type']
                                                         break
 
-                                                part_name = f'process LOB column {lob_col_name}/{lob_col_index}'
+                                                part_name = f'table {target_table} process LOB column {lob_col_name}/{lob_col_index}'
                                                 if lob_col_name is not None and lob_col_index is not None:
                                                     self.config_parser.print_log_message('INFO', f"Worker {worker_id}: LOB column {lob_col_name} found in target table {target_table} - index: {lob_col_index}, type: {lob_col_type}")
 
@@ -637,7 +637,7 @@ class Orchestrator:
                                                     datafiles_cursor.execute(select_datafiles_sql)
                                                     datafiles = datafiles_cursor.fetchall()
                                                     datafiles_cursor.close()
-                                                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Found {len(datafiles)} distinct data files for LOB column {lob_col_name}")
+                                                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {target_table}: Found {len(datafiles)} distinct data files for LOB column {lob_col_name}")
 
                                                     max_lob_parallel_workers = self.config_parser.get_source_database_export_workers()
                                                     if len(datafiles) <= 10:
@@ -652,7 +652,7 @@ class Orchestrator:
 
                                                     if len(datafiles) > 0:
 
-                                                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Processing {len(datafiles)} data files for LOB column {lob_col_name}")
+                                                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {target_table}: Processing {len(datafiles)} data files for LOB column {lob_col_name}")
                                                         current_datafile_num = 0
 
                                                         with concurrent.futures.ThreadPoolExecutor(max_workers=max_lob_parallel_workers) as executor:
@@ -677,7 +677,7 @@ class Orchestrator:
                                                                     'lob_files_path': self.config_parser.get_source_database_export_file_path(),
                                                                 }
 
-                                                                print(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: parallel LOB processing: futures running count: {len(futures)}")
+                                                                self.config_parser.print_log_message('INFO', f"{time.strftime('%Y-%m-%d %H:%M:%S')}: parallel LOB processing: futures running count: {len(futures)}")
                                                                 while len(futures) >= max_lob_parallel_workers:
 
                                                                     done, _ = concurrent.futures.wait(futures, return_when=concurrent.futures.FIRST_COMPLETED)
@@ -685,29 +685,29 @@ class Orchestrator:
                                                                         datafile_done = futures.pop(future)
                                                                         if future.result() == False:
                                                                             if self.on_error_action == 'stop':
-                                                                                print(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: parallel LOB processing: Stopping execution due to error.")
+                                                                                self.config_parser.print_log_message('ERROR', f"{time.strftime('%Y-%m-%d %H:%M:%S')}: parallel LOB processing: Stopping execution due to error.")
                                                                                 exit(1)
                                                                         else:
-                                                                            print(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: parallel LOB processing: {datafile_done} LOBs migrated OK")
+                                                                            self.config_parser.print_log_message('INFO', f"{time.strftime('%Y-%m-%d %H:%M:%S')}: parallel LOB processing: {datafile_done} LOBs migrated OK")
 
                                                                 # Submit the next task
                                                                 future = executor.submit(self.lob_worker, settings)
                                                                 futures[future] = datafile
 
                                                             # Process remaining futures
-                                                            print(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: parallel LOB processing: Processing remaining futures")
+                                                            self.config_parser.print_log_message('INFO', f"{time.strftime('%Y-%m-%d %H:%M:%S')}: parallel LOB processing: Processing remaining futures")
                                                             for future in concurrent.futures.as_completed(futures):
                                                                 datafile_done = futures[future]
                                                                 if future.result() == False:
                                                                     if self.on_error_action == 'stop':
-                                                                        print(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: parallel LOB processing: Stopping execution due to error.")
+                                                                        self.config_parser.print_log_message('ERROR', f"{time.strftime('%Y-%m-%d %H:%M:%S')}: parallel LOB processing: Stopping execution due to error.")
                                                                         exit(1)
                                                                 else:
-                                                                    print(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: parallel LOB processing: {datafile_done} LOBs migrated OK")
+                                                                    self.config_parser.print_log_message('INFO', f"{time.strftime('%Y-%m-%d %H:%M:%S')}: parallel LOB processing: {datafile_done} LOBs migrated OK")
 
-                                                        print(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: parallel LOB processing: All datafiles processed successfully.")
+                                                        self.config_parser.print_log_message('INFO', f"{time.strftime('%Y-%m-%d %H:%M:%S')}: parallel LOB processing: All datafiles processed successfully.")
                                                     else:
-                                                        print(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: parallel LOB processing: No datafiles to process.")
+                                                        self.config_parser.print_log_message('INFO', f"{time.strftime('%Y-%m-%d %H:%M:%S')}: parallel LOB processing: No datafiles to process.")
 
 
                                                 else:
@@ -986,6 +986,10 @@ class Orchestrator:
 
                     row[lob_col_index-1] = chunk
 
+                elif not os.path.exists(filepath):
+                    self.config_parser.print_log_message('ERROR', f"Worker: {worker_id}: LOB file not found: {filepath} - in row: {row} - setting to NULL.")
+                    return False
+
                 if content_is_null:
                     row[lob_col_index-1] = None
 
@@ -993,6 +997,7 @@ class Orchestrator:
                     part_name = 'insert row'
                     cur_insert = worker_insert_connection.connection.cursor()
                     cur_insert.execute(insert_sql, row)
+                    worker_insert_connection.connection.commit()
                     cur_insert.close()
                     counter += 1
                 except Exception as e:

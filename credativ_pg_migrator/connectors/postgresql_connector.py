@@ -523,6 +523,14 @@ class PostgreSQLConnector(DatabaseConnector):
                 ELSE contype::text
                 END as type,
                 pg_get_constraintdef(oid) as condef,
+                CASE WHEN contype = 'f'
+                    THEN (SELECT n.nspname FROM pg_namespace n, pg_class c WHERE c.oid = confrelid AND n.oid = c.relnamespace)
+                ELSE NULL
+                END AS ref_schema,
+                CASE WHEN contype = 'f'
+                    THEN (SELECT c.relname FROM pg_class c WHERE oid = confrelid)
+                ELSE ''
+                END AS ref_table,
                 obj_description(oid, 'pg_constraint') as constraint_comment
             FROM pg_constraint
             WHERE conrelid = '{source_table_id}'::regclass
@@ -535,18 +543,31 @@ class PostgreSQLConnector(DatabaseConnector):
                 constraint_name = row[1]
                 constraint_type = row[2]
                 constraint_sql = row[3]
-                constraint_comment = row[4]
+                constraint_ref_schema = row[4]
+                constraint_ref_table = row[5]
+                constraint_comment = row[6]
 
                 if constraint_type in ('PRIMARY KEY', 'p', 'P'):
                     continue # Primary key is handled in fetch_indexes
 
-                constraints[order_num] = {
-                    'constraint_name': constraint_name,
-                    'constraint_type': constraint_type,
-                    'constraint_sql': constraint_sql,
-                    'constraint_comment': constraint_comment
-                }
-                order_num += 1
+                if constraint_type in ('FOREIGN KEY', 'f', 'F'):
+                     constraints[order_num] = {
+                         'constraint_name': constraint_name,
+                         'constraint_type': constraint_type,
+                         'constraint_sql': constraint_sql,
+                         'constraint_comment': constraint_comment,
+                         'referenced_table_schema': constraint_ref_schema,
+                         'referenced_table_name': constraint_ref_table,
+                     }
+                     order_num += 1
+                else:
+                     constraints[order_num] = {
+                         'constraint_name': constraint_name,
+                         'constraint_type': constraint_type,
+                         'constraint_sql': constraint_sql,
+                         'constraint_comment': constraint_comment,
+                     }
+                     order_num += 1
 
             cursor.close()
             self.disconnect()
@@ -566,6 +587,7 @@ class PostgreSQLConnector(DatabaseConnector):
         constraint_type = settings['constraint_type']
         constraint_owner = self.config_parser.convert_names_case(settings['constraint_owner'])
         constraint_columns = self.config_parser.convert_names_case(settings['constraint_columns'])
+        #referenced_table_schema = target_schema
         referenced_table_schema = self.config_parser.convert_names_case(settings['referenced_table_schema'])
         referenced_table_name = self.config_parser.convert_names_case(settings['referenced_table_name'])
         referenced_columns = self.config_parser.convert_names_case(settings['referenced_columns'])

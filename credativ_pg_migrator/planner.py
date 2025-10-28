@@ -351,6 +351,8 @@ class Planner:
         self.config_parser.print_log_message( 'DEBUG', f"Exclude tables: {exclude_tables}")
 
         for order_num, table_info in source_tables.items():
+            source_table_rows = 0
+            target_table_rows = 0
             self.config_parser.print_log_message('INFO', f"Processing table ({order_num}/{len(source_tables)}): {table_info['table_name']}")
             # If include_tables is empty, include all tables
             # If include_tables is ['.*'] or contains '.*', include all tables
@@ -499,15 +501,24 @@ class Planner:
                                             self.target_connection.disconnect()
                                             self.config_parser.print_log_message( 'DEBUG', f"Create partitions SQL: {create_partitions_sql}")
 
+                self.config_parser.print_log_message( 'INFO', f"Counting rows in source table {table_info['table_name']}...")
+                source_table_rows = self.source_connection.get_table_row_count({
+                    'table_schema': self.source_schema,
+                    'table_name': table_info['table_name'],
+                })
+                self.config_parser.print_log_message( 'INFO', f"Source table {table_info['table_name']} has {source_table_rows} rows.")
+
                 self.migrator_tables.insert_tables({
                     'source_schema': self.source_schema,
                     'source_table': table_info['table_name'],
                     'source_table_id': table_info['id'],
                     'source_columns': source_columns,
+                    'source_table_rows': source_table_rows,
                     'source_table_description': table_description,
                     'target_schema': self.target_schema,
                     'target_table': table_info['table_name'],
                     'target_columns': target_columns,
+                    'target_table_rows': target_table_rows,
                     'target_table_sql': target_table_sql,
                     'table_comment': table_info['comment'],
                     'partitioned': table_partitioned,
@@ -522,10 +533,12 @@ class Planner:
                     'source_table': table_info['table_name'],
                     'source_table_id': table_info['id'],
                     'source_columns': source_columns,
+                    'source_table_rows': source_table_rows,
                     'source_table_description': table_description,
                     'target_schema': self.target_schema,
                     'target_table': table_info['table_name'],
                     'target_columns': target_columns,
+                    'target_table_rows': target_table_rows,
                     'target_table_sql': target_table_sql,
                     'table_comment': table_info['comment'],
                     'partitioned': False,

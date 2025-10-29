@@ -1062,7 +1062,7 @@ class Orchestrator:
 
             target_schema = constraint_data['target_schema']
             target_table = constraint_data['target_table']
-            referenced_table_schema = constraint_data['referenced_table_schema']
+            referenced_table_schema = constraint_data['target_schema']
             referenced_table_name = constraint_data['referenced_table_name']
 
             if create_constraint_sql:

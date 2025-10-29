@@ -502,10 +502,12 @@ class Planner:
                                             self.config_parser.print_log_message( 'DEBUG', f"Create partitions SQL: {create_partitions_sql}")
 
                 self.config_parser.print_log_message( 'INFO', f"Counting rows in source table {table_info['table_name']}...")
-                source_table_rows = self.source_connection.get_table_row_count({
-                    'table_schema': self.source_schema,
-                    'table_name': table_info['table_name'],
-                })
+                self.source_connection.connect()
+                source_table_rows = self.source_connection.get_rows_count(
+                    self.source_schema,
+                    table_info['table_name'],
+                )
+                self.source_connection.disconnect()
                 self.config_parser.print_log_message( 'INFO', f"Source table {table_info['table_name']} has {source_table_rows} rows.")
 
                 self.migrator_tables.insert_tables({

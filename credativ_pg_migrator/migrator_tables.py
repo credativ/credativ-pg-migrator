@@ -1860,6 +1860,21 @@ class MigratorTables:
             self.config_parser.print_log_message('ERROR', f"update_table_status: Exception: {e}")
             raise
 
+    def select_table_by_source(self, source_schema, source_table):
+        table_name = self.config_parser.get_protocol_name_tables()
+        query = f"""
+            SELECT * FROM "{self.protocol_schema}"."{table_name}"
+            WHERE source_schema = %s AND source_table = %s
+        """
+        params = (source_schema, source_table)
+        cursor = self.protocol_connection.connection.cursor()
+        cursor.execute(query, params)
+        row = cursor.fetchone()
+        cursor.close()
+        if row:
+            return self.decode_table_row(row)
+        return None
+
     def insert_indexes(self, values):
         table_name = self.config_parser.get_protocol_name_indexes()
         query = f"""

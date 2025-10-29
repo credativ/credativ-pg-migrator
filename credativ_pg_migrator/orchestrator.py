@@ -368,6 +368,9 @@ class Orchestrator:
             create_table_sql = table_data['target_table_sql']
             migrator_tables = settings['migrator_tables']
 
+            source_table_rows = table_data.get('source_table_rows', 0)
+            target_table_rows = 0
+
             if create_table_sql is None:
                 self.config_parser.print_log_message('INFO', f"Table {target_table} does not have a CREATE TABLE statement - skipping.")
                 return False
@@ -494,13 +497,6 @@ class Orchestrator:
                         ## for other formats relevant to other databases we simply add new data types
                         ## CSV format is common for all databases, but might be necessary to convert it to PostgreSQL CSV conventions
                         if data_source['format_options']['format'].upper() in ('CSV', 'UNL'):
-
-                            # Migration from CSV/UNL data file is considered as offline, source database can be inaccessible
-                            # source_table_rows = worker_source_connection.get_rows_count(table_data['source_schema'], table_data['source_table'])
-                            # target_table_rows = worker_target_connection.get_rows_count(target_schema, target_table)
-
-                            source_table_rows = 0
-                            target_table_rows = 0
 
                             protocol_id = migrator_tables.insert_data_migration({
                                 'worker_id': worker_id,
@@ -723,12 +719,6 @@ class Orchestrator:
                                                 self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Intermediate import table {table_name_for_lob_import} dropped successfully.")
                                             else:
                                                 self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Keeping intermediate import table {table_name_for_lob_import} as clean_objects is False.")
-
-                                            # the same as below after the if/else
-                                            # target_table_rows = worker_target_connection.get_rows_count(target_schema, target_table)
-                                            # data_import_end_time = time.time()
-                                            # data_import_duration = data_import_end_time - data_import_start_time
-                                            # self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data import duration: {data_import_duration:.2f} seconds, rows migrated: {target_table_rows}.")
 
                                         else:
 
@@ -1086,9 +1076,15 @@ class Orchestrator:
                     self.migrator_tables.update_constraint_status(constraint_data['id'], False, f'ERROR: target table {target_schema}.{target_table} does not exist')
                     return False
 
-                if not worker_target_connection.target_table_exists(referenced_table_schema, referenced_table_name):
-                    self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Referenced table {referenced_table_schema}.{referenced_table_name} for constraint {constraint_name} does not exist - skipping constraint creation.")
-                    self.migrator_tables.update_constraint_status(constraint_data['id'], False, f'ERROR: referenced table {referenced_table_schema}.{referenced_table_name} does not exist')
+                referenced_target_table = self.migrator_tables.select_table_by_source(referenced_table_schema, referenced_table_name)
+                if referenced_target_table is None:
+                    self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Referenced table {referenced_table_schema}.{referenced_table_name} for constraint {constraint_name} not found - skipping constraint creation.")
+                    self.migrator_tables.update_constraint_status(constraint_data['id'], False, f'''ERROR: referenced table {referenced_table_schema}.{referenced_table_name} not found''')
+                    worker_target_connection.disconnect()
+                    return False
+                if not worker_target_connection.target_table_exists(referenced_target_table['target_schema'], referenced_target_table['target_table']):
+                    self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Referenced table {referenced_target_table['target_schema']}.{referenced_target_table['target_table']} for constraint {constraint_name} does not exist - skipping constraint creation.")
+                    self.migrator_tables.update_constraint_status(constraint_data['id'], False, f'''ERROR: referenced table {referenced_target_table['target_schema']}.{referenced_target_table['target_table']} does not exist''')
                     return False
 
                 self.config_parser.print_log_message( 'DEBUG', f"Worker {worker_id}: Creating constraint with SQL: {create_constraint_sql}")

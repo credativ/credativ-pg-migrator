@@ -1,6 +1,10 @@
 # Changelog
 
-## 0.10.2 - 2025.10.28
+## 0.10.2 - 2025.10.29
+
+- 2025.10.29:
+
+  - Fix in Orchestrator - repaired check of existence of referenced table before creating the constraint - when creating foreign key constraints, referenced table must be checked based on target database schema and target table name
 
 - 2025.10.28:
 

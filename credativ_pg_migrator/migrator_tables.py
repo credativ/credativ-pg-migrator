@@ -1867,13 +1867,20 @@ class MigratorTables:
             WHERE source_schema = %s AND source_table = %s
         """
         params = (source_schema, source_table)
-        cursor = self.protocol_connection.connection.cursor()
-        cursor.execute(query, params)
-        row = cursor.fetchone()
-        cursor.close()
-        if row:
-            return self.decode_table_row(row)
-        return None
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+            if row:
+                return self.decode_table_row(row)
+            return None
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"select_table_by_source: Error selecting table for source_schema={source_schema}, source_table={source_table} in {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"select_table_by_source: Query: {query}")
+            self.config_parser.print_log_message('ERROR', f"select_table_by_source: Params: {params}")
+            self.config_parser.print_log_message('ERROR', f"select_table_by_source: Exception: {e}")
+            raise
 
     def insert_indexes(self, values):
         table_name = self.config_parser.get_protocol_name_indexes()

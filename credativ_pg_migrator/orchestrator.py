@@ -1076,9 +1076,10 @@ class Orchestrator:
                     self.migrator_tables.update_constraint_status(constraint_data['id'], False, f'ERROR: target table {target_schema}.{target_table} does not exist')
                     return False
 
-                if not worker_target_connection.target_table_exists(referenced_table_schema, referenced_table_name):
-                    self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Referenced table {referenced_table_schema}.{referenced_table_name} for constraint {constraint_name} does not exist - skipping constraint creation.")
-                    self.migrator_tables.update_constraint_status(constraint_data['id'], False, f'ERROR: referenced table {referenced_table_schema}.{referenced_table_name} does not exist')
+                referenced_target_table = self.migrator_tables.select_table_by_source(referenced_table_schema, referenced_table_name)
+                if not worker_target_connection.target_table_exists(referenced_target_table['target_schema'], referenced_target_table['target_table']):
+                    self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Referenced table {referenced_target_table['target_schema']}.{referenced_target_table['target_table']} for constraint {constraint_name} does not exist - skipping constraint creation.")
+                    self.migrator_tables.update_constraint_status(constraint_data['id'], False, f'''ERROR: referenced table {referenced_target_table['target_schema']}.{referenced_target_table['target_table']} does not exist''')
                     return False
 
                 self.config_parser.print_log_message( 'DEBUG', f"Worker {worker_id}: Creating constraint with SQL: {create_constraint_sql}")

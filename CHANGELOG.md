@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.10.2 - 2025.10.29
+
+- 2025.10.29:
+
+  - Fix in Orchestrator - repaired check of existence of referenced table before creating the constraint - when creating foreign key constraints, referenced table must be checked based on target database schema and target table name
+
+- 2025.10.28:
+
+  - Change in Planner and Migrator tables - count of rows in source table is now part of planning phase and value is stored in the protocol table - this allows to have information about source table row counts even in case of data import from CSV/UNL files when source database can be inaccessible during data import
+
 ## 0.10.1 - 2025.10.09
 
 - 2025.10.09:

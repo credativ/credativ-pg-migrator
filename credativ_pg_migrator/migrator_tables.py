@@ -1365,10 +1365,12 @@ class MigratorTables:
             source_table TEXT,
             source_table_id INTEGER,
             source_columns TEXT,
+            source_table_rows BIGINT,
             source_table_description TEXT,
             target_schema TEXT,
             target_table TEXT,
             target_columns TEXT,
+            target_table_rows BIGINT,
             target_table_sql TEXT,
             table_comment TEXT,
             partitioned BOOLEAN,
@@ -1658,16 +1660,18 @@ class MigratorTables:
             'source_table': row[2],
             'source_table_id': row[3],
             'source_columns': json.loads(row[4]),
-            'source_table_description': row[5],
-            'target_schema': row[6],
-            'target_table': row[7],
-            'target_columns': json.loads(row[8]),
-            'target_table_sql': row[9],
-            'table_comment': row[10],
-            'partitioned': row[11],
-            'partitioned_by': row[12],
-            'partitioning_columns': row[13],
-            'create_partitions_sql': row[14],
+            'source_table_rows': row[5],
+            'source_table_description': row[6],
+            'target_schema': row[7],
+            'target_table': row[8],
+            'target_columns': json.loads(row[9]),
+            'target_table_rows': row[10],
+            'target_table_sql': row[11],
+            'table_comment': row[12],
+            'partitioned': row[13],
+            'partitioned_by': row[14],
+            'partitioning_columns': row[15],
+            'create_partitions_sql': row[16],
         }
 
     def decode_index_row(self, row):
@@ -1783,10 +1787,12 @@ class MigratorTables:
         source_table = settings['source_table']
         source_table_id = settings['source_table_id']
         source_columns = settings['source_columns']
+        source_table_rows = settings['source_table_rows']
         source_table_description = settings['source_table_description']
         target_schema = settings['target_schema']
         target_table = settings['target_table']
         target_columns = settings['target_columns']
+        target_table_rows = settings['target_table_rows']
         target_table_sql = settings['target_table_sql']
         table_comment = settings['table_comment']
         partitioned = settings['partitioned']
@@ -1799,14 +1805,14 @@ class MigratorTables:
         target_columns_str = json.dumps(target_columns)
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
-            (source_schema, source_table, source_table_id, source_columns, source_table_description,
-            target_schema, target_table, target_columns, target_table_sql, table_comment,
+            (source_schema, source_table, source_table_id, source_columns, source_table_rows, source_table_description,
+            target_schema, target_table, target_columns, target_table_rows, target_table_sql, table_comment,
             partitioned, partitioned_by, partitioning_columns, create_partitions_sql)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (source_schema, source_table, source_table_id, source_columns_str, source_table_description,
-                  target_schema, target_table, target_columns_str, target_table_sql, table_comment,
+        params = (source_schema, source_table, source_table_id, source_columns_str, source_table_rows, source_table_description,
+                  target_schema, target_table, target_columns_str, target_table_rows, target_table_sql, table_comment,
                   partitioned, partitioned_by, partitioning_columns, create_partitions_sql)
         try:
             cursor = self.protocol_connection.connection.cursor()
@@ -1852,6 +1858,28 @@ class MigratorTables:
             self.config_parser.print_log_message('ERROR', f"update_table_status: Error updating status for table {row_id} in {table_name}.")
             self.config_parser.print_log_message('ERROR', f"update_table_status: Query: {query}")
             self.config_parser.print_log_message('ERROR', f"update_table_status: Exception: {e}")
+            raise
+
+    def select_table_by_source(self, source_schema, source_table):
+        table_name = self.config_parser.get_protocol_name_tables()
+        query = f"""
+            SELECT * FROM "{self.protocol_schema}"."{table_name}"
+            WHERE source_schema = %s AND source_table = %s
+        """
+        params = (source_schema, source_table)
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+            if row:
+                return self.decode_table_row(row)
+            return None
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"select_table_by_source: Error selecting table for source_schema={source_schema}, source_table={source_table} in {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"select_table_by_source: Query: {query}")
+            self.config_parser.print_log_message('ERROR', f"select_table_by_source: Params: {params}")
+            self.config_parser.print_log_message('ERROR', f"select_table_by_source: Exception: {e}")
             raise
 
     def insert_indexes(self, values):

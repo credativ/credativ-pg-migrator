@@ -1862,9 +1862,10 @@ class MigratorTables:
 
     def select_table_by_source(self, source_schema, source_table):
         table_name = self.config_parser.get_protocol_name_tables()
+        self.config_parser.print_log_message('DEBUG3', f"select_table_by_source: Selecting table for source_schema={source_schema}, source_table={source_table} in {table_name}.")
         query = f"""
             SELECT * FROM "{self.protocol_schema}"."{table_name}"
-            WHERE source_schema = %s AND source_table = %s
+            WHERE lower(source_schema) = lower(%s) AND lower(source_table) = lower(%s)
         """
         params = (source_schema, source_table)
         try:

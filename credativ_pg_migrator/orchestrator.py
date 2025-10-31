@@ -363,7 +363,8 @@ class Orchestrator:
         worker_start_time = time.time()
         worker_end_time = None
         try:
-            target_schema = self.config_parser.convert_names_case(table_data['target_schema'])
+            # target_schema = self.config_parser.convert_names_case(table_data['target_schema'])
+            target_schema = table_data['target_schema'] ## target schema is used as defined in the config file, no case conversion
             target_table = self.config_parser.convert_names_case(table_data['target_table'])
             create_table_sql = table_data['target_table_sql']
             migrator_tables = settings['migrator_tables']
@@ -438,7 +439,7 @@ class Orchestrator:
                 }):
                     self.config_parser.print_log_message( 'DEBUG', f"Worker {worker_id}: Found dependency for column alteration: {result}")
                     alter_column_sql = f"""
-                        ALTER TABLE "{self.config_parser.convert_names_case(target_schema)}"."{self.config_parser.convert_names_case(target_table)}"
+                        ALTER TABLE "{target_schema}"."{self.config_parser.convert_names_case(target_table)}"
                         ALTER COLUMN "{self.config_parser.convert_names_case(result['target_column'].replace('"',''))}"
                         TYPE {result['altered_data_type']}"""
                     self.config_parser.print_log_message( 'DEBUG', f"Worker {worker_id}: Altering column with SQL: {alter_column_sql}")
@@ -1333,7 +1334,9 @@ class Orchestrator:
             for table_detail in all_tables:
                 table_data = self.migrator_tables.decode_table_row(table_detail)
                 if table_data['table_comment']:
-                    query = f"""COMMENT ON TABLE "{table_data['target_schema']}"."{table_data['target_table']}" IS '{table_data['table_comment']}'"""
+                    query = f"""COMMENT ON TABLE
+                    "{table_data['target_schema']}"."{self.config_parser.convert_names_case(table_data['target_table'])}"
+                    IS '{table_data['table_comment']}'"""
                     self.config_parser.print_log_message('INFO', f"Setting comment for table {table_data['target_table']} in target database.")
                     self.config_parser.print_log_message( 'DEBUG', f"Executing comment query: {query}")
                     self.target_connection.execute_query(query)
@@ -1341,7 +1344,9 @@ class Orchestrator:
                 for col in table_data['target_columns'].keys():
                     column_comment = table_data['target_columns'][col]['column_comment']
                     if column_comment:
-                        query = f"""COMMENT ON COLUMN "{table_data['target_schema']}"."{table_data['target_table']}"."{table_data['target_columns'][col]['column_name']}" IS '{column_comment}'"""
+                        query = f"""COMMENT ON COLUMN
+                        "{table_data['target_schema']}"."{self.config_parser.convert_names_case(table_data['target_table'])}"."{self.config_parser.convert_names_case(table_data['target_columns'][col]['column_name'])}"
+                        IS '{column_comment}'"""
                         self.config_parser.print_log_message('INFO', f"Setting comment for column {table_data['target_columns'][col]['column_name']} in target database.")
                         self.config_parser.print_log_message( 'DEBUG', f"Executing comment query: {query}")
                         self.target_connection.execute_query(query)
@@ -1351,7 +1356,9 @@ class Orchestrator:
                 index_data = self.migrator_tables.decode_index_row(index_detail)
                 if index_data['index_comment']:
                     index_name = f"{index_data['index_name']}_tab_{index_data['target_table']}"
-                    query = f"""COMMENT ON INDEX "{index_data['target_schema']}"."{index_name}" IS '{index_data['index_comment']}'"""
+                    query = f"""COMMENT ON INDEX
+                    "{index_data['target_schema']}"."{self.config_parser.convert_names_case(index_name)}"
+                    IS '{index_data['index_comment']}'"""
                     self.config_parser.print_log_message('INFO', f"Setting comment for index {index_name} in target database.")
                     self.config_parser.print_log_message( 'DEBUG', f"Executing comment query: {query}")
                     self.target_connection.execute_query(query)
@@ -1360,7 +1367,10 @@ class Orchestrator:
             for constraint_detail in all_constraints:
                 constraint_data = self.migrator_tables.decode_constraint_row(constraint_detail)
                 if constraint_data['constraint_comment']:
-                    query = f"""COMMENT ON CONSTRAINT "{constraint_data['constraint_name']}" ON "{constraint_data['target_schema']}"."{constraint_data['target_table']}" IS '{constraint_data['constraint_comment']}'"""
+                    query = f"""COMMENT ON CONSTRAINT
+                    "{self.config_parser.convert_names_case(constraint_data['constraint_name'])}"
+                    ON "{constraint_data['target_schema']}"."{self.config_parser.convert_names_case(constraint_data['target_table'])}"
+                    IS '{constraint_data['constraint_comment']}'"""
                     self.config_parser.print_log_message('INFO', f"Setting comment for constraint {constraint_data['constraint_name']} in target database.")
                     self.config_parser.print_log_message( 'DEBUG', f"Executing comment query: {query}")
                     self.target_connection.execute_query(query)
@@ -1369,7 +1379,9 @@ class Orchestrator:
             for trigger_detail in all_triggers:
                 trigger_data = self.migrator_tables.decode_trigger_row(trigger_detail)
                 if trigger_data['trigger_comment']:
-                    query = f"""COMMENT ON TRIGGER "{trigger_data['target_schema']}"."{trigger_data['trigger_name']}" IS '{trigger_data['trigger_comment']}'"""
+                    query = f"""COMMENT ON TRIGGER
+                    "{trigger_data['target_schema']}"."{self.config_parser.convert_names_case(trigger_data['trigger_name'])}"
+                    IS '{trigger_data['trigger_comment']}'"""
                     self.config_parser.print_log_message('INFO', f"Setting comment for trigger {trigger_data['trigger_name']} in target database.")
                     self.config_parser.print_log_message( 'DEBUG', f"Executing comment query: {query}")
                     self.target_connection.execute_query(query)
@@ -1378,7 +1390,9 @@ class Orchestrator:
             for view_detail in all_views:
                 view_data = self.migrator_tables.decode_view_row(view_detail)
                 if view_data['view_comment']:
-                    query = f"""COMMENT ON VIEW "{view_data['target_schema']}"."{view_data['view_name']}" IS '{view_data['view_comment']}'"""
+                    query = f"""COMMENT ON VIEW
+                    "{view_data['target_schema']}"."{self.config_parser.convert_names_case(view_data['view_name'])}"
+                    IS '{view_data['view_comment']}'"""
                     self.config_parser.print_log_message('INFO', f"Setting comment for view {view_data['view_name']} in target database.")
                     self.config_parser.print_log_message( 'DEBUG', f"Executing comment query: {query}")
                     self.target_connection.execute_query(query)
@@ -1387,7 +1401,9 @@ class Orchestrator:
             for type_detail in all_user_defined_types:
                 type_data = self.migrator_tables.decode_user_defined_type_row(type_detail)
                 if type_data['type_comment']:
-                    query = f"""COMMENT ON TYPE "{type_data['target_schema']}"."{type_data['type_name']}" IS '{type_data['type_comment']}'"""
+                    query = f"""COMMENT ON TYPE
+                    "{type_data['target_schema']}"."{self.config_parser.convert_names_case(type_data['type_name'])}"
+                    IS '{type_data['type_comment']}'"""
                     self.config_parser.print_log_message('INFO', f"Setting comment for user defined type {type_data['type_name']} in target database.")
                     self.config_parser.print_log_message( 'DEBUG', f"Executing comment query: {query}")
                     self.target_connection.execute_query(query)

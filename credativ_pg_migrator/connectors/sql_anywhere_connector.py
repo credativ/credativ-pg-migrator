@@ -225,7 +225,8 @@ class SQLAnywhereConnector(DatabaseConnector):
             source_table = settings['source_table']
             source_table_id = settings['source_table_id']
             source_columns = settings['source_columns']
-            target_schema = self.config_parser.convert_names_case(settings['target_schema'])
+            # target_schema = self.config_parser.convert_names_case(settings['target_schema'])
+            target_schema = settings['target_schema'] ## target schema is used as it is defined in config, not converted to upper/lower case
             target_table = self.config_parser.convert_names_case(settings['target_table'])
             target_columns = settings['target_columns']
             batch_size = settings['batch_size']

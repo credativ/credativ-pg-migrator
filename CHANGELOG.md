@@ -6,6 +6,9 @@
 
   - Improvements in MySQL connector - added support for ODBC / JDBC connection, current implementation moved under "native" connectivity type
   - Fix in Orchestrator - fix in check of existence of target table before creating the constraint - target schema from target database was mistakenly used instead of referenced schema and referenced table name from source database for checking existence of referenced table
+  - Fix in Orchestrator - repair in creation of comments in the target database for all objects - proper handling of names casing based on migration.names_case_handling setting in the config file
+  - Fix in all connectors - target schema name must be used as it is defined in the config file, not converted based on migration.names_case_handling setting - this setting applies only for object names taken from the source database
+  - Fix in PostgreSQL connector - lists of columns in indexes and constraints must be properly double quoted to preserve case as defined in the config file
 
 - 2025.10.29:
 

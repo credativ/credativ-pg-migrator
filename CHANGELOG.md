@@ -2,6 +2,11 @@
 
 ## 0.10.2 - 2025.10.29
 
+- 2025.10.31:
+
+  - Improvements in MySQL connector - added support for ODBC / JDBC connection, current implementation moved under "native" connectivity type
+  - Fix in Orchestrator - fix in check of existence of target table before creating the constraint - target schema from target database was mistakenly used instead of referenced schema and referenced table name from source database for checking existence of referenced table
+
 - 2025.10.29:
 
   - Fix in Orchestrator - repaired check of existence of referenced table before creating the constraint - when creating foreign key constraints, referenced table must be checked based on target database schema and target table name

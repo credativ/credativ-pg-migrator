@@ -28,6 +28,7 @@ class ConfigParser:
         self.args = args
         self.logger = logger
         self.config = self.load_config(args.config)
+        self.print_log_message('DEBUG3', f"Configuration loaded: {self.config}")
         self.validate_config()
 
     def load_config(self, config_file):
@@ -298,6 +299,7 @@ class ConfigParser:
     def get_default_values_substitution(self):
         implicit_substitutions = []
         from_config_file = self.config.get('default_values_substitution', {})
+        self.print_log_message('DEBUG3', f"get_default_values_substitution: from_config_file: {from_config_file}")
         if self.get_source_db_type() == 'sybase_ase':
             implicit_substitutions = [
                 # Use regex patterns for matching default values

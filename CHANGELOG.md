@@ -1,6 +1,10 @@
 # Changelog
 
-## 0.10.2 - 2025.10.29
+## 0.10.2 - 2025.11.03
+
+- 2025.11.03:
+
+  - Fix in default values substitution - repaired case insensitive matching of default values
 
 - 2025.10.31:
 

@@ -286,13 +286,14 @@ class MigratorTables:
             query = f"""
                 SELECT target_default_value
                 FROM "{self.protocol_schema}".default_values_substitution
-                WHERE trim(%s) ~ trim(column_name)
-                AND trim(%s) ~ trim(source_column_data_type)
-                AND trim(%s::TEXT) ~ trim(default_value_value::TEXT)
+                WHERE lower(trim(%s)) ~ lower(trim(column_name))
+                AND lower(trim(%s)) ~ lower(trim(source_column_data_type))
+                AND lower(trim(%s::TEXT)) ~ lower(trim(default_value_value::TEXT))
             """
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, (check_column_name, check_column_data_type, check_default_value))
             result = cursor.fetchone()
+            self.config_parser.print_log_message( 'DEBUG3', f"0 check_default_values_substitution {check_column_name}, {check_column_data_type}, {check_default_value} query: {query} - {result}")
 
             if result:
                 target_default_value = result[0]
@@ -300,9 +301,9 @@ class MigratorTables:
                 query = f"""
                     SELECT target_default_value
                     FROM "{self.protocol_schema}".default_values_substitution
-                    WHERE upper(trim(%s)) LIKE upper(trim(column_name))
-                    AND upper(trim(%s)) LIKE upper(trim(source_column_data_type))
-                    AND upper(trim(%s::TEXT)) LIKE upper(trim(default_value_value::TEXT))
+                    WHERE lower(trim(%s)) ILIKE lower(trim(column_name))
+                    AND lower(trim(%s)) ILIKE lower(trim(source_column_data_type))
+                    AND lower(trim(%s::TEXT)) ILIKE lower(trim(default_value_value::TEXT))
                 """
                 cursor = self.protocol_connection.connection.cursor()
                 cursor.execute(query, (check_column_name, check_column_data_type, check_default_value))
@@ -314,9 +315,9 @@ class MigratorTables:
                     query = f"""
                         SELECT target_default_value
                         FROM "{self.protocol_schema}".default_values_substitution
-                        WHERE upper(trim(column_name)) = ''
-                        AND upper(trim(%s)) LIKE upper(trim(source_column_data_type))
-                        AND upper(trim(%s::TEXT)) LIKE upper(trim(default_value_value::TEXT))
+                        WHERE lower(trim(column_name)) = ''
+                        AND lower(trim(%s)) ILIKE lower(trim(source_column_data_type))
+                        AND lower(trim(%s::TEXT)) ILIKE lower(trim(default_value_value::TEXT))
                     """
                     cursor.execute(query, (check_column_data_type, check_default_value))
                     result = cursor.fetchone()
@@ -327,9 +328,9 @@ class MigratorTables:
                         query = f"""
                             SELECT target_default_value
                             FROM "{self.protocol_schema}".default_values_substitution
-                            WHERE upper(trim(column_name)) = ''
-                            AND upper(trim(source_column_data_type)) = ''
-                            AND upper(trim(%s::TEXT)) LIKE upper(trim(default_value_value::TEXT))
+                            WHERE lower(trim(column_name)) = ''
+                            AND lower(trim(source_column_data_type)) = ''
+                            AND lower(trim(%s::TEXT)) ILIKE lower(trim(default_value_value::TEXT))
                         """
                         cursor.execute(query, (check_default_value,))
                         result = cursor.fetchone()

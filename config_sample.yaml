@@ -304,14 +304,15 @@ data_types_substitution:
   - ["", "", "decimal(1_,0)", "BIGINT", 'Sybase numeric type with no decimal places, using BIGINT']
   - ["", "", "decimal(2_,0)", "NUMERIC", 'Sybase Integer bigger than 32 bits, using NUMERIC - will probably need to change to BIGINT later']
   - ["staff", "password", "varchar(40)", "TEXT", 'Password in the staff table is varchar(40) but migrated value exceeds this length, using TEXT']
-  - ["", "", "current_timestamp()", "current_timestamp"]
-  - ["", "bit", "b'0'", "false"]
 
 # Default values substitution
 # column_name, source_column_data_type, source_default_value, target_default_value
 default_values_substitution:
   - ["", "", "%getdate()%", "statement_timestamp()"]   ## condition with % to catch also "create default job_lastchange as getdate()", "(getdate())" and similar options
   - ["", "", "db_name()", "current_database()"]
+  - ["", "", "current_timestamp()", "current_timestamp"]
+  - ["", "bit", "b'0'", "false"]
+  - ["", "bit", "b'1'", "true"]
 
 # Substitutions for objects from other databases
 # Informix, Sybase ASE and some other databases allow to use objects from other databases

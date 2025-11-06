@@ -310,6 +310,9 @@ data_types_substitution:
 default_values_substitution:
   - ["", "", "%getdate()%", "statement_timestamp()"]   ## condition with % to catch also "create default job_lastchange as getdate()", "(getdate())" and similar options
   - ["", "", "db_name()", "current_database()"]
+  - ["", "", "current_timestamp()", "current_timestamp"]
+  - ["", "bit", "b'0'", "false"]
+  - ["", "bit", "b'1'", "true"]
 
 # Substitutions for objects from other databases
 # Informix, Sybase ASE and some other databases allow to use objects from other databases

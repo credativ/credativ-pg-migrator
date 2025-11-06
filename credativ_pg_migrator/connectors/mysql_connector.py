@@ -16,11 +16,13 @@
 
 from credativ_pg_migrator.database_connector import DatabaseConnector
 from credativ_pg_migrator.migrator_logging import MigratorLogger
-import mysql.connector  ## install mysql-connector-python
+# import mysql.connector  ## only for native connectivity - install mysql-connector-python
 import traceback
 from tabulate import tabulate
 import time
 import datetime
+import jaydebeapi
+import pyodbc
 
 class MySQLConnector(DatabaseConnector):
     def __init__(self, config_parser, source_or_target):
@@ -35,13 +37,35 @@ class MySQLConnector(DatabaseConnector):
 
     def connect(self):
         db_config = self.config_parser.get_db_config(self.source_or_target)
-        self.connection = mysql.connector.connect(
-            host=db_config['host'],
-            user=db_config['username'],
-            password=db_config['password'],
-            database=db_config['database'],
-            port=db_config['port']
-        )
+        if self.config_parser.get_connectivity(self.source_or_target) == 'native':
+            import mysql.connector  ## only for native connectivity - install mysql-connector-python
+            self.connection = mysql.connector.connect(
+                host=db_config['host'],
+                user=db_config['username'],
+                password=db_config['password'],
+                database=db_config['database'],
+                port=db_config['port']
+            )
+        elif self.config_parser.get_connectivity(self.source_or_target) == 'odbc':
+            connection_string = self.config_parser.get_connect_string(self.source_or_target)
+            self.connection = pyodbc.connect(connection_string)
+        elif self.config_parser.get_connectivity(self.source_or_target) == 'jdbc':
+            connection_string = self.config_parser.get_connect_string(self.source_or_target)
+            username = self.config_parser.get_db_config(self.source_or_target)['username']
+            password = self.config_parser.get_db_config(self.source_or_target)['password']
+            jdbc_driver = self.config_parser.get_db_config(self.source_or_target)['jdbc']['driver']
+            jdbc_libraries = self.config_parser.get_db_config(self.source_or_target)['jdbc']['libraries']
+
+            # if not jpype.isJVMStarted():
+            #     jpype.startJVM(jpype.getDefaultJVMPath(), f"-Djava.class.path={jdbc_libraries}")
+            self.connection = jaydebeapi.connect(
+                jdbc_driver,
+                connection_string,
+                [username, password],
+                jdbc_libraries
+            )
+        else:
+            raise ValueError(f"Unsupported connectivity: {self.config_parser.get_connectivity(self.source_or_target)}")
 
     def disconnect(self):
         if self.connection:
@@ -193,6 +217,7 @@ class MySQLConnector(DatabaseConnector):
         return types_mapping
 
     def get_create_table_sql(self, settings):
+        """ Relevant only for target database """
         return ""
 
     def is_string_type(self, column_type: str) -> bool:
@@ -223,7 +248,8 @@ class MySQLConnector(DatabaseConnector):
             source_table = settings['source_table']
             source_table_id = settings['source_table_id']
             source_columns = settings['source_columns']
-            target_schema = self.config_parser.convert_names_case(settings['target_schema'])
+            # target_schema = self.config_parser.convert_names_case(settings['target_schema'])
+            target_schema = settings['target_schema']  ## target schema is used as it is defined in config, not converted to upper/lower case
             target_table = self.config_parser.convert_names_case(settings['target_table'])
             target_columns = settings['target_columns']
             batch_size = settings['batch_size']
@@ -589,6 +615,7 @@ class MySQLConnector(DatabaseConnector):
             raise
 
     def get_create_index_sql(self, settings):
+        """ Relevant only for target database """
         return ""
 
     def fetch_constraints(self, settings):

@@ -177,7 +177,8 @@ class PostgreSQLConnector(DatabaseConnector):
         source_schema = settings['source_schema']
         source_table = settings['source_table']
         source_table_id = settings['source_table_id']
-        target_schema = self.config_parser.convert_names_case(settings['target_schema'])
+        # target_schema = self.config_parser.convert_names_case(settings['target_schema'])
+        target_schema = settings['target_schema'] ## target schema is used as it is defined in config, not converted to upper/lower case
         target_table_name = self.config_parser.convert_names_case(settings['target_table'])
         # source_columns = settings['source_columns']
         converted = settings['target_columns']
@@ -460,9 +461,23 @@ class PostgreSQLConnector(DatabaseConnector):
         # index_owner = settings['index_owner']
         index_name = self.config_parser.convert_names_case(settings['index_name'])
         index_type = settings['index_type']
-        target_schema = self.config_parser.convert_names_case(settings['target_schema'])
+        # target_schema = self.config_parser.convert_names_case(settings['target_schema'])
+        target_schema = settings['target_schema'] ## target schema is used as it is defined in config, not converted to upper/lower case
         target_table = self.config_parser.convert_names_case(settings['target_table'])
-        index_columns = self.config_parser.convert_names_case(settings['index_columns'])
+        index_columns = settings['index_columns']
+
+        # Split index_columns by comma, clean up quotes, convert case, and re-quote
+        column_names = []
+        for col in index_columns.split(','):
+            col = col.strip()
+            # Remove backticks, single quotes, and double quotes
+            col = col.strip('`').strip("'").strip('"')
+            # Convert case using config parser function
+            col = self.config_parser.convert_names_case(col)
+            # Add to list with double quotes
+            column_names.append(f'"{col}"')
+        # Join back with comma
+        index_columns = ', '.join(column_names)
         # index_comment = settings['index_comment']
 
         # index_columns = ', '.join(f'"{col}"' for col in index_columns)
@@ -580,7 +595,8 @@ class PostgreSQLConnector(DatabaseConnector):
     def get_create_constraint_sql(self, settings):
         create_constraint_query = ''
         source_db_type = settings['source_db_type']
-        target_schema = self.config_parser.convert_names_case(settings['target_schema'])
+        # target_schema = self.config_parser.convert_names_case(settings['target_schema'])
+        target_schema = settings['target_schema'] ## target schema is used as it is defined in config, not converted to upper/lower case
         target_table_name = self.config_parser.convert_names_case(settings['target_table'])
         target_columns = settings['target_columns']
         constraint_name = self.config_parser.convert_names_case(settings['constraint_name'])
@@ -597,9 +613,40 @@ class PostgreSQLConnector(DatabaseConnector):
         constraint_sql = self.config_parser.convert_names_case(settings['constraint_sql']) if 'constraint_sql' in settings else ''
         constraint_status = settings['constraint_status'] if 'constraint_status' in settings else 'ENABLED'
 
+        # Split constraint_columns by comma, clean up quotes, convert case, and re-quote
+        if constraint_columns:
+            column_names = []
+            for col in constraint_columns.split(','):
+                col = col.strip()
+                # Remove backticks, single quotes, and double quotes
+                col = col.strip('`').strip("'").strip('"')
+                # Convert case using config parser function
+                col = self.config_parser.convert_names_case(col)
+                # Add to list with double quotes
+                column_names.append(f'"{col}"')
+            # Join back with comma
+            constraint_columns = ', '.join(column_names)
+
+        # Split referenced_columns by comma, clean up quotes, convert case, and re-quote
+        if referenced_columns:
+            ref_column_names = []
+            for col in referenced_columns.split(','):
+                col = col.strip()
+                # Remove backticks, single quotes, and double quotes
+                col = col.strip('`').strip("'").strip('"')
+                # Convert case using config parser function
+                col = self.config_parser.convert_names_case(col)
+                # Add to list with double quotes
+                ref_column_names.append(f'"{col}"')
+            # Join back with comma
+            referenced_columns = ', '.join(ref_column_names)
+
         if source_db_type != 'postgresql':
             if constraint_type == 'FOREIGN KEY':
-                create_constraint_query = f"""ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{constraint_name}_tab_{target_table_name}" FOREIGN KEY ({constraint_columns}) REFERENCES "{target_schema}"."{referenced_table_name}" ({referenced_columns})"""
+                create_constraint_query = (
+                    f'ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{constraint_name}_tab_{target_table_name}" '
+                    f'FOREIGN KEY ({constraint_columns}) REFERENCES "{target_schema}"."{referenced_table_name}" ({referenced_columns})'
+                )
                 if delete_rule == 'CASCADE':
                     create_constraint_query += " ON DELETE CASCADE"
                 if update_rule == 'CASCADE':
@@ -686,7 +733,8 @@ class PostgreSQLConnector(DatabaseConnector):
             source_table = settings['source_table']
             source_table_id = settings['source_table_id']
             source_columns = settings['source_columns']
-            target_schema = self.config_parser.convert_names_case(settings['target_schema'])
+            # target_schema = self.config_parser.convert_names_case(settings['target_schema'])
+            target_schema = settings['target_schema'] ## target schema is used as it is defined in config, not converted to upper/lower case
             target_table = self.config_parser.convert_names_case(settings['target_table'])
             target_columns = settings['target_columns']
             # primary_key_columns = settings['primary_key_columns']
@@ -1004,6 +1052,7 @@ class PostgreSQLConnector(DatabaseConnector):
 
                     psycopg2.extras.execute_batch(cursor, insert_query, data)
                     inserted_rows = len(data)
+                    self.connection.commit()
                 except Exception as e:
                     self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Error inserting batch data into {target_table}: {e}")
                     self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Trying to insert row by row.")
@@ -1018,13 +1067,13 @@ class PostgreSQLConnector(DatabaseConnector):
                             self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Error inserting row into {target_table}: {row}")
                             self.config_parser.print_log_message('ERROR', e)
 
+                self.connection.autocommit = True
+
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Error before inserting batch data: {e}")
             raise
-        finally:
-            self.connection.commit()
-            self.connection.autocommit = True
-            return inserted_rows
+
+        return inserted_rows
 
     def fetch_funcproc_names(self, schema: str):
         pass
@@ -1389,8 +1438,8 @@ class PostgreSQLConnector(DatabaseConnector):
             SELECT EXISTS (
                 SELECT 1
                 FROM information_schema.tables
-                WHERE table_schema = '{target_schema}'
-                AND table_name = '{target_table}'
+                WHERE lower(table_schema) = lower('{target_schema}')
+                AND lower(table_name) = lower('{target_table}')
             )
         """
         cursor = self.connection.cursor()

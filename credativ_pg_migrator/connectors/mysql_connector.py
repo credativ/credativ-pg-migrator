@@ -16,7 +16,7 @@
 
 from credativ_pg_migrator.database_connector import DatabaseConnector
 from credativ_pg_migrator.migrator_logging import MigratorLogger
-#import mysql.connector  ## only for native connectivity - install mysql-connector-python
+# import mysql.connector  ## only for native connectivity - install mysql-connector-python
 import traceback
 from tabulate import tabulate
 import time

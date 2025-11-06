@@ -1379,9 +1379,11 @@ class Orchestrator:
             for trigger_detail in all_triggers:
                 trigger_data = self.migrator_tables.decode_trigger_row(trigger_detail)
                 if trigger_data['trigger_comment']:
+                    # Escape single quotes in the comment to prevent SQL injection
+                    safe_trigger_comment = trigger_data['trigger_comment'].replace("'", "''")
                     query = f"""COMMENT ON TRIGGER
                     "{trigger_data['target_schema']}"."{self.config_parser.convert_names_case(trigger_data['trigger_name'])}"
-                    IS '{trigger_data['trigger_comment']}'"""
+                    IS '{safe_trigger_comment}'"""
                     self.config_parser.print_log_message('INFO', f"Setting comment for trigger {trigger_data['trigger_name']} in target database.")
                     self.config_parser.print_log_message( 'DEBUG', f"Executing comment query: {query}")
                     self.target_connection.execute_query(query)

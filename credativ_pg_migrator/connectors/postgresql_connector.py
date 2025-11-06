@@ -643,8 +643,10 @@ class PostgreSQLConnector(DatabaseConnector):
 
         if source_db_type != 'postgresql':
             if constraint_type == 'FOREIGN KEY':
-                create_constraint_query = f"""ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{constraint_name}_tab_{target_table_name}"
-                FOREIGN KEY ({constraint_columns}) REFERENCES "{target_schema}"."{referenced_table_name}" ({referenced_columns})"""
+                create_constraint_query = (
+                    f'ALTER TABLE "{target_schema}"."{target_table_name}" ADD CONSTRAINT "{constraint_name}_tab_{target_table_name}" '
+                    f'FOREIGN KEY ({constraint_columns}) REFERENCES "{target_schema}"."{referenced_table_name}" ({referenced_columns})'
+                )
                 if delete_rule == 'CASCADE':
                     create_constraint_query += " ON DELETE CASCADE"
                 if update_rule == 'CASCADE':

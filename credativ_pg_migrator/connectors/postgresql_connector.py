@@ -1067,9 +1067,9 @@ class PostgreSQLConnector(DatabaseConnector):
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Error before inserting batch data: {e}")
             raise
-
-        self.connection.commit()
-        self.connection.autocommit = True
+        finally:
+            self.connection.commit()
+            self.connection.autocommit = True
         return inserted_rows
 
     def fetch_funcproc_names(self, schema: str):

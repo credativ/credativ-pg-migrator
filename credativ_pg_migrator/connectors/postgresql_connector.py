@@ -1052,6 +1052,7 @@ class PostgreSQLConnector(DatabaseConnector):
 
                     psycopg2.extras.execute_batch(cursor, insert_query, data)
                     inserted_rows = len(data)
+                    self.connection.commit()
                 except Exception as e:
                     self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Error inserting batch data into {target_table}: {e}")
                     self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Trying to insert row by row.")
@@ -1066,7 +1067,7 @@ class PostgreSQLConnector(DatabaseConnector):
                             self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Error inserting row into {target_table}: {row}")
                             self.config_parser.print_log_message('ERROR', e)
 
-            self.connection.autocommit = True
+                self.connection.autocommit = True
 
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Error before inserting batch data: {e}")

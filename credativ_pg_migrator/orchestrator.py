@@ -628,7 +628,7 @@ class Orchestrator:
                                                 if lob_col_name is not None and lob_col_index is not None:
                                                     self.config_parser.print_log_message('INFO', f"Worker {worker_id}: LOB column {lob_col_name} found in target table {target_table} - index: {lob_col_index}, type: {lob_col_type}")
 
-                                                    select_datafiles_sql = f"""SELECT DISTINCT split_part({lob_col_name},',',3) as datafile, count(*) as occurrences FROM {target_schema}.{table_name_for_lob_import} group by 1 order by 1;"""
+                                                    select_datafiles_sql = f"""SELECT DISTINCT coalesce(split_part({lob_col_name},',',3), '0,0,0') as datafile, count(*) as occurrences FROM {target_schema}.{table_name_for_lob_import} group by 1 order by 1;"""
 
                                                     datafiles_cursor = worker_target_connection.connection.cursor()
                                                     datafiles_cursor.execute(select_datafiles_sql)
@@ -662,6 +662,7 @@ class Orchestrator:
                                                                 settings = {
                                                                     'target_schema': target_schema,
                                                                     'target_table': target_table,
+                                                                    'primary_key_columns': migrator_tables.select_primary_key(table_data['source_schema'], table_data['source_table']),
                                                                     'unl_import_table': table_name_for_lob_import,
                                                                     'lob_column': lob_col_name,
                                                                     'lob_col_index': lob_col_index,
@@ -893,6 +894,7 @@ class Orchestrator:
     def lob_worker(self, settings):
         target_schema = settings['target_schema']
         target_table = settings['target_table']
+        primary_key_columns = settings['primary_key_columns']
         unl_import_table = settings['unl_import_table']
         lob_column = settings['lob_column']
         lob_col_index = settings['lob_col_index']
@@ -915,14 +917,14 @@ class Orchestrator:
 
             col_list = ', '.join([f'"{col_info["column_name"]}"' for _, col_info in target_columns.items()])
             placeholders = ', '.join(['%s'] * len(target_columns))
-            insert_sql = f'INSERT INTO "{target_schema}"."{target_table}" ({col_list}) VALUES ({placeholders})'
+            insert_sql = f'''INSERT INTO "{target_schema}"."{target_table}" ({col_list}) VALUES ({placeholders}) ON CONFLICT ({primary_key_columns}) DO UPDATE SET {lob_column} = %s'''
 
             worker_select_connection = self.load_connector('target')
             worker_select_connection.connect()
             # cur_select = worker_select_connection.connection.cursor()
 
             select_cur = worker_select_connection.connection.cursor()
-            select_sql = f"""SELECT {col_list} FROM "{target_schema}"."{unl_import_table}" WHERE split_part({lob_column},',',3) = '{datafile}'"""
+            select_sql = f"""SELECT {col_list} FROM "{target_schema}"."{unl_import_table}" WHERE coalesce(split_part({lob_column},',',3), '0,0,0') = '{datafile}'"""
 
             self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Fetching rows from '{unl_import_table}' with query: {select_sql}")
             self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Lob column: {lob_column} (index: {lob_col_index}, type: {lob_col_type})")

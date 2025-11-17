@@ -1,6 +1,11 @@
 # Changelog
 
-## 0.10.2 - 2025.11.03
+## 0.10.2 - 2025.11.17
+
+- 2025.11.17:
+
+  - Fix in Informix connector - repaired import of LOB values from clob*/blob* files - NULL values in LOB column can be indicated both by placeholder 0,0,0 or by NULL values in UNL export file - both cases are now properly handled
+  - Fix in Informix connector - repaired import of LOB values from clob*/blob* files - allow multiple LOB columns in one table - previous implementation allowed only single LOB column per table
 
 - 2025.11.03:
 

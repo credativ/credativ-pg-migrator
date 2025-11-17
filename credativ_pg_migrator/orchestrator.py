@@ -892,10 +892,12 @@ class Orchestrator:
             return False
 
     def lob_worker(self, settings):
+        part_name = 'start of lob_worker'
         target_schema = settings['target_schema']
         target_table = settings['target_table']
         primary_key_columns = settings['primary_key_columns']
         unl_import_table = settings['unl_import_table']
+        all_lob_columns = settings.get('all_lob_columns')
         lob_column = settings['lob_column']
         lob_col_index = settings['lob_col_index']
         lob_col_type = settings['lob_col_type']
@@ -916,8 +918,55 @@ class Orchestrator:
             self.config_parser.print_log_message('INFO', f"Worker {worker_id}: started for LOB file: {datafile} - occurrences: {occurrences} - {current_datafile_num}/{datafiles_count}")
 
             col_list = ', '.join([f'"{col_info["column_name"]}"' for _, col_info in target_columns.items()])
-            placeholders = ', '.join(['%s'] * len(target_columns))
-            insert_sql = f'''INSERT INTO "{target_schema}"."{target_table}" ({col_list}) VALUES ({placeholders}) ON CONFLICT ({primary_key_columns}) DO UPDATE SET {lob_column} = %s'''
+            # placeholders = ', '.join(['%s'] * len(target_columns))
+            part_name = 'prepare merge SQL'
+            if primary_key_columns is None or primary_key_columns.strip() == '':
+                # insert_sql = f'''INSERT INTO "{target_schema}"."{target_table}" ({col_list}) VALUES ({placeholders}) ON CONFLICT ({col_list}) DO UPDATE SET {lob_column} = %s'''
+                # Build match conditions from all columns excluding LOB columns
+                all_lob_columns = settings.get('all_lob_columns', [])
+                if all_lob_columns is None:
+                    all_lob_columns = []
+
+                # Get all column names excluding LOB columns
+                non_lob_columns = []
+                for _, col_info in target_columns.items():
+                    col_name = col_info['column_name'].strip().strip('"')
+                    if col_name not in all_lob_columns:
+                        non_lob_columns.append(col_name)
+
+                # Build match conditions from non-LOB columns
+                if non_lob_columns:
+                    merge_match_conditions = ' AND '.join([f'target."{col}" = source."{col}"' for col in non_lob_columns])
+                # else:
+                #     # Fallback to primary key if no non-LOB columns available
+                #     if primary_key_columns and primary_key_columns.strip():
+                #         pk_columns_list = [col.strip().strip('"') for col in primary_key_columns.split(',')]
+                #         merge_match_conditions = ' AND '.join([f'target."{pk_col}" = source."{pk_col}"' for pk_col in pk_columns_list])
+                #     else:
+                #         # If no primary key and no non-LOB columns, use all columns as fallback
+                #         merge_match_conditions = ' AND '.join([f'target."{col_info["column_name"].strip().strip('"')}" = source."{col_info["column_name"].strip().strip('"')}"' for _, col_info in target_columns.items()])
+            else:
+                # insert_sql = f'''INSERT INTO "{target_schema}"."{target_table}" ({col_list}) VALUES ({placeholders}) ON CONFLICT ({primary_key_columns}) DO UPDATE SET {lob_column} = %s'''
+                pk_columns_list = [col.strip().strip('"') for col in primary_key_columns.split(',')]
+                merge_match_conditions = ' AND '.join([f'target."{pk_col}" = source."{pk_col}"' for pk_col in pk_columns_list])
+
+            # Build the column assignments for INSERT and UPDATE
+            insert_columns = ', '.join([f'"{col_info["column_name"]}"' for _, col_info in target_columns.items()])
+            insert_values = ', '.join([f'source."{col_info["column_name"]}"' for _, col_info in target_columns.items()])
+
+            insert_sql = f'''
+                WITH source_data AS (
+                    SELECT {', '.join([f'%s AS "{col_info["column_name"]}"' for _, col_info in target_columns.items()])}
+                )
+                MERGE INTO "{target_schema}"."{target_table}" AS target
+                USING source_data AS source
+                ON {merge_match_conditions}
+                WHEN MATCHED THEN
+                    UPDATE SET {lob_column} = %s
+                WHEN NOT MATCHED THEN
+                    INSERT ({insert_columns})
+                    VALUES ({insert_values})
+            '''
 
             worker_select_connection = self.load_connector('target')
             worker_select_connection.connect()
@@ -927,6 +976,7 @@ class Orchestrator:
             select_sql = f"""SELECT {col_list} FROM "{target_schema}"."{unl_import_table}" WHERE coalesce(split_part({lob_column},',',3), '0,0,0') = '{datafile}'"""
 
             self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Fetching rows from '{unl_import_table}' with query: {select_sql}")
+            self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Insert SQL: {insert_sql}")
             self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Lob column: {lob_column} (index: {lob_col_index}, type: {lob_col_type})")
             counter = 0
             read_lines = 0
@@ -997,7 +1047,7 @@ class Orchestrator:
                 try:
                     part_name = 'insert row'
                     cur_insert = worker_insert_connection.connection.cursor()
-                    cur_insert.execute(insert_sql, row)
+                    cur_insert.execute(insert_sql, row + [row[lob_col_index-1]])
                     worker_insert_connection.connection.commit()
                     cur_insert.close()
                     counter += 1

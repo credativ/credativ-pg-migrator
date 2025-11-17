@@ -243,6 +243,10 @@ table_settings:
       header: true  # if CSV files contain header line with column names, default is false
       # conversion_path is used only for UNL files, where converted CSV files will be stored
       conversion_path: "/path/to/data/files/conversion"  # directory where converted CSV files will be stored, if not specified, default is the same as for the data files
+      # force specific columns to be treated as LOB columns during the data import
+      lob_columns:
+        - [ "table1", "clob_column1" ]
+        - [ "table2", "blob_column2" ]
 
       ## currently not implemented, just a preparation for the future
       # split of big files for parallel processing - local setting for the table

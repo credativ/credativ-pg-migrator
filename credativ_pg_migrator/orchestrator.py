@@ -637,15 +637,18 @@ class Orchestrator:
                                                     self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {target_table}: Found {len(datafiles)} distinct data files for LOB column {lob_col_name}")
 
                                                     max_lob_parallel_workers = self.config_parser.get_source_database_export_workers()
-                                                    if len(datafiles) <= 10:
+                                                    if max_lob_parallel_workers <= 1:
                                                         max_lob_parallel_workers = 1
-                                                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {target_table}: Set max LOB parallel workers to {max_lob_parallel_workers} due to low data file count ({len(datafiles)})")
-                                                    if len(datafiles) > 10 and len(datafiles) <= 50:
-                                                        max_lob_parallel_workers = 2
-                                                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {target_table}: Set max LOB parallel workers to {max_lob_parallel_workers} due to medium data file count ({len(datafiles)})")
-                                                    if len(datafiles) > 200:
-                                                        max_lob_parallel_workers = max_lob_parallel_workers * 2
-                                                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {target_table}: Set max LOB parallel workers to {max_lob_parallel_workers} due to high data file count ({len(datafiles)})")
+                                                    else:
+                                                        if len(datafiles) <= 10:
+                                                            max_lob_parallel_workers = 1
+                                                            self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {target_table}: Set max LOB parallel workers to {max_lob_parallel_workers} due to low data file count ({len(datafiles)})")
+                                                        if len(datafiles) > 10 and len(datafiles) <= 50:
+                                                            max_lob_parallel_workers = 2
+                                                            self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {target_table}: Set max LOB parallel workers to {max_lob_parallel_workers} due to medium data file count ({len(datafiles)})")
+                                                        if len(datafiles) > 200:
+                                                            max_lob_parallel_workers = max_lob_parallel_workers * 2
+                                                            self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {target_table}: Set max LOB parallel workers to {max_lob_parallel_workers} due to high data file count ({len(datafiles)})")
 
                                                     if len(datafiles) > 0:
 

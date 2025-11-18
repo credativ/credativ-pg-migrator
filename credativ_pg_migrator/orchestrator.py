@@ -581,7 +581,24 @@ class Orchestrator:
                                     try:
                                         if data_source_settings['lob_columns'] != '' and self.config_parser.should_migrate_lob_values():
 
-                                            part_name = 'migrate LOBs'
+                                            part_name = 'migrate LOBs - add primary key'
+                                            primary_key_data = migrator_tables.select_primary_key_all_columns(table_data['source_schema'], table_data['source_table'])
+                                            if primary_key_data is None:
+                                                self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Table {target_table} has LOB columns defined ({data_source_settings['lob_columns']}), but no primary key could be determined.")
+                                            else:
+                                                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {target_table} has LOB columns defined ({data_source_settings['lob_columns']}). Adding primary key: {primary_key_data}")
+                                                try:
+                                                    result = self.index_worker(primary_key_data, '')
+                                                    if not result:
+                                                        self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Failed to add primary key to table {target_table} for LOB migration.")
+                                                    else:
+                                                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Primary key added successfully to table {target_table} for LOB migration.")
+                                                except Exception as e:
+                                                    self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Exception occurred while adding primary key to table {target_table} for LOB migration: {e}")
+                                                    self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Full error details: {traceback.format_exc()}")
+
+                                            part_name = 'migrate LOBs start'
+
                                             table_name_for_lob_import = self.config_parser.get_table_name_for_lob_import(target_table)
                                             # LOB data migration - use the file directly
                                             self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data source for table {target_table} has LOB columns: {data_source_settings['lob_columns']}. Migrating LOB data.")
@@ -920,10 +937,15 @@ class Orchestrator:
             worker_id = uuid.uuid4()
             self.config_parser.print_log_message('INFO', f"Worker {worker_id}: started for LOB file: {datafile} - occurrences: {occurrences} - {current_datafile_num}/{datafiles_count}")
 
+            part_name = 'prepare insert SQL'
             col_list = ', '.join([f'"{col_info["column_name"]}"' for _, col_info in target_columns.items()])
-            # placeholders = ', '.join(['%s'] * len(target_columns))
-            part_name = 'prepare merge SQL'
+            placeholders = ', '.join(['%s'] * len(target_columns))
+
             if primary_key_columns is None or primary_key_columns.strip() == '':
+
+                part_name = 'build merge statement no primary key'
+                # No primary key defined - build MERGE statement using all non-LOB columns as match conditions
+
                 # insert_sql = f'''INSERT INTO "{target_schema}"."{target_table}" ({col_list}) VALUES ({placeholders}) ON CONFLICT ({col_list}) DO UPDATE SET {lob_column} = %s'''
                 # Build match conditions from all columns excluding LOB columns
                 all_lob_columns = settings.get('all_lob_columns', [])
@@ -948,35 +970,41 @@ class Orchestrator:
                 #     else:
                 #         # If no primary key and no non-LOB columns, use all columns as fallback
                 #         merge_match_conditions = ' AND '.join([f'target."{col_info["column_name"].strip().strip('"')}" = source."{col_info["column_name"].strip().strip('"')}"' for _, col_info in target_columns.items()])
+
+                # Build the column assignments for INSERT and UPDATE
+                insert_columns = ', '.join([f'"{col_info["column_name"]}"' for _, col_info in target_columns.items()])
+                insert_values = ', '.join([f'source."{col_info["column_name"]}"' for _, col_info in target_columns.items()])
+
+                # Build cast expressions for each column based on its data type
+                cast_expressions = []
+                for _, col_info in target_columns.items():
+                    col_name = col_info["column_name"]
+                    data_type = col_info["data_type"]
+                    cast_expressions.append(f'%s::{data_type} AS "{col_name}"')
+
+                insert_sql = f'''
+                    WITH source_data AS (
+                        SELECT {', '.join(cast_expressions)}
+                    )
+                    MERGE INTO "{target_schema}"."{target_table}" AS target
+                    USING source_data AS source
+                    ON {merge_match_conditions}
+                    WHEN MATCHED THEN
+                        UPDATE SET {lob_column} = %s::{lob_col_type}
+                    WHEN NOT MATCHED THEN
+                        INSERT ({insert_columns})
+                        VALUES ({insert_values})
+                '''
+
             else:
-                # insert_sql = f'''INSERT INTO "{target_schema}"."{target_table}" ({col_list}) VALUES ({placeholders}) ON CONFLICT ({primary_key_columns}) DO UPDATE SET {lob_column} = %s'''
-                pk_columns_list = [col.strip().strip('"') for col in primary_key_columns.split(',')]
-                merge_match_conditions = ' AND '.join([f'target."{pk_col}" = source."{pk_col}"' for pk_col in pk_columns_list])
 
-            # Build the column assignments for INSERT and UPDATE
-            insert_columns = ', '.join([f'"{col_info["column_name"]}"' for _, col_info in target_columns.items()])
-            insert_values = ', '.join([f'source."{col_info["column_name"]}"' for _, col_info in target_columns.items()])
+                part_name = 'build insert statement with primary key'
+                # we have primary key defined - use it for INSERT ... ON CONFLICT
+                insert_sql = f'''INSERT INTO "{target_schema}"."{target_table}" ({col_list}) VALUES ({placeholders}) ON CONFLICT ({primary_key_columns}) DO UPDATE SET {lob_column} = %s::{lob_col_type}'''
 
-            # Build cast expressions for each column based on its data type
-            cast_expressions = []
-            for _, col_info in target_columns.items():
-                col_name = col_info["column_name"]
-                data_type = col_info["data_type"]
-                cast_expressions.append(f'%s::{data_type} AS "{col_name}"')
+                # pk_columns_list = [col.strip().strip('"') for col in primary_key_columns.split(',')]
+                # merge_match_conditions = ' AND '.join([f'target."{pk_col}" = source."{pk_col}"' for pk_col in pk_columns_list])
 
-            insert_sql = f'''
-                WITH source_data AS (
-                    SELECT {', '.join(cast_expressions)}
-                )
-                MERGE INTO "{target_schema}"."{target_table}" AS target
-                USING source_data AS source
-                ON {merge_match_conditions}
-                WHEN MATCHED THEN
-                    UPDATE SET {lob_column} = %s::{lob_col_type}
-                WHEN NOT MATCHED THEN
-                    INSERT ({insert_columns})
-                    VALUES ({insert_values})
-            '''
 
             worker_select_connection = self.load_connector('target')
             worker_select_connection.connect()

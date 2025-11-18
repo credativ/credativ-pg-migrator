@@ -954,15 +954,22 @@ class Orchestrator:
             insert_columns = ', '.join([f'"{col_info["column_name"]}"' for _, col_info in target_columns.items()])
             insert_values = ', '.join([f'source."{col_info["column_name"]}"' for _, col_info in target_columns.items()])
 
+            # Build cast expressions for each column based on its data type
+            cast_expressions = []
+            for _, col_info in target_columns.items():
+                col_name = col_info["column_name"]
+                data_type = col_info["data_type"]
+                cast_expressions.append(f'%s::{data_type} AS "{col_name}"')
+
             insert_sql = f'''
                 WITH source_data AS (
-                    SELECT {', '.join([f'%s AS "{col_info["column_name"]}"' for _, col_info in target_columns.items()])}
+                    SELECT {', '.join(cast_expressions)}
                 )
                 MERGE INTO "{target_schema}"."{target_table}" AS target
                 USING source_data AS source
                 ON {merge_match_conditions}
                 WHEN MATCHED THEN
-                    UPDATE SET {lob_column} = %s
+                    UPDATE SET {lob_column} = %s::{lob_col_type}
                 WHEN NOT MATCHED THEN
                     INSERT ({insert_columns})
                     VALUES ({insert_values})

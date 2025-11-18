@@ -607,6 +607,10 @@ class ConfigParser:
         return -1  ## by default do not use parallel workers if splitting or workers are not specified
 
     def get_source_database_export_lob_columns(self):
+        """
+        Get LOB columns configuration from source database export.
+        Returns a list of [table_name, column_name] pairs.
+        """
         return self.get_source_database_export().get('lob_columns', [])
 
     def get_table_name_for_lob_import(self, table_name):
@@ -831,11 +835,23 @@ class ConfigParser:
 
     ### Other utility methods
 
-    def get_table_lob_columns(self, source_columns):
+    def get_table_lob_columns(self, source_schema, source_table, source_columns):
         lob_columns_list = []
         for _, column_info in source_columns.items():
             if column_info.get('data_type', '').upper() in ['BLOB', 'CLOB', 'NCLOB']:
                 lob_columns_list.append(column_info['column_name'])
+                self.print_log_message('DEBUG3', f"get_table_lob_columns: Column {column_info['column_name']} in table {source_table} is of LOB type {column_info.get('data_type', '').upper()}. Added to LOB columns list.")
+            else:
+                # Check if this column is configured as a LOB column in the export settings
+                lob_columns_config = self.get_source_database_export_lob_columns()
+                for lob_config in lob_columns_config:
+                    if len(lob_config) >= 2:
+                        config_table_name = lob_config[0]
+                        config_column_name = lob_config[1]
+                        if (not config_table_name or config_table_name == source_table) and config_column_name == column_info['column_name']:
+                            lob_columns_list.append(column_info['column_name'])
+                            self.print_log_message('DEBUG3', f"get_table_lob_columns: Column {column_info['column_name']} in table {source_table} is configured as LOB column. Added to LOB columns list.")
+                            break
         return ','.join(lob_columns_list)
 
     def convert_unl_to_csv(self, data_source_settings, source_columns, target_columns):

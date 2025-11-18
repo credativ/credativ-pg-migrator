@@ -581,7 +581,24 @@ class Orchestrator:
                                     try:
                                         if data_source_settings['lob_columns'] != '' and self.config_parser.should_migrate_lob_values():
 
-                                            part_name = 'migrate LOBs'
+                                            part_name = 'migrate LOBs - add primary key'
+                                            primary_key_data = migrator_tables.select_primary_key_all_columns(table_data['source_schema'], table_data['source_table'])
+                                            if primary_key_data is None:
+                                                self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Table {target_table} has LOB columns defined ({data_source_settings['lob_columns']}), but no primary key could be determined.")
+                                            else:
+                                                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {target_table} has LOB columns defined ({data_source_settings['lob_columns']}). Adding primary key: {primary_key_data}")
+                                                try:
+                                                    result = self.index_worker(primary_key_data, '')
+                                                    if not result:
+                                                        self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Failed to add primary key to table {target_table} for LOB migration.")
+                                                    else:
+                                                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Primary key added successfully to table {target_table} for LOB migration.")
+                                                except Exception as e:
+                                                    self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Exception occurred while adding primary key to table {target_table} for LOB migration: {e}")
+                                                    self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Full error details: {traceback.format_exc()}")
+
+                                            part_name = 'migrate LOBs start'
+
                                             table_name_for_lob_import = self.config_parser.get_table_name_for_lob_import(target_table)
                                             # LOB data migration - use the file directly
                                             self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data source for table {target_table} has LOB columns: {data_source_settings['lob_columns']}. Migrating LOB data.")
@@ -628,7 +645,7 @@ class Orchestrator:
                                                 if lob_col_name is not None and lob_col_index is not None:
                                                     self.config_parser.print_log_message('INFO', f"Worker {worker_id}: LOB column {lob_col_name} found in target table {target_table} - index: {lob_col_index}, type: {lob_col_type}")
 
-                                                    select_datafiles_sql = f"""SELECT DISTINCT split_part({lob_col_name},',',3) as datafile, count(*) as occurrences FROM {target_schema}.{table_name_for_lob_import} group by 1 order by 1;"""
+                                                    select_datafiles_sql = f"""SELECT DISTINCT coalesce(split_part({lob_col_name},',',3), '0,0,0') as datafile, count(*) as occurrences FROM {target_schema}.{table_name_for_lob_import} group by 1 order by 1;"""
 
                                                     datafiles_cursor = worker_target_connection.connection.cursor()
                                                     datafiles_cursor.execute(select_datafiles_sql)
@@ -637,15 +654,18 @@ class Orchestrator:
                                                     self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {target_table}: Found {len(datafiles)} distinct data files for LOB column {lob_col_name}")
 
                                                     max_lob_parallel_workers = self.config_parser.get_source_database_export_workers()
-                                                    if len(datafiles) <= 10:
+                                                    if max_lob_parallel_workers <= 1:
                                                         max_lob_parallel_workers = 1
-                                                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {target_table}: Set max LOB parallel workers to {max_lob_parallel_workers} due to low data file count ({len(datafiles)})")
-                                                    if len(datafiles) > 10 and len(datafiles) <= 50:
-                                                        max_lob_parallel_workers = 2
-                                                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {target_table}: Set max LOB parallel workers to {max_lob_parallel_workers} due to medium data file count ({len(datafiles)})")
-                                                    if len(datafiles) > 200:
-                                                        max_lob_parallel_workers = max_lob_parallel_workers * 2
-                                                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {target_table}: Set max LOB parallel workers to {max_lob_parallel_workers} due to high data file count ({len(datafiles)})")
+                                                    else:
+                                                        if len(datafiles) <= 10:
+                                                            max_lob_parallel_workers = 1
+                                                            self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {target_table}: Set max LOB parallel workers to {max_lob_parallel_workers} due to low data file count ({len(datafiles)})")
+                                                        if len(datafiles) > 10 and len(datafiles) <= 50:
+                                                            max_lob_parallel_workers = 2
+                                                            self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {target_table}: Set max LOB parallel workers to {max_lob_parallel_workers} due to medium data file count ({len(datafiles)})")
+                                                        if len(datafiles) > 200:
+                                                            max_lob_parallel_workers = max_lob_parallel_workers * 2
+                                                            self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {target_table}: Set max LOB parallel workers to {max_lob_parallel_workers} due to high data file count ({len(datafiles)})")
 
                                                     if len(datafiles) > 0:
 
@@ -662,6 +682,7 @@ class Orchestrator:
                                                                 settings = {
                                                                     'target_schema': target_schema,
                                                                     'target_table': target_table,
+                                                                    'primary_key_columns': migrator_tables.select_primary_key(table_data['source_schema'], table_data['source_table']),
                                                                     'unl_import_table': table_name_for_lob_import,
                                                                     'lob_column': lob_col_name,
                                                                     'lob_col_index': lob_col_index,
@@ -891,9 +912,12 @@ class Orchestrator:
             return False
 
     def lob_worker(self, settings):
+        part_name = 'start of lob_worker'
         target_schema = settings['target_schema']
         target_table = settings['target_table']
+        primary_key_columns = settings['primary_key_columns']
         unl_import_table = settings['unl_import_table']
+        all_lob_columns = settings.get('all_lob_columns')
         lob_column = settings['lob_column']
         lob_col_index = settings['lob_col_index']
         lob_col_type = settings['lob_col_type']
@@ -913,18 +937,84 @@ class Orchestrator:
             worker_id = uuid.uuid4()
             self.config_parser.print_log_message('INFO', f"Worker {worker_id}: started for LOB file: {datafile} - occurrences: {occurrences} - {current_datafile_num}/{datafiles_count}")
 
+            part_name = 'prepare insert SQL'
             col_list = ', '.join([f'"{col_info["column_name"]}"' for _, col_info in target_columns.items()])
             placeholders = ', '.join(['%s'] * len(target_columns))
-            insert_sql = f'INSERT INTO "{target_schema}"."{target_table}" ({col_list}) VALUES ({placeholders})'
+
+            if primary_key_columns is None or primary_key_columns.strip() == '':
+
+                part_name = 'build merge statement no primary key'
+                # No primary key defined - build MERGE statement using all non-LOB columns as match conditions
+
+                # insert_sql = f'''INSERT INTO "{target_schema}"."{target_table}" ({col_list}) VALUES ({placeholders}) ON CONFLICT ({col_list}) DO UPDATE SET {lob_column} = %s'''
+                # Build match conditions from all columns excluding LOB columns
+                all_lob_columns = settings.get('all_lob_columns', [])
+                if all_lob_columns is None:
+                    all_lob_columns = []
+
+                # Get all column names excluding LOB columns
+                non_lob_columns = []
+                for _, col_info in target_columns.items():
+                    col_name = col_info['column_name'].strip().strip('"')
+                    if col_name not in all_lob_columns:
+                        non_lob_columns.append(col_name)
+
+                # Build match conditions from non-LOB columns
+                if non_lob_columns:
+                    merge_match_conditions = ' AND '.join([f'target."{col}" = source."{col}"' for col in non_lob_columns])
+                # else:
+                #     # Fallback to primary key if no non-LOB columns available
+                #     if primary_key_columns and primary_key_columns.strip():
+                #         pk_columns_list = [col.strip().strip('"') for col in primary_key_columns.split(',')]
+                #         merge_match_conditions = ' AND '.join([f'target."{pk_col}" = source."{pk_col}"' for pk_col in pk_columns_list])
+                #     else:
+                #         # If no primary key and no non-LOB columns, use all columns as fallback
+                #         merge_match_conditions = ' AND '.join([f'target."{col_info["column_name"].strip().strip('"')}" = source."{col_info["column_name"].strip().strip('"')}"' for _, col_info in target_columns.items()])
+
+                # Build the column assignments for INSERT and UPDATE
+                insert_columns = ', '.join([f'"{col_info["column_name"]}"' for _, col_info in target_columns.items()])
+                insert_values = ', '.join([f'source."{col_info["column_name"]}"' for _, col_info in target_columns.items()])
+
+                # Build cast expressions for each column based on its data type
+                cast_expressions = []
+                for _, col_info in target_columns.items():
+                    col_name = col_info["column_name"]
+                    data_type = col_info["data_type"]
+                    cast_expressions.append(f'%s::{data_type} AS "{col_name}"')
+
+                insert_sql = f'''
+                    WITH source_data AS (
+                        SELECT {', '.join(cast_expressions)}
+                    )
+                    MERGE INTO "{target_schema}"."{target_table}" AS target
+                    USING source_data AS source
+                    ON {merge_match_conditions}
+                    WHEN MATCHED THEN
+                        UPDATE SET {lob_column} = %s::{lob_col_type}
+                    WHEN NOT MATCHED THEN
+                        INSERT ({insert_columns})
+                        VALUES ({insert_values})
+                '''
+
+            else:
+
+                part_name = 'build insert statement with primary key'
+                # we have primary key defined - use it for INSERT ... ON CONFLICT
+                insert_sql = f'''INSERT INTO "{target_schema}"."{target_table}" ({col_list}) VALUES ({placeholders}) ON CONFLICT ({primary_key_columns}) DO UPDATE SET {lob_column} = %s::{lob_col_type}'''
+
+                # pk_columns_list = [col.strip().strip('"') for col in primary_key_columns.split(',')]
+                # merge_match_conditions = ' AND '.join([f'target."{pk_col}" = source."{pk_col}"' for pk_col in pk_columns_list])
+
 
             worker_select_connection = self.load_connector('target')
             worker_select_connection.connect()
             # cur_select = worker_select_connection.connection.cursor()
 
             select_cur = worker_select_connection.connection.cursor()
-            select_sql = f"""SELECT {col_list} FROM "{target_schema}"."{unl_import_table}" WHERE split_part({lob_column},',',3) = '{datafile}'"""
+            select_sql = f"""SELECT {col_list} FROM "{target_schema}"."{unl_import_table}" WHERE coalesce(split_part({lob_column},',',3), '0,0,0') = '{datafile}'"""
 
             self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Fetching rows from '{unl_import_table}' with query: {select_sql}")
+            self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Insert SQL: {insert_sql}")
             self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Lob column: {lob_column} (index: {lob_col_index}, type: {lob_col_type})")
             counter = 0
             read_lines = 0
@@ -995,7 +1085,7 @@ class Orchestrator:
                 try:
                     part_name = 'insert row'
                     cur_insert = worker_insert_connection.connection.cursor()
-                    cur_insert.execute(insert_sql, row)
+                    cur_insert.execute(insert_sql, row + [row[lob_col_index-1]])
                     worker_insert_connection.connection.commit()
                     cur_insert.close()
                     counter += 1

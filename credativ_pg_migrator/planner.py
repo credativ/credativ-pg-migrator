@@ -1083,7 +1083,7 @@ class Planner:
                         'file_size': os.path.getsize(table_file_name) if data_file_found else -1,
                         'file_lines': None, ## count of lines was too slow - sum(1 for _ in open(table_file_name, 'r', encoding='utf-8')) if data_file_found else -1,
                         'file_found': data_file_found,
-                        'lob_columns': self.config_parser.get_table_lob_columns(table_info['source_columns']) if table_info else '',
+                        'lob_columns': self.config_parser.get_table_lob_columns(table_info['source_schema'], table_info['source_table'], table_info['source_columns']) if table_info else '',
                         'converted_file_name': converted_file_name,
                         'format_options': {
                             'settings_source': settings_source,
@@ -1154,7 +1154,7 @@ class Planner:
                                 'file_size': os.path.getsize(unl_dump_file) if data_file_found else -1,
                                 'file_lines': sum(1 for _ in open(unl_dump_file, 'r', encoding='utf-8')) if data_file_found else -1,
                                 'file_found': data_file_found,
-                                'lob_columns': self.config_parser.get_table_lob_columns(table_info['source_columns']) if table_info else '',
+                                'lob_columns': self.config_parser.get_table_lob_columns(table_info['source_schema'], table_info['source_table'], table_info['source_columns']) if table_info else '',
                                 'converted_file_name': converted_file_name,
                                 'format_options': {
                                     'format': 'UNL',

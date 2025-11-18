@@ -1,6 +1,13 @@
 # Changelog
 
-## 0.10.2 - 2025.11.03
+## 0.10.2 - 2025.11.17
+
+- 2025.11.17:
+
+  - Fix in Informix connector - repaired import of LOB values from clob*/blob* files - NULL values in LOB column can be indicated both by placeholder 0,0,0 or by NULL values in UNL export file - both cases are now properly handled
+  - Fix in Informix connector - repaired import of LOB values from clob*/blob* files - allow multiple LOB columns in one table - previous implementation allowed only single LOB column per table
+  - Fix in data sources - updated handling of lob_columns parameter in source database export config - now it passes list of [table_name, column_name] pairs for LOB columns to be treated as LOBs during data import
+    - function now uses primary key column for INSERT ... ON CONFLICT statement if available, otherwise it uses all non-LOB columns for building the MERGE statement (which is less efficient and slower)
 
 - 2025.11.03:
 

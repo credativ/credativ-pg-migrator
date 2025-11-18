@@ -2344,6 +2344,30 @@ class MigratorTables:
             self.config_parser.print_log_message('ERROR', e)
             return None
 
+    def select_primary_key_all_columns(self, source_schema, source_table):
+        query = f"""
+            SELECT
+                *
+            FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_indexes()}" i
+            WHERE i.source_schema = '{source_schema}' AND
+                i.source_table = '{source_table}' AND
+                i.index_type = 'PRIMARY KEY'
+            LIMIT 1
+        """
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query)
+            index_row = cursor.fetchone()
+            cursor.close()
+            if index_row:
+                return self.decode_index_row(index_row)
+            else:
+                return None
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error selecting primary key SQL for {source_schema}.{source_table}.")
+            self.config_parser.print_log_message('ERROR', e)
+            return None
+
     def print_summary(self, objects, migrator_table_name, additional_columns=None):
         try:
             self.config_parser.print_log_message('INFO', f"{objects} summary:")

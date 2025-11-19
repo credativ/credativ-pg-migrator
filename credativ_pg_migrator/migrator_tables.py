@@ -286,17 +286,19 @@ class MigratorTables:
             query = f"""
                 SELECT target_default_value
                 FROM "{self.protocol_schema}".default_values_substitution
-                WHERE lower(trim(%s)) ~ lower(trim(column_name))
-                AND lower(trim(%s)) ~ lower(trim(source_column_data_type))
-                AND lower(trim(%s::TEXT)) ~ lower(trim(default_value_value::TEXT))
+                WHERE (lower(trim(%s)) ~ lower(trim(column_name)) OR lower(trim(%s)) ILIKE lower(trim(column_name)) OR lower(trim(column_name)) = '')
+                AND (lower(trim(%s)) ~ lower(trim(source_column_data_type)) OR lower(trim(%s)) ILIKE lower(trim(source_column_data_type)) OR lower(trim(source_column_data_type)) = '')
+                AND (lower(trim(%s::TEXT)) ~ lower(trim(default_value_value::TEXT)) OR lower(trim(%s::TEXT)) ILIKE lower(trim(default_value_value::TEXT)) )
+                ORDER BY CASE WHEN default_value_value LIKE '%%(?i)%%' THEN 1 ELSE 2 END
             """
             cursor = self.protocol_connection.connection.cursor()
-            cursor.execute(query, (check_column_name, check_column_data_type, check_default_value))
+            cursor.execute(query, (check_column_name, check_column_name, check_column_data_type, check_column_data_type,  check_default_value, check_default_value))
             result = cursor.fetchone()
             self.config_parser.print_log_message( 'DEBUG3', f"0 check_default_values_substitution {check_column_name}, {check_column_data_type}, {check_default_value} query: {query} - {result}")
 
-            if result:
+            if result is not None:
                 target_default_value = result[0]
+                self.config_parser.print_log_message( 'DEBUG3', f"0 check_default_values_substitution found direct match: {target_default_value}")
             else:
                 query = f"""
                     SELECT target_default_value
@@ -309,8 +311,10 @@ class MigratorTables:
                 cursor.execute(query, (check_column_name, check_column_data_type, check_default_value))
                 result = cursor.fetchone()
                 self.config_parser.print_log_message( 'DEBUG3', f"1 check_default_values_substitution {check_column_name}, {check_column_data_type}, {check_default_value} query: {query} - {result}")
-                if result:
+
+                if result is not None:
                     target_default_value = result[0]
+                    self.config_parser.print_log_message( 'DEBUG3', f"1 check_default_values_substitution found ILIKE match: {target_default_value}")
                 else:
                     query = f"""
                         SELECT target_default_value
@@ -322,8 +326,10 @@ class MigratorTables:
                     cursor.execute(query, (check_column_data_type, check_default_value))
                     result = cursor.fetchone()
                     self.config_parser.print_log_message( 'DEBUG3', f"2 check_default_values_substitution {check_column_name}, {check_column_data_type}, {check_default_value} query: {query} - {result}")
-                    if result:
+
+                    if result is not None:
                         target_default_value = result[0]
+                        self.config_parser.print_log_message( 'DEBUG3', f"2 check_default_values_substitution found data type match: {target_default_value}")
                     else:
                         query = f"""
                             SELECT target_default_value
@@ -335,9 +341,12 @@ class MigratorTables:
                         cursor.execute(query, (check_default_value,))
                         result = cursor.fetchone()
                         self.config_parser.print_log_message( 'DEBUG3', f"3 check_default_values_substitution {check_column_name}, {check_column_data_type}, {check_default_value} query: {query} - {result}")
-                        if result:
+
+                        if result is not None:
                             target_default_value = result[0]
+                            self.config_parser.print_log_message( 'DEBUG3', f"3 check_default_values_substitution found default value match: {target_default_value}")
             cursor.close()
+
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"Error checking default values substitution for {check_column_name}, {check_column_data_type}, {check_default_value}.")
             self.config_parser.print_log_message('ERROR', e)

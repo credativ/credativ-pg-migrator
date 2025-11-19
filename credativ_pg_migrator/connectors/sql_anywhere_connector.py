@@ -596,6 +596,7 @@ class SQLAnywhereConnector(DatabaseConnector):
                 constraint_name = f"{row[0]}_fk"
                 constraint_type = 'FOREIGN KEY'
                 primary_table_name = row[2]
+                foreign_table_schema = row[3]
                 foreign_table_name = row[4]
                 sa_columns = row[5]
                 pk_columns, ref_columns = sa_columns.split(" IS ")
@@ -624,6 +625,7 @@ class SQLAnywhereConnector(DatabaseConnector):
                     'constraint_type': constraint_type,
                     'constraint_owner': source_table_schema,
                     'constraint_columns': ref_columns,
+                    'referenced_table_schema': foreign_table_schema,
                     'referenced_table_name': foreign_table_name,
                     'referenced_columns': pk_columns,
                     'constraint_sql': '',

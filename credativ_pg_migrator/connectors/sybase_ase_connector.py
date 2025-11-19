@@ -90,6 +90,7 @@ class SybaseASEConnector(DatabaseConnector):
                 'stuff(': 'overlay(',
                 'replicate(': 'repeat(',
                 'charindex(': 'position(',
+                '@@nestlevel': '-1', ## no equivalent in PostgreSQL
             }
         else:
             self.config_parser.print_log_message('ERROR', f"Unsupported target database type: {target_db_type}")
@@ -508,6 +509,7 @@ class SybaseASEConnector(DatabaseConnector):
             case when col_name(c.tableid, r.fokey4, db_id()) is not null then ',"' + col_name(c.tableid, r.fokey4, db_id()) + '"' else '' end +
             case when col_name(c.tableid, r.fokey5, db_id()) is not null then ',"' + col_name(c.tableid, r.fokey5, db_id()) + '"' else '' end
             as foreign_keys_columns,
+            user_name(oc.uid) as ref_table_schema,
             oc.name as ref_table_name,
             case when col_name(r.reftabid, r.refkey1, r.pmrydbid) is not null then '"' + col_name(r.reftabid, r.refkey1, r.pmrydbid) + '"' end +
             case when col_name(r.reftabid, r.refkey2, r.pmrydbid) is not null then ',"' + col_name(r.reftabid, r.refkey2, r.pmrydbid) + '"' else '' end +
@@ -533,14 +535,16 @@ class SybaseASEConnector(DatabaseConnector):
         for constraint in constraints:
             fk_name = constraint[0]
             fk_column = constraint[1].strip()
-            ref_table_name = constraint[2]
-            ref_column = constraint[3].strip()
+            ref_table_schema = constraint[2]
+            ref_table_name = constraint[3]
+            ref_column = constraint[4].strip()
 
             table_constraints[order_num] = {
                 'constraint_name': fk_name,
                 'constraint_owner': source_table_schema,
                 'constraint_type': 'FOREIGN KEY',
                 'constraint_columns': fk_column,
+                'referenced_table_schema': ref_table_schema,
                 'referenced_table_name': ref_table_name,
                 'referenced_columns': ref_column,
                 'constraint_sql': '',

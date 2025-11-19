@@ -6,6 +6,7 @@
 
   - Improvements in Sybase ASE connector - implemented conversion of functions/procedures from Sybase ASE to PostgreSQL - added basic conversion of control flow statements, cursors, data types and some built-in functions
     - Note: conversion is not complete yet, some complex constructs might not be converted properly, further improvements will be done in future releases
+  - Fix in Sybase ASE & SQL Anywhere connectors - repaired migration of foreign key constraints - referenced schema name is now properly handled during migration of foreign key constraints
 
 ## 0.10.2 - 2025.11.17
 

@@ -657,70 +657,64 @@ class SybaseASEConnector(DatabaseConnector):
 
         function_immutable = ''
 
-        ### this functionality will be published later, not in this version
-        return ""
+        # Replace 'create proc' with 'CREATE OR REPLACE FUNCTION'
+        converted_code = re.sub(r'create\s+proc\s+([a-zA-Z0-9_]+)', r'CREATE OR REPLACE FUNCTION \1', funcproc_code, flags=re.IGNORECASE)
 
-        if target_db_type == 'postgresql':
-            postgresql_code = funcproc_code
+        # Replace parameter declarations (simple version)
+        converted_code = re.sub(r'@([a-zA-Z0-9_]+)\s+([a-zA-Z0-9_()]+)', r'\1 \2', converted_code)
 
-            # Replace empty lines with ";"
-            postgresql_code = re.sub(r'^\s*$', ';\n', postgresql_code, flags=re.MULTILINE)
-            # Split the code based on "\n
-            commands = [command.strip() for command in postgresql_code.split('\n') if command.strip()]
-            postgresql_code = ''
-            line_number = 0
+        # Replace 'as BEGIN' with 'RETURNS void AS $$\nBEGIN'
+        converted_code = re.sub(r'as\s*BEGIN', r'RETURNS void AS $$\nBEGIN', converted_code, flags=re.IGNORECASE)
 
-            for command in commands:
-                command = command.strip().upper()
-                self.config_parser.print_log_message('DEBUG3', f"Processing command: '{command}'")
+        # Replace 'END' with 'END; $$ LANGUAGE plpgsql;'
+        converted_code = re.sub(r'\bEND\b', r'END; $$ LANGUAGE plpgsql;', converted_code)
 
-                if command.startswith('--'):
-                    command = command.replace(command, f"\n/* {command.strip()} */;")
+        # Replace 'declare' with 'DECLARE'
+        converted_code = re.sub(r'\bdeclare\b', r'DECLARE', converted_code, flags=re.IGNORECASE)
 
-                if command.startswith('IF'):
-                    command = command.replace(command, f";{command.strip()}")
+        # Replace Sybase print with PostgreSQL RAISE NOTICE
+        converted_code = re.sub(r'print\s+\'([^\']*)\'(,([^\n]+))?', r"RAISE NOTICE '\1', \3;", converted_code)
 
-                if command == 'AS':
-                    command = command.replace(command, "AS $$\nBEGIN\n")
+        # Replace Sybase raiserror with PostgreSQL RAISE EXCEPTION
+        converted_code = re.sub(r'raiserror\s+\d+\s+"([^"]+)"', r"RAISE EXCEPTION '\1';", converted_code)
 
-                # Add ";" before specific keywords (case insensitive)
-                keywords = ["LET", "END FOREACH", "EXIT FOREACH", "RETURN", "DEFINE", "ON EXCEPTION", "END EXCEPTION",
-                            "ELSE", "ELIF", "END IF", "END LOOP", "END WHILE", "END FOR", "END FUNCTION", "END PROCEDURE",
-                            "UPDATE", "INSERT", "DELETE FROM"]
-                for keyword in keywords:
-                    command = re.sub(r'(?i)\b' + re.escape(keyword) + r'\b', ";" + keyword, command, flags=re.IGNORECASE)
+        # Replace variable assignment
+        converted_code = re.sub(r'select\s+@([a-zA-Z0-9_]+)\s*=\s*([^;\n]+)', r'\1 := \2;', converted_code)
 
-                    # Comment out lines starting with FOR followed by a single word within the first 5 lines
-                if re.match(r'^\s*FOR\s+\w+\s*$', command, flags=re.IGNORECASE) and line_number <= 5:
-                    command = f"/* {command} */"
+        # Replace fetch cursor
+        converted_code = re.sub(r'fetch\s+([a-zA-Z0-9_]+)\s+into\s+@([a-zA-Z0-9_]+)', r'FETCH \1 INTO \2;', converted_code)
 
-                # Add ";" after specific keywords (case insensitive)
-                keywords = ["ELSE", "END IF", "END LOOP", "END WHILE", "END FOR", "END FUNCTION", "END PROCEDURE", "THEN", "END EXCEPTION",
-                            "EXIT FOREACH", "END FOREACH", "CONTINUE FOREACH", "EXIT WHILE", "EXIT FOR", "EXIT LOOP"]
-                for keyword in keywords:
-                    command = re.sub(r'(?i)\b' + re.escape(keyword) + r'\b', keyword + ";", command, flags=re.IGNORECASE)
+        # Replace cursor declaration
+        converted_code = re.sub(r'declare\s+([a-zA-Z0-9_]+)\s+cursor\s+for\s+select', r'CURSOR \1 IS SELECT', converted_code, flags=re.IGNORECASE)
 
-                postgresql_code += ' ' + command + ' '
-                line_number += 1
+        # Replace open/close/deallocate cursor
+        converted_code = re.sub(r'open\s+([a-zA-Z0-9_]+)', r'OPEN \1;', converted_code, flags=re.IGNORECASE)
+        converted_code = re.sub(r'close\s+([a-zA-Z0-9_]+)', r'CLOSE \1;', converted_code, flags=re.IGNORECASE)
+        converted_code = re.sub(r'deallocate\s+cursor\s+([a-zA-Z0-9_]+)', r'DEALLOCATE \1;', converted_code, flags=re.IGNORECASE)
 
-            commands = postgresql_code.split(';')
-            postgresql_code = ''
-            for command in commands:
-                command = command.strip().replace('\n', ' ')
-                command = re.sub(r'\s+', ' ', command)
-                # command = command.strip()
-                if command:
-                    command = command + ';\n'
-                    command = re.sub(r'THEN;', 'THEN', command, flags=re.IGNORECASE)
-                    command = re.sub(r' \*/;', ' */', command, flags=re.IGNORECASE)
-                    command = re.sub(r'--;\n', '--', command, flags=re.IGNORECASE)
+        # Replace while (1=1) with LOOP
+        converted_code = re.sub(r'while\s*\(1=1\)', r'LOOP', converted_code, flags=re.IGNORECASE)
 
-                postgresql_code += command
+        # Replace if (@@sqlstatus!=0) break with EXIT WHEN NOT FOUND
+        converted_code = re.sub(r'if\s*\(@@sqlstatus!=0\)\s*break', r'EXIT WHEN NOT FOUND;', converted_code, flags=re.IGNORECASE)
 
-            postgresql_code = re.sub(r'(\S)\s*(/\*)', r'\1\n\2', postgresql_code, flags=re.IGNORECASE)
-            postgresql_code = re.sub(r'\n\*/;', ' */', postgresql_code, flags=re.IGNORECASE)
+        # Replace modulus operator
+        converted_code = re.sub(r'(\w+)\s*%\s*(\d+)', r'MOD(\1, \2)', converted_code)
 
-        return postgresql_code
+        # Replace data types
+        converted_code = re.sub(r'numeric\((\d+),(\d+)\)', r'numeric(\1,\2)', converted_code)
+        converted_code = re.sub(r'tinyint', r'smallint', converted_code, flags=re.IGNORECASE)
+        converted_code = re.sub(r'charindex', r'POSITION', converted_code, flags=re.IGNORECASE)
+        converted_code = re.sub(r'char_length', r'LENGTH', converted_code, flags=re.IGNORECASE)
+        converted_code = re.sub(r'substring', r'SUBSTRING', converted_code, flags=re.IGNORECASE)
+
+        # Remove Sybase table aliases with commas, replace with JOINs (not fully implemented)
+        converted_code = re.sub(r'from\s+([a-zA-Z0-9_]+)\s+([a-zA-Z0-9_]+),', r'FROM \1 AS \2,', converted_code, flags=re.IGNORECASE)
+
+        # Remove GO statements if present
+        converted_code = re.sub(r'\bGO\b', '', converted_code, flags=re.IGNORECASE)
+
+        return converted_code
 
     def fetch_sequences(self, table_schema: str, table_name: str):
         pass
@@ -1294,12 +1288,81 @@ class SybaseASEConnector(DatabaseConnector):
             raise e
 
     def convert_trigger(self, settings):
-        trigger_name = settings['trigger_name']
+        trigger_name = self.config_parser.convert_names_case(settings['trigger_name'])
         trigger_code = settings['trigger_sql']
         source_schema = settings['source_schema']
+        source_table = settings['source_table']
         target_schema = settings['target_schema']
+        target_table = self.config_parser.convert_names_case(settings['target_table'])
         table_list = settings['table_list']
-        return ''
+
+        ## get_sql_functions_mapping
+        function_map = self.get_sql_functions_mapping({ 'target_db_type': settings['target_db_type'] })
+
+        events = re.findall(r'for\s+([a-z, ]+)', trigger_code, re.IGNORECASE)
+        events = events[0].replace(' ', '').upper().split(',') if events else []
+        pg_events = ' OR '.join(events)
+
+        # Extract declare block
+        declare_match = re.search(r'declare\s+((?:@[\w]+\s+[\w]+(?:,)?\s*)+)', trigger_code, re.IGNORECASE)
+        declare_block = ''
+        if declare_match:
+            declare_lines = declare_match.group(1)
+            # Split by commas, strip whitespace
+            declarations = [d.strip() for d in declare_lines.split(',') if d.strip()]
+            pg_declarations = []
+            for decl in declarations:
+                m = re.match(r'@([\w]+)\s+([\w]+)', decl)
+                if m:
+                    var, dtype = m.groups()
+                    pg_declarations.append(f"v_{var} {dtype};")
+            if pg_declarations:
+                declare_block = 'DECLARE\n' + '\n'.join(pg_declarations) + '\n'
+
+        # Remove declare block from body
+        trigger_code_wo_declare = re.sub(r'declare\s+((?:@[\w]+\s+[\w]+(?:,)?\s*)+)', '', trigger_code, flags=re.IGNORECASE)
+
+        # Extract trigger body (between BEGIN and END)
+        body_match = re.search(r'BEGIN(.*)END', trigger_code_wo_declare, re.DOTALL | re.IGNORECASE)
+        body = body_match.group(1) if body_match else ''
+
+        # Replace Sybase functions
+        for sybase_func, pg_equiv in function_map.items():
+            body = re.sub(sybase_func, pg_equiv, body, flags=re.IGNORECASE)
+
+        # Replace Sybase variables and other syntax
+        body = re.sub(r'inserted\.([a-zA-Z_]+)', r'NEW.\1', body)
+        body = re.sub(r'deleted\.([a-zA-Z_]+)', r'OLD.\1', body)
+        body = re.sub(r'@([a-zA-Z_]+)', r'v_\1', body)
+        body = re.sub(r'select\s+v_([a-zA-Z_]+)=([^\n;]+);?', r'v_\1 := \2;', body)
+        body = re.sub(r'update\s+([a-zA-Z_]+)\s+set', r'UPDATE \1 SET', body, flags=re.IGNORECASE)
+        body = re.sub(r'where\s+([a-zA-Z_]+)\.([a-zA-Z_]+)=NEW\.([a-zA-Z_]+)', r'WHERE \1.\2 = NEW.\3', body)
+
+        # Remove Sybase-specific syntax
+        body = re.sub(r'from\s+[a-zA-Z_, ]+\n', '', body)
+        body = re.sub(r'if\s+UPDATE\([a-zA-Z_]+\)', '-- IF UPDATE(column) not directly supported in PostgreSQL', body)
+        body = re.sub(r'and v_[a-zA-Z_]+ IS NOT NULL', '', body)
+        body = re.sub(r'ELSE', 'ELSE', body)
+        body = re.sub(r'RETURN', 'RETURN NEW;', body)
+
+        # Compose PostgreSQL function
+        pg_func = f"""CREATE OR REPLACE FUNCTION {trigger_name}_func()
+            RETURNS trigger AS $$
+            {declare_block}BEGIN
+            {body.strip()}
+            RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql;
+            """
+
+        # Compose PostgreSQL trigger
+        pg_trigger = f"""CREATE TRIGGER {trigger_name}
+            AFTER {pg_events} ON "{target_schema}"."{target_table}"
+            FOR EACH ROW
+            EXECUTE FUNCTION {trigger_name}_func();
+            """
+
+        return pg_func + '\n' + pg_trigger
 
     def fetch_triggers(self, table_id, schema_name, table_name):
         trigger_data = {}

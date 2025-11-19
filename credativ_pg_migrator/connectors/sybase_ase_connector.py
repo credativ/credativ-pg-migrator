@@ -667,6 +667,23 @@ class SybaseASEConnector(DatabaseConnector):
         # Replace parameter declarations (simple version)
         converted_code = re.sub(r'@([a-zA-Z0-9_]+)\s+([a-zA-Z0-9_()]+)', r'\1 \2', converted_code)
 
+        # Check if the function header has parameter declarations
+        header_pattern = r'CREATE\s+OR\s+REPLACE\s+FUNCTION\s+([a-zA-Z0-9_]+)(\s*\([^)]*\))?'
+        header_match = re.search(header_pattern, converted_code, flags=re.IGNORECASE)
+
+        if header_match:
+            func_name = header_match.group(1)
+            params_part = header_match.group(2)
+
+            # If there are no parentheses after the function name, add empty ones
+            if not params_part or params_part.strip() == '':
+                converted_code = re.sub(
+                    rf'(CREATE\s+OR\s+REPLACE\s+FUNCTION\s+{re.escape(func_name)})(\s*)',
+                    r'\1()',
+                    converted_code,
+                    flags=re.IGNORECASE
+                )
+
         # Replace 'as BEGIN' with 'RETURNS void AS $$\nBEGIN'
         converted_code = re.sub(r'as\s*BEGIN', r'RETURNS void AS $$\nBEGIN', converted_code, flags=re.IGNORECASE)
 
@@ -675,6 +692,28 @@ class SybaseASEConnector(DatabaseConnector):
 
         # Replace 'declare' with 'DECLARE'
         converted_code = re.sub(r'\bdeclare\b', r'DECLARE', converted_code, flags=re.IGNORECASE)
+
+        # Extract DECLARE section and move it before first BEGIN
+        declare_pattern = r'\bDECLARE\s+(.*?)(?=\bBEGIN\b|\bIF\b|\bWHILE\b|\bSELECT\b|\bINSERT\b|\bUPDATE\b|\bDELETE\b|\bRETURN\b|\bEND\b)'
+        declare_match = re.search(declare_pattern, converted_code, flags=re.IGNORECASE | re.DOTALL)
+
+        if declare_match:
+            declare_section = declare_match.group(0)
+            # Replace commas with semicolons and add semicolon at the end
+            declare_section = declare_section.replace(',', ';')
+            if not declare_section.rstrip().endswith(';'):
+                declare_section = declare_section.rstrip() + ';'
+
+            # Remove DECLARE section from its current position
+            converted_code = re.sub(declare_pattern, '', converted_code, flags=re.IGNORECASE | re.DOTALL)
+
+            # Find the first BEGIN and insert DECLARE before it
+            begin_pattern = r'(\bRETURNS\s+\w+\s+AS\s+\$\$\s*)(\bBEGIN\b)'
+            if re.search(begin_pattern, converted_code, flags=re.IGNORECASE):
+                converted_code = re.sub(begin_pattern, rf'\1{declare_section}\n\2', converted_code, flags=re.IGNORECASE)
+            else:
+                # Fallback: insert before any BEGIN
+                converted_code = re.sub(r'(\bBEGIN\b)', rf'{declare_section}\n\1', converted_code, count=1, flags=re.IGNORECASE)
 
         # Replace Sybase print with PostgreSQL RAISE NOTICE
         converted_code = re.sub(r'print\s+\'([^\']*)\'(,([^\n]+))?', r"RAISE NOTICE '\1', \3;", converted_code)
@@ -1305,6 +1344,10 @@ class SybaseASEConnector(DatabaseConnector):
 
         events = re.findall(r'for\s+([a-z, ]+)', trigger_code, re.IGNORECASE)
         events = events[0].replace(' ', '').upper().split(',') if events else []
+
+        # If no events are found, use 'AFTER INSERT, UPDATE, DELETE' as default
+        if not events:
+            events = ['INSERT', 'UPDATE', 'DELETE']
         pg_events = ' OR '.join(events)
 
         # Extract declare block

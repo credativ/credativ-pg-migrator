@@ -604,7 +604,8 @@ class PostgreSQLConnector(DatabaseConnector):
         constraint_owner = self.config_parser.convert_names_case(settings['constraint_owner'])
         constraint_columns = self.config_parser.convert_names_case(settings['constraint_columns'])
         #referenced_table_schema = target_schema
-        referenced_table_schema = self.config_parser.convert_names_case(settings['referenced_table_schema'])
+        # referenced_table_schema = self.config_parser.convert_names_case(settings['referenced_table_schema'])
+        referenced_table_schema = settings['referenced_table_schema']
         referenced_table_name = self.config_parser.convert_names_case(settings['referenced_table_name'])
         referenced_columns = self.config_parser.convert_names_case(settings['referenced_columns'])
         delete_rule = settings['delete_rule'] if 'delete_rule' in settings else 'NO ACTION'

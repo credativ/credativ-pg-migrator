@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.10.3 - 2025.11.19
+
+- 2025.11.19:
+
+  - Improvements in Sybase ASE connector - implemented conversion of functions/procedures from Sybase ASE to PostgreSQL - added basic conversion of control flow statements, cursors, data types and some built-in functions
+    - Note: conversion is not complete yet, some complex constructs might not be converted properly, further improvements will be done in future releases
+
 ## 0.10.2 - 2025.11.17
 
 - 2025.11.17:

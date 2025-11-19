@@ -1328,7 +1328,8 @@ class SybaseASEConnector(DatabaseConnector):
 
         # Replace Sybase functions
         for sybase_func, pg_equiv in function_map.items():
-            body = re.sub(sybase_func, pg_equiv, body, flags=re.IGNORECASE)
+            escaped_src_func = re.escape(sybase_func)
+            body = re.sub(escaped_src_func, pg_equiv, body, flags=re.IGNORECASE)
 
         # Replace Sybase variables and other syntax
         body = re.sub(r'inserted\.([a-zA-Z_]+)', r'NEW.\1', body)

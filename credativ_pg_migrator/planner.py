@@ -648,10 +648,13 @@ class Planner:
 
                         converted_code = self.source_connection.convert_trigger({
                                 'source_schema': self.config_parser.get_source_schema(),
+                                'source_table': table_info['table_name'],
                                 'target_schema': self.config_parser.get_target_schema(),
+                                'target_table': table_info['table_name'],
                                 'trigger_name': trigger_details['name'],
                                 'trigger_sql': trigger_details['sql'],
-                                'table_list': []
+                                'table_list': [],
+                                'target_db_type': self.config_parser.get_target_db_type(),
                             })
 
                         self.config_parser.print_log_message( 'DEBUG', f"Source trigger code: {trigger_details['sql']}")

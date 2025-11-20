@@ -715,6 +715,11 @@ class SybaseASEConnector(DatabaseConnector):
                 # Fallback: insert before any BEGIN
                 converted_code = re.sub(r'(\bBEGIN\b)', rf'{declare_section}\n\1', converted_code, count=1, flags=re.IGNORECASE)
 
+            types_mapping = self.get_types_mapping({'target_db_type': settings['target_db_type']})
+            for sybase_type, pg_type in types_mapping.items():
+                self.config_parser.print_log_message('DEBUG3', f"convert_funcproc_code: Replacing data type {sybase_type} ({re.escape(sybase_type)}) with {pg_type}")
+                converted_code = re.sub(rf'\b{re.escape(sybase_type)}\b', pg_type, converted_code, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
+
         # Replace Sybase print with PostgreSQL RAISE NOTICE
         converted_code = re.sub(r'print\s+\'([^\']*)\'(,([^\n]+))?', r"RAISE NOTICE '\1', \3;", converted_code)
 
@@ -1342,12 +1347,8 @@ class SybaseASEConnector(DatabaseConnector):
         ## get_sql_functions_mapping
         function_map = self.get_sql_functions_mapping({ 'target_db_type': settings['target_db_type'] })
 
-        events = re.findall(r'for\s+([a-z, ]+)', trigger_code, re.IGNORECASE)
+        events = re.findall(r'for\s+([a-z, ]+?)(?:\s+as\b|$)', trigger_code, re.IGNORECASE)
         events = events[0].replace(' ', '').upper().split(',') if events else []
-
-        # If no events are found, use 'AFTER INSERT, UPDATE, DELETE' as default
-        if not events:
-            events = ['INSERT', 'UPDATE', 'DELETE']
         pg_events = ' OR '.join(events)
 
         # Extract declare block
@@ -1365,6 +1366,11 @@ class SybaseASEConnector(DatabaseConnector):
                     pg_declarations.append(f"v_{var} {dtype};")
             if pg_declarations:
                 declare_block = 'DECLARE\n' + '\n'.join(pg_declarations) + '\n'
+
+            types_mapping = self.get_types_mapping({'target_db_type': settings['target_db_type']})
+            for sybase_type, pg_type in types_mapping.items():
+                self.config_parser.print_log_message('DEBUG3', f"convert_trigger: Replacing data type {sybase_type} ({re.escape(sybase_type)}) with {pg_type}")
+                declare_block = re.sub(rf'\b{re.escape(sybase_type)}\b', pg_type, declare_block, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
 
         # Remove declare block from body
         trigger_code_wo_declare = re.sub(r'declare\s+((?:@[\w]+\s+[\w]+(?:,)?\s*)+)', '', trigger_code, flags=re.IGNORECASE)
@@ -1396,8 +1402,8 @@ class SybaseASEConnector(DatabaseConnector):
         # Compose PostgreSQL function
         pg_func = f"""CREATE OR REPLACE FUNCTION {trigger_name}_func()
             RETURNS trigger AS $$
-            {declare_block}BEGIN
-            {body.strip()}
+            {declare_block} BEGIN
+            {body.strip()};
             RETURN NEW;
             END;
             $$ LANGUAGE plpgsql;
@@ -1420,29 +1426,52 @@ class SybaseASEConnector(DatabaseConnector):
                 DISTINCT
                 o.name,
                 o.id,
-                o.sysstat
+                o.sysstat,
+                c.text,
+                c.colid
             FROM syscomments c, sysobjects o
             WHERE o.id=c.id
                 AND user_name(o.uid) = '{schema_name}'
                 AND type in ('TR')
                 AND (o.sysstat & 8 = 8)
-            ORDER BY o.name
+            ORDER BY o.name, c.colid
         """
         self.config_parser.print_log_message('DEBUG3', f"Fetching function/procedure names for schema {schema_name}")
         self.config_parser.print_log_message('DEBUG3', f"Query: {query}")
         self.connect()
         cursor = self.connection.cursor()
         cursor.execute(query)
+        triggers_text = {}
         for row in cursor.fetchall():
+            trigger_name = row[0]
+            trigger_id = row[1]
+            sysstat = row[2]
+            text_part = row[3]
+            colid = row[4]
+
+            if trigger_name not in triggers_text:
+                triggers_text[trigger_name] = {
+                    'id': trigger_id,
+                    'sysstat': sysstat,
+                    'text_parts': []
+                }
+
+            triggers_text[trigger_name]['text_parts'].append((colid, text_part))
+
+        # Sort text parts by colid and concatenate
+        for trigger_name, trigger_info in triggers_text.items():
+            trigger_info['text_parts'].sort(key=lambda x: x[0])
+            concatenated_sql = ''.join([part[1] for part in trigger_info['text_parts']])
+
             trigger_data[order_num] = {
-                'name': row[0],
-                'id': row[1],
-                'sysstat': row[2],
-                'event': '',
-                'new': '',
-                'old': '',
-                'sql': '',
-                'comment': ''
+            'name': trigger_name,
+            'id': trigger_info['id'],
+            'sysstat': trigger_info['sysstat'],
+            'event': '',
+            'new': '',
+            'old': '',
+            'sql': concatenated_sql,
+            'comment': ''
             }
             order_num += 1
         cursor.close()

@@ -1,6 +1,10 @@
 # Changelog
 
-## 0.10.3 - 2025.11.19
+## 0.10.3 - 2025.11.20
+
+- 2025.11.20:
+
+  - Fix in Sybase ASE connector - repaired fetch of triggers source code from Sybase ASE system tables, fixes in trigger code conversion, added conversion of data types and SQL functions in code
 
 - 2025.11.19:
 

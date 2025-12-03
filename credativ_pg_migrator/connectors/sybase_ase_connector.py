@@ -699,8 +699,29 @@ class SybaseASEConnector(DatabaseConnector):
 
         if declare_match:
             declare_section = declare_match.group(0)
-            # Replace commas with semicolons and add semicolon at the end
-            declare_section = declare_section.replace(',', ';')
+            # Replace commas with semicolons, but preserve commas within parentheses (precision definitions)
+            # Split by commas, but handle parentheses properly
+            parts = []
+            current_part = ""
+            paren_depth = 0
+
+            for char in declare_section:
+                if char == '(':
+                    paren_depth += 1
+                elif char == ')':
+                    paren_depth -= 1
+                elif char == ',' and paren_depth == 0:
+                    # This comma is a separator between declarations
+                    parts.append(current_part.strip())
+                    current_part = ""
+                    continue
+                current_part += char
+
+            if current_part.strip():
+                parts.append(current_part.strip())
+
+            # Join with semicolons instead of commas
+            declare_section = '; '.join(parts)
             if not declare_section.rstrip().endswith(';'):
                 declare_section = declare_section.rstrip() + ';'
 
@@ -1402,7 +1423,8 @@ class SybaseASEConnector(DatabaseConnector):
         # Compose PostgreSQL function
         pg_func = f"""CREATE OR REPLACE FUNCTION {trigger_name}_func()
             RETURNS trigger AS $$
-            {declare_block} BEGIN
+            {declare_block}
+            BEGIN
             {body.strip()};
             RETURN NEW;
             END;

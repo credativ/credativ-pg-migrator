@@ -1,6 +1,10 @@
 # Changelog
 
-## 0.10.3 - 2025.11.20
+## 0.10.3 - 2025.12.03
+
+- 2025.12.03
+
+  - First version of user documentation added into docs/ directory
 
 - 2025.11.20:
 

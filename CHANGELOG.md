@@ -1,7 +1,11 @@
 # Changelog
 
-## 0.10.3 - 2025.12.03
+## 0.10.3 - 2026.01.xx
 
+- 2025.12.11
+
+  - Improvements in Informix part - import of table with multiple LOB columns from UNL files - speed improvements
+  
 - 2025.12.03
 
   - First version of user documentation added into docs/ directory

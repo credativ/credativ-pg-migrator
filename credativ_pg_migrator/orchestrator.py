@@ -581,21 +581,29 @@ class Orchestrator:
                                     try:
                                         if data_source_settings['lob_columns'] != '' and self.config_parser.should_migrate_lob_values():
 
-                                            part_name = 'migrate LOBs - add primary key'
-                                            primary_key_data = migrator_tables.select_primary_key_all_columns(table_data['source_schema'], table_data['source_table'])
-                                            if primary_key_data is None:
-                                                self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Table {target_table} has LOB columns defined ({data_source_settings['lob_columns']}), but no primary key could be determined.")
-                                            else:
-                                                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {target_table} has LOB columns defined ({data_source_settings['lob_columns']}). Adding primary key: {primary_key_data}")
-                                                try:
-                                                    result = self.index_worker(primary_key_data, '')
-                                                    if not result:
-                                                        self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Failed to add primary key to table {target_table} for LOB migration.")
-                                                    else:
-                                                        self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Primary key added successfully to table {target_table} for LOB migration.")
-                                                except Exception as e:
-                                                    self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Exception occurred while adding primary key to table {target_table} for LOB migration: {e}")
-                                                    self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Full error details: {traceback.format_exc()}")
+                                            # Loop over import table row by row, select all columns, find column(s) specified in lob_columns and read their content
+                                            lob_columns = [col.strip() for col in data_source_settings['lob_columns'].split(',') if col.strip()]
+                                            lob_columns_count = len(lob_columns)
+
+                                            # we need to have a primary key for LOB migration if multiple LOB columns are defined on the table - to check if row exists and to update only LOB column(s)
+                                            # primary key unfortunately slows down the LOB migration due to index rebuilds, but is necessary for data integrity
+                                            if lob_columns_count > 1:
+                                                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {target_table} has multiple LOB columns defined ({data_source_settings['lob_columns']}) - adding primary key for LOB migration.")
+                                                part_name = 'migrate LOBs - add primary key'
+                                                primary_key_data = migrator_tables.select_primary_key_all_columns(table_data['source_schema'], table_data['source_table'])
+                                                if primary_key_data is None:
+                                                    self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Table {target_table} has LOB columns defined ({data_source_settings['lob_columns']}), but no primary key could be determined.")
+                                                else:
+                                                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {target_table} has LOB columns defined ({data_source_settings['lob_columns']}). Adding primary key: {primary_key_data}")
+                                                    try:
+                                                        result = self.index_worker(primary_key_data, '')
+                                                        if not result:
+                                                            self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Failed to add primary key to table {target_table} for LOB migration.")
+                                                        else:
+                                                            self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Primary key added successfully to table {target_table} for LOB migration.")
+                                                    except Exception as e:
+                                                        self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Exception occurred while adding primary key to table {target_table} for LOB migration: {e}")
+                                                        self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Full error details: {traceback.format_exc()}")
 
                                             part_name = 'migrate LOBs start'
 
@@ -627,8 +635,6 @@ class Orchestrator:
                                             part_name = 'import to intermediate table'
                                             worker_target_connection.copy_from_file(imp_table_copy_command, csv_file_name)
 
-                                            # Loop over import table row by row, select all columns, find column(s) specified in lob_columns and read their content
-                                            lob_columns = [col.strip() for col in data_source_settings['lob_columns'].split(',') if col.strip()]
                                             lob_col_name = None
                                             lob_col_index = None
                                             lob_col_type = None
@@ -687,6 +693,7 @@ class Orchestrator:
                                                                     'lob_column': lob_col_name,
                                                                     'lob_col_index': lob_col_index,
                                                                     'lob_col_type': lob_col_type,
+                                                                    'lob_columns_count': lob_columns_count,
                                                                     'target_columns': table_data['target_columns'],
                                                                     'datafile': datafile,
                                                                     'datafiles_count': len(datafiles),
@@ -921,6 +928,7 @@ class Orchestrator:
         lob_column = settings['lob_column']
         lob_col_index = settings['lob_col_index']
         lob_col_type = settings['lob_col_type']
+        lob_columns_count = settings.get('lob_columns_count', 1)
         target_columns = settings['target_columns']
         datafile = settings['datafile']
         datafiles_count = settings['datafiles_count']
@@ -941,12 +949,13 @@ class Orchestrator:
             col_list = ', '.join([f'"{col_info["column_name"]}"' for _, col_info in target_columns.items()])
             placeholders = ', '.join(['%s'] * len(target_columns))
 
-            if primary_key_columns is None or primary_key_columns.strip() == '':
+            basic_insert_sql = f'''INSERT INTO "{target_schema}"."{target_table}" ({col_list}) VALUES ({placeholders})'''
+
+            if primary_key_columns is None or primary_key_columns.strip() == '' or lob_columns_count <= 1:
 
                 part_name = 'build merge statement no primary key'
                 # No primary key defined - build MERGE statement using all non-LOB columns as match conditions
 
-                # insert_sql = f'''INSERT INTO "{target_schema}"."{target_table}" ({col_list}) VALUES ({placeholders}) ON CONFLICT ({col_list}) DO UPDATE SET {lob_column} = %s'''
                 # Build match conditions from all columns excluding LOB columns
                 all_lob_columns = settings.get('all_lob_columns', [])
                 if all_lob_columns is None:
@@ -982,7 +991,7 @@ class Orchestrator:
                     data_type = col_info["data_type"]
                     cast_expressions.append(f'%s::{data_type} AS "{col_name}"')
 
-                insert_sql = f'''
+                repeat_insert_sql = f'''
                     WITH source_data AS (
                         SELECT {', '.join(cast_expressions)}
                     )
@@ -1000,7 +1009,7 @@ class Orchestrator:
 
                 part_name = 'build insert statement with primary key'
                 # we have primary key defined - use it for INSERT ... ON CONFLICT
-                insert_sql = f'''INSERT INTO "{target_schema}"."{target_table}" ({col_list}) VALUES ({placeholders}) ON CONFLICT ({primary_key_columns}) DO UPDATE SET {lob_column} = %s::{lob_col_type}'''
+                repeat_insert_sql = f'''INSERT INTO "{target_schema}"."{target_table}" ({col_list}) VALUES ({placeholders}) ON CONFLICT ({primary_key_columns}) DO UPDATE SET {lob_column} = %s::{lob_col_type}'''
 
                 # pk_columns_list = [col.strip().strip('"') for col in primary_key_columns.split(',')]
                 # merge_match_conditions = ' AND '.join([f'target."{pk_col}" = source."{pk_col}"' for pk_col in pk_columns_list])
@@ -1014,7 +1023,8 @@ class Orchestrator:
             select_sql = f"""SELECT {col_list} FROM "{target_schema}"."{unl_import_table}" WHERE coalesce(split_part({lob_column},',',3), '0,0,0') = '{datafile}'"""
 
             self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Fetching rows from '{unl_import_table}' with query: {select_sql}")
-            self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Insert SQL: {insert_sql}")
+            self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Basic Insert SQL: {basic_insert_sql}")
+            self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Repeat Insert SQL: {repeat_insert_sql}")
             self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Lob column: {lob_column} (index: {lob_col_index}, type: {lob_col_type})")
             counter = 0
             read_lines = 0
@@ -1083,15 +1093,24 @@ class Orchestrator:
                     row[lob_col_index-1] = None
 
                 try:
-                    part_name = 'insert row'
+                    part_name = 'insert row basic'
                     cur_insert = worker_insert_connection.connection.cursor()
-                    cur_insert.execute(insert_sql, row + [row[lob_col_index-1]])
-                    worker_insert_connection.connection.commit()
+                    try:
+                        cur_insert.execute(basic_insert_sql, row + [row[lob_col_index-1]])
+                        worker_insert_connection.connection.commit()
+                    except Exception as e:
+                        try:
+                            part_name = 'insert row repeat'
+                            cur_insert.execute(repeat_insert_sql, row + [row[lob_col_index-1]])
+                            worker_insert_connection.connection.commit()
+                        except Exception as e:
+                            worker_insert_connection.connection.rollback()
+                            raise e
                     cur_insert.close()
                     counter += 1
                 except Exception as e:
                     cur_insert.close()
-                    self.config_parser.print_log_message('ERROR', f"Worker: {worker_id}: Error executing INSERT command for row: {row} (counter: {counter}), error: {e}")
+                    self.config_parser.print_log_message('ERROR', f"Worker: {worker_id} [{part_name}]: Error executing INSERT command for row: {row} (counter: {counter}), error: {e}")
 
                 part_name = 'fetch next row'
                 row = select_cur.fetchone()

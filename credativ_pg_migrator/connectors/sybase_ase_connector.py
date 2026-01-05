@@ -654,136 +654,298 @@ class SybaseASEConnector(DatabaseConnector):
     def convert_funcproc_code(self, settings):
         funcproc_code = settings['funcproc_code']
         target_db_type = settings['target_db_type']
-        source_schema = settings['source_schema']
-        target_schema = settings['target_schema']
-        table_list = settings['table_list']
-        view_list = settings['view_list']
+        
+        # 1. Clean up potential GO statements and strict comments handling if needed (minimal here)
+        converted_code = re.sub(r'\bGO\b', '', funcproc_code, flags=re.IGNORECASE)
 
-        function_immutable = ''
-
-        # Replace 'create proc' with 'CREATE OR REPLACE FUNCTION'
-        converted_code = re.sub(r'create\s+proc\s+([a-zA-Z0-9_]+)', r'CREATE OR REPLACE FUNCTION \1', funcproc_code, flags=re.IGNORECASE)
-
-        # Replace parameter declarations (simple version)
-        converted_code = re.sub(r'@([a-zA-Z0-9_]+)\s+([a-zA-Z0-9_()]+)', r'\1 \2', converted_code)
-
-        # Check if the function header has parameter declarations
-        header_pattern = r'CREATE\s+OR\s+REPLACE\s+FUNCTION\s+([a-zA-Z0-9_]+)(\s*\([^)]*\))?'
-        header_match = re.search(header_pattern, converted_code, flags=re.IGNORECASE)
+        # 2. Extract Header and Body
+        # Pattern: CREATE PROC[EDURE] name [params] AS [BEGIN] body [END]
+        header_match = re.search(r'CREATE\s+(?:PROC|PROCEDURE)\s+([a-zA-Z0-9_\.]+)(.*?)(\bAS\b)', converted_code, flags=re.IGNORECASE | re.DOTALL)
+        
+        func_schema = ""
+        func_name = ""
+        params_str = ""
+        body_start_idx = 0
 
         if header_match:
-            func_name = header_match.group(1)
-            params_part = header_match.group(2)
+            full_name = header_match.group(1)
+            params_str = header_match.group(2).strip()
+            # body technically starts after AS. 
+            body_start_idx = header_match.end(3)
 
-            # If there are no parentheses after the function name, add empty ones
-            if not params_part or params_part.strip() == '':
-                converted_code = re.sub(
-                    rf'(CREATE\s+OR\s+REPLACE\s+FUNCTION\s+{re.escape(func_name)})(\s*)',
-                    r'\1()',
-                    converted_code,
-                    flags=re.IGNORECASE
-                )
-
-        # Replace 'as BEGIN' with 'RETURNS void AS $$\nBEGIN'
-        converted_code = re.sub(r'as\s*BEGIN', r'RETURNS void AS $$\nBEGIN', converted_code, flags=re.IGNORECASE)
-
-        # Replace 'END' with 'END; $$ LANGUAGE plpgsql;'
-        converted_code = re.sub(r'\bEND\b', r'END; $$ LANGUAGE plpgsql;', converted_code)
-
-        # Replace 'declare' with 'DECLARE'
-        converted_code = re.sub(r'\bdeclare\b', r'DECLARE', converted_code, flags=re.IGNORECASE)
-
-        # Extract DECLARE section and move it before first BEGIN
-        declare_pattern = r'\bDECLARE\s+(.*?)(?=\bBEGIN\b|\bIF\b|\bWHILE\b|\bSELECT\b|\bINSERT\b|\bUPDATE\b|\bDELETE\b|\bRETURN\b|\bEND\b)'
-        declare_match = re.search(declare_pattern, converted_code, flags=re.IGNORECASE | re.DOTALL)
-
-        if declare_match:
-            declare_section = declare_match.group(0)
-            # Replace commas with semicolons, but preserve commas within parentheses (precision definitions)
-            # Split by commas, but handle parentheses properly
-            parts = []
-            current_part = ""
-            paren_depth = 0
-
-            for char in declare_section:
-                if char == '(':
-                    paren_depth += 1
-                elif char == ')':
-                    paren_depth -= 1
-                elif char == ',' and paren_depth == 0:
-                    # This comma is a separator between declarations
-                    parts.append(current_part.strip())
-                    current_part = ""
-                    continue
-                current_part += char
-
-            if current_part.strip():
-                parts.append(current_part.strip())
-
-            # Join with semicolons instead of commas
-            declare_section = '; '.join(parts)
-            if not declare_section.rstrip().endswith(';'):
-                declare_section = declare_section.rstrip() + ';'
-
-            # Remove DECLARE section from its current position
-            converted_code = re.sub(declare_pattern, '', converted_code, flags=re.IGNORECASE | re.DOTALL)
-
-            # Find the first BEGIN and insert DECLARE before it
-            begin_pattern = r'(\bRETURNS\s+\w+\s+AS\s+\$\$\s*)(\bBEGIN\b)'
-            if re.search(begin_pattern, converted_code, flags=re.IGNORECASE):
-                converted_code = re.sub(begin_pattern, rf'\1{declare_section}\n\2', converted_code, flags=re.IGNORECASE)
+            if '.' in full_name:
+                parts = full_name.split('.')
+                func_schema = parts[0]
+                func_name = parts[1]
             else:
-                # Fallback: insert before any BEGIN
-                converted_code = re.sub(r'(\bBEGIN\b)', rf'{declare_section}\n\1', converted_code, count=1, flags=re.IGNORECASE)
+                func_name = full_name
+        else:
+            # Fallback if regex fails - return original or minor mod
+            return converted_code
 
-            types_mapping = self.get_types_mapping({'target_db_type': settings['target_db_type']})
+        # Helper to split by comma respecting parens
+        def split_respecting_parens(text):
+            parts = []
+            current = []
+            depth = 0
+            for char in text:
+                if char == '(':
+                    depth += 1
+                elif char == ')':
+                    depth -= 1
+                
+                if char == ',' and depth == 0:
+                    parts.append("".join(current).strip())
+                    current = []
+                else:
+                    current.append(char)
+            if current:
+                parts.append("".join(current).strip())
+            return parts
+
+        # 3. Process Parameters
+        types_mapping = self.get_types_mapping({'target_db_type': target_db_type})
+        
+        pg_params = []
+        if params_str:
+            clean_params = params_str.replace('@', '')
             for sybase_type, pg_type in types_mapping.items():
-                self.config_parser.print_log_message('DEBUG3', f"convert_funcproc_code: Replacing data type {sybase_type} ({re.escape(sybase_type)}) with {pg_type}")
-                converted_code = re.sub(rf'\b{re.escape(sybase_type)}\b', pg_type, converted_code, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
+                clean_params = re.sub(rf'\b{re.escape(sybase_type)}\b', pg_type, clean_params, flags=re.IGNORECASE)
+            pg_params_str = clean_params
+        else:
+            pg_params_str = ""
 
-        # Replace Sybase print with PostgreSQL RAISE NOTICE
-        converted_code = re.sub(r'print\s+\'([^\']*)\'(,([^\n]+))?', r"RAISE NOTICE '\1', \3;", converted_code)
+        # 4. Process Body
+        body_content = converted_code[body_start_idx:].strip()
 
-        # Replace Sybase raiserror with PostgreSQL RAISE EXCEPTION
-        converted_code = re.sub(r'raiserror\s+\d+\s+"([^"]+)"', r"RAISE EXCEPTION '\1';", converted_code)
+        # Remove leading BEGIN and trailing END if they wrap the entire body
+        if re.match(r'^BEGIN\b', body_content, flags=re.IGNORECASE):
+            body_content = re.sub(r'^BEGIN', '', body_content, count=1, flags=re.IGNORECASE).strip()
+            body_content = re.sub(r'END\s*$', '', body_content, flags=re.IGNORECASE).strip()
 
-        # Replace variable assignment
-        converted_code = re.sub(r'select\s+@([a-zA-Z0-9_]+)\s*=\s*([^;\n]+)', r'\1 := \2;', converted_code)
+        # 5. Variable Declarations
+        declarations = []
+        
+        def declaration_replacer(match):
+            full_decl = match.group(0)
+            content = full_decl[7:].strip() # len('DECLARE') = 7
+            
+            content_clean = content.replace('@', '')
+            for sybase_type, pg_type in types_mapping.items():
+                content_clean = re.sub(rf'\b{re.escape(sybase_type)}\b', pg_type, content_clean, flags=re.IGNORECASE)
+            
+            parts = split_respecting_parens(content_clean)
+            for part in parts:
+                declarations.append(part.strip() + ';')
+            
+            return '' # Remove from body
 
-        # Replace fetch cursor
-        converted_code = re.sub(r'fetch\s+([a-zA-Z0-9_]+)\s+into\s+@([a-zA-Z0-9_]+)', r'FETCH \1 INTO \2;', converted_code)
+        body_content = re.sub(r'DECLARE\s+@.*?(?=\bBEGIN\b|\bIF\b|\bWHILE\b|\bSELECT\b|\bINSERT\b|\bUPDATE\b|\bDELETE\b|\bRETURN\b|\bSET\b|\bFETCH\b|\bOPEN\b|\bCLOSE\b|\bDEALLOCATE\b|\bDECLARE\b|$)', declaration_replacer, body_content, flags=re.IGNORECASE | re.DOTALL)
 
-        # Replace cursor declaration
-        converted_code = re.sub(r'declare\s+([a-zA-Z0-9_]+)\s+cursor\s+for\s+select', r'CURSOR \1 IS SELECT', converted_code, flags=re.IGNORECASE)
+        # 6. Global Variable Replacement in Body
+        # Replace @var with var, BUT skip @@system_vars
+        body_content = re.sub(r'(?<!@)@([a-zA-Z0-9_]+)', r'\1', body_content)
 
-        # Replace open/close/deallocate cursor
-        converted_code = re.sub(r'open\s+([a-zA-Z0-9_]+)', r'OPEN \1;', converted_code, flags=re.IGNORECASE)
-        converted_code = re.sub(r'close\s+([a-zA-Z0-9_]+)', r'CLOSE \1;', converted_code, flags=re.IGNORECASE)
-        converted_code = re.sub(r'deallocate\s+cursor\s+([a-zA-Z0-9_]+)', r'DEALLOCATE \1;', converted_code, flags=re.IGNORECASE)
+        # 7. Conversions (Line by line / block based)
+        
+        # Cursor Declarations
+        cursor_matches = re.finditer(r'DECLARE\s+([a-zA-Z0-9_]+)\s+CURSOR\s+FOR\s+(.*)', body_content, flags=re.IGNORECASE)
+        for cm in cursor_matches:
+            c_name = cm.group(1)
+            c_def = cm.group(2)
+            declarations.append(f"{c_name} CURSOR FOR {c_def};")
+        
+        body_content = re.sub(r'DECLARE\s+[a-zA-Z0-9_]+\s+CURSOR\s+FOR\s+.*', '', body_content, flags=re.IGNORECASE)
 
-        # Replace while (1=1) with LOOP
-        converted_code = re.sub(r'while\s*\(1=1\)', r'LOOP', converted_code, flags=re.IGNORECASE)
+        # 8. Control Flow & Assignments
+        
+        # 8.0 Pre-process END ELSE to avoid breaking IF-ELSE chains
+        # T-SQL: IF ... BEGIN ... END ELSE ...
+        # PG: IF ... THEN ... ELSE ... END IF;
+        # We replace "END ELSE" with "ELSE" so the first block merges into the structure, 
+        # and the final END closes the whole IF.
+        body_content = re.sub(r'END\s+ELSE', r'ELSE', body_content, flags=re.IGNORECASE | re.MULTILINE)
+        
+        # 8.1 Select Into (Handle BEFORE simple assignment to catch FROM clauses even multiline)
+        # SELECT var = col FROM ... -> SELECT col INTO var FROM ...
+        def select_into_transformer(match):
+            content = match.group(1) # content between SELECT and FROM
+            rest = match.group(2) # FROM ...
+            
+            if '=' in content:
+                parts = split_respecting_parens(content)
+                vars_list = []
+                cols_list = []
+                for asm in parts:
+                    if '=' in asm:
+                        side_l, side_r = asm.split('=', 1)
+                        vars_list.append(side_l.strip())
+                        cols_list.append(side_r.strip())
+                    else:
+                        cols_list.append(asm)
+                
+                if vars_list:
+                    return f"SELECT {', '.join(cols_list)} INTO {', '.join(vars_list)} {rest}"
+            
+            return match.group(0)
 
-        # Replace if (@@sqlstatus!=0) break with EXIT WHEN NOT FOUND
-        converted_code = re.sub(r'if\s*\(@@sqlstatus!=0\)\s*break', r'EXIT WHEN NOT FOUND;', converted_code, flags=re.IGNORECASE)
+        # Use DOTALL to match newlines in the SELECT ... FROM
+        body_content = re.sub(r'SELECT\s+(.+?)\s+(FROM\s+.*)', select_into_transformer, body_content, flags=re.IGNORECASE | re.DOTALL)
 
-        # Replace modulus operator
-        converted_code = re.sub(r'(\w+)\s*%\s*(\d+)', r'MOD(\1, \2)', converted_code)
+        # 8.2 Simple Assignment: SELECT var = val (no FROM)
+        def simple_assignment(match):
+            full_match = match.group(0)
+            if 'FROM' in full_match.upper():
+                return full_match
+            
+            content = match.group(1).strip() # content after SELECT
+            
+            if '=' not in content:
+                return full_match
 
-        # Replace data types
-        converted_code = re.sub(r'numeric\((\d+),(\d+)\)', r'numeric(\1,\2)', converted_code)
-        converted_code = re.sub(r'tinyint', r'smallint', converted_code, flags=re.IGNORECASE)
-        converted_code = re.sub(r'charindex', r'POSITION', converted_code, flags=re.IGNORECASE)
-        converted_code = re.sub(r'char_length', r'LENGTH', converted_code, flags=re.IGNORECASE)
-        converted_code = re.sub(r'substring', r'SUBSTRING', converted_code, flags=re.IGNORECASE)
+            parts = split_respecting_parens(content)
+            assignments = []
+            is_assignment = True
+            for part in parts:
+                if '=' in part:
+                    side_l, side_r = part.split('=', 1)
+                    assignments.append(f"{side_l.strip()} := {side_r.strip()}")
+                else:
+                    is_assignment = False
+            
+            if is_assignment and assignments:
+                return "; ".join(assignments) + ";"
+            return full_match
+            
+        # Match SELECT until newline or semicolon
+        body_content = re.sub(r'SELECT\s+([^;\n]+)', simple_assignment, body_content, flags=re.IGNORECASE)
 
-        # Remove Sybase table aliases with commas, replace with JOINs (not fully implemented)
-        converted_code = re.sub(r'from\s+([a-zA-Z0-9_]+)\s+([a-zA-Z0-9_]+),', r'FROM \1 AS \2,', converted_code, flags=re.IGNORECASE)
+        
+        # IF / WHILE
+        # Mark BLOCK IFs to distinguish from Single Line IFs
+        body_content = re.sub(r'IF\s+(.*?)\s+BEGIN', r'IF \1 THEN --BLOCK', body_content, flags=re.IGNORECASE)
+        body_content = re.sub(r'WHILE\s+(.*?)\s+BEGIN', r'WHILE \1 LOOP', body_content, flags=re.IGNORECASE)
+        body_content = re.sub(r'ELSE\s+BEGIN', r'ELSE', body_content, flags=re.IGNORECASE)
+        
+        # Single Line IF (no BEGIN)
+        def single_line_if(match):
+            cond = match.group(1)
+            if 'THEN' in cond.upper():
+                return match.group(0)
+            return f"IF {cond} THEN --SINGLE" # Mark as single
 
-        # Remove GO statements if present
-        converted_code = re.sub(r'\bGO\b', '', converted_code, flags=re.IGNORECASE)
+        body_content = re.sub(r'IF\s+(.+?)(?=\s+(?:UPDATE|INSERT|DELETE|SELECT|RETURN|RAISE|PERFORM|FETCH|OPEN|CLOSE|DEALLOCATE))', single_line_if, body_content, flags=re.IGNORECASE)
+        body_content = re.sub(r'IF\s+(.+?)\s*$', single_line_if, body_content, flags=re.IGNORECASE | re.MULTILINE)
+        
+        # Line processing to close blocks and single IFs
+        lines = body_content.split('\n')
+        new_lines = []
+        stack = [] # 'IF_BLOCK', 'LOOP'
+        pending_single_if = False
+        
+        for line in lines:
+            stripped = line.strip()
+            
+            # Remove our markers for final output
+            is_block_if = '--BLOCK' in line
+            is_single_if = '--SINGLE' in line
+            
+            clean_line = line.replace('--BLOCK', '').replace('--SINGLE', '')
+            
+            if is_block_if:
+                stack.append('IF_BLOCK')
+            elif re.search(r'WHILE\s+.*\s+LOOP', line, flags=re.IGNORECASE):
+                stack.append('LOOP')
+            
+            if is_single_if:
+                pending_single_if = True
+                new_lines.append(clean_line)
+                continue
+            
+            # If we have a pending single IF, we need to close it after the next statement
+            if pending_single_if and stripped:
+                new_lines.append(clean_line + " END IF;")
+                pending_single_if = False
+                continue
 
-        return converted_code
+            # END
+            if re.match(r'^END\s*;?$', stripped, flags=re.IGNORECASE):
+                if stack:
+                    block = stack.pop()
+                    if block == 'IF_BLOCK':
+                        new_lines.append("END IF;")
+                    elif block == 'LOOP':
+                        new_lines.append("END LOOP;")
+                    else:
+                        new_lines.append(clean_line) # keep original END;?
+                else:
+                    new_lines.append("END;")
+            else:
+                 new_lines.append(clean_line)
+        
+        # If pending single if matches end of file?
+        if pending_single_if:
+             new_lines.append("END IF;")
+             
+        body_content = '\n'.join(new_lines)
+        
+        # Fix ENDs
+        lines = body_content.split('\n')
+        new_lines = []
+        stack = []
+        
+        for line in lines:
+            stripped = line.strip()
+            if re.search(r'IF\s+.*\s+THEN', line, flags=re.IGNORECASE):
+                stack.append('IF')
+            elif re.search(r'WHILE\s+.*\s+LOOP', line, flags=re.IGNORECASE):
+                stack.append('LOOP')
+            
+            # Check for END
+            if re.match(r'^END\s*;?$', stripped, flags=re.IGNORECASE):
+                if stack:
+                    block = stack.pop()
+                    if block == 'IF':
+                        new_lines.append(line.upper().replace('END', 'END IF;'))
+                    elif block == 'LOOP':
+                        new_lines.append(line.upper().replace('END', 'END LOOP;'))
+                    else:
+                        new_lines.append('END;')
+                else:
+                    new_lines.append('END;')
+            else:
+                 new_lines.append(line)
+        
+        body_content = '\n'.join(new_lines)
+        
+        # RETURN 0 -> RETURN
+        body_content = re.sub(r'RETURN\s+\d+', 'RETURN', body_content, flags=re.IGNORECASE)
+
+        # Other types mapping in body
+        for sybase_type, pg_type in types_mapping.items():
+            body_content = re.sub(rf'\b{re.escape(sybase_type)}\b', pg_type, body_content, flags=re.IGNORECASE)
+
+        # Misc Conversions
+        body_content = re.sub(r'fetch\s+([a-zA-Z0-9_]+)\s+into\s+(.*)', r'FETCH \1 INTO \2;', body_content, flags=re.IGNORECASE)
+        body_content = re.sub(r'print\s+\'([^\']*)\'(,([^\n]+))?', r"RAISE NOTICE '\1', \3;", body_content, flags=re.IGNORECASE)
+        body_content = re.sub(r'open\s+([a-zA-Z0-9_]+)', r'OPEN \1;', body_content, flags=re.IGNORECASE)
+        body_content = re.sub(r'close\s+([a-zA-Z0-9_]+)', r'CLOSE \1;', body_content, flags=re.IGNORECASE)
+        body_content = re.sub(r'deallocate\s+cursor\s+([a-zA-Z0-9_]+)', r'DEALLOCATE \1;', body_content, flags=re.IGNORECASE)
+        
+        # 9. Assembly
+        final_code = f"CREATE OR REPLACE FUNCTION {func_schema}.{func_name}({pg_params_str})\n"
+        final_code += "RETURNS void AS $$\n"
+        
+        if declarations:
+            final_code += "DECLARE\n"
+            for decl in declarations:
+                final_code += f"    {decl}\n"
+        
+        final_code += "BEGIN\n"
+        final_code += body_content
+        final_code += "\nEND;\n$$ LANGUAGE plpgsql;"
+        
+        return final_code
 
     def fetch_sequences(self, table_schema: str, table_name: str):
         pass

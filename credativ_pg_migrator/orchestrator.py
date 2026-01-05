@@ -1273,21 +1273,21 @@ class Orchestrator:
                     funcproc_id = funcproc_data['id']
                     funcproc_type = funcproc_data['type']
                     self.config_parser.print_log_message('INFO', f"Migrating {funcproc_type} {funcproc_data['name']}.")
-                    funcproc_code = self.source_connection.fetch_funcproc_code(funcproc_id)
+                    try:
+                        funcproc_code = self.source_connection.fetch_funcproc_code(funcproc_id)
 
-                    table_names = []
-                    view_names = []
-                    converted_code = ''
-                    try:
-                        table_names = self.migrator_tables.fetch_all_target_table_names()
-                    except Exception as e:
-                        self.handle_error(e, 'fetching table names')
-                    try:
-                        view_names = self.migrator_tables.fetch_all_target_view_names()
-                    except Exception as e:
-                        self.handle_error(e, 'fetching view names')
+                        table_names = []
+                        view_names = []
+                        converted_code = ''
+                        try:
+                            table_names = self.migrator_tables.fetch_all_target_table_names()
+                        except Exception as e:
+                            self.handle_error(e, 'fetching table names')
+                        try:
+                            view_names = self.migrator_tables.fetch_all_target_view_names()
+                        except Exception as e:
+                            self.handle_error(e, 'fetching view names')
 
-                    try:
                         self.config_parser.print_log_message( 'DEBUG', f"Converting {funcproc_type} {funcproc_data['name']} code...")
                         converted_code = self.source_connection.convert_funcproc_code({
                             'funcproc_code': funcproc_code,
@@ -1325,10 +1325,13 @@ class Orchestrator:
                         self.target_connection.disconnect()
                     except Exception as e:
                         self.config_parser.print_log_message( 'DEBUG', f"[ERROR] Migrating {funcproc_type} {funcproc_data['name']}.")
-                        self.config_parser.print_log_message( 'DEBUG', f"[ERROR] Source code for {funcproc_data['name']}: {funcproc_code}")
-                        self.config_parser.print_log_message( 'DEBUG', f"[ERROR] Converted code for {funcproc_data['name']}: {converted_code}")
                         self.migrator_tables.update_funcproc_status(funcproc_id, False, f'ERROR: {e}')
-                        self.handle_error(e, f"migrate_funcproc {funcproc_type} {funcproc_data['name']}")
+                        self.config_parser.print_log_message('ERROR', f"Error migrating {funcproc_type} {funcproc_data['name']}: {e}")
+                        self.config_parser.print_log_message('ERROR', traceback.format_exc())
+                        try:
+                            self.target_connection.disconnect()
+                        except:
+                            pass
 
                 self.config_parser.print_log_message('INFO', "Functions and procedures migrated successfully.")
             else:
@@ -1378,8 +1381,12 @@ class Orchestrator:
                                 self.config_parser.print_log_message( 'DEBUG', f"[ERROR] Migrating trigger {trigger_detail['trigger_name']}.")
                                 self.config_parser.print_log_message( 'DEBUG', f"[ERROR] Source code for {trigger_detail['trigger_name']}: {trigger_detail['trigger_source_sql']}")
                                 self.config_parser.print_log_message( 'DEBUG', f"[ERROR] Converted code for {trigger_detail['trigger_name']}: {converted_code}")
+                                # self.migrator_tables.update_trigger_status(trigger_detail['id'], False, f'ERROR: {e}')
                                 self.migrator_tables.update_trigger_status(trigger_detail['id'], False, f'ERROR: {e}')
-                                self.handle_error(e, f"migrate_trigger {trigger_detail['trigger_name']}")
+                                # self.handle_error(e, f"migrate_trigger {trigger_detail['trigger_name']}")
+                                # We do not want to stop the whole migration if one trigger fails
+                                self.config_parser.print_log_message('ERROR', f"Error migrating trigger {trigger_detail['trigger_name']}: {e}")
+                                self.config_parser.print_log_message('ERROR', traceback.format_exc())
                         else:
                             self.config_parser.print_log_message('INFO', f"Skipping trigger {trigger_detail['trigger_name']} for table {trigger_detail['table_name']} based on the migration configuration.")
 

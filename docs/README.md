@@ -12,7 +12,7 @@ Supported source databases:
 - Oracle
 - PostgreSQL (special use cases)
 - SQL Anywhere
-- Sybase ASE 
+- Sybase ASE
 
 Target database: PostgreSQL only.
 
@@ -73,7 +73,7 @@ There are three logical databases in a migration:
     - success/failure indicators and timestamps for each migrated object
   - Often this is the same database as the target (same cluster), but it can also be a separate PostgreSQL database.
 
---- 
+---
 
 ## 3. Installation
 ### 3.1 Python package (recommended)
@@ -141,7 +141,7 @@ See more on the “Connection to Informix” wiki page:
   - connectivity: "jdbc"
   - Under a jdbc block:
     - driver: "com.informix.jdbc.IfxDriver"
-    - libraries: a colon‑separated classpath with your JAR files, e.g.: 
+    - libraries: a colon‑separated classpath with your JAR files, e.g.:
 	/usr/share/java/jdbc-4.50.10.1.jar:/usr/share/java/bson-3.8.0.jar
 
 Host, port, database name, and credentials are specified in other fields of the same source‑DB section (see config_sample.yaml in the repo for the exact parameter names).
@@ -223,6 +223,26 @@ The usual workflow is:
 
 Use config_sample.yaml as the authoritative reference for the exact field names and their meanings – it is maintained along with the code and kept up to date.
 
+### 5.3 Advanced Configuration
+
+Beyond the basics, the configuration file supports several advanced features:
+
+- **Environment Setting (`env_variables`)**:
+  - Allows defining environment variables (e.g. `LD_LIBRARY_PATH`, `LANG`) that need to be set before the migration starts. This is useful for drivers or libraries that depend on specific environment settings.
+
+- **Scheduled Actions (`scheduled_actions`)**:
+  - You can schedule actions to `pause`, `stop`, or `continue` the migration at specific times.
+  - Useful for pausing migration during business hours and resuming during maintenance windows.
+
+- **File-based Data Source (`database_export`)**:
+  - (Currently primarily for Informix)
+  - Allows using exported data files (CSV, UNL, SQL dump) as the source of data instead of reading directly from the source database.
+  - Useful for very large databases where parallel export/import via files is faster or when direct connectivity is limited.
+  - Supports features like `big_files_split` to process large files in parallel chunks.
+
+- **Pre-migration Analysis (`pre_migration_analysis`)**:
+  - Settings to list TOP N tables by rows, size, columns, indexes, etc. to help plan the migration strategy.
+
 ---
 
 ## 6. Running the Migrator
@@ -245,9 +265,17 @@ Parameters:
 - --log-level
   - Logging verbosity for the CLI output and log file. The tool supports at least:
     - INFO – high‑level progress and important messages
-    - DEBUG – detailed internal operations 
+    - DEBUG – detailed internal operations
 	- DEBUG2 – very verbose, low‑level details (may produce large logs)
 	- DEBUG3 – maximum verbosity, for deep troubleshooting
+    - --dry-run
+      - Run the tool in dry-run mode (no changes to target).
+    - --resume
+      - Resume the migration process after a crash or stop (default: False = start from scratch).
+    - --drop-unfinished-tables
+      - Drop and recreate unfinished tables when resuming after a crash. Works only together with --resume parameter (default: False = continue with partially migrated tables without dropping them).
+    - --version
+      - Show the version of the tool.
 
 Start with DEBUG, should be sufficient for most use cases. Deeper levels are only needed for troubleshooting specific issues.
 

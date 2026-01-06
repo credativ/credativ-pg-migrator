@@ -1161,7 +1161,15 @@ class SybaseASEConnector(DatabaseConnector):
 
         # Misc Conversions (Before flow control to ensure valid statements)
         body_content = re.sub(r'fetch\s+([a-zA-Z0-9_]+)\s+into\s+(.*)', r'FETCH \1 INTO \2;', body_content, flags=re.IGNORECASE)
-        body_content = re.sub(r'print\s+\'([^\']*)\'(,([^\n]+))?', r"RAISE NOTICE '\1', \3;", body_content, flags=re.IGNORECASE)
+
+        def print_replacer(match):
+             msg = match.group(1)
+             args = match.group(2)
+             if args:
+                  return f"RAISE NOTICE '{msg}', {args.strip()};"
+             return f"RAISE NOTICE '{msg}';"
+
+        body_content = re.sub(r'print\s+\'([^\']*)\'(?:,\s*([^\n]+))?', print_replacer, body_content, flags=re.IGNORECASE)
         body_content = re.sub(r'open\s+([a-zA-Z0-9_]+)', r'OPEN \1;', body_content, flags=re.IGNORECASE)
         body_content = re.sub(r'close\s+([a-zA-Z0-9_]+)', r'CLOSE \1;', body_content, flags=re.IGNORECASE)
         body_content = re.sub(r'deallocate\s+cursor\s+([a-zA-Z0-9_]+)', r'DEALLOCATE \1;', body_content, flags=re.IGNORECASE)
@@ -2483,7 +2491,9 @@ class SybaseASEConnector(DatabaseConnector):
                     first_word = combined_code.split()[0].upper()
 
                     # Also check assignments "var := val"
-                    is_assignment = ':=' in combined_code
+                    # Remove strings to avoid false positives like IF x = ':='
+                    combined_no_strings = re.sub(r"'.*?'", '', combined_code)
+                    is_assignment = ':=' in combined_no_strings
 
                     # Keywords requiring semicolon
                     needs_semi = ('UPDATE', 'INSERT', 'DELETE', 'SELECT', 'PERFORM', 'CALL', 'WITH', 'MERGE', 'RAISE')

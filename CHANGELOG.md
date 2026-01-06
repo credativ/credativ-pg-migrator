@@ -2,6 +2,11 @@
 
 ## 0.10.3 - 2026.01.xx
 
+- 2026.01.06
+
+  - Fix in Sybase ASE connector - repaired convert_funcproc_code function - fixed issue where missing schema in source function definition resulted in invalid PostgreSQL function name (e.g. .funcname) - now uses target schema as fallback
+  - Fix in Sybase ASE connector - repaired convert_view_code function - implemented support for legacy Sybase outer join syntax (*= and =*) - these are now correctly parsed and converted to ANSI standard LEFT OUTER JOINs
+
 - 2025.12.11
 
   - Improvements in Informix part - import of table with multiple LOB columns from UNL files - speed improvements

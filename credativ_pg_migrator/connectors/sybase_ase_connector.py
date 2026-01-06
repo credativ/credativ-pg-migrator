@@ -2194,6 +2194,10 @@ class SybaseASEConnector(DatabaseConnector):
         # 3. Variable Declarations
         types_mapping = self.get_types_mapping({'target_db_type': target_db_type})
         declarations = []
+        
+        # Pre-process: Rename specific conflicting variables globally before stripping @
+        # e.g. @date -> @v_date (Keep @ so DECLARE regex matches it)
+        body_content = re.sub(r'@date\b', '@v_date', body_content, flags=re.IGNORECASE)
 
         def declaration_replacer(match):
             full_decl = match.group(0)
@@ -2248,6 +2252,34 @@ class SybaseASEConnector(DatabaseConnector):
         def select_into_transformer(match):
             content = match.group(1)
             rest = match.group(2)
+            
+            # Clean up FROM NEW/OLD in rest
+            # If rest contains "FROM NEW" or "FROM OLD", we strip it if it's the only thing or logic suggests.
+            from_match = re.search(r'FROM\s+(.*?)(?:\bWHERE\b|\bGROUP\b|\bORDER\b|$)', rest, re.IGNORECASE)
+            if from_match:
+                table_list = from_match.group(1)
+                # Remove comments
+                table_list = re.sub(r'--.*', '', table_list)
+                table_list = re.sub(r'/\*.*?\*/', '', table_list, flags=re.DOTALL)
+                
+                tables = split_respecting_parens(table_list)
+                clean_tables = []
+                for t in tables:
+                    t_clean = t.strip()
+                    if not t_clean:
+                        continue
+                    # Check first word (table name) against keywords
+                    # NEW alias -> NEW. NEW -> NEW.
+                    first_word = t_clean.split()[0].upper()
+                    if first_word not in ('NEW', 'OLD', 'INSERTED', 'DELETED'):
+                        clean_tables.append(t)
+                
+                if not clean_tables:
+                   # No tables left, remove FROM clause entirely
+                   start, end = from_match.span()
+                   # Simply remove the match range from rest
+                   rest = rest[:start] + rest[end:]
+
             if '=' in content:
                 parts = split_respecting_parens(content)
                 vars_list = []
@@ -2264,7 +2296,13 @@ class SybaseASEConnector(DatabaseConnector):
             return match.group(0)
 
         # Regex must ensure we don't cross statement boundaries (UPDATE, INSERT, etc.)
-        body_content = re.sub(r'SELECT\s+((?:(?!\b(?:UPDATE|INSERT|DELETE|IF|WHILE|RETURN|BEGIN|END)\b).)+?)\s+(FROM\s+.*)', select_into_transformer, body_content, flags=re.IGNORECASE | re.DOTALL)
+        # Added SELECT to lookahead to prevent merging multiple SELECTs
+        # Also constrained matches after FROM to statement boundaries
+        body_content = re.sub(r'SELECT\s+((?:(?!\b(?:UPDATE|INSERT|DELETE|IF|WHILE|RETURN|BEGIN|END|SELECT)\b).)+?)\s+(FROM\s+(?:(?!\b(?:UPDATE|INSERT|DELETE|IF|WHILE|RETURN|BEGIN|END|SELECT)\b).)+)', select_into_transformer, body_content, flags=re.IGNORECASE | re.DOTALL)
+
+        # Cleanup: Remove FROM NEW/OLD from SELECT statements if they persist
+        # e.g. "SELECT ... INTO ... FROM NEW" -> "SELECT ... INTO ..."
+        body_content = re.sub(r'(SELECT\s+[^;]+?)\s+FROM\s+(?:NEW|OLD|INSERTED|DELETED)\b', r'\1', body_content, flags=re.IGNORECASE | re.DOTALL)
 
         # Simple Assignments
         def simple_assignment(match):
@@ -2311,11 +2349,17 @@ class SybaseASEConnector(DatabaseConnector):
                 # Check alias? "table alias" or "table AS alias"
                 # If target matches table name or alias
                 # Simplifying: check if target string is contained
+                # Remove target table
                 if target.lower() == t_clean.lower():
                     continue # Skip target
                 # Check for "target alias"
                 if t_clean.lower().startswith(target.lower() + ' ') or t_clean.lower().startswith(target.lower() + '\t'):
                      continue
+                
+                # Also remove NEW and OLD from FROM clause in triggers
+                if t_clean.upper() in ('NEW', 'OLD', 'INSERTED', 'DELETED'):
+                    continue
+                
                 new_tables.append(t)
 
             if new_tables:
@@ -2334,10 +2378,18 @@ class SybaseASEConnector(DatabaseConnector):
         body_content = re.sub(r"\s*\+\s*(')", r" || \1", body_content)
 
         # 8. Control Flow (IF/WHILE) - Minimal support as per trigger usage
-        body_content = re.sub(r'IF\s+(.*?)\s+BEGIN', r'IF \1 THEN', body_content, flags=re.IGNORECASE)
+        
+        # ELSE IF -> ELSIF
+        body_content = re.sub(r'ELSE\s+IF', 'ELSIF', body_content, flags=re.IGNORECASE)
+
+        # IF replacement with DOTALL support for multiline conditions
+        body_content = re.sub(r'IF\s+(.*?)\s+BEGIN', r'IF \1 THEN', body_content, flags=re.IGNORECASE | re.DOTALL)
+        
+        # Standardize other keywords
         body_content = re.sub(r'WHILE\s+(.*?)\s+BEGIN', r'WHILE \1 LOOP', body_content, flags=re.IGNORECASE)
         body_content = re.sub(r'ELSE\s+BEGIN', r'ELSE', body_content, flags=re.IGNORECASE)
         body_content = re.sub(r'END\s+ELSE', r'ELSE', body_content, flags=re.IGNORECASE)
+
 
         # END replacement (simple approach for now, triggers usually simple)
         # But we stripped outer END. Inner ENDs need closure.

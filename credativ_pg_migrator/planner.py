@@ -376,6 +376,7 @@ class Planner:
                 settings = {
                     'table_schema': self.source_schema,
                     'table_name': table_info['table_name'],
+                    'target_db_type': self.config_parser.get_target_db_type(),
                 }
                 table_description = self.source_connection.get_table_description(settings)
                 table_description = table_description['table_description'] if 'table_description' in table_description else ''

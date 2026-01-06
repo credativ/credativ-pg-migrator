@@ -1076,8 +1076,22 @@ class SybaseASEConnector(DatabaseConnector):
 
         # 8. Control Flow & Assignments
 
-        # BREAK -> EXIT
-        body_content = re.sub(r'\bBREAK\b', 'EXIT', body_content, flags=re.IGNORECASE)
+        # BREAK -> EXIT;
+        body_content = re.sub(r'\bBREAK\b', 'EXIT;', body_content, flags=re.IGNORECASE)
+
+        # Handle @@sqlstatus (Cursor status)
+        # @@sqlstatus = 0 -> FOUND
+        # @@sqlstatus != 0 -> NOT FOUND (Commonly used for loop break)
+        # 1. Replace "@@sqlstatus != 0" (and variants)
+        # We look for IF (@@sqlstatus!=0) ...
+        # Regex to capture optional whitespace: @@sqlstatus\s*!=\s*0
+        # Replace with NOT FOUND
+        body_content = re.sub(r'@@sqlstatus\s*!=\s*0', 'NOT FOUND', body_content, flags=re.IGNORECASE)
+        # 2. Replace "@@sqlstatus = 0"
+        body_content = re.sub(r'@@sqlstatus\s*=\s*0', 'FOUND', body_content, flags=re.IGNORECASE)
+        # 3. Handle simple "IF (@@sqlstatus)" which implies non-zero? No, usually compared.
+        # But some code might use > 0.
+        body_content = re.sub(r'@@sqlstatus\s*>\s*0', 'NOT FOUND', body_content, flags=re.IGNORECASE)
 
         # 8.0 Pre-process END ELSE to avoid breaking IF-ELSE chains
         # T-SQL: IF ... BEGIN ... END ELSE ...

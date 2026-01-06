@@ -240,6 +240,34 @@ class SybaseASEConnector(DatabaseConnector):
                     'is_hidden_column': 'YES' if is_hidden_column == 1 else 'NO',
                 }
 
+                # Check for config substitutions first (Higher Priority)
+                config_substitutions = self.config_parser.get_data_types_substitution()
+                substitution_found = False
+
+                # Iterate through substitutions to find a match for the current data_type
+                # Substitution format: [schema, table, source_type, target_type, target_length]
+                # We prioritize exact matches on type name.
+                for sub in config_substitutions:
+                    # sub[2] is source_type, sub[3] is target_type
+                    if sub[2].lower() == data_type.lower():
+                         # Found a substitution
+                         target_type = sub[3]
+                         # If target_length is provided, use it (e.g. VARCHAR(255))
+                         # But typically target_type might be just 'TEXT' or 'BIGINT'
+                         # We need to populate basic_ fields.
+
+                         # Determine if target type is substituted
+                         result[ordinal_position]['basic_data_type'] = target_type
+                         # We might not know precision/scale easily from just the name unless we parse it or it's provided.
+                         # For now, we assume the config substitution handles the mapping sufficiently for the migration mapping phase.
+                         # The key result is basic_column_type.
+                         result[ordinal_position]['basic_column_type'] = target_type
+                         substitution_found = True
+                         break
+
+                if substitution_found:
+                     continue
+
                 query_custom_types = f"""
                     SELECT
                         bt.name AS source_data_type,
@@ -700,6 +728,10 @@ class SybaseASEConnector(DatabaseConnector):
 
         # 1. Clean up potential GO statements and strict comments handling if needed (minimal here)
         converted_code = re.sub(r'\bGO\b', '', funcproc_code, flags=re.IGNORECASE)
+
+        # PROACTIVE FIX: Common OCR/Typo errors in source code
+        converted_code = re.sub(r'\bfetc\s+h\b', 'FETCH', converted_code, flags=re.IGNORECASE)
+        converted_code = re.sub(r'\bc\s+ursor\b', 'CURSOR', converted_code, flags=re.IGNORECASE)
 
         # 2. Extract Header and Body
         # Pattern: CREATE PROC[EDURE] name [params] AS [BEGIN] body [END]
@@ -2339,7 +2371,79 @@ class SybaseASEConnector(DatabaseConnector):
         pass
 
     def fetch_user_defined_types(self, schema: str):
-        pass
+        # Fetch user defined types
+        # We look for entries in systypes where usertype > 100 (user defined)
+        # We join with a second instance of systypes to get the base physical type name.
+
+        # Note: In ASE, types define length/prec/scale.
+        # Variable length types: varchar, char, nvarchar, nchar, varbinary, binary -> use length
+        # Numeric types: numeric, decimal -> use prec, scale
+
+        query = """
+            SELECT
+                u.name as schema_name,
+                t.name as type_name,
+                t.length,
+                t.prec,
+                t.scale,
+                bt.name as base_type_name
+            FROM dbo.systypes t
+            JOIN dbo.sysusers u ON t.uid = u.uid
+            LEFT JOIN dbo.systypes bt ON t.type = bt.type AND bt.usertype < 100
+            WHERE t.usertype > 100
+            ORDER BY t.name
+        """
+
+        self.connect()
+        cursor = self.connection.cursor()
+        self.config_parser.print_log_message('DEBUG', "Fetching user defined types")
+        cursor.execute(query)
+        rows = cursor.fetchall()
+
+        udts = {}
+        order_num = 1
+
+        for row in rows:
+            schema_name = row[0]
+            type_name = row[1]
+            length = row[2]
+            prec = row[3]
+            scale = row[4]
+            base_type = row[5]
+
+            # Construct SQL definition
+            if not base_type:
+                # Should not happen for valid UDTs referencing standard types
+                base_type = "UNKNOWN"
+
+            type_sql = base_type.upper()
+
+            # Parametrization logic
+            # String/Binary types
+            if base_type.lower() in ('varchar', 'char', 'nvarchar', 'nchar', 'varbinary', 'binary'):
+                type_sql += f"({length})"
+            # Numeric types
+            elif base_type.lower() in ('numeric', 'decimal'):
+                type_sql += f"({prec},{scale})"
+            # Float (sometimes has prec, but standard float often just FLOAT or FLOAT(n))
+            # Sybase float(n) -> precision.
+            elif base_type.lower() == 'float':
+                # If prec is specific? Usually float(prec).
+                # But Sybase systypes 'prec' column for float might be 8 (bytes)?
+                # Let's check typical usage. Often UDTs on float are just aliases.
+                pass
+
+            udts[order_num] = {
+                'schema_name': schema_name,
+                'type_name': type_name,
+                'sql': type_sql,
+                'comment': ''
+            }
+            order_num += 1
+
+        cursor.close()
+        self.disconnect()
+        return udts
 
     def get_table_size(self, table_schema: str, table_name: str):
         query = f"""

@@ -923,14 +923,14 @@ class SybaseASEConnector(DatabaseConnector):
                    # We clean @
                    args = args.replace('@', '')
                    # We assume simple comma separation works for generated SQL
-                   return f"PERFORM {proc_name}({args})"
+                   return f"PERFORM {proc_name}({args});"
                 else:
                     # Already has parens (e.g. EXEC (@sql)) - could be dynamic SQL
                     # If it's dynamic SQL, it should be text.
-                    return f"PERFORM {proc_name}{args}"
+                    return f"PERFORM {proc_name}{args};"
             else:
                  # No args
-                 return f"PERFORM {proc_name}()"
+                 return f"PERFORM {proc_name}();"
 
         # Regex to catch EXEC/EXECUTE followed by name and optional args
         # We match until newline or semicolon or end of string
@@ -1276,7 +1276,8 @@ class SybaseASEConnector(DatabaseConnector):
             # Check for Stopper Keywords indicating end of previous statement
             # If we hit IF, WHILE, RETURN, BEGIN, END, RAISERROR, PRINT, FETCH, OPEN, CLOSE, DEALLOCATE
             # AND we are in_dml, then we must close the DML.
-            stopper_match = re.search(r'^\b(IF|WHILE|RETURN|BEGIN|END|RAISE|PRINT|FETCH|OPEN|CLOSE|DEALLOCATE)\b', stripped, flags=re.IGNORECASE)
+            # We also add INSERT, UPDATE, DELETE because they start a new statement (and thus close previous one)
+            stopper_match = re.search(r'^\b(IF|WHILE|RETURN|BEGIN|END|RAISE|PRINT|FETCH|OPEN|CLOSE|DEALLOCATE|INSERT|UPDATE|DELETE)\b', stripped, flags=re.IGNORECASE)
             if in_dml and stopper_match:
                  # Check previous line
                  if new_lines:

@@ -414,6 +414,49 @@ class SybaseASEConnector(DatabaseConnector):
     def get_create_table_sql(self, settings):
         return ""
 
+    def _apply_data_type_substitutions(self, text):
+        """
+        Apply data type substitutions defined in the configuration.
+        Substitutions are applied based on table name (optional), column name (optional),
+        and source data type (regex).
+        In the context of functions/procedures/triggers, we mainly care about the source data type matching.
+        """
+        substitutions = self.config_parser.get_data_types_substitution()
+        if not substitutions:
+            return text
+
+        # Sort substitutions by length of source type (descending) to match specific types first?
+        # Or just rely on config order. Config order is probably best.
+
+        for entry in substitutions:
+            # entry: [table_name, column_name, source_type, target_type, comment]
+            if len(entry) != 5:
+                continue
+
+            # For general code substitution, we ignore table_name and column_name usually,
+            # or treat them as wildcards if they are empty.
+            # However, for function params/vars, we assume no table/column context matches unless explicitly handled.
+            # But the requirement is likely to map generic types like 'TypID' -> 'BIGINT'.
+            # So we look for entries where source_type is defined.
+
+            # We are not passed table/column context here easily for params/vars unless we parse them deeply.
+            # So we focus on source_type match.
+
+            source_type = entry[2]
+            target_type = entry[3]
+
+            if source_type:
+                # Use regex or simple replace? Config says regex.
+                # Use word boundaries to avoid partial replacement.
+                try:
+                    pattern = re.compile(rf'\b{source_type}\b', flags=re.IGNORECASE)
+                    text = pattern.sub(target_type, text)
+                except re.error:
+                    self.config_parser.print_log_message('WARNING', f"Invalid regex in data_types_substitution: {source_type}")
+
+        return text
+
+
     def is_string_type(self, column_type: str) -> bool:
         string_types = ['CHAR', 'VARCHAR', 'NCHAR', 'NVARCHAR', 'TEXT', 'LONG VARCHAR', 'LONG NVARCHAR', 'UNICHAR', 'UNIVARCHAR']
         return column_type.upper() in string_types
@@ -711,10 +754,45 @@ class SybaseASEConnector(DatabaseConnector):
 
         pg_params = []
         if params_str:
-            clean_params = params_str.replace('@', '')
-            for sybase_type, pg_type in types_mapping.items():
-                clean_params = re.sub(rf'\b{re.escape(sybase_type)}\b', pg_type, clean_params, flags=re.IGNORECASE)
-            pg_params_str = clean_params
+            # Fix 1: Strip outer parens if present to avoid ((...))
+            # Sybase func often is CREATE P params ... but can be CREATE P (params) ...
+            # Our regex group(2) captures ' (params)' inclusive or ' params'
+            clean_params = params_str.strip()
+            if clean_params.startswith('(') and clean_params.endswith(')'):
+                clean_params = clean_params[1:-1].strip()
+
+            clean_params = clean_params.replace('@', '')
+
+            # Custom type substitutions first
+            clean_params = self._apply_data_type_substitutions(clean_params)
+
+            # Fix 2: Handle OUTPUT -> INOUT
+            # Strategy: Split by comma, process each param
+            param_parts = split_respecting_parens(clean_params)
+            processed_params = []
+
+            for p in param_parts:
+                p_clean = p.strip()
+                # Check for OUTPUT (case insensitive)
+                # Matches: param_name type OUTPUT
+                output_match = re.search(r'\bOUTPUT\b', p_clean, flags=re.IGNORECASE)
+                if output_match:
+                    # Remove OUTPUT
+                    p_clean = re.sub(r'\bOUTPUT\b', '', p_clean, flags=re.IGNORECASE).strip()
+                    # Add INOUT prefix if not already present (unlikely in Sybase but good for safety)
+                    # Sybase: @p type OUTPUT
+                    # PG: INOUT p type
+                    # We assume format is "name type" or "name type default val"
+                    # Just prepend INOUT
+                    p_clean = "INOUT " + p_clean
+
+                # Standard type mapping
+                for sybase_type, pg_type in types_mapping.items():
+                    p_clean = re.sub(rf'\b{re.escape(sybase_type)}\b', pg_type, p_clean, flags=re.IGNORECASE)
+
+                processed_params.append(p_clean)
+
+            pg_params_str = ", ".join(processed_params)
         else:
             pg_params_str = ""
 
@@ -734,6 +812,8 @@ class SybaseASEConnector(DatabaseConnector):
             content = full_decl[7:].strip() # len('DECLARE') = 7
 
             content_clean = content.replace('@', '')
+            # Custom type substitutions first
+            content_clean = self._apply_data_type_substitutions(content_clean)
             for sybase_type, pg_type in types_mapping.items():
                 content_clean = re.sub(rf'\b{re.escape(sybase_type)}\b', pg_type, content_clean, flags=re.IGNORECASE)
 
@@ -752,15 +832,56 @@ class SybaseASEConnector(DatabaseConnector):
         # 7. Conversions (Line by line / block based)
 
         # Cursor Declarations
-        cursor_matches = re.finditer(r'DECLARE\s+([a-zA-Z0-9_]+)\s+CURSOR\s+FOR\s+(.*)', body_content, flags=re.IGNORECASE)
+        # Fix: Capture optional FOR UPDATE
+        cursor_matches = re.finditer(r'DECLARE\s+([a-zA-Z0-9_]+)\s+CURSOR\s+FOR\s+(.*?)(\s+FOR\s+UPDATE)?\s+(?=\bOPEN\b|\bDECLARE\b|$)', body_content, flags=re.IGNORECASE | re.DOTALL)
+        # Simplify regex to just capture everything until OPEN or next DECLARE or end, handling FOR UPDATE inside
+        # Actually, simpler: DECLARE ... CURSOR FOR ... [FOR UPDATE]
+        # We can try to capture line-based or until OPEN.
+        # Let's retain the original logic but extend the matching group to consume "FOR UPDATE" if present at the end of declaration.
+
+        # New strategy: Find DECLARE ... CURSOR FOR ...
+        # Then consume content until 'OPEN cursor_name' or 'DEALLOCATE' or 'DECLARE'
+        # But for now, let's just make the simple regex robust for trailing FOR UPDATE
+
+        # Re-reading user issue: "FOR UPDATE" is on a new line.
+        # The original regex: r'DECLARE\s+([a-zA-Z0-9_]+)\s+CURSOR\s+FOR\s+(.*)'
+        # This matches until end of line? ".+" matches except newline. re.DOTALL not used in original snippet?
+        # Original: flags=re.IGNORECASE (no DOTALL). So it stops at newline.
+        # User Code:
+        # declare access_cursor cursor
+        # for select ...
+        # for update
+        # open access_cursor
+
+        # The body_content passed here has newlines.
+        # If original didn't use DOTALL, valid cursor defs on multiple lines would fail or only capture first line.
+        # We need DOTALL and a better stop condition. Lookahead for OPEN or DECLARE or variable assignment or BEGIN/END?
+
+        # Better regex:
+        # DECLARE name CURSOR FOR <content> [FOR UPDATE]
+        # Stop at OPEN <name> or just empty line?
+        # Safest is to consume until 'OPEN <name>' because usually you open it right after or soon.
+        # But there could be other code.
+        # Let's look for "FOR UPDATE" specifically.
+
+        cursor_matches = re.finditer(r'DECLARE\s+([a-zA-Z0-9_]+)\s+CURSOR\s+FOR\s+(.+?)(\s+FOR\s+UPDATE)?(?=\s+OPEN|\s+DECLARE|\s+SELECT|\s+SET|\s+FETCH|\s+BEGIN|$)', body_content, flags=re.IGNORECASE | re.DOTALL)
+
         for cm in cursor_matches:
             c_name = cm.group(1)
-            c_def = cm.group(2)
+            c_def = cm.group(2).strip()
+            for_upd = cm.group(3)
+            if for_upd:
+                 c_def += " " + for_upd.strip()
             declarations.append(f"{c_name} CURSOR FOR {c_def};")
 
-        body_content = re.sub(r'DECLARE\s+[a-zA-Z0-9_]+\s+CURSOR\s+FOR\s+.*', '', body_content, flags=re.IGNORECASE)
+        # Cleanup: Remove the matched text from body
+        # We need to construct a regex that matches exactly what we found to remove it
+        body_content = re.sub(r'DECLARE\s+[a-zA-Z0-9_]+\s+CURSOR\s+FOR\s+.+?(\s+FOR\s+UPDATE)?(?=\s+OPEN|\s+DECLARE|\s+SELECT|\s+SET|\s+FETCH|\s+BEGIN|$)', '', body_content, flags=re.IGNORECASE | re.DOTALL)
 
         # 8. Control Flow & Assignments
+
+        # BREAK -> EXIT
+        body_content = re.sub(r'\bBREAK\b', 'EXIT', body_content, flags=re.IGNORECASE)
 
         # 8.0 Pre-process END ELSE to avoid breaking IF-ELSE chains
         # T-SQL: IF ... BEGIN ... END ELSE ...
@@ -811,10 +932,10 @@ class SybaseASEConnector(DatabaseConnector):
             is_assignment = True
             for part in parts:
                 if '=' in part:
-                    side_l, side_r = part.split('=', 1)
-                    assignments.append(f"{side_l.strip()} := {side_r.strip()}")
+                     side_l, side_r = part.split('=', 1)
+                     assignments.append(f"{side_l.strip()} := {side_r.strip()}")
                 else:
-                    is_assignment = False
+                     is_assignment = False
 
             if is_assignment and assignments:
                 return "; ".join(assignments) + ";"
@@ -837,7 +958,14 @@ class SybaseASEConnector(DatabaseConnector):
                 return match.group(0)
             return f"IF {cond} THEN --SINGLE" # Mark as single
 
-        body_content = re.sub(r'IF\s+(.+?)(?=\s+(?:UPDATE|INSERT|DELETE|SELECT|RETURN|RAISE|PERFORM|FETCH|OPEN|CLOSE|DEALLOCATE))', single_line_if, body_content, flags=re.IGNORECASE)
+        # Expanded lookahead to include EXIT(BREAK), CONTINUE, PRINT, etc.
+        # Original: (?=\s+(?:UPDATE|INSERT|DELETE|SELECT|RETURN|RAISE|PERFORM|FETCH|OPEN|CLOSE|DEALLOCATE))
+        # New tokens: EXIT, CONTINUE, PRINT (handled later as markers)
+        # Also need to handle 'BREAK' which is now 'EXIT'
+
+        # Note: We already replaced BREAK -> EXIT above.
+
+        body_content = re.sub(r'IF\s+(.+?)(?=\s+(?:UPDATE|INSERT|DELETE|SELECT|RETURN|RAISE|PERFORM|FETCH|OPEN|CLOSE|DEALLOCATE|EXIT|CONTINUE|PRINT))', single_line_if, body_content, flags=re.IGNORECASE)
         body_content = re.sub(r'IF\s+(.+?)\s*$', single_line_if, body_content, flags=re.IGNORECASE | re.MULTILINE)
 
         # Line processing to close blocks and single IFs
@@ -861,8 +989,15 @@ class SybaseASEConnector(DatabaseConnector):
                 stack.append('LOOP')
 
             if is_single_if:
-                pending_single_if = True
-                new_lines.append(clean_line)
+                # Check if statement is on same line.
+                # Regex adds THEN --SINGLE. If line ends with THEN (ignoring whitespace), statement is next line.
+                # If there is content after THEN, it is the statement (matched by lookahead).
+                if clean_line.rstrip().endswith('THEN'):
+                    pending_single_if = True
+                    new_lines.append(clean_line)
+                else:
+                    new_lines.append(clean_line + " END IF;")
+                    pending_single_if = False
                 continue
 
             # If we have a pending single IF, we need to close it after the next statement
@@ -925,6 +1060,8 @@ class SybaseASEConnector(DatabaseConnector):
         body_content = re.sub(r'RETURN\s+\d+', 'RETURN', body_content, flags=re.IGNORECASE)
 
         # Other types mapping in body
+        # Custom type substitutions first
+        body_content = self._apply_data_type_substitutions(body_content)
         for sybase_type, pg_type in types_mapping.items():
             body_content = re.sub(rf'\b{re.escape(sybase_type)}\b', pg_type, body_content, flags=re.IGNORECASE)
 
@@ -1574,6 +1711,8 @@ class SybaseASEConnector(DatabaseConnector):
             content = full_decl[7:].strip() # len('DECLARE') = 7
 
             content_clean = content.replace('@', '')
+            # Custom type substitutions first
+            content_clean = self._apply_data_type_substitutions(content_clean)
             for sybase_type, pg_type in types_mapping.items():
                 content_clean = re.sub(rf'\b{re.escape(sybase_type)}\b', pg_type, content_clean, flags=re.IGNORECASE)
 
@@ -1591,6 +1730,11 @@ class SybaseASEConnector(DatabaseConnector):
         for sybase_func, pg_equiv in function_map.items():
             escaped_src_func = re.escape(sybase_func)
             body_content = re.sub(escaped_src_func, pg_equiv, body_content, flags=re.IGNORECASE)
+
+        # Type substitutions in body
+        body_content = self._apply_data_type_substitutions(body_content)
+        for sybase_type, pg_type in types_mapping.items():
+            body_content = re.sub(rf'\b{re.escape(sybase_type)}\b', pg_type, body_content, flags=re.IGNORECASE)
 
         # Remove @
         body_content = re.sub(r'(?<!@)@([a-zA-Z0-9_]+)', r'\1', body_content)
@@ -2060,8 +2204,16 @@ class SybaseASEConnector(DatabaseConnector):
                 target_table_node = None
                 from_clause = select_node.args.get('from')
                 if from_clause:
-                     for child in from_clause.find_all(sqlglot.exp.Table):
+                     for child in from_clause.expressions:
+                         # 1. Direct match (Table or Aliased Subquery)
                          if child.alias_or_name == target_alias:
+                             target_table_node = child
+                             break
+
+                         # 2. Wrapper match (Subquery/Paren without explicit alias, containing the table)
+                         # e.g. FROM (table) -> child is Subquery/Paren
+                         child_tables = list(child.find_all(sqlglot.exp.Table))
+                         if len(child_tables) == 1 and child_tables[0].alias_or_name == target_alias:
                              target_table_node = child
                              break
 

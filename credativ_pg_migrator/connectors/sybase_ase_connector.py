@@ -2379,6 +2379,35 @@ class SybaseASEConnector(DatabaseConnector):
 
         # 8. Control Flow (IF/WHILE) - Minimal support as per trigger usage
         
+        # IF UPDATE(column) -> IF NEW.column IS DISTINCT FROM OLD.column
+        # Needs to happen before IF regex
+        def if_update_replacer(match):
+            col = match.group(1)
+            # Sybase: IF UPDATE(col)
+            # PG: IF NEW.col IS DISTINCT FROM OLD.col
+            return f"IF NEW.{col} IS DISTINCT FROM OLD.{col}"
+        
+        body_content = re.sub(r'IF\s+UPDATE\(([\w]+)\)', if_update_replacer, body_content, flags=re.IGNORECASE)
+
+        # Rollback Trigger
+        # rollback trigger [with raiserror number 'message']
+        # rollback transaction ...
+        # Replace with RAISE EXCEPTION
+        def rollback_replacer(match):
+            # Try to capture message if present
+            # Pattern: rollback trigger with raiserror 99999 'Message'
+            rest = match.group(1) if match.lastindex >= 1 else ''
+            message = "Trigger Rollback"
+            
+            # Extract message string '...'
+            msg_match = re.search(r"'([^']+)'", rest)
+            if msg_match:
+                message = msg_match.group(1)
+            
+            return f"RAISE EXCEPTION '{message}';"
+
+        body_content = re.sub(r'rollback\s+(?:trigger|transaction)\s*(.*)', rollback_replacer, body_content, flags=re.IGNORECASE)
+
         # ELSE IF -> ELSIF
         body_content = re.sub(r'ELSE\s+IF', 'ELSIF', body_content, flags=re.IGNORECASE)
 
@@ -2433,10 +2462,6 @@ class SybaseASEConnector(DatabaseConnector):
 
         def flush_buffer(buf):
             if not buf: return
-            # Check the last non-empty line in buffer?
-            # Or assume the statement ends at the last line of buffer?
-            # We want to append ; to the last character of the logically complete statement.
-            # But buffer contains lines.
 
             # Find last non-empty line index
             last_idx = -1
@@ -2447,17 +2472,23 @@ class SybaseASEConnector(DatabaseConnector):
 
             if last_idx != -1:
                 s = buf[last_idx].rstrip()
-                # Don't add if ends with ; or block openers/closers that don't need it (formatting dependent)
-                # END IF; should have ;.
-                # IF ... THEN shouldn't.
-                # ELSE shouldn't.
-                # LOOP shouldn't.
-                # BEGIN shouldn't.
+                # Don't add if ends with ; or block openers/closers that don't need it
                 ignore_ends = ('BEGIN', 'THEN', 'LOOP', 'ELSE', ';')
                 if not s.upper().endswith(ignore_ends):
                     # Check if it started with a command that needs ;
-                    combined_start = buf[0].strip().split()[0].upper()
-                    if combined_start in ('UPDATE', 'INSERT', 'DELETE', 'SELECT', 'Perform', 'CALL', 'WITH', 'MERGE'):
+                    combined = " ".join([b.strip() for b in buf]) # Join all lines to check full start
+                    # Remove comments from check
+                    combined_code = re.sub(r'--.*', '', combined).strip()
+                    
+                    first_word = combined_code.split()[0].upper()
+                    
+                    # Also check assignments "var := val"
+                    is_assignment = ':=' in combined_code
+                    
+                    # Keywords requiring semicolon
+                    needs_semi = ('UPDATE', 'INSERT', 'DELETE', 'SELECT', 'PERFORM', 'CALL', 'WITH', 'MERGE', 'RAISE')
+                    
+                    if first_word in needs_semi or is_assignment:
                          buf[last_idx] = s + ';'
 
             final_lines.extend(buf)
@@ -2465,12 +2496,11 @@ class SybaseASEConnector(DatabaseConnector):
         for line in lines:
             stripped = line.strip()
             # Start of new statement?
-            # Note: NEW, OLD are not keywords.
-            # Also handle v_var := ... (assignment)
             is_start = False
-            if re.match(r'^(UPDATE|INSERT|DELETE|SELECT|IF|WHILE|RETURN|END|DECLARE|BEGIN)\b', stripped, re.IGNORECASE):
+            # Check forkeywords that start statements
+            if re.match(r'^(UPDATE|INSERT|DELETE|SELECT|IF|WHILE|RETURN|END|DECLARE|BEGIN|RAISE)\b', stripped, re.IGNORECASE):
                 is_start = True
-            elif ' := ' in line: # Assignment line?
+            elif ':=' in line: # Assignment line?
                  is_start = True
 
             if is_start:

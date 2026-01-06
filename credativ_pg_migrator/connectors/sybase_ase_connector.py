@@ -1159,6 +1159,13 @@ class SybaseASEConnector(DatabaseConnector):
 
         # 8. Control Flow & Assignments
 
+        # Misc Conversions (Before flow control to ensure valid statements)
+        body_content = re.sub(r'fetch\s+([a-zA-Z0-9_]+)\s+into\s+(.*)', r'FETCH \1 INTO \2;', body_content, flags=re.IGNORECASE)
+        body_content = re.sub(r'print\s+\'([^\']*)\'(,([^\n]+))?', r"RAISE NOTICE '\1', \3;", body_content, flags=re.IGNORECASE)
+        body_content = re.sub(r'open\s+([a-zA-Z0-9_]+)', r'OPEN \1;', body_content, flags=re.IGNORECASE)
+        body_content = re.sub(r'close\s+([a-zA-Z0-9_]+)', r'CLOSE \1;', body_content, flags=re.IGNORECASE)
+        body_content = re.sub(r'deallocate\s+cursor\s+([a-zA-Z0-9_]+)', r'DEALLOCATE \1;', body_content, flags=re.IGNORECASE)
+
         # BREAK -> EXIT;
         body_content = re.sub(r'\bBREAK\b', 'EXIT;', body_content, flags=re.IGNORECASE)
 
@@ -1490,21 +1497,19 @@ class SybaseASEConnector(DatabaseConnector):
 
              output_params = re.findall(r'\b(INOUT|OUT)\b', pg_params_str, flags=re.IGNORECASE)
 
+        def cleaner_return(match):
+             expr = match.group(1).strip()
+             terminator = match.group(2)
+             if not expr:
+                  return f"RETURN;{terminator}"
+             return f"RETURN; /* {expr} */{terminator}"
+
+        # Match RETURN <expr> until semicolon or newline or end of string OR 'END' keyword
+        # Apply to ALL returns because Sybase status codes are not used in PG functions
+        body_content = re.sub(r'RETURN\b\s*(.*?)(\;|\n|\bEND\b|$)', cleaner_return, body_content, flags=re.IGNORECASE)
+
         if output_params:
-             # If we have output parameters, Sybase "RETURN x" (status code) should be ignored or converted to RETURN;
-             # because PG uses OUT params for results.
-             # Replace "RETURN <expr>" with "RETURN;"
-             # Be careful not to replace "RETURN;" itself.
-
-             def cleaner_return(match):
-                  expr = match.group(1).strip()
-                  if not expr:
-                       return "RETURN;"
-                  return f"RETURN; /* {expr} */"
-
-             # Match RETURN <expr> until semicolon or newline or end of string
-             body_content = re.sub(r'RETURN\b\s*(.*?)(\;|\n|$)', cleaner_return, body_content, flags=re.IGNORECASE)
-
+             # If we have output parameters, replacement is already done above.
              if len(output_params) > 1:
                   returns_clause = "RETURNS RECORD"
              else:
@@ -1554,12 +1559,7 @@ class SybaseASEConnector(DatabaseConnector):
         for sybase_type, pg_type in types_mapping.items():
             body_content = re.sub(rf'\b{re.escape(sybase_type)}\b', pg_type, body_content, flags=re.IGNORECASE)
 
-        # Misc Conversions
-        body_content = re.sub(r'fetch\s+([a-zA-Z0-9_]+)\s+into\s+(.*)', r'FETCH \1 INTO \2;', body_content, flags=re.IGNORECASE)
-        body_content = re.sub(r'print\s+\'([^\']*)\'(,([^\n]+))?', r"RAISE NOTICE '\1', \3;", body_content, flags=re.IGNORECASE)
-        body_content = re.sub(r'open\s+([a-zA-Z0-9_]+)', r'OPEN \1;', body_content, flags=re.IGNORECASE)
-        body_content = re.sub(r'close\s+([a-zA-Z0-9_]+)', r'CLOSE \1;', body_content, flags=re.IGNORECASE)
-        body_content = re.sub(r'deallocate\s+cursor\s+([a-zA-Z0-9_]+)', r'DEALLOCATE \1;', body_content, flags=re.IGNORECASE)
+
 
         # 9. Assembly
         final_code = f"CREATE OR REPLACE FUNCTION {func_schema}.{func_name}({pg_params_str})\n"
@@ -2194,7 +2194,7 @@ class SybaseASEConnector(DatabaseConnector):
         # 3. Variable Declarations
         types_mapping = self.get_types_mapping({'target_db_type': target_db_type})
         declarations = []
-        
+
         # Pre-process: Rename specific conflicting variables globally before stripping @
         # e.g. @date -> @v_date (Keep @ so DECLARE regex matches it)
         body_content = re.sub(r'@date\b', '@v_date', body_content, flags=re.IGNORECASE)
@@ -2252,7 +2252,7 @@ class SybaseASEConnector(DatabaseConnector):
         def select_into_transformer(match):
             content = match.group(1)
             rest = match.group(2)
-            
+
             # Clean up FROM NEW/OLD in rest
             # If rest contains "FROM NEW" or "FROM OLD", we strip it if it's the only thing or logic suggests.
             from_match = re.search(r'FROM\s+(.*?)(?:\bWHERE\b|\bGROUP\b|\bORDER\b|$)', rest, re.IGNORECASE)
@@ -2261,7 +2261,7 @@ class SybaseASEConnector(DatabaseConnector):
                 # Remove comments
                 table_list = re.sub(r'--.*', '', table_list)
                 table_list = re.sub(r'/\*.*?\*/', '', table_list, flags=re.DOTALL)
-                
+
                 tables = split_respecting_parens(table_list)
                 clean_tables = []
                 for t in tables:
@@ -2273,7 +2273,7 @@ class SybaseASEConnector(DatabaseConnector):
                     first_word = t_clean.split()[0].upper()
                     if first_word not in ('NEW', 'OLD', 'INSERTED', 'DELETED'):
                         clean_tables.append(t)
-                
+
                 if not clean_tables:
                    # No tables left, remove FROM clause entirely
                    start, end = from_match.span()
@@ -2355,11 +2355,11 @@ class SybaseASEConnector(DatabaseConnector):
                 # Check for "target alias"
                 if t_clean.lower().startswith(target.lower() + ' ') or t_clean.lower().startswith(target.lower() + '\t'):
                      continue
-                
+
                 # Also remove NEW and OLD from FROM clause in triggers
                 if t_clean.upper() in ('NEW', 'OLD', 'INSERTED', 'DELETED'):
                     continue
-                
+
                 new_tables.append(t)
 
             if new_tables:
@@ -2378,7 +2378,7 @@ class SybaseASEConnector(DatabaseConnector):
         body_content = re.sub(r"\s*\+\s*(')", r" || \1", body_content)
 
         # 8. Control Flow (IF/WHILE) - Minimal support as per trigger usage
-        
+
         # IF UPDATE(column) -> IF NEW.column IS DISTINCT FROM OLD.column
         # Needs to happen before IF regex
         def if_update_replacer(match):
@@ -2386,7 +2386,7 @@ class SybaseASEConnector(DatabaseConnector):
             # Sybase: IF UPDATE(col)
             # PG: IF NEW.col IS DISTINCT FROM OLD.col
             return f"IF NEW.{col} IS DISTINCT FROM OLD.{col}"
-        
+
         body_content = re.sub(r'IF\s+UPDATE\(([\w]+)\)', if_update_replacer, body_content, flags=re.IGNORECASE)
 
         # Rollback Trigger
@@ -2398,12 +2398,12 @@ class SybaseASEConnector(DatabaseConnector):
             # Pattern: rollback trigger with raiserror 99999 'Message'
             rest = match.group(1) if match.lastindex >= 1 else ''
             message = "Trigger Rollback"
-            
+
             # Extract message string '...'
             msg_match = re.search(r"'([^']+)'", rest)
             if msg_match:
                 message = msg_match.group(1)
-            
+
             return f"RAISE EXCEPTION '{message}';"
 
         body_content = re.sub(r'rollback\s+(?:trigger|transaction)\s*(.*)', rollback_replacer, body_content, flags=re.IGNORECASE)
@@ -2413,7 +2413,7 @@ class SybaseASEConnector(DatabaseConnector):
 
         # IF replacement with DOTALL support for multiline conditions
         body_content = re.sub(r'IF\s+(.*?)\s+BEGIN', r'IF \1 THEN', body_content, flags=re.IGNORECASE | re.DOTALL)
-        
+
         # Standardize other keywords
         body_content = re.sub(r'WHILE\s+(.*?)\s+BEGIN', r'WHILE \1 LOOP', body_content, flags=re.IGNORECASE)
         body_content = re.sub(r'ELSE\s+BEGIN', r'ELSE', body_content, flags=re.IGNORECASE)
@@ -2479,15 +2479,15 @@ class SybaseASEConnector(DatabaseConnector):
                     combined = " ".join([b.strip() for b in buf]) # Join all lines to check full start
                     # Remove comments from check
                     combined_code = re.sub(r'--.*', '', combined).strip()
-                    
+
                     first_word = combined_code.split()[0].upper()
-                    
+
                     # Also check assignments "var := val"
                     is_assignment = ':=' in combined_code
-                    
+
                     # Keywords requiring semicolon
                     needs_semi = ('UPDATE', 'INSERT', 'DELETE', 'SELECT', 'PERFORM', 'CALL', 'WITH', 'MERGE', 'RAISE')
-                    
+
                     if first_word in needs_semi or is_assignment:
                          buf[last_idx] = s + ';'
 
@@ -2821,8 +2821,14 @@ class SybaseASEConnector(DatabaseConnector):
         # Pre-process Sybase specific join syntax
         # *= -> = /* left_outer */
         # =* -> = /* right_outer */
+        # Pre-process Sybase specific join syntax
+        # *= -> = /* left_outer */
+        # =* -> = /* right_outer */
         converted_code = re.sub(r'\*=', '= /* left_outer */', converted_code)
         converted_code = re.sub(r'=\*', '= /* right_outer */', converted_code)
+
+        # Remove 'noholdlock' hints (often interpreted as aliases)
+        converted_code = re.sub(r'\bnoholdlock\b', '', converted_code, flags=re.IGNORECASE)
 
         converted_code = self._apply_udt_to_base_type_substitutions(converted_code, settings)
 
@@ -2922,22 +2928,39 @@ class SybaseASEConnector(DatabaseConnector):
                 # Should not happen for valid UDTs referencing standard types
                 base_type = "UNKNOWN"
 
-            type_sql = base_type.upper()
+            # Map base type to target DB type
+            mappings = self.get_types_mapping({'target_db_type': 'postgresql'})
+            # Standardize base type name for lookup (often lower case in mapping dict)
+            base_lower = base_type.lower()
+            if base_lower in mappings:
+                 mapped_type = mappings[base_lower]
+                 # If mapping contains length like 'varchar', good.
+                 # If it contains full definition like 'varchar(255)', we might need to be careful if we append (length) again.
+                 # Usually get_types_mapping returns just the type name 'VARCHAR'.
+                 type_sql = mapped_type.upper()
 
-            # Parametrization logic
-            # String/Binary types
-            if base_type.lower() in ('varchar', 'char', 'nvarchar', 'nchar', 'varbinary', 'binary'):
-                type_sql += f"({length})"
-            # Numeric types
-            elif base_type.lower() in ('numeric', 'decimal'):
-                type_sql += f"({prec},{scale})"
-            # Float (sometimes has prec, but standard float often just FLOAT or FLOAT(n))
-            # Sybase float(n) -> precision.
-            elif base_type.lower() == 'float':
-                # If prec is specific? Usually float(prec).
-                # But Sybase systypes 'prec' column for float might be 8 (bytes)?
-                # Let's check typical usage. Often UDTs on float are just aliases.
-                pass
+                 # Check if mapped type is boolean
+                 if mapped_type.upper() in ('BOOLEAN', 'BOOL'):
+                     # Boolean in PG does not take length/prec
+                     pass
+                 elif base_lower in ('varchar', 'char', 'nvarchar', 'nchar', 'varbinary', 'binary', 'univarchar', 'unichar'):
+                     type_sql += f"({length})"
+                 elif base_lower in ('numeric', 'decimal'):
+                     type_sql += f"({prec},{scale})"
+                 elif base_lower == 'float':
+                      # Float handling...
+                      pass
+            else:
+                 # Fallback to original behavior if no mapping found (risk of syntax error if not standard)
+                 type_sql = base_type.upper()
+
+                 if base_lower in ('varchar', 'char', 'nvarchar', 'nchar', 'varbinary', 'binary', 'univarchar', 'unichar'):
+                    type_sql += f"({length})"
+                 elif base_lower in ('numeric', 'decimal'):
+                    type_sql += f"({prec},{scale})"
+                 elif base_lower == 'float':
+                    # Float handling
+                    pass
 
             udts[order_num] = {
                 'schema_name': schema_name,

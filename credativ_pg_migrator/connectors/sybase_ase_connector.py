@@ -578,16 +578,28 @@ class SybaseASEConnector(DatabaseConnector):
                 if len(entry) >= 3 and entry[2]:
                     ignored_types.add(entry[2].upper())
 
+        # Get type mappings for recursive substitution
+        types_mapping = self.get_types_mapping({'target_db_type': settings.get('target_db_type', 'postgresql')})
+
         for udt_name, base_def in udt_map.items():
             if udt_name.upper() in ignored_types:
                 continue
 
             self.config_parser.print_log_message('DEBUG', f"DEBUGGING UDT: Checking {udt_name} -> {base_def}")
+
+            # Recursive step: Convert the base definition if it matches a Sybase type
+            # e.g. base_def="univarchar(20)" -> "VARCHAR(20)"
+            final_def = base_def
+            for sybase_type, pg_type in types_mapping.items():
+                 # Use word boundary to match type name, ignoring parens for regex
+                 # Escape sybase type just in case
+                 final_def = re.sub(rf'\b{re.escape(sybase_type)}\b', pg_type, final_def, flags=re.IGNORECASE)
+
             # Perform substitution
             # Use word boundaries
             try:
                 pattern = re.compile(rf'(?:\[|")?\b{re.escape(udt_name)}\b(?:\]|")?', flags=re.IGNORECASE)
-                text = pattern.sub(base_def, text)
+                text = pattern.sub(final_def, text)
             except re.error:
                 pass
 
@@ -934,6 +946,26 @@ class SybaseASEConnector(DatabaseConnector):
 
         # Regex to catch EXEC/EXECUTE followed by name and optional args
         # We match until newline or semicolon or end of string
+        # Regex to catch EXEC/EXECUTE variants
+        # 1. Assignment: EXECUTE @var = proc ...
+        # 2. Simple: EXECUTE proc ...
+
+        def exec_assignment_transformer(match):
+             variable = match.group(1).replace('@', '')
+             proc_name = match.group(2)
+             args = match.group(3)
+             if args:
+                  args = args.replace('@', '').strip()
+                  if args.startswith(','): args = args[1:].strip()
+                  # args should be comma separated.
+                  # wrap in parens
+                  return f"{variable} := {proc_name}({args});"
+             else:
+                  return f"{variable} := {proc_name}();"
+
+        converted_code = re.sub(r'\b(?:EXEC|EXECUTE)\s+(@[a-zA-Z0-9_]+)\s*=\s*([a-zA-Z0-9_\.]+)([^\n;]*)(?=;|\n|$)', exec_assignment_transformer, converted_code, flags=re.IGNORECASE)
+
+        # 2. Simple EXEC (existing logic, mostly)
         converted_code = re.sub(r'\b(?:EXEC|EXECUTE)\s+([a-zA-Z0-9_\.]+)([^\n;]*)(?=;|\n|$)', exec_transformer, converted_code, flags=re.IGNORECASE)
 
         # 2. Extract Header and Body
@@ -1000,7 +1032,6 @@ class SybaseASEConnector(DatabaseConnector):
 
             # Custom type substitutions first
             clean_params = self._apply_data_type_substitutions(clean_params)
-            clean_params = self._apply_udt_to_base_type_substitutions(clean_params, settings)
             clean_params = self._apply_udt_to_base_type_substitutions(clean_params, settings)
 
             # Fix 2: Handle OUTPUT -> INOUT
@@ -1166,7 +1197,7 @@ class SybaseASEConnector(DatabaseConnector):
             # Check for generic SELECT ... INTO table syntax (converted from #table -> tt_table)
             # We convert to DROP TABLE IF EXISTS ...; CREATE TEMP TABLE ... AS SELECT ...
             # look for `INTO tt_([a-zA-Z0-9_]+)`
-            
+
             into_match = re.search(r'\bINTO\s+(tt_[a-zA-Z0-9_]+)', content, flags=re.IGNORECASE)
             if into_match:
                 table_name = into_match.group(1)
@@ -1174,10 +1205,10 @@ class SybaseASEConnector(DatabaseConnector):
                 # Be careful to remove exactly the match
                 # Use split/join or sub
                 new_content = re.sub(r'\bINTO\s+tt_[a-zA-Z0-9_]+\s*', '', content, flags=re.IGNORECASE)
-                
+
                 # Check if new_content ends with comma (failed parse?) or handled correctly?
                 # Usually standard SQL: SELECT a, b INTO #t ...
-                
+
                 return f"DROP TABLE IF EXISTS {table_name}; CREATE TEMP TABLE {table_name} AS SELECT {new_content} {rest}"
 
             if '=' in content:
@@ -1231,9 +1262,12 @@ class SybaseASEConnector(DatabaseConnector):
 
         # IF / WHILE
         # Mark BLOCK IFs to distinguish from Single Line IFs
-        body_content = re.sub(r'IF\s+(.*?)\s+BEGIN', r'IF \1 THEN --BLOCK', body_content, flags=re.IGNORECASE)
-        body_content = re.sub(r'WHILE\s+(.*?)\s+BEGIN', r'WHILE \1 LOOP', body_content, flags=re.IGNORECASE)
-        body_content = re.sub(r'ELSE\s+BEGIN', r'ELSE', body_content, flags=re.IGNORECASE)
+        # Use DOTALL to match newlines in condition
+        # Ensure we don't match too greedily if nested
+        # But (.*?) is non-greedy.
+        body_content = re.sub(r'IF\s+(.*?)\s+BEGIN', r'IF \1 THEN --BLOCK', body_content, flags=re.IGNORECASE | re.DOTALL)
+        body_content = re.sub(r'WHILE\s+(.*?)\s+BEGIN', r'WHILE \1 LOOP', body_content, flags=re.IGNORECASE | re.DOTALL)
+        body_content = re.sub(r'ELSE\s+BEGIN', r'ELSE --BLOCK', body_content, flags=re.IGNORECASE)
 
         # Single Line IF (no BEGIN)
         def single_line_if(match):
@@ -1246,10 +1280,11 @@ class SybaseASEConnector(DatabaseConnector):
         # Original: (?=\s+(?:UPDATE|INSERT|DELETE|SELECT|RETURN|RAISE|PERFORM|FETCH|OPEN|CLOSE|DEALLOCATE))
         # New tokens: EXIT, CONTINUE, PRINT (handled later as markers)
         # Also need to handle 'BREAK' which is now 'EXIT'
+        # Added BEGIN to lookahead to prevent single line match if BEGIN follows (though IF..BEGIN regex above should catch it first)
 
         # Note: We already replaced BREAK -> EXIT above.
 
-        body_content = re.sub(r'(?<!\bTABLE\s)IF\s+(.+?)(?=\s+(?:UPDATE|INSERT|DELETE|SELECT|RETURN|RAISE|PERFORM|FETCH|OPEN|CLOSE|DEALLOCATE|EXIT|CONTINUE|PRINT))', single_line_if, body_content, flags=re.IGNORECASE)
+        body_content = re.sub(r'(?<!\bTABLE\s)IF\s+(.+?)(?=\s+(?:UPDATE|INSERT|DELETE|SELECT|RETURN|RAISE|PERFORM|FETCH|OPEN|CLOSE|DEALLOCATE|EXIT|CONTINUE|PRINT|BEGIN))', single_line_if, body_content, flags=re.IGNORECASE)
         body_content = re.sub(r'(?<!\bTABLE\s)IF\s+(.+?)\s*$', single_line_if, body_content, flags=re.IGNORECASE | re.MULTILINE)
 
         # Line processing to close blocks and single IFs
@@ -1259,42 +1294,47 @@ class SybaseASEConnector(DatabaseConnector):
         pending_single_if = False
         in_dml = False # Track if we are inside a DML statement
 
-        for line in lines:
+
+        new_lines = []
+        stack = []
+        pending_single_if = False
+        in_dml = False
+
+        i = 0
+        while i < len(lines):
+            line = lines[i]
             stripped = line.strip()
 
-            # Remove our markers for final output
+            # Remove our markers
             is_block_if = '--BLOCK' in line
             is_single_if = '--SINGLE' in line
 
             clean_line = line.replace('--BLOCK', '').replace('--SINGLE', '')
 
-            # Check for DML Start
-            dml_start_match = re.search(r'^\b(UPDATE|INSERT|DELETE|SELECT)\b', stripped, flags=re.IGNORECASE)
-            if dml_start_match:
-                 in_dml = True
+            # Detect rowcount usage
+            has_rowcount = '@@rowcount' in clean_line.lower() or 'sql%rowcount' in clean_line.lower()
 
-            # Check for Stopper Keywords indicating end of previous statement
-            # If we hit IF, WHILE, RETURN, BEGIN, END, RAISERROR, PRINT, FETCH, OPEN, CLOSE, DEALLOCATE
-            # AND we are in_dml, then we must close the DML.
-            # We also add INSERT, UPDATE, DELETE because they start a new statement (and thus close previous one)
+            # Stopper Logic (Close previous DML)
             stopper_match = re.search(r'^\b(IF|WHILE|RETURN|BEGIN|END|RAISE|PRINT|FETCH|OPEN|CLOSE|DEALLOCATE|INSERT|UPDATE|DELETE)\b', stripped, flags=re.IGNORECASE)
             if in_dml and stopper_match:
-                 # Check previous line
                  if new_lines:
                       prev = new_lines[-1]
                       if not prev.strip().endswith(';'):
                            new_lines[-1] = prev + ";"
-
                  if has_rowcount:
                       new_lines.append("GET DIAGNOSTICS _rowcount = ROW_COUNT;")
                  in_dml = False
 
-            # Also if current line ends with ;, DML is done (simple case)
+            # Starter Logic (Open new DML)
+            dml_start_match = re.search(r'^\b(UPDATE|INSERT|DELETE|SELECT)\b', stripped, flags=re.IGNORECASE)
+            if dml_start_match:
+                 in_dml = True
+
+            # Simple Closure Logic
             if in_dml and stripped.endswith(';'):
                  if has_rowcount:
                       clean_line += " GET DIAGNOSTICS _rowcount = ROW_COUNT;"
                  in_dml = False
-
 
             if is_block_if:
                 stack.append('IF_BLOCK')
@@ -1302,24 +1342,50 @@ class SybaseASEConnector(DatabaseConnector):
                 stack.append('LOOP')
 
             if is_single_if:
-                # Check if statement is on same line.
-                # Regex adds THEN --SINGLE. If line ends with THEN (ignoring whitespace), statement is next line.
-                # If there is content after THEN, it is the statement (matched by lookahead).
                 if clean_line.rstrip().endswith('THEN'):
                     pending_single_if = True
                     new_lines.append(clean_line)
                 else:
-                    new_lines.append(clean_line + " END IF;")
-                    pending_single_if = False
+                    # Single line IF with statement on same line: IF ... THEN stmt
+                    # Check next line for ELSE
+                    next_is_else = False
+                    if i + 1 < len(lines):
+                         next_line = lines[i+1].strip()
+                         # Check for ELSE or ELSE --BLOCK
+                         if re.match(r'^ELSE\b', next_line, flags=re.IGNORECASE):
+                              next_is_else = True
+
+                    if next_is_else:
+                         # Treat as if we are entering an ELSE block for a single IF
+                         # We do NOT append END IF;
+                         # Push a state to stack indicating we are in an IF that needs closing after ELSE
+                         stack.append('IF_SINGLE_ELSE')
+                         new_lines.append(clean_line)
+                    else:
+                         new_lines.append(clean_line + " END IF;")
+                i += 1
                 continue
 
-            # If we have a pending single IF, we need to close it after the next statement
             if pending_single_if and stripped:
-                new_lines.append(clean_line + " END IF;")
+                # We just processed the statement for a pending single IF
+                # Check next line for ELSE
+                next_is_else = False
+                if i + 1 < len(lines):
+                        next_line = lines[i+1].strip()
+                        if re.match(r'^ELSE\b', next_line, flags=re.IGNORECASE):
+                            next_is_else = True
+
+                if next_is_else:
+                     stack.append('IF_SINGLE_ELSE')
+                     new_lines.append(clean_line)
+                else:
+                     new_lines.append(clean_line + " END IF;")
+
                 pending_single_if = False
+                i += 1
                 continue
 
-            # END
+            # Standard END handling
             if re.match(r'^END\s*;?$', stripped, flags=re.IGNORECASE):
                 if stack:
                     block = stack.pop()
@@ -1327,16 +1393,45 @@ class SybaseASEConnector(DatabaseConnector):
                         new_lines.append("END IF;")
                     elif block == 'LOOP':
                         new_lines.append("END LOOP;")
+                    elif block == 'IF_SINGLE_ELSE':
+                         # If we hit END while in IF_SINGLE_ELSE, it means the ELSE block finished?
+                         # Usually ELSE for single IF doesn't have END unless it was a block ELSE.
+                         # But wait, if it was 'ELSE --BLOCK', it would have pushed IF_BLOCK?
+                         # No, 'ELSE --BLOCK' is just a line.
+                         new_lines.append("END IF;") # Close the ELSE's IF
                     else:
-                        new_lines.append(clean_line) # keep original END;?
+                        new_lines.append(clean_line)
                 else:
                     new_lines.append("END;")
             else:
+                 # Check if this line is ELSE.
+                 # If we match ELSE, and we are in IF_SINGLE_ELSE, we just print ELSE.
+                 # The 'IF_SINGLE_ELSE' state remains until the statement AFTER else is done?
+                 # Wait.
+                 # If we are in IF_SINGLE_ELSE state, it means we had `IF ... stmt` (no END IF) `ELSE`.
+                 # So we are now processing `ELSE`.
+                 # If `ELSE` is `ELSE --BLOCK` (converted from `ELSE BEGIN`), then `is_block_if` would be true?
+                 # No, `is_block_if` checks `--BLOCK`. My regex replaced `ELSE BEGIN` with `ELSE`.
+                 # I should probably replace `ELSE BEGIN` with `ELSE --BLOCK` to track it.
+
                  new_lines.append(clean_line)
 
-        # If pending single if matches end of file?
+                 # If we are in 'IF_SINGLE_ELSE' state, and we just emitted a statement that is NOT 'ELSE',
+                 # that implies the single-line ELSE body is finished.
+                 # UNLESS the statement was 'ELSE' itself.
+
+                 is_else_line = re.match(r'^ELSE\b', stripped, flags=re.IGNORECASE)
+                 if stack and stack[-1] == 'IF_SINGLE_ELSE' and not is_else_line:
+                      # We just processed the body of the else. Close it.
+                      stack.pop()
+                      new_lines[-1] += " END IF;"
+
+            i += 1
+
+        # Fallback closure
         if pending_single_if:
              new_lines.append("END IF;")
+
 
         # If DML is still open at end of body (e.g. because END was stripped), close it
         if in_dml:
@@ -1376,8 +1471,81 @@ class SybaseASEConnector(DatabaseConnector):
 
         body_content = '\n'.join(new_lines)
 
-        # RETURN 0 -> RETURN
         body_content = re.sub(r'RETURN\s+\d+', 'RETURN', body_content, flags=re.IGNORECASE)
+
+        # Check for Output parameters to adjust RETURNs and RETURNS clause
+        output_params = []
+        if header_match:
+             # Re-parse params_str to find output params
+             # This is a bit rough, assuming comma separation on top level
+             # Better to trust our params parsing if we had it structured.
+             # We can regex search for 'OUTPUT' or 'OUT' in params_str
+             # params_str: "@id int output, @val varchar(10)"
+             # We need to count them.
+
+             # Split by comma respecting parens (not strictly needed for just counting OUTPUT keywords, mostly)
+             # But let's look at the generated pg_params_str.
+             # It has INOUT for output params.
+             # "INOUT geraet_id BIGINT"
+
+             output_params = re.findall(r'\b(INOUT|OUT)\b', pg_params_str, flags=re.IGNORECASE)
+
+        if output_params:
+             # If we have output parameters, Sybase "RETURN x" (status code) should be ignored or converted to RETURN;
+             # because PG uses OUT params for results.
+             # Replace "RETURN <expr>" with "RETURN;"
+             # Be careful not to replace "RETURN;" itself.
+
+             def cleaner_return(match):
+                  expr = match.group(1).strip()
+                  if not expr:
+                       return "RETURN;"
+                  return f"RETURN; /* {expr} */"
+
+             # Match RETURN <expr> until semicolon or newline or end of string
+             body_content = re.sub(r'RETURN\b\s*(.*?)(\;|\n|$)', cleaner_return, body_content, flags=re.IGNORECASE)
+
+             if len(output_params) > 1:
+                  returns_clause = "RETURNS RECORD"
+             else:
+                  # If we have 1 OUT param, PG usually implies RETURNS <type> of that param,
+                  # OR if defined as INOUT in signature, we can use RETURNS void or matches?
+                  # Actually, if parameters are DEFINED as INOUT, function returns VOID? No.
+                  # In PG, if you use OUT/INOUT params, you usually do RETURNS RECORD (if multiple)
+                  # or RETURNS <type> (if single OUT), OR RETURNS SETOF ...
+                  # But wait, PG docs: "If there are OUT or INOUT parameters, the RETURNS clause
+                  # can be omitted (equivalent to RETURNS record) or can specify the result type."
+                  # "If RETURNS void is used, output parameters are not allowed." -> ERROR user saw!
+
+                  # So we must NOT return VOID.
+                  # We can return "RECORD" generally, or rely on PG inferring it if we omit it?
+                  # We must specify something if we used 'RETURNS void' before.
+
+                  # Safest: "RETURNS RECORD" if multiple.
+                  # If single, we should ideally match the type, but "RETURNS RECORD" works too?
+                  # Actually, if we use INOUT in declaration, "RETURNS <type>" is expected if single?
+                  # Or "RETURNS SETOF <type>"?
+
+                  # User error: "function result type must be bigint because of OUT parameters"
+                  # This implies PG expects the type of the single OUT param.
+                  pass
+                  # We need to extract the type of the single OUT param.
+                  # pg_params_str: "techauftrag_id BIGINT, INOUT geraet_id BIGINT =0"
+                  # We can try to extract the type.
+
+        # Determine RETURNS clause
+        returns_clause = "RETURNS void"
+        if output_params:
+             if len(output_params) > 1:
+                  returns_clause = "RETURNS RECORD"
+             else:
+                  # Extract type of the single INOUT param
+                  # Look for "INOUT param_name TYPE"
+                  single_out = re.search(r'\b(?:INOUT|OUT)\s+[a-zA-Z0-9_]+\s+([a-zA-Z0-9_]+(?:\(.*\))?)', pg_params_str, flags=re.IGNORECASE)
+                  if single_out:
+                       returns_clause = f"RETURNS {single_out.group(1)}"
+                  else:
+                       returns_clause = "RETURNS RECORD" # Fallback
 
         # Other types mapping in body
         # Custom type substitutions first
@@ -1395,7 +1563,7 @@ class SybaseASEConnector(DatabaseConnector):
 
         # 9. Assembly
         final_code = f"CREATE OR REPLACE FUNCTION {func_schema}.{func_name}({pg_params_str})\n"
-        final_code += "RETURNS void AS $$\n"
+        final_code += f"{returns_clause} AS $$\n"
 
         if declarations:
             final_code += "DECLARE\n"

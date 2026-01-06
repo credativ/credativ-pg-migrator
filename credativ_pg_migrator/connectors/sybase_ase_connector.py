@@ -829,6 +829,26 @@ class SybaseASEConnector(DatabaseConnector):
         # Replace @var with var, BUT skip @@system_vars
         body_content = re.sub(r'(?<!@)@([a-zA-Z0-9_]+)', r'\1', body_content)
 
+        # Handle @@rowcount
+        has_rowcount = '@@rowcount' in body_content.lower()
+        if has_rowcount:
+             declarations.append('_rowcount INTEGER;')
+             # Replace usage
+             body_content = re.sub(r'@@rowcount', '_rowcount', body_content, flags=re.IGNORECASE)
+
+        # RAISERROR conversion
+        # Sybase: RAISERROR num "msg" or RAISERROR num 'msg'
+        # PG: RAISE EXCEPTION 'msg' USING ERRCODE = 'num'
+        def raiserror_replacer(match):
+            code = match.group(1)
+            msg = match.group(2)
+            # Fix quotes if double
+            if msg.startswith('"'):
+                msg = "'" + msg[1:-1].replace("'", "''") + "'"
+            return f"RAISE EXCEPTION {msg} USING ERRCODE = '{code}'"
+
+        body_content = re.sub(r'RAISERROR\s+(\d+)\s+(["\'].*?["\'])', raiserror_replacer, body_content, flags=re.IGNORECASE)
+
         # 7. Conversions (Line by line / block based)
 
         # Cursor Declarations
@@ -854,16 +874,6 @@ class SybaseASEConnector(DatabaseConnector):
         # open access_cursor
 
         # The body_content passed here has newlines.
-        # If original didn't use DOTALL, valid cursor defs on multiple lines would fail or only capture first line.
-        # We need DOTALL and a better stop condition. Lookahead for OPEN or DECLARE or variable assignment or BEGIN/END?
-
-        # Better regex:
-        # DECLARE name CURSOR FOR <content> [FOR UPDATE]
-        # Stop at OPEN <name> or just empty line?
-        # Safest is to consume until 'OPEN <name>' because usually you open it right after or soon.
-        # But there could be other code.
-        # Let's look for "FOR UPDATE" specifically.
-
         cursor_matches = re.finditer(r'DECLARE\s+([a-zA-Z0-9_]+)\s+CURSOR\s+FOR\s+(.+?)(\s+FOR\s+UPDATE)?(?=\s+OPEN|\s+DECLARE|\s+SELECT|\s+SET|\s+FETCH|\s+BEGIN|$)', body_content, flags=re.IGNORECASE | re.DOTALL)
 
         for cm in cursor_matches:
@@ -973,6 +983,7 @@ class SybaseASEConnector(DatabaseConnector):
         new_lines = []
         stack = [] # 'IF_BLOCK', 'LOOP'
         pending_single_if = False
+        in_dml = False # Track if we are inside a DML statement
 
         for line in lines:
             stripped = line.strip()
@@ -982,6 +993,33 @@ class SybaseASEConnector(DatabaseConnector):
             is_single_if = '--SINGLE' in line
 
             clean_line = line.replace('--BLOCK', '').replace('--SINGLE', '')
+
+            # Check for DML Start
+            dml_start_match = re.search(r'^\b(UPDATE|INSERT|DELETE)\b', stripped, flags=re.IGNORECASE)
+            if dml_start_match:
+                 in_dml = True
+
+            # Check for Stopper Keywords indicating end of previous statement
+            # If we hit IF, WHILE, RETURN, BEGIN, END, RAISERROR, PRINT, FETCH, OPEN, CLOSE, DEALLOCATE
+            # AND we are in_dml, then we must close the DML.
+            stopper_match = re.search(r'^\b(IF|WHILE|RETURN|BEGIN|END|RAISE|PRINT|FETCH|OPEN|CLOSE|DEALLOCATE)\b', stripped, flags=re.IGNORECASE)
+            if in_dml and stopper_match:
+                 # Check previous line
+                 if new_lines:
+                      prev = new_lines[-1]
+                      if not prev.strip().endswith(';'):
+                           new_lines[-1] = prev + ";"
+
+                      if has_rowcount:
+                           new_lines.append("GET DIAGNOSTICS _rowcount = ROW_COUNT;")
+                 in_dml = False
+
+            # Also if current line ends with ;, DML is done (simple case)
+            if in_dml and stripped.endswith(';'):
+                 if has_rowcount:
+                      clean_line += " GET DIAGNOSTICS _rowcount = ROW_COUNT;"
+                 in_dml = False
+
 
             if is_block_if:
                 stack.append('IF_BLOCK')

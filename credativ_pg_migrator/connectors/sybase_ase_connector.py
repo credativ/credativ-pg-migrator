@@ -902,7 +902,11 @@ class SybaseASEConnector(DatabaseConnector):
              cmd_safe = re.sub(r'\bBEGIN\b', 'START', cmd, flags=re.IGNORECASE)
              return f"NULL; /* {cmd_safe} */"
 
-        converted_code = re.sub(r'(\b(?:BEGIN|COMMIT|ROLLBACK|SAVE)\s+(?:TRAN|TRANSACTION)(?:\s+[a-zA-Z0-9_]+)?\b)', tran_replacer, converted_code, flags=re.IGNORECASE)
+        # Use [ \t] instead of \s before the optional name to prevent matching across newlines
+        # Also support TRAN, TRANS, TRANSACTION via TRAN\w*
+        # And ensure the 'name' is NOT a keyword (declare, select, etc) using negative lookahead
+        # to prevent consuming the next statement if whitespace matching is loose.
+        converted_code = re.sub(r'(\b(?:BEGIN|COMMIT|ROLLBACK|SAVE)\s+(?:TRAN\w*)(?:[ \t]+(?!(?:DECLARE|SELECT|INSERT|UPDATE|DELETE|EXECUTE|EXEC|RETURN|IF|WHILE|BEGIN|COMMIT|ROLLBACK|SAVE)\b)[a-zA-Z0-9_]+)?\b)', tran_replacer, converted_code, flags=re.IGNORECASE)
 
         # 1.6 EXECUTE -> PERFORM (Function Call)
         # Sybase: EXEC[UTE] proc_name [args]
@@ -1148,11 +1152,33 @@ class SybaseASEConnector(DatabaseConnector):
         # and the final END closes the whole IF.
         body_content = re.sub(r'END\s+ELSE', r'ELSE', body_content, flags=re.IGNORECASE | re.MULTILINE)
 
+        # 8.05 Temp Table Handling (# -> tt_)
+        # Global replacements of #name with tt_name
+        # Note: Do this BEFORE select into transformer so we can detect tt_name
+        body_content = re.sub(r'#([a-zA-Z0-9_]+)', r'tt_\1', body_content)
+
         # 8.1 Select Into (Handle BEFORE simple assignment to catch FROM clauses even multiline)
         # SELECT var = col FROM ... -> SELECT col INTO var FROM ...
         def select_into_transformer(match):
             content = match.group(1) # content between SELECT and FROM
             rest = match.group(2) # FROM ...
+
+            # Check for generic SELECT ... INTO table syntax (converted from #table -> tt_table)
+            # We convert to DROP TABLE IF EXISTS ...; CREATE TEMP TABLE ... AS SELECT ...
+            # look for `INTO tt_([a-zA-Z0-9_]+)`
+            
+            into_match = re.search(r'\bINTO\s+(tt_[a-zA-Z0-9_]+)', content, flags=re.IGNORECASE)
+            if into_match:
+                table_name = into_match.group(1)
+                # Remove `INTO table_name` from content
+                # Be careful to remove exactly the match
+                # Use split/join or sub
+                new_content = re.sub(r'\bINTO\s+tt_[a-zA-Z0-9_]+\s*', '', content, flags=re.IGNORECASE)
+                
+                # Check if new_content ends with comma (failed parse?) or handled correctly?
+                # Usually standard SQL: SELECT a, b INTO #t ...
+                
+                return f"DROP TABLE IF EXISTS {table_name}; CREATE TEMP TABLE {table_name} AS SELECT {new_content} {rest}"
 
             if '=' in content:
                 parts = split_respecting_parens(content)
@@ -1223,8 +1249,8 @@ class SybaseASEConnector(DatabaseConnector):
 
         # Note: We already replaced BREAK -> EXIT above.
 
-        body_content = re.sub(r'IF\s+(.+?)(?=\s+(?:UPDATE|INSERT|DELETE|SELECT|RETURN|RAISE|PERFORM|FETCH|OPEN|CLOSE|DEALLOCATE|EXIT|CONTINUE|PRINT))', single_line_if, body_content, flags=re.IGNORECASE)
-        body_content = re.sub(r'IF\s+(.+?)\s*$', single_line_if, body_content, flags=re.IGNORECASE | re.MULTILINE)
+        body_content = re.sub(r'(?<!\bTABLE\s)IF\s+(.+?)(?=\s+(?:UPDATE|INSERT|DELETE|SELECT|RETURN|RAISE|PERFORM|FETCH|OPEN|CLOSE|DEALLOCATE|EXIT|CONTINUE|PRINT))', single_line_if, body_content, flags=re.IGNORECASE)
+        body_content = re.sub(r'(?<!\bTABLE\s)IF\s+(.+?)\s*$', single_line_if, body_content, flags=re.IGNORECASE | re.MULTILINE)
 
         # Line processing to close blocks and single IFs
         lines = body_content.split('\n')

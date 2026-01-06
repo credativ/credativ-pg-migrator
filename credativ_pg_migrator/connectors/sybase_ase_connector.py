@@ -654,14 +654,14 @@ class SybaseASEConnector(DatabaseConnector):
     def convert_funcproc_code(self, settings):
         funcproc_code = settings['funcproc_code']
         target_db_type = settings['target_db_type']
-        
+
         # 1. Clean up potential GO statements and strict comments handling if needed (minimal here)
         converted_code = re.sub(r'\bGO\b', '', funcproc_code, flags=re.IGNORECASE)
 
         # 2. Extract Header and Body
         # Pattern: CREATE PROC[EDURE] name [params] AS [BEGIN] body [END]
         header_match = re.search(r'CREATE\s+(?:PROC|PROCEDURE)\s+([a-zA-Z0-9_\.]+)(.*?)(\bAS\b)', converted_code, flags=re.IGNORECASE | re.DOTALL)
-        
+
         func_schema = ""
         func_name = ""
         params_str = ""
@@ -670,7 +670,7 @@ class SybaseASEConnector(DatabaseConnector):
         if header_match:
             full_name = header_match.group(1)
             params_str = header_match.group(2).strip()
-            # body technically starts after AS. 
+            # body technically starts after AS.
             body_start_idx = header_match.end(3)
 
             if '.' in full_name:
@@ -679,6 +679,9 @@ class SybaseASEConnector(DatabaseConnector):
                 func_name = parts[1]
             else:
                 func_name = full_name
+
+            if not func_schema:
+                func_schema = settings.get('target_schema', 'public')
         else:
             # Fallback if regex fails - return original or minor mod
             return converted_code
@@ -693,7 +696,7 @@ class SybaseASEConnector(DatabaseConnector):
                     depth += 1
                 elif char == ')':
                     depth -= 1
-                
+
                 if char == ',' and depth == 0:
                     parts.append("".join(current).strip())
                     current = []
@@ -705,7 +708,7 @@ class SybaseASEConnector(DatabaseConnector):
 
         # 3. Process Parameters
         types_mapping = self.get_types_mapping({'target_db_type': target_db_type})
-        
+
         pg_params = []
         if params_str:
             clean_params = params_str.replace('@', '')
@@ -725,19 +728,19 @@ class SybaseASEConnector(DatabaseConnector):
 
         # 5. Variable Declarations
         declarations = []
-        
+
         def declaration_replacer(match):
             full_decl = match.group(0)
             content = full_decl[7:].strip() # len('DECLARE') = 7
-            
+
             content_clean = content.replace('@', '')
             for sybase_type, pg_type in types_mapping.items():
                 content_clean = re.sub(rf'\b{re.escape(sybase_type)}\b', pg_type, content_clean, flags=re.IGNORECASE)
-            
+
             parts = split_respecting_parens(content_clean)
             for part in parts:
                 declarations.append(part.strip() + ';')
-            
+
             return '' # Remove from body
 
         body_content = re.sub(r'DECLARE\s+@.*?(?=\bBEGIN\b|\bIF\b|\bWHILE\b|\bSELECT\b|\bINSERT\b|\bUPDATE\b|\bDELETE\b|\bRETURN\b|\bSET\b|\bFETCH\b|\bOPEN\b|\bCLOSE\b|\bDEALLOCATE\b|\bDECLARE\b|$)', declaration_replacer, body_content, flags=re.IGNORECASE | re.DOTALL)
@@ -747,31 +750,31 @@ class SybaseASEConnector(DatabaseConnector):
         body_content = re.sub(r'(?<!@)@([a-zA-Z0-9_]+)', r'\1', body_content)
 
         # 7. Conversions (Line by line / block based)
-        
+
         # Cursor Declarations
         cursor_matches = re.finditer(r'DECLARE\s+([a-zA-Z0-9_]+)\s+CURSOR\s+FOR\s+(.*)', body_content, flags=re.IGNORECASE)
         for cm in cursor_matches:
             c_name = cm.group(1)
             c_def = cm.group(2)
             declarations.append(f"{c_name} CURSOR FOR {c_def};")
-        
+
         body_content = re.sub(r'DECLARE\s+[a-zA-Z0-9_]+\s+CURSOR\s+FOR\s+.*', '', body_content, flags=re.IGNORECASE)
 
         # 8. Control Flow & Assignments
-        
+
         # 8.0 Pre-process END ELSE to avoid breaking IF-ELSE chains
         # T-SQL: IF ... BEGIN ... END ELSE ...
         # PG: IF ... THEN ... ELSE ... END IF;
-        # We replace "END ELSE" with "ELSE" so the first block merges into the structure, 
+        # We replace "END ELSE" with "ELSE" so the first block merges into the structure,
         # and the final END closes the whole IF.
         body_content = re.sub(r'END\s+ELSE', r'ELSE', body_content, flags=re.IGNORECASE | re.MULTILINE)
-        
+
         # 8.1 Select Into (Handle BEFORE simple assignment to catch FROM clauses even multiline)
         # SELECT var = col FROM ... -> SELECT col INTO var FROM ...
         def select_into_transformer(match):
             content = match.group(1) # content between SELECT and FROM
             rest = match.group(2) # FROM ...
-            
+
             if '=' in content:
                 parts = split_respecting_parens(content)
                 vars_list = []
@@ -783,10 +786,10 @@ class SybaseASEConnector(DatabaseConnector):
                         cols_list.append(side_r.strip())
                     else:
                         cols_list.append(asm)
-                
+
                 if vars_list:
                     return f"SELECT {', '.join(cols_list)} INTO {', '.join(vars_list)} {rest}"
-            
+
             return match.group(0)
 
         # Use DOTALL to match newlines in the SELECT ... FROM
@@ -797,9 +800,9 @@ class SybaseASEConnector(DatabaseConnector):
             full_match = match.group(0)
             if 'FROM' in full_match.upper():
                 return full_match
-            
+
             content = match.group(1).strip() # content after SELECT
-            
+
             if '=' not in content:
                 return full_match
 
@@ -812,21 +815,21 @@ class SybaseASEConnector(DatabaseConnector):
                     assignments.append(f"{side_l.strip()} := {side_r.strip()}")
                 else:
                     is_assignment = False
-            
+
             if is_assignment and assignments:
                 return "; ".join(assignments) + ";"
             return full_match
-            
+
         # Match SELECT until newline or semicolon
         body_content = re.sub(r'SELECT\s+([^;\n]+)', simple_assignment, body_content, flags=re.IGNORECASE)
 
-        
+
         # IF / WHILE
         # Mark BLOCK IFs to distinguish from Single Line IFs
         body_content = re.sub(r'IF\s+(.*?)\s+BEGIN', r'IF \1 THEN --BLOCK', body_content, flags=re.IGNORECASE)
         body_content = re.sub(r'WHILE\s+(.*?)\s+BEGIN', r'WHILE \1 LOOP', body_content, flags=re.IGNORECASE)
         body_content = re.sub(r'ELSE\s+BEGIN', r'ELSE', body_content, flags=re.IGNORECASE)
-        
+
         # Single Line IF (no BEGIN)
         def single_line_if(match):
             cond = match.group(1)
@@ -836,32 +839,32 @@ class SybaseASEConnector(DatabaseConnector):
 
         body_content = re.sub(r'IF\s+(.+?)(?=\s+(?:UPDATE|INSERT|DELETE|SELECT|RETURN|RAISE|PERFORM|FETCH|OPEN|CLOSE|DEALLOCATE))', single_line_if, body_content, flags=re.IGNORECASE)
         body_content = re.sub(r'IF\s+(.+?)\s*$', single_line_if, body_content, flags=re.IGNORECASE | re.MULTILINE)
-        
+
         # Line processing to close blocks and single IFs
         lines = body_content.split('\n')
         new_lines = []
         stack = [] # 'IF_BLOCK', 'LOOP'
         pending_single_if = False
-        
+
         for line in lines:
             stripped = line.strip()
-            
+
             # Remove our markers for final output
             is_block_if = '--BLOCK' in line
             is_single_if = '--SINGLE' in line
-            
+
             clean_line = line.replace('--BLOCK', '').replace('--SINGLE', '')
-            
+
             if is_block_if:
                 stack.append('IF_BLOCK')
             elif re.search(r'WHILE\s+.*\s+LOOP', line, flags=re.IGNORECASE):
                 stack.append('LOOP')
-            
+
             if is_single_if:
                 pending_single_if = True
                 new_lines.append(clean_line)
                 continue
-            
+
             # If we have a pending single IF, we need to close it after the next statement
             if pending_single_if and stripped:
                 new_lines.append(clean_line + " END IF;")
@@ -882,25 +885,25 @@ class SybaseASEConnector(DatabaseConnector):
                     new_lines.append("END;")
             else:
                  new_lines.append(clean_line)
-        
+
         # If pending single if matches end of file?
         if pending_single_if:
              new_lines.append("END IF;")
-             
+
         body_content = '\n'.join(new_lines)
-        
+
         # Fix ENDs
         lines = body_content.split('\n')
         new_lines = []
         stack = []
-        
+
         for line in lines:
             stripped = line.strip()
             if re.search(r'IF\s+.*\s+THEN', line, flags=re.IGNORECASE):
                 stack.append('IF')
             elif re.search(r'WHILE\s+.*\s+LOOP', line, flags=re.IGNORECASE):
                 stack.append('LOOP')
-            
+
             # Check for END
             if re.match(r'^END\s*;?$', stripped, flags=re.IGNORECASE):
                 if stack:
@@ -915,9 +918,9 @@ class SybaseASEConnector(DatabaseConnector):
                     new_lines.append('END;')
             else:
                  new_lines.append(line)
-        
+
         body_content = '\n'.join(new_lines)
-        
+
         # RETURN 0 -> RETURN
         body_content = re.sub(r'RETURN\s+\d+', 'RETURN', body_content, flags=re.IGNORECASE)
 
@@ -931,20 +934,20 @@ class SybaseASEConnector(DatabaseConnector):
         body_content = re.sub(r'open\s+([a-zA-Z0-9_]+)', r'OPEN \1;', body_content, flags=re.IGNORECASE)
         body_content = re.sub(r'close\s+([a-zA-Z0-9_]+)', r'CLOSE \1;', body_content, flags=re.IGNORECASE)
         body_content = re.sub(r'deallocate\s+cursor\s+([a-zA-Z0-9_]+)', r'DEALLOCATE \1;', body_content, flags=re.IGNORECASE)
-        
+
         # 9. Assembly
         final_code = f"CREATE OR REPLACE FUNCTION {func_schema}.{func_name}({pg_params_str})\n"
         final_code += "RETURNS void AS $$\n"
-        
+
         if declarations:
             final_code += "DECLARE\n"
             for decl in declarations:
                 final_code += f"    {decl}\n"
-        
+
         final_code += "BEGIN\n"
         final_code += body_content
         final_code += "\nEND;\n$$ LANGUAGE plpgsql;"
-        
+
         return final_code
 
     def fetch_sequences(self, table_schema: str, table_name: str):
@@ -1535,7 +1538,7 @@ class SybaseASEConnector(DatabaseConnector):
                     depth += 1
                 elif char == ')':
                     depth -= 1
-                
+
                 if char == ',' and depth == 0:
                     parts.append("".join(current).strip())
                     current = []
@@ -1565,19 +1568,19 @@ class SybaseASEConnector(DatabaseConnector):
         # 3. Variable Declarations
         types_mapping = self.get_types_mapping({'target_db_type': target_db_type})
         declarations = []
-        
+
         def declaration_replacer(match):
             full_decl = match.group(0)
             content = full_decl[7:].strip() # len('DECLARE') = 7
-            
+
             content_clean = content.replace('@', '')
             for sybase_type, pg_type in types_mapping.items():
                 content_clean = re.sub(rf'\b{re.escape(sybase_type)}\b', pg_type, content_clean, flags=re.IGNORECASE)
-            
+
             parts = split_respecting_parens(content_clean)
             for part in parts:
                 declarations.append(part.strip() + ';')
-            
+
             return '' # Remove from body
 
         body_content = re.sub(r'DECLARE\s+@.*?(?=\bBEGIN\b|\bIF\b|\bWHILE\b|\bSELECT\b|\bINSERT\b|\bUPDATE\b|\bDELETE\b|\bRETURN\b|\bSET\b|\bFETCH\b|\bOPEN\b|\bCLOSE\b|\bDEALLOCATE\b|\bDECLARE\b|$)', declaration_replacer, body_content, flags=re.IGNORECASE | re.DOTALL)
@@ -1591,17 +1594,24 @@ class SybaseASEConnector(DatabaseConnector):
 
         # Remove @
         body_content = re.sub(r'(?<!@)@([a-zA-Z0-9_]+)', r'\1', body_content)
-        
+
         # INSERTED/DELETED -> NEW/OLD
         body_content = re.sub(r'\binserted\b', 'NEW', body_content, flags=re.IGNORECASE)
         body_content = re.sub(r'\bdeleted\b', 'OLD', body_content, flags=re.IGNORECASE)
 
+        # Sybase Specific Cleanups
+        # @@trancount -> 1 (Assume transaction active)
+        body_content = re.sub(r'@@trancount', '1', body_content, flags=re.IGNORECASE)
+        # Remove SET chained/transaction commands
+        body_content = re.sub(r'SET\s+chained\s+\w+', '', body_content, flags=re.IGNORECASE)
+        body_content = re.sub(r'SET\s+transaction\s+isolation\s+level\s+\d+', '', body_content, flags=re.IGNORECASE)
+
         # 5. Assignments and Selects
-        
+
         # Select Into
         def select_into_transformer(match):
-            content = match.group(1) 
-            rest = match.group(2) 
+            content = match.group(1)
+            rest = match.group(2)
             if '=' in content:
                 parts = split_respecting_parens(content)
                 vars_list = []
@@ -1628,7 +1638,7 @@ class SybaseASEConnector(DatabaseConnector):
             content = match.group(1).strip()
             if '=' not in content:
                 return full_match
-            
+
             parts = split_respecting_parens(content)
             assignments = []
             is_assignment = True
@@ -1638,23 +1648,23 @@ class SybaseASEConnector(DatabaseConnector):
                     assignments.append(f"{side_l.strip()} := {side_r.strip()}")
                 else:
                     is_assignment = False
-            
+
             if is_assignment and assignments:
                 return "; ".join(assignments) + ";"
             return full_match
-            
+
         body_content = re.sub(r'SELECT\s+([^;\n]+)', simple_assignment, body_content, flags=re.IGNORECASE)
 
         # 6. UPDATE ... FROM fixes
         # If UPDATE target ... FROM target, table2 -> FROM table2
         # Need to parse UPDATE target
-        
+
         def update_from_fix(match):
             target = match.group(1)
             set_clause = match.group(2)
             from_clause = match.group(3)
             rest = match.group(4)
-            
+
             # Parse FROM tables
             # Sybase FROM t1, t2
             # PG FROM t2 (if t1 is target)
@@ -1671,7 +1681,7 @@ class SybaseASEConnector(DatabaseConnector):
                 if t_clean.lower().startswith(target.lower() + ' ') or t_clean.lower().startswith(target.lower() + '\t'):
                      continue
                 new_tables.append(t)
-            
+
             if new_tables:
                 return f"UPDATE {target} {set_clause} FROM {', '.join(new_tables)} {rest}"
             else:
@@ -1686,13 +1696,13 @@ class SybaseASEConnector(DatabaseConnector):
         # Heuristic: '...' + ... or ... + '...'
         body_content = re.sub(r"('\s*)\+\s*", r"\1 || ", body_content)
         body_content = re.sub(r"\s*\+\s*(')", r" || \1", body_content)
-        
+
         # 8. Control Flow (IF/WHILE) - Minimal support as per trigger usage
         body_content = re.sub(r'IF\s+(.*?)\s+BEGIN', r'IF \1 THEN', body_content, flags=re.IGNORECASE)
         body_content = re.sub(r'WHILE\s+(.*?)\s+BEGIN', r'WHILE \1 LOOP', body_content, flags=re.IGNORECASE)
         body_content = re.sub(r'ELSE\s+BEGIN', r'ELSE', body_content, flags=re.IGNORECASE)
         body_content = re.sub(r'END\s+ELSE', r'ELSE', body_content, flags=re.IGNORECASE)
-        
+
         # END replacement (simple approach for now, triggers usually simple)
         # But we stripped outer END. Inner ENDs need closure.
         # If we replaced BEGIN with THEN/LOOP, we need END IF/LOOP.
@@ -1700,7 +1710,7 @@ class SybaseASEConnector(DatabaseConnector):
         # User trigger has IF?
         # "IF UPDATE(column)" was handled in old code.
         body_content = re.sub(r'if\s+UPDATE\([a-zA-Z_]+\)', '-- IF UPDATE(column) not supported', body_content, flags=re.IGNORECASE)
-        
+
         # Fix inner ENDs
         # Reuse logic from convert_funcproc_code manually or simplified
         lines = body_content.split('\n')
@@ -1712,7 +1722,7 @@ class SybaseASEConnector(DatabaseConnector):
                 stack.append('IF')
             elif re.search(r'WHILE\s+.*\s+LOOP', line, flags=re.IGNORECASE):
                 stack.append('LOOP')
-            
+
             if re.match(r'^END\s*;?$', stripped, flags=re.IGNORECASE):
                 if stack:
                     block = stack.pop()
@@ -1727,7 +1737,7 @@ class SybaseASEConnector(DatabaseConnector):
             else:
                 new_lines.append(line)
         body_content = '\n'.join(new_lines)
-        
+
         # 9. Semicolon Heuristic (Ensure statements end with ;)
         lines = body_content.split('\n')
         final_lines = []
@@ -1735,18 +1745,18 @@ class SybaseASEConnector(DatabaseConnector):
 
         def flush_buffer(buf):
             if not buf: return
-            # Check the last non-empty line in buffer? 
+            # Check the last non-empty line in buffer?
             # Or assume the statement ends at the last line of buffer?
             # We want to append ; to the last character of the logically complete statement.
             # But buffer contains lines.
-            
+
             # Find last non-empty line index
             last_idx = -1
             for i in range(len(buf) - 1, -1, -1):
                 if buf[i].strip():
                     last_idx = i
                     break
-            
+
             if last_idx != -1:
                 s = buf[last_idx].rstrip()
                 # Don't add if ends with ; or block openers/closers that don't need it (formatting dependent)
@@ -1761,7 +1771,7 @@ class SybaseASEConnector(DatabaseConnector):
                     combined_start = buf[0].strip().split()[0].upper()
                     if combined_start in ('UPDATE', 'INSERT', 'DELETE', 'SELECT', 'Perform', 'CALL', 'WITH', 'MERGE'):
                          buf[last_idx] = s + ';'
-            
+
             final_lines.extend(buf)
 
         for line in lines:
@@ -1774,18 +1784,22 @@ class SybaseASEConnector(DatabaseConnector):
                 is_start = True
             elif ' := ' in line: # Assignment line?
                  is_start = True
-                 
+
             if is_start:
                  flush_buffer(statement_buffer)
                  statement_buffer = [line]
             else:
                  statement_buffer.append(line)
-        
+
         flush_buffer(statement_buffer)
         body_content = '\n'.join(final_lines)
 
         # 10. Return
-        body_content = re.sub(r'RETURN', 'RETURN NEW;', body_content, flags=re.IGNORECASE)
+        # Only replace RETURN word boundary.
+        # Handle RETURN result? Sybase triggers don't typically return values like functions, but RETURN without args exits.
+        # If RETURN 1 or RETURN @var, we might need to be careful.
+        # For now, converting standalone RETURN to RETURN NEW;
+        body_content = re.sub(r'\bRETURN\b', 'RETURN NEW;', body_content, flags=re.IGNORECASE)
         # If RETURN NEW; NEW; (double) -> fix
         body_content = body_content.replace('RETURN NEW; NEW;', 'RETURN NEW;')
 
@@ -1805,13 +1819,13 @@ class SybaseASEConnector(DatabaseConnector):
             END;
             $$ LANGUAGE plpgsql;
             """
-        
+
         pg_trigger = f"""CREATE TRIGGER {trigger_name}
             AFTER {pg_events} ON "{target_schema}"."{target_table}"
             FOR EACH ROW
             EXECUTE FUNCTION {trigger_name}_func();
             """
-            
+
         return pg_func + '\n' + pg_trigger
 
     def fetch_triggers(self, table_id, schema_name, table_name):
@@ -2014,8 +2028,76 @@ class SybaseASEConnector(DatabaseConnector):
                     return sqlglot.exp.Anonymous(this=mapped)
             return node
 
+
+        def transform_sybase_joins(expression):
+            # Check for EQ nodes with outer join comments
+            outer_joins = []
+            for node in expression.find_all(sqlglot.exp.EQ):
+                if node.comments and any('left_outer' in c for c in node.comments):
+                    outer_joins.append((node, 'LEFT'))
+                elif node.comments and any('right_outer' in c for c in node.comments):
+                    outer_joins.append((node, 'RIGHT'))
+
+            for node, join_type in outer_joins:
+                # LEFT JOIN: A *= B -> left=A, right=B (preserves A, B is null supplying)
+                # RIGHT JOIN: A =* B -> left=A, right=B (preserves B, A is null supplying)
+
+                null_supplying_col = node.right if join_type == 'LEFT' else node.left
+
+                # Identify target table from null supplying column
+                target_alias = ""
+                if isinstance(null_supplying_col, sqlglot.exp.Column):
+                     target_alias = null_supplying_col.table
+
+                if not target_alias:
+                    continue
+
+                select_node = node.find_ancestor(sqlglot.exp.Select)
+                if not select_node:
+                    continue
+
+                # Find target table in FROM clause
+                target_table_node = None
+                from_clause = select_node.args.get('from')
+                if from_clause:
+                     for child in from_clause.find_all(sqlglot.exp.Table):
+                         if child.alias_or_name == target_alias:
+                             target_table_node = child
+                             break
+
+                if target_table_node:
+                    # Remove from FROM clause
+                    from_clause.expressions.remove(target_table_node)
+
+                    # Create JOIN
+                    join_condition = node.copy()
+                    join_condition.comments = None
+
+                    join = sqlglot.exp.Join(
+                        this=target_table_node,
+                        kind="LEFT",
+                        on=join_condition
+                    )
+
+                    # Add to Select joins
+                    if "joins" not in select_node.args:
+                        select_node.args["joins"] = []
+                    select_node.args["joins"].append(join)
+
+                    # Replace condition in WHERE with TRUE
+                    node.replace(sqlglot.exp.Boolean(this=True))
+
+            return expression
+
         self.config_parser.print_log_message('DEBUG3', f"settings in convert_view_code: {settings}")
         converted_code = settings['view_code']
+
+        # Pre-process Sybase specific join syntax
+        # *= -> = /* left_outer */
+        # =* -> = /* right_outer */
+        converted_code = re.sub(r'\*=', '= /* left_outer */', converted_code)
+        converted_code = re.sub(r'=\*', '= /* right_outer */', converted_code)
+
         if settings['target_db_type'] == 'postgresql':
 
             try:
@@ -2026,6 +2108,10 @@ class SybaseASEConnector(DatabaseConnector):
 
             # double quote column names
             parsed_code = parsed_code.transform(quote_column_names)
+
+            # Transform Sybase Joins
+            parsed_code = transform_sybase_joins(parsed_code)
+
             self.config_parser.print_log_message('DEBUG3', f"Double quoted columns: {parsed_code.sql()}")
 
             # replace source schema with target schema

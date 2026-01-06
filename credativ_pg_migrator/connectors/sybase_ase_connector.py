@@ -585,7 +585,7 @@ class SybaseASEConnector(DatabaseConnector):
             # Perform substitution
             # Use word boundaries
             try:
-                pattern = re.compile(rf'\b{re.escape(udt_name)}\b', flags=re.IGNORECASE)
+                pattern = re.compile(rf'(?:\[|")?\b{re.escape(udt_name)}\b(?:\]|")?', flags=re.IGNORECASE)
                 text = pattern.sub(base_def, text)
             except re.error:
                 pass
@@ -870,7 +870,7 @@ class SybaseASEConnector(DatabaseConnector):
         procbody = cursor.fetchall()
         cursor.close()
         self.disconnect()
-        procbody_str = ' '.join([body[0] for body in procbody])
+        procbody_str = ''.join([body[0] for body in procbody])
         return procbody_str
 
     def convert_funcproc_code(self, settings):
@@ -1195,7 +1195,7 @@ class SybaseASEConnector(DatabaseConnector):
             clean_line = line.replace('--BLOCK', '').replace('--SINGLE', '')
 
             # Check for DML Start
-            dml_start_match = re.search(r'^\b(UPDATE|INSERT|DELETE)\b', stripped, flags=re.IGNORECASE)
+            dml_start_match = re.search(r'^\b(UPDATE|INSERT|DELETE|SELECT)\b', stripped, flags=re.IGNORECASE)
             if dml_start_match:
                  in_dml = True
 
@@ -1210,8 +1210,8 @@ class SybaseASEConnector(DatabaseConnector):
                       if not prev.strip().endswith(';'):
                            new_lines[-1] = prev + ";"
 
-                      if has_rowcount:
-                           new_lines.append("GET DIAGNOSTICS _rowcount = ROW_COUNT;")
+                 if has_rowcount:
+                      new_lines.append("GET DIAGNOSTICS _rowcount = ROW_COUNT;")
                  in_dml = False
 
             # Also if current line ends with ;, DML is done (simple case)
@@ -1262,6 +1262,13 @@ class SybaseASEConnector(DatabaseConnector):
         # If pending single if matches end of file?
         if pending_single_if:
              new_lines.append("END IF;")
+
+        # If DML is still open at end of body (e.g. because END was stripped), close it
+        if in_dml:
+             if new_lines and not new_lines[-1].strip().endswith(';'):
+                  new_lines[-1] += ";"
+             if has_rowcount:
+                  new_lines.append("GET DIAGNOSTICS _rowcount = ROW_COUNT;")
 
         body_content = '\n'.join(new_lines)
 

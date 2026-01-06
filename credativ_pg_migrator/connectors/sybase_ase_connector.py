@@ -582,6 +582,7 @@ class SybaseASEConnector(DatabaseConnector):
             if udt_name.upper() in ignored_types:
                 continue
 
+            self.config_parser.print_log_message('DEBUG', f"DEBUGGING UDT: Checking {udt_name} -> {base_def}")
             # Perform substitution
             # Use word boundaries
             try:
@@ -883,6 +884,53 @@ class SybaseASEConnector(DatabaseConnector):
         # PROACTIVE FIX: Common OCR/Typo errors in source code
         converted_code = re.sub(r'\bfetc\s+h\b', 'FETCH', converted_code, flags=re.IGNORECASE)
         converted_code = re.sub(r'\bc\s+ursor\b', 'CURSOR', converted_code, flags=re.IGNORECASE)
+
+        # 1.5 Transaction Control - Not supported in PG functions
+        # We comment them out BEFORE extracting body so 'BEGIN TRAN' doesn't confuse BEGIN/END
+        # Handle SAVE TRAN, and named transactions.
+        # Use NULL; /* command */ to preserve statement validity for IF/ELSE
+
+        # Regex for BEGIN/COMMIT/ROLLBACK/SAVE TRAN[SACTION] [name]
+        # We capture the full command to comment it out
+        # We replace with NULL; /* [COMMAND] */
+        # Note: IF ... THEN NULL; is valid. IF ... THEN -- comment \n ... might be risky if newline changes logic.
+        # NULL; is safest relative to flow.
+
+        def tran_replacer(match):
+             cmd = match.group(1)
+             # Avoid 'BEGIN' word in comment to not confuse IF block detection which looks for BEGIN
+             cmd_safe = re.sub(r'\bBEGIN\b', 'START', cmd, flags=re.IGNORECASE)
+             return f"NULL; /* {cmd_safe} */"
+
+        converted_code = re.sub(r'(\b(?:BEGIN|COMMIT|ROLLBACK|SAVE)\s+(?:TRAN|TRANSACTION)(?:\s+[a-zA-Z0-9_]+)?\b)', tran_replacer, converted_code, flags=re.IGNORECASE)
+
+        # 1.6 EXECUTE -> PERFORM (Function Call)
+        # Sybase: EXEC[UTE] proc_name [args]
+        # PG: PERFORM proc_name(args);
+        # Helper to transform EXEC calls
+        def exec_transformer(match):
+            proc_name = match.group(1)
+            args_str = match.group(2)
+            if args_str:
+                args = args_str.strip()
+                # If args are not in parens, wrap them
+                if not args.startswith('('):
+                   # Sybase args are comma separated, sometimes with @
+                   # We clean @
+                   args = args.replace('@', '')
+                   # We assume simple comma separation works for generated SQL
+                   return f"PERFORM {proc_name}({args})"
+                else:
+                    # Already has parens (e.g. EXEC (@sql)) - could be dynamic SQL
+                    # If it's dynamic SQL, it should be text.
+                    return f"PERFORM {proc_name}{args}"
+            else:
+                 # No args
+                 return f"PERFORM {proc_name}()"
+
+        # Regex to catch EXEC/EXECUTE followed by name and optional args
+        # We match until newline or semicolon or end of string
+        converted_code = re.sub(r'\b(?:EXEC|EXECUTE)\s+([a-zA-Z0-9_\.]+)([^\n;]*)(?=;|\n|$)', exec_transformer, converted_code, flags=re.IGNORECASE)
 
         # 2. Extract Header and Body
         # Pattern: CREATE PROC[EDURE] name [params] AS [BEGIN] body [END]

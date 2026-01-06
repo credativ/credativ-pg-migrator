@@ -25,7 +25,7 @@ class MigratorConstants:
 
     @staticmethod
     def get_message_levels():
-        return ['INFO', 'DEBUG', 'DEBUG2', 'DEBUG3']
+        return ['INFO', 'WARNING', 'ERROR', 'DEBUG', 'DEBUG2', 'DEBUG3']
 
     @staticmethod
     def get_default_name():

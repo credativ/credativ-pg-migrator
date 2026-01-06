@@ -310,11 +310,42 @@ class SybaseASEConnector(DatabaseConnector):
 
                     source_data_type_length = f"{source_data_type}({source_length})" if source_length else source_data_type
 
-                    result[ordinal_position]['basic_data_type'] = source_data_type
+                    # Convert base type to PostgreSQL equivalent
+                    # We need types mapping here
+                    types_mapping = self.get_types_mapping(settings)
+
+                    # We need to handle mapped base type
+                    # source_data_type is e.g. 'varchar', 'numeric'
+                    # types_mapping keys are usually uppercase
+                    mapped_type = types_mapping.get(source_data_type.upper(), source_data_type)
+
+                    # If mapped type matches source type (case insensitive), we might still want to uppercase it?
+                    # But types_mapping values are usually what we want (e.g. 'VARCHAR', 'NUMERIC')
+
+                    mapped_type_length = f"{mapped_type}({source_length})" if source_length and self.is_string_type(source_data_type) else (f"{mapped_type}({source_length})" if source_length and self.is_numeric_type(source_data_type) else mapped_type)
+
+                    # Actually, logic for length might differ per type (PG TEXT has no length usually, but VARCHAR does)
+                    # But here we are producing 'basic_column_type' which serves as fallback.
+                    # The original code used source_data_type.
+
+                    # Let's align with how `types_mapping` works.
+                    # If mapped_type is TEXT, we might drop length if source was varchar?
+                    # The request says: "base data types must be converted into proper PostgreSQL types using conversions returned by get_types_mapping function"
+
+                    # Let's use the same logic as _get_udt_codes_mapping will use.
+
+                    mapped_full_type = mapped_type.upper()
+                    if source_length:
+                        if self.is_string_type(source_data_type) and mapped_type.upper() not in ('TEXT', 'BYTEA', 'BOOLEAN', 'INTEGER', 'BIGINT', 'SMALLINT', 'DATE', 'TIMESTAMP', 'TIME'):
+                             mapped_full_type += f"({source_length})"
+                        elif self.is_numeric_type(source_data_type) and mapped_type.upper() in ('NUMERIC', 'DECIMAL'):
+                             mapped_full_type += f"({source_length})"
+
+                    result[ordinal_position]['basic_data_type'] = mapped_type # Was source_data_type
                     result[ordinal_position]['basic_character_maximum_length'] = basic_character_maximum_length
                     result[ordinal_position]['basic_numeric_precision'] = data_type_precision if self.is_numeric_type(source_data_type) else None
                     result[ordinal_position]['basic_numeric_scale'] = data_type_scale if self.is_numeric_type(source_data_type) else None
-                    result[ordinal_position]['basic_column_type'] = source_data_type_length
+                    result[ordinal_position]['basic_column_type'] = mapped_full_type # Was source_data_type_length
 
             cursor.close()
             self.disconnect()
@@ -443,7 +474,7 @@ class SybaseASEConnector(DatabaseConnector):
     def get_create_table_sql(self, settings):
         return ""
 
-    def _get_udt_codes_mapping(self):
+    def _get_udt_codes_mapping(self, settings=None):
         """
         Returns a dictionary mapping UDT names to their base SQL definition.
         Example: {'MY_TYPE': 'VARCHAR(10)', 'NUM_TYPE': 'NUMERIC(10,2)'}
@@ -474,16 +505,16 @@ class SybaseASEConnector(DatabaseConnector):
             # Actually convert_funcproc_code does NOT use DB. But fetch_funcproc_code DOES.
             # Convert happens offline often? No, look at main.py usually.
             # But here we need DB access. So we wrap in connect/disconnect or check self.connection.
-            
+
             should_disconnect = False
             if not self.connection:
                 self.connect()
                 should_disconnect = True
-            
+
             cursor = self.connection.cursor()
             cursor.execute(query)
             rows = cursor.fetchall()
-            
+
             for row in rows:
                 type_name = row[0]
                 length = row[1]
@@ -494,15 +525,27 @@ class SybaseASEConnector(DatabaseConnector):
                 if not base_type:
                     base_type = "UNKNOWN"
 
-                type_sql = base_type.upper()
+                # Convert base_type to PG type
+                # Check mapping
+                pg_base_type = base_type.upper()
+                if settings: ## we must have settings to get types mapping
+                     types_mapping = self.get_types_mapping(settings)
+                     # types_mapping keys are usually uppercase
+                     pg_base_type = types_mapping.get(base_type.upper(), base_type.upper())
+
+                type_sql = pg_base_type
 
                 if base_type.lower() in ('varchar', 'char', 'nvarchar', 'nchar', 'varbinary', 'binary', 'univarchar', 'unichar'):
-                    type_sql += f"({length})"
+                    # Check if PG type supports length?
+                    # If PG type is TEXT, we drop length.
+                    if pg_base_type not in ('TEXT', 'BYTEA', 'DATE', 'TIMESTAMP', 'TIME', 'BOOLEAN', 'INTEGER', 'BIGINT', 'SMALLINT'):
+                        type_sql += f"({length})"
                 elif base_type.lower() in ('numeric', 'decimal'):
-                    type_sql += f"({prec},{scale})"
-                
+                     if pg_base_type in ('NUMERIC', 'DECIMAL'):
+                         type_sql += f"({prec},{scale})"
+
                 udt_map[type_name] = type_sql
-            
+
             cursor.close()
             if should_disconnect:
                 self.disconnect()
@@ -515,12 +558,12 @@ class SybaseASEConnector(DatabaseConnector):
         self._udt_cache = udt_map
         return udt_map
 
-    def _apply_udt_to_base_type_substitutions(self, text):
+    def _apply_udt_to_base_type_substitutions(self, text, settings):
         """
         Apply UDT -> Base Type substitutions, BUT respect config substitutions.
         If a UDT is defined in config data_types_substitution, we SKIP it here.
         """
-        udt_map = self._get_udt_codes_mapping()
+        udt_map = self._get_udt_codes_mapping(settings)
         if not udt_map:
             return text
 
@@ -528,7 +571,7 @@ class SybaseASEConnector(DatabaseConnector):
         config_substitutions = self.config_parser.get_data_types_substitution()
         # config_substitutions is list of [schema, table, source_type, target_type, comment]
         # We collect source types to ignore
-        
+
         ignored_types = set()
         if config_substitutions:
             for entry in config_substitutions:
@@ -538,12 +581,12 @@ class SybaseASEConnector(DatabaseConnector):
         for udt_name, base_def in udt_map.items():
             if udt_name.upper() in ignored_types:
                 continue
-                
+
             # Perform substitution
             # Use word boundaries
             try:
                 pattern = re.compile(rf'\b{re.escape(udt_name)}\b', flags=re.IGNORECASE)
-                text = pattern.sub(base_def, text) 
+                text = pattern.sub(base_def, text)
             except re.error:
                 pass
 
@@ -905,8 +948,8 @@ class SybaseASEConnector(DatabaseConnector):
 
             # Custom type substitutions first
             clean_params = self._apply_data_type_substitutions(clean_params)
-            clean_params = self._apply_udt_to_base_type_substitutions(clean_params)
-            clean_params = self._apply_udt_to_base_type_substitutions(clean_params)
+            clean_params = self._apply_udt_to_base_type_substitutions(clean_params, settings)
+            clean_params = self._apply_udt_to_base_type_substitutions(clean_params, settings)
 
             # Fix 2: Handle OUTPUT -> INOUT
             # Strategy: Split by comma, process each param
@@ -956,7 +999,7 @@ class SybaseASEConnector(DatabaseConnector):
             content_clean = content.replace('@', '')
             # Custom type substitutions first
             content_clean = self._apply_data_type_substitutions(content_clean)
-            content_clean = self._apply_udt_to_base_type_substitutions(content_clean)
+            content_clean = self._apply_udt_to_base_type_substitutions(content_clean, settings)
             for sybase_type, pg_type in types_mapping.items():
                 content_clean = re.sub(rf'\b{re.escape(sybase_type)}\b', pg_type, content_clean, flags=re.IGNORECASE)
 
@@ -1243,7 +1286,7 @@ class SybaseASEConnector(DatabaseConnector):
         # Other types mapping in body
         # Custom type substitutions first
         body_content = self._apply_data_type_substitutions(body_content)
-        body_content = self._apply_udt_to_base_type_substitutions(body_content)
+        body_content = self._apply_udt_to_base_type_substitutions(body_content, settings)
         for sybase_type, pg_type in types_mapping.items():
             body_content = re.sub(rf'\b{re.escape(sybase_type)}\b', pg_type, body_content, flags=re.IGNORECASE)
 
@@ -1895,7 +1938,7 @@ class SybaseASEConnector(DatabaseConnector):
             content_clean = content.replace('@', '')
             # Custom type substitutions first
             content_clean = self._apply_data_type_substitutions(content_clean)
-            content_clean = self._apply_udt_to_base_type_substitutions(content_clean)
+            content_clean = self._apply_udt_to_base_type_substitutions(content_clean, settings)
             for sybase_type, pg_type in types_mapping.items():
                 content_clean = re.sub(rf'\b{re.escape(sybase_type)}\b', pg_type, content_clean, flags=re.IGNORECASE)
 
@@ -1916,8 +1959,8 @@ class SybaseASEConnector(DatabaseConnector):
 
         # Type substitutions in body
         body_content = self._apply_data_type_substitutions(body_content)
-        body_content = self._apply_udt_to_base_type_substitutions(body_content)
-        body_content = self._apply_udt_to_base_type_substitutions(body_content)
+        body_content = self._apply_udt_to_base_type_substitutions(body_content, settings)
+        body_content = self._apply_udt_to_base_type_substitutions(body_content, settings)
         for sybase_type, pg_type in types_mapping.items():
             body_content = re.sub(rf'\b{re.escape(sybase_type)}\b', pg_type, body_content, flags=re.IGNORECASE)
 
@@ -2434,6 +2477,8 @@ class SybaseASEConnector(DatabaseConnector):
         # =* -> = /* right_outer */
         converted_code = re.sub(r'\*=', '= /* left_outer */', converted_code)
         converted_code = re.sub(r'=\*', '= /* right_outer */', converted_code)
+
+        converted_code = self._apply_udt_to_base_type_substitutions(converted_code, settings)
 
         if settings['target_db_type'] == 'postgresql':
 

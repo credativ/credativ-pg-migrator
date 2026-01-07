@@ -1343,7 +1343,8 @@ class Orchestrator:
                             self.handle_error(e, 'fetching view names')
 
                         self.config_parser.print_log_message( 'DEBUG', f"Converting {funcproc_type} {funcproc_data['name']} code...")
-                        converted_code = self.source_connection.convert_funcproc_code({
+                        # converted_code = self.source_connection.convert_funcproc_code({
+                        converted_code = self.source_connection.convert_funcproc_code_v2({
                             'funcproc_code': funcproc_code,
                             'target_db_type': self.config_parser.get_target_db_type(),
                             'source_schema': self.config_parser.get_source_schema(),
@@ -1378,6 +1379,8 @@ class Orchestrator:
                             self.migrator_tables.update_funcproc_status(funcproc_id, False, 'no conversion')
                         self.target_connection.disconnect()
                     except Exception as e:
+                        self.config_parser.print_log_message( 'DEBUG', f"[ERROR] Source code for {funcproc_data['name']}: {funcproc_code}")
+                        self.config_parser.print_log_message( 'DEBUG', f"[ERROR] Converted code for {funcproc_data['name']}: {converted_code}")
                         self.config_parser.print_log_message( 'DEBUG', f"[ERROR] Migrating {funcproc_type} {funcproc_data['name']}.")
                         self.migrator_tables.update_funcproc_status(funcproc_id, False, f'ERROR: {e}')
                         self.config_parser.print_log_message('ERROR', f"Error migrating {funcproc_type} {funcproc_data['name']}: {e}")

@@ -741,7 +741,7 @@ class MigratorTables:
             row = cursor.fetchone()
             cursor.close()
 
-            default_value_row = self.decode_user_defined_type_row(row)
+            default_value_row = self.decode_default_value_row(row)
             self.config_parser.print_log_message( 'DEBUG3', f"insert_default_value: returned row: {default_value_row}")
             self.insert_protocol('default_value', default_value_name, 'create', None, None, None, None, 'info', None, default_value_row['id'])
         except Exception as e:

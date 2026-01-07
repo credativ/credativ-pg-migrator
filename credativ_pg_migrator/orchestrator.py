@@ -218,10 +218,9 @@ class Orchestrator:
                 self.config_parser.print_log_message('DEBUG3', f"run_create_user_defined_types: type_data: {type_data['target_type_sql']}")
                 try:
                     self.target_connection.connect()
-                    
+
                     # Check if domain already exists
                     check_query = """SELECT data_type FROM information_schema.domains WHERE domain_schema = %s AND domain_name = %s"""
-                    # Handle single quotes removal if present in type name for safety, or use parameterized query properly
                     cursor = self.target_connection.connection.cursor()
                     cursor.execute(check_query, (type_data['target_schema_name'], type_data['target_type_name']))
                     existing = cursor.fetchone()
@@ -230,23 +229,24 @@ class Orchestrator:
                     if existing:
                         existing_type = existing[0]
                         target_basic_type = type_data.get('target_basic_type')
-                        
-                        # Compare
-                        # existing_type from PG is usually lowercase or proper case? check_default values uses lower/trim.
-                        # target_basic_type comes from Planner mapping which is usually uppercase.
-                        if target_basic_type and existing_type.lower().strip() == target_basic_type.lower().strip():
-                            msg = f"Domain {type_data['target_type_name']} with underlying type {target_basic_type} already exists. Skipping."
+
+                        # Normalize and compare
+                        norm_existing = self._normalize_data_type(existing_type)
+                        norm_target = self._normalize_data_type(target_basic_type)
+
+                        if target_basic_type and norm_existing == norm_target:
+                            msg = f"Domain {type_data['target_type_name']} with underlying type {target_basic_type} already exists (normalized match: {norm_existing}). Skipping."
                             self.config_parser.print_log_message('INFO', msg)
                             self.migrator_tables.update_user_defined_type_status(type_data['id'], True, 'skipped (exists)')
                         else:
-                            msg = f"Domain {type_data['target_type_name']} already exists but with different underlying type: {existing_type} (expected: {target_basic_type}). Skipping creation."
+                            msg = f"Domain {type_data['target_type_name']} already exists but with different underlying type: {existing_type} (expected: {target_basic_type}). Normalized: {norm_existing} vs {norm_target}. Skipping creation."
                             self.config_parser.print_log_message('ERROR', msg)
                             self.migrator_tables.update_user_defined_type_status(type_data['id'], False, f"ERROR: {msg}")
                     else:
                         self.target_connection.execute_query(type_data['target_type_sql'])
                         self.migrator_tables.update_user_defined_type_status(type_data['id'], True, 'migrated OK')
                         self.config_parser.print_log_message('INFO', f"User defined type {type_data['target_type_name']} created successfully.")
-                    
+
                     self.target_connection.disconnect()
                 except Exception as e:
                     self.migrator_tables.update_user_defined_type_status(type_data['id'], False, f'ERROR: {e}')
@@ -255,6 +255,33 @@ class Orchestrator:
         else:
             self.config_parser.print_log_message('INFO', "No user defined types found to migrate.")
         self.migrator_tables.update_main_status('Orchestrator', 'user defined types migration', True, 'finished OK')
+
+    def _normalize_data_type(self, data_type):
+        """Normalize PostgreSQL data type names for comparison."""
+        if not data_type:
+            return None
+
+        dt = data_type.lower().strip()
+
+        # Mapping of aliases to canonical/common names
+        mapping = {
+            'character varying': 'varchar',
+            'character': 'char',
+            'integer': 'int',
+            'int4': 'int',
+            'bigint': 'int8',
+            'smallint': 'int2',
+            'decimal': 'numeric',
+            'real': 'float4',
+            'double precision': 'float8',
+            'boolean': 'bool',
+            'timestamp without time zone': 'timestamp',
+            'timestamp with time zone': 'timestamptz',
+            'time without time zone': 'time',
+            'time with time zone': 'timetz'
+        }
+
+        return mapping.get(dt, dt)
 
     def run_create_domains(self):
         self.migrator_tables.insert_main('Orchestrator', 'domains migration')

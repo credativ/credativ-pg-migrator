@@ -894,6 +894,10 @@ class SybaseASEConnector(DatabaseConnector):
         funcproc_code = settings['funcproc_code']
         target_db_type = settings['target_db_type']
 
+        # 0. Encapsulate comments
+        # Convert -- comment to /* comment */ to prevent breaking code
+        funcproc_code = re.sub(r'--([^\n]*)', r'/*\1*/', funcproc_code)
+
         # 1. Clean up potential GO statements and strict comments handling if needed (minimal here)
         converted_code = re.sub(r'\bGO\b', '', funcproc_code, flags=re.IGNORECASE)
 
@@ -2193,6 +2197,11 @@ class SybaseASEConnector(DatabaseConnector):
     def convert_trigger(self, settings):
         trigger_name = self.config_parser.convert_names_case(settings['trigger_name'])
         trigger_code = settings['trigger_sql']
+
+        # 0. Encapsulate comments
+        # Convert -- comment to /* comment */ to prevent breaking code
+        trigger_code = re.sub(r'--([^\n]*)', r'/*\1*/', trigger_code)
+
         target_schema = settings['target_schema']
         target_table = self.config_parser.convert_names_case(settings['target_table'])
         target_db_type = settings['target_db_type']

@@ -988,7 +988,7 @@ class SybaseASEConnector(DatabaseConnector):
         # print(f"DEBUG: Body after masking:\n{body_content[:1000]}")
 
         # --- Pre-process Declarations (Variables) ---
-        types_mapping = self.get_types_mapping({'target_db_type': 'postgres'})
+        types_mapping = self.get_types_mapping({'target_db_type': 'postgresql'})
 
         def split_respecting_parens(text):
             parts = []

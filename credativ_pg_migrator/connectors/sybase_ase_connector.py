@@ -1239,7 +1239,7 @@ class SybaseASEConnector(DatabaseConnector):
         # Regex updated to handle comments: stmt -- comment \n ELSE -> stmt; -- comment \n ELSE
         body_content = re.sub(r'([^;\s])([ \t]*(?:--[^\n]*|/\*.*?\*/[ \t]*)?)\n\s*(ELSE|ELSIF)\b', r'\1;\2\n\3', body_content, flags=re.IGNORECASE)
 
-        body_content = re.sub(r'END\s+ELSE', r'ELSE', body_content, flags=re.IGNORECASE | re.MULTILINE)
+        body_content = re.sub(r'END\s*;?\s+ELSE', r'ELSE', body_content, flags=re.IGNORECASE | re.MULTILINE)
 
         # 8.05 Temp Table Handling (# -> tt_)
         # Global replacements of #name with tt_name
@@ -2497,7 +2497,7 @@ class SybaseASEConnector(DatabaseConnector):
         # Standardize other keywords
         body_content = re.sub(r'WHILE\s+(.*?)\s+BEGIN', r'WHILE \1 LOOP', body_content, flags=re.IGNORECASE)
         body_content = re.sub(r'ELSE\s+BEGIN', r'ELSE', body_content, flags=re.IGNORECASE)
-        body_content = re.sub(r'END\s+ELSE', r'ELSE', body_content, flags=re.IGNORECASE)
+        body_content = re.sub(r'END\s*;?\s+ELSE', r'ELSE', body_content, flags=re.IGNORECASE)
 
 
         # END replacement (simple approach for now, triggers usually simple)
@@ -2546,7 +2546,11 @@ class SybaseASEConnector(DatabaseConnector):
             # Find last non-empty line index
             last_idx = -1
             for i in range(len(buf) - 1, -1, -1):
-                if buf[i].strip():
+                line_stripped = buf[i].strip()
+                if line_stripped:
+                    # Skip comments
+                    if line_stripped.startswith('/*') or line_stripped.startswith('--'):
+                        continue
                     last_idx = i
                     break
 

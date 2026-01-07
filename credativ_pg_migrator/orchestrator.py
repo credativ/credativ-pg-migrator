@@ -218,9 +218,35 @@ class Orchestrator:
                 self.config_parser.print_log_message('DEBUG3', f"run_create_user_defined_types: type_data: {type_data['target_type_sql']}")
                 try:
                     self.target_connection.connect()
-                    self.target_connection.execute_query(type_data['target_type_sql'])
-                    self.migrator_tables.update_user_defined_type_status(type_data['id'], True, 'migrated OK')
-                    self.config_parser.print_log_message('INFO', f"User defined type {type_data['target_type_name']} created successfully.")
+                    
+                    # Check if domain already exists
+                    check_query = """SELECT data_type FROM information_schema.domains WHERE domain_schema = %s AND domain_name = %s"""
+                    # Handle single quotes removal if present in type name for safety, or use parameterized query properly
+                    cursor = self.target_connection.connection.cursor()
+                    cursor.execute(check_query, (type_data['target_schema_name'], type_data['target_type_name']))
+                    existing = cursor.fetchone()
+                    cursor.close()
+
+                    if existing:
+                        existing_type = existing[0]
+                        target_basic_type = type_data.get('target_basic_type')
+                        
+                        # Compare
+                        # existing_type from PG is usually lowercase or proper case? check_default values uses lower/trim.
+                        # target_basic_type comes from Planner mapping which is usually uppercase.
+                        if target_basic_type and existing_type.lower().strip() == target_basic_type.lower().strip():
+                            msg = f"Domain {type_data['target_type_name']} with underlying type {target_basic_type} already exists. Skipping."
+                            self.config_parser.print_log_message('INFO', msg)
+                            self.migrator_tables.update_user_defined_type_status(type_data['id'], True, 'skipped (exists)')
+                        else:
+                            msg = f"Domain {type_data['target_type_name']} already exists but with different underlying type: {existing_type} (expected: {target_basic_type}). Skipping creation."
+                            self.config_parser.print_log_message('ERROR', msg)
+                            self.migrator_tables.update_user_defined_type_status(type_data['id'], False, f"ERROR: {msg}")
+                    else:
+                        self.target_connection.execute_query(type_data['target_type_sql'])
+                        self.migrator_tables.update_user_defined_type_status(type_data['id'], True, 'migrated OK')
+                        self.config_parser.print_log_message('INFO', f"User defined type {type_data['target_type_name']} created successfully.")
+                    
                     self.target_connection.disconnect()
                 except Exception as e:
                     self.migrator_tables.update_user_defined_type_status(type_data['id'], False, f'ERROR: {e}')

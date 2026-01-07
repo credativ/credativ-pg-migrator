@@ -470,6 +470,7 @@ class MigratorTables:
             target_schema_name TEXT,
             target_type_name TEXT,
             target_type_sql TEXT,
+            target_basic_type TEXT,
             type_comment TEXT,
             task_created TIMESTAMP DEFAULT clock_timestamp(),
             task_started TIMESTAMP,
@@ -481,23 +482,24 @@ class MigratorTables:
         self.config_parser.print_log_message('DEBUG3', f"Table {table_name} created in schema {self.protocol_schema}")
 
     def insert_user_defined_type(self, settings):
-        ## source_schema_name, source_type_name, source_type_sql, target_schema_name, target_type_name, target_type_sql, type_comment
+        ## source_schema_name, source_type_name, source_type_sql, target_schema_name, target_type_name, target_type_sql, target_basic_type, type_comment
         source_schema_name = settings['source_schema_name']
         source_type_name = settings['source_type_name']
         source_type_sql = settings['source_type_sql']
         target_schema_name = settings['target_schema_name']
         target_type_name = settings['target_type_name']
         target_type_sql = settings['target_type_sql']
+        target_basic_type = settings.get('target_basic_type')
         type_comment = settings['type_comment']
 
         table_name = self.config_parser.get_protocol_name_user_defined_types()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
-            (source_schema_name, source_type_name, source_type_sql, target_schema_name, target_type_name, target_type_sql, type_comment)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            (source_schema_name, source_type_name, source_type_sql, target_schema_name, target_type_name, target_type_sql, target_basic_type, type_comment)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (source_schema_name, source_type_name, source_type_sql, target_schema_name, target_type_name, target_type_sql, type_comment)
+        params = (source_schema_name, source_type_name, source_type_sql, target_schema_name, target_type_name, target_type_sql, target_basic_type, type_comment)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -563,12 +565,13 @@ class MigratorTables:
             'target_schema_name': row[4],
             'target_type_name': row[5],
             'target_type_sql': row[6],
-            'type_comment': row[7],
-            'task_created': row[8],
-            'task_started': row[9],
-            'task_completed': row[10],
-            'success': row[11],
-            'message': row[12]
+            'target_basic_type': row[7],
+            'type_comment': row[8],
+            'task_created': row[9],
+            'task_started': row[10],
+            'task_completed': row[11],
+            'success': row[12],
+            'message': row[13]
         }
 
     def create_table_for_domains(self):

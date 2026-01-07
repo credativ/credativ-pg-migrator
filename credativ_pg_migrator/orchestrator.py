@@ -1346,6 +1346,7 @@ class Orchestrator:
                         # converted_code = self.source_connection.convert_funcproc_code({
                         converted_code = self.source_connection.convert_funcproc_code_v2({
                             'funcproc_code': funcproc_code,
+                            'funcproc_name': funcproc_data['name'],
                             'target_db_type': self.config_parser.get_target_db_type(),
                             'source_schema': self.config_parser.get_source_schema(),
                             'target_schema': self.config_parser.get_target_schema(),

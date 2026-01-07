@@ -120,7 +120,8 @@ try:
     for i, e in enumerate(parsed_body):
         print(f"Expr {i}: Type={type(e)} SQL={e.sql()[:50]}...")
 
-    v2_out = connector.convert_funcproc_code_v2(settings)
+    # Call wrapper to test fallback
+    v2_out = connector.convert_funcproc_code(settings)
     print(v2_out)
 except Exception as e:
     print(f"V2 Error: {e}")

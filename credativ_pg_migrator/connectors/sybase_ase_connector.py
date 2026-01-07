@@ -965,27 +965,27 @@ class SybaseASEConnector(DatabaseConnector):
         declarations.extend(cursor_declarations)
 
         # --- Mask Cursor Commands (OPEN, FETCH, CLOSE, DEALLOCATE) ---
-        # Mask as PRINT 'CURSOR_CMD:...' which is valid/safe T-SQL.
+        # Mask as SELECT 'CURSOR_CMD:...' which uses standard SQL literal string.
 
         def mask_fetch(match):
             cur = match.group(1)
             var = match.group(2)
-            return f"PRINT 'CURSOR_CMD:FETCH {cur} INTO {var}'"
+            return f"SELECT * FROM (SELECT 'CURSOR_CMD:FETCH {cur} INTO {var}') AS _cursor_mask"
 
         def mask_open(match):
-            return f"PRINT 'CURSOR_CMD:OPEN {match.group(1)}'"
+            return f"SELECT * FROM (SELECT 'CURSOR_CMD:OPEN {match.group(1)}') AS _cursor_mask"
 
         def mask_close(match):
-            return f"PRINT 'CURSOR_CMD:CLOSE {match.group(1)}'"
+            return f"SELECT * FROM (SELECT 'CURSOR_CMD:CLOSE {match.group(1)}') AS _cursor_mask"
 
         def mask_deallocate(match):
-            return f"PRINT 'CURSOR_CMD:NULL; -- DEALLOCATE {match.group(1)}'"
+            return f"SELECT * FROM (SELECT 'CURSOR_CMD:NULL; -- DEALLOCATE {match.group(1)}') AS _cursor_mask"
 
         body_content = re.sub(r'\bFETCH\s+([a-zA-Z0-9_]+)\s+INTO\s+@([a-zA-Z0-9_]+)', mask_fetch, body_content, flags=re.IGNORECASE)
         body_content = re.sub(r'\bOPEN\s+([a-zA-Z0-9_]+)', mask_open, body_content, flags=re.IGNORECASE)
         body_content = re.sub(r'\bCLOSE\s+([a-zA-Z0-9_]+)', mask_close, body_content, flags=re.IGNORECASE)
         body_content = re.sub(r'\bDEALLOCATE\s+(?:CURSOR\s+)?([a-zA-Z0-9_]+)', mask_deallocate, body_content, flags=re.IGNORECASE)
-        # print(f"DEBUG: Body after masking:\n{body_content[:500]}")
+        # print(f"DEBUG: Body after masking:\n{body_content[:1000]}")
 
         # --- Pre-process Declarations (Variables) ---
         types_mapping = self.get_types_mapping({'target_db_type': 'postgres'})
@@ -1029,7 +1029,8 @@ class SybaseASEConnector(DatabaseConnector):
 
         # --- Use sqlglot to parse the cleaned body ---
         try:
-            parsed = sqlglot.parse(body_content, read='tsql')
+            # Using error_level='ignore' to allow partial parsing and avoid hard crashes
+            parsed = sqlglot.parse(body_content.strip(), read='tsql', error_level='ignore')
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"Global parsing failed for code: {funcproc_code[:100]}... Error: {e}")
             return f"/* PARSING FAILED: {e} */\n" + funcproc_code
@@ -1038,18 +1039,18 @@ class SybaseASEConnector(DatabaseConnector):
             # Transpile to Postgres
             try:
                 pg_sql = expression.sql(dialect='postgres')
+                skip_semicolon = False
 
-                # 1. Handle masked commands (PRINT 'CURSOR_CMD:...')
+                # 1. Handle masked commands (SELECT 'CURSOR_CMD:...')
                 is_cursor_cmd = False
-                if isinstance(expression, exp.Command) and expression.this.upper().startswith('PRINT'):
-                     # extract message
-                     if expression.expression:
-                          msg = expression.expression.sql()
-                          if 'CURSOR_CMD:' in msg:
-                               # Unmask
-                               clean_msg = msg.strip("'").replace('CURSOR_CMD:', '')
-                               pg_sql = clean_msg
-                               is_cursor_cmd = True
+                if isinstance(expression, exp.Select):
+                      # Check generated SQL for CURSOR_CMD
+                      if "'CURSOR_CMD:" in pg_sql:
+                           # Regex extract
+                           match_cmd = re.search(r"'CURSOR_CMD:(.*?)'", pg_sql)
+                           if match_cmd:
+                                pg_sql = match_cmd.group(1)
+                                is_cursor_cmd = True
 
                 if not is_cursor_cmd:
                     # 2. Normal PRINT -> RAISE NOTICE
@@ -1115,8 +1116,10 @@ class SybaseASEConnector(DatabaseConnector):
                         pg_sql = expression.sql(dialect='postgres')
                         if 'END IF' not in pg_sql.upper():
                             pg_sql += " END IF"
+                        skip_semicolon = True
                     elif hasattr(exp, 'While') and isinstance(expression, exp.While):
                         pg_sql = expression.sql(dialect='postgres')
+                        skip_semicolon = True
 
                     else:
                         pg_sql = expression.sql(dialect='postgres')
@@ -1139,6 +1142,14 @@ class SybaseASEConnector(DatabaseConnector):
                     # Semicolon
                     if not skip_semicolon and not pg_sql.strip().endswith(';'):
                         pg_sql += ';'
+
+                    # Fix sqlglot 'INTERVAL variable unit' generation (e.g. INTERVAL -days day)
+                    # Maps to: (variable * INTERVAL '1 unit')
+                    pg_sql = re.sub(
+                        r"(?i)\bINTERVAL\s+([-@\w]+)\s+(YEAR|MONTH|DAY|HOUR|MINUTE|SECOND)S?\b",
+                        r"(\1 * INTERVAL '1 \2')",
+                        pg_sql
+                    )
 
                     converted_statements.append(pg_sql)
 
@@ -1190,12 +1201,23 @@ class SybaseASEConnector(DatabaseConnector):
         return ddl
 
     def convert_funcproc_code(self, settings):
-        # return self.convert_funcproc_code_v1(settings)
         try:
-            return self.convert_funcproc_code_v2(settings) or ("-- [WARNING] Empty result from V2 conversion\n" + settings.get('funcproc_code', ''))
+            v2_result = self.convert_funcproc_code_v2(settings)
+            # Check for failure markers, empty result, or silent empty body
+            is_valid = v2_result and "/* PARSING FAILED:" not in v2_result
+            if is_valid and "-- [WARNING] Empty input" not in v2_result:
+                 if not re.search(r'BEGIN\s+END;', v2_result.strip()):
+                      return v2_result
+
+            # Fallback to V1
+            self.config_parser.print_log_message('WARNING', "V2 Conversion failed or incomplete, falling back to V1.")
+            return self.convert_funcproc_code_v1(settings)
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"V2 Conversion Critical Failure: {e}")
-            return f"/* CRITICAL FAILURE IN V2: {e} */\n" + settings.get('funcproc_code', '')
+            self.config_parser.print_log_message('ERROR', f"V2 Conversion Critical Failure: {e}. Falling back to V1.")
+            try:
+                return self.convert_funcproc_code_v1(settings)
+            except Exception as v1_e:
+                return f"/* CRITICAL FAILURE IN V1/V2: {e} / {v1_e} */\n" + settings.get('funcproc_code', '')
     def convert_funcproc_code_v1(self, settings):
         funcproc_code = settings['funcproc_code']
         target_db_type = settings['target_db_type']

@@ -1104,6 +1104,10 @@ class SybaseASEConnector(DatabaseConnector):
 
         # 6. Global Variable Replacement in Body
         # Replace @var with var, BUT skip @@system_vars
+
+        # FIX: Rename @return to @v_return to avoid collision with keyword RETURN
+        body_content = re.sub(r'@return\b', '@v_return', body_content, flags=re.IGNORECASE)
+
         body_content = re.sub(r'(?<!@)@([a-zA-Z0-9_]+)', r'\1', body_content)
 
         # Handle @@rowcount

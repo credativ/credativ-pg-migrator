@@ -488,6 +488,61 @@ class SybaseASEConnector(DatabaseConnector):
         if self._udt_cache is not None:
             return self._udt_cache
 
+        udt_map = {}
+        udt_rows = []
+
+        # Priority: Check migrator_tables (Protocol Table)
+        migrator_tables = settings.get('migrator_tables') if settings else None
+
+        if migrator_tables:
+            try:
+                # Assuming migrator_tables has fetch_all_user_defined_types
+                udt_rows = migrator_tables.fetch_all_user_defined_types()
+                # Format of udt_rows from fetch_all_user_defined_types needs to be adapted or used
+                # fetch_all_user_defined_types returns raw rows from migrator protocol table
+                # We need to decode or map them.
+                # Assuming row format: [id, row_data, status, comment, ...] or similar.
+                # Use decode_user_defined_type_row
+
+                # We build udt_map from this list
+                for row_data in udt_rows:
+                    decoded = migrator_tables.decode_user_defined_type_row(row_data)
+                    # format: dict(type_name, base_type, length, prec, scale, ...)
+                    # base_type needs to be mapped to PG type
+
+                    type_name = decoded['type_name']
+                    base_type = decoded['base_type_name']
+                    length = decoded['length'] if decoded['length'] else 0
+                    prec = decoded['prec'] if decoded['prec'] else 0
+                    scale = decoded['scale'] if decoded['scale'] else 0
+
+                    if not base_type: base_type = "UNKNOWN"
+
+                    # Convert base_type to PG type
+                    pg_base_type = base_type.upper()
+                    if settings:
+                         types_mapping = self.get_types_mapping(settings)
+                         pg_base_type = types_mapping.get(base_type.upper(), base_type.upper())
+
+                    type_sql = pg_base_type
+
+                    # Apply length/precision logic (similar to query based loop below)
+                    if base_type.lower() in ('varchar', 'char', 'nvarchar', 'nchar', 'varbinary', 'binary', 'univarchar', 'unichar'):
+                         if pg_base_type not in ('TEXT', 'BYTEA', 'DATE', 'TIMESTAMP', 'TIME', 'BOOLEAN', 'INTEGER', 'BIGINT', 'SMALLINT'):
+                              type_sql += f"({length})"
+                    elif base_type.lower() in ('numeric', 'decimal'):
+                         if pg_base_type in ('NUMERIC', 'DECIMAL'):
+                              type_sql += f"({prec},{scale})"
+
+                    udt_map[type_name] = type_sql
+
+                self._udt_cache = udt_map
+                return udt_map
+
+            except Exception as e:
+                self.config_parser.print_log_message('WARNING', f"Failed to fetch UDTs from protocol table: {e}. Fallback to live query.")
+
+
         query = """
             SELECT
                 t.name as type_name,
@@ -502,16 +557,7 @@ class SybaseASEConnector(DatabaseConnector):
             ORDER BY t.name
         """
 
-        udt_map = {}
         try:
-            # We need to manage connection here if it's not open?
-            # Usually self.connect() is called by the caller of convert_*, or the caller expects it?
-            # The pattern in this class is self.connect() -> cursor -> self.disconnect().
-            # convert_funcproc_code does not open connection itself, it relies on passed in settings usually?
-            # Actually convert_funcproc_code does NOT use DB. But fetch_funcproc_code DOES.
-            # Convert happens offline often? No, look at main.py usually.
-            # But here we need DB access. So we wrap in connect/disconnect or check self.connection.
-
             should_disconnect = False
             if not self.connection:
                 self.connect()
@@ -893,6 +939,7 @@ class SybaseASEConnector(DatabaseConnector):
         return procbody_str
 
     def convert_funcproc_code_v2(self, settings):
+        print(f"DEBUG: Entered convert_funcproc_code_v2 for {settings.get('funcproc_name')}")
         """
         Parser-based conversion using sqlglot.
         Breaks code into logical statements (expressions) and transpiles to Postgres.
@@ -1314,6 +1361,7 @@ class SybaseASEConnector(DatabaseConnector):
         body_start_idx = 0
 
         if header_match:
+            print(f"DEBUG_MATCH: SUCCESS params='{header_match.group(2)}'")
             full_name = header_match.group(1)
             params_str = header_match.group(2).strip()
             # body technically starts after AS.
@@ -1330,6 +1378,7 @@ class SybaseASEConnector(DatabaseConnector):
                 func_schema = settings.get('target_schema', 'public')
         else:
             # Fallback if regex fails - return original or minor mod
+            print(f"DEBUG_FAIL: Header regex failed. Code start: {converted_code[:100]}")
             return converted_code
 
         # Helper to split by comma respecting parens
@@ -1357,12 +1406,19 @@ class SybaseASEConnector(DatabaseConnector):
 
         pg_params = []
         if params_str:
-            # Fix 1: Strip outer parens if present to avoid ((...))
-            # Sybase func often is CREATE P params ... but can be CREATE P (params) ...
-            # Our regex group(2) captures ' (params)' inclusive or ' params'
+            # Fix 1: Robustly strip outer parens
             clean_params = params_str.strip()
-            if clean_params.startswith('(') and clean_params.endswith(')'):
+
+            # Remove comments to allow clean parenthesis check
+            # Note: convert_funcproc_code_v1/v2 already converts -- to /* */
+            clean_params = re.sub(r'/\*.*?\*/', '', clean_params, flags=re.DOTALL).strip()
+
+            while clean_params.startswith('(') and clean_params.endswith(')'):
                 clean_params = clean_params[1:-1].strip()
+                # Re-clean comments in case parens wrapped comments? Unlikely but safe.
+                clean_params = re.sub(r'/\*.*?\*/', '', clean_params, flags=re.DOTALL).strip()
+
+            print(f"DEBUG_PARA: '{func_name}' ORG='{params_str}' CLEAN='{clean_params}'")
 
             clean_params = clean_params.replace('@', '')
 
@@ -1398,6 +1454,7 @@ class SybaseASEConnector(DatabaseConnector):
 
             pg_params_str = ", ".join(processed_params)
         else:
+            print(f"DEBUG_PARA_EMPTY: '{func_name}'")
             pg_params_str = ""
 
         # 4. Process Body

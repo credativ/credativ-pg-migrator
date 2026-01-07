@@ -428,7 +428,7 @@ class MigratorTables:
             AND subtask_name = %s
             RETURNING *
         """
-        params = ('TRUE' if success else 'FALSE', message, task_name, subtask_name)
+        params = ('TRUE' if str(success).upper() == 'TRUE' else 'FALSE', message, task_name, subtask_name)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -523,7 +523,7 @@ class MigratorTables:
             WHERE id = %s
             RETURNING *
         """
-        params = ('TRUE' if success else 'FALSE', message, row_id)
+        params = ('TRUE' if str(success).upper() == 'TRUE' else 'FALSE', message.replace('"', ''), row_id)
         self.config_parser.print_log_message( 'DEBUG3', f"update_user_defined_type_status: query: {query}, params: {params}")
         try:
             cursor = self.protocol_connection.connection.cursor()
@@ -759,7 +759,7 @@ class MigratorTables:
             WHERE id = %s
             RETURNING *
         """
-        params = ('TRUE' if success else 'FALSE', message, row_id)
+        params = ('TRUE' if str(success).upper() == 'TRUE' else 'FALSE', message, row_id)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -1790,7 +1790,7 @@ class MigratorTables:
         WHERE object_protocol_id = %s
         AND object_type = %s
         """
-        params = ('TRUE' if execution_success else 'FALSE', execution_error_message, execution_results, object_protocol_id, object_type)
+        params = ('TRUE' if str(execution_success).upper() == 'TRUE' else 'FALSE', execution_error_message, execution_results, object_protocol_id, object_type)
         self.config_parser.print_log_message('DEBUG', f"update_protocol: Executing query with params: {params}")
         try:
             self.protocol_connection.execute_query(query, params)

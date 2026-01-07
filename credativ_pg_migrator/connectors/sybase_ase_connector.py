@@ -1170,13 +1170,13 @@ class SybaseASEConnector(DatabaseConnector):
              content = match.group(1).strip()
              # Split by comma respecting parens
              args = split_respecting_parens(content)
-             
+
              if not args:
                   return "RAISE NOTICE '';"
-             
+
              first_arg = args[0]
              rest_args = args[1:]
-             
+
              # Check if first arg is a string literal
              if first_arg.startswith("'") and first_arg.endswith("'"):
                   # It's a format string
@@ -1190,9 +1190,9 @@ class SybaseASEConnector(DatabaseConnector):
                   # treat as RAISE NOTICE '%', arg
                   # Use %s for generic? PG RAISE NOTICE uses %
                   # If multiple args, we construct specific format string?
-                  # Sybase PRINT "val" prints val. 
+                  # Sybase PRINT "val" prints val.
                   # PG RAISE NOTICE '%', val.
-                  
+
                   # If multiple args: PRINT @a, @b -> RAISE NOTICE '%, %', @a, @b
                   format_str = ", ".join(["%"] * len(args))
                   return f"RAISE NOTICE '{format_str}', {', '.join(args)};"
@@ -1224,12 +1224,13 @@ class SybaseASEConnector(DatabaseConnector):
         # PG: IF ... THEN ... ELSE ... END IF;
         # We replace "END ELSE" with "ELSE" so the first block merges into the structure,
         # and the final END closes the whole IF.
-        
+
         # FIX: Ensure semicolon before ELSE/ELSIF if missing
         # Sybase often allows: stmt \n ELSE
         # PG needs: stmt; \n ELSE
-        body_content = re.sub(r'([^;\s])\s*\n\s*(ELSE|ELSIF)\b', r'\1;\n\2', body_content, flags=re.IGNORECASE)
-        
+        # Regex updated to handle comments: stmt -- comment \n ELSE -> stmt; -- comment \n ELSE
+        body_content = re.sub(r'([^;\s])([ \t]*(?:--[^\n]*|/\*.*?\*/[ \t]*)?)\n\s*(ELSE|ELSIF)\b', r'\1;\2\n\3', body_content, flags=re.IGNORECASE)
+
         body_content = re.sub(r'END\s+ELSE', r'ELSE', body_content, flags=re.IGNORECASE | re.MULTILINE)
 
         # 8.05 Temp Table Handling (# -> tt_)
@@ -2471,7 +2472,8 @@ class SybaseASEConnector(DatabaseConnector):
         body_content = re.sub(r'rollback\s+(?:trigger|transaction)\s*(.*)', rollback_replacer, body_content, flags=re.IGNORECASE)
 
         # FIX: Ensure semicolon before ELSE/ELSIF if missing
-        body_content = re.sub(r'([^;\s])\s*\n\s*(ELSE|ELSIF)\b', r'\1;\n\2', body_content, flags=re.IGNORECASE)
+        # Regex updated to handle comments
+        body_content = re.sub(r'([^;\s])([ \t]*(?:--[^\n]*|/\*.*?\*/[ \t]*)?)\n\s*(ELSE|ELSIF)\b', r'\1;\2\n\3', body_content, flags=re.IGNORECASE)
 
         # ELSE IF -> ELSIF
         body_content = re.sub(r'ELSE\s+IF', 'ELSIF', body_content, flags=re.IGNORECASE)
@@ -2893,7 +2895,7 @@ class SybaseASEConnector(DatabaseConnector):
                     # Conversion needed
                     new_left = left
                     new_right = right
-                    
+
                     # Cast non-string operands to text to avoid type errors in PostgreSQL
                     if not is_left_string:
                          new_left = sqlglot.exp.Cast(this=left, to=sqlglot.exp.DataType.build('text'))
@@ -3029,45 +3031,23 @@ class SybaseASEConnector(DatabaseConnector):
                 # Should not happen for valid UDTs referencing standard types
                 base_type = "UNKNOWN"
 
-            # Map base type to target DB type
-            mappings = self.get_types_mapping({'target_db_type': 'postgresql'})
-            # Standardize base type name for lookup (often lower case in mapping dict)
+            # Create source type SQL for reference (Sybase DDL)
+            type_sql = base_type.upper()
             base_lower = base_type.lower()
-            if base_lower in mappings:
-                 mapped_type = mappings[base_lower]
-                 # If mapping contains length like 'varchar', good.
-                 # If it contains full definition like 'varchar(255)', we might need to be careful if we append (length) again.
-                 # Usually get_types_mapping returns just the type name 'VARCHAR'.
-                 type_sql = mapped_type.upper()
 
-                 # Check if mapped type supports length
-                 if mapped_type.upper() in ('BOOLEAN', 'BOOL', 'TEXT', 'BYTEA', 'DATE', 'TIMESTAMP', 'TIME', 'INTEGER', 'BIGINT', 'SMALLINT'):
-                     # These types in PG do not take length/prec usually
-                     pass
-                 elif base_lower in ('varchar', 'char', 'nvarchar', 'nchar', 'varbinary', 'binary', 'univarchar', 'unichar'):
-                     type_sql += f"({length})"
-                 elif base_lower in ('numeric', 'decimal'):
-                     type_sql += f"({prec},{scale})"
-                 elif base_lower == 'float':
-                      # Float handling...
-                      pass
-            else:
-                 # Fallback to original behavior if no mapping found (risk of syntax error if not standard)
-                 type_sql = base_type.upper()
-
-                 # Naive length addition for fallback
-                 if base_lower in ('varchar', 'char', 'nvarchar', 'nchar', 'varbinary', 'binary', 'univarchar', 'unichar'):
-                    type_sql += f"({length})"
-                 elif base_lower in ('numeric', 'decimal'):
-                    type_sql += f"({prec},{scale})"
-                 elif base_lower == 'float':
-                    # Float handling
-                    pass
+            if base_lower in ('varchar', 'char', 'nvarchar', 'nchar', 'varbinary', 'binary', 'univarchar', 'unichar'):
+                type_sql += f"({length})"
+            elif base_lower in ('numeric', 'decimal'):
+                type_sql += f"({prec},{scale})"
 
             udts[order_num] = {
                 'schema_name': schema_name,
                 'type_name': type_name,
                 'sql': type_sql,
+                'base_type': base_type,
+                'length': length,
+                'prec': prec,
+                'scale': scale,
                 'comment': ''
             }
             order_num += 1

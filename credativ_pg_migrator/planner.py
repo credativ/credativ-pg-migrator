@@ -876,6 +876,7 @@ class Planner:
                     'target_schema_name': self.target_schema,
                     'target_type_name': type_name,
                     'target_type_sql': target_type_sql,
+                    'target_basic_type': target_base_type,
                     'type_comment': type_info['comment'],
                 })
                 self.config_parser.print_log_message('INFO', f"User defined type {type_name} processed successfully.")

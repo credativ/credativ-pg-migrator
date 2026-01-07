@@ -22,8 +22,10 @@ from credativ_pg_migrator.database_connector import DatabaseConnector
 from credativ_pg_migrator.migrator_logging import MigratorLogger
 import re
 import traceback
+import sys
 from tabulate import tabulate
 import sqlglot
+from sqlglot import exp
 import time
 import datetime
 
@@ -890,7 +892,311 @@ class SybaseASEConnector(DatabaseConnector):
         procbody_str = ''.join([body[0] for body in procbody])
         return procbody_str
 
+    def convert_funcproc_code_v2(self, settings):
+        """
+        Parser-based conversion using sqlglot.
+        Breaks code into logical statements (expressions) and transpiles to Postgres.
+        Includes ported V1 logic for rowcount, exec, assignments, cursors, etc.
+        """
+        funcproc_code = settings['funcproc_code']
+        if not funcproc_code:
+             return "-- [WARNING] Empty input code provided"
+        # target_db_type = settings['target_db_type'] # Typically 'postgres'
+        # print(f"DEBUG: V2 Input Code FULL:\n{repr(funcproc_code)}")
+        # print(f"DEBUG Input Len: {len(funcproc_code)}")
+
+        # --- Pre-processing (Ported from V1 & Enhancements) ---
+
+        # 0. Encapsulate comments
+        funcproc_code = re.sub(r'--([^\n]*)', r'/*\1*/', funcproc_code)
+
+        # 1. Remove GO
+        funcproc_code = re.sub(r'\bGO\b', '', funcproc_code, flags=re.IGNORECASE)
+
+        # 2. Temp Table Replacement (# -> tt_)
+        funcproc_code = re.sub(r'#([a-zA-Z0-9_]+)', r'tt_\1', funcproc_code)
+
+        # 3. Rename @return to @v_return
+        funcproc_code = re.sub(r'@return\b', '@v_return', funcproc_code, flags=re.IGNORECASE)
+
+        # 4. Global @@rowcount detection
+        has_rowcount = '@@rowcount' in funcproc_code.lower()
+
+        # 5. Fix common typos
+        funcproc_code = re.sub(r'\bfetc\s+h\b', 'FETCH', funcproc_code, flags=re.IGNORECASE)
+        funcproc_code = re.sub(r'\bc\s+ursor\b', 'CURSOR', funcproc_code, flags=re.IGNORECASE)
+
+        # 6. @@sqlstatus Replacement
+        funcproc_code = re.sub(r'@@sqlstatus\s*!=\s*0', 'NOT FOUND', funcproc_code, flags=re.IGNORECASE)
+        funcproc_code = re.sub(r'@@sqlstatus\s*=\s*0', 'FOUND', funcproc_code, flags=re.IGNORECASE)
+        funcproc_code = re.sub(r'@@sqlstatus\s*=\s*2', 'NOT FOUND', funcproc_code, flags=re.IGNORECASE)
+
+        # 7. Extract Header (Params) and Body
+        header_match = re.search(r'CREATE\s+(?:PROC|PROCEDURE)\s+([a-zA-Z0-9_\.]+)(.*?)(\bAS\b)', funcproc_code, flags=re.IGNORECASE | re.DOTALL)
+
+        body_content = funcproc_code
+        params_str = ""
+        proc_name = settings['funcproc_name']
+
+        if header_match:
+             proc_name_extracted = header_match.group(1)
+             params_str = header_match.group(2).strip()
+             body_content = funcproc_code[header_match.end(3):].strip()
+
+        # Strip outer BEGIN and END if present
+        if re.match(r'^BEGIN\b', body_content, flags=re.IGNORECASE):
+             body_content = re.sub(r'^BEGIN', '', body_content, count=1, flags=re.IGNORECASE).strip()
+             body_content = re.sub(r'END\s*$', '', body_content, flags=re.IGNORECASE).strip()
+
+        declarations = []
+
+        # --- Pre-process Cursors (Run First!) ---
+        # Match DECLARE name CURSOR FOR ...
+        cursor_declarations = []
+        def cursor_replacer(match):
+             full = match.group(0)
+             clean = re.sub(r'^\s*DECLARE\s+', '', full, flags=re.IGNORECASE).strip()
+             cursor_declarations.append(clean + ';')
+             return '' # remove from body
+
+        # Explicit pattern compile for debugging
+        cursor_pattern = re.compile(r'DECLARE\s+[a-zA-Z0-9_]+\s+CURSOR\s+FOR\s+.*?(?=\bOPEN\b)', re.IGNORECASE | re.DOTALL)
+        body_content = cursor_pattern.sub(cursor_replacer, body_content)
+        declarations.extend(cursor_declarations)
+
+        # --- Mask Cursor Commands (OPEN, FETCH, CLOSE, DEALLOCATE) ---
+        # Mask as PRINT 'CURSOR_CMD:...' which is valid/safe T-SQL.
+
+        def mask_fetch(match):
+            cur = match.group(1)
+            var = match.group(2)
+            return f"PRINT 'CURSOR_CMD:FETCH {cur} INTO {var}'"
+
+        def mask_open(match):
+            return f"PRINT 'CURSOR_CMD:OPEN {match.group(1)}'"
+
+        def mask_close(match):
+            return f"PRINT 'CURSOR_CMD:CLOSE {match.group(1)}'"
+
+        def mask_deallocate(match):
+            return f"PRINT 'CURSOR_CMD:NULL; -- DEALLOCATE {match.group(1)}'"
+
+        body_content = re.sub(r'\bFETCH\s+([a-zA-Z0-9_]+)\s+INTO\s+@([a-zA-Z0-9_]+)', mask_fetch, body_content, flags=re.IGNORECASE)
+        body_content = re.sub(r'\bOPEN\s+([a-zA-Z0-9_]+)', mask_open, body_content, flags=re.IGNORECASE)
+        body_content = re.sub(r'\bCLOSE\s+([a-zA-Z0-9_]+)', mask_close, body_content, flags=re.IGNORECASE)
+        body_content = re.sub(r'\bDEALLOCATE\s+(?:CURSOR\s+)?([a-zA-Z0-9_]+)', mask_deallocate, body_content, flags=re.IGNORECASE)
+        # print(f"DEBUG: Body after masking:\n{body_content[:500]}")
+
+        # --- Pre-process Declarations (Variables) ---
+        types_mapping = self.get_types_mapping({'target_db_type': 'postgres'})
+
+        def split_respecting_parens(text):
+            parts = []
+            current = []
+            depth = 0
+            for char in text:
+                if char == '(':
+                    depth += 1
+                elif char == ')':
+                    depth -= 1
+                if char == ',' and depth == 0:
+                    parts.append("".join(current).strip())
+                    current = []
+                else:
+                    current.append(char)
+            if current:
+                parts.append("".join(current).strip())
+            return parts
+
+        def declaration_replacer(match):
+            full_decl = match.group(0)
+            content = full_decl[7:].strip() # len('DECLARE') = 7
+            content_clean = content.replace('@', '')
+            content_clean = self._apply_data_type_substitutions(content_clean)
+            content_clean = self._apply_udt_to_base_type_substitutions(content_clean, settings)
+            for sybase_type, pg_type in types_mapping.items():
+                content_clean = re.sub(rf'\b{re.escape(sybase_type)}\b', pg_type, content_clean, flags=re.IGNORECASE)
+
+            parts = split_respecting_parens(content_clean)
+            for part in parts:
+                declarations.append(part.strip() + ';')
+            return ''
+
+        # Extract Variable Declarations matches generic DECLARE
+        body_content = re.sub(r'DECLARE\s+@.*?(?=\bBEGIN\b|\bIF\b|\bWHILE\b|\bSELECT\b|\bINSERT\b|\bUPDATE\b|\bDELETE\b|\bRETURN\b|\bSET\b|\bFETCH\b|\bOPEN\b|\bCLOSE\b|\bDEALLOCATE\b|\bDECLARE\b|$)', declaration_replacer, body_content, flags=re.IGNORECASE | re.DOTALL)
+
+        converted_statements = []
+
+        # --- Use sqlglot to parse the cleaned body ---
+        try:
+            parsed = sqlglot.parse(body_content, read='tsql')
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Global parsing failed for code: {funcproc_code[:100]}... Error: {e}")
+            return f"/* PARSING FAILED: {e} */\n" + funcproc_code
+
+        for expression in parsed:
+            # Transpile to Postgres
+            try:
+                pg_sql = expression.sql(dialect='postgres')
+
+                # 1. Handle masked commands (PRINT 'CURSOR_CMD:...')
+                is_cursor_cmd = False
+                if isinstance(expression, exp.Command) and expression.this.upper().startswith('PRINT'):
+                     # extract message
+                     if expression.expression:
+                          msg = expression.expression.sql()
+                          if 'CURSOR_CMD:' in msg:
+                               # Unmask
+                               clean_msg = msg.strip("'").replace('CURSOR_CMD:', '')
+                               pg_sql = clean_msg
+                               is_cursor_cmd = True
+
+                if not is_cursor_cmd:
+                    # 2. Normal PRINT -> RAISE NOTICE
+                    if isinstance(expression, exp.Command) and expression.this.upper().startswith('PRINT'):
+                        msg_match = re.search(r'PRINT\s+(.*)', expression.this, re.IGNORECASE)
+                        if msg_match:
+                            msg_val = msg_match.group(1).strip()
+                            pg_sql = f"RAISE NOTICE {msg_val}"
+                        else:
+                            pg_sql = f"RAISE NOTICE 'PRINT found'"
+
+                    # 3. SELECT Assignments & SELECT INTO
+                    elif isinstance(expression, exp.Select):
+                        generated = expression.sql(dialect='postgres')
+                        match_assign = re.match(r'SELECT\s+([a-zA-Z0-9_]+)\s*=\s*(.*)', generated, re.IGNORECASE)
+                        if match_assign:
+                            var_name = match_assign.group(1).replace('@', '')
+                            val_expr = match_assign.group(2)
+                            pg_sql = f"{var_name} := {val_expr}"
+                        elif 'INTO tt_' in generated:
+                            match_into = re.search(r'\bINTO\s+(tt_[a-zA-Z0-9_]+)', generated)
+                            if match_into:
+                                table = match_into.group(1)
+                                select_part = re.sub(r'\bINTO\s+tt_[a-zA-Z0-9_]+\s*', '', generated)
+                                pg_sql = f"DROP TABLE IF EXISTS {table}; CREATE TEMP TABLE {table} AS {select_part}"
+                            else:
+                                pg_sql = generated
+                        else:
+                            pg_sql = generated
+
+                    # 4. EXEC -> PERFORM or Assignment
+                    elif isinstance(expression, exp.Command) and (expression.this.upper().startswith('EXEC') or expression.this.upper().startswith('EXECUTE')):
+                        gen_sql = expression.sql(dialect='postgres')
+
+                        match_exec_assign = re.match(r'(?:EXEC|EXECUTE)\s+([a-zA-Z0-9_]+)\s*=\s*([a-zA-Z0-9_\.]+)(.*)', gen_sql, re.IGNORECASE)
+                        match_exec = re.match(r'(?:EXEC|EXECUTE)\s+([a-zA-Z0-9_\.]+)(.*)', gen_sql, re.IGNORECASE)
+
+                        if match_exec_assign:
+                            var = match_exec_assign.group(1).replace('@', '')
+                            proc = match_exec_assign.group(2)
+                            args = match_exec_assign.group(3).strip()
+                            args = args.replace('@', '')
+                            if args and not args.startswith('('): args = f"({args})"
+                            elif not args: args = "()"
+                            pg_sql = f"{var} := {proc}{args}"
+                        elif match_exec:
+                            proc = match_exec.group(1)
+                            args = match_exec.group(2).strip()
+                            args = args.replace('@', '')
+                            if args and not args.startswith('('): args = f"({args})"
+                            elif not args: args = "()"
+                            pg_sql = f"PERFORM {proc}{args}"
+                        else:
+                            pg_sql = gen_sql
+
+                    # 5. RETURN
+                    elif isinstance(expression, exp.Return):
+                        pg_sql = "RETURN"
+
+                    # 6. IF / WHILE (Control Flow)
+                    # Safe check for existence of While/If before using instance check if module is old
+                    elif isinstance(expression, exp.If):
+                        pg_sql = expression.sql(dialect='postgres')
+                        if 'END IF' not in pg_sql.upper():
+                            pg_sql += " END IF"
+                    elif hasattr(exp, 'While') and isinstance(expression, exp.While):
+                        pg_sql = expression.sql(dialect='postgres')
+
+                    else:
+                        pg_sql = expression.sql(dialect='postgres')
+
+
+                    # Fix DEALLOCATE CURSOR -> DEALLOCATE
+                    if pg_sql.upper().startswith('DEALLOCATE CURSOR '):
+                        pg_sql = pg_sql.replace('DEALLOCATE CURSOR ', 'DEALLOCATE ')
+                    if pg_sql.upper().startswith('CLOSE CURSOR '): # Sybase CLOSE name, PG CLOSE name.
+                        pg_sql = pg_sql.replace('CLOSE CURSOR ', 'CLOSE ') # just in case
+
+                    # --- Post-processing per statement ---
+
+                    # Fix Variables: Remove '@' (sqlglot might have left some)
+                    pg_sql = re.sub(r'(?<!\w)@([a-zA-Z0-9_]+)', r'\1', pg_sql)
+
+                    # @@rowcount -> _rowcount replacement (if used as var)
+                    pg_sql = re.sub(r'@@rowcount', '_rowcount', pg_sql, flags=re.IGNORECASE)
+
+                    # Semicolon
+                    if not skip_semicolon and not pg_sql.strip().endswith(';'):
+                        pg_sql += ';'
+
+                    converted_statements.append(pg_sql)
+
+                    # --- Rowcount Injection ---
+                    if has_rowcount:
+                        is_dml = isinstance(expression, (exp.Insert, exp.Update, exp.Delete))
+                        if 'SELECT' in pg_sql.upper() and 'INTO' in pg_sql.upper(): is_dml = True
+                        if is_dml:
+                            converted_statements.append("GET DIAGNOSTICS _rowcount = ROW_COUNT;")
+
+            except Exception as e:
+                self.config_parser.print_log_message('WARNING', f"Failed to transpile statement: {expression}. Error: {e}")
+                converted_statements.append(f"-- FAILED CONVERSION: {expression.sql()}\n-- Error: {e}")
+
+        # --- Hoist Declarations ---
+        final_stmts_clean = []
+        for stmt in converted_statements:
+             stmt_stripped = stmt.strip()
+             # Check for Variable declaration
+             if stmt_stripped.upper().startswith('DECLARE '):
+                  declarations.append(stmt_stripped)
+             else:
+                  final_stmts_clean.append(stmt)
+
+        # Inject _rowcount declaration
+        if has_rowcount:
+             declarations.insert(0, "_rowcount INTEGER;")
+
+        final_body = "\n".join(final_stmts_clean)
+
+        # --- Clean Parameters (Ported Logic) ---
+        pg_params_str = params_str
+        if pg_params_str:
+             pg_params_str = re.sub(r'@', '', pg_params_str)
+             pg_params_str = re.sub(r'\bnumeric\b', 'numeric', pg_params_str, flags=re.IGNORECASE)
+             pg_params_str = re.sub(r'\bint\b', 'integer', pg_params_str, flags=re.IGNORECASE)
+
+        # Construct DDL
+        ddl = f"CREATE OR REPLACE FUNCTION {settings['target_schema']}.{proc_name}({pg_params_str})\n"
+        ddl += "RETURNS void AS $$\n"
+        ddl += "DECLARE\n"
+        if declarations:
+             ddl += "\n".join(declarations) + "\n"
+        ddl += "BEGIN\n"
+        ddl += final_body + "\n"
+        ddl += "END;\n"
+        ddl += "$$ LANGUAGE plpgsql;"
+
+        return ddl
+
     def convert_funcproc_code(self, settings):
+        # return self.convert_funcproc_code_v1(settings)
+        try:
+            return self.convert_funcproc_code_v2(settings) or ("-- [WARNING] Empty result from V2 conversion\n" + settings.get('funcproc_code', ''))
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"V2 Conversion Critical Failure: {e}")
+            return f"/* CRITICAL FAILURE IN V2: {e} */\n" + settings.get('funcproc_code', '')
+    def convert_funcproc_code_v1(self, settings):
         funcproc_code = settings['funcproc_code']
         target_db_type = settings['target_db_type']
 
@@ -2198,7 +2504,152 @@ class SybaseASEConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Full stack trace: {traceback.format_exc()}")
             raise e
 
+    def convert_trigger_v2(self, settings):
+        """
+        Parser-based conversion for triggers.
+        Returns the BODY of the Postgres trigger function.
+        Includes ported V1 logic: IF UPDATE, inserted/deleted -> NEW/OLD, etc.
+        """
+        trigger_code = settings['trigger_sql']
+
+        # --- Pre-processing (Ported from V1) ---
+
+        # 0. Encapsulate comments
+        trigger_code = re.sub(r'--([^\n]*)', r'/*\1*/', trigger_code)
+
+        # 1. Remove GO
+        trigger_code = re.sub(r'\bGO\b', '', trigger_code, flags=re.IGNORECASE)
+
+        # 2. Extract Body (After AS) - Critical for sqlglot to just parse statements, not DDL
+        # Pattern: CREATE TRIGGER ... AS [BEGIN] ... [END]
+        # or ... FOR INSERT AS ...
+        # match case insensitive AS on word boundary
+        as_match = re.search(r'\bAS\b', trigger_code, flags=re.IGNORECASE)
+        body_content = trigger_code
+        if as_match:
+             body_content = trigger_code[as_match.end():].strip()
+
+        # 3. Global Replacements specific to Triggers
+
+        # inserted/deleted -> NEW/OLD (Naive but often sufficient for T-SQL -> PG Row Triggers)
+        # Note: In T-SQL, inserted/deleted are tables. In PG Row Triggers, NEW/OLD are records.
+        # If the code does `SELECT ... FROM inserted`, that fails in PG (unless specific workaround).
+        # But commonly: `IF (SELECT count(*) FROM inserted) > 0` -> logic checks.
+        # OR `SELECT @v = col FROM inserted`.
+        # V1 logic replaced them globally. We will do same but watch out for `FROM NEW`.
+
+        body_content = re.sub(r'\binserted\b', 'NEW', body_content, flags=re.IGNORECASE)
+        body_content = re.sub(r'\bdeleted\b', 'OLD', body_content, flags=re.IGNORECASE)
+
+        # Cleanup: Remove `FROM NEW`/`FROM OLD` if they appear in `SELECT ... FROM NEW` pattern?
+        # Because `SELECT ... FROM NEW` is valid T-SQL (table) but invalid PG (record).
+        # PG: `SELECT NEW.col` works directly.
+        # We'll try to handle this during expression processing or strict regex.
+        # Regex from V1: remove FROM clause if it only contains NEW/OLD
+        # We do this PRE-parsing so sqlglot parses `SELECT NEW.col` (valid-ish) instead of `SELECT ... FROM NEW` (invalidish for row)
+
+        # Regex to strip `FROM NEW` / `FROM OLD`
+        # Simple heuristic: `FROM\s+(?:NEW|OLD)\b` -> empty string
+        body_content = re.sub(r'\bFROM\s+(?:NEW|OLD)\b', '', body_content, flags=re.IGNORECASE)
+
+        # 4. IF UPDATE(col) -> IF NEW.col IS DISTINCT FROM OLD.col
+        # This is strictly a T-SQL function. sqlglot might parse it as Func 'UPDATE'.
+        # We can transform it in AST, but regex is reliable for this specific pattern per V1.
+        def if_update_replacer(match):
+            col = match.group(1)
+            return f"NEW.{col} IS DISTINCT FROM OLD.{col}" # PG idiomatic check
+
+        body_content = re.sub(r'\bUPDATE\(([a-zA-Z0-9_]+)\)', if_update_replacer, body_content, flags=re.IGNORECASE)
+
+
+        converted_statements = []
+        try:
+            expressions = sqlglot.parse(body_content, read='tsql')
+
+            for expression in expressions:
+                try:
+                    pg_sql = ""
+                    skip_semicolon = False
+
+                    # 1. ROLLBACK TRIGGER / TRANSACTION -> RAISE EXCEPTION
+                    if isinstance(expression, exp.Command) and 'ROLLBACK' in expression.this.upper():
+                         # Check if it resembles extraction logic from V1
+                         # match string
+                         cmd_str = expression.this.upper()
+                         if 'TRIGGER' in cmd_str or 'TRAN' in cmd_str:
+                              # Extract message if possible? sqlglot Command content is just the string usually.
+                              # V1 extracted message.
+                              # Let's just output generic exception or try to preserve string.
+                              # Original: ROLLBACK TRIGGER WITH RAISERROR 12345 'Message'
+                              # sqlglot might parse 'WITH RAISERROR...' as options?
+                              # Let's rely on regex on the raw expression SQL if we want message.
+                              raw = expression.sql()
+                              msg_match = re.search(r"'([^']+)'", raw)
+                              msg = msg_match.group(1) if msg_match else "Trigger Rollback"
+                              pg_sql = f"RAISE EXCEPTION '{msg}'"
+
+                    elif isinstance(expression, exp.Rollback):
+                         pg_sql = "RAISE EXCEPTION 'Transaction Rollback Not Supported in Trigger'"
+
+                    # 2. PRINT -> RAISE NOTICE (Standard)
+                    elif isinstance(expression, exp.Print):
+                        msg_val = expression.this.sql(dialect='postgres')
+                        pg_sql = f"RAISE NOTICE {msg_val}"
+
+                    # 3. SELECT Assignments (reuse logic)
+                    elif isinstance(expression, exp.Select):
+                        generated = expression.sql(dialect='postgres')
+
+                        # Check "SELECT @v = 1" pattern (sqlglot might emit `SELECT v = 1` or `v := 1`)
+                        match_assign = re.match(r'SELECT\s+([a-zA-Z0-9_]+)\s*=\s*(.*)', generated, re.IGNORECASE)
+                        if match_assign:
+                            var_name = match_assign.group(1).replace('@', '')
+                            val_expr = match_assign.group(2)
+                            pg_sql = f"{var_name} := {val_expr}"
+                        else:
+                            pg_sql = generated
+
+                    # 4. IF / WHILE (Control Flow)
+                    elif isinstance(expression, (exp.If, exp.While)):
+                         pg_sql = expression.sql(dialect='postgres')
+                         if 'END IF' not in pg_sql.upper() and isinstance(expression, exp.If):
+                              pg_sql += " END IF"
+
+                    else:
+                        pg_sql = expression.sql(dialect='postgres')
+
+                    # --- Post-processing per statement ---
+
+                    # Fix Variables: Remove '@' (sqlglot might have left some)
+                    pg_sql = re.sub(r'(?<!\w)@([a-zA-Z0-9_]+)', r'\1', pg_sql)
+
+                    # Fix `NEW`/`OLD` usage confusion if `sqlglot` didn't like them?
+                    # `NEW.col` should work fine.
+
+                    # Semicolon
+                    if not skip_semicolon and not pg_sql.strip().endswith(';'):
+                        pg_sql += ';'
+
+                    converted_statements.append(pg_sql)
+
+                except Exception as e:
+                    self.config_parser.print_log_message('WARNING', f"Failed to transpile trigger statement: {expression}. Error: {e}")
+                    converted_statements.append(f"-- FAILED CONVERSION: {expression.sql()}\n-- Error: {e}")
+
+        except Exception as e:
+             self.config_parser.print_log_message('ERROR', f"Trigger parsing failed: {e}")
+             return f"/* TRIGGER PARSING FAILED: {e} */\n" + body_content
+
+        # Join statements
+        final_body = "\n".join(converted_statements)
+
+        return final_body
+
     def convert_trigger(self, settings):
+        # return self.convert_trigger_v1(settings)
+        return self.convert_trigger_v2(settings)
+
+    def convert_trigger_v1(self, settings):
         trigger_name = self.config_parser.convert_names_case(settings['trigger_name'])
         trigger_code = settings['trigger_sql']
 

@@ -978,22 +978,114 @@ class SybaseASEConnector(DatabaseConnector):
         funcproc_code = re.sub(r'@@sqlstatus\s*=\s*0', 'FOUND', funcproc_code, flags=re.IGNORECASE)
         funcproc_code = re.sub(r'@@sqlstatus\s*=\s*2', 'NOT FOUND', funcproc_code, flags=re.IGNORECASE)
 
+        # 6.5 Transaction Control (Masking)
+        def tran_replacer(match):
+             cmd = match.group(1)
+             cmd_safe = re.sub(r'\bBEGIN\b', 'START', cmd, flags=re.IGNORECASE)
+             return f"NULL; /* {cmd_safe} */"
+        
+        # Regex to mask BEGIN/COMMIT/ROLLBACK/SAVE TRAN...
+        funcproc_code = re.sub(r'(\b(?:BEGIN|COMMIT|ROLLBACK|SAVE)\s+(?:TRAN\w*)(?:[ \t]+(?!(?:DECLARE|SELECT|INSERT|UPDATE|DELETE|EXECUTE|EXEC|RETURN|IF|WHILE|BEGIN|COMMIT|ROLLBACK|SAVE)\b)[a-zA-Z0-9_]+)?\b)', tran_replacer, funcproc_code, flags=re.IGNORECASE)
+
+
         # 7. Extract Header (Params) and Body
         header_match = re.search(r'CREATE\s+(?:PROC|PROCEDURE)\s+([a-zA-Z0-9_\.]+)(.*?)(\bAS\b)', funcproc_code, flags=re.IGNORECASE | re.DOTALL)
 
         body_content = funcproc_code
         params_str = ""
-        proc_name = settings['funcproc_name']
+        proc_name = settings['funcproc_name'] # ENSURE THIS IS SET
+        func_schema = "" # Extracted from header
 
         if header_match:
-             proc_name_extracted = header_match.group(1)
+             full_name = header_match.group(1)
              params_str = header_match.group(2).strip()
              body_content = funcproc_code[header_match.end(3):].strip()
+
+             if '.' in full_name:
+                 parts = full_name.split('.')
+                 func_schema = parts[0]
+                 # func_name = parts[1] 
+             else:
+                 # func_name = full_name
+                 pass
+             
+             if not func_schema:
+                 func_schema = settings.get('target_schema', 'public')
+        else:
+             # Fallback: try to find AS
+             # If no header match, we might have issues.
+             pass
 
         # Strip outer BEGIN and END if present
         if re.match(r'^BEGIN\b', body_content, flags=re.IGNORECASE):
              body_content = re.sub(r'^BEGIN', '', body_content, count=1, flags=re.IGNORECASE).strip()
              body_content = re.sub(r'END\s*$', '', body_content, flags=re.IGNORECASE).strip()
+
+
+        # --- Process Parameters (ROBUST V1 LOGIC) ---
+        target_db_type = 'postgresql' # Force PG
+        types_mapping = self.get_types_mapping({'target_db_type': target_db_type})
+
+        # Helper to split by comma respecting parens
+        def split_respecting_parens(text):
+            parts = []
+            current = []
+            depth = 0
+            for char in text:
+                if char == '(':
+                    depth += 1
+                elif char == ')':
+                    depth -= 1
+                if char == ',' and depth == 0:
+                    parts.append("".join(current).strip())
+                    current = []
+                else:
+                    current.append(char)
+            if current:
+                parts.append("".join(current).strip())
+            return parts
+
+        pg_params_str = ""
+        output_params = [] # Track output params for RETURNS clause
+
+        if params_str:
+            # Fix 1: Robustly strip outer parens
+            clean_params = params_str.strip()
+            # Remove comments to allow clean parenthesis check
+            clean_params = re.sub(r'/\*.*?\*/', '', clean_params, flags=re.DOTALL).strip()
+
+            while clean_params.startswith('(') and clean_params.endswith(')'):
+                clean_params = clean_params[1:-1].strip()
+                clean_params = re.sub(r'/\*.*?\*/', '', clean_params, flags=re.DOTALL).strip()
+
+            clean_params = clean_params.replace('@', '')
+
+            # Custom type substitutions first
+            clean_params = self._apply_data_type_substitutions(clean_params)
+            clean_params = self._apply_udt_to_base_type_substitutions(clean_params, settings)
+
+            # Fix 2: Handle OUTPUT -> INOUT
+            param_parts = split_respecting_parens(clean_params)
+            processed_params = []
+
+            for p in param_parts:
+                p_clean = p.strip()
+                output_match = re.search(r'\bOUTPUT\b', p_clean, flags=re.IGNORECASE)
+                if output_match:
+                    p_clean = re.sub(r'\bOUTPUT\b', '', p_clean, flags=re.IGNORECASE).strip()
+                    p_clean = "INOUT " + p_clean
+                
+                for sybase_type, pg_type in types_mapping.items():
+                    p_clean = re.sub(rf'\b{re.escape(sybase_type)}\b', pg_type, p_clean, flags=re.IGNORECASE)
+                
+                processed_params.append(p_clean)
+
+            pg_params_str = ", ".join(processed_params)
+            
+            # Determine OUTPUT params for RETURNS clause calculation matched later
+            output_params = re.findall(r'\b(INOUT|OUT)\b', pg_params_str, flags=re.IGNORECASE)
+
+        # --------------------------------------------
 
         declarations = []
 
@@ -1072,9 +1164,20 @@ class SybaseASEConnector(DatabaseConnector):
         # Extract Variable Declarations matches generic DECLARE
         body_content = re.sub(r'DECLARE\s+@.*?(?=\bBEGIN\b|\bIF\b|\bWHILE\b|\bSELECT\b|\bINSERT\b|\bUPDATE\b|\bDELETE\b|\bRETURN\b|\bSET\b|\bFETCH\b|\bOPEN\b|\bCLOSE\b|\bDEALLOCATE\b|\bDECLARE\b|$)', declaration_replacer, body_content, flags=re.IGNORECASE | re.DOTALL)
 
-        converted_statements = []
+        # RAISERROR conversion (Masking Strategy)
+        def raiserror_replacer(match):
+            code = match.group(1)
+            msg = match.group(2)
+            if msg.startswith('"'):
+                msg = "'"+ msg[1:-1].replace("'", "''") + "'"
+            # Mask as SELECT 'RAISERROR_CMD:code' AS _cmd, msg AS _msg
+            return f"SELECT 'RAISERROR_CMD:{code}' AS _cmd, {msg} AS _msg"
+
+        body_content = re.sub(r'RAISERROR\s+(\d+)\s+(["\'].*?["\'])', raiserror_replacer, body_content, flags=re.IGNORECASE)
+
 
         # --- Use sqlglot to parse the cleaned body ---
+        converted_statements = []
         try:
             # Using error_level='ignore' to allow partial parsing and avoid hard crashes
             parsed = sqlglot.parse(body_content.strip(), read='tsql', error_level='ignore')
@@ -1086,20 +1189,36 @@ class SybaseASEConnector(DatabaseConnector):
             # Transpile to Postgres
             try:
                 pg_sql = expression.sql(dialect='postgres')
+                # if 'RAISERROR_CMD' in pg_sql:
+                #      print(f"DEBUG_RAISE_SQL: {pg_sql}") # Debug
+                #      pass 
                 skip_semicolon = False
 
-                # 1. Handle masked commands (SELECT 'CURSOR_CMD:...')
+                # 1. Handle masked commands
                 is_cursor_cmd = False
+                is_raise_cmd = False
+
                 if isinstance(expression, exp.Select):
                       # Check generated SQL for CURSOR_CMD
                       if "'CURSOR_CMD:" in pg_sql:
-                           # Regex extract
                            match_cmd = re.search(r"'CURSOR_CMD:(.*?)'", pg_sql)
                            if match_cmd:
                                 pg_sql = match_cmd.group(1)
                                 is_cursor_cmd = True
+                      elif "'RAISERROR_CMD:" in pg_sql:
+                           # Regex look for: SELECT 'RAISERROR_CMD:code' AS _cmd, 'msg' AS _msg
+                           # Generated SQL should look similar.
+                           match_raise = re.search(r"'RAISERROR_CMD:(\d+)'\s+AS\s+_cmd,\s+(.*?)\s+AS\s+_msg", pg_sql, re.IGNORECASE)
+                           if match_raise:
+                                r_code = match_raise.group(1)
+                                r_msg = match_raise.group(2) 
+                                pg_sql = f"RAISE EXCEPTION {r_msg} USING ERRCODE = '{r_code}'"
+                                is_raise_cmd = True
+                           # else:
+                           #      print(f"DEBUG_REGEX_FAIL: {pg_sql}")
 
-                if not is_cursor_cmd:
+
+                if not is_cursor_cmd and not is_raise_cmd:
                     # 2. Normal PRINT -> RAISE NOTICE
                     if isinstance(expression, exp.Command) and expression.this.upper().startswith('PRINT'):
                         msg_match = re.search(r'PRINT\s+(.*)', expression.this, re.IGNORECASE)
@@ -1178,36 +1297,37 @@ class SybaseASEConnector(DatabaseConnector):
                     if pg_sql.upper().startswith('CLOSE CURSOR '): # Sybase CLOSE name, PG CLOSE name.
                         pg_sql = pg_sql.replace('CLOSE CURSOR ', 'CLOSE ') # just in case
 
-                    # --- Post-processing per statement ---
+                # --- Post-processing per statement ---
 
-                    # Fix Variables: Remove '@' (sqlglot might have left some)
-                    pg_sql = re.sub(r'(?<!\w)@([a-zA-Z0-9_]+)', r'\1', pg_sql)
+                # Fix Variables: Remove '@' (sqlglot might have left some)
+                pg_sql = re.sub(r'(?<!\w)@([a-zA-Z0-9_]+)', r'\1', pg_sql)
 
-                    # @@rowcount -> _rowcount replacement (if used as var)
-                    pg_sql = re.sub(r'@@rowcount', '_rowcount', pg_sql, flags=re.IGNORECASE)
+                # @@rowcount -> _rowcount replacement (if used as var)
+                pg_sql = re.sub(r'@@rowcount', '_rowcount', pg_sql, flags=re.IGNORECASE)
 
-                    # Semicolon
-                    if not skip_semicolon and not pg_sql.strip().endswith(';'):
-                        pg_sql += ';'
+                # Semicolon
+                if not skip_semicolon and not pg_sql.strip().endswith(';'):
+                    pg_sql += ';'
 
-                    # Fix sqlglot 'INTERVAL variable unit' generation (e.g. INTERVAL -days day)
-                    # Maps to: (variable * INTERVAL '1 unit')
-                    pg_sql = re.sub(
-                        r"(?i)\bINTERVAL\s+([-@\w]+)\s+(YEAR|MONTH|DAY|HOUR|MINUTE|SECOND)S?\b",
-                        r"(\1 * INTERVAL '1 \2')",
-                        pg_sql
-                    )
+                # Fix sqlglot 'INTERVAL variable unit' generation (e.g. INTERVAL -days day)
+                # Maps to: (variable * INTERVAL '1 unit')
+                pg_sql = re.sub(
+                    r"(?i)\bINTERVAL\s+([-@\w]+)\s+(YEAR|MONTH|DAY|HOUR|MINUTE|SECOND)S?\b",
+                    r"(\1 * INTERVAL '1 \2')",
+                    pg_sql
+                )
 
-                    converted_statements.append(pg_sql)
+                converted_statements.append(pg_sql)
 
-                    # --- Rowcount Injection ---
-                    if has_rowcount:
-                        is_dml = isinstance(expression, (exp.Insert, exp.Update, exp.Delete))
-                        if 'SELECT' in pg_sql.upper() and 'INTO' in pg_sql.upper(): is_dml = True
-                        if is_dml:
-                            converted_statements.append("GET DIAGNOSTICS _rowcount = ROW_COUNT;")
+                # --- Rowcount Injection ---
+                if has_rowcount:
+                    is_dml = isinstance(expression, (exp.Insert, exp.Update, exp.Delete))
+                    if 'SELECT' in pg_sql.upper() and 'INTO' in pg_sql.upper(): is_dml = True
+                    if is_dml:
+                        converted_statements.append("GET DIAGNOSTICS _rowcount = ROW_COUNT;")
 
             except Exception as e:
+                # print(f"DEBUG: Exception {e}")
                 self.config_parser.print_log_message('WARNING', f"Failed to transpile statement: {expression}. Error: {e}")
                 converted_statements.append(f"-- FAILED CONVERSION: {expression.sql()}\n-- Error: {e}")
 
@@ -1228,15 +1348,34 @@ class SybaseASEConnector(DatabaseConnector):
         final_body = "\n".join(final_stmts_clean)
 
         # --- Clean Parameters (Ported Logic) ---
-        pg_params_str = params_str
-        if pg_params_str:
-             pg_params_str = re.sub(r'@', '', pg_params_str)
-             pg_params_str = re.sub(r'\bnumeric\b', 'numeric', pg_params_str, flags=re.IGNORECASE)
-             pg_params_str = re.sub(r'\bint\b', 'integer', pg_params_str, flags=re.IGNORECASE)
+        # NO OP - handled at start
+        # pg_params_str = params_str # REMOVED: Using robust extracted params
+        # if pg_params_str:
+        #      pg_params_str = re.sub(r'@', '', pg_params_str)
+        #      pg_params_str = re.sub(r'\bnumeric\b', 'numeric', pg_params_str, flags=re.IGNORECASE)
+        #      pg_params_str = re.sub(r'\bint\b', 'integer', pg_params_str, flags=re.IGNORECASE)
+
+        
+        # Determine RETURNS clause
+        returns_clause = "RETURNS void"
+        if output_params:
+             if len(output_params) > 1:
+                  returns_clause = "RETURNS RECORD"
+             else:
+                  # Extract type of the single INOUT param
+                  # Look for "INOUT param_name TYPE"
+                  single_out = re.search(r'\b(?:INOUT|OUT)\s+[a-zA-Z0-9_]+\s+([a-zA-Z0-9_]+(?:\(.*\))?)', pg_params_str, flags=re.IGNORECASE)
+                  if single_out:
+                       returns_clause = f"RETURNS {single_out.group(1)}"
+                  else:
+                       returns_clause = "RETURNS RECORD" # Fallback
 
         # Construct DDL
-        ddl = f"CREATE OR REPLACE FUNCTION {settings['target_schema']}.{proc_name}({pg_params_str})\n"
-        ddl += "RETURNS void AS $$\n"
+        # Use EXTRACTED func_schema if valid, else settings
+        schema_to_use = func_schema if func_schema else settings['target_schema']
+        
+        ddl = f"CREATE OR REPLACE FUNCTION {schema_to_use}.{proc_name}({pg_params_str})\n"
+        ddl += f"{returns_clause} AS $$\n"
         ddl += "DECLARE\n"
         if declarations:
              ddl += "\n".join(declarations) + "\n"

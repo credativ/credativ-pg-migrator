@@ -1352,6 +1352,7 @@ class Orchestrator:
                             'target_schema': self.config_parser.get_target_schema(),
                             'table_list': table_names,
                             'view_list': view_names,
+                            'migrator_tables': self.migrator_tables,
                             })
 
                         self.config_parser.print_log_message( 'DEBUG', "Checking for remote objects substitution in functions/procedures...")

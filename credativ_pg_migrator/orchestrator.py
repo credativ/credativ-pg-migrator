@@ -215,6 +215,7 @@ class Orchestrator:
             for type_row in user_defined_types:
                 type_data = self.migrator_tables.decode_user_defined_type_row(type_row)
                 self.config_parser.print_log_message('INFO', f"Creating user defined type {type_data['target_type_name']} in target database.")
+                self.config_parser.print_log_message('DEBUG3', f"run_create_user_defined_types: type_data: {type_data['target_type_sql']}")
                 try:
                     self.target_connection.connect()
                     self.target_connection.execute_query(type_data['target_type_sql'])

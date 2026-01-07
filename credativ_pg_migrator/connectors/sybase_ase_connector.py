@@ -1224,6 +1224,12 @@ class SybaseASEConnector(DatabaseConnector):
         # PG: IF ... THEN ... ELSE ... END IF;
         # We replace "END ELSE" with "ELSE" so the first block merges into the structure,
         # and the final END closes the whole IF.
+        
+        # FIX: Ensure semicolon before ELSE/ELSIF if missing
+        # Sybase often allows: stmt \n ELSE
+        # PG needs: stmt; \n ELSE
+        body_content = re.sub(r'([^;\s])\s*\n\s*(ELSE|ELSIF)\b', r'\1;\n\2', body_content, flags=re.IGNORECASE)
+        
         body_content = re.sub(r'END\s+ELSE', r'ELSE', body_content, flags=re.IGNORECASE | re.MULTILINE)
 
         # 8.05 Temp Table Handling (# -> tt_)
@@ -2463,6 +2469,9 @@ class SybaseASEConnector(DatabaseConnector):
             return f"RAISE EXCEPTION '{message}';"
 
         body_content = re.sub(r'rollback\s+(?:trigger|transaction)\s*(.*)', rollback_replacer, body_content, flags=re.IGNORECASE)
+
+        # FIX: Ensure semicolon before ELSE/ELSIF if missing
+        body_content = re.sub(r'([^;\s])\s*\n\s*(ELSE|ELSIF)\b', r'\1;\n\2', body_content, flags=re.IGNORECASE)
 
         # ELSE IF -> ELSIF
         body_content = re.sub(r'ELSE\s+IF', 'ELSIF', body_content, flags=re.IGNORECASE)

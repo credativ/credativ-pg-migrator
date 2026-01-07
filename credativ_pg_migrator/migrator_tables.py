@@ -507,6 +507,7 @@ class MigratorTables:
             self.config_parser.print_log_message( 'DEBUG3', f"insert_user_defined_type: returned row: {row}")
             user_defined_type_row = self.decode_user_defined_type_row(row)
             self.insert_protocol('user_defined_type', target_type_name, 'create', target_type_sql, None, None, None, 'info', None, user_defined_type_row['id'])
+            return user_defined_type_row['id']
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"insert_user_defined_type: Error inserting user defined type {target_type_name} into {table_name}.")
             self.config_parser.print_log_message('ERROR', e)
@@ -523,6 +524,7 @@ class MigratorTables:
             RETURNING *
         """
         params = ('TRUE' if success else 'FALSE', message, row_id)
+        self.config_parser.print_log_message( 'DEBUG3', f"update_user_defined_type_status: query: {query}, params: {params}")
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -561,7 +563,12 @@ class MigratorTables:
             'target_schema_name': row[4],
             'target_type_name': row[5],
             'target_type_sql': row[6],
-            'type_comment': row[7]
+            'type_comment': row[7],
+            'task_created': row[8],
+            'task_started': row[9],
+            'task_completed': row[10],
+            'success': row[11],
+            'message': row[12]
         }
 
     def create_table_for_domains(self):

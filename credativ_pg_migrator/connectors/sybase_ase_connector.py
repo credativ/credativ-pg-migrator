@@ -409,7 +409,11 @@ class SybaseASEConnector(DatabaseConnector):
 
 
     def get_types_mapping(self, settings):
-        target_db_type = settings['target_db_type']
+        # Guard against None settings or missing key
+        if settings is None:
+            settings = {}
+        target_db_type = settings.get('target_db_type', 'postgresql')
+
         types_mapping = {}
         if target_db_type == 'postgresql':
             types_mapping = {
@@ -442,13 +446,13 @@ class SybaseASEConnector(DatabaseConnector):
                 'NCHAR': 'CHAR',
                 'UNICHAR': 'CHAR',
                 'NVARCHAR': 'VARCHAR',
+                'UNIVARCHAR': 'VARCHAR',
                 'TEXT': 'TEXT',
                 'SYSNAME': 'TEXT',
                 'LONGSYSNAME': 'TEXT',
                 'LONG VARCHAR': 'TEXT',
                 'LONG NVARCHAR': 'TEXT',
                 'UNITEXT': 'TEXT',
-                'UNIVARCHAR': 'VARCHAR',
                 'VARCHAR': 'VARCHAR',
 
                 'CLOB': 'TEXT',
@@ -1163,13 +1167,37 @@ class SybaseASEConnector(DatabaseConnector):
         body_content = re.sub(r'fetch\s+([a-zA-Z0-9_]+)\s+into\s+(.*)', r'FETCH \1 INTO \2;', body_content, flags=re.IGNORECASE)
 
         def print_replacer(match):
-             msg = match.group(1)
-             args = match.group(2)
-             if args:
-                  return f"RAISE NOTICE '{msg}', {args.strip()};"
-             return f"RAISE NOTICE '{msg}';"
+             content = match.group(1).strip()
+             # Split by comma respecting parens
+             args = split_respecting_parens(content)
+             
+             if not args:
+                  return "RAISE NOTICE '';"
+             
+             first_arg = args[0]
+             rest_args = args[1:]
+             
+             # Check if first arg is a string literal
+             if first_arg.startswith("'") and first_arg.endswith("'"):
+                  # It's a format string
+                  msg = first_arg
+                  if rest_args:
+                       return f"RAISE NOTICE {msg}, {', '.join(rest_args)};"
+                  else:
+                       return f"RAISE NOTICE {msg};"
+             else:
+                  # First arg is a variable or expression
+                  # treat as RAISE NOTICE '%', arg
+                  # Use %s for generic? PG RAISE NOTICE uses %
+                  # If multiple args, we construct specific format string?
+                  # Sybase PRINT "val" prints val. 
+                  # PG RAISE NOTICE '%', val.
+                  
+                  # If multiple args: PRINT @a, @b -> RAISE NOTICE '%, %', @a, @b
+                  format_str = ", ".join(["%"] * len(args))
+                  return f"RAISE NOTICE '{format_str}', {', '.join(args)};"
 
-        body_content = re.sub(r'print\s+\'([^\']*)\'(?:,\s*([^\n]+))?', print_replacer, body_content, flags=re.IGNORECASE)
+        body_content = re.sub(r'print\s+(.+?)(?=;|\n|$)', print_replacer, body_content, flags=re.IGNORECASE)
         body_content = re.sub(r'open\s+([a-zA-Z0-9_]+)', r'OPEN \1;', body_content, flags=re.IGNORECASE)
         body_content = re.sub(r'close\s+([a-zA-Z0-9_]+)', r'CLOSE \1;', body_content, flags=re.IGNORECASE)
         body_content = re.sub(r'deallocate\s+cursor\s+([a-zA-Z0-9_]+)', r'DEALLOCATE \1;', body_content, flags=re.IGNORECASE)
@@ -2254,6 +2282,26 @@ class SybaseASEConnector(DatabaseConnector):
         body_content = re.sub(r'SET\s+chained\s+\w+', '', body_content, flags=re.IGNORECASE)
         body_content = re.sub(r'SET\s+transaction\s+isolation\s+level\s+\d+', '', body_content, flags=re.IGNORECASE)
 
+        # PRINT -> RAISE NOTICE
+        def print_replacer(match):
+             content = match.group(1).strip()
+             args = split_respecting_parens(content)
+             if not args:
+                  return "RAISE NOTICE '';"
+             first_arg = args[0]
+             rest_args = args[1:]
+             if first_arg.startswith("'") and first_arg.endswith("'"):
+                  msg = first_arg
+                  if rest_args:
+                       return f"RAISE NOTICE {msg}, {', '.join(rest_args)};"
+                  else:
+                       return f"RAISE NOTICE {msg};"
+             else:
+                  format_str = ", ".join(["%"] * len(args))
+                  return f"RAISE NOTICE '{format_str}', {', '.join(args)};"
+
+        body_content = re.sub(r'print\s+(.+?)(?=;|\n|$)', print_replacer, body_content, flags=re.IGNORECASE)
+
         # 5. Assignments and Selects
 
         # Select Into
@@ -2825,8 +2873,39 @@ class SybaseASEConnector(DatabaseConnector):
 
             return expression
 
+        def convert_string_concatenation(node):
+            if isinstance(node, sqlglot.exp.Add):
+                left = node.left
+                right = node.right
+                is_left_string = left.is_string or (isinstance(left, sqlglot.exp.Cast) and left.to.this.name.upper() in ('VARCHAR', 'CHAR', 'TEXT', 'NVARCHAR', 'NCHAR', 'UNIVARCHAR', 'UNICHAR'))
+                is_right_string = right.is_string or (isinstance(right, sqlglot.exp.Cast) and right.to.this.name.upper() in ('VARCHAR', 'CHAR', 'TEXT', 'NVARCHAR', 'NCHAR', 'UNIVARCHAR', 'UNICHAR'))
+
+                if is_left_string or is_right_string:
+                    # Conversion needed
+                    new_left = left
+                    new_right = right
+                    
+                    # Cast non-string operands to text to avoid type errors in PostgreSQL
+                    if not is_left_string:
+                         new_left = sqlglot.exp.Cast(this=left, to=sqlglot.exp.DataType.build('text'))
+                    if not is_right_string:
+                         new_right = sqlglot.exp.Cast(this=right, to=sqlglot.exp.DataType.build('text'))
+
+                    return sqlglot.exp.DPipe(this=new_left, expression=new_right)
+            return node
+
         self.config_parser.print_log_message('DEBUG3', f"settings in convert_view_code: {settings}")
         converted_code = settings['view_code']
+
+        # Apply remote_objects_substitution
+        remote_subs = self.config_parser.get_remote_objects_substitution()
+        if remote_subs:
+            iterator = remote_subs.items() if isinstance(remote_subs, dict) else remote_subs
+            for source_obj, target_obj in iterator:
+                if source_obj and target_obj:
+                    # Case-insensitive replacement
+                    converted_code = re.sub(re.escape(source_obj), target_obj, converted_code, flags=re.IGNORECASE)
+                    self.config_parser.print_log_message('DEBUG', f"Applied remote object substitution: {source_obj} -> {target_obj}")
 
         # Pre-process Sybase specific join syntax
         # *= -> = /* left_outer */
@@ -2855,6 +2934,9 @@ class SybaseASEConnector(DatabaseConnector):
 
             # Transform Sybase Joins
             parsed_code = transform_sybase_joins(parsed_code)
+
+            # Convert string concatenation + to ||
+            parsed_code = parsed_code.transform(convert_string_concatenation)
 
             self.config_parser.print_log_message('DEBUG3', f"Double quoted columns: {parsed_code.sql()}")
 
@@ -2949,9 +3031,9 @@ class SybaseASEConnector(DatabaseConnector):
                  # Usually get_types_mapping returns just the type name 'VARCHAR'.
                  type_sql = mapped_type.upper()
 
-                 # Check if mapped type is boolean
-                 if mapped_type.upper() in ('BOOLEAN', 'BOOL'):
-                     # Boolean in PG does not take length/prec
+                 # Check if mapped type supports length
+                 if mapped_type.upper() in ('BOOLEAN', 'BOOL', 'TEXT', 'BYTEA', 'DATE', 'TIMESTAMP', 'TIME', 'INTEGER', 'BIGINT', 'SMALLINT'):
+                     # These types in PG do not take length/prec usually
                      pass
                  elif base_lower in ('varchar', 'char', 'nvarchar', 'nchar', 'varbinary', 'binary', 'univarchar', 'unichar'):
                      type_sql += f"({length})"
@@ -2964,6 +3046,7 @@ class SybaseASEConnector(DatabaseConnector):
                  # Fallback to original behavior if no mapping found (risk of syntax error if not standard)
                  type_sql = base_type.upper()
 
+                 # Naive length addition for fallback
                  if base_lower in ('varchar', 'char', 'nvarchar', 'nchar', 'varbinary', 'binary', 'univarchar', 'unichar'):
                     type_sql += f"({length})"
                  elif base_lower in ('numeric', 'decimal'):

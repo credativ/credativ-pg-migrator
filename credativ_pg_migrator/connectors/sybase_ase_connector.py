@@ -1035,12 +1035,22 @@ class SybaseASEConnector(DatabaseConnector):
         funcproc_code = re.sub(r'@@sqlstatus\s*=\s*0', 'FOUND', funcproc_code, flags=re.IGNORECASE)
         funcproc_code = re.sub(r'@@sqlstatus\s*=\s*2', 'NOT FOUND', funcproc_code, flags=re.IGNORECASE)
 
+        # 6.1 Handle @@rowcount, @@error, @@trancount (Replacements)
+        has_trancount = 'global_trancount' in funcproc_code.lower() or '@@trancount' in funcproc_code.lower()
+
+        # Replace @@rowcount with locvar_rowcount
+        funcproc_code = re.sub(r'@@rowcount\b', 'locvar_rowcount', funcproc_code, flags=re.IGNORECASE)
+        # Replace @@error with placeholder (SQLSTATE breaks parsing)
+        funcproc_code = re.sub(r'@@error\b', 'locvar_error_placeholder', funcproc_code, flags=re.IGNORECASE)
+        # Replace @@trancount with global_trancount
+        funcproc_code = re.sub(r'@@trancount\b', 'global_trancount', funcproc_code, flags=re.IGNORECASE)
+
         # 6.5 Transaction Control (Masking)
         def tran_replacer(match):
              cmd = match.group(1)
              cmd_safe = re.sub(r'\bBEGIN\b', 'START', cmd, flags=re.IGNORECASE)
              return f"NULL; /* {cmd_safe} */"
-        
+
         # Regex to mask BEGIN/COMMIT/ROLLBACK/SAVE TRAN...
         funcproc_code = re.sub(r'(\b(?:BEGIN|COMMIT|ROLLBACK|SAVE)\s+(?:TRAN\w*)(?:[ \t]+(?!(?:DECLARE|SELECT|INSERT|UPDATE|DELETE|EXECUTE|EXEC|RETURN|IF|WHILE|BEGIN|COMMIT|ROLLBACK|SAVE)\b)[a-zA-Z0-9_]+)?\b)', tran_replacer, funcproc_code, flags=re.IGNORECASE)
 
@@ -1064,11 +1074,11 @@ class SybaseASEConnector(DatabaseConnector):
              if '.' in full_name:
                  parts = full_name.split('.')
                  func_schema = parts[0]
-                 # func_name = parts[1] 
+                 # func_name = parts[1]
              else:
                  # func_name = full_name
                  pass
-             
+
              if not func_schema:
                  func_schema = settings.get('target_schema', 'public')
         else:
@@ -1134,14 +1144,14 @@ class SybaseASEConnector(DatabaseConnector):
                 if output_match:
                     p_clean = re.sub(r'\bOUTPUT\b', '', p_clean, flags=re.IGNORECASE).strip()
                     p_clean = "INOUT " + p_clean
-                
+
                 for sybase_type, pg_type in types_mapping.items():
                     p_clean = re.sub(rf'\b{re.escape(sybase_type)}\b', pg_type, p_clean, flags=re.IGNORECASE)
-                
+
                 processed_params.append(p_clean)
 
             pg_params_str = ", ".join(processed_params)
-            
+
             # Determine OUTPUT params for RETURNS clause calculation matched later
             output_params = re.findall(r'\b(INOUT|OUT)\b', pg_params_str, flags=re.IGNORECASE)
 
@@ -1242,9 +1252,9 @@ class SybaseASEConnector(DatabaseConnector):
         # To do this robustly with nesting, we need a scanner.
         # Simplification: We rely on "BEGIN" and "END" matching.
         # But we must be careful about strings/comments (already handled/removed partially?).
-        # Double-check comments are handled? Yes, step 0. 
+        # Double-check comments are handled? Yes, step 0.
         # Strings? raiserror mask handles some. Code might still contain strings.
-        
+
         # Helper to convert body strings recursively
         def _recursive_convert_body(body_str):
             # Recurse: We need to instantiate a mini-connector or reuse self methods?
@@ -1258,17 +1268,17 @@ class SybaseASEConnector(DatabaseConnector):
              # Basic scanner for IF/WHILE
              tokens = re.split(r'(\bIF\b|\bWHILE\b|\bBEGIN\b|\bEND\b|\'\'|"(?:[^"]|"")*"|\'(?:[^\']|\'\')*\')', body_content, flags=re.IGNORECASE)
              # tokens include separators. match strings to skip them.
-             
+
              # Re-assembling logic:
              # Scan tokens. If IF/WHILE found, consume condition, then expect stmt or BEGIN...END.
              # If BEGIN found, increment depth. If END found, decrement.
              # This is a bit complex for a regex split.
-             
+
              # Alternative: Regex for simplistic IF condition BEGIN ... END detection (if strictly formatted).
              # But we need robustness.
-             
+
              # Let's use the placeholder approach if we can isolate the blocks.
-             pass 
+             pass
 
         # --- Use sqlglot to parse the cleaned body (or remaining parts) ---
         converted_statements = self._convert_stmts(body_content, settings, has_rowcount=has_rowcount)
@@ -1291,7 +1301,7 @@ class SybaseASEConnector(DatabaseConnector):
 
         # --- Clean Parameters (Ported Logic) ---
         # NO OP - handled at start
-        
+
         # Determine RETURNS clause
         returns_clause = "RETURNS void"
         if output_params:
@@ -1309,7 +1319,7 @@ class SybaseASEConnector(DatabaseConnector):
         # Construct DDL
         # Use EXTRACTED func_schema if valid, else settings
         schema_to_use = func_schema if func_schema else settings['target_schema']
-        
+
         ddl = f"CREATE OR REPLACE FUNCTION {schema_to_use}.{proc_name}({pg_params_str})\n"
         ddl += f"{returns_clause} AS $$\n"
         ddl += "DECLARE\n"
@@ -1332,16 +1342,36 @@ class SybaseASEConnector(DatabaseConnector):
         # We detect IF/WHILE and extract them out to recurse.
 
         import base64
-        
+
         # Pre-process: Inject semicolons between statements to help sqlglot parser (T-SQL dialect issue)
         # We assume statements start with these keywords on new lines.
         # This handles the case where sqlglot consumes newlines without splitting.
+        # Removed SET from here to handle it smartly below.
         processed_body = re.sub(
-             r'([\r\n]+)\s*(?!(?:END|ELSE|WHEN|THEN)\b)(?<!;)\s*\b(SELECT|INSERT|UPDATE|DELETE|EXEC|EXECUTE|SET|RETURN|WITH|DECLARE|PRINT|RAISERROR)\b',
+             r'([\r\n]+)\s*(?!(?:END|ELSE|WHEN|THEN)\b)(?<!;)\s*\b(SELECT|INSERT|UPDATE|DELETE|EXEC|EXECUTE|RETURN|WITH|DECLARE|PRINT|RAISERROR)\b',
              r';\1\2',
              body_content,
              flags=re.IGNORECASE
         )
+
+        def set_injector(match):
+             start_idx = match.start()
+             full_text = match.string
+             preceding = full_text[:start_idx]
+             last_semi = preceding.rfind(';')
+             if last_semi == -1:
+                  snippet = preceding
+             else:
+                  snippet = preceding[last_semi+1:]
+
+             snippet_clean = snippet.strip().upper()
+             # Check if current statement looks like an UPDATE
+             if snippet_clean.startswith('UPDATE'):
+                  return match.group(0)
+             return ';' + match.group(0)
+
+        processed_body = re.sub(r'([\r\n]+)\s*(?<!;)\s*\bSET\b', set_injector, processed_body, flags=re.IGNORECASE)
+
         # Also clean up double semicolons (optional, but clean)
         processed_body = re.sub(r';\s*;', ';', processed_body)
 
@@ -1353,33 +1383,33 @@ class SybaseASEConnector(DatabaseConnector):
         # Scanner state
         # We want to find top-level IF/WHILE in this body_content
         # But splitting mixed content is hard.
-        
+
         # New approach: Let's defer IF/WHILE handling to the loop below IF we can recognize them?
         # NO, sqlglot fails to parse them. We MUST mask them BEFORE sqlglot.
-        
+
         # Regex for 'IF condition BEGIN body END' (greedy body?)
         # Nested BEGIN/END is the problem.
-        
+
         # Let's try to parse balanced BEGIN/END using a custom parser loop *HERE*.
-        
+
         new_chunks = []
         # We need to process body_content.
         # We'll treat body_content as a stream.
-        
-        # Simplistic approach: 
+
+        # Simplistic approach:
         # 1. Regex find "IF ... BEGIN" (lazy) -> Start of block.
         # 2. Iterate chars/tokens from there to find matching END.
         # 3. Replace with MASK.
-        
-        # Since implementing a full tokenizer is error prone in one shot, 
+
+        # Since implementing a full tokenizer is error prone in one shot,
         # we will assume for now that standard sqlglot works for *simple* statements.
         # If sqlglot fails, we catch exception? No, we saw valid IF failed.
 
         # Let's try to match the *Outer* IFs first?
         # A recursive function that scans the string.
-        
+
         # Scan:
-        # Ptr 0. 
+        # Ptr 0.
         # Find next IF / WHILE keyword (outside quotes).
         # If found:
         #    Parse condition (until BEGIN? or implicit?)
@@ -1392,111 +1422,142 @@ class SybaseASEConnector(DatabaseConnector):
         #    Replace with SELECT 'MASKED_IF:condition:encoded_pg_body'
         #    Advance Ptr.
         # Else: Move Ptr.
-        
+
         # Optimization: Only support IF ... BEGIN ... END for now as it's the structure failing.
         # Single line IF might work in sqlglot if simple? (Our test IF 1=1 SELECT 2 failed too though).
-        
-        # THIS IS COMPLEX. 
+
+        # THIS IS COMPLEX.
         # Implementation Plan:
         # use a regex to find candidate "IF ... BEGIN" start.
         # Manual scan for END.
-        
+
         # processed_body = body_content # Already processed above
-        
+
         # Regex for start of block: \b(IF|WHILE)\b\s*(.*?)\s*\bBEGIN\b
-        # We iterate to find the *first* match, handle it, then loop (re-search).
         # This handles nesting because we process from outside in, then recurse.
-        
-        while True:
-            match = re.search(r'(\bIF\b|\bWHILE\b)\s+(.*?)\s+\bBEGIN\b', processed_body, flags=re.IGNORECASE | re.DOTALL)
-            if not match:
-                break
-            
-            kw = match.group(1).upper()
-            cond = match.group(2).strip()
-            start_idx = match.start()
-            begin_end_idx = match.end() # Point after BEGIN
-            
-            # Now scan for matching END from begin_end_idx
-            # We need to count BEGIN vs END tokens.
-            # We must ignore strings/comments. Comments handled in step 0. strings handled by skipping inside quotes.
-            
-            depth = 1
-            idx = begin_end_idx
-            length = len(processed_body)
-            body_start = idx
-            found_end = False
-            
-            while idx < length:
-                 # Check for string literal
-                 char = processed_body[idx]
-                 if char == "'":
-                      # Skip string
-                      idx += 1
-                      while idx < length:
-                           if processed_body[idx] == "'":
-                                if idx+1 < length and processed_body[idx+1] == "'":
-                                     idx += 2
-                                else:
-                                     idx += 1
-                                     break
-                           else:
-                                idx += 1
-                      continue
-                 
-                 # Check keywords
-                 # Look ahead 5 chars
-                 chunk = processed_body[idx:idx+6].upper()
-                 if chunk.startswith('BEGIN') and (idx+5 >= length or not processed_body[idx+5].isalnum()):
-                      depth += 1
-                      idx += 5
-                 elif chunk.startswith('END') and (idx+3 >= length or not processed_body[idx+3].isalnum()):
-                      depth -= 1
-                      if depth == 0:
-                           found_end = True
-                           break
-                      idx += 3
-                 else:
-                      idx += 1
-            
-            if found_end:
-                 # We have the block
-                 block_body = processed_body[body_start:idx]
-                 # Recurse
-                 pg_body_list = self._convert_stmts(block_body, settings, is_nested=True, has_rowcount=has_rowcount, is_trigger=is_trigger)
-                 pg_body = "\n".join(pg_body_list)
-                 
-                 # Encode
-                 b64 = encode_body(pg_body)
-                 masked = f"SELECT 'MASKED_BLOCK:{kw}:{base64.b64encode(cond.encode()).decode()}:{b64}'"
-                 
-                 # Replace in processed_body
-                 # processed_body = prefix + masked + suffix
-                 # idx points to 'E' of END. END length is 3.
-                 end_token_end = idx + 3
-                 
-                 processed_body = processed_body[:start_idx] + masked + ";" + processed_body[end_token_end:]
+
+        # Robust Tokenizer-based Scanner to find IF/WHILE ... BEGIN ... END blocks
+        # This prevents matching keywords inside strings or comments.
+
+        tokenizer_pattern = re.compile(
+            r"('(?:''|[^'])*')|" +  # Group 1: String literal (handles '' escape)
+            r"(--[^\n]*)|" +        # Group 2: Line comment
+            r"(\/\*.*?\*\/)|" +     # Group 3: Block comment
+            r"\b(IF|WHILE|BEGIN|END)\b", # Group 4: Keywords
+            re.IGNORECASE | re.DOTALL
+        )
+
+        matches = list(tokenizer_pattern.finditer(processed_body))
+        blocks_to_mask = []
+        i = 0
+        while i < len(matches):
+            m = matches[i]
+            token_upper = m.group(0).upper()
+
+            # Check if this token is a keyword (Group 4)
+            # If Group 1, 2, or 3 is matched, it's string/comment -> Skip
+            if not m.group(4):
+                i += 1
+                continue
+
+            if token_upper in ('IF', 'WHILE'):
+                # Found potential block start
+                kw = token_upper
+                start_match = m
+                start_full_idx = m.start()
+
+                # Scan forward for matching BEGIN
+                # The condition is the text between IF/WHILE and BEGIN
+
+                j = i + 1
+                begin_match = None
+
+                while j < len(matches):
+                    m_j = matches[j]
+                    if m_j.group(4) and m_j.group(4).upper() == 'BEGIN':
+                         begin_match = m_j
+                         break
+                    # If we hit END before BEGIN, it's not a block we handle (e.g. single stmt IF)
+                    if m_j.group(4) and m_j.group(4).upper() == 'END':
+                         break
+                    j += 1
+
+                if not begin_match:
+                    # No BEGIN found, skip this IF/WHILE (treat as simple stmt)
+                    i += 1
+                    continue
+
+                # Found BEGIN. Now scan for matching END.
+                body_start_idx = begin_match.end()
+                cond_text = processed_body[start_match.end():begin_match.start()].strip()
+
+                depth = 1
+                k = j + 1
+                end_match = None
+
+                while k < len(matches):
+                    m_k = matches[k]
+                    # We only care about Keywords
+                    if m_k.group(4):
+                        tk = m_k.group(4).upper()
+                        if tk == 'BEGIN':
+                            depth += 1
+                        elif tk == 'END':
+                            depth -= 1
+                            if depth == 0:
+                                end_match = m_k
+                                break
+                    k += 1
+
+                if end_match:
+                     # Found complete block!
+                     body_end_idx = end_match.start()
+                     block_body = processed_body[body_start_idx:body_end_idx]
+
+                     # Recurse to convert body
+                     pg_body_list = self._convert_stmts(block_body, settings, is_nested=True, has_rowcount=has_rowcount, is_trigger=is_trigger)
+                     pg_body = "\n".join(pg_body_list)
+
+                     b64 = encode_body(pg_body)
+                     cond_b64 = base64.b64encode(cond_text.encode('utf-8')).decode('utf-8')
+                     masked_sql = f"SELECT 'MASKED_BLOCK:{kw}:{cond_b64}:{b64}';"
+                     # Semicolon added to be safe, though processed_body logic might have them.
+                     # But we are replacing the whole IF...END block with this SELECT.
+
+                     blocks_to_mask.append({
+                         'start': start_full_idx,
+                         'end': end_match.end(),
+                         'replacement': masked_sql
+                     })
+
+                     # Continue scanning AFTER this block
+                     i = k + 1
+                else:
+                     # Unclosed block? Skip IF
+                     i += 1
             else:
-                 # Failed to find matching end. Skip this match to avoid infinite loop?
-                 # Or break? breaking means we leave it for sqlglot (which will fail).
-                 # Better to break to avoid hang.
-                 self.config_parser.print_log_message('WARNING', f"Could not find matching END for {kw} block: {cond[:50]}...")
-                 break
+                # BEGIN/END not starting a block (or skipped)
+                i += 1
+
+        # Apply replacements in reverse order to preserve indices
+        for blk in reversed(blocks_to_mask):
+             processed_body = processed_body[:blk['start']] + blk['replacement'] + processed_body[blk['end']:]
 
         # --- Use sqlglot to parse the cleaned body ---
         converted_statements = []
         try:
             # Using error_level='ignore' to allow partial parsing and avoid hard crashes
             parsed = sqlglot.parse(processed_body.strip(), read='tsql', error_level='ignore')
+            # print(f"DEBUG PARSED: {[e.sql() for e in parsed if e]}")
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"Global parsing failed for code: {body_content[:100]}... Error: {e}")
-            return f"/* PARSING FAILED: {e} */\n" + body_content
+            return [f"/* PARSING FAILED: {e} */\n" + body_content]
 
         for expression in parsed:
             if not expression: continue
             # Transpile to Postgres
             try:
-                
+
                 if is_trigger:
                      if isinstance(expression, exp.Command) and 'ROLLBACK' in expression.this.upper():
                           raw = expression.sql()
@@ -1515,10 +1576,19 @@ class SybaseASEConnector(DatabaseConnector):
                           continue
 
                 pg_sql = expression.sql(dialect='postgres')
-                
-                # if 'RAISERROR_CMD' in pg_sql:
-                #      print(f"DEBUG_RAISE_SQL: {pg_sql}") # Debug
-                #      pass 
+
+                if pg_sql.strip().upper() == 'BEGIN':
+                     continue
+
+                # Replace placeholder with final SQLSTATE
+                pg_sql = pg_sql.replace('locvar_error_placeholder', 'SQLSTATE')
+
+                # Inject ROW_COUNT capture if needed (Skip special internal commands)
+                is_special_cmd = "MASKED_BLOCK:" in pg_sql or "'CURSOR_CMD:" in pg_sql or "'RAISERROR_CMD:" in pg_sql
+                # Note: We check exp.Command too if it might be DML (like TRUNCATE?)
+                if has_rowcount and not is_special_cmd and isinstance(expression, (exp.Insert, exp.Update, exp.Delete, exp.Select)):
+                     pg_sql += ";\nGET DIAGNOSTICS locvar_rowcount = ROW_COUNT"
+
                 skip_semicolon = False
 
                 # 1. Handle masked commands
@@ -1534,22 +1604,22 @@ class SybaseASEConnector(DatabaseConnector):
                                  typ = match_blk.group(1)
                                  cond_b64 = match_blk.group(2)
                                  body_b64 = match_blk.group(3)
-                                 
+
                                  import base64
                                  cond_str = base64.b64decode(cond_b64).decode()
                                  body_str = base64.b64decode(body_b64).decode()
-                                 
+
                                  # Convert condition T-SQL -> Postgres using sqlglot (expression mode)
                                  try:
                                       cond_pg = sqlglot.transpile(cond_str, read='tsql', write='postgres')[0]
                                  except:
                                       cond_pg = cond_str # Fallback
-                                      
+
                                  if typ == 'IF':
                                       pg_sql = f"IF {cond_pg} THEN\n{body_str}\nEND IF"
                                  elif typ == 'WHILE':
                                       pg_sql = f"WHILE {cond_pg} LOOP\n{body_str}\nEND LOOP"
-                                 
+
                                  is_block_cmd = True
 
                       # Check generated SQL for CURSOR_CMD
@@ -1564,10 +1634,10 @@ class SybaseASEConnector(DatabaseConnector):
                            match_raise = re.search(r"'RAISERROR_CMD:(\d+)'\s+AS\s+_cmd,\s+(.*?)\s+AS\s+_msg", pg_sql, re.IGNORECASE)
                            if match_raise:
                                 r_code = match_raise.group(1)
-                                r_msg = match_raise.group(2) 
+                                r_msg = match_raise.group(2)
                                 pg_sql = f"RAISE EXCEPTION {r_msg} USING ERRCODE = '{r_code}'"
                                 is_raise_cmd = True
-                            
+
                             # else:
                             #      print(f"DEBUG_REGEX_FAIL: {pg_sql}")
 
@@ -1678,7 +1748,7 @@ class SybaseASEConnector(DatabaseConnector):
                     is_dml = isinstance(expression, (exp.Insert, exp.Update, exp.Delete))
                     if 'SELECT' in pg_sql.upper() and 'INTO' in pg_sql.upper(): is_dml = True
                     if is_dml:
-                        converted_statements.append("GET DIAGNOSTICS _rowcount = ROW_COUNT;")
+                        converted_statements.append("GET DIAGNOSTICS locvar_rowcount = ROW_COUNT;")
 
             except Exception as e:
                 # print(f"DEBUG: Exception {e}")
@@ -1701,7 +1771,7 @@ class SybaseASEConnector(DatabaseConnector):
         #      pg_params_str = re.sub(r'\bnumeric\b', 'numeric', pg_params_str, flags=re.IGNORECASE)
         #      pg_params_str = re.sub(r'\bint\b', 'integer', pg_params_str, flags=re.IGNORECASE)
 
-        
+
         # Determine RETURNS clause
         returns_clause = "RETURNS void"
         if output_params:
@@ -1719,7 +1789,7 @@ class SybaseASEConnector(DatabaseConnector):
         # Construct DDL
         # Use EXTRACTED func_schema if valid, else settings
         schema_to_use = func_schema if func_schema else settings['target_schema']
-        
+
         ddl = f"CREATE OR REPLACE FUNCTION {schema_to_use}.{proc_name}({pg_params_str})\n"
         ddl += f"{returns_clause} AS $$\n"
         ddl += "DECLARE\n"
@@ -3090,12 +3160,22 @@ class SybaseASEConnector(DatabaseConnector):
         # 1.5 Rename Local Variables (@var -> locvar_var)
         trigger_code = self._rename_sybase_local_variables(trigger_code)
 
+        # 1.6 Handle Global Variables
+        has_rowcount = '@@rowcount' in trigger_code.lower()
+
+        # Replace @@rowcount with locvar_rowcount
+        trigger_code = re.sub(r'@@rowcount\b', 'locvar_rowcount', trigger_code, flags=re.IGNORECASE)
+        # Replace @@error with placeholder (SQLSTATE breaks parsing)
+        trigger_code = re.sub(r'@@error\b', 'locvar_error_placeholder', trigger_code, flags=re.IGNORECASE)
+        # Replace @@trancount with global_trancount
+        trigger_code = re.sub(r'@@trancount\b', 'global_trancount', trigger_code, flags=re.IGNORECASE)
+
         # 2. Extract Body (After AS)
         as_match = re.search(r'\bAS\b', trigger_code, flags=re.IGNORECASE)
         body_content = trigger_code
         if as_match:
              body_content = trigger_code[as_match.end():].strip()
-        
+
         # 3. Global Replacements specific to Triggers
         body_content = re.sub(r'\binserted\b', 'NEW', body_content, flags=re.IGNORECASE)
         body_content = re.sub(r'\bdeleted\b', 'OLD', body_content, flags=re.IGNORECASE)
@@ -3104,7 +3184,7 @@ class SybaseASEConnector(DatabaseConnector):
         # IF UPDATE(col) -> IF NEW.col IS DISTINCT FROM OLD.col
         def if_update_replacer(match):
             col = match.group(1)
-            return f"NEW.{col} IS DISTINCT FROM OLD.{col}" 
+            return f"NEW.{col} IS DISTINCT FROM OLD.{col}"
         body_content = re.sub(r'\bUPDATE\(([a-zA-Z0-9_]+)\)', if_update_replacer, body_content, flags=re.IGNORECASE)
 
         # 4. Extract Declarations (Ported from convert_funcproc_code_v2)
@@ -3142,11 +3222,12 @@ class SybaseASEConnector(DatabaseConnector):
 
         # Expanded lookahead for declaration end
         body_content = re.sub(r'DECLARE\s+(?![@#])[a-zA-Z0-9_].*?(?=\bBEGIN\b|\bEND\b|\bIF\b|\bWHILE\b|\bSELECT\b|\bINSERT\b|\bUPDATE\b|\bDELETE\b|\bRETURN\b|\bSET\b|\bFETCH\b|\bOPEN\b|\bCLOSE\b|\bDEALLOCATE\b|\bDECLARE\b|\bEXEC\b|\bEXECUTE\b|\bPRINT\b|\bRAISERROR\b|\bWAITFOR\b|\bCOMMIT\b|\bROLLBACK\b|\bSAVE\b|$)', declaration_replacer, body_content, flags=re.IGNORECASE | re.DOTALL)
-        
+
+        # 5. Convert Statements (using _convert_stmts logic)
         # 5. Convert Statements (using _convert_stmts logic)
         # Note: _convert_stmts handles block scanning logic internally now
-        converted_statements = self._convert_stmts(body_content, settings, is_nested=False, is_trigger=True)
-        
+        converted_statements = self._convert_stmts(body_content, settings, is_nested=False, is_trigger=True, has_rowcount=has_rowcount)
+
         final_stmts_clean = []
         for stmt in converted_statements:
              stmt_stripped = stmt.strip()
@@ -3154,7 +3235,13 @@ class SybaseASEConnector(DatabaseConnector):
                   declarations.append(stmt_stripped)
              else:
                   final_stmts_clean.append(stmt)
-        
+
+        if has_rowcount:
+             declarations.insert(0, "locvar_rowcount INTEGER;")
+
+        if 'global_trancount' in trigger_code.lower():
+             declarations.insert(0, "global_trancount INTEGER DEFAULT 1;")
+
         final_body = "\n".join(final_stmts_clean)
 
         # 6. Event Extraction
@@ -3545,9 +3632,15 @@ EXECUTE FUNCTION {target_schema}.{trigger_name}_func();
 
             if last_idx != -1:
                 s = buf[last_idx].rstrip()
+
+                # Remove trailing comments for check (to avoid adding ; to BEGIN -- comment)
+                s_code = re.sub(r'--.*', '', s)
+                s_code = re.sub(r'/\*.*?\*/', '', s_code, flags=re.DOTALL)
+                s_code = s_code.strip()
+
                 # Don't add if ends with ; or block openers/closers that don't need it
                 ignore_ends = ('BEGIN', 'THEN', 'LOOP', 'ELSE', ';')
-                if not s.upper().endswith(ignore_ends):
+                if not s_code.upper().endswith(ignore_ends):
                     # Check if it started with a command that needs ;
                     combined = " ".join([b.strip() for b in buf]) # Join all lines to check full start
                     # Remove comments from check

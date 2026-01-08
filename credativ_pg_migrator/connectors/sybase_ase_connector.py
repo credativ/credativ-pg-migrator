@@ -25,9 +25,87 @@ import traceback
 import sys
 from tabulate import tabulate
 import sqlglot
-from sqlglot import exp
+from sqlglot import exp, TokenType
+from sqlglot.dialects import TSQL
 import time
 import datetime
+import logging
+
+
+# Define Custom Block Expression
+class Block(exp.Expression):
+    arg_types = {"expressions": True}
+
+# Register Block with Postgres Generator to allow fallback generation
+from sqlglot.dialects.postgres import Postgres
+def block_handler(self, expression):
+    return "\n".join(self.sql(e) for e in expression.expressions)
+Postgres.Generator.TRANSFORMS[Block] = block_handler
+
+class CustomTSQL(TSQL):
+    class Parser(TSQL.Parser):
+        STATEMENT_PARSERS = TSQL.Parser.STATEMENT_PARSERS.copy()
+        config_parser = None
+
+        def _parse_block(self):
+            if not self._match(TokenType.BEGIN):
+                 pass
+
+            expressions = []
+            loop_counter = 0
+            last_token_idx = -1
+
+            while self._curr and self._curr.token_type != TokenType.END:
+                 loop_counter += 1
+                 if loop_counter > 100000:
+                      raise Exception(f"Potential Infinite Loop in _parse_block at token {self._curr}")
+
+                 # Check progress
+                 current_idx = self._index
+                 if current_idx == last_token_idx:
+                      # Stuck?
+                      msg = f"DEBUG: Processed token {self._curr} but did not advance. Force advance."
+                      if self.config_parser:
+                           self.config_parser.print_log_message('DEBUG', msg)
+                      else:
+                           logging.debug(msg)
+                      self._advance()
+                 last_token_idx = current_idx
+
+                 stmt = self._parse_statement()
+                 if stmt:
+                      expressions.append(stmt)
+                 self._match(TokenType.SEMICOLON)
+
+            self._match(TokenType.END)
+            return Block(expressions=expressions)
+
+        def _parse_if(self):
+            res = self.expression(
+                 exp.If,
+                 this=self._parse_conjunction(),
+                 true=self._parse_statement(),
+                 false=self._parse_statement() if self._match(TokenType.ELSE) else None,
+            )
+            return res
+
+        STATEMENT_PARSERS[TokenType.BEGIN] = lambda self: self._parse_block()
+        if hasattr(TokenType, 'IF'):
+             STATEMENT_PARSERS[getattr(TokenType, 'IF')] = lambda self: self._parse_if()
+
+    class Generator(TSQL.Generator):
+        TRANSFORMS = TSQL.Generator.TRANSFORMS.copy()
+
+        def _block_handler(self, expression):
+            # Block handler needs to process children
+            # Since sqlglot generator expects strings, we need to generate sql for children
+            stmts = []
+            if hasattr(expression, 'expressions'):
+                for e in expression.expressions:
+                    stmts.append(self.sql(e))
+            return "\n".join(stmts)
+
+        TRANSFORMS[Block] = _block_handler
 
 class SybaseASEConnector(DatabaseConnector):
     def __init__(self, config_parser, source_or_target):
@@ -1025,7 +1103,7 @@ class SybaseASEConnector(DatabaseConnector):
 
     def convert_funcproc_code_v2(self, settings):
 
-        print(f"DEBUG: Entered convert_funcproc_code_v2 for {settings.get('funcproc_name')}")
+        self.config_parser.print_log_message('DEBUG', f"Entered convert_funcproc_code_v2 for {settings.get('funcproc_name')}")
         """
         Parser-based conversion using sqlglot.
         Breaks code into logical statements (expressions) and transpiles to Postgres.
@@ -1034,9 +1112,8 @@ class SybaseASEConnector(DatabaseConnector):
         funcproc_code = settings['funcproc_code']
         if not funcproc_code:
              return "-- [WARNING] Empty input code provided"
-        # target_db_type = settings['target_db_type'] # Typically 'postgres'
-        # print(f"DEBUG: V2 Input Code FULL:\n{repr(funcproc_code)}")
-        # print(f"DEBUG Input Len: {len(funcproc_code)}")
+        # self.config_parser.print_log_message('DEBUG', f"V2 Input Code FULL:\n{repr(funcproc_code)}")
+        # self.config_parser.print_log_message('DEBUG', f"Input Len: {len(funcproc_code)}")
 
         # --- Pre-processing (Ported from V1 & Enhancements) ---
 
@@ -1157,6 +1234,8 @@ class SybaseASEConnector(DatabaseConnector):
                 clean_params = clean_params[1:-1].strip()
                 clean_params = re.sub(r'/\*.*?\*/', '', clean_params, flags=re.DOTALL).strip()
 
+            self.config_parser.print_log_message('DEBUG', f"DEBUG_PARA: '{func_name}' ORG='{params_str}' CLEAN='{clean_params}'")
+
             clean_params = clean_params.replace('@', '')
 
             # Custom type substitutions first
@@ -1223,7 +1302,7 @@ class SybaseASEConnector(DatabaseConnector):
         body_content = re.sub(r'\bOPEN\s+([a-zA-Z0-9_]+)', mask_open, body_content, flags=re.IGNORECASE)
         body_content = re.sub(r'\bCLOSE\s+([a-zA-Z0-9_]+)', mask_close, body_content, flags=re.IGNORECASE)
         body_content = re.sub(r'\bDEALLOCATE\s+(?:CURSOR\s+)?([a-zA-Z0-9_]+)', mask_deallocate, body_content, flags=re.IGNORECASE)
-        # print(f"DEBUG: Body after masking:\n{body_content[:1000]}")
+        # self.config_parser.print_log_message('DEBUG', f"Body after masking:\n{body_content[:1000]}")
 
         # --- Pre-process Declarations (Variables) ---
         types_mapping = self.get_types_mapping({'target_db_type': 'postgresql'})
@@ -1385,59 +1464,8 @@ class SybaseASEConnector(DatabaseConnector):
         processed_body = re.sub(r"([\w\.]+)\s*\=\*\s*([\w\.]+)", r"locvar_sybase_right_join(\1, \2)", processed_body)
 
         # --- Use sqlglot to parse the cleaned body ---
-        # Define Custom TSQL Parser to handle IF/BEGIN blocks correctly
-        from sqlglot.dialects import TSQL
-        from sqlglot import TokenType, exp
-
-        # Define Custom Block Expression (missing in older sqlglot?)
-        class Block(exp.Expression):
-             arg_types = {"expressions": True}
-
-        class CustomTSQL(TSQL):
-             class Parser(TSQL.Parser):
-                  STATEMENT_PARSERS = TSQL.Parser.STATEMENT_PARSERS.copy()
-
-                  def _parse_block(self):
-                       if not self._match(TokenType.BEGIN):
-                           pass
-
-                       expressions = []
-                       loop_counter = 0
-                       last_token_idx = -1
-
-                       while self._curr and self._curr.token_type != TokenType.END:
-                            loop_counter += 1
-                            if loop_counter > 100000:
-                                 raise Exception(f"Potential Infinite Loop in _parse_block at token {self._curr}")
-
-                            # Check progress
-                            current_idx = self._idx
-                            if current_idx == last_token_idx:
-                                 # Stuck?
-                                 print(f"DEBUG: Processed token {self._curr} but did not advance. Force advance.")
-                                 self._advance()
-                            last_token_idx = current_idx
-
-                            stmt = self._parse_statement()
-                            if stmt:
-                                 expressions.append(stmt)
-                            self._match(TokenType.SEMICOLON)
-
-                       self._match(TokenType.END)
-                       return Block(expressions=expressions)
-
-                  def _parse_if(self):
-                       res = self.expression(
-                            exp.If,
-                            this=self._parse_conjunction(),
-                            true=self._parse_statement(),
-                             false=self._parse_statement() if self._match(TokenType.ELSE) else None,
-                       )
-                       return res
-
-                  STATEMENT_PARSERS[TokenType.BEGIN] = lambda self: self._parse_block()
-                  if hasattr(TokenType, 'IF'):
-                       STATEMENT_PARSERS[getattr(TokenType, 'IF')] = lambda self: self._parse_if()
+        # CustomTSQL is defined at module level
+        CustomTSQL.Parser.config_parser = self.config_parser
 
         try:
              # Using error_level='ignore' to allow partial parsing and avoid hard crashes
@@ -1450,20 +1478,25 @@ class SybaseASEConnector(DatabaseConnector):
              return [f"/* PARSING FAILED: {e} */\n" + body_content]
 
         converted_statements = []
-
         def process_node(expression):
              if not expression: return None
 
              # Handle Blocks Recursively
-             if isinstance(expression, Block):
+             # Use extensive checks to catch Block processing
+             is_block = isinstance(expression, Block) or type(expression).__name__ == 'Block'
+
+             if is_block:
                   stmts = []
-                  for e in expression.expressions:
-                       s = process_node(e)
-                       if s: stmts.append(s)
+                  if hasattr(expression, 'expressions'):
+                       for e in expression.expressions:
+                            s = process_node(e)
+                            if s: stmts.append(s)
                   return "\n".join(stmts)
 
              # Handle IF Recursively to ensure structure (and avoid sqlglot CASE generation quirks)
-             if isinstance(expression, exp.If):
+             is_if = isinstance(expression, exp.If) or expression.key == 'if' or type(expression).__name__ == 'If'
+
+             if is_if:
                   cond_sql = expression.this.sql(dialect='postgres')
                   true_node = expression.args.get('true')
                   false_node = expression.args.get('false')
@@ -1544,6 +1577,26 @@ class SybaseASEConnector(DatabaseConnector):
                        return "RAISE EXCEPTION 'Transaction Rollback Not Supported in Trigger';"
                   elif isinstance(expression, exp.Return):
                        return "RETURN NEW;"
+
+             # Catch-all debug for confusing failures
+             # Handle CASE Recursively (in case IF was parsed as CASE)
+             if isinstance(expression, exp.Case):
+                  case_sql = f"CASE {process_node(expression.this)}" if expression.this else "CASE"
+                  for i in expression.args.get('ifs', []):
+                       # ifs are usually exp.If or exp.Case for strict SQL, but here likely exp.If
+                       # recursively call process_node on them
+                       case_sql += f"\n{process_node(i)}" # process_node handles IF -> IF ... THEN
+
+                  default = expression.args.get('default')
+                  if default:
+                       case_sql += f"\nELSE {process_node(default)}"
+
+                  case_sql += "\nEND"
+                  return case_sql
+
+             # Catch-all debug for confusing failures
+             self.config_parser.print_log_message('DEBUG', f"FALLTHROUGH GENERIC! Type: {type(expression).__name__}, Key: {expression.key if hasattr(expression, 'key') else 'None'}")
+             # self.config_parser.print_log_message('DEBUG', f"DUMP: {expression}") # Can be verbose
 
              pg_sql = expression.sql(dialect='postgres')
 
@@ -1628,7 +1681,7 @@ class SybaseASEConnector(DatabaseConnector):
                                new_exprs = [a[1] for a in assignments]
                                expression.set('expressions', new_exprs)
                                into_target = ", ".join(targets)
-                               expression.set('into', exp.Into(this=exp.Identifier(this=into_target, quoted=False)))
+                               expression.set('into', exp.Identifier(this=into_target, quoted=False))
                                pg_sql = expression.sql(dialect='postgres')
                           else:
                                lines = []
@@ -1858,7 +1911,7 @@ class SybaseASEConnector(DatabaseConnector):
         body_start_idx = 0
 
         if header_match:
-            print(f"DEBUG_MATCH: SUCCESS params='{header_match.group(2)}'")
+            self.config_parser.print_log_message('DEBUG', f"DEBUG_MATCH: SUCCESS params='{header_match.group(2)}'")
             full_name = header_match.group(1)
             params_str = header_match.group(2).strip()
             # body technically starts after AS.
@@ -1875,7 +1928,7 @@ class SybaseASEConnector(DatabaseConnector):
                 func_schema = settings.get('target_schema', 'public')
         else:
             # Fallback if regex fails - return original or minor mod
-            print(f"DEBUG_FAIL: Header regex failed. Code start: {converted_code[:100]}")
+            self.config_parser.print_log_message('DEBUG', f"DEBUG_FAIL: Header regex failed. Code start: {converted_code[:100]}")
             return converted_code
 
         # Helper to split by comma respecting parens
@@ -1915,7 +1968,7 @@ class SybaseASEConnector(DatabaseConnector):
                 # Re-clean comments in case parens wrapped comments? Unlikely but safe.
                 clean_params = re.sub(r'/\*.*?\*/', '', clean_params, flags=re.DOTALL).strip()
 
-            print(f"DEBUG_PARA: '{func_name}' ORG='{params_str}' CLEAN='{clean_params}'")
+            self.config_parser.print_log_message('DEBUG', f"DEBUG_PARA: '{func_name}' ORG='{params_str}' CLEAN='{clean_params}'")
 
             clean_params = clean_params.replace('@', '')
 
@@ -1951,7 +2004,7 @@ class SybaseASEConnector(DatabaseConnector):
 
             pg_params_str = ", ".join(processed_params)
         else:
-            print(f"DEBUG_PARA_EMPTY: '{func_name}'")
+            self.config_parser.print_log_message('DEBUG', f"DEBUG_PARA_EMPTY: '{func_name}'")
             pg_params_str = ""
 
         # 4. Process Body

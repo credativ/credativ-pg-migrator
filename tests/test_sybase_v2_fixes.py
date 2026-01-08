@@ -46,8 +46,8 @@ def test_v2_fixes():
 
     if "((@a" in res1 or "((a" in res1:
         print("FAIL: Double parens detected!")
-    elif "(a integer)" in res1:
-        print("PASS: Double parens stripped.")
+    elif "(locvar_a integer)" in res1:
+        print("PASS: Double parens stripped (and var renamed).")
     else:
         print("WARN: Check output.")
 
@@ -65,7 +65,7 @@ def test_v2_fixes():
     res3 = connector.convert_funcproc_code_v2(settings)
     print(f"Result 3:\n{res3}\n")
 
-    if "INOUT res integer" in res3 and "RETURNS integer" in res3:
+    if "INOUT locvar_res integer" in res3 and "RETURNS integer" in res3:
         print("PASS: OUTPUT converted to INOUT and RETURNS calculated.")
     else:
         print("FAIL: OUTPUT param handling incorrect.")
@@ -83,6 +83,35 @@ def test_v2_fixes():
         print("PASS: RAISERROR converted.")
     else:
         print("FAIL: RAISERROR not converted.")
+
+
+    # Test Case 5: Variable Renaming & Conflict Handling
+    print("\n[TEST 5] Variable Renaming (@var -> locvar_var)")
+    code_vars = """
+    CREATE PROC test_vars (@p1 int) AS
+    BEGIN
+        DECLARE @v1 int
+        SET @v1 = 10
+        SELECT @p1 = @v1 + 5
+        DECLARE @locvar_v1 int -- Conflict Check
+        SET @locvar_v1 = 99
+    END
+    """
+    settings['funcproc_code'] = code_vars
+    settings['funcproc_name'] = 'test_vars'
+
+    res5 = connector.convert_funcproc_code_v2(settings)
+    print(f"Result 5:\n{res5}")
+
+    # We expect @p1 -> locvar_p1, @v1 -> locvar_v1
+    # @locvar_v1 -> locvar_locvar_v1 (or collision handled?)
+
+    if "locvar_p1" in res5 and "locvar_v1_1" in res5 and "locvar_locvar_v1" in res5:
+        print("PASS: locvar prefix applied and collisions handled (@v1 -> locvar_v1_1 due to collision with @locvar_v1 stem).")
+    else:
+        print("FAIL: Renaming expectations not met.")
+        print("Expected: locvar_p1, locvar_v1_1, locvar_locvar_v1")
+        if "locvar_v1" in res5: print("Note: found locvar_v1 (maybe collision failed?)")
 
 if __name__ == "__main__":
     test_v2_fixes()

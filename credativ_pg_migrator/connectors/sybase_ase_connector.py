@@ -43,9 +43,108 @@ def block_handler(self, expression):
 Postgres.Generator.TRANSFORMS[Block] = block_handler
 
 class CustomTSQL(TSQL):
+    class Tokenizer(TSQL.Tokenizer):
+        COMMANDS = TSQL.Tokenizer.COMMANDS - {TokenType.COMMAND}
+
     class Parser(TSQL.Parser):
-        STATEMENT_PARSERS = TSQL.Parser.STATEMENT_PARSERS.copy()
         config_parser = None
+
+        def _parse_command_custom(self):
+            # Intercept PRINT to parse expression
+            # Note: _parse_statement has already consumed the COMMAND token via STATEMENT_PARSERS dispatch?
+            # Wait, standard dispatch calls handler(self). It does NOT consume token first unless specified?
+            # In sqlglot, STATEMENT_PARSERS map token type to handler.
+            # Usually handler is responsible for consuming.
+            # But my test script showed: "_parse_statement has already consumed the COMMAND token" comment was misleading?
+            # Let's check test script output Step 3279:
+            # DEBUG: _parse_command_custom called. Prev: PRINT, Curr: STRING.
+            # So PRINT WAS CONSUMED.
+            # My test script handler registration: STATEMENT_PARSERS[TokenType.COMMAND] = _parse_command_custom
+            # Sqlglot _parse_statement does: if token in parsers: return parsers[token](self)
+            # It does NOT consume.
+            # EXCEPT if _parse_command_custom is called via _parse_command handling?
+            # No.
+            # Why did my test script say "Matched PRINT" only if I checked _prev?
+
+            # Re-read Step 3279 output carefully.
+            # "Loop. Curr: ... PRINT ..."
+            # "Found handler for TokenType.COMMAND"
+            # "_parse_command_custom called. Prev: ... PRINT ... Curr: ... STRING ..."
+
+            # This implies _parse_statement CONSUMED the token before calling handler?
+            # Or my test loop manually consumed it?
+            # Test script Step 3320 loop:
+            # expr = self._parse_statement()
+            # _parse_statement in sqlglot (generic):
+            # if self._curr.token_type in self.STATEMENT_PARSERS:
+            #      return self.STATEMENT_PARSERS[...](self)
+
+            # It does NOT consume.
+            # So why is Curr STRING?
+            # Ah! My test script implementation of `_parse_command_custom` checked `self._prev.text.upper() == 'PRINT'`.
+            # And `_curr` was `STRING`.
+            # This implies SOMETHING consumed `PRINT`.
+
+            # Wait. `_parse_command` (standard) consumes.
+            # But if I override it?
+
+            # In validation script Step 3320:
+            # STATEMENT_PARSERS[TokenType.COMMAND] = _parse_command_custom
+            # And `_parse_command_custom`:
+            # print(f"... Prev: {self._prev}, Curr: {self._curr}")
+
+            # If `_curr` is STRING. `PRINT` is gone.
+            # Who consumed it?
+            # Maybe `_parse_statement` logic in `TSQL` or `Parser`?
+            # I cannot see `Parser._parse_statement` source here.
+
+            # BUT, the `sybase_ase_connector.py` implementation (Step 3335) Lines 54-56:
+            # if self._curr.text.upper() == 'PRINT':
+            #      self._advance()
+            #      return exp.Print(...)
+
+            # This implementation assumes `PRINT` is CURRENT.
+            # So it consumes it (`_advance`).
+
+            # If my test script showed `PRINT` as `_prev`.
+            # Maybe my test script environment is different?
+            # Or I misread output.
+
+            # Step 3279 output:
+            # DEBUG: Loop. Curr: ... PRINT ...
+            # DEBUG: Found handler ...
+            # DEBUG: _parse_command_custom called. Prev: ... PRINT ... Curr: ... STRING ...
+
+            # This confirms `_parse_statement` CONSUMED it.
+            # Why?
+            # Maybe `STATEMENT_PARSERS` behavior changed in recent sqlglot?
+            # Or `TSQL.Parser` does something special?
+
+            # I must match the behavior OBSERVED in test.
+            # `PRINT` is already consumed.
+            # So I should check `self._prev`.
+            # And I should NOT call `self._advance()`.
+
+            # However, the code in `sybase_ase_connector.py` currently checks `self._curr`.
+            # If I blindly keep `self._curr`, it will fail if `PRINT` is already consumed.
+
+            # I will implement a safer check: `_prev` is PRINT OR `_curr` is PRINT.
+
+            prev_is_print = self._prev.text.upper() == 'PRINT'
+            curr_is_print = self._curr.text.upper() == 'PRINT'
+
+            if curr_is_print:
+                 self._advance()
+            elif not prev_is_print:
+                 # Not a PRINT command (shouldn't happen if dispatch works correctly)
+                 return self._parse_command()
+
+            # Use _parse_conjunction to avoid consuming END (as alias)
+            return exp.Command(this='PRINT', expression=self._parse_conjunction())
+
+
+        STATEMENT_PARSERS = TSQL.Parser.STATEMENT_PARSERS.copy()
+        STATEMENT_PARSERS[TokenType.COMMAND] = _parse_command_custom
 
         def _parse_block(self):
             if not self._match(TokenType.BEGIN):

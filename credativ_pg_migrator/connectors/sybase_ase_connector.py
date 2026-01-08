@@ -1342,209 +1342,11 @@ class SybaseASEConnector(DatabaseConnector):
         # We detect IF/WHILE and extract them out to recurse.
 
         import base64
+        processed_body = body_content
+        
+        # Semicolon Injection Removed.
 
-        # Pre-process: Inject semicolons between statements to help sqlglot parser (T-SQL dialect issue)
-        # We assume statements start with these keywords on new lines.
-        # This handles the case where sqlglot consumes newlines without splitting.
-        # Removed SET from here to handle it smartly below.
-        processed_body = re.sub(
-             r'([\r\n]+)\s*(?!(?:END|ELSE|WHEN|THEN)\b)(?<!;)\s*\b(SELECT|INSERT|UPDATE|DELETE|EXEC|EXECUTE|RETURN|WITH|DECLARE|PRINT|RAISERROR|IF|WHILE|BEGIN)\b',
-             r';\1\2',
-             body_content,
-             flags=re.IGNORECASE
-        )
-
-        def set_injector(match):
-             start_idx = match.start()
-             full_text = match.string
-             preceding = full_text[:start_idx]
-             last_semi = preceding.rfind(';')
-             if last_semi == -1:
-                  snippet = preceding
-             else:
-                  snippet = preceding[last_semi+1:]
-
-             snippet_clean = snippet.strip().upper()
-             # Check if current statement looks like an UPDATE
-             if snippet_clean.startswith('UPDATE'):
-                  return match.group(0)
-             return ';' + match.group(0)
-
-        processed_body = re.sub(r'([\r\n]+)\s*(?<!;)\s*\bSET\b', set_injector, processed_body, flags=re.IGNORECASE)
-
-        # Also clean up double semicolons (optional, but clean)
-        processed_body = re.sub(r';\s*;', ';', processed_body)
-
-        def encode_body(b):
-             return base64.b64encode(b.encode('utf-8')).decode('utf-8')
-        def decode_body(b):
-             return base64.b64decode(b.encode('utf-8')).decode('utf-8')
-
-        # Scanner state
-        # We want to find top-level IF/WHILE in this body_content
-        # But splitting mixed content is hard.
-
-        # New approach: Let's defer IF/WHILE handling to the loop below IF we can recognize them?
-        # NO, sqlglot fails to parse them. We MUST mask them BEFORE sqlglot.
-
-        # Regex for 'IF condition BEGIN body END' (greedy body?)
-        # Nested BEGIN/END is the problem.
-
-        # Let's try to parse balanced BEGIN/END using a custom parser loop *HERE*.
-
-        new_chunks = []
-        # We need to process body_content.
-        # We'll treat body_content as a stream.
-
-        # Simplistic approach:
-        # 1. Regex find "IF ... BEGIN" (lazy) -> Start of block.
-        # 2. Iterate chars/tokens from there to find matching END.
-        # 3. Replace with MASK.
-
-        # Since implementing a full tokenizer is error prone in one shot,
-        # we will assume for now that standard sqlglot works for *simple* statements.
-        # If sqlglot fails, we catch exception? No, we saw valid IF failed.
-
-        # Let's try to match the *Outer* IFs first?
-        # A recursive function that scans the string.
-
-        # Scan:
-        # Ptr 0.
-        # Find next IF / WHILE keyword (outside quotes).
-        # If found:
-        #    Parse condition (until BEGIN? or implicit?)
-        #       - T-SQL: IF usually followed by BEGIN or single stmt.
-        #       - If single stmt: Hard to detect end of stmt without parser.
-        #       - We will checking for BEGIN usage primarily as requested ("All declarations... put in DECLARE").
-        #       - Users code in TEST 2 had BEGIN/END.
-        #    If BEGIN found: Find matching END.
-        #    Recurse on Body.
-        #    Replace with SELECT 'MASKED_IF:condition:encoded_pg_body'
-        #    Advance Ptr.
-        # Else: Move Ptr.
-
-        # Optimization: Only support IF ... BEGIN ... END for now as it's the structure failing.
-        # Single line IF might work in sqlglot if simple? (Our test IF 1=1 SELECT 2 failed too though).
-
-        # THIS IS COMPLEX.
-        # Implementation Plan:
-        # use a regex to find candidate "IF ... BEGIN" start.
-        # Manual scan for END.
-
-        # processed_body = body_content # Already processed above
-
-        # Regex for start of block: \b(IF|WHILE)\b\s*(.*?)\s*\bBEGIN\b
-        # This handles nesting because we process from outside in, then recurse.
-
-        # Robust Tokenizer-based Scanner to find IF/WHILE ... BEGIN ... END blocks
-        # This prevents matching keywords inside strings or comments.
-
-        tokenizer_pattern = re.compile(
-            r"('(?:''|[^'])*')|" +  # Group 1: String literal (handles '' escape)
-            r"(--[^\n]*)|" +        # Group 2: Line comment
-            r"(\/\*.*?\*\/)|" +     # Group 3: Block comment
-            r"(?<![a-zA-Z0-9_])((?:ELSE\s+)?(?:IF|WHILE|BEGIN|END))(?![a-zA-Z0-9_])", # Group 4: Keywords
-            re.IGNORECASE | re.DOTALL
-        )
-
-        matches = list(tokenizer_pattern.finditer(processed_body))
-        blocks_to_mask = []
-        i = 0
-        while i < len(matches):
-            m = matches[i]
-            token_upper = m.group(0).upper()
-
-            # Check if this token is a keyword (Group 4)
-            # If Group 1, 2, or 3 is matched, it's string/comment -> Skip
-            if not m.group(4):
-                i += 1
-                continue
-
-            # Handle IF, ELSE IF, WHILE
-            if 'IF' in token_upper or 'WHILE' in token_upper:
-                # Found potential block start
-                kw = 'IF' if 'IF' in token_upper else 'WHILE'
-                if 'ELSE' in token_upper: kw = 'ELSE ' + kw
-
-                start_match = m
-                start_full_idx = m.start()
-
-                # Scan forward for matching BEGIN
-                # The condition is the text between IF/WHILE and BEGIN
-
-                j = i + 1
-                begin_match = None
-
-                while j < len(matches):
-                    m_j = matches[j]
-                    if m_j.group(4) and m_j.group(4).upper() == 'BEGIN':
-                         begin_match = m_j
-                         break
-                    # If we hit END before BEGIN, it's not a block we handle (e.g. single stmt IF)
-                    if m_j.group(4) and m_j.group(4).upper() == 'END':
-                         break
-                    j += 1
-
-                if not begin_match:
-                    # No BEGIN found, skip this IF/WHILE (treat as simple stmt)
-                    i += 1
-                    continue
-
-                # Found BEGIN. Now scan for matching END.
-                body_start_idx = begin_match.end()
-                cond_text = processed_body[start_match.end():begin_match.start()].strip()
-
-                depth = 1
-                k = j + 1
-                end_match = None
-
-                while k < len(matches):
-                    m_k = matches[k]
-                    # We only care about Keywords
-                    if m_k.group(4):
-                        tk = m_k.group(4).upper()
-                        if tk == 'BEGIN':
-                            depth += 1
-                        elif tk == 'END':
-                            depth -= 1
-                            if depth == 0:
-                                end_match = m_k
-                                break
-                    k += 1
-
-                if end_match:
-                     # Found complete block!
-                     body_end_idx = end_match.start()
-                     block_body = processed_body[body_start_idx:body_end_idx]
-
-                     # Recurse to convert body
-                     pg_body_list = self._convert_stmts(block_body, settings, is_nested=True, has_rowcount=has_rowcount, is_trigger=is_trigger)
-                     pg_body = "\n".join(pg_body_list)
-
-                     b64 = encode_body(pg_body)
-                     cond_b64 = base64.b64encode(cond_text.encode('utf-8')).decode('utf-8')
-                     masked_sql = f"SELECT 'MASKED_BLOCK:{kw}:{cond_b64}:{b64}';"
-                     # Semicolon added to be safe, though processed_body logic might have them.
-                     # But we are replacing the whole IF...END block with this SELECT.
-
-                     blocks_to_mask.append({
-                         'start': start_full_idx,
-                         'end': end_match.end(),
-                         'replacement': masked_sql
-                     })
-
-                     # Continue scanning AFTER this block
-                     i = k + 1
-                else:
-                     # Unclosed block? Skip IF
-                     i += 1
-            else:
-                # BEGIN/END not starting a block (or skipped)
-                i += 1
-
-        # Apply replacements in reverse order to preserve indices
-        for blk in reversed(blocks_to_mask):
-             processed_body = processed_body[:blk['start']] + blk['replacement'] + processed_body[blk['end']:]
+        # Legacy Block Masking Removed to allow sqlglot CustomTSQL parser to handle nesting.
 
         # --- Handle Sybase Outer Joins (*= and =*) before parsing ---
         # Replace *= with temporary function call to preserve valid parsing
@@ -1554,322 +1356,302 @@ class SybaseASEConnector(DatabaseConnector):
         processed_body = re.sub(r"([\w\.]+)\s*\=\*\s*([\w\.]+)", r"locvar_sybase_right_join(\1, \2)", processed_body)
 
         # --- Use sqlglot to parse the cleaned body ---
-        converted_statements = []
+        # Define Custom TSQL Parser to handle IF/BEGIN blocks correctly
+        from sqlglot.dialects import TSQL
+        from sqlglot import TokenType, exp
+
+        # Define Custom Block Expression (missing in older sqlglot?)
+        class Block(exp.Expression):
+             arg_types = {"expressions": True}
+
+        class CustomTSQL(TSQL):
+             class Parser(TSQL.Parser):
+                  STATEMENT_PARSERS = TSQL.Parser.STATEMENT_PARSERS.copy()
+                  
+                  def _parse_block(self):
+                       if not self._match(TokenType.BEGIN):
+                           pass
+                       
+                       expressions = []
+                       while self._curr and self._curr.token_type != TokenType.END:
+                            stmt = self._parse_statement()
+                            if stmt:
+                                 expressions.append(stmt)
+                            self._match(TokenType.SEMICOLON)
+                       
+                       self._match(TokenType.END)
+                       return Block(expressions=expressions)
+ 
+                  def _parse_if(self):
+                       res = self.expression(
+                            exp.If,
+                            this=self._parse_conjunction(),
+                            true=self._parse_statement(),
+                             false=self._parse_statement() if self._match(TokenType.ELSE) else None,
+                       )
+                       return res
+
+                  STATEMENT_PARSERS[TokenType.BEGIN] = lambda self: self._parse_block()
+                  STATEMENT_PARSERS[TokenType.IF] = lambda self: self._parse_if()
+
         try:
-            # Using error_level='ignore' to allow partial parsing and avoid hard crashes
-            parsed = sqlglot.parse(processed_body.strip(), read='tsql', error_level='ignore')
-            # print(f"DEBUG PARSED: {[e.sql() for e in parsed if e]}")
+             # Using error_level='ignore' to allow partial parsing and avoid hard crashes
+             # Use Custom TSQL dialect to support nested BEGIN/END blocks in IF statements
+             parsed = sqlglot.parse(processed_body.strip(), read=CustomTSQL)
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Global parsing failed for code: {body_content[:100]}... Error: {e}")
-            return [f"/* PARSING FAILED: {e} */\n" + body_content]
+             import traceback
+             traceback.print_exc()
+             self.config_parser.print_log_message('ERROR', f"Global parsing failed for code: {body_content[:100]}... Error: {e}")
+             return [f"/* PARSING FAILED: {e} */\n" + body_content]
+
+        converted_statements = []
+
+        def process_node(expression):
+             if not expression: return None
+             
+             # Handle Blocks Recursively
+             if isinstance(expression, Block):
+                  stmts = []
+                  for e in expression.expressions:
+                       s = process_node(e)
+                       if s: stmts.append(s)
+                  return "\n".join(stmts)
+             
+             # Handle IF Recursively to ensure structure (and avoid sqlglot CASE generation quirks)
+             if isinstance(expression, exp.If):
+                  cond_sql = expression.this.sql(dialect='postgres')
+                  true_node = expression.args.get('true')
+                  false_node = expression.args.get('false')
+                  
+                  true_sql = process_node(true_node) if true_node else ""
+                  
+                  pg_sql = f"IF {cond_sql} THEN\n{true_sql}"
+                  if false_node:
+                       false_sql = process_node(false_node)
+                       pg_sql += f"\nELSE\n{false_sql}"
+                  pg_sql += "\nEND IF;"
+                  return pg_sql
+
+             # --- AST Transformation for Sybase Outer Joins ---
+             try:
+                 where = expression.find(exp.Where)
+                 joins_to_add = []
+                 if where:
+                      for func in where.find_all(exp.Anonymous):
+                           fname = func.this
+                           kind = None
+                           if fname.upper() == 'LOCVAR_SYBASE_OUTER_JOIN':
+                                kind = 'LEFT'
+                           elif fname.upper() == 'LOCVAR_SYBASE_RIGHT_JOIN':
+                                kind = 'RIGHT'
+                           
+                           if kind:
+                                left = func.expressions[0]
+                                right = func.expressions[1]
+                                table_name = None
+                                if isinstance(right, exp.Column):
+                                    table_name = right.table
+                                
+                                if table_name:
+                                    joins_to_add.append({
+                                        'table': table_name,
+                                        'condition': exp.EQ(this=left, expression=right),
+                                        'node': func,
+                                        'kind': kind
+                                    })
+                      
+                      for j in joins_to_add:
+                           j['node'].replace(exp.TRUE) # Use TRUE to remove from logic
+                 
+                 # Modify FROM clause
+                 from_clause = expression.args.get('from')
+                 if from_clause and joins_to_add:
+                      new_froms = []
+                      tables_to_remove = [j['table'] for j in joins_to_add]
+                      
+                      for f in from_clause.expressions:
+                           if isinstance(f, exp.Table) and f.alias_or_name in tables_to_remove:
+                               continue
+                           new_froms.append(f)
+                      
+                      for j in joins_to_add:
+                           join_expr = exp.Join(
+                               this=exp.Table(this=exp.Identifier(this=j['table'], quoted=False)),
+                               kind=j['kind'],
+                               on=j['condition']
+                           )
+                           new_froms.append(join_expr)
+                      
+                      from_clause.set('expressions', new_froms)
+             except Exception as e_ast:
+                  pass # Proceed with generation (warning logged elsewhere if needed)
+
+             pg_sql = ""
+             skip_semicolon = False
+             
+             if is_trigger:
+                  if isinstance(expression, exp.Command) and 'ROLLBACK' in expression.this.upper():
+                       raw = expression.sql()
+                       msg_match = re.search(r"'([^']+)'", raw)
+                       msg = msg_match.group(1) if msg_match else "Trigger Rollback"
+                       return f"RAISE EXCEPTION '{msg}';"
+                  elif isinstance(expression, exp.Rollback):
+                       return "RAISE EXCEPTION 'Transaction Rollback Not Supported in Trigger';"
+                  elif isinstance(expression, exp.Return):
+                       return "RETURN NEW;"
+
+             pg_sql = expression.sql(dialect='postgres')
+
+             if pg_sql.strip().upper() == 'BEGIN':
+                  return None # Skip standalone BEGIN if it wasn't parsed as Block/Transaction logic handled elsewhere
+
+             pg_sql = pg_sql.replace('locvar_error_placeholder', 'SQLSTATE')
+             
+             is_special_cmd = "MASKED_BLOCK:" in pg_sql or "'CURSOR_CMD:" in pg_sql or "'RAISERROR_CMD:" in pg_sql
+             if has_rowcount and not is_special_cmd and isinstance(expression, (exp.Insert, exp.Update, exp.Delete, exp.Select)):
+                  pg_sql += ";\nGET DIAGNOSTICS locvar_rowcount = ROW_COUNT"
+
+             # 1. Handle masked commands
+             is_cursor_cmd = False
+             is_raise_cmd = False
+             is_block_cmd = False
+             
+             if isinstance(expression, exp.Select):
+                   if "MASKED_BLOCK:" in pg_sql:
+                         match_blk = re.search(r"MASKED_BLOCK:([^:]+):([^:]+):(.*?)['$]", pg_sql)
+                         if match_blk:
+                              typ = match_blk.group(1)
+                              cond_b64 = match_blk.group(2)
+                              body_b64 = match_blk.group(3)
+                              import base64
+                              cond_str = base64.b64decode(cond_b64).decode()
+                              body_str = base64.b64decode(body_b64).decode()
+                              try:
+                                   cond_pg = sqlglot.transpile(cond_str, read='tsql', write='postgres')[0]
+                              except:
+                                   cond_pg = cond_str
+                              if typ == 'IF' or typ == 'ELSE IF':
+                                   pg_sql = f"IF {cond_pg} THEN\n{body_str}\nEND IF"
+                              elif typ == 'WHILE':
+                                   pg_sql = f"WHILE {cond_pg} LOOP\n{body_str}\nEND LOOP"
+                              is_block_cmd = True
+                   elif "'CURSOR_CMD:" in pg_sql:
+                        match_cmd = re.search(r"'CURSOR_CMD:(.*?)'", pg_sql)
+                        if match_cmd:
+                              pg_sql = match_cmd.group(1)
+                              is_cursor_cmd = True
+                   elif "'RAISERROR_CMD:" in pg_sql:
+                        match_raise = re.re.search(r"'RAISERROR_CMD:(\d+)'\s+AS\s+_cmd,\s+(.*?)\s+AS\s+_msg", pg_sql, re.IGNORECASE)
+                        if match_raise:
+                              r_code = match_raise.group(1)
+                              r_msg = match_raise.group(2)
+                              pg_sql = f"RAISE EXCEPTION {r_msg} USING ERRCODE = '{r_code}'"
+                              is_raise_cmd = True
+
+             if not is_cursor_cmd and not is_raise_cmd and not is_block_cmd:
+                 # 2. Normal PRINT -> RAISE NOTICE
+                 if isinstance(expression, exp.Command) and expression.this.upper().startswith('PRINT'):
+                     # Reuse regex from original
+                     msg_match = re.search(r'PRINT\s+(.*)', expression.this, re.IGNORECASE)
+                     if msg_match:
+                         pg_sql = f"RAISE NOTICE {msg_match.group(1).strip()}"
+                     else:
+                         pg_sql = f"RAISE NOTICE 'PRINT found'"
+                 
+                 # 3. SELECT Assignments & SELECT INTO
+                 elif isinstance(expression, exp.Select):
+                     generated = pg_sql
+                     assignments = []
+                     is_var_assignment = False
+                     for e in expression.expressions:
+                          if isinstance(e, exp.EQ):
+                               left = e.this
+                               right = e.expression
+                               lname = left.sql(dialect='postgres')
+                               if 'locvar_' in lname or '@' in lname:
+                                    assignments.append((lname.replace('@',''), right))
+                          else:
+                               break
+                     if assignments and len(assignments) == len(expression.expressions):
+                          is_var_assignment = True
+                     
+                     if is_var_assignment:
+                          targets = [a[0] for a in assignments]
+                          has_clauses = expression.args.get('from') or expression.args.get('where') or expression.args.get('group') or expression.args.get('having')
+                          
+                          if has_clauses:
+                               new_exprs = [a[1] for a in assignments]
+                               expression.set('expressions', new_exprs)
+                               into_target = ", ".join(targets)
+                               expression.set('into', exp.Into(this=exp.Identifier(this=into_target, quoted=False)))
+                               pg_sql = expression.sql(dialect='postgres')
+                          else:
+                               lines = []
+                               for t, val_expr in zip(targets, assignments):
+                                    val_sql = val_expr[1].sql(dialect='postgres')
+                                    lines.append(f"{t} := {val_sql}")
+                               pg_sql = "\n".join(lines)
+                     elif 'INTO tt_' in generated:
+                           match_into = re.search(r'\bINTO\s+(tt_[a-zA-Z0-9_]+)', generated)
+                           if match_into:
+                               table = match_into.group(1)
+                               select_part = re.sub(r'\bINTO\s+tt_[a-zA-Z0-9_]+\s*', '', generated)
+                               pg_sql = f"DROP TABLE IF EXISTS {table}; CREATE TEMP TABLE {table} AS {select_part}"
+                 
+                 # 4. EXEC -> PERFORM
+                 elif isinstance(expression, exp.Command) and (expression.this.upper().startswith('EXEC') or expression.this.upper().startswith('EXECUTE')):
+                      gen_sql = pg_sql # already generated
+                      match_exec_assign = re.match(r'(?:EXEC|EXECUTE)\s+([a-zA-Z0-9_]+)\s*=\s*([a-zA-Z0-9_\.]+)(.*)', gen_sql, re.IGNORECASE)
+                      match_exec = re.match(r'(?:EXEC|EXECUTE)\s+([a-zA-Z0-9_\.]+)(.*)', gen_sql, re.IGNORECASE)
+                      if match_exec_assign:
+                          var = match_exec_assign.group(1).replace('@', '')
+                          proc = match_exec_assign.group(2)
+                          args = match_exec_assign.group(3).strip().replace('@', '')
+                          if args and not args.startswith('('): args = f"({args})"
+                          elif not args: args = "()"
+                          pg_sql = f"{var} := {proc}{args}"
+                      elif match_exec:
+                          proc = match_exec.group(1)
+                          args = match_exec.group(2).strip().replace('@', '')
+                          if args and not args.startswith('('): args = f"({args})"
+                          elif not args: args = "()"
+                          pg_sql = f"PERFORM {proc}{args}"
+
+                 # 5. RETURN
+                 elif isinstance(expression, exp.Return):
+                      pg_sql = "RETURN" # Helper triggers handle actual return usually (RETURN NEW done above)
+
+                 # 6. IF/WHILE catch-all (if not caught by recursive handler)
+                 elif isinstance(expression, exp.If):
+                      if 'END IF' not in pg_sql.upper(): pg_sql += " END IF"
+                 elif hasattr(exp, 'While') and isinstance(expression, exp.While):
+                      pass # handled by sqlglot?
+
+                 # Fix DEALLOCATE
+                 if pg_sql.upper().startswith('DEALLOCATE CURSOR '): pg_sql = pg_sql.replace('DEALLOCATE CURSOR ', 'DEALLOCATE ')
+                 if pg_sql.upper().startswith('CLOSE CURSOR '): pg_sql = pg_sql.replace('CLOSE CURSOR ', 'CLOSE ')
+             
+             # Post-processing
+             pg_sql = re.sub(r'(?<!\w)@([a-zA-Z0-9_]+)', r'\1', pg_sql)
+             pg_sql = re.sub(r",\s*(LEFT|RIGHT|FULL)\s+JOIN", r" \1 JOIN", pg_sql, flags=re.IGNORECASE)
+             pg_sql = re.sub(r'@@rowcount', '_rowcount', pg_sql, flags=re.IGNORECASE)
+             
+             # Fix sqlglot 'INTERVAL variable unit' generation
+             pg_sql = re.sub(
+                 r"(?i)\bINTERVAL\s+([-@\w]+)\s+(YEAR|MONTH|DAY|HOUR|MINUTE|SECOND)S?\b",
+                 r"(\1 * INTERVAL '1 \2')",
+                 pg_sql
+             )
+             
+             if not skip_semicolon and not pg_sql.strip().endswith(';'):
+                 pg_sql += ';'
+             return pg_sql
 
         for expression in parsed:
-            if not expression: continue
-            
-            # --- AST Transformation for Sybase Outer Joins ---
-            try:
-                where = expression.find(exp.Where)
-                joins_to_add = []
-                if where:
-                     for func in where.find_all(exp.Anonymous):
-                          fname = func.this
-                          kind = None
-                          if fname.upper() == 'LOCVAR_SYBASE_OUTER_JOIN':
-                               kind = 'LEFT'
-                          elif fname.upper() == 'LOCVAR_SYBASE_RIGHT_JOIN':
-                               kind = 'RIGHT'
-                          
-                          if kind:
-                               left = func.expressions[0]
-                               right = func.expressions[1]
-                               table_name = None
-                               if isinstance(right, exp.Column):
-                                   table_name = right.table
-                               
-                               if table_name:
-                                   joins_to_add.append({
-                                       'table': table_name,
-                                       'condition': exp.EQ(this=left, expression=right),
-                                       'node': func,
-                                       'kind': kind
-                                   })
-                     
-                     for j in joins_to_add:
-                          j['node'].replace(exp.TRUE) # Use TRUE to remove from logic
-                
-                # Modify FROM clause
-                from_clause = expression.args.get('from')
-                if from_clause and joins_to_add:
-                     new_froms = []
-                     tables_to_remove = [j['table'] for j in joins_to_add]
-                     
-                     for f in from_clause.expressions:
-                          if isinstance(f, exp.Table) and f.alias_or_name in tables_to_remove:
-                              continue
-                          new_froms.append(f)
-                     
-                     for j in joins_to_add:
-                          join_expr = exp.Join(
-                              this=exp.Table(this=exp.Identifier(this=j['table'], quoted=False)),
-                              kind=j['kind'],
-                              on=j['condition']
-                          )
-                          new_froms.append(join_expr)
-                     
-                     from_clause.set('expressions', new_froms)
-            except Exception as e_ast:
-                 self.config_parser.print_log_message('WARNING', f"AST Outer Join Transform failed: {e_ast}")
-
-            # Transpile to Postgres
-            try:
-
-                if is_trigger:
-                     if isinstance(expression, exp.Command) and 'ROLLBACK' in expression.this.upper():
-                          raw = expression.sql()
-                          msg_match = re.search(r"'([^']+)'", raw)
-                          msg = msg_match.group(1) if msg_match else "Trigger Rollback"
-                          pg_sql = f"RAISE EXCEPTION '{msg}'"
-                          converted_statements.append(pg_sql + ';')
-                          continue
-                     elif isinstance(expression, exp.Rollback):
-                          pg_sql = "RAISE EXCEPTION 'Transaction Rollback Not Supported in Trigger'"
-                          converted_statements.append(pg_sql + ';')
-                          continue
-                     elif isinstance(expression, exp.Return):
-                          pg_sql = "RETURN NEW"
-                          converted_statements.append(pg_sql + ';')
-                          continue
-
-                pg_sql = expression.sql(dialect='postgres')
-
-                if pg_sql.strip().upper() == 'BEGIN':
-                     continue
-
-                # Replace placeholder with final SQLSTATE
-                pg_sql = pg_sql.replace('locvar_error_placeholder', 'SQLSTATE')
-
-                # Inject ROW_COUNT capture if needed (Skip special internal commands)
-                is_special_cmd = "MASKED_BLOCK:" in pg_sql or "'CURSOR_CMD:" in pg_sql or "'RAISERROR_CMD:" in pg_sql
-                # Note: We check exp.Command too if it might be DML (like TRUNCATE?)
-                if has_rowcount and not is_special_cmd and isinstance(expression, (exp.Insert, exp.Update, exp.Delete, exp.Select)):
-                     pg_sql += ";\nGET DIAGNOSTICS locvar_rowcount = ROW_COUNT"
-
-                skip_semicolon = False
-
-                # 1. Handle masked commands
-                is_cursor_cmd = False
-                is_raise_cmd = False
-                is_block_cmd = False
-
-                if isinstance(expression, exp.Select):
-                      # Check for MASKED_BLOCK (High Priority)
-                      if "MASKED_BLOCK:" in pg_sql:
-                            match_blk = re.search(r"MASKED_BLOCK:([^:]+):([^:]+):(.*?)['$]", pg_sql)
-                            if match_blk:
-                                 typ = match_blk.group(1)
-                                 cond_b64 = match_blk.group(2)
-                                 body_b64 = match_blk.group(3)
-
-                                 import base64
-                                 cond_str = base64.b64decode(cond_b64).decode()
-                                 body_str = base64.b64decode(body_b64).decode()
-
-                                 # Convert condition T-SQL -> Postgres using sqlglot (expression mode)
-                                 try:
-                                      cond_pg = sqlglot.transpile(cond_str, read='tsql', write='postgres')[0]
-                                 except:
-                                      cond_pg = cond_str # Fallback
-
-                                 if typ == 'IF' or typ == 'ELSE IF':
-                                      # T-SQL ELSE IF -> Postgres IF (Separate block to avoid orphan ELSIF)
-                                      pg_sql = f"IF {cond_pg} THEN\n{body_str}\nEND IF"
-                                 elif typ == 'WHILE':
-                                      pg_sql = f"WHILE {cond_pg} LOOP\n{body_str}\nEND LOOP"
-
-                                 is_block_cmd = True
-
-                      # Check generated SQL for CURSOR_CMD
-                      elif "'CURSOR_CMD:" in pg_sql:
-                           match_cmd = re.search(r"'CURSOR_CMD:(.*?)'", pg_sql)
-                           if match_cmd:
-                                pg_sql = match_cmd.group(1)
-                                is_cursor_cmd = True
-                      elif "'RAISERROR_CMD:" in pg_sql:
-                           # Regex look for: SELECT 'RAISERROR_CMD:code' AS _cmd, 'msg' AS _msg
-                           # Generated SQL should look similar.
-                           match_raise = re.search(r"'RAISERROR_CMD:(\d+)'\s+AS\s+_cmd,\s+(.*?)\s+AS\s+_msg", pg_sql, re.IGNORECASE)
-                           if match_raise:
-                                r_code = match_raise.group(1)
-                                r_msg = match_raise.group(2)
-                                pg_sql = f"RAISE EXCEPTION {r_msg} USING ERRCODE = '{r_code}'"
-                                is_raise_cmd = True
-
-                            # else:
-                            #      print(f"DEBUG_REGEX_FAIL: {pg_sql}")
-
-
-                if not is_cursor_cmd and not is_raise_cmd and not is_block_cmd:
-                    # 2. Normal PRINT -> RAISE NOTICE
-                    if isinstance(expression, exp.Command) and expression.this.upper().startswith('PRINT'):
-                        msg_match = re.search(r'PRINT\s+(.*)', expression.this, re.IGNORECASE)
-                        if msg_match:
-                            msg_val = msg_match.group(1).strip()
-                            pg_sql = f"RAISE NOTICE {msg_val}"
-                        else:
-                            pg_sql = f"RAISE NOTICE 'PRINT found'"
-
-                    # 3. SELECT Assignments & SELECT INTO
-                    # 3. SELECT Assignments & SELECT INTO
-                    elif isinstance(expression, exp.Select):
-                        generated = expression.sql(dialect='postgres')
-                        
-                        # Analyze for Variable Assignments (Sybase: SELECT @var = val)
-                        assignments = []
-                        is_var_assignment = False
-                        
-                        # Only treat as assignment if ALL items are EQ assignments to variables (starting with locvar_ or @)
-                        for e in expression.expressions:
-                             if isinstance(e, exp.EQ):
-                                  left = e.this
-                                  right = e.expression
-                                  lname = left.sql(dialect='postgres')
-                                  # Check if left matches variable pattern
-                                  if 'locvar_' in lname or '@' in lname:
-                                       assignments.append((lname.replace('@',''), right)) # Keep right as expression object
-                             else:
-                                  break # Found non-assignment
-                        
-                        if assignments and len(assignments) == len(expression.expressions):
-                             is_var_assignment = True
-                        
-                        if is_var_assignment:
-                             targets = [a[0] for a in assignments]
-                             # Check for clauses (FROM, WHERE, etc)
-                             has_clauses = expression.args.get('from') or expression.args.get('where') or expression.args.get('group') or expression.args.get('having')
-                             
-                             if has_clauses:
-                                  # Use SELECT ... INTO ... syntax
-                                  # Modify expression to be SELECT val1, val2 INTO var1, var2 FROM ...
-                                  
-                                  # 1. Update expressions list to only contain values
-                                  new_exprs = [a[1] for a in assignments]
-                                  expression.set('expressions', new_exprs)
-                                  
-                                  # 2. Set INTO clause
-                                  # Provide targets as a single string Identifier "var1, var2"
-                                  into_target = ", ".join(targets)
-                                  expression.set('into', exp.Into(this=exp.Identifier(this=into_target, quoted=False)))
-                                  
-                                  pg_sql = expression.sql(dialect='postgres')
-                             
-                             else:
-                                  # Simple assignment (var := val)
-                                  lines = []
-                                  for t, val_expr in zip(targets, assignments):
-                                       # val_expr is tuple (name, expr)
-                                       val_sql = val_expr[1].sql(dialect='postgres')
-                                       lines.append(f"{t} := {val_sql}")
-                                  pg_sql = "\n".join(lines)
-                        
-                        elif 'INTO tt_' in generated:
-                             match_into = re.search(r'\bINTO\s+(tt_[a-zA-Z0-9_]+)', generated)
-                             if match_into:
-                                 table = match_into.group(1)
-                                 select_part = re.sub(r'\bINTO\s+tt_[a-zA-Z0-9_]+\s*', '', generated)
-                                 pg_sql = f"DROP TABLE IF EXISTS {table}; CREATE TEMP TABLE {table} AS {select_part}"
-                             else:
-                                 pg_sql = generated
-                        else:
-                             pg_sql = generated
-
-                    # 4. EXEC -> PERFORM or Assignment
-                    elif isinstance(expression, exp.Command) and (expression.this.upper().startswith('EXEC') or expression.this.upper().startswith('EXECUTE')):
-                        gen_sql = expression.sql(dialect='postgres')
-
-                        match_exec_assign = re.match(r'(?:EXEC|EXECUTE)\s+([a-zA-Z0-9_]+)\s*=\s*([a-zA-Z0-9_\.]+)(.*)', gen_sql, re.IGNORECASE)
-                        match_exec = re.match(r'(?:EXEC|EXECUTE)\s+([a-zA-Z0-9_\.]+)(.*)', gen_sql, re.IGNORECASE)
-
-                        if match_exec_assign:
-                            var = match_exec_assign.group(1).replace('@', '')
-                            proc = match_exec_assign.group(2)
-                            args = match_exec_assign.group(3).strip()
-                            args = args.replace('@', '')
-                            if args and not args.startswith('('): args = f"({args})"
-                            elif not args: args = "()"
-                            pg_sql = f"{var} := {proc}{args}"
-                        elif match_exec:
-                            proc = match_exec.group(1)
-                            args = match_exec.group(2).strip()
-                            args = args.replace('@', '')
-                            if args and not args.startswith('('): args = f"({args})"
-                            elif not args: args = "()"
-                            pg_sql = f"PERFORM {proc}{args}"
-                        else:
-                            pg_sql = gen_sql
-
-                    # 5. RETURN
-                    elif isinstance(expression, exp.Return):
-                        pg_sql = "RETURN"
-
-                    # 6. IF / WHILE (Control Flow)
-                    # Safe check for existence of While/If before using instance check if module is old
-                    elif isinstance(expression, exp.If):
-                        pg_sql = expression.sql(dialect='postgres')
-                        if 'END IF' not in pg_sql.upper():
-                            pg_sql += " END IF"
-                        # skip_semicolon = True # We want semicolon after END IF;
-                    elif hasattr(exp, 'While') and isinstance(expression, exp.While):
-                        pg_sql = expression.sql(dialect='postgres')
-                        # skip_semicolon = True # We want semicolon after END LOOP;
-
-                    else:
-                        pg_sql = expression.sql(dialect='postgres')
-
-
-                    # Fix DEALLOCATE CURSOR -> DEALLOCATE
-                    if pg_sql.upper().startswith('DEALLOCATE CURSOR '):
-                        pg_sql = pg_sql.replace('DEALLOCATE CURSOR ', 'DEALLOCATE ')
-                    if pg_sql.upper().startswith('CLOSE CURSOR '): # Sybase CLOSE name, PG CLOSE name.
-                        pg_sql = pg_sql.replace('CLOSE CURSOR ', 'CLOSE ') # just in case
-
-                 # --- Post-processing per statement ---
-
-                # Fix Variables: Remove '@' (sqlglot might have left some)
-                pg_sql = re.sub(r'(?<!\w)@([a-zA-Z0-9_]+)', r'\1', pg_sql)
-
-                # Cleanup sqlglot generation artifact: Comma before JOIN in FROM list (Sybase Outer Join Fix)
-                pg_sql = re.sub(r",\s*(LEFT|RIGHT|FULL)\s+JOIN", r" \1 JOIN", pg_sql, flags=re.IGNORECASE)
-
-
-                # @@rowcount -> _rowcount replacement (if used as var)
-                pg_sql = re.sub(r'@@rowcount', '_rowcount', pg_sql, flags=re.IGNORECASE)
-
-                # Semicolon
-                if not skip_semicolon and not pg_sql.strip().endswith(';'):
-                    pg_sql += ';'
-
-                # Fix sqlglot 'INTERVAL variable unit' generation (e.g. INTERVAL -days day)
-                # Maps to: (variable * INTERVAL '1 unit')
-                pg_sql = re.sub(
-                    r"(?i)\bINTERVAL\s+([-@\w]+)\s+(YEAR|MONTH|DAY|HOUR|MINUTE|SECOND)S?\b",
-                    r"(\1 * INTERVAL '1 \2')",
-                    pg_sql
-                )
-
-                converted_statements.append(pg_sql)
-
-                # --- Rowcount Injection ---
-                if has_rowcount:
-                    is_dml = isinstance(expression, (exp.Insert, exp.Update, exp.Delete))
-                    if 'SELECT' in pg_sql.upper() and 'INTO' in pg_sql.upper(): is_dml = True
-                    if is_dml:
-                        converted_statements.append("GET DIAGNOSTICS locvar_rowcount = ROW_COUNT;")
-
-            except Exception as e:
-                # print(f"DEBUG: Exception {e}")
-                self.config_parser.print_log_message('WARNING', f"Failed to transpile statement: {expression}. Error: {e}")
-                converted_statements.append(f"-- FAILED CONVERSION: {expression.sql()}\n-- Error: {e}")
-
+             res = process_node(expression)
+             if res:
+                  converted_statements.append(res)
+        
         return converted_statements
 
         # Inject _rowcount declaration

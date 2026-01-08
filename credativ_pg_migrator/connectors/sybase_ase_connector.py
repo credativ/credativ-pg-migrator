@@ -1546,6 +1546,13 @@ class SybaseASEConnector(DatabaseConnector):
         for blk in reversed(blocks_to_mask):
              processed_body = processed_body[:blk['start']] + blk['replacement'] + processed_body[blk['end']:]
 
+        # --- Handle Sybase Outer Joins (*= and =*) before parsing ---
+        # Replace *= with temporary function call to preserve valid parsing
+        # Regex for Left Outer Join (*=)
+        processed_body = re.sub(r"([\w\.]+)\s*\*\=\s*([\w\.]+)", r"locvar_sybase_outer_join(\1, \2)", processed_body)
+        # Regex for Right Outer Join (=*)
+        processed_body = re.sub(r"([\w\.]+)\s*\=\*\s*([\w\.]+)", r"locvar_sybase_right_join(\1, \2)", processed_body)
+
         # --- Use sqlglot to parse the cleaned body ---
         converted_statements = []
         try:
@@ -1558,6 +1565,61 @@ class SybaseASEConnector(DatabaseConnector):
 
         for expression in parsed:
             if not expression: continue
+            
+            # --- AST Transformation for Sybase Outer Joins ---
+            try:
+                where = expression.find(exp.Where)
+                joins_to_add = []
+                if where:
+                     for func in where.find_all(exp.Anonymous):
+                          fname = func.this
+                          kind = None
+                          if fname.upper() == 'LOCVAR_SYBASE_OUTER_JOIN':
+                               kind = 'LEFT'
+                          elif fname.upper() == 'LOCVAR_SYBASE_RIGHT_JOIN':
+                               kind = 'RIGHT'
+                          
+                          if kind:
+                               left = func.expressions[0]
+                               right = func.expressions[1]
+                               table_name = None
+                               if isinstance(right, exp.Column):
+                                   table_name = right.table
+                               
+                               if table_name:
+                                   joins_to_add.append({
+                                       'table': table_name,
+                                       'condition': exp.EQ(this=left, expression=right),
+                                       'node': func,
+                                       'kind': kind
+                                   })
+                     
+                     for j in joins_to_add:
+                          j['node'].replace(exp.TRUE) # Use TRUE to remove from logic
+                
+                # Modify FROM clause
+                from_clause = expression.args.get('from')
+                if from_clause and joins_to_add:
+                     new_froms = []
+                     tables_to_remove = [j['table'] for j in joins_to_add]
+                     
+                     for f in from_clause.expressions:
+                          if isinstance(f, exp.Table) and f.alias_or_name in tables_to_remove:
+                              continue
+                          new_froms.append(f)
+                     
+                     for j in joins_to_add:
+                          join_expr = exp.Join(
+                              this=exp.Table(this=exp.Identifier(this=j['table'], quoted=False)),
+                              kind=j['kind'],
+                              on=j['condition']
+                          )
+                          new_froms.append(join_expr)
+                     
+                     from_clause.set('expressions', new_froms)
+            except Exception as e_ast:
+                 self.config_parser.print_log_message('WARNING', f"AST Outer Join Transform failed: {e_ast}")
+
             # Transpile to Postgres
             try:
 
@@ -1729,6 +1791,10 @@ class SybaseASEConnector(DatabaseConnector):
 
                 # Fix Variables: Remove '@' (sqlglot might have left some)
                 pg_sql = re.sub(r'(?<!\w)@([a-zA-Z0-9_]+)', r'\1', pg_sql)
+
+                # Cleanup sqlglot generation artifact: Comma before JOIN in FROM list (Sybase Outer Join Fix)
+                pg_sql = re.sub(r",\s*(LEFT|RIGHT|FULL)\s+JOIN", r" \1 JOIN", pg_sql, flags=re.IGNORECASE)
+
 
                 # @@rowcount -> _rowcount replacement (if used as var)
                 pg_sql = re.sub(r'@@rowcount', '_rowcount', pg_sql, flags=re.IGNORECASE)

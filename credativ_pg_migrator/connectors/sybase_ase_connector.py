@@ -1719,23 +1719,68 @@ class SybaseASEConnector(DatabaseConnector):
                             pg_sql = f"RAISE NOTICE 'PRINT found'"
 
                     # 3. SELECT Assignments & SELECT INTO
+                    # 3. SELECT Assignments & SELECT INTO
                     elif isinstance(expression, exp.Select):
                         generated = expression.sql(dialect='postgres')
-                        match_assign = re.match(r'SELECT\s+([a-zA-Z0-9_]+)\s*=\s*(.*)', generated, re.IGNORECASE)
-                        if match_assign:
-                            var_name = match_assign.group(1).replace('@', '')
-                            val_expr = match_assign.group(2)
-                            pg_sql = f"{var_name} := {val_expr}"
+                        
+                        # Analyze for Variable Assignments (Sybase: SELECT @var = val)
+                        assignments = []
+                        is_var_assignment = False
+                        
+                        # Only treat as assignment if ALL items are EQ assignments to variables (starting with locvar_ or @)
+                        for e in expression.expressions:
+                             if isinstance(e, exp.EQ):
+                                  left = e.this
+                                  right = e.expression
+                                  lname = left.sql(dialect='postgres')
+                                  # Check if left matches variable pattern
+                                  if 'locvar_' in lname or '@' in lname:
+                                       assignments.append((lname.replace('@',''), right)) # Keep right as expression object
+                             else:
+                                  break # Found non-assignment
+                        
+                        if assignments and len(assignments) == len(expression.expressions):
+                             is_var_assignment = True
+                        
+                        if is_var_assignment:
+                             targets = [a[0] for a in assignments]
+                             # Check for clauses (FROM, WHERE, etc)
+                             has_clauses = expression.args.get('from') or expression.args.get('where') or expression.args.get('group') or expression.args.get('having')
+                             
+                             if has_clauses:
+                                  # Use SELECT ... INTO ... syntax
+                                  # Modify expression to be SELECT val1, val2 INTO var1, var2 FROM ...
+                                  
+                                  # 1. Update expressions list to only contain values
+                                  new_exprs = [a[1] for a in assignments]
+                                  expression.set('expressions', new_exprs)
+                                  
+                                  # 2. Set INTO clause
+                                  # Provide targets as a single string Identifier "var1, var2"
+                                  into_target = ", ".join(targets)
+                                  expression.set('into', exp.Into(this=exp.Identifier(this=into_target, quoted=False)))
+                                  
+                                  pg_sql = expression.sql(dialect='postgres')
+                             
+                             else:
+                                  # Simple assignment (var := val)
+                                  lines = []
+                                  for t, val_expr in zip(targets, assignments):
+                                       # val_expr is tuple (name, expr)
+                                       val_sql = val_expr[1].sql(dialect='postgres')
+                                       lines.append(f"{t} := {val_sql}")
+                                  pg_sql = "\n".join(lines)
+                        
                         elif 'INTO tt_' in generated:
-                            match_into = re.search(r'\bINTO\s+(tt_[a-zA-Z0-9_]+)', generated)
-                            if match_into:
-                                table = match_into.group(1)
-                                select_part = re.sub(r'\bINTO\s+tt_[a-zA-Z0-9_]+\s*', '', generated)
-                                pg_sql = f"DROP TABLE IF EXISTS {table}; CREATE TEMP TABLE {table} AS {select_part}"
-                            else:
-                                pg_sql = generated
+                             match_into = re.search(r'\bINTO\s+(tt_[a-zA-Z0-9_]+)', generated)
+                             if match_into:
+                                 table = match_into.group(1)
+                                 select_part = re.sub(r'\bINTO\s+tt_[a-zA-Z0-9_]+\s*', '', generated)
+                                 pg_sql = f"DROP TABLE IF EXISTS {table}; CREATE TEMP TABLE {table} AS {select_part}"
+                             else:
+                                 pg_sql = generated
                         else:
-                            pg_sql = generated
+                             pg_sql = generated
 
                     # 4. EXEC -> PERFORM or Assignment
                     elif isinstance(expression, exp.Command) and (expression.this.upper().startswith('EXEC') or expression.this.upper().startswith('EXECUTE')):

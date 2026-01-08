@@ -67,6 +67,8 @@ class SybaseASEConnector(DatabaseConnector):
                 self.connection.close()
         except Exception as e:
             pass
+        finally:
+            self.connection = None
 
     def get_sql_functions_mapping(self, settings):
         """ Returns a dictionary of SQL functions mapping for the target database """
@@ -638,27 +640,54 @@ class SybaseASEConnector(DatabaseConnector):
         # Get type mappings for recursive substitution
         types_mapping = self.get_types_mapping({'target_db_type': settings.get('target_db_type', 'postgresql')})
 
+        # Optimize: Pre-calculate all final definitions and use single regex pass
+        self.config_parser.print_log_message('DEBUG', "Optimizing UDT substitution: preparing map...")
+        udt_lookup = {}
+        keys_to_match = []
+
         for udt_name, base_def in udt_map.items():
             if udt_name.upper() in ignored_types:
                 continue
 
-            self.config_parser.print_log_message('DEBUG', f"DEBUGGING UDT: Checking {udt_name} -> {base_def}")
-
-            # Recursive step: Convert the base definition if it matches a Sybase type
-            # e.g. base_def="univarchar(20)" -> "VARCHAR(20)"
+            # Resolve final definition
             final_def = base_def
             for sybase_type, pg_type in types_mapping.items():
-                 # Use word boundary to match type name, ignoring parens for regex
-                 # Escape sybase type just in case
                  final_def = re.sub(rf'\b{re.escape(sybase_type)}\b', pg_type, final_def, flags=re.IGNORECASE)
 
-            # Perform substitution
-            # Use word boundaries
-            try:
-                pattern = re.compile(rf'(?:\[|")?\b{re.escape(udt_name)}\b(?:\]|")?', flags=re.IGNORECASE)
-                text = pattern.sub(final_def, text)
-            except re.error:
-                pass
+            # Store in lookup (Upper case key for case-insensitive matching)
+            udt_lookup[udt_name.upper()] = final_def
+            keys_to_match.append(udt_name)
+
+        if not keys_to_match:
+            self.config_parser.print_log_message('DEBUG', "No UDTs to substitute.")
+            return text
+
+        self.config_parser.print_log_message('DEBUG', f"Compiling regex for {len(keys_to_match)} UDTs...")
+        # Sort by length desc to handle prefixes/overlaps
+        keys_to_match.sort(key=len, reverse=True)
+
+        # Pattern: (?:\[|")?\b(UDT1|UDT2...)\b(?:\]|")?
+        # Capturing group 1 contains the UDT name
+        escaped_keys = [re.escape(k) for k in keys_to_match]
+        pattern_str = r'(?:\[|")?\b(' + '|'.join(escaped_keys) + r')\b(?:\]|")?'
+
+        try:
+             regex = re.compile(pattern_str, flags=re.IGNORECASE)
+        except re.error as e:
+             self.config_parser.print_log_message('WARNING', f"Failed to compile optimized UDT regex: {e}. Fallback to slow loop.")
+             # Fallback logic could be here, but simpler to just return or raise.
+             return text
+
+        def replacer(match):
+             # match.group(1) is the inner UDT name
+             core_name = match.group(1)
+             if core_name:
+                 return udt_lookup.get(core_name.upper(), match.group(0))
+             return match.group(0)
+
+        self.config_parser.print_log_message('DEBUG', "Executing UDT substitution...")
+        text = regex.sub(replacer, text)
+        self.config_parser.print_log_message('DEBUG', "UDT substitution complete.")
 
         return text
 
@@ -1343,7 +1372,7 @@ class SybaseASEConnector(DatabaseConnector):
 
         import base64
         processed_body = body_content
-        
+
         # Semicolon Injection Removed.
 
         # Legacy Block Masking Removed to allow sqlglot CustomTSQL parser to handle nesting.
@@ -1367,21 +1396,36 @@ class SybaseASEConnector(DatabaseConnector):
         class CustomTSQL(TSQL):
              class Parser(TSQL.Parser):
                   STATEMENT_PARSERS = TSQL.Parser.STATEMENT_PARSERS.copy()
-                  
+
                   def _parse_block(self):
                        if not self._match(TokenType.BEGIN):
                            pass
-                       
+
                        expressions = []
+                       loop_counter = 0
+                       last_token_idx = -1
+
                        while self._curr and self._curr.token_type != TokenType.END:
+                            loop_counter += 1
+                            if loop_counter > 100000:
+                                 raise Exception(f"Potential Infinite Loop in _parse_block at token {self._curr}")
+
+                            # Check progress
+                            current_idx = self._idx
+                            if current_idx == last_token_idx:
+                                 # Stuck?
+                                 print(f"DEBUG: Processed token {self._curr} but did not advance. Force advance.")
+                                 self._advance()
+                            last_token_idx = current_idx
+
                             stmt = self._parse_statement()
                             if stmt:
                                  expressions.append(stmt)
                             self._match(TokenType.SEMICOLON)
-                       
+
                        self._match(TokenType.END)
                        return Block(expressions=expressions)
- 
+
                   def _parse_if(self):
                        res = self.expression(
                             exp.If,
@@ -1392,7 +1436,8 @@ class SybaseASEConnector(DatabaseConnector):
                        return res
 
                   STATEMENT_PARSERS[TokenType.BEGIN] = lambda self: self._parse_block()
-                  STATEMENT_PARSERS[TokenType.IF] = lambda self: self._parse_if()
+                  if hasattr(TokenType, 'IF'):
+                       STATEMENT_PARSERS[getattr(TokenType, 'IF')] = lambda self: self._parse_if()
 
         try:
              # Using error_level='ignore' to allow partial parsing and avoid hard crashes
@@ -1408,7 +1453,7 @@ class SybaseASEConnector(DatabaseConnector):
 
         def process_node(expression):
              if not expression: return None
-             
+
              # Handle Blocks Recursively
              if isinstance(expression, Block):
                   stmts = []
@@ -1416,15 +1461,15 @@ class SybaseASEConnector(DatabaseConnector):
                        s = process_node(e)
                        if s: stmts.append(s)
                   return "\n".join(stmts)
-             
+
              # Handle IF Recursively to ensure structure (and avoid sqlglot CASE generation quirks)
              if isinstance(expression, exp.If):
                   cond_sql = expression.this.sql(dialect='postgres')
                   true_node = expression.args.get('true')
                   false_node = expression.args.get('false')
-                  
+
                   true_sql = process_node(true_node) if true_node else ""
-                  
+
                   pg_sql = f"IF {cond_sql} THEN\n{true_sql}"
                   if false_node:
                        false_sql = process_node(false_node)
@@ -1444,14 +1489,14 @@ class SybaseASEConnector(DatabaseConnector):
                                 kind = 'LEFT'
                            elif fname.upper() == 'LOCVAR_SYBASE_RIGHT_JOIN':
                                 kind = 'RIGHT'
-                           
+
                            if kind:
                                 left = func.expressions[0]
                                 right = func.expressions[1]
                                 table_name = None
                                 if isinstance(right, exp.Column):
                                     table_name = right.table
-                                
+
                                 if table_name:
                                     joins_to_add.append({
                                         'table': table_name,
@@ -1459,21 +1504,21 @@ class SybaseASEConnector(DatabaseConnector):
                                         'node': func,
                                         'kind': kind
                                     })
-                      
+
                       for j in joins_to_add:
                            j['node'].replace(exp.TRUE) # Use TRUE to remove from logic
-                 
+
                  # Modify FROM clause
                  from_clause = expression.args.get('from')
                  if from_clause and joins_to_add:
                       new_froms = []
                       tables_to_remove = [j['table'] for j in joins_to_add]
-                      
+
                       for f in from_clause.expressions:
                            if isinstance(f, exp.Table) and f.alias_or_name in tables_to_remove:
                                continue
                            new_froms.append(f)
-                      
+
                       for j in joins_to_add:
                            join_expr = exp.Join(
                                this=exp.Table(this=exp.Identifier(this=j['table'], quoted=False)),
@@ -1481,14 +1526,14 @@ class SybaseASEConnector(DatabaseConnector):
                                on=j['condition']
                            )
                            new_froms.append(join_expr)
-                      
+
                       from_clause.set('expressions', new_froms)
              except Exception as e_ast:
                   pass # Proceed with generation (warning logged elsewhere if needed)
 
              pg_sql = ""
              skip_semicolon = False
-             
+
              if is_trigger:
                   if isinstance(expression, exp.Command) and 'ROLLBACK' in expression.this.upper():
                        raw = expression.sql()
@@ -1506,7 +1551,7 @@ class SybaseASEConnector(DatabaseConnector):
                   return None # Skip standalone BEGIN if it wasn't parsed as Block/Transaction logic handled elsewhere
 
              pg_sql = pg_sql.replace('locvar_error_placeholder', 'SQLSTATE')
-             
+
              is_special_cmd = "MASKED_BLOCK:" in pg_sql or "'CURSOR_CMD:" in pg_sql or "'RAISERROR_CMD:" in pg_sql
              if has_rowcount and not is_special_cmd and isinstance(expression, (exp.Insert, exp.Update, exp.Delete, exp.Select)):
                   pg_sql += ";\nGET DIAGNOSTICS locvar_rowcount = ROW_COUNT"
@@ -1515,7 +1560,7 @@ class SybaseASEConnector(DatabaseConnector):
              is_cursor_cmd = False
              is_raise_cmd = False
              is_block_cmd = False
-             
+
              if isinstance(expression, exp.Select):
                    if "MASKED_BLOCK:" in pg_sql:
                          match_blk = re.search(r"MASKED_BLOCK:([^:]+):([^:]+):(.*?)['$]", pg_sql)
@@ -1557,7 +1602,7 @@ class SybaseASEConnector(DatabaseConnector):
                          pg_sql = f"RAISE NOTICE {msg_match.group(1).strip()}"
                      else:
                          pg_sql = f"RAISE NOTICE 'PRINT found'"
-                 
+
                  # 3. SELECT Assignments & SELECT INTO
                  elif isinstance(expression, exp.Select):
                      generated = pg_sql
@@ -1574,11 +1619,11 @@ class SybaseASEConnector(DatabaseConnector):
                                break
                      if assignments and len(assignments) == len(expression.expressions):
                           is_var_assignment = True
-                     
+
                      if is_var_assignment:
                           targets = [a[0] for a in assignments]
                           has_clauses = expression.args.get('from') or expression.args.get('where') or expression.args.get('group') or expression.args.get('having')
-                          
+
                           if has_clauses:
                                new_exprs = [a[1] for a in assignments]
                                expression.set('expressions', new_exprs)
@@ -1597,7 +1642,7 @@ class SybaseASEConnector(DatabaseConnector):
                                table = match_into.group(1)
                                select_part = re.sub(r'\bINTO\s+tt_[a-zA-Z0-9_]+\s*', '', generated)
                                pg_sql = f"DROP TABLE IF EXISTS {table}; CREATE TEMP TABLE {table} AS {select_part}"
-                 
+
                  # 4. EXEC -> PERFORM
                  elif isinstance(expression, exp.Command) and (expression.this.upper().startswith('EXEC') or expression.this.upper().startswith('EXECUTE')):
                       gen_sql = pg_sql # already generated
@@ -1630,19 +1675,19 @@ class SybaseASEConnector(DatabaseConnector):
                  # Fix DEALLOCATE
                  if pg_sql.upper().startswith('DEALLOCATE CURSOR '): pg_sql = pg_sql.replace('DEALLOCATE CURSOR ', 'DEALLOCATE ')
                  if pg_sql.upper().startswith('CLOSE CURSOR '): pg_sql = pg_sql.replace('CLOSE CURSOR ', 'CLOSE ')
-             
+
              # Post-processing
              pg_sql = re.sub(r'(?<!\w)@([a-zA-Z0-9_]+)', r'\1', pg_sql)
              pg_sql = re.sub(r",\s*(LEFT|RIGHT|FULL)\s+JOIN", r" \1 JOIN", pg_sql, flags=re.IGNORECASE)
              pg_sql = re.sub(r'@@rowcount', '_rowcount', pg_sql, flags=re.IGNORECASE)
-             
+
              # Fix sqlglot 'INTERVAL variable unit' generation
              pg_sql = re.sub(
                  r"(?i)\bINTERVAL\s+([-@\w]+)\s+(YEAR|MONTH|DAY|HOUR|MINUTE|SECOND)S?\b",
                  r"(\1 * INTERVAL '1 \2')",
                  pg_sql
              )
-             
+
              if not skip_semicolon and not pg_sql.strip().endswith(';'):
                  pg_sql += ';'
              return pg_sql
@@ -1651,7 +1696,7 @@ class SybaseASEConnector(DatabaseConnector):
              res = process_node(expression)
              if res:
                   converted_statements.append(res)
-        
+
         return converted_statements
 
         # Inject _rowcount declaration
@@ -3245,7 +3290,9 @@ EXECUTE FUNCTION {target_schema}.{trigger_name}_func();
 
             return '' # Remove from body
 
+        self.config_parser.print_log_message('DEBUG', "Starting variable declaration extraction...")
         body_content = re.sub(r'DECLARE\s+@.*?(?=\bBEGIN\b|\bIF\b|\bWHILE\b|\bSELECT\b|\bINSERT\b|\bUPDATE\b|\bDELETE\b|\bRETURN\b|\bSET\b|\bFETCH\b|\bOPEN\b|\bCLOSE\b|\bDEALLOCATE\b|\bDECLARE\b|$)', declaration_replacer, body_content, flags=re.IGNORECASE | re.DOTALL)
+        self.config_parser.print_log_message('DEBUG', "Variable declaration extraction complete.")
 
         # 4. Global Replacements
         # Functions
@@ -3255,8 +3302,8 @@ EXECUTE FUNCTION {target_schema}.{trigger_name}_func();
             body_content = re.sub(escaped_src_func, pg_equiv, body_content, flags=re.IGNORECASE)
 
         # Type substitutions in body
+        self.config_parser.print_log_message('DEBUG', "Starting global type substitutions...")
         body_content = self._apply_data_type_substitutions(body_content)
-        body_content = self._apply_udt_to_base_type_substitutions(body_content, settings)
         body_content = self._apply_udt_to_base_type_substitutions(body_content, settings)
         for sybase_type, pg_type in types_mapping.items():
             body_content = re.sub(rf'\b{re.escape(sybase_type)}\b', pg_type, body_content, flags=re.IGNORECASE)

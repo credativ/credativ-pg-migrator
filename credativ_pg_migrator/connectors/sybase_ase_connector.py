@@ -192,6 +192,26 @@ class CustomTSQL(TSQL):
         if hasattr(TokenType, 'IF'):
              STATEMENT_PARSERS[getattr(TokenType, 'IF')] = lambda self: self._parse_if()
 
+        def _parse(self, parse_method, raw_tokens, sql=None):
+            self.reset()
+            self.sql = sql or ""
+            self._tokens = raw_tokens
+            self._index = -1
+            self._advance()
+
+            expressions = []
+            while self._curr:
+                if self._match(TokenType.SEMICOLON):
+                     continue
+
+                stmt = parse_method(self)
+                if not stmt:
+                     if self._curr:
+                          self.raise_error("Invalid expression / Unexpected token")
+                     break
+                expressions.append(stmt)
+            return expressions
+
     class Generator(TSQL.Generator):
         TRANSFORMS = TSQL.Generator.TRANSFORMS.copy()
 

@@ -5,7 +5,6 @@ credativ_pg_migrator/*.log
 *.log
 *.diff
 
-
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

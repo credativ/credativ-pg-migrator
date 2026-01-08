@@ -512,6 +512,7 @@ class SybaseASEConnector(DatabaseConnector):
 
                     type_name = decoded['type_name']
                     base_type = decoded['base_type_name']
+                    target_basic_type = decoded.get('target_basic_type')
                     length = decoded['length'] if decoded['length'] else 0
                     prec = decoded['prec'] if decoded['prec'] else 0
                     scale = decoded['scale'] if decoded['scale'] else 0
@@ -519,10 +520,14 @@ class SybaseASEConnector(DatabaseConnector):
                     if not base_type: base_type = "UNKNOWN"
 
                     # Convert base_type to PG type
-                    pg_base_type = base_type.upper()
-                    if settings:
-                         types_mapping = self.get_types_mapping(settings)
-                         pg_base_type = types_mapping.get(base_type.upper(), base_type.upper())
+                    # Priority: target_basic_type (from protocol) > types_mapping(base_type)
+                    if target_basic_type:
+                         pg_base_type = target_basic_type.upper()
+                    else:
+                         pg_base_type = base_type.upper()
+                         if settings:
+                              types_mapping = self.get_types_mapping(settings)
+                              pg_base_type = types_mapping.get(base_type.upper(), base_type.upper())
 
                     type_sql = pg_base_type
 
@@ -1317,7 +1322,7 @@ class SybaseASEConnector(DatabaseConnector):
 
         return ddl
 
-    def _convert_stmts(self, body_content, settings, is_nested=False, has_rowcount=False):
+    def _convert_stmts(self, body_content, settings, is_nested=False, has_rowcount=False, is_trigger=False):
         """
         Internal helper to convert T-SQL body statements to PL/pgSQL.
         Used recursively for block contents.
@@ -1458,7 +1463,7 @@ class SybaseASEConnector(DatabaseConnector):
                  # We have the block
                  block_body = processed_body[body_start:idx]
                  # Recurse
-                 pg_body_list = self._convert_stmts(block_body, settings, is_nested=True, has_rowcount=has_rowcount)
+                 pg_body_list = self._convert_stmts(block_body, settings, is_nested=True, has_rowcount=has_rowcount, is_trigger=is_trigger)
                  pg_body = "\n".join(pg_body_list)
                  
                  # Encode
@@ -1491,6 +1496,24 @@ class SybaseASEConnector(DatabaseConnector):
             if not expression: continue
             # Transpile to Postgres
             try:
+                
+                if is_trigger:
+                     if isinstance(expression, exp.Command) and 'ROLLBACK' in expression.this.upper():
+                          raw = expression.sql()
+                          msg_match = re.search(r"'([^']+)'", raw)
+                          msg = msg_match.group(1) if msg_match else "Trigger Rollback"
+                          pg_sql = f"RAISE EXCEPTION '{msg}'"
+                          converted_statements.append(pg_sql + ';')
+                          continue
+                     elif isinstance(expression, exp.Rollback):
+                          pg_sql = "RAISE EXCEPTION 'Transaction Rollback Not Supported in Trigger'"
+                          converted_statements.append(pg_sql + ';')
+                          continue
+                     elif isinstance(expression, exp.Return):
+                          pg_sql = "RETURN NEW"
+                          converted_statements.append(pg_sql + ';')
+                          continue
+
                 pg_sql = expression.sql(dialect='postgres')
                 
                 # if 'RAISERROR_CMD' in pg_sql:
@@ -3047,13 +3070,16 @@ class SybaseASEConnector(DatabaseConnector):
 
     def convert_trigger_v2(self, settings):
         """
-        Parser-based conversion for triggers.
-        Returns the BODY of the Postgres trigger function.
-        Includes ported V1 logic: IF UPDATE, inserted/deleted -> NEW/OLD, etc.
+        Parser-based conversion for triggers (V2).
+        Returns full DDL (CREATE FUNCTION + CREATE TRIGGER).
         """
         trigger_code = settings['trigger_sql']
+        trigger_name = self.config_parser.convert_names_case(settings['trigger_name'])
+        target_schema = settings['target_schema']
+        target_table = self.config_parser.convert_names_case(settings['target_table'])
+        target_db_type = settings['target_db_type']
 
-        # --- Pre-processing (Ported from V1) ---
+        # --- Pre-processing ---
 
         # 0. Encapsulate comments
         trigger_code = re.sub(r'--([^\n]*)', r'/*\1*/', trigger_code)
@@ -3061,130 +3087,101 @@ class SybaseASEConnector(DatabaseConnector):
         # 1. Remove GO
         trigger_code = re.sub(r'\bGO\b', '', trigger_code, flags=re.IGNORECASE)
 
-        # 2. Extract Body (After AS) - Critical for sqlglot to just parse statements, not DDL
-        # Pattern: CREATE TRIGGER ... AS [BEGIN] ... [END]
-        # or ... FOR INSERT AS ...
-        # match case insensitive AS on word boundary
+        # 1.5 Rename Local Variables (@var -> locvar_var)
+        trigger_code = self._rename_sybase_local_variables(trigger_code)
+
+        # 2. Extract Body (After AS)
         as_match = re.search(r'\bAS\b', trigger_code, flags=re.IGNORECASE)
         body_content = trigger_code
         if as_match:
              body_content = trigger_code[as_match.end():].strip()
-
+        
         # 3. Global Replacements specific to Triggers
-
-        # inserted/deleted -> NEW/OLD (Naive but often sufficient for T-SQL -> PG Row Triggers)
-        # Note: In T-SQL, inserted/deleted are tables. In PG Row Triggers, NEW/OLD are records.
-        # If the code does `SELECT ... FROM inserted`, that fails in PG (unless specific workaround).
-        # But commonly: `IF (SELECT count(*) FROM inserted) > 0` -> logic checks.
-        # OR `SELECT @v = col FROM inserted`.
-        # V1 logic replaced them globally. We will do same but watch out for `FROM NEW`.
-
         body_content = re.sub(r'\binserted\b', 'NEW', body_content, flags=re.IGNORECASE)
         body_content = re.sub(r'\bdeleted\b', 'OLD', body_content, flags=re.IGNORECASE)
-
-        # Cleanup: Remove `FROM NEW`/`FROM OLD` if they appear in `SELECT ... FROM NEW` pattern?
-        # Because `SELECT ... FROM NEW` is valid T-SQL (table) but invalid PG (record).
-        # PG: `SELECT NEW.col` works directly.
-        # We'll try to handle this during expression processing or strict regex.
-        # Regex from V1: remove FROM clause if it only contains NEW/OLD
-        # We do this PRE-parsing so sqlglot parses `SELECT NEW.col` (valid-ish) instead of `SELECT ... FROM NEW` (invalidish for row)
-
-        # Regex to strip `FROM NEW` / `FROM OLD`
-        # Simple heuristic: `FROM\s+(?:NEW|OLD)\b` -> empty string
         body_content = re.sub(r'\bFROM\s+(?:NEW|OLD)\b', '', body_content, flags=re.IGNORECASE)
 
-        # 4. IF UPDATE(col) -> IF NEW.col IS DISTINCT FROM OLD.col
-        # This is strictly a T-SQL function. sqlglot might parse it as Func 'UPDATE'.
-        # We can transform it in AST, but regex is reliable for this specific pattern per V1.
+        # IF UPDATE(col) -> IF NEW.col IS DISTINCT FROM OLD.col
         def if_update_replacer(match):
             col = match.group(1)
-            return f"NEW.{col} IS DISTINCT FROM OLD.{col}" # PG idiomatic check
-
+            return f"NEW.{col} IS DISTINCT FROM OLD.{col}" 
         body_content = re.sub(r'\bUPDATE\(([a-zA-Z0-9_]+)\)', if_update_replacer, body_content, flags=re.IGNORECASE)
 
+        # 4. Extract Declarations (Ported from convert_funcproc_code_v2)
+        declarations = []
+        types_mapping = self.get_types_mapping({'target_db_type': target_db_type})
 
-        converted_statements = []
-        try:
-            expressions = sqlglot.parse(body_content, read='tsql')
+        def split_respecting_parens(text):
+            parts = []
+            current = []
+            depth = 0
+            for char in text:
+                if char == '(': depth += 1
+                elif char == ')': depth -= 1
+                if char == ',' and depth == 0:
+                    parts.append("".join(current).strip())
+                    current = []
+                else:
+                    current.append(char)
+            if current: parts.append("".join(current).strip())
+            return parts
 
-            for expression in expressions:
-                try:
-                    pg_sql = ""
-                    skip_semicolon = False
+        def declaration_replacer(match):
+            full_decl = match.group(0)
+            content = full_decl[7:].strip() # len('DECLARE') = 7
+            content_clean = content.replace('@', '')
+            content_clean = self._apply_data_type_substitutions(content_clean)
+            content_clean = self._apply_udt_to_base_type_substitutions(content_clean, settings)
+            for sybase_type, pg_type in types_mapping.items():
+                content_clean = re.sub(rf'\b{re.escape(sybase_type)}\b', pg_type, content_clean, flags=re.IGNORECASE)
 
-                    # 1. ROLLBACK TRIGGER / TRANSACTION -> RAISE EXCEPTION
-                    if isinstance(expression, exp.Command) and 'ROLLBACK' in expression.this.upper():
-                         # Check if it resembles extraction logic from V1
-                         # match string
-                         cmd_str = expression.this.upper()
-                         if 'TRIGGER' in cmd_str or 'TRAN' in cmd_str:
-                              # Extract message if possible? sqlglot Command content is just the string usually.
-                              # V1 extracted message.
-                              # Let's just output generic exception or try to preserve string.
-                              # Original: ROLLBACK TRIGGER WITH RAISERROR 12345 'Message'
-                              # sqlglot might parse 'WITH RAISERROR...' as options?
-                              # Let's rely on regex on the raw expression SQL if we want message.
-                              raw = expression.sql()
-                              msg_match = re.search(r"'([^']+)'", raw)
-                              msg = msg_match.group(1) if msg_match else "Trigger Rollback"
-                              pg_sql = f"RAISE EXCEPTION '{msg}'"
+            parts = split_respecting_parens(content_clean)
+            for part in parts:
+                declarations.append(part.strip() + ';')
+            return ''
 
-                    elif isinstance(expression, exp.Rollback):
-                         pg_sql = "RAISE EXCEPTION 'Transaction Rollback Not Supported in Trigger'"
+        # Expanded lookahead for declaration end
+        body_content = re.sub(r'DECLARE\s+(?![@#])[a-zA-Z0-9_].*?(?=\bBEGIN\b|\bEND\b|\bIF\b|\bWHILE\b|\bSELECT\b|\bINSERT\b|\bUPDATE\b|\bDELETE\b|\bRETURN\b|\bSET\b|\bFETCH\b|\bOPEN\b|\bCLOSE\b|\bDEALLOCATE\b|\bDECLARE\b|\bEXEC\b|\bEXECUTE\b|\bPRINT\b|\bRAISERROR\b|\bWAITFOR\b|\bCOMMIT\b|\bROLLBACK\b|\bSAVE\b|$)', declaration_replacer, body_content, flags=re.IGNORECASE | re.DOTALL)
+        
+        # 5. Convert Statements (using _convert_stmts logic)
+        # Note: _convert_stmts handles block scanning logic internally now
+        converted_statements = self._convert_stmts(body_content, settings, is_nested=False, is_trigger=True)
+        
+        final_stmts_clean = []
+        for stmt in converted_statements:
+             stmt_stripped = stmt.strip()
+             if stmt_stripped.upper().startswith('DECLARE '):
+                  declarations.append(stmt_stripped)
+             else:
+                  final_stmts_clean.append(stmt)
+        
+        final_body = "\n".join(final_stmts_clean)
 
-                    # 2. PRINT -> RAISE NOTICE (Standard)
-                    elif isinstance(expression, exp.Print):
-                        msg_val = expression.this.sql(dialect='postgres')
-                        pg_sql = f"RAISE NOTICE {msg_val}"
+        # 6. Event Extraction
+        events = re.findall(r'for\s+([a-z, ]+?)(?:\s+as\b|$)', trigger_code, re.IGNORECASE)
+        pg_events = "INSERT OR UPDATE OR DELETE"
+        if events:
+             event_list = events[0].replace(' ', '').upper().split(',')
+             pg_events = ' OR '.join(event_list)
 
-                    # 3. SELECT Assignments (reuse logic)
-                    elif isinstance(expression, exp.Select):
-                        generated = expression.sql(dialect='postgres')
+        # 7. Assemble DDL
+        pg_func = f"""CREATE OR REPLACE FUNCTION {target_schema}.{trigger_name}_func()
+RETURNS trigger AS $$
+DECLARE
+{chr(10).join(declarations)}
+BEGIN
+{final_body}
+RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+"""
 
-                        # Check "SELECT @v = 1" pattern (sqlglot might emit `SELECT v = 1` or `v := 1`)
-                        match_assign = re.match(r'SELECT\s+([a-zA-Z0-9_]+)\s*=\s*(.*)', generated, re.IGNORECASE)
-                        if match_assign:
-                            var_name = match_assign.group(1).replace('@', '')
-                            val_expr = match_assign.group(2)
-                            pg_sql = f"{var_name} := {val_expr}"
-                        else:
-                            pg_sql = generated
-
-                    # 4. IF / WHILE (Control Flow)
-                    elif isinstance(expression, (exp.If, exp.While)):
-                         pg_sql = expression.sql(dialect='postgres')
-                         if 'END IF' not in pg_sql.upper() and isinstance(expression, exp.If):
-                              pg_sql += " END IF"
-
-                    else:
-                        pg_sql = expression.sql(dialect='postgres')
-
-                    # --- Post-processing per statement ---
-
-                    # Fix Variables: Remove '@' (sqlglot might have left some)
-                    pg_sql = re.sub(r'(?<!\w)@([a-zA-Z0-9_]+)', r'\1', pg_sql)
-
-                    # Fix `NEW`/`OLD` usage confusion if `sqlglot` didn't like them?
-                    # `NEW.col` should work fine.
-
-                    # Semicolon
-                    if not skip_semicolon and not pg_sql.strip().endswith(';'):
-                        pg_sql += ';'
-
-                    converted_statements.append(pg_sql)
-
-                except Exception as e:
-                    self.config_parser.print_log_message('WARNING', f"Failed to transpile trigger statement: {expression}. Error: {e}")
-                    converted_statements.append(f"-- FAILED CONVERSION: {expression.sql()}\n-- Error: {e}")
-
-        except Exception as e:
-             self.config_parser.print_log_message('ERROR', f"Trigger parsing failed: {e}")
-             return f"/* TRIGGER PARSING FAILED: {e} */\n" + body_content
-
-        # Join statements
-        final_body = "\n".join(converted_statements)
-
-        return final_body
+        pg_trigger = f"""CREATE TRIGGER {trigger_name}
+AFTER {pg_events} ON "{target_schema}"."{target_table}"
+FOR EACH ROW
+EXECUTE FUNCTION {target_schema}.{trigger_name}_func();
+"""
+        return pg_func + '\n' + pg_trigger
 
     def convert_trigger(self, settings):
         # return self.convert_trigger_v1(settings)

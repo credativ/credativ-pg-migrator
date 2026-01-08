@@ -1348,7 +1348,7 @@ class SybaseASEConnector(DatabaseConnector):
         # This handles the case where sqlglot consumes newlines without splitting.
         # Removed SET from here to handle it smartly below.
         processed_body = re.sub(
-             r'([\r\n]+)\s*(?!(?:END|ELSE|WHEN|THEN)\b)(?<!;)\s*\b(SELECT|INSERT|UPDATE|DELETE|EXEC|EXECUTE|RETURN|WITH|DECLARE|PRINT|RAISERROR)\b',
+             r'([\r\n]+)\s*(?!(?:END|ELSE|WHEN|THEN)\b)(?<!;)\s*\b(SELECT|INSERT|UPDATE|DELETE|EXEC|EXECUTE|RETURN|WITH|DECLARE|PRINT|RAISERROR|IF|WHILE|BEGIN)\b',
              r';\1\2',
              body_content,
              flags=re.IGNORECASE
@@ -1443,7 +1443,7 @@ class SybaseASEConnector(DatabaseConnector):
             r"('(?:''|[^'])*')|" +  # Group 1: String literal (handles '' escape)
             r"(--[^\n]*)|" +        # Group 2: Line comment
             r"(\/\*.*?\*\/)|" +     # Group 3: Block comment
-            r"\b(IF|WHILE|BEGIN|END)\b", # Group 4: Keywords
+            r"(?<![a-zA-Z0-9_])((?:ELSE\s+)?(?:IF|WHILE|BEGIN|END))(?![a-zA-Z0-9_])", # Group 4: Keywords
             re.IGNORECASE | re.DOTALL
         )
 
@@ -1460,9 +1460,12 @@ class SybaseASEConnector(DatabaseConnector):
                 i += 1
                 continue
 
-            if token_upper in ('IF', 'WHILE'):
+            # Handle IF, ELSE IF, WHILE
+            if 'IF' in token_upper or 'WHILE' in token_upper:
                 # Found potential block start
-                kw = token_upper
+                kw = 'IF' if 'IF' in token_upper else 'WHILE'
+                if 'ELSE' in token_upper: kw = 'ELSE ' + kw
+
                 start_match = m
                 start_full_idx = m.start()
 
@@ -1615,7 +1618,8 @@ class SybaseASEConnector(DatabaseConnector):
                                  except:
                                       cond_pg = cond_str # Fallback
 
-                                 if typ == 'IF':
+                                 if typ == 'IF' or typ == 'ELSE IF':
+                                      # T-SQL ELSE IF -> Postgres IF (Separate block to avoid orphan ELSIF)
                                       pg_sql = f"IF {cond_pg} THEN\n{body_str}\nEND IF"
                                  elif typ == 'WHILE':
                                       pg_sql = f"WHILE {cond_pg} LOOP\n{body_str}\nEND LOOP"

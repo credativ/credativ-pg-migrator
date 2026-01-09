@@ -49,6 +49,13 @@ class CustomTSQL(TSQL):
     class Parser(TSQL.Parser):
         config_parser = None
 
+        def _parse_alias(self, this):
+             # FIX: Explicitly prevent UPDATE/INSERT/DELETE/MERGE/SET from being aliases
+             # usage of keywords as aliases without AS is weird in implicit statement boundary contexts
+             if self._curr.token_type in (TokenType.UPDATE, TokenType.INSERT, TokenType.DELETE, TokenType.MERGE, TokenType.SET):
+                  return this
+             return super()._parse_alias(this)
+
         def _parse_command_custom(self):
             # Intercept PRINT to parse expression
             # Also helper for SET non-greedy parsing
@@ -67,20 +74,20 @@ class CustomTSQL(TSQL):
                       while self._curr:
                            if self._curr.token_type in (TokenType.SEMICOLON, TokenType.END):
                                 break
-                           
+
                            if balance == 0:
                                 txt = self._curr.text.upper()
                                 if txt in ('SELECT', 'UPDATE', 'INSERT', 'DELETE', 'BEGIN', 'IF', 'WHILE', 'RETURN', 'DECLARE', 'CREATE', 'TRUNCATE', 'GO'):
                                      break
-                           
+
                            if self._curr.token_type == TokenType.L_PAREN:
                                 balance += 1
                            elif self._curr.token_type == TokenType.R_PAREN:
                                 balance -= 1
-                           
+
                            expressions.append(self._curr.text)
                            self._advance()
-                      
+
                       return exp.Command(this='SET', expression=exp.Literal.string(" ".join(expressions)))
 
                  # Not a PRINT or SET command
@@ -1517,7 +1524,7 @@ class SybaseASEConnector(DatabaseConnector):
                 elif node.table.lower() == 'deleted':
                     node.set('table', exp.Identifier(this='OLD', quoted=False))
                 return node
-            
+
             if isinstance(node, (exp.Select, exp.Update, exp.Delete)):
                 # Check FROM
                 from_clause = node.args.get('from')
@@ -1528,7 +1535,7 @@ class SybaseASEConnector(DatabaseConnector):
                 has_inserted = False
                 has_deleted = False
                 new_froms = []
-                
+
                 # Check expressions for COUNT(*)
                 is_count_star = False
                 if isinstance(node, exp.Select) and len(node.expressions) == 1 and isinstance(node.expressions[0], exp.Count) and node.expressions[0].this == exp.Star():
@@ -1544,11 +1551,11 @@ class SybaseASEConnector(DatabaseConnector):
                             has_deleted = True
                             continue # Remove
                     new_froms.append(f)
-                
+
                 if has_inserted and is_count_star and not new_froms:
                      # SELECT count(*) FROM inserted -> CASE WHEN TG_OP ...
                      return sqlglot.parse_one("CASE WHEN TG_OP IN ('INSERT', 'UPDATE') THEN 1 ELSE 0 END")
-                
+
                 if has_deleted and is_count_star and not new_froms:
                      return sqlglot.parse_one("CASE WHEN TG_OP IN ('DELETE', 'UPDATE') THEN 1 ELSE 0 END")
 
@@ -1557,7 +1564,7 @@ class SybaseASEConnector(DatabaseConnector):
                         node.set('from', None)
                     else:
                         from_clause.set('expressions', new_froms)
-                
+
                 return node
             return node
 
@@ -3844,21 +3851,23 @@ EXECUTE FUNCTION {target_schema}.{trigger_name}_func();
         trigger_data = {}
         order_num = 1
         query = f"""
-            SELECT
-                DISTINCT
-                o.name,
-                o.id,
-                o.sysstat,
+            SELECT DISTINCT
+                tr.name AS trigger_name,
+                tr.id AS trigger_id,
+                tr.sysstat,
                 c.text,
                 c.colid
-            FROM syscomments c, sysobjects o
-            WHERE o.id=c.id
-                AND user_name(o.uid) = '{schema_name}'
-                AND type in ('TR')
-                AND (o.sysstat & 8 = 8)
-            ORDER BY o.name, c.colid
+            FROM sysobjects tr
+            JOIN sysdepends d ON tr.id = d.id
+            JOIN sysobjects tbl ON d.depid = tbl.id
+            JOIN syscomments c ON tr.id = c.id
+            WHERE
+                tbl.id = {table_id}
+                AND tr.type = 'TR'
+                AND tbl.type = 'U'
+            ORDER BY tr.id, c.colid
         """
-        self.config_parser.print_log_message('DEBUG3', f"Fetching function/procedure names for schema {schema_name}")
+        self.config_parser.print_log_message('DEBUG3', f"Fetching triggers for table {table_name}")
         self.config_parser.print_log_message('DEBUG3', f"Query: {query}")
         self.connect()
         cursor = self.connection.cursor()

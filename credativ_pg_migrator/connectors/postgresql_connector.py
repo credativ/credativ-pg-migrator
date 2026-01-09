@@ -669,7 +669,61 @@ class PostgreSQLConnector(DatabaseConnector):
         return create_constraint_query
 
     def fetch_triggers(self, table_id: int, table_schema: str, table_name: str):
-        pass
+        triggers = {}
+        order_num = 1
+        query = f"""
+            SELECT
+                t.oid,
+                t.tgname,
+                pg_get_triggerdef(t.oid) as definition,
+                t.tgtype::text,
+                t.tgisinternal,
+                t.tgenabled,
+                obj_description(t.oid, 'pg_trigger') as comment,
+                t.tgtype
+            FROM pg_trigger t
+            JOIN pg_class c ON t.tgrelid = c.oid
+            JOIN pg_namespace n ON c.relnamespace = n.oid
+            WHERE c.oid = {table_id}
+            AND NOT t.tgisinternal
+        """
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            for row in cursor.fetchall():
+                # Detect event and timing from tgtype (bitmask) or just rely on definition
+                # tgtype definition:
+                # 2 = BEFORE
+                # 0 = AFTER (default?) -> actually checking bits
+                # It is easier to rely on pg_get_triggerdef for the full SQL.
+                # But planner expects decomposed values: event, new, old, etc?
+                # looking at planner.py:
+                # trigger_details['event']
+                # trigger_details['new']
+                # trigger_details['old']
+                # trigger_details['sql']
+                
+                # For PG, we simply put the full definition in 'sql'.
+                # The other fields might be purely informational for logging or other connectors.
+                
+                triggers[order_num] = {
+                    'id': row[0],
+                    'name': row[1],
+                    'sql': row[2],
+                    'event': 'See SQL', # simplified
+                    'new': '',
+                    'old': '',
+                    'comment': row[6]
+                }
+                order_num += 1
+            cursor.close()
+            self.disconnect()
+            return triggers
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
+            raise
 
     def execute_query(self, query: str, params=None):
         with self.connection.cursor() as cursor:
@@ -1077,20 +1131,72 @@ class PostgreSQLConnector(DatabaseConnector):
         return inserted_rows
 
     def fetch_funcproc_names(self, schema: str):
-        pass
+        funcprocs = {}
+        order_num = 1
+        query = f"""
+            SELECT
+                p.oid,
+                p.proname,
+                pg_get_function_identity_arguments(p.oid) as arguments,
+                obj_description(p.oid, 'pg_proc') as comment
+            FROM pg_proc p
+            JOIN pg_namespace n ON p.pronamespace = n.oid
+            WHERE n.nspname = '{schema}'
+              AND p.prokind IN ('f', 'p')
+            ORDER BY p.proname
+        """
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            for row in cursor.fetchall():
+                funcprocs[order_num] = {
+                    'id': row[0],
+                    'name': row[1],
+                    'header': f"{row[1]}({row[2]})",
+                    'comment': row[3]
+                }
+                order_num += 1
+            cursor.close()
+            self.disconnect()
+            return funcprocs
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
+            raise
 
     def fetch_funcproc_code(self, funcproc_id: int):
-        pass
+        query = f"SELECT pg_get_functiondef({funcproc_id})"
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            code = cursor.fetchone()[0]
+            cursor.close()
+            self.disconnect()
+            return code
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
+            raise
 
     def convert_funcproc_code(self, settings):
         funcproc_code = settings['funcproc_code']
-        target_db_type = settings['target_db_type']
+        # target_db_type = settings['target_db_type']
         source_schema = settings['source_schema']
         target_schema = settings['target_schema']
-        table_list = settings['table_list']
-        view_list = settings['view_list']
-        converted_code = ''
-        # placeholder for actual conversion logic
+        
+        # Simple schema replacement if they differ
+        converted_code = funcproc_code
+        if source_schema != target_schema:
+            # Replace schema references
+            # Use loose matching or generic replace for source_schema
+            # This is risky if schema name is common word, but standard practice in this simple migration
+            # Better: Replace "source_schema". with "target_schema".
+            converted_code = converted_code.replace(f'"{source_schema}".', f'"{target_schema}".')
+            # Also without quotes?
+            converted_code = converted_code.replace(f'{source_schema}.', f'{target_schema}.')
+        
         return converted_code
 
     def handle_error(self, e, description=None):
@@ -1187,8 +1293,18 @@ class PostgreSQLConnector(DatabaseConnector):
         cursor.close()
         return size
 
-    def convert_trigger(self, trigger_id: int, target_db_type: str, target_schema: str):
-        pass
+    def convert_trigger(self, settings: dict):
+        trigger_sql = settings['trigger_sql']
+        source_schema = settings['source_schema']
+        target_schema = settings['target_schema']
+
+        # Simple schema replacement
+        converted_code = trigger_sql
+        if source_schema != target_schema:
+             converted_code = converted_code.replace(f'"{source_schema}".', f'"{target_schema}".')
+             converted_code = converted_code.replace(f'{source_schema}.', f'{target_schema}.')
+        
+        return converted_code
 
     def fetch_views_names(self, source_schema: str):
         views = {}

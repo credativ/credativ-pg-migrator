@@ -1766,7 +1766,7 @@ class SybaseASEConnector(DatabaseConnector):
                               pg_sql = match_cmd.group(1)
                               is_cursor_cmd = True
                    elif "'RAISERROR_CMD:" in pg_sql:
-                        match_raise = re.re.search(r"'RAISERROR_CMD:(\d+)'\s+AS\s+_cmd,\s+(.*?)\s+AS\s+_msg", pg_sql, re.IGNORECASE)
+                        match_raise = re.search(r"'RAISERROR_CMD:(\d+)'\s+AS\s+_cmd,\s+(.*?)\s+AS\s+_msg", pg_sql, re.IGNORECASE)
                         if match_raise:
                               r_code = match_raise.group(1)
                               r_msg = match_raise.group(2)

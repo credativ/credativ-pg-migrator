@@ -1896,50 +1896,50 @@ class SybaseASEConnector(DatabaseConnector):
 
         return converted_statements
 
-        # Inject _rowcount declaration
-        if has_rowcount:
-             declarations.insert(0, "_rowcount INTEGER;")
+        # # Inject _rowcount declaration
+        # if has_rowcount:
+        #      declarations.insert(0, "_rowcount INTEGER;")
 
-        final_body = "\n".join(final_stmts_clean)
+        # final_body = "\n".join(final_stmts_clean)
 
-        # --- Clean Parameters (Ported Logic) ---
-        # NO OP - handled at start
-        # pg_params_str = params_str # REMOVED: Using robust extracted params
-        # if pg_params_str:
-        #      pg_params_str = re.sub(r'@', '', pg_params_str)
-        #      pg_params_str = re.sub(r'\bnumeric\b', 'numeric', pg_params_str, flags=re.IGNORECASE)
-        #      pg_params_str = re.sub(r'\bint\b', 'integer', pg_params_str, flags=re.IGNORECASE)
+        # # --- Clean Parameters (Ported Logic) ---
+        # # NO OP - handled at start
+        # # pg_params_str = params_str # REMOVED: Using robust extracted params
+        # # if pg_params_str:
+        # #      pg_params_str = re.sub(r'@', '', pg_params_str)
+        # #      pg_params_str = re.sub(r'\bnumeric\b', 'numeric', pg_params_str, flags=re.IGNORECASE)
+        # #      pg_params_str = re.sub(r'\bint\b', 'integer', pg_params_str, flags=re.IGNORECASE)
 
 
-        # Determine RETURNS clause
-        returns_clause = "RETURNS void"
-        if output_params:
-             if len(output_params) > 1:
-                  returns_clause = "RETURNS RECORD"
-             else:
-                  # Extract type of the single INOUT param
-                  # Look for "INOUT param_name TYPE"
-                  single_out = re.search(r'\b(?:INOUT|OUT)\s+[a-zA-Z0-9_]+\s+([a-zA-Z0-9_]+(?:\(.*\))?)', pg_params_str, flags=re.IGNORECASE)
-                  if single_out:
-                       returns_clause = f"RETURNS {single_out.group(1)}"
-                  else:
-                       returns_clause = "RETURNS RECORD" # Fallback
+        # # Determine RETURNS clause
+        # returns_clause = "RETURNS void"
+        # if output_params:
+        #      if len(output_params) > 1:
+        #           returns_clause = "RETURNS RECORD"
+        #      else:
+        #           # Extract type of the single INOUT param
+        #           # Look for "INOUT param_name TYPE"
+        #           single_out = re.search(r'\b(?:INOUT|OUT)\s+[a-zA-Z0-9_]+\s+([a-zA-Z0-9_]+(?:\(.*\))?)', pg_params_str, flags=re.IGNORECASE)
+        #           if single_out:
+        #                returns_clause = f"RETURNS {single_out.group(1)}"
+        #           else:
+        #                returns_clause = "RETURNS RECORD" # Fallback
 
-        # Construct DDL
-        # Use EXTRACTED func_schema if valid, else settings
-        schema_to_use = func_schema if func_schema else settings['target_schema']
+        # # Construct DDL
+        # # Use EXTRACTED func_schema if valid, else settings
+        # schema_to_use = func_schema if func_schema else settings['target_schema']
 
-        ddl = f"CREATE OR REPLACE FUNCTION {schema_to_use}.{proc_name}({pg_params_str})\n"
-        ddl += f"{returns_clause} AS $$\n"
-        ddl += "DECLARE\n"
-        if declarations:
-             ddl += "\n".join(declarations) + "\n"
-        ddl += "BEGIN\n"
-        ddl += final_body + "\n"
-        ddl += "END;\n"
-        ddl += "$$ LANGUAGE plpgsql;"
+        # ddl = f"CREATE OR REPLACE FUNCTION {schema_to_use}.{proc_name}({pg_params_str})\n"
+        # ddl += f"{returns_clause} AS $$\n"
+        # ddl += "DECLARE\n"
+        # if declarations:
+        #      ddl += "\n".join(declarations) + "\n"
+        # ddl += "BEGIN\n"
+        # ddl += final_body + "\n"
+        # ddl += "END;\n"
+        # ddl += "$$ LANGUAGE plpgsql;"
 
-        return ddl
+        # return ddl
 
     def convert_funcproc_code(self, settings):
         try:

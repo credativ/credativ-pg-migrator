@@ -771,7 +771,6 @@ class SybaseASEConnector(DatabaseConnector):
         except Exception as e:
             self.config_parser.print_log_message('WARNING', f"Failed to fetch UDTs for substitution: {e}")
             # If we fail, we just return empty map to not break flow
-            pass
 
         self._udt_cache = udt_map
         return udt_map

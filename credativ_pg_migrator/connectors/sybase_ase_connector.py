@@ -3278,7 +3278,7 @@ class SybaseASEConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Full stack trace: {traceback.format_exc()}")
             raise e
 
-    def convert_trigger_v2(self, settings):
+    def convert_trigger(self, settings):
         """
         Parser-based conversion for triggers (V2).
         Returns full DDL (CREATE FUNCTION + CREATE TRIGGER).
@@ -3390,7 +3390,7 @@ class SybaseASEConnector(DatabaseConnector):
              declarations.insert(0, "global_trancount INTEGER DEFAULT 1;")
 
         final_body = "\n".join(final_stmts_clean)
-        
+
         # Post-processing: Replace locvar_sybase_update_func(col) with NEW.col IS DISTINCT FROM OLD.col
         # This handles the result of if_update_replacer after parsing/generation
         def update_func_replacer(match):
@@ -3398,7 +3398,7 @@ class SybaseASEConnector(DatabaseConnector):
              # match group 2: column name
              # match group 3: optional quote (should match group 1)
              # Use simplified regex since we know how sqlglot generates output (likely quoted)
-             
+
              # Regex to capture: locvar_sybase_update_func( "col" ) or ( col )
              content = match.group(1)
              return f"NEW.{content} IS DISTINCT FROM OLD.{content}"
@@ -3431,451 +3431,447 @@ EXECUTE FUNCTION {target_schema}.{trigger_name}_func();
 """
         return pg_func + '\n' + pg_trigger
 
-    def convert_trigger(self, settings):
-        # return self.convert_trigger_v1(settings)
-        return self.convert_trigger_v2(settings)
-
-    def convert_trigger_v1(self, settings):
-        trigger_name = self.config_parser.convert_names_case(settings['trigger_name'])
-        trigger_code = settings['trigger_sql']
-
-        # 0. Encapsulate comments
-        # Convert -- comment to /* comment */ to prevent breaking code
-        trigger_code = re.sub(r'--([^\n]*)', r'/*\1*/', trigger_code)
-
-        target_schema = settings['target_schema']
-        target_table = self.config_parser.convert_names_case(settings['target_table'])
-        target_db_type = settings['target_db_type']
-
-        # Helper
-        def split_respecting_parens(text):
-            parts = []
-            current = []
-            depth = 0
-            for char in text:
-                if char == '(':
-                    depth += 1
-                elif char == ')':
-                    depth -= 1
-
-                if char == ',' and depth == 0:
-                    parts.append("".join(current).strip())
-                    current = []
-                else:
-                    current.append(char)
-            if current:
-                parts.append("".join(current).strip())
-            return parts
-
-        # 1. Basic Cleanup
-        converted_code = re.sub(r'\bGO\b', '', trigger_code, flags=re.IGNORECASE)
-
-        # 2. Extract Body (After AS)
-        # Pattern: CREATE TRIGGER ... AS [BEGIN] ... [END]
-        # or ... FOR INSERT AS ...
-        as_match = re.search(r'\bAS\b', converted_code, flags=re.IGNORECASE)
-        if as_match:
-            body_content = converted_code[as_match.end():].strip()
-        else:
-            body_content = converted_code # Fallback?
-
-        # Remove outer BEGIN/END if present
-        if re.match(r'^BEGIN\b', body_content, flags=re.IGNORECASE):
-            body_content = re.sub(r'^BEGIN', '', body_content, count=1, flags=re.IGNORECASE).strip()
-            body_content = re.sub(r'END\s*$', '', body_content, flags=re.IGNORECASE).strip()
-
-        # 3. Variable Declarations
-        types_mapping = self.get_types_mapping({'target_db_type': target_db_type})
-        declarations = []
-
-        # Pre-process: Rename specific conflicting variables globally before stripping @
-        # e.g. @date -> @v_date (Keep @ so DECLARE regex matches it)
-        body_content = re.sub(r'@date\b', '@v_date', body_content, flags=re.IGNORECASE)
-
-        def declaration_replacer(match):
-            full_decl = match.group(0)
-            content = full_decl[7:].strip() # len('DECLARE') = 7
-
-            content_clean = content.replace('@', '')
-            # Custom type substitutions first
-            content_clean = self._apply_data_type_substitutions(content_clean)
-            content_clean = self._apply_udt_to_base_type_substitutions(content_clean, settings)
-            for sybase_type, pg_type in types_mapping.items():
-                content_clean = re.sub(rf'\b{re.escape(sybase_type)}\b', pg_type, content_clean, flags=re.IGNORECASE)
-
-            parts = split_respecting_parens(content_clean)
-            for part in parts:
-                declarations.append(part.strip() + ';')
-
-            return '' # Remove from body
-
-        self.config_parser.print_log_message('DEBUG', "Starting variable declaration extraction...")
-        body_content = re.sub(r'DECLARE\s+@.*?(?=\bBEGIN\b|\bIF\b|\bWHILE\b|\bSELECT\b|\bINSERT\b|\bUPDATE\b|\bDELETE\b|\bRETURN\b|\bSET\b|\bFETCH\b|\bOPEN\b|\bCLOSE\b|\bDEALLOCATE\b|\bDECLARE\b|$)', declaration_replacer, body_content, flags=re.IGNORECASE | re.DOTALL)
-        self.config_parser.print_log_message('DEBUG', "Variable declaration extraction complete.")
-
-        # 4. Global Replacements
-        # Functions
-        function_map = self.get_sql_functions_mapping({ 'target_db_type': target_db_type })
-        for sybase_func, pg_equiv in function_map.items():
-            escaped_src_func = re.escape(sybase_func)
-            body_content = re.sub(escaped_src_func, pg_equiv, body_content, flags=re.IGNORECASE)
-
-        # Type substitutions in body
-        self.config_parser.print_log_message('DEBUG', "Starting global type substitutions...")
-        body_content = self._apply_data_type_substitutions(body_content)
-        body_content = self._apply_udt_to_base_type_substitutions(body_content, settings)
-        for sybase_type, pg_type in types_mapping.items():
-            body_content = re.sub(rf'\b{re.escape(sybase_type)}\b', pg_type, body_content, flags=re.IGNORECASE)
-
-        # Remove @
-        body_content = re.sub(r'(?<!@)@([a-zA-Z0-9_]+)', r'\1', body_content)
-
-        # INSERTED/DELETED -> NEW/OLD
-        body_content = re.sub(r'\binserted\b', 'NEW', body_content, flags=re.IGNORECASE)
-        body_content = re.sub(r'\bdeleted\b', 'OLD', body_content, flags=re.IGNORECASE)
-
-        # Sybase Specific Cleanups
-        # @@trancount -> 1 (Assume transaction active)
-        body_content = re.sub(r'@@trancount', '1', body_content, flags=re.IGNORECASE)
-        # Remove SET chained/transaction commands
-        body_content = re.sub(r'SET\s+chained\s+\w+', '', body_content, flags=re.IGNORECASE)
-        body_content = re.sub(r'SET\s+transaction\s+isolation\s+level\s+\d+', '', body_content, flags=re.IGNORECASE)
-
-        # PRINT -> RAISE NOTICE
-        def print_replacer(match):
-             content = match.group(1).strip()
-             args = split_respecting_parens(content)
-             if not args:
-                  return "RAISE NOTICE '';"
-             first_arg = args[0]
-             rest_args = args[1:]
-             if first_arg.startswith("'") and first_arg.endswith("'"):
-                  msg = first_arg
-                  if rest_args:
-                       return f"RAISE NOTICE {msg}, {', '.join(rest_args)};"
-                  else:
-                       return f"RAISE NOTICE {msg};"
-             else:
-                  format_str = ", ".join(["%"] * len(args))
-                  return f"RAISE NOTICE '{format_str}', {', '.join(args)};"
-
-        body_content = re.sub(r'print\s+(.+?)(?=;|\n|$)', print_replacer, body_content, flags=re.IGNORECASE)
-
-        # 5. Assignments and Selects
-
-        # Select Into
-        def select_into_transformer(match):
-            content = match.group(1)
-            rest = match.group(2)
-
-            # Clean up FROM NEW/OLD in rest
-            # If rest contains "FROM NEW" or "FROM OLD", we strip it if it's the only thing or logic suggests.
-            from_match = re.search(r'FROM\s+(.*?)(?:\bWHERE\b|\bGROUP\b|\bORDER\b|$)', rest, re.IGNORECASE)
-            if from_match:
-                table_list = from_match.group(1)
-                # Remove comments
-                table_list = re.sub(r'--.*', '', table_list)
-                table_list = re.sub(r'/\*.*?\*/', '', table_list, flags=re.DOTALL)
-
-                tables = split_respecting_parens(table_list)
-                clean_tables = []
-                for t in tables:
-                    t_clean = t.strip()
-                    if not t_clean:
-                        continue
-                    # Check first word (table name) against keywords
-                    # NEW alias -> NEW. NEW -> NEW.
-                    first_word = t_clean.split()[0].upper()
-                    if first_word not in ('NEW', 'OLD', 'INSERTED', 'DELETED'):
-                        clean_tables.append(t)
-
-                if not clean_tables:
-                   # No tables left, remove FROM clause entirely
-                   start, end = from_match.span()
-                   # Simply remove the match range from rest
-                   rest = rest[:start] + rest[end:]
-
-            if '=' in content:
-                parts = split_respecting_parens(content)
-                vars_list = []
-                cols_list = []
-                for asm in parts:
-                    if '=' in asm:
-                        side_l, side_r = asm.split('=', 1)
-                        vars_list.append(side_l.strip())
-                        cols_list.append(side_r.strip())
-                    else:
-                        cols_list.append(asm)
-                if vars_list:
-                    return f"SELECT {', '.join(cols_list)} INTO {', '.join(vars_list)} {rest}"
-            return match.group(0)
-
-        # Regex must ensure we don't cross statement boundaries (UPDATE, INSERT, etc.)
-        # Added SELECT to lookahead to prevent merging multiple SELECTs
-        # Also constrained matches after FROM to statement boundaries
-        body_content = re.sub(r'SELECT\s+((?:(?!\b(?:UPDATE|INSERT|DELETE|IF|WHILE|RETURN|BEGIN|END|SELECT)\b).)+?)\s+(FROM\s+(?:(?!\b(?:UPDATE|INSERT|DELETE|IF|WHILE|RETURN|BEGIN|END|SELECT)\b).)+)', select_into_transformer, body_content, flags=re.IGNORECASE | re.DOTALL)
-
-        # Cleanup: Remove FROM NEW/OLD from SELECT statements if they persist
-        # e.g. "SELECT ... INTO ... FROM NEW" -> "SELECT ... INTO ..."
-        body_content = re.sub(r'(SELECT\s+[^;]+?)\s+FROM\s+(?:NEW|OLD|INSERTED|DELETED)\b', r'\1', body_content, flags=re.IGNORECASE | re.DOTALL)
-
-        # Simple Assignments
-        def simple_assignment(match):
-            full_match = match.group(0)
-            if 'FROM' in full_match.upper():
-                return full_match
-            content = match.group(1).strip()
-            if '=' not in content:
-                return full_match
-
-            parts = split_respecting_parens(content)
-            assignments = []
-            is_assignment = True
-            for part in parts:
-                if '=' in part:
-                    side_l, side_r = part.split('=', 1)
-                    assignments.append(f"{side_l.strip()} := {side_r.strip()}")
-                else:
-                    is_assignment = False
-
-            if is_assignment and assignments:
-                return "; ".join(assignments) + ";"
-            return full_match
-
-        body_content = re.sub(r'SELECT\s+([^;\n]+)', simple_assignment, body_content, flags=re.IGNORECASE)
-
-        # 6. UPDATE ... FROM fixes
-        # If UPDATE target ... FROM target, table2 -> FROM table2
-        # Need to parse UPDATE target
-
-        def update_from_fix(match):
-            target = match.group(1)
-            set_clause = match.group(2)
-            from_clause = match.group(3)
-            rest = match.group(4)
-
-            # Parse FROM tables
-            # Sybase FROM t1, t2
-            # PG FROM t2 (if t1 is target)
-            tables = split_respecting_parens(from_clause)
-            new_tables = []
-            for t in tables:
-                t_clean = t.strip()
-                # Check alias? "table alias" or "table AS alias"
-                # If target matches table name or alias
-                # Simplifying: check if target string is contained
-                # Remove target table
-                if target.lower() == t_clean.lower():
-                    continue # Skip target
-                # Check for "target alias"
-                if t_clean.lower().startswith(target.lower() + ' ') or t_clean.lower().startswith(target.lower() + '\t'):
-                     continue
-
-                # Also remove NEW and OLD from FROM clause in triggers
-                if t_clean.upper() in ('NEW', 'OLD', 'INSERTED', 'DELETED'):
-                    continue
-
-                new_tables.append(t)
-
-            if new_tables:
-                return f"UPDATE {target} {set_clause} FROM {', '.join(new_tables)} {rest}"
-            else:
-                # If no tables left (self update only), remove FROM
-                return f"UPDATE {target} {set_clause} {rest}"
-
-        # Regex: UPDATE target SET ... FROM ... [WHERE...]
-        # Be careful matching SET ... FROM
-        body_content = re.sub(r'UPDATE\s+([a-zA-Z0-9_]+)\s+(SET\s+.*?)\s+FROM\s+(.*?)(\bWHERE\b|\bGROUP\b|\bORDER\b|$)', update_from_fix, body_content, flags=re.IGNORECASE | re.DOTALL)
-
-        # 7. String Concatenation Fix (+ -> ||)
-        # Heuristic: '...' + ... or ... + '...'
-        body_content = re.sub(r"('\s*)\+\s*", r"\1 || ", body_content)
-        body_content = re.sub(r"\s*\+\s*(')", r" || \1", body_content)
-
-        # 8. Control Flow (IF/WHILE) - Minimal support as per trigger usage
-
-        # IF UPDATE(column) -> IF NEW.column IS DISTINCT FROM OLD.column
-        # Needs to happen before IF regex
-        def if_update_replacer(match):
-            col = match.group(1)
-            # Sybase: IF UPDATE(col)
-            # PG: IF NEW.col IS DISTINCT FROM OLD.col
-            return f"IF NEW.{col} IS DISTINCT FROM OLD.{col}"
-
-        body_content = re.sub(r'IF\s+UPDATE\(([\w]+)\)', if_update_replacer, body_content, flags=re.IGNORECASE)
-
-        # Rollback Trigger
-        # rollback trigger [with raiserror number 'message']
-        # rollback transaction ...
-        # Replace with RAISE EXCEPTION
-        def rollback_replacer(match):
-            # Try to capture message if present
-            # Pattern: rollback trigger with raiserror 99999 'Message'
-            rest = match.group(1) if match.lastindex >= 1 else ''
-            message = "Trigger Rollback"
-
-            # Extract message string '...'
-            msg_match = re.search(r"'([^']+)'", rest)
-            if msg_match:
-                message = msg_match.group(1)
-
-            return f"RAISE EXCEPTION '{message}';"
-
-        body_content = re.sub(r'rollback\s+(?:trigger|transaction)\s*(.*)', rollback_replacer, body_content, flags=re.IGNORECASE)
-
-        # FIX: Ensure semicolon before ELSE/ELSIF if missing
-        # Regex updated to handle comments
-        body_content = re.sub(r'([^;\s])([ \t]*(?:--[^\n]*|/\*.*?\*/[ \t]*)?)\n\s*(ELSE|ELSIF)\b', r'\1;\2\n\3', body_content, flags=re.IGNORECASE)
-
-        # ELSE IF -> ELSIF
-        body_content = re.sub(r'ELSE\s+IF', 'ELSIF', body_content, flags=re.IGNORECASE)
-
-        # IF replacement with DOTALL support for multiline conditions
-        body_content = re.sub(r'IF\s+(.*?)\s+BEGIN', r'IF \1 THEN', body_content, flags=re.IGNORECASE | re.DOTALL)
-
-        # Standardize other keywords
-        body_content = re.sub(r'WHILE\s+(.*?)\s+BEGIN', r'WHILE \1 LOOP', body_content, flags=re.IGNORECASE)
-        body_content = re.sub(r'ELSE\s+BEGIN', r'ELSE', body_content, flags=re.IGNORECASE)
-        body_content = re.sub(r'END\s*;?\s+ELSE', r'ELSE', body_content, flags=re.IGNORECASE)
-
-
-        # END replacement (simple approach for now, triggers usually simple)
-        # But we stripped outer END. Inner ENDs need closure.
-        # If we replaced BEGIN with THEN/LOOP, we need END IF/LOOP.
-        # Let's use the stack logic if we really want to be safe, or just END IF for triggers?
-        # User trigger has IF?
-        # "IF UPDATE(column)" was handled in old code.
-        body_content = re.sub(r'if\s+UPDATE\([a-zA-Z_]+\)', '-- IF UPDATE(column) not supported', body_content, flags=re.IGNORECASE)
-
-        # Fix inner ENDs
-        # Reuse logic from convert_funcproc_code manually or simplified
-        lines = body_content.split('\n')
-        new_lines = []
-        stack = []
-        for line in lines:
-            stripped = line.strip()
-            if re.search(r'IF\s+.*\s+THEN', line, flags=re.IGNORECASE):
-                stack.append('IF')
-            elif re.search(r'WHILE\s+.*\s+LOOP', line, flags=re.IGNORECASE):
-                stack.append('LOOP')
-
-            if re.match(r'^END\s*;?$', stripped, flags=re.IGNORECASE):
-                if stack:
-                    block = stack.pop()
-                    if block == 'IF':
-                        new_lines.append("END IF;")
-                    elif block == 'LOOP':
-                        new_lines.append("END LOOP;")
-                    else:
-                        new_lines.append('END;')
-                else:
-                    new_lines.append('END;') # Should not happen if outer stripped
-            else:
-                new_lines.append(line)
-        body_content = '\n'.join(new_lines)
-
-        # 9. Semicolon Heuristic (Ensure statements end with ;)
-        lines = body_content.split('\n')
-        final_lines = []
-        statement_buffer = []
-
-        def flush_buffer(buf):
-            if not buf: return
-
-            # Find last non-empty line index
-            last_idx = -1
-            for i in range(len(buf) - 1, -1, -1):
-                line_stripped = buf[i].strip()
-                if line_stripped:
-                    # Skip comments
-                    if line_stripped.startswith('/*') or line_stripped.startswith('--'):
-                        continue
-                    last_idx = i
-                    break
-
-            if last_idx != -1:
-                s = buf[last_idx].rstrip()
-
-                # Remove trailing comments for check (to avoid adding ; to BEGIN -- comment)
-                s_code = re.sub(r'--.*', '', s)
-                s_code = re.sub(r'/\*.*?\*/', '', s_code, flags=re.DOTALL)
-                s_code = s_code.strip()
-
-                # Don't add if ends with ; or block openers/closers that don't need it
-                ignore_ends = ('BEGIN', 'THEN', 'LOOP', 'ELSE', ';')
-                if not s_code.upper().endswith(ignore_ends):
-                    # Check if it started with a command that needs ;
-                    combined = " ".join([b.strip() for b in buf]) # Join all lines to check full start
-                    # Remove comments from check
-                    combined_code = re.sub(r'--.*', '', combined).strip()
-
-                    first_word = combined_code.split()[0].upper()
-
-                    # Also check assignments "var := val"
-                    # Remove strings to avoid false positives like IF x = ':='
-                    combined_no_strings = re.sub(r"'.*?'", '', combined_code)
-                    is_assignment = ':=' in combined_no_strings
-
-                    # Keywords requiring semicolon
-                    needs_semi = ('UPDATE', 'INSERT', 'DELETE', 'SELECT', 'PERFORM', 'CALL', 'WITH', 'MERGE', 'RAISE')
-
-                    if first_word in needs_semi or is_assignment:
-                         buf[last_idx] = s + ';'
-
-            final_lines.extend(buf)
-
-        for line in lines:
-            stripped = line.strip()
-            # Start of new statement?
-            is_start = False
-            # Check forkeywords that start statements
-            if re.match(r'^(UPDATE|INSERT|DELETE|SELECT|IF|WHILE|RETURN|END|DECLARE|BEGIN|RAISE)\b', stripped, re.IGNORECASE):
-                is_start = True
-            elif ':=' in line: # Assignment line?
-                 is_start = True
-
-            if is_start:
-                 flush_buffer(statement_buffer)
-                 statement_buffer = [line]
-            else:
-                 statement_buffer.append(line)
-
-        flush_buffer(statement_buffer)
-        body_content = '\n'.join(final_lines)
-
-        # 10. Return
-        # Only replace RETURN word boundary.
-        # Handle RETURN result? Sybase triggers don't typically return values like functions, but RETURN without args exits.
-        # If RETURN 1 or RETURN @var, we might need to be careful.
-        # For now, converting standalone RETURN to RETURN NEW;
-        body_content = re.sub(r'\bRETURN\b', 'RETURN NEW;', body_content, flags=re.IGNORECASE)
-        # If RETURN NEW; NEW; (double) -> fix
-        body_content = body_content.replace('RETURN NEW; NEW;', 'RETURN NEW;')
-
-        # Event parsing
-        events = re.findall(r'for\s+([a-z, ]+?)(?:\s+as\b|$)', trigger_code, re.IGNORECASE)
-        events = events[0].replace(' ', '').upper().split(',') if events else []
-        pg_events = ' OR '.join(events)
-
-        # Assemble
-        pg_func = f"""CREATE OR REPLACE FUNCTION {trigger_name}_func()
-            RETURNS trigger AS $$
-            DECLARE
-            {chr(10).join(declarations)}
-            BEGIN
-            {body_content.strip()}
-            RETURN NEW;
-            END;
-            $$ LANGUAGE plpgsql;
-            """
-
-        pg_trigger = f"""CREATE TRIGGER {trigger_name}
-            AFTER {pg_events} ON "{target_schema}"."{target_table}"
-            FOR EACH ROW
-            EXECUTE FUNCTION {trigger_name}_func();
-            """
-
-        return pg_func + '\n' + pg_trigger
+    # def convert_trigger_v1(self, settings):
+    #     trigger_name = self.config_parser.convert_names_case(settings['trigger_name'])
+    #     trigger_code = settings['trigger_sql']
+
+    #     # 0. Encapsulate comments
+    #     # Convert -- comment to /* comment */ to prevent breaking code
+    #     trigger_code = re.sub(r'--([^\n]*)', r'/*\1*/', trigger_code)
+
+    #     target_schema = settings['target_schema']
+    #     target_table = self.config_parser.convert_names_case(settings['target_table'])
+    #     target_db_type = settings['target_db_type']
+
+    #     # Helper
+    #     def split_respecting_parens(text):
+    #         parts = []
+    #         current = []
+    #         depth = 0
+    #         for char in text:
+    #             if char == '(':
+    #                 depth += 1
+    #             elif char == ')':
+    #                 depth -= 1
+
+    #             if char == ',' and depth == 0:
+    #                 parts.append("".join(current).strip())
+    #                 current = []
+    #             else:
+    #                 current.append(char)
+    #         if current:
+    #             parts.append("".join(current).strip())
+    #         return parts
+
+    #     # 1. Basic Cleanup
+    #     converted_code = re.sub(r'\bGO\b', '', trigger_code, flags=re.IGNORECASE)
+
+    #     # 2. Extract Body (After AS)
+    #     # Pattern: CREATE TRIGGER ... AS [BEGIN] ... [END]
+    #     # or ... FOR INSERT AS ...
+    #     as_match = re.search(r'\bAS\b', converted_code, flags=re.IGNORECASE)
+    #     if as_match:
+    #         body_content = converted_code[as_match.end():].strip()
+    #     else:
+    #         body_content = converted_code # Fallback?
+
+    #     # Remove outer BEGIN/END if present
+    #     if re.match(r'^BEGIN\b', body_content, flags=re.IGNORECASE):
+    #         body_content = re.sub(r'^BEGIN', '', body_content, count=1, flags=re.IGNORECASE).strip()
+    #         body_content = re.sub(r'END\s*$', '', body_content, flags=re.IGNORECASE).strip()
+
+    #     # 3. Variable Declarations
+    #     types_mapping = self.get_types_mapping({'target_db_type': target_db_type})
+    #     declarations = []
+
+    #     # Pre-process: Rename specific conflicting variables globally before stripping @
+    #     # e.g. @date -> @v_date (Keep @ so DECLARE regex matches it)
+    #     body_content = re.sub(r'@date\b', '@v_date', body_content, flags=re.IGNORECASE)
+
+    #     def declaration_replacer(match):
+    #         full_decl = match.group(0)
+    #         content = full_decl[7:].strip() # len('DECLARE') = 7
+
+    #         content_clean = content.replace('@', '')
+    #         # Custom type substitutions first
+    #         content_clean = self._apply_data_type_substitutions(content_clean)
+    #         content_clean = self._apply_udt_to_base_type_substitutions(content_clean, settings)
+    #         for sybase_type, pg_type in types_mapping.items():
+    #             content_clean = re.sub(rf'\b{re.escape(sybase_type)}\b', pg_type, content_clean, flags=re.IGNORECASE)
+
+    #         parts = split_respecting_parens(content_clean)
+    #         for part in parts:
+    #             declarations.append(part.strip() + ';')
+
+    #         return '' # Remove from body
+
+    #     self.config_parser.print_log_message('DEBUG', "Starting variable declaration extraction...")
+    #     body_content = re.sub(r'DECLARE\s+@.*?(?=\bBEGIN\b|\bIF\b|\bWHILE\b|\bSELECT\b|\bINSERT\b|\bUPDATE\b|\bDELETE\b|\bRETURN\b|\bSET\b|\bFETCH\b|\bOPEN\b|\bCLOSE\b|\bDEALLOCATE\b|\bDECLARE\b|$)', declaration_replacer, body_content, flags=re.IGNORECASE | re.DOTALL)
+    #     self.config_parser.print_log_message('DEBUG', "Variable declaration extraction complete.")
+
+    #     # 4. Global Replacements
+    #     # Functions
+    #     function_map = self.get_sql_functions_mapping({ 'target_db_type': target_db_type })
+    #     for sybase_func, pg_equiv in function_map.items():
+    #         escaped_src_func = re.escape(sybase_func)
+    #         body_content = re.sub(escaped_src_func, pg_equiv, body_content, flags=re.IGNORECASE)
+
+    #     # Type substitutions in body
+    #     self.config_parser.print_log_message('DEBUG', "Starting global type substitutions...")
+    #     body_content = self._apply_data_type_substitutions(body_content)
+    #     body_content = self._apply_udt_to_base_type_substitutions(body_content, settings)
+    #     for sybase_type, pg_type in types_mapping.items():
+    #         body_content = re.sub(rf'\b{re.escape(sybase_type)}\b', pg_type, body_content, flags=re.IGNORECASE)
+
+    #     # Remove @
+    #     body_content = re.sub(r'(?<!@)@([a-zA-Z0-9_]+)', r'\1', body_content)
+
+    #     # INSERTED/DELETED -> NEW/OLD
+    #     body_content = re.sub(r'\binserted\b', 'NEW', body_content, flags=re.IGNORECASE)
+    #     body_content = re.sub(r'\bdeleted\b', 'OLD', body_content, flags=re.IGNORECASE)
+
+    #     # Sybase Specific Cleanups
+    #     # @@trancount -> 1 (Assume transaction active)
+    #     body_content = re.sub(r'@@trancount', '1', body_content, flags=re.IGNORECASE)
+    #     # Remove SET chained/transaction commands
+    #     body_content = re.sub(r'SET\s+chained\s+\w+', '', body_content, flags=re.IGNORECASE)
+    #     body_content = re.sub(r'SET\s+transaction\s+isolation\s+level\s+\d+', '', body_content, flags=re.IGNORECASE)
+
+    #     # PRINT -> RAISE NOTICE
+    #     def print_replacer(match):
+    #          content = match.group(1).strip()
+    #          args = split_respecting_parens(content)
+    #          if not args:
+    #               return "RAISE NOTICE '';"
+    #          first_arg = args[0]
+    #          rest_args = args[1:]
+    #          if first_arg.startswith("'") and first_arg.endswith("'"):
+    #               msg = first_arg
+    #               if rest_args:
+    #                    return f"RAISE NOTICE {msg}, {', '.join(rest_args)};"
+    #               else:
+    #                    return f"RAISE NOTICE {msg};"
+    #          else:
+    #               format_str = ", ".join(["%"] * len(args))
+    #               return f"RAISE NOTICE '{format_str}', {', '.join(args)};"
+
+    #     body_content = re.sub(r'print\s+(.+?)(?=;|\n|$)', print_replacer, body_content, flags=re.IGNORECASE)
+
+    #     # 5. Assignments and Selects
+
+    #     # Select Into
+    #     def select_into_transformer(match):
+    #         content = match.group(1)
+    #         rest = match.group(2)
+
+    #         # Clean up FROM NEW/OLD in rest
+    #         # If rest contains "FROM NEW" or "FROM OLD", we strip it if it's the only thing or logic suggests.
+    #         from_match = re.search(r'FROM\s+(.*?)(?:\bWHERE\b|\bGROUP\b|\bORDER\b|$)', rest, re.IGNORECASE)
+    #         if from_match:
+    #             table_list = from_match.group(1)
+    #             # Remove comments
+    #             table_list = re.sub(r'--.*', '', table_list)
+    #             table_list = re.sub(r'/\*.*?\*/', '', table_list, flags=re.DOTALL)
+
+    #             tables = split_respecting_parens(table_list)
+    #             clean_tables = []
+    #             for t in tables:
+    #                 t_clean = t.strip()
+    #                 if not t_clean:
+    #                     continue
+    #                 # Check first word (table name) against keywords
+    #                 # NEW alias -> NEW. NEW -> NEW.
+    #                 first_word = t_clean.split()[0].upper()
+    #                 if first_word not in ('NEW', 'OLD', 'INSERTED', 'DELETED'):
+    #                     clean_tables.append(t)
+
+    #             if not clean_tables:
+    #                # No tables left, remove FROM clause entirely
+    #                start, end = from_match.span()
+    #                # Simply remove the match range from rest
+    #                rest = rest[:start] + rest[end:]
+
+    #         if '=' in content:
+    #             parts = split_respecting_parens(content)
+    #             vars_list = []
+    #             cols_list = []
+    #             for asm in parts:
+    #                 if '=' in asm:
+    #                     side_l, side_r = asm.split('=', 1)
+    #                     vars_list.append(side_l.strip())
+    #                     cols_list.append(side_r.strip())
+    #                 else:
+    #                     cols_list.append(asm)
+    #             if vars_list:
+    #                 return f"SELECT {', '.join(cols_list)} INTO {', '.join(vars_list)} {rest}"
+    #         return match.group(0)
+
+    #     # Regex must ensure we don't cross statement boundaries (UPDATE, INSERT, etc.)
+    #     # Added SELECT to lookahead to prevent merging multiple SELECTs
+    #     # Also constrained matches after FROM to statement boundaries
+    #     body_content = re.sub(r'SELECT\s+((?:(?!\b(?:UPDATE|INSERT|DELETE|IF|WHILE|RETURN|BEGIN|END|SELECT)\b).)+?)\s+(FROM\s+(?:(?!\b(?:UPDATE|INSERT|DELETE|IF|WHILE|RETURN|BEGIN|END|SELECT)\b).)+)', select_into_transformer, body_content, flags=re.IGNORECASE | re.DOTALL)
+
+    #     # Cleanup: Remove FROM NEW/OLD from SELECT statements if they persist
+    #     # e.g. "SELECT ... INTO ... FROM NEW" -> "SELECT ... INTO ..."
+    #     body_content = re.sub(r'(SELECT\s+[^;]+?)\s+FROM\s+(?:NEW|OLD|INSERTED|DELETED)\b', r'\1', body_content, flags=re.IGNORECASE | re.DOTALL)
+
+    #     # Simple Assignments
+    #     def simple_assignment(match):
+    #         full_match = match.group(0)
+    #         if 'FROM' in full_match.upper():
+    #             return full_match
+    #         content = match.group(1).strip()
+    #         if '=' not in content:
+    #             return full_match
+
+    #         parts = split_respecting_parens(content)
+    #         assignments = []
+    #         is_assignment = True
+    #         for part in parts:
+    #             if '=' in part:
+    #                 side_l, side_r = part.split('=', 1)
+    #                 assignments.append(f"{side_l.strip()} := {side_r.strip()}")
+    #             else:
+    #                 is_assignment = False
+
+    #         if is_assignment and assignments:
+    #             return "; ".join(assignments) + ";"
+    #         return full_match
+
+    #     body_content = re.sub(r'SELECT\s+([^;\n]+)', simple_assignment, body_content, flags=re.IGNORECASE)
+
+    #     # 6. UPDATE ... FROM fixes
+    #     # If UPDATE target ... FROM target, table2 -> FROM table2
+    #     # Need to parse UPDATE target
+
+    #     def update_from_fix(match):
+    #         target = match.group(1)
+    #         set_clause = match.group(2)
+    #         from_clause = match.group(3)
+    #         rest = match.group(4)
+
+    #         # Parse FROM tables
+    #         # Sybase FROM t1, t2
+    #         # PG FROM t2 (if t1 is target)
+    #         tables = split_respecting_parens(from_clause)
+    #         new_tables = []
+    #         for t in tables:
+    #             t_clean = t.strip()
+    #             # Check alias? "table alias" or "table AS alias"
+    #             # If target matches table name or alias
+    #             # Simplifying: check if target string is contained
+    #             # Remove target table
+    #             if target.lower() == t_clean.lower():
+    #                 continue # Skip target
+    #             # Check for "target alias"
+    #             if t_clean.lower().startswith(target.lower() + ' ') or t_clean.lower().startswith(target.lower() + '\t'):
+    #                  continue
+
+    #             # Also remove NEW and OLD from FROM clause in triggers
+    #             if t_clean.upper() in ('NEW', 'OLD', 'INSERTED', 'DELETED'):
+    #                 continue
+
+    #             new_tables.append(t)
+
+    #         if new_tables:
+    #             return f"UPDATE {target} {set_clause} FROM {', '.join(new_tables)} {rest}"
+    #         else:
+    #             # If no tables left (self update only), remove FROM
+    #             return f"UPDATE {target} {set_clause} {rest}"
+
+    #     # Regex: UPDATE target SET ... FROM ... [WHERE...]
+    #     # Be careful matching SET ... FROM
+    #     body_content = re.sub(r'UPDATE\s+([a-zA-Z0-9_]+)\s+(SET\s+.*?)\s+FROM\s+(.*?)(\bWHERE\b|\bGROUP\b|\bORDER\b|$)', update_from_fix, body_content, flags=re.IGNORECASE | re.DOTALL)
+
+    #     # 7. String Concatenation Fix (+ -> ||)
+    #     # Heuristic: '...' + ... or ... + '...'
+    #     body_content = re.sub(r"('\s*)\+\s*", r"\1 || ", body_content)
+    #     body_content = re.sub(r"\s*\+\s*(')", r" || \1", body_content)
+
+    #     # 8. Control Flow (IF/WHILE) - Minimal support as per trigger usage
+
+    #     # IF UPDATE(column) -> IF NEW.column IS DISTINCT FROM OLD.column
+    #     # Needs to happen before IF regex
+    #     def if_update_replacer(match):
+    #         col = match.group(1)
+    #         # Sybase: IF UPDATE(col)
+    #         # PG: IF NEW.col IS DISTINCT FROM OLD.col
+    #         return f"IF NEW.{col} IS DISTINCT FROM OLD.{col}"
+
+    #     body_content = re.sub(r'IF\s+UPDATE\(([\w]+)\)', if_update_replacer, body_content, flags=re.IGNORECASE)
+
+    #     # Rollback Trigger
+    #     # rollback trigger [with raiserror number 'message']
+    #     # rollback transaction ...
+    #     # Replace with RAISE EXCEPTION
+    #     def rollback_replacer(match):
+    #         # Try to capture message if present
+    #         # Pattern: rollback trigger with raiserror 99999 'Message'
+    #         rest = match.group(1) if match.lastindex >= 1 else ''
+    #         message = "Trigger Rollback"
+
+    #         # Extract message string '...'
+    #         msg_match = re.search(r"'([^']+)'", rest)
+    #         if msg_match:
+    #             message = msg_match.group(1)
+
+    #         return f"RAISE EXCEPTION '{message}';"
+
+    #     body_content = re.sub(r'rollback\s+(?:trigger|transaction)\s*(.*)', rollback_replacer, body_content, flags=re.IGNORECASE)
+
+    #     # FIX: Ensure semicolon before ELSE/ELSIF if missing
+    #     # Regex updated to handle comments
+    #     body_content = re.sub(r'([^;\s])([ \t]*(?:--[^\n]*|/\*.*?\*/[ \t]*)?)\n\s*(ELSE|ELSIF)\b', r'\1;\2\n\3', body_content, flags=re.IGNORECASE)
+
+    #     # ELSE IF -> ELSIF
+    #     body_content = re.sub(r'ELSE\s+IF', 'ELSIF', body_content, flags=re.IGNORECASE)
+
+    #     # IF replacement with DOTALL support for multiline conditions
+    #     body_content = re.sub(r'IF\s+(.*?)\s+BEGIN', r'IF \1 THEN', body_content, flags=re.IGNORECASE | re.DOTALL)
+
+    #     # Standardize other keywords
+    #     body_content = re.sub(r'WHILE\s+(.*?)\s+BEGIN', r'WHILE \1 LOOP', body_content, flags=re.IGNORECASE)
+    #     body_content = re.sub(r'ELSE\s+BEGIN', r'ELSE', body_content, flags=re.IGNORECASE)
+    #     body_content = re.sub(r'END\s*;?\s+ELSE', r'ELSE', body_content, flags=re.IGNORECASE)
+
+
+    #     # END replacement (simple approach for now, triggers usually simple)
+    #     # But we stripped outer END. Inner ENDs need closure.
+    #     # If we replaced BEGIN with THEN/LOOP, we need END IF/LOOP.
+    #     # Let's use the stack logic if we really want to be safe, or just END IF for triggers?
+    #     # User trigger has IF?
+    #     # "IF UPDATE(column)" was handled in old code.
+    #     body_content = re.sub(r'if\s+UPDATE\([a-zA-Z_]+\)', '-- IF UPDATE(column) not supported', body_content, flags=re.IGNORECASE)
+
+    #     # Fix inner ENDs
+    #     # Reuse logic from convert_funcproc_code manually or simplified
+    #     lines = body_content.split('\n')
+    #     new_lines = []
+    #     stack = []
+    #     for line in lines:
+    #         stripped = line.strip()
+    #         if re.search(r'IF\s+.*\s+THEN', line, flags=re.IGNORECASE):
+    #             stack.append('IF')
+    #         elif re.search(r'WHILE\s+.*\s+LOOP', line, flags=re.IGNORECASE):
+    #             stack.append('LOOP')
+
+    #         if re.match(r'^END\s*;?$', stripped, flags=re.IGNORECASE):
+    #             if stack:
+    #                 block = stack.pop()
+    #                 if block == 'IF':
+    #                     new_lines.append("END IF;")
+    #                 elif block == 'LOOP':
+    #                     new_lines.append("END LOOP;")
+    #                 else:
+    #                     new_lines.append('END;')
+    #             else:
+    #                 new_lines.append('END;') # Should not happen if outer stripped
+    #         else:
+    #             new_lines.append(line)
+    #     body_content = '\n'.join(new_lines)
+
+    #     # 9. Semicolon Heuristic (Ensure statements end with ;)
+    #     lines = body_content.split('\n')
+    #     final_lines = []
+    #     statement_buffer = []
+
+    #     def flush_buffer(buf):
+    #         if not buf: return
+
+    #         # Find last non-empty line index
+    #         last_idx = -1
+    #         for i in range(len(buf) - 1, -1, -1):
+    #             line_stripped = buf[i].strip()
+    #             if line_stripped:
+    #                 # Skip comments
+    #                 if line_stripped.startswith('/*') or line_stripped.startswith('--'):
+    #                     continue
+    #                 last_idx = i
+    #                 break
+
+    #         if last_idx != -1:
+    #             s = buf[last_idx].rstrip()
+
+    #             # Remove trailing comments for check (to avoid adding ; to BEGIN -- comment)
+    #             s_code = re.sub(r'--.*', '', s)
+    #             s_code = re.sub(r'/\*.*?\*/', '', s_code, flags=re.DOTALL)
+    #             s_code = s_code.strip()
+
+    #             # Don't add if ends with ; or block openers/closers that don't need it
+    #             ignore_ends = ('BEGIN', 'THEN', 'LOOP', 'ELSE', ';')
+    #             if not s_code.upper().endswith(ignore_ends):
+    #                 # Check if it started with a command that needs ;
+    #                 combined = " ".join([b.strip() for b in buf]) # Join all lines to check full start
+    #                 # Remove comments from check
+    #                 combined_code = re.sub(r'--.*', '', combined).strip()
+
+    #                 first_word = combined_code.split()[0].upper()
+
+    #                 # Also check assignments "var := val"
+    #                 # Remove strings to avoid false positives like IF x = ':='
+    #                 combined_no_strings = re.sub(r"'.*?'", '', combined_code)
+    #                 is_assignment = ':=' in combined_no_strings
+
+    #                 # Keywords requiring semicolon
+    #                 needs_semi = ('UPDATE', 'INSERT', 'DELETE', 'SELECT', 'PERFORM', 'CALL', 'WITH', 'MERGE', 'RAISE')
+
+    #                 if first_word in needs_semi or is_assignment:
+    #                      buf[last_idx] = s + ';'
+
+    #         final_lines.extend(buf)
+
+    #     for line in lines:
+    #         stripped = line.strip()
+    #         # Start of new statement?
+    #         is_start = False
+    #         # Check forkeywords that start statements
+    #         if re.match(r'^(UPDATE|INSERT|DELETE|SELECT|IF|WHILE|RETURN|END|DECLARE|BEGIN|RAISE)\b', stripped, re.IGNORECASE):
+    #             is_start = True
+    #         elif ':=' in line: # Assignment line?
+    #              is_start = True
+
+    #         if is_start:
+    #              flush_buffer(statement_buffer)
+    #              statement_buffer = [line]
+    #         else:
+    #              statement_buffer.append(line)
+
+    #     flush_buffer(statement_buffer)
+    #     body_content = '\n'.join(final_lines)
+
+    #     # 10. Return
+    #     # Only replace RETURN word boundary.
+    #     # Handle RETURN result? Sybase triggers don't typically return values like functions, but RETURN without args exits.
+    #     # If RETURN 1 or RETURN @var, we might need to be careful.
+    #     # For now, converting standalone RETURN to RETURN NEW;
+    #     body_content = re.sub(r'\bRETURN\b', 'RETURN NEW;', body_content, flags=re.IGNORECASE)
+    #     # If RETURN NEW; NEW; (double) -> fix
+    #     body_content = body_content.replace('RETURN NEW; NEW;', 'RETURN NEW;')
+
+    #     # Event parsing
+    #     events = re.findall(r'for\s+([a-z, ]+?)(?:\s+as\b|$)', trigger_code, re.IGNORECASE)
+    #     events = events[0].replace(' ', '').upper().split(',') if events else []
+    #     pg_events = ' OR '.join(events)
+
+    #     # Assemble
+    #     pg_func = f"""CREATE OR REPLACE FUNCTION {trigger_name}_func()
+    #         RETURNS trigger AS $$
+    #         DECLARE
+    #         {chr(10).join(declarations)}
+    #         BEGIN
+    #         {body_content.strip()}
+    #         RETURN NEW;
+    #         END;
+    #         $$ LANGUAGE plpgsql;
+    #         """
+
+    #     pg_trigger = f"""CREATE TRIGGER {trigger_name}
+    #         AFTER {pg_events} ON "{target_schema}"."{target_table}"
+    #         FOR EACH ROW
+    #         EXECUTE FUNCTION {trigger_name}_func();
+    #         """
+
+    #     return pg_func + '\n' + pg_trigger
 
     def fetch_triggers(self, table_id, schema_name, table_name):
         trigger_data = {}

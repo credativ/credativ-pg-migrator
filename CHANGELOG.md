@@ -1,10 +1,10 @@
 # Changelog
 
-## 0.11.0 - 2026.01.xx
+## 0.11.0 - 2026.01.09
 
 - 2026.01.09
 
-  - Fix in Sybase ASE connector - repaired fetch of triggers source code from Sybase ASE system tables, fixes in trigger code conversion, added conversion of data types and SQL functions in code
+  - Fix in Sybase ASE connector - repaired fetch of triggers source code from Sybase ASE system tables, fixes in trigger code conversion, added conversion of user defined data types and SQL functions in code
 
 - 2026.01.08
 
@@ -15,7 +15,6 @@
   - Fix in Sybase ASE connector - repaired convert_funcproc_code function - fixed issue where missing schema in source function definition resulted in invalid PostgreSQL function name (e.g. .funcname) - now uses target schema as fallback
   - Fix in Sybase ASE connector - repaired convert_view_code function - implemented support for legacy Sybase outer join syntax (*= and =*) - these are now correctly parsed and converted to ANSI standard LEFT OUTER JOINs
   - Features in Sybase ASE connector - implemented fetching of User Defined Types (UDTs) and their substitution with base types or custom defined types from config file
-    - Added data type substitution logic for columns in tables and views
   - Improvements in Sybase ASE connector - enhanced conversion of stored procedures and functions - Converted OUTPUT parameters to INOUT parameters, implemented conversion of BREAK statement to EXIT, implemented conversion of RAISERROR to RAISE EXCEPTION, added handling of @@rowcount using GET DIAGNOSTICS, improved parsing and conversion of cursors
 
 - 2025.12.11

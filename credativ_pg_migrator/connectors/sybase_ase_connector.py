@@ -248,16 +248,49 @@ class SybaseASEConnector(DatabaseConnector):
                 'user_name()': 'current_user',
                 'len(': 'length(',
                 'isnull(': 'coalesce(',
-
-                'str_replace(': 'replace(',
-                'convert(': 'cast(',
-                'stuff(': 'overlay(',
-                'replicate(': 'repeat(',
+                'datalength(': 'length(',
+                'substring(': 'substring(',
                 'charindex(': 'position(',
-                '@@nestlevel': '-1', ## no equivalent in PostgreSQL
+                'str_replace(': 'replace(',
+                'stuff(': 'overlay(',
+                'dateadd(': "now() + interval '",  # requires more complex logic
+                'datediff(': "age(",  # requires more logic
             }
         else:
             self.config_parser.print_log_message('ERROR', f"Unsupported target database type: {target_db_type}")
+            return {}
+
+    def _split_respecting_parens(self, text):
+        parts = []
+        current = []
+        depth = 0
+        for char in text:
+            if char == '(':
+                depth += 1
+            elif char == ')':
+                depth -= 1
+            if char == ',' and depth == 0:
+                parts.append("".join(current).strip())
+                current = []
+            else:
+                current.append(char)
+        if current:
+            parts.append("".join(current).strip())
+        return parts
+
+    def _declaration_replacer(self, match, settings, types_mapping, declarations):
+        full_decl = match.group(0)
+        content = full_decl[7:].strip() # len('DECLARE') = 7
+        content_clean = content.replace('@', '')
+        content_clean = self._apply_data_type_substitutions(content_clean)
+        content_clean = self._apply_udt_to_base_type_substitutions(content_clean, settings)
+        for sybase_type, pg_type in types_mapping.items():
+            content_clean = re.sub(rf'\b{re.escape(sybase_type)}\b', pg_type, content_clean, flags=re.IGNORECASE)
+
+        parts = self._split_respecting_parens(content_clean)
+        for part in parts:
+            declarations.append(part.strip() + ';')
+        return ''
 
     def fetch_table_names(self, table_schema: str):
         # 2048 = proxy table referencing remote table
@@ -1282,25 +1315,6 @@ class SybaseASEConnector(DatabaseConnector):
         target_db_type = 'postgresql' # Force PG
         types_mapping = self.get_types_mapping({'target_db_type': target_db_type})
 
-        # Helper to split by comma respecting parens
-        def split_respecting_parens(text):
-            parts = []
-            current = []
-            depth = 0
-            for char in text:
-                if char == '(':
-                    depth += 1
-                elif char == ')':
-                    depth -= 1
-                if char == ',' and depth == 0:
-                    parts.append("".join(current).strip())
-                    current = []
-                else:
-                    current.append(char)
-            if current:
-                parts.append("".join(current).strip())
-            return parts
-
         pg_params_str = ""
         output_params = [] # Track output params for RETURNS clause
 
@@ -1323,7 +1337,7 @@ class SybaseASEConnector(DatabaseConnector):
             clean_params = self._apply_udt_to_base_type_substitutions(clean_params, settings)
 
             # Fix 2: Handle OUTPUT -> INOUT
-            param_parts = split_respecting_parens(clean_params)
+            param_parts = self._split_respecting_parens(clean_params)
             processed_params = []
 
             for p in param_parts:
@@ -1387,37 +1401,9 @@ class SybaseASEConnector(DatabaseConnector):
         # --- Pre-process Declarations (Variables) ---
         types_mapping = self.get_types_mapping({'target_db_type': 'postgresql'})
 
-        def split_respecting_parens(text):
-            parts = []
-            current = []
-            depth = 0
-            for char in text:
-                if char == '(':
-                    depth += 1
-                elif char == ')':
-                    depth -= 1
-                if char == ',' and depth == 0:
-                    parts.append("".join(current).strip())
-                    current = []
-                else:
-                    current.append(char)
-            if current:
-                parts.append("".join(current).strip())
-            return parts
 
-        def declaration_replacer(match):
-            full_decl = match.group(0)
-            content = full_decl[7:].strip() # len('DECLARE') = 7
-            content_clean = content.replace('@', '')
-            content_clean = self._apply_data_type_substitutions(content_clean)
-            content_clean = self._apply_udt_to_base_type_substitutions(content_clean, settings)
-            for sybase_type, pg_type in types_mapping.items():
-                content_clean = re.sub(rf'\b{re.escape(sybase_type)}\b', pg_type, content_clean, flags=re.IGNORECASE)
 
-            parts = split_respecting_parens(content_clean)
-            for part in parts:
-                declarations.append(part.strip() + ';')
-            return ''
+        declaration_replacer = lambda m: self._declaration_replacer(m, settings, types_mapping, declarations)
 
         # Extract Variable Declarations matches generic DECLARE
         # Removed @ expectation in regex since variables are now locvar_...
@@ -2075,25 +2061,6 @@ class SybaseASEConnector(DatabaseConnector):
             self.config_parser.print_log_message('DEBUG', f"DEBUG_FAIL: Header regex failed. Code start: {converted_code[:100]}")
             return converted_code
 
-        # Helper to split by comma respecting parens
-        def split_respecting_parens(text):
-            parts = []
-            current = []
-            depth = 0
-            for char in text:
-                if char == '(':
-                    depth += 1
-                elif char == ')':
-                    depth -= 1
-
-                if char == ',' and depth == 0:
-                    parts.append("".join(current).strip())
-                    current = []
-                else:
-                    current.append(char)
-            if current:
-                parts.append("".join(current).strip())
-            return parts
 
         # 3. Process Parameters
         types_mapping = self.get_types_mapping({'target_db_type': target_db_type})
@@ -2122,10 +2089,10 @@ class SybaseASEConnector(DatabaseConnector):
 
             # Fix 2: Handle OUTPUT -> INOUT
             # Strategy: Split by comma, process each param
-            param_parts = split_respecting_parens(clean_params)
+            params_list = self._split_respecting_parens(clean_params)
             processed_params = []
 
-            for p in param_parts:
+            for p in params_list:
                 p_clean = p.strip()
                 # Check for OUTPUT (case insensitive)
                 # Matches: param_name type OUTPUT
@@ -2162,22 +2129,7 @@ class SybaseASEConnector(DatabaseConnector):
         # 5. Variable Declarations
         declarations = []
 
-        def declaration_replacer(match):
-            full_decl = match.group(0)
-            content = full_decl[7:].strip() # len('DECLARE') = 7
-
-            content_clean = content.replace('@', '')
-            # Custom type substitutions first
-            content_clean = self._apply_data_type_substitutions(content_clean)
-            content_clean = self._apply_udt_to_base_type_substitutions(content_clean, settings)
-            for sybase_type, pg_type in types_mapping.items():
-                content_clean = re.sub(rf'\b{re.escape(sybase_type)}\b', pg_type, content_clean, flags=re.IGNORECASE)
-
-            parts = split_respecting_parens(content_clean)
-            for part in parts:
-                declarations.append(part.strip() + ';')
-
-            return '' # Remove from body
+        declaration_replacer = lambda m: self._declaration_replacer(m, settings, types_mapping, declarations)
 
         body_content = re.sub(r'DECLARE\s+@.*?(?=\bBEGIN\b|\bIF\b|\bWHILE\b|\bSELECT\b|\bINSERT\b|\bUPDATE\b|\bDELETE\b|\bRETURN\b|\bSET\b|\bFETCH\b|\bOPEN\b|\bCLOSE\b|\bDEALLOCATE\b|\bDECLARE\b|$)', declaration_replacer, body_content, flags=re.IGNORECASE | re.DOTALL)
 
@@ -2256,7 +2208,7 @@ class SybaseASEConnector(DatabaseConnector):
         def print_replacer(match):
              content = match.group(1).strip()
              # Split by comma respecting parens
-             args = split_respecting_parens(content)
+             args = self._split_respecting_parens(match.group(1))
 
              if not args:
                   return "RAISE NOTICE '';"
@@ -2349,7 +2301,7 @@ class SybaseASEConnector(DatabaseConnector):
                 return f"DROP TABLE IF EXISTS {table_name}; CREATE TEMP TABLE {table_name} AS SELECT {new_content} {rest}"
 
             if '=' in content:
-                parts = split_respecting_parens(content)
+                parts = self._split_respecting_parens(content)
                 vars_list = []
                 cols_list = []
                 for asm in parts:
@@ -2379,7 +2331,7 @@ class SybaseASEConnector(DatabaseConnector):
             if '=' not in content:
                 return full_match
 
-            parts = split_respecting_parens(content)
+            parts = self._split_respecting_parens(content)
             assignments = []
             is_assignment = True
             for part in parts:
@@ -3337,34 +3289,7 @@ class SybaseASEConnector(DatabaseConnector):
         declarations = []
         types_mapping = self.get_types_mapping({'target_db_type': target_db_type})
 
-        def split_respecting_parens(text):
-            parts = []
-            current = []
-            depth = 0
-            for char in text:
-                if char == '(': depth += 1
-                elif char == ')': depth -= 1
-                if char == ',' and depth == 0:
-                    parts.append("".join(current).strip())
-                    current = []
-                else:
-                    current.append(char)
-            if current: parts.append("".join(current).strip())
-            return parts
-
-        def declaration_replacer(match):
-            full_decl = match.group(0)
-            content = full_decl[7:].strip() # len('DECLARE') = 7
-            content_clean = content.replace('@', '')
-            content_clean = self._apply_data_type_substitutions(content_clean)
-            content_clean = self._apply_udt_to_base_type_substitutions(content_clean, settings)
-            for sybase_type, pg_type in types_mapping.items():
-                content_clean = re.sub(rf'\b{re.escape(sybase_type)}\b', pg_type, content_clean, flags=re.IGNORECASE)
-
-            parts = split_respecting_parens(content_clean)
-            for part in parts:
-                declarations.append(part.strip() + ';')
-            return ''
+        declaration_replacer = lambda m: self._declaration_replacer(m, settings, types_mapping, declarations)
 
         # Expanded lookahead for declaration end
         body_content = re.sub(r'DECLARE\s+(?![@#])[a-zA-Z0-9_].*?(?=\bBEGIN\b|\bEND\b|\bIF\b|\bWHILE\b|\bSELECT\b|\bINSERT\b|\bUPDATE\b|\bDELETE\b|\bRETURN\b|\bSET\b|\bFETCH\b|\bOPEN\b|\bCLOSE\b|\bDEALLOCATE\b|\bDECLARE\b|\bEXEC\b|\bEXECUTE\b|\bPRINT\b|\bRAISERROR\b|\bWAITFOR\b|\bCOMMIT\b|\bROLLBACK\b|\bSAVE\b|$)', declaration_replacer, body_content, flags=re.IGNORECASE | re.DOTALL)
@@ -3442,26 +3367,6 @@ EXECUTE FUNCTION {target_schema}.{trigger_name}_func();
     #     target_table = self.config_parser.convert_names_case(settings['target_table'])
     #     target_db_type = settings['target_db_type']
 
-    #     # Helper
-    #     def split_respecting_parens(text):
-    #         parts = []
-    #         current = []
-    #         depth = 0
-    #         for char in text:
-    #             if char == '(':
-    #                 depth += 1
-    #             elif char == ')':
-    #                 depth -= 1
-
-    #             if char == ',' and depth == 0:
-    #                 parts.append("".join(current).strip())
-    #                 current = []
-    #             else:
-    #                 current.append(char)
-    #         if current:
-    #             parts.append("".join(current).strip())
-    #         return parts
-
     #     # 1. Basic Cleanup
     #     converted_code = re.sub(r'\bGO\b', '', trigger_code, flags=re.IGNORECASE)
 
@@ -3498,7 +3403,7 @@ EXECUTE FUNCTION {target_schema}.{trigger_name}_func();
     #         for sybase_type, pg_type in types_mapping.items():
     #             content_clean = re.sub(rf'\b{re.escape(sybase_type)}\b', pg_type, content_clean, flags=re.IGNORECASE)
 
-    #         parts = split_respecting_parens(content_clean)
+    #         parts = self._split_respecting_parens(content_clean)
     #         for part in parts:
     #             declarations.append(part.strip() + ';')
 
@@ -3539,7 +3444,7 @@ EXECUTE FUNCTION {target_schema}.{trigger_name}_func();
     #     # PRINT -> RAISE NOTICE
     #     def print_replacer(match):
     #          content = match.group(1).strip()
-    #          args = split_respecting_parens(content)
+    #          args = self._split_respecting_parens(content)
     #          if not args:
     #               return "RAISE NOTICE '';"
     #          first_arg = args[0]
@@ -3572,7 +3477,7 @@ EXECUTE FUNCTION {target_schema}.{trigger_name}_func();
     #             table_list = re.sub(r'--.*', '', table_list)
     #             table_list = re.sub(r'/\*.*?\*/', '', table_list, flags=re.DOTALL)
 
-    #             tables = split_respecting_parens(table_list)
+    #             tables = self._split_respecting_parens(table_list)
     #             clean_tables = []
     #             for t in tables:
     #                 t_clean = t.strip()
@@ -3591,7 +3496,7 @@ EXECUTE FUNCTION {target_schema}.{trigger_name}_func();
     #                rest = rest[:start] + rest[end:]
 
     #         if '=' in content:
-    #             parts = split_respecting_parens(content)
+    #             parts = self._split_respecting_parens(content)
     #             vars_list = []
     #             cols_list = []
     #             for asm in parts:
@@ -3623,7 +3528,7 @@ EXECUTE FUNCTION {target_schema}.{trigger_name}_func();
     #         if '=' not in content:
     #             return full_match
 
-    #         parts = split_respecting_parens(content)
+    #         parts = self._split_respecting_parens(content)
     #         assignments = []
     #         is_assignment = True
     #         for part in parts:
@@ -3652,7 +3557,7 @@ EXECUTE FUNCTION {target_schema}.{trigger_name}_func();
     #         # Parse FROM tables
     #         # Sybase FROM t1, t2
     #         # PG FROM t2 (if t1 is target)
-    #         tables = split_respecting_parens(from_clause)
+    #         tables = self._split_respecting_parens(from_clause)
     #         new_tables = []
     #         for t in tables:
     #             t_clean = t.strip()

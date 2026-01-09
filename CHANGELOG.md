@@ -8,7 +8,7 @@
 
 - 2026.01.08
 
-  - Fix in Sybase ASE connector - rewrite of convert_funcproc_code and convert_trigger_code functions - implemented sql parser to better distinquish and convert control flow statements, cursors, data types and other features. Successrate of conversion is now significantly better than before.
+  - Fix in Sybase ASE connector - rewrite of convert_funcproc_code and convert_trigger_code functions - implemented sql parser to better distinguish and convert control flow statements, cursors, data types and other features. Successrate of conversion is now significantly better than before.
 
 - 2026.01.06
 

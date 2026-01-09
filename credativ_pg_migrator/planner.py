@@ -647,8 +647,7 @@ class Planner:
                 if triggers:
                     for _, trigger_details in triggers.items():
 
-                        # converted_code = self.source_connection.convert_trigger({
-                        converted_code = self.source_connection.convert_trigger_v2({
+                        converted_code = self.source_connection.convert_trigger({
                                 'source_schema': self.config_parser.get_source_schema(),
                                 'source_table': table_info['table_name'],
                                 'target_schema': self.config_parser.get_target_schema(),

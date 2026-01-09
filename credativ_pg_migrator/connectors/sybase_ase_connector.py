@@ -44,107 +44,53 @@ Postgres.Generator.TRANSFORMS[Block] = block_handler
 
 class CustomTSQL(TSQL):
     class Tokenizer(TSQL.Tokenizer):
-        COMMANDS = TSQL.Tokenizer.COMMANDS - {TokenType.COMMAND}
+        COMMANDS = TSQL.Tokenizer.COMMANDS - {TokenType.COMMAND, TokenType.SET}
 
     class Parser(TSQL.Parser):
         config_parser = None
 
         def _parse_command_custom(self):
             # Intercept PRINT to parse expression
-            # Note: _parse_statement has already consumed the COMMAND token via STATEMENT_PARSERS dispatch?
-            # Wait, standard dispatch calls handler(self). It does NOT consume token first unless specified?
-            # In sqlglot, STATEMENT_PARSERS map token type to handler.
-            # Usually handler is responsible for consuming.
-            # But my test script showed: "_parse_statement has already consumed the COMMAND token" comment was misleading?
-            # Let's check test script output Step 3279:
-            # DEBUG: _parse_command_custom called. Prev: PRINT, Curr: STRING.
-            # So PRINT WAS CONSUMED.
-            # My test script handler registration: STATEMENT_PARSERS[TokenType.COMMAND] = _parse_command_custom
-            # Sqlglot _parse_statement does: if token in parsers: return parsers[token](self)
-            # It does NOT consume.
-            # EXCEPT if _parse_command_custom is called via _parse_command handling?
-            # No.
-            # Why did my test script say "Matched PRINT" only if I checked _prev?
+            # Also helper for SET non-greedy parsing
 
-            # Re-read Step 3279 output carefully.
-            # "Loop. Curr: ... PRINT ..."
-            # "Found handler for TokenType.COMMAND"
-            # "_parse_command_custom called. Prev: ... PRINT ... Curr: ... STRING ..."
-
-            # This implies _parse_statement CONSUMED the token before calling handler?
-            # Or my test loop manually consumed it?
-            # Test script Step 3320 loop:
-            # expr = self._parse_statement()
-            # _parse_statement in sqlglot (generic):
-            # if self._curr.token_type in self.STATEMENT_PARSERS:
-            #      return self.STATEMENT_PARSERS[...](self)
-
-            # It does NOT consume.
-            # So why is Curr STRING?
-            # Ah! My test script implementation of `_parse_command_custom` checked `self._prev.text.upper() == 'PRINT'`.
-            # And `_curr` was `STRING`.
-            # This implies SOMETHING consumed `PRINT`.
-
-            # Wait. `_parse_command` (standard) consumes.
-            # But if I override it?
-
-            # In validation script Step 3320:
-            # STATEMENT_PARSERS[TokenType.COMMAND] = _parse_command_custom
-            # And `_parse_command_custom`:
-            # print(f"... Prev: {self._prev}, Curr: {self._curr}")
-
-            # If `_curr` is STRING. `PRINT` is gone.
-            # Who consumed it?
-            # Maybe `_parse_statement` logic in `TSQL` or `Parser`?
-            # I cannot see `Parser._parse_statement` source here.
-
-            # BUT, the `sybase_ase_connector.py` implementation (Step 3335) Lines 54-56:
-            # if self._curr.text.upper() == 'PRINT':
-            #      self._advance()
-            #      return exp.Print(...)
-
-            # This implementation assumes `PRINT` is CURRENT.
-            # So it consumes it (`_advance`).
-
-            # If my test script showed `PRINT` as `_prev`.
-            # Maybe my test script environment is different?
-            # Or I misread output.
-
-            # Step 3279 output:
-            # DEBUG: Loop. Curr: ... PRINT ...
-            # DEBUG: Found handler ...
-            # DEBUG: _parse_command_custom called. Prev: ... PRINT ... Curr: ... STRING ...
-
-            # This confirms `_parse_statement` CONSUMED it.
-            # Why?
-            # Maybe `STATEMENT_PARSERS` behavior changed in recent sqlglot?
-            # Or `TSQL.Parser` does something special?
-
-            # I must match the behavior OBSERVED in test.
-            # `PRINT` is already consumed.
-            # So I should check `self._prev`.
-            # And I should NOT call `self._advance()`.
-
-            # However, the code in `sybase_ase_connector.py` currently checks `self._curr`.
-            # If I blindly keep `self._curr`, it will fail if `PRINT` is already consumed.
-
-            # I will implement a safer check: `_prev` is PRINT OR `_curr` is PRINT.
-
-            prev_is_print = self._prev.text.upper() == 'PRINT'
-            curr_is_print = self._curr.text.upper() == 'PRINT'
+            prev_is_print = self._prev.text.upper() == 'PRINT' if self._prev else False
+            curr_is_print = self._curr.text.upper() == 'PRINT' if self._curr else False
 
             if curr_is_print:
                  self._advance()
             elif not prev_is_print:
-                 # Not a PRINT command (shouldn't happen if dispatch works correctly)
+                 if self._prev.text.upper() == 'SET':
+                      # SET already consumed by dispatcher mechanism?
+                      # Handle SET non-greedily: Stop at new statement keywords or semicolon
+                      expressions = []
+                      balance = 0
+                      while self._curr:
+                           if self._curr.token_type in (TokenType.SEMICOLON, TokenType.END):
+                                break
+                           
+                           if balance == 0:
+                                txt = self._curr.text.upper()
+                                if txt in ('SELECT', 'UPDATE', 'INSERT', 'DELETE', 'BEGIN', 'IF', 'WHILE', 'RETURN', 'DECLARE', 'CREATE', 'TRUNCATE', 'GO'):
+                                     break
+                           
+                           if self._curr.token_type == TokenType.L_PAREN:
+                                balance += 1
+                           elif self._curr.token_type == TokenType.R_PAREN:
+                                balance -= 1
+                           
+                           expressions.append(self._curr.text)
+                           self._advance()
+                      
+                      return exp.Command(this='SET', expression=exp.Literal.string(" ".join(expressions)))
+
+                 # Not a PRINT or SET command
                  return self._parse_command()
 
             # Use _parse_conjunction to avoid consuming END (as alias)
             return exp.Command(this='PRINT', expression=self._parse_conjunction())
-
-
         STATEMENT_PARSERS = TSQL.Parser.STATEMENT_PARSERS.copy()
         STATEMENT_PARSERS[TokenType.COMMAND] = _parse_command_custom
+        STATEMENT_PARSERS[TokenType.SET] = _parse_command_custom
 
         def _parse_block(self):
             if not self._match(TokenType.BEGIN):
@@ -1353,7 +1299,7 @@ class SybaseASEConnector(DatabaseConnector):
                 clean_params = clean_params[1:-1].strip()
                 clean_params = re.sub(r'/\*.*?\*/', '', clean_params, flags=re.DOTALL).strip()
 
-            self.config_parser.print_log_message('DEBUG', f"DEBUG_PARA: '{func_name}' ORG='{params_str}' CLEAN='{clean_params}'")
+            self.config_parser.print_log_message('DEBUG', f"DEBUG_PARA: '{proc_name}' ORG='{params_str}' CLEAN='{clean_params}'")
 
             clean_params = clean_params.replace('@', '')
 
@@ -1559,6 +1505,64 @@ class SybaseASEConnector(DatabaseConnector):
 
         return ddl
 
+    def _transform_trigger_tables(self, expression):
+        """
+        Transforms `inserted` and `deleted` tables in trigger AST to `NEW` and `OLD` records/expressions.
+        Handles replacing 'SELECT count(*) FROM inserted' with 'CASE WHEN TG_OP ...'
+        """
+        def transform(node):
+            if isinstance(node, exp.Column):
+                if node.table.lower() == 'inserted':
+                    node.set('table', exp.Identifier(this='NEW', quoted=False))
+                elif node.table.lower() == 'deleted':
+                    node.set('table', exp.Identifier(this='OLD', quoted=False))
+                return node
+            
+            if isinstance(node, (exp.Select, exp.Update, exp.Delete)):
+                # Check FROM
+                from_clause = node.args.get('from')
+                if not from_clause:
+                    return node
+
+                # Detect inserted/deleted tables
+                has_inserted = False
+                has_deleted = False
+                new_froms = []
+                
+                # Check expressions for COUNT(*)
+                is_count_star = False
+                if isinstance(node, exp.Select) and len(node.expressions) == 1 and isinstance(node.expressions[0], exp.Count) and node.expressions[0].this == exp.Star():
+                     is_count_star = True
+
+                for f in from_clause.expressions:
+                    if isinstance(f, exp.Table):
+                        name = f.name.lower()
+                        if name == 'inserted':
+                            has_inserted = True
+                            continue # Remove
+                        if name == 'deleted':
+                            has_deleted = True
+                            continue # Remove
+                    new_froms.append(f)
+                
+                if has_inserted and is_count_star and not new_froms:
+                     # SELECT count(*) FROM inserted -> CASE WHEN TG_OP ...
+                     return sqlglot.parse_one("CASE WHEN TG_OP IN ('INSERT', 'UPDATE') THEN 1 ELSE 0 END")
+                
+                if has_deleted and is_count_star and not new_froms:
+                     return sqlglot.parse_one("CASE WHEN TG_OP IN ('DELETE', 'UPDATE') THEN 1 ELSE 0 END")
+
+                if has_inserted or has_deleted:
+                    if not new_froms:
+                        node.set('from', None)
+                    else:
+                        from_clause.set('expressions', new_froms)
+                
+                return node
+            return node
+
+        return expression.transform(transform)
+
     def _convert_stmts(self, body_content, settings, is_nested=False, has_rowcount=False, is_trigger=False):
         """
         Internal helper to convert T-SQL body statements to PL/pgSQL.
@@ -1696,6 +1700,10 @@ class SybaseASEConnector(DatabaseConnector):
                        return "RAISE EXCEPTION 'Transaction Rollback Not Supported in Trigger';"
                   elif isinstance(expression, exp.Return):
                        return "RETURN NEW;"
+                  elif isinstance(expression, exp.Command) and expression.this.upper() == 'SET':
+                       expr_cmd = expression.expression.this if expression.expression else ""
+                       if not expr_cmd.strip().startswith('@'):
+                           return f"/* {expression.sql()} -- Ignored in Trigger */;"
 
              # Catch-all debug for confusing failures
              # Handle CASE Recursively (in case IF was parsed as CASE)
@@ -1865,6 +1873,8 @@ class SybaseASEConnector(DatabaseConnector):
              return pg_sql
 
         for expression in parsed:
+             if is_trigger:
+                 expression = self._transform_trigger_tables(expression)
              res = process_node(expression)
              if res:
                   converted_statements.append(res)
@@ -3290,10 +3300,10 @@ class SybaseASEConnector(DatabaseConnector):
         if as_match:
              body_content = trigger_code[as_match.end():].strip()
 
-        # 3. Global Replacements specific to Triggers
-        body_content = re.sub(r'\binserted\b', 'NEW', body_content, flags=re.IGNORECASE)
-        body_content = re.sub(r'\bdeleted\b', 'OLD', body_content, flags=re.IGNORECASE)
-        body_content = re.sub(r'\bFROM\s+(?:NEW|OLD)\b', '', body_content, flags=re.IGNORECASE)
+        # 3. Global Replacements specific to Triggers (MOVED TO AST TRANSFORM)
+        # body_content = re.sub(r'\binserted\b', 'NEW', body_content, flags=re.IGNORECASE)
+        # body_content = re.sub(r'\bdeleted\b', 'OLD', body_content, flags=re.IGNORECASE)
+        # body_content = re.sub(r'\bFROM\s+(?:NEW|OLD)\b', '', body_content, flags=re.IGNORECASE)
 
         # IF UPDATE(col) -> IF NEW.col IS DISTINCT FROM OLD.col
         def if_update_replacer(match):

@@ -55,13 +55,19 @@ class PostgreSQLConnector(DatabaseConnector):
     def fetch_table_names(self, schema: str = 'public'):
         query = f"""
             SELECT
-                oid,
-                relname,
-                obj_description(oid, 'pg_class') as table_comment
-            FROM pg_class
-            WHERE relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = '{schema}')
-            AND relkind in ('r', 'p')
-            ORDER BY relname
+                c.oid,
+                c.relname,
+                obj_description(c.oid, 'pg_class') as table_comment,
+                c.relkind,
+                c.relispartition,
+                pg_get_partkeydef(c.oid) as partition_key_def,
+                pg_get_expr(c.relpartbound, c.oid) as partition_bound,
+                (SELECT relname FROM pg_class WHERE oid = i.inhparent) as parent_table
+            FROM pg_class c
+            LEFT JOIN pg_inherits i ON c.oid = i.inhrelid
+            WHERE c.relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = '{schema}')
+            AND c.relkind in ('r', 'p')
+            ORDER BY c.relname
         """
         self.config_parser.print_log_message('DEBUG3', f"Reading table names for {schema}")
         self.config_parser.print_log_message('DEBUG3', f"Query: {query}")
@@ -76,7 +82,12 @@ class PostgreSQLConnector(DatabaseConnector):
                     'id': row[0],
                     'schema_name': schema,
                     'table_name': row[1],
-                    'comment': row[2]
+                    'comment': row[2],
+                    'relkind': row[3],
+                    'relispartition': row[4],
+                    'partition_key_def': row[5],
+                    'partition_bound': row[6],
+                    'parent_table': row[7]
                 }
                 order_num += 1
             cursor.close()
@@ -185,6 +196,24 @@ class PostgreSQLConnector(DatabaseConnector):
         migrator_tables = settings['migrator_tables']
         create_table_sql = ""
         create_table_sql_parts = []
+
+        if self.config_parser.get_source_db_type() == 'postgresql':
+           table_info_list = self.fetch_table_names(source_schema)
+           # Find key for current table
+           current_table_info = None
+           for key, val in table_info_list.items():
+               if val['table_name'] == source_table:
+                   current_table_info = val
+                   break
+           
+           if current_table_info:
+               if current_table_info.get('relispartition'):
+                   # It is a partition. Generate CREATE TABLE ... PARTITION OF ...
+                   parent_table = current_table_info.get('parent_table')
+                   partition_bound = current_table_info.get('partition_bound')
+                   # For partition, we don't list columns as they are inherited
+                   create_table_sql = f"""CREATE TABLE "{target_schema}"."{target_table_name}" PARTITION OF "{target_schema}"."{parent_table}" {partition_bound}"""
+                   return create_table_sql
 
         self.config_parser.print_log_message('DEBUG', f"Creating DDL for table {target_schema}.{target_table_name}, case handling: {self.config_parser.get_names_case_handling()}")
 
@@ -391,7 +420,12 @@ class PostgreSQLConnector(DatabaseConnector):
             create_table_sql_parts.append(create_column_sql)
 
         create_table_sql = ", ".join(create_table_sql_parts)
-        create_table_sql = f"""CREATE TABLE "{target_schema}"."{target_table_name}" ({create_table_sql})"""
+
+        if self.config_parser.get_source_db_type() == 'postgresql' and current_table_info and current_table_info.get('relkind') == 'p':
+            partition_key_def = current_table_info.get('partition_key_def')
+            create_table_sql = f"""CREATE TABLE "{target_schema}"."{target_table_name}" ({create_table_sql}) PARTITION BY {partition_key_def}"""
+        else:
+            create_table_sql = f"""CREATE TABLE "{target_schema}"."{target_table_name}" ({create_table_sql})"""
         return create_table_sql
 
     def is_string_type(self, column_type: str) -> bool:
@@ -1387,6 +1421,75 @@ class PostgreSQLConnector(DatabaseConnector):
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
             self.config_parser.print_log_message('ERROR', e)
+            raise
+
+    def migrate_sequences(self, target_connector, settings):
+        source_schema = settings['source_schema']
+        target_schema = settings['target_schema']
+        
+        self.config_parser.print_log_message('INFO', f"Migrating sequences from {source_schema} to {target_schema}...")
+        
+        query = f"""
+            SELECT c.relname 
+            FROM pg_class c 
+            JOIN pg_namespace n ON c.relnamespace = n.oid 
+            WHERE n.nspname = '{source_schema}' 
+            AND c.relkind = 'S'
+        """
+        
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            sequences = [row[0] for row in cursor.fetchall()]
+            cursor.close()
+            
+            for seq_name in sequences:
+                self.config_parser.print_log_message('DEBUG', f"Processing sequence: {seq_name}")
+                details = self.get_sequence_details(source_schema, seq_name)
+                
+                # Fetch current value separately as it's not in pg_sequence catalog
+                curr_val_query = f"SELECT last_value, is_called FROM {source_schema}.{seq_name}"
+                cursor = self.connection.cursor()
+                cursor.execute(curr_val_query)
+                curr_val_row = cursor.fetchone()
+                last_value = curr_val_row[0]
+                is_called = curr_val_row[1]
+                cursor.close()
+                
+                # Generate CREATE SEQUENCE
+                # Details: min_value, max_value, increment_by, cycle, cache_size, start_value
+                create_sql = f"""CREATE SEQUENCE IF NOT EXISTS "{target_schema}"."{seq_name}"
+                    INCREMENT BY {details['increment_by']} # MINVALUE {details['min_value']} MAXVALUE {details['max_value']}
+                    START WITH {details['start_value']} CACHE {details['cache_size']}
+                    {'CYCLE' if details['cycle'] else 'NO CYCLE'};
+                """
+                # Handle Min/Max separately to avoid syntax issues if they are defaults (though getting explicit values is safer)
+                # To be safer with defaults, strict SQL construction:
+                create_sql = f"""CREATE SEQUENCE IF NOT EXISTS "{target_schema}"."{seq_name}"
+                    INCREMENT BY {details['increment_by']} 
+                    MINVALUE {details['min_value']} 
+                    MAXVALUE {details['max_value']} 
+                    START WITH {details['start_value']} 
+                    CACHE {details['cache_size']} 
+                    {'CYCLE' if details['cycle'] else 'NO CYCLE'};
+                """
+                
+                # Generate SETVAL
+                # setval(regclass, bigint, boolean)
+                setval_sql = f"SELECT setval('\"{target_schema}\".\"{seq_name}\"', {last_value}, {'true' if is_called else 'false'});"
+                
+                self.config_parser.print_log_message('DEBUG', f"Sequence {seq_name} SQL: {create_sql}")
+                self.config_parser.print_log_message('DEBUG', f"Sequence {seq_name} SETVAL: {setval_sql}")
+
+                target_connector.execute_query(create_sql)
+                target_connector.execute_query(setval_sql)
+            
+            self.disconnect()
+            return True
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error migrating sequences: {e}")
+            self.disconnect()
             raise
 
     def fetch_view_code(self, settings):

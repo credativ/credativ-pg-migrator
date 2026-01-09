@@ -205,7 +205,7 @@ class PostgreSQLConnector(DatabaseConnector):
                if val['table_name'] == source_table:
                    current_table_info = val
                    break
-           
+
            if current_table_info:
                if current_table_info.get('relispartition'):
                    # It is a partition. Generate CREATE TABLE ... PARTITION OF ...
@@ -963,7 +963,7 @@ class PostgreSQLConnector(DatabaseConnector):
                             for order_num, column in source_columns.items():
                                 column_name = column['column_name']
                                 column_type = column['data_type']
-                                if column_type in ['bytea']:
+                                if column_type in ['bytea'] and record[column_name] is not None:
                                     record[column_name] = record[column_name].tobytes()
 
                         # Insert batch into target table
@@ -1426,29 +1426,50 @@ class PostgreSQLConnector(DatabaseConnector):
     def migrate_sequences(self, target_connector, settings):
         source_schema = settings['source_schema']
         target_schema = settings['target_schema']
+        migrator_tables = settings.get('migrator_tables')
         
         self.config_parser.print_log_message('INFO', f"Migrating sequences from {source_schema} to {target_schema}...")
         
         query = f"""
-            SELECT c.relname 
-            FROM pg_class c 
-            JOIN pg_namespace n ON c.relnamespace = n.oid 
-            WHERE n.nspname = '{source_schema}' 
-            AND c.relkind = 'S'
+            SELECT c.relname, c.oid
+            FROM pg_class c
+            JOIN pg_namespace n ON c.relnamespace = n.oid
+            WHERE n.nspname = '{source_schema}'
+              AND c.relkind = 'S'
         """
         
         try:
             self.connect()
+            target_connector.connect() # Ensure target is connected
             cursor = self.connection.cursor()
             cursor.execute(query)
-            sequences = [row[0] for row in cursor.fetchall()]
+            sequences = cursor.fetchall() # list of (name, oid) matches
             cursor.close()
             
-            for seq_name in sequences:
+            for seq_row in sequences:
+                seq_name = seq_row[0]
+                seq_oid = seq_row[1]
+                
                 self.config_parser.print_log_message('DEBUG', f"Processing sequence: {seq_name}")
+                
+                # Insert into protocol table if migrator_tables is available
+                # We don't have table/column info here as we are migrating all sequences in schema
+                if migrator_tables:
+                    try:
+                        # set_sequence_sql will be populated later, but we need to insert first to get ID/track start?
+                        # insert_sequence(self, sequence_id, schema_name, table_name, column_name, sequence_name, set_sequence_sql)
+                        # We'll update it later or insert it now with placeholders?
+                        # Usually insert happens before work starts to track 'started', but insert_sequence seems to just log existence?
+                        # Looking at other methods, insert_* usually logs the item and then update_* sets status.
+                        migrator_tables.insert_sequence(seq_oid, source_schema, '', '', seq_name, '')
+                    except Exception as e:
+                        self.config_parser.print_log_message('ERROR', f"Failed to insert sequence {seq_name} into protocol: {e}")
+
                 details = self.get_sequence_details(source_schema, seq_name)
                 
                 # Fetch current value separately as it's not in pg_sequence catalog
+                # Re-connect because get_sequence_details closes the connection
+                self.connect()
                 curr_val_query = f"SELECT last_value, is_called FROM {source_schema}.{seq_name}"
                 cursor = self.connection.cursor()
                 cursor.execute(curr_val_query)
@@ -1456,40 +1477,68 @@ class PostgreSQLConnector(DatabaseConnector):
                 last_value = curr_val_row[0]
                 is_called = curr_val_row[1]
                 cursor.close()
+                self.disconnect()
                 
                 # Generate CREATE SEQUENCE
                 # Details: min_value, max_value, increment_by, cycle, cache_size, start_value
-                create_sql = f"""CREATE SEQUENCE IF NOT EXISTS "{target_schema}"."{seq_name}"
-                    INCREMENT BY {details['increment_by']} # MINVALUE {details['min_value']} MAXVALUE {details['max_value']}
-                    START WITH {details['start_value']} CACHE {details['cache_size']}
-                    {'CYCLE' if details['cycle'] else 'NO CYCLE'};
-                """
-                # Handle Min/Max separately to avoid syntax issues if they are defaults (though getting explicit values is safer)
-                # To be safer with defaults, strict SQL construction:
+                # We use START WITH = last_value to ensure it picks up where it left off, 
+                # OR we use START WITH = min_value and then setval? 
+                # Postgres dump usually does CREATE SEQUENCE ...; SELECT setval(...);
+                
+                # If we use setval, CREATE SEQUENCE can just use defaults or original properties.
+                # However, if we want `START WITH` to be correct for a fresh init, we might want original start_value (which we have in details['start_value'])
+                # But `last_value` is the critical runtime state.
+                
+                cycle_str = "CYCLE" if details['cycle'] else "NO CYCLE"
                 create_sql = f"""CREATE SEQUENCE IF NOT EXISTS "{target_schema}"."{seq_name}"
                     INCREMENT BY {details['increment_by']} 
                     MINVALUE {details['min_value']} 
                     MAXVALUE {details['max_value']} 
                     START WITH {details['start_value']} 
                     CACHE {details['cache_size']} 
-                    {'CYCLE' if details['cycle'] else 'NO CYCLE'};
+                    {cycle_str};
                 """
                 
-                # Generate SETVAL
-                # setval(regclass, bigint, boolean)
                 setval_sql = f"SELECT setval('\"{target_schema}\".\"{seq_name}\"', {last_value}, {'true' if is_called else 'false'});"
                 
                 self.config_parser.print_log_message('DEBUG', f"Sequence {seq_name} SQL: {create_sql}")
                 self.config_parser.print_log_message('DEBUG', f"Sequence {seq_name} SETVAL: {setval_sql}")
-
-                target_connector.execute_query(create_sql)
-                target_connector.execute_query(setval_sql)
+                
+                try:
+                    target_connector.execute_query(create_sql)
+                    target_connector.execute_query(setval_sql)
+                    
+                    if migrator_tables:
+                        # Update protocol with success and the setval SQL used
+                        # Note: update_sequence_status doesn't update SQL. insert check above put empty SQL.
+                        # Ideally we should have inserted SQL there. But we didn't have it yet.
+                        # Maybe we should DELETE and re-INSERT or just update status?
+                        # insert_sequence puts it in 'sequences' table.
+                        # update_sequence_status updates 'sequences' table.
+                        # If I want to save the SQL, I might need to update it. 
+                        # But migrator_tables implementation of update_sequence_status only updates success/message/time.
+                        # So I should probably insert with the SQL if I can generate it before?
+                        # No, I generate it later.
+                        # I'll just leave SQL empty or put "See logs" if I can't update it. 
+                        # Or I accept that the protocol table won't show the SQL.
+                        migrator_tables.update_sequence_status(seq_oid, True, 'migrated OK')
+                        
+                except Exception as ex:
+                    self.config_parser.print_log_message('ERROR', f"Failed to migrate sequence {seq_name}: {ex}")
+                    if migrator_tables:
+                        migrator_tables.update_sequence_status(seq_oid, False, str(ex))
             
             self.disconnect()
+            target_connector.disconnect()
             return True
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"Error migrating sequences: {e}")
             self.disconnect()
+            # Try to disconnect target if possible, though it might be closed/failed
+            try:
+                target_connector.disconnect()
+            except:
+                pass
             raise
 
     def fetch_view_code(self, settings):
@@ -1517,7 +1566,7 @@ class PostgreSQLConnector(DatabaseConnector):
         ddl = f'CREATE {view_type} "{target_schema}"."{view_name}" AS {view_code}'
         if not ddl.strip().endswith(';'):
              ddl += ';'
-        
+
         return ddl
 
     def fetch_user_defined_types(self, schema: str):

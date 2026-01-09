@@ -1631,6 +1631,7 @@ class Orchestrator:
         settings = {
             'source_schema': self.config_parser.get_source_schema(),
             'target_schema': self.config_parser.get_target_schema(),
+            'migrator_tables': self.migrator_tables,
         }
         
         try:

@@ -865,7 +865,10 @@ class Planner:
                 # However, planner usually prepares 'target_type_sql' which is then executed.
 
                 # Using 'AS' syntax for domains
-                target_type_sql = f'CREATE DOMAIN "{self.target_schema}"."{type_name}" AS {definition};'
+                if definition:
+                    target_type_sql = f'CREATE DOMAIN "{self.target_schema}"."{type_name}" AS {definition};'
+                else:
+                    target_type_sql = source_type_sql.replace(f'"{type_info.get("schema_name", self.source_schema)}".', f'"{self.target_schema}".') if source_type_sql else ''
 
                 self.config_parser.print_log_message('DEBUG', f"Converted type SQL: {target_type_sql}")
 
@@ -887,6 +890,8 @@ class Planner:
     def run_prepare_domains(self):
         self.config_parser.print_log_message('INFO', "Planner - Preparing domains...")
         migrated_as = 'CHECK CONSTRAINT'
+        if self.config_parser.get_target_db_type() == 'postgresql':
+            migrated_as = 'DOMAIN'
         domains = self.source_connection.fetch_domains(self.source_schema)
         self.config_parser.print_log_message( 'DEBUG', f"Domains found in source database: {domains}")
         if domains:

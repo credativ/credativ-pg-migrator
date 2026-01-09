@@ -61,7 +61,7 @@ class Orchestrator:
                 ## migration of domains is a bit unclear currently
                 ## domains in PostgreSQL are special data types
                 ## But in Sybase ASE they are defined as sort of additional check constraint on the column
-                # self.run_create_domains()
+                self.run_create_domains()
 
             # In case of crash recovery, we currently continue from this point as in normal migration
             if not self.config_parser.is_dry_run():

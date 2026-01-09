@@ -1429,14 +1429,14 @@ class SybaseASEConnector(DatabaseConnector):
         # Double-check comments are handled? Yes, step 0.
         # Strings? raiserror mask handles some. Code might still contain strings.
 
-        # Helper to convert body strings recursively
-        def _recursive_convert_body(body_str):
-            # Recurse: We need to instantiate a mini-connector or reuse self methods?
-            # Reusing convert_funcproc_code_v2 completely is heavy (header parsing etc).
-            # We need a method that takes 'body_str' and returns 'pg_str'.
-            # We can extract the logic below 'declarations' into _convert_stmts(body_content).
-            # For now, let's implement the core logic inline or as a method.
-            return self._convert_stmts(body_str, settings, is_nested=True, has_rowcount=has_rowcount)
+        # # Helper to convert body strings recursively
+        # def _recursive_convert_body(body_str):
+        #     # Recurse: We need to instantiate a mini-connector or reuse self methods?
+        #     # Reusing convert_funcproc_code_v2 completely is heavy (header parsing etc).
+        #     # We need a method that takes 'body_str' and returns 'pg_str'.
+        #     # We can extract the logic below 'declarations' into _convert_stmts(body_content).
+        #     # For now, let's implement the core logic inline or as a method.
+        #     return self._convert_stmts(body_str, settings, is_nested=True, has_rowcount=has_rowcount)
 
         if 'IF' in body_content.upper() or 'WHILE' in body_content.upper():
              # Basic scanner for IF/WHILE
@@ -1596,7 +1596,6 @@ class SybaseASEConnector(DatabaseConnector):
              # Use Custom TSQL dialect to support nested BEGIN/END blocks in IF statements
              parsed = sqlglot.parse(processed_body.strip(), read=CustomTSQL)
         except Exception as e:
-             import traceback
              traceback.print_exc()
              self.config_parser.print_log_message('ERROR', f"Global parsing failed for code: {body_content[:100]}... Error: {e}")
              return [f"/* PARSING FAILED: {e} */\n" + body_content]
@@ -1941,6 +1940,7 @@ class SybaseASEConnector(DatabaseConnector):
             return self.convert_funcproc_code_v1(settings)
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"V2 Conversion Critical Failure: {e}. Falling back to V1.")
+            self.config_parser.print_log_message('ERROR', f"Traceback: {traceback.format_exc()}")
             try:
                 return self.convert_funcproc_code_v1(settings)
             except Exception as v1_e:
@@ -2165,26 +2165,26 @@ class SybaseASEConnector(DatabaseConnector):
         # 7. Conversions (Line by line / block based)
 
         # Cursor Declarations
-        # Fix: Capture optional FOR UPDATE
-        cursor_matches = re.finditer(r'DECLARE\s+([a-zA-Z0-9_]+)\s+CURSOR\s+FOR\s+(.*?)(\s+FOR\s+UPDATE)?\s+(?=\bOPEN\b|\bDECLARE\b|$)', body_content, flags=re.IGNORECASE | re.DOTALL)
-        # Simplify regex to just capture everything until OPEN or next DECLARE or end, handling FOR UPDATE inside
-        # Actually, simpler: DECLARE ... CURSOR FOR ... [FOR UPDATE]
-        # We can try to capture line-based or until OPEN.
-        # Let's retain the original logic but extend the matching group to consume "FOR UPDATE" if present at the end of declaration.
+        # # Fix: Capture optional FOR UPDATE
+        # cursor_matches = re.finditer(r'DECLARE\s+([a-zA-Z0-9_]+)\s+CURSOR\s+FOR\s+(.*?)(\s+FOR\s+UPDATE)?\s+(?=\bOPEN\b|\bDECLARE\b|$)', body_content, flags=re.IGNORECASE | re.DOTALL)
+        # # Simplify regex to just capture everything until OPEN or next DECLARE or end, handling FOR UPDATE inside
+        # # Actually, simpler: DECLARE ... CURSOR FOR ... [FOR UPDATE]
+        # # We can try to capture line-based or until OPEN.
+        # # Let's retain the original logic but extend the matching group to consume "FOR UPDATE" if present at the end of declaration.
 
-        # New strategy: Find DECLARE ... CURSOR FOR ...
-        # Then consume content until 'OPEN cursor_name' or 'DEALLOCATE' or 'DECLARE'
-        # But for now, let's just make the simple regex robust for trailing FOR UPDATE
+        # # New strategy: Find DECLARE ... CURSOR FOR ...
+        # # Then consume content until 'OPEN cursor_name' or 'DEALLOCATE' or 'DECLARE'
+        # # But for now, let's just make the simple regex robust for trailing FOR UPDATE
 
-        # Re-reading user issue: "FOR UPDATE" is on a new line.
-        # The original regex: r'DECLARE\s+([a-zA-Z0-9_]+)\s+CURSOR\s+FOR\s+(.*)'
-        # This matches until end of line? ".+" matches except newline. re.DOTALL not used in original snippet?
-        # Original: flags=re.IGNORECASE (no DOTALL). So it stops at newline.
-        # User Code:
-        # declare access_cursor cursor
-        # for select ...
-        # for update
-        # open access_cursor
+        # # Re-reading user issue: "FOR UPDATE" is on a new line.
+        # # The original regex: r'DECLARE\s+([a-zA-Z0-9_]+)\s+CURSOR\s+FOR\s+(.*)'
+        # # This matches until end of line? ".+" matches except newline. re.DOTALL not used in original snippet?
+        # # Original: flags=re.IGNORECASE (no DOTALL). So it stops at newline.
+        # # User Code:
+        # # declare access_cursor cursor
+        # # for select ...
+        # # for update
+        # # open access_cursor
 
         # The body_content passed here has newlines.
         cursor_matches = re.finditer(r'DECLARE\s+([a-zA-Z0-9_]+)\s+CURSOR\s+FOR\s+(.+?)(\s+FOR\s+UPDATE)?(?=\s+OPEN|\s+DECLARE|\s+SELECT|\s+SET|\s+FETCH|\s+BEGIN|$)', body_content, flags=re.IGNORECASE | re.DOTALL)

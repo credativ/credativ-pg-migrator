@@ -38,8 +38,17 @@ class Block(exp.Expression):
 
 # Register Block with Postgres Generator to allow fallback generation
 from sqlglot.dialects.postgres import Postgres
+
 def block_handler(self, expression):
-    return "\n".join(self.sql(e) for e in expression.expressions)
+    # Ensure all statements in a block end with a semicolon
+    statements = []
+    for e in expression.expressions:
+        stmt = self.sql(e).strip()
+        if stmt and not stmt.endswith(';'):
+            stmt += ';'
+        statements.append(stmt)
+    return "\n".join(statements)
+
 Postgres.Generator.TRANSFORMS[Block] = block_handler
 
 class CustomTSQL(TSQL):
@@ -49,12 +58,12 @@ class CustomTSQL(TSQL):
     class Parser(TSQL.Parser):
         config_parser = None
 
-        def _parse_alias(self, this):
+        def _parse_alias(self, this, explicit=False):
              # FIX: Explicitly prevent UPDATE/INSERT/DELETE/MERGE/SET from being aliases
              # usage of keywords as aliases without AS is weird in implicit statement boundary contexts
              if self._curr.token_type in (TokenType.UPDATE, TokenType.INSERT, TokenType.DELETE, TokenType.MERGE, TokenType.SET):
                   return this
-             return super()._parse_alias(this)
+             return super()._parse_alias(this, explicit)
 
         def _parse_command_custom(self):
             # Intercept PRINT to parse expression
@@ -3288,6 +3297,12 @@ class SybaseASEConnector(DatabaseConnector):
         # 1. Remove GO
         trigger_code = re.sub(r'\bGO\b', '', trigger_code, flags=re.IGNORECASE)
 
+        # Pre-process Sybase specific join syntax (Missing in original V2)
+        # *= -> = /* left_outer */
+        # =* -> = /* right_outer */
+        trigger_code = re.sub(r'\*=', '= /* left_outer */', trigger_code)
+        trigger_code = re.sub(r'=\*', '= /* right_outer */', trigger_code)
+
         # 1.5 Rename Local Variables (@var -> locvar_var)
         trigger_code = self._rename_sybase_local_variables(trigger_code)
 
@@ -3312,10 +3327,11 @@ class SybaseASEConnector(DatabaseConnector):
         # body_content = re.sub(r'\bdeleted\b', 'OLD', body_content, flags=re.IGNORECASE)
         # body_content = re.sub(r'\bFROM\s+(?:NEW|OLD)\b', '', body_content, flags=re.IGNORECASE)
 
-        # IF UPDATE(col) -> IF NEW.col IS DISTINCT FROM OLD.col
+        # IF UPDATE(col) -> IF locvar_sybase_update_func(col) (To avoid parser confusion with UPDATE keyword)
         def if_update_replacer(match):
             col = match.group(1)
-            return f"NEW.{col} IS DISTINCT FROM OLD.{col}"
+            # return f"NEW.{col} IS DISTINCT FROM OLD.{col}"
+            return f"locvar_sybase_update_func({col})"
         body_content = re.sub(r'\bUPDATE\(([a-zA-Z0-9_]+)\)', if_update_replacer, body_content, flags=re.IGNORECASE)
 
         # 4. Extract Declarations (Ported from convert_funcproc_code_v2)
@@ -3374,6 +3390,20 @@ class SybaseASEConnector(DatabaseConnector):
              declarations.insert(0, "global_trancount INTEGER DEFAULT 1;")
 
         final_body = "\n".join(final_stmts_clean)
+        
+        # Post-processing: Replace locvar_sybase_update_func(col) with NEW.col IS DISTINCT FROM OLD.col
+        # This handles the result of if_update_replacer after parsing/generation
+        def update_func_replacer(match):
+             # match group 1: optional quote
+             # match group 2: column name
+             # match group 3: optional quote (should match group 1)
+             # Use simplified regex since we know how sqlglot generates output (likely quoted)
+             
+             # Regex to capture: locvar_sybase_update_func( "col" ) or ( col )
+             content = match.group(1)
+             return f"NEW.{content} IS DISTINCT FROM OLD.{content}"
+
+        final_body = re.sub(r'locvar_sybase_update_func\((.*?)\)', update_func_replacer, final_body, flags=re.IGNORECASE)
 
         # 6. Event Extraction
         events = re.findall(r'for\s+([a-z, ]+?)(?:\s+as\b|$)', trigger_code, re.IGNORECASE)

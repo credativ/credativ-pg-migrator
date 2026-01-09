@@ -2,6 +2,10 @@
 
 ## 0.11.0 - 2026.01.xx
 
+- 2026.01.09
+
+  - Fix in Sybase ASE connector - repaired fetch of triggers source code from Sybase ASE system tables, fixes in trigger code conversion, added conversion of data types and SQL functions in code
+
 - 2026.01.08
 
   - Fix in Sybase ASE connector - rewrite of convert_funcproc_code and convert_trigger_code functions - implemented sql parser to better distinquish and convert control flow statements, cursors, data types and other features. Successrate of conversion is now significantly better than before.

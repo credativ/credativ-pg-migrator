@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.12.0 - 2026.01.09
+
+- 2026.01.09
+
+  - Fixes in PostgreSQL connector
+    - repaired conversion of sequences to PostgreSQL sequences - now sequences are converted to PostgreSQL sequences with correct start value and increment
+    - repaired conversion of domains to PostgreSQL domains - now domains are converted to PostgreSQL domains with correct data type and default value
+    - repaired conversion of user defined types to PostgreSQL types - now user defined types are converted to PostgreSQL types with correct data type and default value
+    - repaired conversion of functions to PostgreSQL functions - fixed extraction of function type ('FUNCTION' vs 'PROCEDURE') to resolve KeyErrors during migration
+    - repaired conversion of triggers to PostgreSQL triggers - implemented correct fetching of trigger definitions from source PostgreSQL database
+    - repaired conversion of constraints to PostgreSQL constraints - fixed filtering of constraints to exclude internal NOT NULL constraints (contype='n') - NOT NULL constraints are part of column definition and are not converted as separate constraints
+
+
 ## 0.11.0 - 2026.01.09
 
 - 2026.01.09

@@ -22,10 +22,171 @@ from credativ_pg_migrator.database_connector import DatabaseConnector
 from credativ_pg_migrator.migrator_logging import MigratorLogger
 import re
 import traceback
+import sys
 from tabulate import tabulate
 import sqlglot
+from sqlglot import exp, TokenType
+from sqlglot.dialects import TSQL
 import time
 import datetime
+import logging
+
+
+# Define Custom Block Expression
+class Block(exp.Expression):
+    arg_types = {"expressions": True}
+
+# Register Block with Postgres Generator to allow fallback generation
+from sqlglot.dialects.postgres import Postgres
+
+def block_handler(self, expression):
+    # Ensure all statements in a block end with a semicolon
+    statements = []
+    for e in expression.expressions:
+        stmt = self.sql(e).strip()
+        if stmt and not stmt.endswith(';'):
+            stmt += ';'
+        statements.append(stmt)
+    return "\n".join(statements)
+
+Postgres.Generator.TRANSFORMS[Block] = block_handler
+
+class CustomTSQL(TSQL):
+    class Tokenizer(TSQL.Tokenizer):
+        COMMANDS = TSQL.Tokenizer.COMMANDS - {TokenType.COMMAND, TokenType.SET}
+
+    class Parser(TSQL.Parser):
+        config_parser = None
+
+        def _parse_alias(self, this, explicit=False):
+             # FIX: Explicitly prevent UPDATE/INSERT/DELETE/MERGE/SET from being aliases
+             # usage of keywords as aliases without AS is weird in implicit statement boundary contexts
+             if self._curr.token_type in (TokenType.UPDATE, TokenType.INSERT, TokenType.DELETE, TokenType.MERGE, TokenType.SET):
+                  return this
+             return super()._parse_alias(this, explicit)
+
+        def _parse_command_custom(self):
+            # Intercept PRINT to parse expression
+            # Also helper for SET non-greedy parsing
+
+            prev_is_print = self._prev.text.upper() == 'PRINT' if self._prev else False
+            curr_is_print = self._curr.text.upper() == 'PRINT' if self._curr else False
+
+            if curr_is_print:
+                 self._advance()
+            elif not prev_is_print:
+                 if self._prev.text.upper() == 'SET':
+                      # SET already consumed by dispatcher mechanism?
+                      # Handle SET non-greedily: Stop at new statement keywords or semicolon
+                      expressions = []
+                      balance = 0
+                      while self._curr:
+                           if self._curr.token_type in (TokenType.SEMICOLON, TokenType.END):
+                                break
+
+                           if balance == 0:
+                                txt = self._curr.text.upper()
+                                if txt in ('SELECT', 'UPDATE', 'INSERT', 'DELETE', 'BEGIN', 'IF', 'WHILE', 'RETURN', 'DECLARE', 'CREATE', 'TRUNCATE', 'GO'):
+                                     break
+
+                           if self._curr.token_type == TokenType.L_PAREN:
+                                balance += 1
+                           elif self._curr.token_type == TokenType.R_PAREN:
+                                balance -= 1
+
+                           expressions.append(self._curr.text)
+                           self._advance()
+
+                      return exp.Command(this='SET', expression=exp.Literal.string(" ".join(expressions)))
+
+                 # Not a PRINT or SET command
+                 return self._parse_command()
+
+            # Use _parse_conjunction to avoid consuming END (as alias)
+            return exp.Command(this='PRINT', expression=self._parse_conjunction())
+        STATEMENT_PARSERS = TSQL.Parser.STATEMENT_PARSERS.copy()
+        STATEMENT_PARSERS[TokenType.COMMAND] = _parse_command_custom
+        STATEMENT_PARSERS[TokenType.SET] = _parse_command_custom
+
+        def _parse_block(self):
+            if not self._match(TokenType.BEGIN):
+                 pass
+
+            expressions = []
+            loop_counter = 0
+            last_token_idx = -1
+
+            while self._curr and self._curr.token_type != TokenType.END:
+                 loop_counter += 1
+                 if loop_counter > 100000:
+                      raise Exception(f"Potential Infinite Loop in _parse_block at token {self._curr}")
+
+                 # Check progress
+                 current_idx = self._index
+                 if current_idx == last_token_idx:
+                      # Stuck?
+                      msg = f"DEBUG: Processed token {self._curr} but did not advance. Force advance."
+                      if self.config_parser:
+                           self.config_parser.print_log_message('DEBUG', msg)
+                      else:
+                           logging.debug(msg)
+                      self._advance()
+                 last_token_idx = current_idx
+
+                 stmt = self._parse_statement()
+                 if stmt:
+                      expressions.append(stmt)
+                 self._match(TokenType.SEMICOLON)
+
+            self._match(TokenType.END)
+            return Block(expressions=expressions)
+
+        def _parse_if(self):
+            res = self.expression(
+                 exp.If,
+                 this=self._parse_conjunction(),
+                 true=self._parse_statement(),
+                 false=self._parse_statement() if self._match(TokenType.ELSE) else None,
+            )
+            return res
+
+        STATEMENT_PARSERS[TokenType.BEGIN] = lambda self: self._parse_block()
+        if hasattr(TokenType, 'IF'):
+             STATEMENT_PARSERS[getattr(TokenType, 'IF')] = lambda self: self._parse_if()
+
+        def _parse(self, parse_method, raw_tokens, sql=None):
+            self.reset()
+            self.sql = sql or ""
+            self._tokens = raw_tokens
+            self._index = -1
+            self._advance()
+
+            expressions = []
+            while self._curr:
+                if self._match(TokenType.SEMICOLON):
+                     continue
+
+                stmt = parse_method(self)
+                if not stmt:
+                     if self._curr:
+                          self.raise_error("Invalid expression / Unexpected token")
+                     break
+                expressions.append(stmt)
+            return expressions
+
+    class Generator(TSQL.Generator):
+        TRANSFORMS = TSQL.Generator.TRANSFORMS.copy()
+
+        def _block_handler(self, expression):
+            # Block handler needs to process children
+            # Since sqlglot generator expects strings, we need to generate sql for children
+            stmts = []
+            if hasattr(expression, 'expressions'):
+                for e in expression.expressions:
+                    stmts.append(self.sql(e))
+            return "\n".join(stmts)
+
+        TRANSFORMS[Block] = _block_handler
 
 class SybaseASEConnector(DatabaseConnector):
     def __init__(self, config_parser, source_or_target):
@@ -37,6 +198,7 @@ class SybaseASEConnector(DatabaseConnector):
         self.source_or_target = source_or_target
         self.on_error_action = self.config_parser.get_on_error_action()
         self.logger = MigratorLogger(self.config_parser.get_log_file()).logger
+        self._udt_cache = None
 
     def connect(self):
         if self.config_parser.get_connectivity(self.source_or_target) == 'odbc':
@@ -64,6 +226,8 @@ class SybaseASEConnector(DatabaseConnector):
                 self.connection.close()
         except Exception as e:
             pass
+        finally:
+            self.connection = None
 
     def get_sql_functions_mapping(self, settings):
         """ Returns a dictionary of SQL functions mapping for the target database """
@@ -84,15 +248,49 @@ class SybaseASEConnector(DatabaseConnector):
                 'user_name()': 'current_user',
                 'len(': 'length(',
                 'isnull(': 'coalesce(',
-
-                'str_replace(': 'replace(',
-                'convert(': 'cast(',
-                'stuff(': 'overlay(',
-                'replicate(': 'repeat(',
+                'datalength(': 'length(',
+                'substring(': 'substring(',
                 'charindex(': 'position(',
+                'str_replace(': 'replace(',
+                'stuff(': 'overlay(',
+                'dateadd(': "now() + interval '",  # requires more complex logic
+                'datediff(': "age(",  # requires more logic
             }
         else:
             self.config_parser.print_log_message('ERROR', f"Unsupported target database type: {target_db_type}")
+            return {}
+
+    def _split_respecting_parens(self, text):
+        parts = []
+        current = []
+        depth = 0
+        for char in text:
+            if char == '(':
+                depth += 1
+            elif char == ')':
+                depth -= 1
+            if char == ',' and depth == 0:
+                parts.append("".join(current).strip())
+                current = []
+            else:
+                current.append(char)
+        if current:
+            parts.append("".join(current).strip())
+        return parts
+
+    def _declaration_replacer(self, match, settings, types_mapping, declarations):
+        full_decl = match.group(0)
+        content = full_decl[7:].strip() # len('DECLARE') = 7
+        content_clean = content.replace('@', '')
+        content_clean = self._apply_data_type_substitutions(content_clean)
+        content_clean = self._apply_udt_to_base_type_substitutions(content_clean, settings)
+        for sybase_type, pg_type in types_mapping.items():
+            content_clean = re.sub(rf'\b{re.escape(sybase_type)}\b', pg_type, content_clean, flags=re.IGNORECASE)
+
+        parts = self._split_respecting_parens(content_clean)
+        for part in parts:
+            declarations.append(part.strip() + ';')
+        return ''
 
     def fetch_table_names(self, table_schema: str):
         # 2048 = proxy table referencing remote table
@@ -239,6 +437,34 @@ class SybaseASEConnector(DatabaseConnector):
                     'is_hidden_column': 'YES' if is_hidden_column == 1 else 'NO',
                 }
 
+                # Check for config substitutions first (Higher Priority)
+                config_substitutions = self.config_parser.get_data_types_substitution()
+                substitution_found = False
+
+                # Iterate through substitutions to find a match for the current data_type
+                # Substitution format: [schema, table, source_type, target_type, target_length]
+                # We prioritize exact matches on type name.
+                for sub in config_substitutions:
+                    # sub[2] is source_type, sub[3] is target_type
+                    if sub[2].lower() == data_type.lower():
+                         # Found a substitution
+                         target_type = sub[3]
+                         # If target_length is provided, use it (e.g. VARCHAR(255))
+                         # But typically target_type might be just 'TEXT' or 'BIGINT'
+                         # We need to populate basic_ fields.
+
+                         # Determine if target type is substituted
+                         result[ordinal_position]['basic_data_type'] = target_type
+                         # We might not know precision/scale easily from just the name unless we parse it or it's provided.
+                         # For now, we assume the config substitution handles the mapping sufficiently for the migration mapping phase.
+                         # The key result is basic_column_type.
+                         result[ordinal_position]['basic_column_type'] = target_type
+                         substitution_found = True
+                         break
+
+                if substitution_found:
+                     continue
+
                 query_custom_types = f"""
                     SELECT
                         bt.name AS source_data_type,
@@ -280,11 +506,42 @@ class SybaseASEConnector(DatabaseConnector):
 
                     source_data_type_length = f"{source_data_type}({source_length})" if source_length else source_data_type
 
-                    result[ordinal_position]['basic_data_type'] = source_data_type
+                    # Convert base type to PostgreSQL equivalent
+                    # We need types mapping here
+                    types_mapping = self.get_types_mapping(settings)
+
+                    # We need to handle mapped base type
+                    # source_data_type is e.g. 'varchar', 'numeric'
+                    # types_mapping keys are usually uppercase
+                    mapped_type = types_mapping.get(source_data_type.upper(), source_data_type)
+
+                    # If mapped type matches source type (case insensitive), we might still want to uppercase it?
+                    # But types_mapping values are usually what we want (e.g. 'VARCHAR', 'NUMERIC')
+
+                    mapped_type_length = f"{mapped_type}({source_length})" if source_length and self.is_string_type(source_data_type) else (f"{mapped_type}({source_length})" if source_length and self.is_numeric_type(source_data_type) else mapped_type)
+
+                    # Actually, logic for length might differ per type (PG TEXT has no length usually, but VARCHAR does)
+                    # But here we are producing 'basic_column_type' which serves as fallback.
+                    # The original code used source_data_type.
+
+                    # Let's align with how `types_mapping` works.
+                    # If mapped_type is TEXT, we might drop length if source was varchar?
+                    # The request says: "base data types must be converted into proper PostgreSQL types using conversions returned by get_types_mapping function"
+
+                    # Let's use the same logic as _get_udt_codes_mapping will use.
+
+                    mapped_full_type = mapped_type.upper()
+                    if source_length:
+                        if self.is_string_type(source_data_type) and mapped_type.upper() not in ('TEXT', 'BYTEA', 'BOOLEAN', 'INTEGER', 'BIGINT', 'SMALLINT', 'DATE', 'TIMESTAMP', 'TIME'):
+                             mapped_full_type += f"({source_length})"
+                        elif self.is_numeric_type(source_data_type) and mapped_type.upper() in ('NUMERIC', 'DECIMAL'):
+                             mapped_full_type += f"({source_length})"
+
+                    result[ordinal_position]['basic_data_type'] = mapped_type # Was source_data_type
                     result[ordinal_position]['basic_character_maximum_length'] = basic_character_maximum_length
                     result[ordinal_position]['basic_numeric_precision'] = data_type_precision if self.is_numeric_type(source_data_type) else None
                     result[ordinal_position]['basic_numeric_scale'] = data_type_scale if self.is_numeric_type(source_data_type) else None
-                    result[ordinal_position]['basic_column_type'] = source_data_type_length
+                    result[ordinal_position]['basic_column_type'] = mapped_full_type # Was source_data_type_length
 
             cursor.close()
             self.disconnect()
@@ -348,7 +605,11 @@ class SybaseASEConnector(DatabaseConnector):
 
 
     def get_types_mapping(self, settings):
-        target_db_type = settings['target_db_type']
+        # Guard against None settings or missing key
+        if settings is None:
+            settings = {}
+        target_db_type = settings.get('target_db_type', 'postgresql')
+
         types_mapping = {}
         if target_db_type == 'postgresql':
             types_mapping = {
@@ -381,13 +642,13 @@ class SybaseASEConnector(DatabaseConnector):
                 'NCHAR': 'CHAR',
                 'UNICHAR': 'CHAR',
                 'NVARCHAR': 'VARCHAR',
+                'UNIVARCHAR': 'VARCHAR',
                 'TEXT': 'TEXT',
                 'SYSNAME': 'TEXT',
                 'LONGSYSNAME': 'TEXT',
                 'LONG VARCHAR': 'TEXT',
                 'LONG NVARCHAR': 'TEXT',
                 'UNITEXT': 'TEXT',
-                'UNIVARCHAR': 'VARCHAR',
                 'VARCHAR': 'VARCHAR',
 
                 'CLOB': 'TEXT',
@@ -412,6 +673,258 @@ class SybaseASEConnector(DatabaseConnector):
 
     def get_create_table_sql(self, settings):
         return ""
+
+    def _get_udt_codes_mapping(self, settings=None):
+        """
+        Returns a dictionary mapping UDT names to their base SQL definition.
+        Example: {'MY_TYPE': 'VARCHAR(10)', 'NUM_TYPE': 'NUMERIC(10,2)'}
+        """
+        if self._udt_cache is not None:
+            return self._udt_cache
+
+        udt_map = {}
+        udt_rows = []
+
+        # Priority: Check migrator_tables (Protocol Table)
+        migrator_tables = settings.get('migrator_tables') if settings else None
+
+        if migrator_tables:
+            try:
+                # Assuming migrator_tables has fetch_all_user_defined_types
+                udt_rows = migrator_tables.fetch_all_user_defined_types()
+                # Format of udt_rows from fetch_all_user_defined_types needs to be adapted or used
+                # fetch_all_user_defined_types returns raw rows from migrator protocol table
+                # We need to decode or map them.
+                # Assuming row format: [id, row_data, status, comment, ...] or similar.
+                # Use decode_user_defined_type_row
+
+                # We build udt_map from this list
+                for row_data in udt_rows:
+                    decoded = migrator_tables.decode_user_defined_type_row(row_data)
+                    # format: dict(type_name, base_type, length, prec, scale, ...)
+                    # base_type needs to be mapped to PG type
+
+                    type_name = decoded['type_name']
+                    base_type = decoded['base_type_name']
+                    target_basic_type = decoded.get('target_basic_type')
+                    length = decoded['length'] if decoded['length'] else 0
+                    prec = decoded['prec'] if decoded['prec'] else 0
+                    scale = decoded['scale'] if decoded['scale'] else 0
+
+                    if not base_type: base_type = "UNKNOWN"
+
+                    # Convert base_type to PG type
+                    # Priority: target_basic_type (from protocol) > types_mapping(base_type)
+                    if target_basic_type:
+                         pg_base_type = target_basic_type.upper()
+                    else:
+                         pg_base_type = base_type.upper()
+                         if settings:
+                              types_mapping = self.get_types_mapping(settings)
+                              pg_base_type = types_mapping.get(base_type.upper(), base_type.upper())
+
+                    type_sql = pg_base_type
+
+                    # Apply length/precision logic (similar to query based loop below)
+                    if base_type.lower() in ('varchar', 'char', 'nvarchar', 'nchar', 'varbinary', 'binary', 'univarchar', 'unichar'):
+                         if pg_base_type not in ('TEXT', 'BYTEA', 'DATE', 'TIMESTAMP', 'TIME', 'BOOLEAN', 'INTEGER', 'BIGINT', 'SMALLINT'):
+                              type_sql += f"({length})"
+                    elif base_type.lower() in ('numeric', 'decimal'):
+                         if pg_base_type in ('NUMERIC', 'DECIMAL'):
+                              type_sql += f"({prec},{scale})"
+
+                    udt_map[type_name] = type_sql
+
+                self._udt_cache = udt_map
+                return udt_map
+
+            except Exception as e:
+                self.config_parser.print_log_message('WARNING', f"Failed to fetch UDTs from protocol table: {e}. Fallback to live query.")
+
+
+        query = """
+            SELECT
+                t.name as type_name,
+                t.length,
+                t.prec,
+                t.scale,
+                bt.name as base_type_name
+            FROM dbo.systypes t
+            JOIN dbo.sysusers u ON t.uid = u.uid
+            LEFT JOIN dbo.systypes bt ON t.type = bt.type AND bt.usertype < 100
+            WHERE t.usertype > 100
+            ORDER BY t.name
+        """
+
+        try:
+            should_disconnect = False
+            if not self.connection:
+                self.connect()
+                should_disconnect = True
+
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            rows = cursor.fetchall()
+
+            for row in rows:
+                type_name = row[0]
+                length = row[1]
+                prec = row[2]
+                scale = row[3]
+                base_type = row[4]
+
+                if not base_type:
+                    base_type = "UNKNOWN"
+
+                # Convert base_type to PG type
+                # Check mapping
+                pg_base_type = base_type.upper()
+                if settings: ## we must have settings to get types mapping
+                     types_mapping = self.get_types_mapping(settings)
+                     # types_mapping keys are usually uppercase
+                     pg_base_type = types_mapping.get(base_type.upper(), base_type.upper())
+
+                type_sql = pg_base_type
+
+                if base_type.lower() in ('varchar', 'char', 'nvarchar', 'nchar', 'varbinary', 'binary', 'univarchar', 'unichar'):
+                    # Check if PG type supports length?
+                    # If PG type is TEXT, we drop length.
+                    if pg_base_type not in ('TEXT', 'BYTEA', 'DATE', 'TIMESTAMP', 'TIME', 'BOOLEAN', 'INTEGER', 'BIGINT', 'SMALLINT'):
+                        type_sql += f"({length})"
+                elif base_type.lower() in ('numeric', 'decimal'):
+                     if pg_base_type in ('NUMERIC', 'DECIMAL'):
+                         type_sql += f"({prec},{scale})"
+
+                udt_map[type_name] = type_sql
+
+            cursor.close()
+            if should_disconnect:
+                self.disconnect()
+
+        except Exception as e:
+            self.config_parser.print_log_message('WARNING', f"Failed to fetch UDTs for substitution: {e}")
+            # If we fail, we just return empty map to not break flow
+
+        self._udt_cache = udt_map
+        return udt_map
+
+    def _apply_udt_to_base_type_substitutions(self, text, settings):
+        """
+        Apply UDT -> Base Type substitutions, BUT respect config substitutions.
+        If a UDT is defined in config data_types_substitution, we SKIP it here.
+        """
+        udt_map = self._get_udt_codes_mapping(settings)
+        if not udt_map:
+            return text
+
+        # Get config substitutions
+        config_substitutions = self.config_parser.get_data_types_substitution()
+        # config_substitutions is list of [schema, table, source_type, target_type, comment]
+        # We collect source types to ignore
+
+        ignored_types = set()
+        if config_substitutions:
+            for entry in config_substitutions:
+                if len(entry) >= 3 and entry[2]:
+                    ignored_types.add(entry[2].upper())
+
+        # Get type mappings for recursive substitution
+        types_mapping = self.get_types_mapping({'target_db_type': settings.get('target_db_type', 'postgresql')})
+
+        # Optimize: Pre-calculate all final definitions and use single regex pass
+        self.config_parser.print_log_message('DEBUG', "Optimizing UDT substitution: preparing map...")
+        udt_lookup = {}
+        keys_to_match = []
+
+        for udt_name, base_def in udt_map.items():
+            if udt_name.upper() in ignored_types:
+                continue
+
+            # Resolve final definition
+            final_def = base_def
+            for sybase_type, pg_type in types_mapping.items():
+                 final_def = re.sub(rf'\b{re.escape(sybase_type)}\b', pg_type, final_def, flags=re.IGNORECASE)
+
+            # Store in lookup (Upper case key for case-insensitive matching)
+            udt_lookup[udt_name.upper()] = final_def
+            keys_to_match.append(udt_name)
+
+        if not keys_to_match:
+            self.config_parser.print_log_message('DEBUG', "No UDTs to substitute.")
+            return text
+
+        self.config_parser.print_log_message('DEBUG', f"Compiling regex for {len(keys_to_match)} UDTs...")
+        # Sort by length desc to handle prefixes/overlaps
+        keys_to_match.sort(key=len, reverse=True)
+
+        # Pattern: (?:\[|")?\b(UDT1|UDT2...)\b(?:\]|")?
+        # Capturing group 1 contains the UDT name
+        escaped_keys = [re.escape(k) for k in keys_to_match]
+        pattern_str = r'(?:\[|")?\b(' + '|'.join(escaped_keys) + r')\b(?:\]|")?'
+
+        try:
+             regex = re.compile(pattern_str, flags=re.IGNORECASE)
+        except re.error as e:
+             self.config_parser.print_log_message('WARNING', f"Failed to compile optimized UDT regex: {e}. Fallback to slow loop.")
+             # Fallback logic could be here, but simpler to just return or raise.
+             return text
+
+        def replacer(match):
+             # match.group(1) is the inner UDT name
+             core_name = match.group(1)
+             if core_name:
+                 return udt_lookup.get(core_name.upper(), match.group(0))
+             return match.group(0)
+
+        self.config_parser.print_log_message('DEBUG', "Executing UDT substitution...")
+        text = regex.sub(replacer, text)
+        self.config_parser.print_log_message('DEBUG', "UDT substitution complete.")
+
+        return text
+
+
+    def _apply_data_type_substitutions(self, text):
+        """
+        Apply data type substitutions defined in the configuration.
+        Substitutions are applied based on table name (optional), column name (optional),
+        and source data type (regex).
+        In the context of functions/procedures/triggers, we mainly care about the source data type matching.
+        """
+        substitutions = self.config_parser.get_data_types_substitution()
+        if not substitutions:
+            return text
+
+        # Sort substitutions by length of source type (descending) to match specific types first?
+        # Or just rely on config order. Config order is probably best.
+
+        for entry in substitutions:
+            # entry: [table_name, column_name, source_type, target_type, comment]
+            if len(entry) != 5:
+                continue
+
+            # For general code substitution, we ignore table_name and column_name usually,
+            # or treat them as wildcards if they are empty.
+            # However, for function params/vars, we assume no table/column context matches unless explicitly handled.
+            # But the requirement is likely to map generic types like 'TypID' -> 'BIGINT'.
+            # So we look for entries where source_type is defined.
+
+            # We are not passed table/column context here easily for params/vars unless we parse them deeply.
+            # So we focus on source_type match.
+
+            source_type = entry[2]
+            target_type = entry[3]
+
+            if source_type:
+                # Use regex or simple replace? Config says regex.
+                # Use word boundaries to avoid partial replacement.
+                try:
+                    pattern = re.compile(rf'\b{source_type}\b', flags=re.IGNORECASE)
+                    text = pattern.sub(target_type, text)
+                except re.error:
+                    self.config_parser.print_log_message('WARNING', f"Invalid regex in data_types_substitution: {source_type}")
+
+        return text
+
 
     def is_string_type(self, column_type: str) -> bool:
         string_types = ['CHAR', 'VARCHAR', 'NCHAR', 'NVARCHAR', 'TEXT', 'LONG VARCHAR', 'LONG NVARCHAR', 'UNICHAR', 'UNIVARCHAR']
@@ -508,6 +1021,7 @@ class SybaseASEConnector(DatabaseConnector):
             case when col_name(c.tableid, r.fokey4, db_id()) is not null then ',"' + col_name(c.tableid, r.fokey4, db_id()) + '"' else '' end +
             case when col_name(c.tableid, r.fokey5, db_id()) is not null then ',"' + col_name(c.tableid, r.fokey5, db_id()) + '"' else '' end
             as foreign_keys_columns,
+            user_name(oc.uid) as ref_table_schema,
             oc.name as ref_table_name,
             case when col_name(r.reftabid, r.refkey1, r.pmrydbid) is not null then '"' + col_name(r.reftabid, r.refkey1, r.pmrydbid) + '"' end +
             case when col_name(r.reftabid, r.refkey2, r.pmrydbid) is not null then ',"' + col_name(r.reftabid, r.refkey2, r.pmrydbid) + '"' else '' end +
@@ -533,14 +1047,16 @@ class SybaseASEConnector(DatabaseConnector):
         for constraint in constraints:
             fk_name = constraint[0]
             fk_column = constraint[1].strip()
-            ref_table_name = constraint[2]
-            ref_column = constraint[3].strip()
+            ref_table_schema = constraint[2]
+            ref_table_name = constraint[3]
+            ref_column = constraint[4].strip()
 
             table_constraints[order_num] = {
                 'constraint_name': fk_name,
                 'constraint_owner': source_table_schema,
                 'constraint_type': 'FOREIGN KEY',
                 'constraint_columns': fk_column,
+                'referenced_table_schema': ref_table_schema,
                 'referenced_table_name': ref_table_name,
                 'referenced_columns': ref_column,
                 'constraint_sql': '',
@@ -644,83 +1160,1504 @@ class SybaseASEConnector(DatabaseConnector):
         procbody = cursor.fetchall()
         cursor.close()
         self.disconnect()
-        procbody_str = ' '.join([body[0] for body in procbody])
+        procbody_str = ''.join([body[0] for body in procbody])
         return procbody_str
 
+
+    def _rename_sybase_local_variables(self, code):
+        """
+        Renames local variables (starting with @) to start with 'locvar_'.
+        Ensures no conflict with existing identifiers.
+        Example: @myVar -> locvar_myVar
+        """
+        # 1. Collect all identifiers to check for conflicts
+        # Use simple tokenization to find potential conflicts
+        all_words = set(re.findall(r'\b[a-zA-Z_][a-zA-Z0-9_]*\b', code))
+
+        # 2. Find all variables (starting with @), excluding @@globals
+        # Regex: Start with @, not followed by another @ (to exclude @@), then identifier chars
+        vars_found = set(re.findall(r'(?<!@)@(?![@])([a-zA-Z0-9_]+)', code))
+
+        mapping = {}
+        for v in vars_found:
+             # v is "foo" from "@foo"
+             base_name = "locvar_" + v
+             new_name = base_name
+
+             # Conflict resolution
+             # Check if new_name exists in all_words
+             counter = 1
+             while new_name in all_words:
+                 new_name = f"{base_name}_{counter}"
+                 counter += 1
+
+             mapping[v] = new_name
+             # Add to all_words to prevent future collisions in this loop
+             all_words.add(new_name)
+
+        if not mapping:
+            return code
+
+        # 3. Apply replacement
+        # Sort by length desc to handle prefix overlaps (@val vs @value)
+        sorted_vars = sorted(mapping.keys(), key=len, reverse=True)
+
+        new_code = code
+        for v in sorted_vars:
+            target = mapping[v]
+            # Replace @v with target
+            # Use regex with boundary: (?<!@)@v\b
+            # We want to match @v but not @var matching @v part
+            # Escape v just in case
+            pattern = re.compile(rf'(?<!@)@(?![@]){re.escape(v)}\b')
+            new_code = pattern.sub(target, new_code)
+
+        return new_code
+
+    def convert_funcproc_code_v2(self, settings):
+
+        self.config_parser.print_log_message('DEBUG', f"Entered convert_funcproc_code_v2 for {settings.get('funcproc_name')}")
+        """
+        Parser-based conversion using sqlglot.
+        Breaks code into logical statements (expressions) and transpiles to Postgres.
+        Includes ported V1 logic for rowcount, exec, assignments, cursors, etc.
+        """
+        funcproc_code = settings['funcproc_code']
+        if not funcproc_code:
+             return "-- [WARNING] Empty input code provided"
+        # self.config_parser.print_log_message('DEBUG', f"V2 Input Code FULL:\n{repr(funcproc_code)}")
+        # self.config_parser.print_log_message('DEBUG', f"Input Len: {len(funcproc_code)}")
+
+        # --- Pre-processing (Ported from V1 & Enhancements) ---
+
+        # 0. Encapsulate comments
+        funcproc_code = re.sub(r'--([^\n]*)', r'/*\1*/', funcproc_code)
+
+        # 1. Remove GO
+        funcproc_code = re.sub(r'\bGO\b', '', funcproc_code, flags=re.IGNORECASE)
+
+        # 2. Temp Table Replacement (# -> tt_)
+        funcproc_code = re.sub(r'#([a-zA-Z0-9_]+)', r'tt_\1', funcproc_code)
+
+        # 3. Rename @return to @v_return
+        funcproc_code = re.sub(r'@return\b', '@v_return', funcproc_code, flags=re.IGNORECASE)
+
+        # 4. Global @@rowcount detection
+        has_rowcount = '@@rowcount' in funcproc_code.lower()
+
+        # 5. Fix common typos
+        funcproc_code = re.sub(r'\bfetc\s+h\b', 'FETCH', funcproc_code, flags=re.IGNORECASE)
+        funcproc_code = re.sub(r'\bc\s+ursor\b', 'CURSOR', funcproc_code, flags=re.IGNORECASE)
+
+        # 6. @@sqlstatus Replacement
+        funcproc_code = re.sub(r'@@sqlstatus\s*!=\s*0', 'NOT FOUND', funcproc_code, flags=re.IGNORECASE)
+        funcproc_code = re.sub(r'@@sqlstatus\s*=\s*0', 'FOUND', funcproc_code, flags=re.IGNORECASE)
+        funcproc_code = re.sub(r'@@sqlstatus\s*=\s*2', 'NOT FOUND', funcproc_code, flags=re.IGNORECASE)
+
+        # 6.1 Handle @@rowcount, @@error, @@trancount (Replacements)
+        has_trancount = 'global_trancount' in funcproc_code.lower() or '@@trancount' in funcproc_code.lower()
+
+        # Replace @@rowcount with locvar_rowcount
+        funcproc_code = re.sub(r'@@rowcount\b', 'locvar_rowcount', funcproc_code, flags=re.IGNORECASE)
+        # Replace @@error with placeholder (SQLSTATE breaks parsing)
+        funcproc_code = re.sub(r'@@error\b', 'locvar_error_placeholder', funcproc_code, flags=re.IGNORECASE)
+        # Replace @@trancount with global_trancount
+        funcproc_code = re.sub(r'@@trancount\b', 'global_trancount', funcproc_code, flags=re.IGNORECASE)
+
+        # 6.5 Transaction Control (Masking)
+        def tran_replacer(match):
+             cmd = match.group(1)
+             cmd_safe = re.sub(r'\bBEGIN\b', 'START', cmd, flags=re.IGNORECASE)
+             return f"NULL; /* {cmd_safe} */"
+
+        # Regex to mask BEGIN/COMMIT/ROLLBACK/SAVE TRAN...
+        funcproc_code = re.sub(r'(\b(?:BEGIN|COMMIT|ROLLBACK|SAVE)\s+(?:TRAN\w*)(?:[ \t]+(?!(?:DECLARE|SELECT|INSERT|UPDATE|DELETE|EXECUTE|EXEC|RETURN|IF|WHILE|BEGIN|COMMIT|ROLLBACK|SAVE)\b)[a-zA-Z0-9_]+)?\b)', tran_replacer, funcproc_code, flags=re.IGNORECASE)
+
+        # 6.6 Rename Local Variables (@var -> locvar_var)
+        # MUST BE DONE BEFORE Header Parsing to handle Params correctly
+        funcproc_code = self._rename_sybase_local_variables(funcproc_code)
+
+        # 7. Extract Header (Params) and Body
+        header_match = re.search(r'CREATE\s+(?:PROC|PROCEDURE)\s+([a-zA-Z0-9_\.]+)(.*?)(\bAS\b)', funcproc_code, flags=re.IGNORECASE | re.DOTALL)
+
+        body_content = funcproc_code
+        params_str = ""
+        proc_name = settings['funcproc_name'] # ENSURE THIS IS SET
+        func_schema = "" # Extracted from header
+
+        if header_match:
+             full_name = header_match.group(1)
+             params_str = header_match.group(2).strip()
+             body_content = funcproc_code[header_match.end(3):].strip()
+
+             if '.' in full_name:
+                 parts = full_name.split('.')
+                 func_schema = parts[0]
+                 # func_name = parts[1]
+             else:
+                 # func_name = full_name
+                 pass
+
+             if not func_schema:
+                 func_schema = settings.get('target_schema', 'public')
+        else:
+             # Fallback: try to find AS
+             # If no header match, we might have issues.
+             pass
+
+        # Strip outer BEGIN and END if present
+        if re.match(r'^BEGIN\b', body_content, flags=re.IGNORECASE):
+             body_content = re.sub(r'^BEGIN', '', body_content, count=1, flags=re.IGNORECASE).strip()
+             body_content = re.sub(r'END\s*$', '', body_content, flags=re.IGNORECASE).strip()
+
+
+        # --- Process Parameters (ROBUST V1 LOGIC) ---
+        target_db_type = 'postgresql' # Force PG
+        types_mapping = self.get_types_mapping({'target_db_type': target_db_type})
+
+        pg_params_str = ""
+        output_params = [] # Track output params for RETURNS clause
+
+        if params_str:
+            # Fix 1: Robustly strip outer parens
+            clean_params = params_str.strip()
+            # Remove comments to allow clean parenthesis check
+            clean_params = re.sub(r'/\*.*?\*/', '', clean_params, flags=re.DOTALL).strip()
+
+            while clean_params.startswith('(') and clean_params.endswith(')'):
+                clean_params = clean_params[1:-1].strip()
+                clean_params = re.sub(r'/\*.*?\*/', '', clean_params, flags=re.DOTALL).strip()
+
+            self.config_parser.print_log_message('DEBUG', f"DEBUG_PARA: '{proc_name}' ORG='{params_str}' CLEAN='{clean_params}'")
+
+            clean_params = clean_params.replace('@', '')
+
+            # Custom type substitutions first
+            clean_params = self._apply_data_type_substitutions(clean_params)
+            clean_params = self._apply_udt_to_base_type_substitutions(clean_params, settings)
+
+            # Fix 2: Handle OUTPUT -> INOUT
+            param_parts = self._split_respecting_parens(clean_params)
+            processed_params = []
+
+            for p in param_parts:
+                p_clean = p.strip()
+                output_match = re.search(r'\bOUTPUT\b', p_clean, flags=re.IGNORECASE)
+                if output_match:
+                    p_clean = re.sub(r'\bOUTPUT\b', '', p_clean, flags=re.IGNORECASE).strip()
+                    p_clean = "INOUT " + p_clean
+
+                for sybase_type, pg_type in types_mapping.items():
+                    p_clean = re.sub(rf'\b{re.escape(sybase_type)}\b', pg_type, p_clean, flags=re.IGNORECASE)
+
+                processed_params.append(p_clean)
+
+            pg_params_str = ", ".join(processed_params)
+
+            # Determine OUTPUT params for RETURNS clause calculation matched later
+            output_params = re.findall(r'\b(INOUT|OUT)\b', pg_params_str, flags=re.IGNORECASE)
+
+        # --------------------------------------------
+
+        declarations = []
+
+        # --- Pre-process Cursors (Run First!) ---
+        # Match DECLARE name CURSOR FOR ...
+        cursor_declarations = []
+        def cursor_replacer(match):
+             full = match.group(0)
+             clean = re.sub(r'^\s*DECLARE\s+', '', full, flags=re.IGNORECASE).strip()
+             cursor_declarations.append(clean + ';')
+             return '' # remove from body
+
+        # Explicit pattern compile for debugging
+        cursor_pattern = re.compile(r'DECLARE\s+[a-zA-Z0-9_]+\s+CURSOR\s+FOR\s+.*?(?=\bOPEN\b)', re.IGNORECASE | re.DOTALL)
+        body_content = cursor_pattern.sub(cursor_replacer, body_content)
+        declarations.extend(cursor_declarations)
+
+        # --- Mask Cursor Commands (OPEN, FETCH, CLOSE, DEALLOCATE) ---
+        # Mask as SELECT 'CURSOR_CMD:...' which uses standard SQL literal string.
+
+        def mask_fetch(match):
+            cur = match.group(1)
+            var = match.group(2)
+            return f"SELECT * FROM (SELECT 'CURSOR_CMD:FETCH {cur} INTO {var}') AS _cursor_mask"
+
+        def mask_open(match):
+            return f"SELECT * FROM (SELECT 'CURSOR_CMD:OPEN {match.group(1)}') AS _cursor_mask"
+
+        def mask_close(match):
+            return f"SELECT * FROM (SELECT 'CURSOR_CMD:CLOSE {match.group(1)}') AS _cursor_mask"
+
+        def mask_deallocate(match):
+            return f"SELECT * FROM (SELECT 'CURSOR_CMD:NULL; -- DEALLOCATE {match.group(1)}') AS _cursor_mask"
+
+        body_content = re.sub(r'\bFETCH\s+([a-zA-Z0-9_]+)\s+INTO\s+([a-zA-Z0-9_]+)', mask_fetch, body_content, flags=re.IGNORECASE)
+        body_content = re.sub(r'\bOPEN\s+([a-zA-Z0-9_]+)', mask_open, body_content, flags=re.IGNORECASE)
+        body_content = re.sub(r'\bCLOSE\s+([a-zA-Z0-9_]+)', mask_close, body_content, flags=re.IGNORECASE)
+        body_content = re.sub(r'\bDEALLOCATE\s+(?:CURSOR\s+)?([a-zA-Z0-9_]+)', mask_deallocate, body_content, flags=re.IGNORECASE)
+        # self.config_parser.print_log_message('DEBUG', f"Body after masking:\n{body_content[:1000]}")
+
+        # --- Pre-process Declarations (Variables) ---
+        types_mapping = self.get_types_mapping({'target_db_type': 'postgresql'})
+
+
+
+        declaration_replacer = lambda m: self._declaration_replacer(m, settings, types_mapping, declarations)
+
+        # Extract Variable Declarations matches generic DECLARE
+        # Removed @ expectation in regex since variables are now locvar_...
+        # Fix: Expanded lookahead to include EXEC, PRINT, END, RAISERROR, etc. to prevent swallowing.
+        body_content = re.sub(r'DECLARE\s+(?![@#])[a-zA-Z0-9_].*?(?=\bBEGIN\b|\bEND\b|\bIF\b|\bWHILE\b|\bSELECT\b|\bINSERT\b|\bUPDATE\b|\bDELETE\b|\bRETURN\b|\bSET\b|\bFETCH\b|\bOPEN\b|\bCLOSE\b|\bDEALLOCATE\b|\bDECLARE\b|\bEXEC\b|\bEXECUTE\b|\bPRINT\b|\bRAISERROR\b|\bWAITFOR\b|\bCOMMIT\b|\bROLLBACK\b|\bSAVE\b|$)', declaration_replacer, body_content, flags=re.IGNORECASE | re.DOTALL)
+
+        # RAISERROR conversion (Masking Strategy)
+        def raiserror_replacer(match):
+            code = match.group(1)
+            msg = match.group(2)
+            if msg.startswith('"'):
+                msg = "'"+ msg[1:-1].replace("'", "''") + "'"
+            # Mask as SELECT 'RAISERROR_CMD:code' AS _cmd, msg AS _msg
+            return f"SELECT 'RAISERROR_CMD:{code}' AS _cmd, {msg} AS _msg"
+
+        body_content = re.sub(r'RAISERROR\s+(\d+)\s+(["\'].*?["\'])', raiserror_replacer, body_content, flags=re.IGNORECASE)
+
+        # --- Manual Recursion for IF/WHILE Blocks (Bypass sqlglot T-SQL parser issues) ---
+        # We find IF ... BEGIN ... END and mask as SELECT 'MASKED_BLOCK:IF:cond:base64body'
+        # To do this robustly with nesting, we need a scanner.
+        # Simplification: We rely on "BEGIN" and "END" matching.
+        # But we must be careful about strings/comments (already handled/removed partially?).
+        # Double-check comments are handled? Yes, step 0.
+        # Strings? raiserror mask handles some. Code might still contain strings.
+
+        # # Helper to convert body strings recursively
+        # def _recursive_convert_body(body_str):
+        #     # Recurse: We need to instantiate a mini-connector or reuse self methods?
+        #     # Reusing convert_funcproc_code_v2 completely is heavy (header parsing etc).
+        #     # We need a method that takes 'body_str' and returns 'pg_str'.
+        #     # We can extract the logic below 'declarations' into _convert_stmts(body_content).
+        #     # For now, let's implement the core logic inline or as a method.
+        #     return self._convert_stmts(body_str, settings, is_nested=True, has_rowcount=has_rowcount)
+
+        if 'IF' in body_content.upper() or 'WHILE' in body_content.upper():
+             # Basic scanner for IF/WHILE
+             tokens = re.split(r'(\bIF\b|\bWHILE\b|\bBEGIN\b|\bEND\b|\'\'|"(?:[^"]|"")*"|\'(?:[^\']|\'\')*\')', body_content, flags=re.IGNORECASE)
+             # tokens include separators. match strings to skip them.
+
+             # Re-assembling logic:
+             # Scan tokens. If IF/WHILE found, consume condition, then expect stmt or BEGIN...END.
+             # If BEGIN found, increment depth. If END found, decrement.
+             # This is a bit complex for a regex split.
+
+             # Alternative: Regex for simplistic IF condition BEGIN ... END detection (if strictly formatted).
+             # But we need robustness.
+
+             # Let's use the placeholder approach if we can isolate the blocks.
+             pass
+
+        # --- Use sqlglot to parse the cleaned body (or remaining parts) ---
+        converted_statements = self._convert_stmts(body_content, settings, has_rowcount=has_rowcount)
+
+        # --- Hoist Declarations (Only for top level) ---
+        final_stmts_clean = []
+        for stmt in converted_statements:
+             stmt_stripped = stmt.strip()
+             # Check for Variable declaration
+             if stmt_stripped.upper().startswith('DECLARE '):
+                  declarations.append(stmt_stripped)
+             else:
+                  final_stmts_clean.append(stmt)
+
+        # Inject _rowcount declaration
+        if has_rowcount:
+             declarations.insert(0, "_rowcount INTEGER;")
+
+        final_body = "\n".join(final_stmts_clean)
+
+        # --- Clean Parameters (Ported Logic) ---
+        # NO OP - handled at start
+
+        # Determine RETURNS clause
+        returns_clause = "RETURNS void"
+        if output_params:
+             if len(output_params) > 1:
+                  returns_clause = "RETURNS RECORD"
+             else:
+                  # Extract type of the single INOUT param
+                  # Look for "INOUT param_name TYPE"
+                  single_out = re.search(r'\b(?:INOUT|OUT)\s+[a-zA-Z0-9_]+\s+([a-zA-Z0-9_]+(?:\(.*\))?)', pg_params_str, flags=re.IGNORECASE)
+                  if single_out:
+                       returns_clause = f"RETURNS {single_out.group(1)}"
+                  else:
+                       returns_clause = "RETURNS RECORD" # Fallback
+
+        # Construct DDL
+        # Use EXTRACTED func_schema if valid, else settings
+        schema_to_use = func_schema if func_schema else settings['target_schema']
+
+        ddl = f"CREATE OR REPLACE FUNCTION {schema_to_use}.{proc_name}({pg_params_str})\n"
+        ddl += f"{returns_clause} AS $$\n"
+        ddl += "DECLARE\n"
+        if declarations:
+             ddl += "\n".join(declarations) + "\n"
+        ddl += "BEGIN\n"
+        ddl += final_body + "\n"
+        ddl += "END;\n"
+        ddl += "$$ LANGUAGE plpgsql;"
+
+        return ddl
+
+    def _transform_trigger_tables(self, expression):
+        """
+        Transforms `inserted` and `deleted` tables in trigger AST to `NEW` and `OLD` records/expressions.
+        Handles replacing 'SELECT count(*) FROM inserted' with 'CASE WHEN TG_OP ...'
+        """
+        def transform(node):
+            if isinstance(node, exp.Column):
+                if node.table.lower() == 'inserted':
+                    node.set('table', exp.Identifier(this='NEW', quoted=False))
+                elif node.table.lower() == 'deleted':
+                    node.set('table', exp.Identifier(this='OLD', quoted=False))
+                return node
+
+            if isinstance(node, (exp.Select, exp.Update, exp.Delete)):
+                # Check FROM
+                from_clause = node.args.get('from')
+                if not from_clause:
+                    return node
+
+                # Detect inserted/deleted tables
+                has_inserted = False
+                has_deleted = False
+                new_froms = []
+
+                # Check expressions for COUNT(*)
+                is_count_star = False
+                if isinstance(node, exp.Select) and len(node.expressions) == 1 and isinstance(node.expressions[0], exp.Count) and node.expressions[0].this == exp.Star():
+                     is_count_star = True
+
+                for f in from_clause.expressions:
+                    if isinstance(f, exp.Table):
+                        name = f.name.lower()
+                        if name == 'inserted':
+                            has_inserted = True
+                            continue # Remove
+                        if name == 'deleted':
+                            has_deleted = True
+                            continue # Remove
+                    new_froms.append(f)
+
+                if has_inserted and is_count_star and not new_froms:
+                     # SELECT count(*) FROM inserted -> CASE WHEN TG_OP ...
+                     return sqlglot.parse_one("CASE WHEN TG_OP IN ('INSERT', 'UPDATE') THEN 1 ELSE 0 END")
+
+                if has_deleted and is_count_star and not new_froms:
+                     return sqlglot.parse_one("CASE WHEN TG_OP IN ('DELETE', 'UPDATE') THEN 1 ELSE 0 END")
+
+                if has_inserted or has_deleted:
+                    if not new_froms:
+                        node.set('from', None)
+                    else:
+                        from_clause.set('expressions', new_froms)
+
+                return node
+            return node
+
+        return expression.transform(transform)
+
+    def _convert_stmts(self, body_content, settings, is_nested=False, has_rowcount=False, is_trigger=False):
+        """
+        Internal helper to convert T-SQL body statements to PL/pgSQL.
+        Used recursively for block contents.
+        """
+        # --- IF/WHILE Manual Handling via Tokenizing Scanner ---
+        # Used to bypass sqlglot failure on blocks.
+        # We detect IF/WHILE and extract them out to recurse.
+
+        import base64
+        processed_body = body_content
+
+        # Semicolon Injection Removed.
+
+        # Legacy Block Masking Removed to allow sqlglot CustomTSQL parser to handle nesting.
+
+        # --- Handle Sybase Outer Joins (*= and =*) before parsing ---
+        # Replace *= with temporary function call to preserve valid parsing
+        # Regex for Left Outer Join (*=)
+        processed_body = re.sub(r"([\w\.]+)\s*\*\=\s*([\w\.]+)", r"locvar_sybase_outer_join(\1, \2)", processed_body)
+        # Regex for Right Outer Join (=*)
+        processed_body = re.sub(r"([\w\.]+)\s*\=\*\s*([\w\.]+)", r"locvar_sybase_right_join(\1, \2)", processed_body)
+
+        # --- Use sqlglot to parse the cleaned body ---
+        # CustomTSQL is defined at module level
+        CustomTSQL.Parser.config_parser = self.config_parser
+
+        try:
+             # Using error_level='ignore' to allow partial parsing and avoid hard crashes
+             # Use Custom TSQL dialect to support nested BEGIN/END blocks in IF statements
+             parsed = sqlglot.parse(processed_body.strip(), read=CustomTSQL)
+        except Exception as e:
+             traceback.print_exc()
+             self.config_parser.print_log_message('ERROR', f"Global parsing failed for code: {body_content[:100]}... Error: {e}")
+             return [f"/* PARSING FAILED: {e} */\n" + body_content]
+
+        converted_statements = []
+        def process_node(expression):
+             if not expression: return None
+
+             # Handle Blocks Recursively
+             # Use extensive checks to catch Block processing
+             is_block = isinstance(expression, Block) or type(expression).__name__ == 'Block'
+
+             if is_block:
+                  stmts = []
+                  if hasattr(expression, 'expressions'):
+                       for e in expression.expressions:
+                            s = process_node(e)
+                            if s: stmts.append(s)
+                  return "\n".join(stmts)
+
+             # Handle IF Recursively to ensure structure (and avoid sqlglot CASE generation quirks)
+             is_if = isinstance(expression, exp.If) or expression.key == 'if' or type(expression).__name__ == 'If'
+
+             if is_if:
+                  cond_sql = expression.this.sql(dialect='postgres')
+                  true_node = expression.args.get('true')
+                  false_node = expression.args.get('false')
+
+                  true_sql = process_node(true_node) if true_node else ""
+
+                  pg_sql = f"IF {cond_sql} THEN\n{true_sql}"
+                  if false_node:
+                       false_sql = process_node(false_node)
+                       pg_sql += f"\nELSE\n{false_sql}"
+                  pg_sql += "\nEND IF;"
+                  return pg_sql
+
+             # --- AST Transformation for Sybase Outer Joins ---
+             try:
+                 where = expression.find(exp.Where)
+                 joins_to_add = []
+                 if where:
+                      for func in where.find_all(exp.Anonymous):
+                           fname = func.this
+                           kind = None
+                           if fname.upper() == 'LOCVAR_SYBASE_OUTER_JOIN':
+                                kind = 'LEFT'
+                           elif fname.upper() == 'LOCVAR_SYBASE_RIGHT_JOIN':
+                                kind = 'RIGHT'
+
+                           if kind:
+                                left = func.expressions[0]
+                                right = func.expressions[1]
+                                table_name = None
+                                if isinstance(right, exp.Column):
+                                    table_name = right.table
+
+                                if table_name:
+                                    joins_to_add.append({
+                                        'table': table_name,
+                                        'condition': exp.EQ(this=left, expression=right),
+                                        'node': func,
+                                        'kind': kind
+                                    })
+
+                      for j in joins_to_add:
+                           j['node'].replace(exp.TRUE) # Use TRUE to remove from logic
+
+                 # Modify FROM clause
+                 from_clause = expression.args.get('from')
+                 if from_clause and joins_to_add:
+                      new_froms = []
+                      tables_to_remove = [j['table'] for j in joins_to_add]
+
+                      for f in from_clause.expressions:
+                           if isinstance(f, exp.Table) and f.alias_or_name in tables_to_remove:
+                               continue
+                           new_froms.append(f)
+
+                      for j in joins_to_add:
+                           join_expr = exp.Join(
+                               this=exp.Table(this=exp.Identifier(this=j['table'], quoted=False)),
+                               kind=j['kind'],
+                               on=j['condition']
+                           )
+                           new_froms.append(join_expr)
+
+                      from_clause.set('expressions', new_froms)
+             except Exception as e_ast:
+                  pass # Proceed with generation (warning logged elsewhere if needed)
+
+             pg_sql = ""
+             skip_semicolon = False
+
+             if is_trigger:
+                  if isinstance(expression, exp.Command) and 'ROLLBACK' in expression.this.upper():
+                       raw = expression.sql()
+                       msg_match = re.search(r"'([^']+)'", raw)
+                       msg = msg_match.group(1) if msg_match else "Trigger Rollback"
+                       return f"RAISE EXCEPTION '{msg}';"
+                  elif isinstance(expression, exp.Rollback):
+                       return "RAISE EXCEPTION 'Transaction Rollback Not Supported in Trigger';"
+                  elif isinstance(expression, exp.Return):
+                       return "RETURN NEW;"
+                  elif isinstance(expression, exp.Command) and expression.this.upper() == 'SET':
+                       expr_cmd = expression.expression.this if expression.expression else ""
+                       if not expr_cmd.strip().startswith('@'):
+                           return f"/* {expression.sql()} -- Ignored in Trigger */;"
+
+             # Catch-all debug for confusing failures
+             # Handle CASE Recursively (in case IF was parsed as CASE)
+             if isinstance(expression, exp.Case):
+                  case_sql = f"CASE {process_node(expression.this)}" if expression.this else "CASE"
+                  for i in expression.args.get('ifs', []):
+                       # ifs are usually exp.If or exp.Case for strict SQL, but here likely exp.If
+                       # recursively call process_node on them
+                       case_sql += f"\n{process_node(i)}" # process_node handles IF -> IF ... THEN
+
+                  default = expression.args.get('default')
+                  if default:
+                       case_sql += f"\nELSE {process_node(default)}"
+
+                  case_sql += "\nEND"
+                  return case_sql
+
+             # Catch-all debug for confusing failures
+             self.config_parser.print_log_message('DEBUG', f"FALLTHROUGH GENERIC! Type: {type(expression).__name__}, Key: {expression.key if hasattr(expression, 'key') else 'None'}")
+             # self.config_parser.print_log_message('DEBUG', f"DUMP: {expression}") # Can be verbose
+
+             pg_sql = expression.sql(dialect='postgres')
+
+             if pg_sql.strip().upper() == 'BEGIN':
+                  return None # Skip standalone BEGIN if it wasn't parsed as Block/Transaction logic handled elsewhere
+
+             pg_sql = pg_sql.replace('locvar_error_placeholder', 'SQLSTATE')
+
+             is_special_cmd = "MASKED_BLOCK:" in pg_sql or "'CURSOR_CMD:" in pg_sql or "'RAISERROR_CMD:" in pg_sql
+             if has_rowcount and not is_special_cmd and isinstance(expression, (exp.Insert, exp.Update, exp.Delete, exp.Select)):
+                  pg_sql += ";\nGET DIAGNOSTICS locvar_rowcount = ROW_COUNT"
+
+             # 1. Handle masked commands
+             is_cursor_cmd = False
+             is_raise_cmd = False
+             is_block_cmd = False
+
+             if isinstance(expression, exp.Select):
+                   if "MASKED_BLOCK:" in pg_sql:
+                         match_blk = re.search(r"MASKED_BLOCK:([^:]+):([^:]+):(.*?)['$]", pg_sql)
+                         if match_blk:
+                              typ = match_blk.group(1)
+                              cond_b64 = match_blk.group(2)
+                              body_b64 = match_blk.group(3)
+                              import base64
+                              cond_str = base64.b64decode(cond_b64).decode()
+                              body_str = base64.b64decode(body_b64).decode()
+                              try:
+                                   cond_pg = sqlglot.transpile(cond_str, read='tsql', write='postgres')[0]
+                              except:
+                                   cond_pg = cond_str
+                              if typ == 'IF' or typ == 'ELSE IF':
+                                   pg_sql = f"IF {cond_pg} THEN\n{body_str}\nEND IF"
+                              elif typ == 'WHILE':
+                                   pg_sql = f"WHILE {cond_pg} LOOP\n{body_str}\nEND LOOP"
+                              is_block_cmd = True
+                   elif "'CURSOR_CMD:" in pg_sql:
+                        match_cmd = re.search(r"'CURSOR_CMD:(.*?)'", pg_sql)
+                        if match_cmd:
+                              pg_sql = match_cmd.group(1)
+                              is_cursor_cmd = True
+                   elif "'RAISERROR_CMD:" in pg_sql:
+                        match_raise = re.search(r"'RAISERROR_CMD:(\d+)'\s+AS\s+_cmd,\s+(.*?)\s+AS\s+_msg", pg_sql, re.IGNORECASE)
+                        if match_raise:
+                              r_code = match_raise.group(1)
+                              r_msg = match_raise.group(2)
+                              pg_sql = f"RAISE EXCEPTION {r_msg} USING ERRCODE = '{r_code}'"
+                              is_raise_cmd = True
+
+             if not is_cursor_cmd and not is_raise_cmd and not is_block_cmd:
+                 # 2. Normal PRINT -> RAISE NOTICE
+                 if isinstance(expression, exp.Command) and expression.this.upper().startswith('PRINT'):
+                     # Reuse regex from original
+                     msg_match = re.search(r'PRINT\s+(.*)', expression.this, re.IGNORECASE)
+                     if msg_match:
+                         pg_sql = f"RAISE NOTICE {msg_match.group(1).strip()}"
+                     else:
+                         pg_sql = f"RAISE NOTICE 'PRINT found'"
+
+                 # 3. SELECT Assignments & SELECT INTO
+                 elif isinstance(expression, exp.Select):
+                     generated = pg_sql
+                     assignments = []
+                     is_var_assignment = False
+                     for e in expression.expressions:
+                          if isinstance(e, exp.EQ):
+                               left = e.this
+                               right = e.expression
+                               lname = left.sql(dialect='postgres')
+                               if 'locvar_' in lname or '@' in lname:
+                                    assignments.append((lname.replace('@',''), right))
+                          else:
+                               break
+                     if assignments and len(assignments) == len(expression.expressions):
+                          is_var_assignment = True
+
+                     if is_var_assignment:
+                          targets = [a[0] for a in assignments]
+                          has_clauses = expression.args.get('from') or expression.args.get('where') or expression.args.get('group') or expression.args.get('having')
+
+                          if has_clauses:
+                               new_exprs = [a[1] for a in assignments]
+                               expression.set('expressions', new_exprs)
+                               into_target = ", ".join(targets)
+                               expression.set('into', exp.Identifier(this=into_target, quoted=False))
+                               pg_sql = expression.sql(dialect='postgres')
+                          else:
+                               lines = []
+                               for t, val_expr in zip(targets, assignments):
+                                    val_sql = val_expr[1].sql(dialect='postgres')
+                                    lines.append(f"{t} := {val_sql}")
+                               pg_sql = "\n".join(lines)
+                     elif 'INTO tt_' in generated:
+                           match_into = re.search(r'\bINTO\s+(tt_[a-zA-Z0-9_]+)', generated)
+                           if match_into:
+                               table = match_into.group(1)
+                               select_part = re.sub(r'\bINTO\s+tt_[a-zA-Z0-9_]+\s*', '', generated)
+                               pg_sql = f"DROP TABLE IF EXISTS {table}; CREATE TEMP TABLE {table} AS {select_part}"
+
+                 # 4. EXEC -> PERFORM
+                 elif isinstance(expression, exp.Command) and (expression.this.upper().startswith('EXEC') or expression.this.upper().startswith('EXECUTE')):
+                      gen_sql = pg_sql # already generated
+                      match_exec_assign = re.match(r'(?:EXEC|EXECUTE)\s+([a-zA-Z0-9_]+)\s*=\s*([a-zA-Z0-9_\.]+)(.*)', gen_sql, re.IGNORECASE)
+                      match_exec = re.match(r'(?:EXEC|EXECUTE)\s+([a-zA-Z0-9_\.]+)(.*)', gen_sql, re.IGNORECASE)
+                      if match_exec_assign:
+                          var = match_exec_assign.group(1).replace('@', '')
+                          proc = match_exec_assign.group(2)
+                          args = match_exec_assign.group(3).strip().replace('@', '')
+                          if args and not args.startswith('('): args = f"({args})"
+                          elif not args: args = "()"
+                          pg_sql = f"{var} := {proc}{args}"
+                      elif match_exec:
+                          proc = match_exec.group(1)
+                          args = match_exec.group(2).strip().replace('@', '')
+                          if args and not args.startswith('('): args = f"({args})"
+                          elif not args: args = "()"
+                          pg_sql = f"PERFORM {proc}{args}"
+
+                 # 5. RETURN
+                 elif isinstance(expression, exp.Return):
+                      pg_sql = "RETURN" # Helper triggers handle actual return usually (RETURN NEW done above)
+
+                 # 6. IF/WHILE catch-all (if not caught by recursive handler)
+                 elif isinstance(expression, exp.If):
+                      if 'END IF' not in pg_sql.upper(): pg_sql += " END IF"
+                 elif hasattr(exp, 'While') and isinstance(expression, exp.While):
+                      pass # handled by sqlglot?
+
+                 # Fix DEALLOCATE
+                 if pg_sql.upper().startswith('DEALLOCATE CURSOR '): pg_sql = pg_sql.replace('DEALLOCATE CURSOR ', 'DEALLOCATE ')
+                 if pg_sql.upper().startswith('CLOSE CURSOR '): pg_sql = pg_sql.replace('CLOSE CURSOR ', 'CLOSE ')
+
+             # Post-processing
+             pg_sql = re.sub(r'(?<!\w)@([a-zA-Z0-9_]+)', r'\1', pg_sql)
+             pg_sql = re.sub(r",\s*(LEFT|RIGHT|FULL)\s+JOIN", r" \1 JOIN", pg_sql, flags=re.IGNORECASE)
+             pg_sql = re.sub(r'@@rowcount', '_rowcount', pg_sql, flags=re.IGNORECASE)
+
+             # Fix sqlglot 'INTERVAL variable unit' generation
+             pg_sql = re.sub(
+                 r"(?i)\bINTERVAL\s+([-@\w]+)\s+(YEAR|MONTH|DAY|HOUR|MINUTE|SECOND)S?\b",
+                 r"(\1 * INTERVAL '1 \2')",
+                 pg_sql
+             )
+
+             if not skip_semicolon and not pg_sql.strip().endswith(';'):
+                 pg_sql += ';'
+             return pg_sql
+
+        for expression in parsed:
+             if is_trigger:
+                 expression = self._transform_trigger_tables(expression)
+             res = process_node(expression)
+             if res:
+                  converted_statements.append(res)
+
+        return converted_statements
+
+        # # Inject _rowcount declaration
+        # if has_rowcount:
+        #      declarations.insert(0, "_rowcount INTEGER;")
+
+        # final_body = "\n".join(final_stmts_clean)
+
+        # # --- Clean Parameters (Ported Logic) ---
+        # # NO OP - handled at start
+        # # pg_params_str = params_str # REMOVED: Using robust extracted params
+        # # if pg_params_str:
+        # #      pg_params_str = re.sub(r'@', '', pg_params_str)
+        # #      pg_params_str = re.sub(r'\bnumeric\b', 'numeric', pg_params_str, flags=re.IGNORECASE)
+        # #      pg_params_str = re.sub(r'\bint\b', 'integer', pg_params_str, flags=re.IGNORECASE)
+
+
+        # # Determine RETURNS clause
+        # returns_clause = "RETURNS void"
+        # if output_params:
+        #      if len(output_params) > 1:
+        #           returns_clause = "RETURNS RECORD"
+        #      else:
+        #           # Extract type of the single INOUT param
+        #           # Look for "INOUT param_name TYPE"
+        #           single_out = re.search(r'\b(?:INOUT|OUT)\s+[a-zA-Z0-9_]+\s+([a-zA-Z0-9_]+(?:\(.*\))?)', pg_params_str, flags=re.IGNORECASE)
+        #           if single_out:
+        #                returns_clause = f"RETURNS {single_out.group(1)}"
+        #           else:
+        #                returns_clause = "RETURNS RECORD" # Fallback
+
+        # # Construct DDL
+        # # Use EXTRACTED func_schema if valid, else settings
+        # schema_to_use = func_schema if func_schema else settings['target_schema']
+
+        # ddl = f"CREATE OR REPLACE FUNCTION {schema_to_use}.{proc_name}({pg_params_str})\n"
+        # ddl += f"{returns_clause} AS $$\n"
+        # ddl += "DECLARE\n"
+        # if declarations:
+        #      ddl += "\n".join(declarations) + "\n"
+        # ddl += "BEGIN\n"
+        # ddl += final_body + "\n"
+        # ddl += "END;\n"
+        # ddl += "$$ LANGUAGE plpgsql;"
+
+        # return ddl
+
     def convert_funcproc_code(self, settings):
+        try:
+            v2_result = self.convert_funcproc_code_v2(settings)
+            # Check for failure markers, empty result, or silent empty body
+            is_valid = v2_result and "/* PARSING FAILED:" not in v2_result
+            if is_valid and "-- [WARNING] Empty input" not in v2_result:
+                 if not re.search(r'BEGIN\s+END;', v2_result.strip()):
+                      return v2_result
+
+            # Fallback to V1
+            self.config_parser.print_log_message('WARNING', "V2 Conversion failed or incomplete, falling back to V1.")
+            return self.convert_funcproc_code_v1(settings)
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"V2 Conversion Critical Failure: {e}. Falling back to V1.")
+            self.config_parser.print_log_message('ERROR', f"Traceback: {traceback.format_exc()}")
+            try:
+                return self.convert_funcproc_code_v1(settings)
+            except Exception as v1_e:
+                return f"/* CRITICAL FAILURE IN V1/V2: {e} / {v1_e} */\n" + settings.get('funcproc_code', '')
+
+    def convert_funcproc_code_v1(self, settings):
         funcproc_code = settings['funcproc_code']
         target_db_type = settings['target_db_type']
-        source_schema = settings['source_schema']
-        target_schema = settings['target_schema']
-        table_list = settings['table_list']
-        view_list = settings['view_list']
 
-        function_immutable = ''
+        # 0. Encapsulate comments
+        # Convert -- comment to /* comment */ to prevent breaking code
+        funcproc_code = re.sub(r'--([^\n]*)', r'/*\1*/', funcproc_code)
 
-        ### this functionality will be published later, not in this version
-        return ""
+        # 1. Clean up potential GO statements and strict comments handling if needed (minimal here)
+        converted_code = re.sub(r'\bGO\b', '', funcproc_code, flags=re.IGNORECASE)
 
-        if target_db_type == 'postgresql':
-            postgresql_code = funcproc_code
+        # PROACTIVE FIX: Common OCR/Typo errors in source code
+        converted_code = re.sub(r'\bfetc\s+h\b', 'FETCH', converted_code, flags=re.IGNORECASE)
+        converted_code = re.sub(r'\bc\s+ursor\b', 'CURSOR', converted_code, flags=re.IGNORECASE)
 
-            # Replace empty lines with ";"
-            postgresql_code = re.sub(r'^\s*$', ';\n', postgresql_code, flags=re.MULTILINE)
-            # Split the code based on "\n
-            commands = [command.strip() for command in postgresql_code.split('\n') if command.strip()]
-            postgresql_code = ''
-            line_number = 0
+        # 1.5 Transaction Control - Not supported in PG functions
+        # We comment them out BEFORE extracting body so 'BEGIN TRAN' doesn't confuse BEGIN/END
+        # Handle SAVE TRAN, and named transactions.
+        # Use NULL; /* command */ to preserve statement validity for IF/ELSE
 
-            for command in commands:
-                command = command.strip().upper()
-                self.config_parser.print_log_message('DEBUG3', f"Processing command: '{command}'")
+        # Regex for BEGIN/COMMIT/ROLLBACK/SAVE TRAN[SACTION] [name]
+        # We capture the full command to comment it out
+        # We replace with NULL; /* [COMMAND] */
+        # Note: IF ... THEN NULL; is valid. IF ... THEN -- comment \n ... might be risky if newline changes logic.
+        # NULL; is safest relative to flow.
 
-                if command.startswith('--'):
-                    command = command.replace(command, f"\n/* {command.strip()} */;")
+        def tran_replacer(match):
+             cmd = match.group(1)
+             # Avoid 'BEGIN' word in comment to not confuse IF block detection which looks for BEGIN
+             cmd_safe = re.sub(r'\bBEGIN\b', 'START', cmd, flags=re.IGNORECASE)
+             return f"NULL; /* {cmd_safe} */"
 
-                if command.startswith('IF'):
-                    command = command.replace(command, f";{command.strip()}")
+        # Use [ \t] instead of \s before the optional name to prevent matching across newlines
+        # Also support TRAN, TRANS, TRANSACTION via TRAN\w*
+        # And ensure the 'name' is NOT a keyword (declare, select, etc) using negative lookahead
+        # to prevent consuming the next statement if whitespace matching is loose.
+        converted_code = re.sub(r'(\b(?:BEGIN|COMMIT|ROLLBACK|SAVE)\s+(?:TRAN\w*)(?:[ \t]+(?!(?:DECLARE|SELECT|INSERT|UPDATE|DELETE|EXECUTE|EXEC|RETURN|IF|WHILE|BEGIN|COMMIT|ROLLBACK|SAVE)\b)[a-zA-Z0-9_]+)?\b)', tran_replacer, converted_code, flags=re.IGNORECASE)
 
-                if command == 'AS':
-                    command = command.replace(command, "AS $$\nBEGIN\n")
+        # 1.6 EXECUTE -> PERFORM (Function Call)
+        # Sybase: EXEC[UTE] proc_name [args]
+        # PG: PERFORM proc_name(args);
+        # Helper to transform EXEC calls
+        def exec_transformer(match):
+            proc_name = match.group(1)
+            args_str = match.group(2)
+            if args_str:
+                args = args_str.strip()
+                # If args are not in parens, wrap them
+                if not args.startswith('('):
+                   # Sybase args are comma separated, sometimes with @
+                   # We clean @
+                   args = args.replace('@', '')
+                   # We assume simple comma separation works for generated SQL
+                   return f"PERFORM {proc_name}({args});"
+                else:
+                    # Already has parens (e.g. EXEC (@sql)) - could be dynamic SQL
+                    # If it's dynamic SQL, it should be text.
+                    return f"PERFORM {proc_name}{args};"
+            else:
+                 # No args
+                 return f"PERFORM {proc_name}();"
 
-                # Add ";" before specific keywords (case insensitive)
-                keywords = ["LET", "END FOREACH", "EXIT FOREACH", "RETURN", "DEFINE", "ON EXCEPTION", "END EXCEPTION",
-                            "ELSE", "ELIF", "END IF", "END LOOP", "END WHILE", "END FOR", "END FUNCTION", "END PROCEDURE",
-                            "UPDATE", "INSERT", "DELETE FROM"]
-                for keyword in keywords:
-                    command = re.sub(r'(?i)\b' + re.escape(keyword) + r'\b', ";" + keyword, command, flags=re.IGNORECASE)
+        # Regex to catch EXEC/EXECUTE followed by name and optional args
+        # We match until newline or semicolon or end of string
+        # Regex to catch EXEC/EXECUTE variants
+        # 1. Assignment: EXECUTE @var = proc ...
+        # 2. Simple: EXECUTE proc ...
 
-                    # Comment out lines starting with FOR followed by a single word within the first 5 lines
-                if re.match(r'^\s*FOR\s+\w+\s*$', command, flags=re.IGNORECASE) and line_number <= 5:
-                    command = f"/* {command} */"
+        def exec_assignment_transformer(match):
+             variable = match.group(1).replace('@', '')
+             proc_name = match.group(2)
+             args = match.group(3)
+             if args:
+                  args = args.replace('@', '').strip()
+                  if args.startswith(','): args = args[1:].strip()
+                  # args should be comma separated.
+                  # wrap in parens
+                  return f"{variable} := {proc_name}({args});"
+             else:
+                  return f"{variable} := {proc_name}();"
 
-                # Add ";" after specific keywords (case insensitive)
-                keywords = ["ELSE", "END IF", "END LOOP", "END WHILE", "END FOR", "END FUNCTION", "END PROCEDURE", "THEN", "END EXCEPTION",
-                            "EXIT FOREACH", "END FOREACH", "CONTINUE FOREACH", "EXIT WHILE", "EXIT FOR", "EXIT LOOP"]
-                for keyword in keywords:
-                    command = re.sub(r'(?i)\b' + re.escape(keyword) + r'\b', keyword + ";", command, flags=re.IGNORECASE)
+        converted_code = re.sub(r'\b(?:EXEC|EXECUTE)\s+(@[a-zA-Z0-9_]+)\s*=\s*([a-zA-Z0-9_\.]+)([^\n;]*)(?=;|\n|$)', exec_assignment_transformer, converted_code, flags=re.IGNORECASE)
 
-                postgresql_code += ' ' + command + ' '
-                line_number += 1
+        # 2. Simple EXEC (existing logic, mostly)
+        converted_code = re.sub(r'\b(?:EXEC|EXECUTE)\s+([a-zA-Z0-9_\.]+)([^\n;]*)(?=;|\n|$)', exec_transformer, converted_code, flags=re.IGNORECASE)
 
-            commands = postgresql_code.split(';')
-            postgresql_code = ''
-            for command in commands:
-                command = command.strip().replace('\n', ' ')
-                command = re.sub(r'\s+', ' ', command)
-                # command = command.strip()
-                if command:
-                    command = command + ';\n'
-                    command = re.sub(r'THEN;', 'THEN', command, flags=re.IGNORECASE)
-                    command = re.sub(r' \*/;', ' */', command, flags=re.IGNORECASE)
-                    command = re.sub(r'--;\n', '--', command, flags=re.IGNORECASE)
+        # 2. Extract Header and Body
+        # Pattern: CREATE PROC[EDURE] name [params] AS [BEGIN] body [END]
+        header_match = re.search(r'CREATE\s+(?:PROC|PROCEDURE)\s+([a-zA-Z0-9_\.]+)(.*?)(\bAS\b)', converted_code, flags=re.IGNORECASE | re.DOTALL)
 
-                postgresql_code += command
+        func_schema = ""
+        func_name = ""
+        params_str = ""
+        body_start_idx = 0
 
-            postgresql_code = re.sub(r'(\S)\s*(/\*)', r'\1\n\2', postgresql_code, flags=re.IGNORECASE)
-            postgresql_code = re.sub(r'\n\*/;', ' */', postgresql_code, flags=re.IGNORECASE)
+        if header_match:
+            self.config_parser.print_log_message('DEBUG', f"DEBUG_MATCH: SUCCESS params='{header_match.group(2)}'")
+            full_name = header_match.group(1)
+            params_str = header_match.group(2).strip()
+            # body technically starts after AS.
+            body_start_idx = header_match.end(3)
 
-        return postgresql_code
+            if '.' in full_name:
+                parts = full_name.split('.')
+                func_schema = parts[0]
+                func_name = parts[1]
+            else:
+                func_name = full_name
+
+            if not func_schema:
+                func_schema = settings.get('target_schema', 'public')
+        else:
+            # Fallback if regex fails - return original or minor mod
+            self.config_parser.print_log_message('DEBUG', f"DEBUG_FAIL: Header regex failed. Code start: {converted_code[:100]}")
+            return converted_code
+
+
+        # 3. Process Parameters
+        types_mapping = self.get_types_mapping({'target_db_type': target_db_type})
+
+        pg_params = []
+        if params_str:
+            # Fix 1: Robustly strip outer parens
+            clean_params = params_str.strip()
+
+            # Remove comments to allow clean parenthesis check
+            # Note: convert_funcproc_code_v1/v2 already converts -- to /* */
+            clean_params = re.sub(r'/\*.*?\*/', '', clean_params, flags=re.DOTALL).strip()
+
+            while clean_params.startswith('(') and clean_params.endswith(')'):
+                clean_params = clean_params[1:-1].strip()
+                # Re-clean comments in case parens wrapped comments? Unlikely but safe.
+                clean_params = re.sub(r'/\*.*?\*/', '', clean_params, flags=re.DOTALL).strip()
+
+            self.config_parser.print_log_message('DEBUG', f"DEBUG_PARA: '{func_name}' ORG='{params_str}' CLEAN='{clean_params}'")
+
+            clean_params = clean_params.replace('@', '')
+
+            # Custom type substitutions first
+            clean_params = self._apply_data_type_substitutions(clean_params)
+            clean_params = self._apply_udt_to_base_type_substitutions(clean_params, settings)
+
+            # Fix 2: Handle OUTPUT -> INOUT
+            # Strategy: Split by comma, process each param
+            params_list = self._split_respecting_parens(clean_params)
+            processed_params = []
+
+            for p in params_list:
+                p_clean = p.strip()
+                # Check for OUTPUT (case insensitive)
+                # Matches: param_name type OUTPUT
+                output_match = re.search(r'\bOUTPUT\b', p_clean, flags=re.IGNORECASE)
+                if output_match:
+                    # Remove OUTPUT
+                    p_clean = re.sub(r'\bOUTPUT\b', '', p_clean, flags=re.IGNORECASE).strip()
+                    # Add INOUT prefix if not already present (unlikely in Sybase but good for safety)
+                    # Sybase: @p type OUTPUT
+                    # PG: INOUT p type
+                    # We assume format is "name type" or "name type default val"
+                    # Just prepend INOUT
+                    p_clean = "INOUT " + p_clean
+
+                # Standard type mapping
+                for sybase_type, pg_type in types_mapping.items():
+                    p_clean = re.sub(rf'\b{re.escape(sybase_type)}\b', pg_type, p_clean, flags=re.IGNORECASE)
+
+                processed_params.append(p_clean)
+
+            pg_params_str = ", ".join(processed_params)
+        else:
+            self.config_parser.print_log_message('DEBUG', f"DEBUG_PARA_EMPTY: '{func_name}'")
+            pg_params_str = ""
+
+        # 4. Process Body
+        body_content = converted_code[body_start_idx:].strip()
+
+        # Remove leading BEGIN and trailing END if they wrap the entire body
+        if re.match(r'^BEGIN\b', body_content, flags=re.IGNORECASE):
+            body_content = re.sub(r'^BEGIN', '', body_content, count=1, flags=re.IGNORECASE).strip()
+            body_content = re.sub(r'END\s*$', '', body_content, flags=re.IGNORECASE).strip()
+
+        # 5. Variable Declarations
+        declarations = []
+
+        declaration_replacer = lambda m: self._declaration_replacer(m, settings, types_mapping, declarations)
+
+        body_content = re.sub(r'DECLARE\s+@.*?(?=\bBEGIN\b|\bIF\b|\bWHILE\b|\bSELECT\b|\bINSERT\b|\bUPDATE\b|\bDELETE\b|\bRETURN\b|\bSET\b|\bFETCH\b|\bOPEN\b|\bCLOSE\b|\bDEALLOCATE\b|\bDECLARE\b|$)', declaration_replacer, body_content, flags=re.IGNORECASE | re.DOTALL)
+
+        # 6. Global Variable Replacement in Body
+        # Replace @var with var, BUT skip @@system_vars
+
+        # FIX: Rename @return to @v_return to avoid collision with keyword RETURN
+        body_content = re.sub(r'@return\b', '@v_return', body_content, flags=re.IGNORECASE)
+
+        body_content = re.sub(r'(?<!@)@([a-zA-Z0-9_]+)', r'\1', body_content)
+
+        # Handle @@rowcount
+        has_rowcount = '@@rowcount' in body_content.lower()
+        if has_rowcount:
+             declarations.append('_rowcount INTEGER;')
+             # Replace usage
+             body_content = re.sub(r'@@rowcount', '_rowcount', body_content, flags=re.IGNORECASE)
+
+        # RAISERROR conversion
+        # Sybase: RAISERROR num "msg" or RAISERROR num 'msg'
+        # PG: RAISE EXCEPTION 'msg' USING ERRCODE = 'num'
+        def raiserror_replacer(match):
+            code = match.group(1)
+            msg = match.group(2)
+            # Fix quotes if double
+            if msg.startswith('"'):
+                msg = "'" + msg[1:-1].replace("'", "''") + "'"
+            return f"RAISE EXCEPTION {msg} USING ERRCODE = '{code}'"
+
+        body_content = re.sub(r'RAISERROR\s+(\d+)\s+(["\'].*?["\'])', raiserror_replacer, body_content, flags=re.IGNORECASE)
+
+        # 7. Conversions (Line by line / block based)
+
+        # Cursor Declarations
+        # # Fix: Capture optional FOR UPDATE
+        # cursor_matches = re.finditer(r'DECLARE\s+([a-zA-Z0-9_]+)\s+CURSOR\s+FOR\s+(.*?)(\s+FOR\s+UPDATE)?\s+(?=\bOPEN\b|\bDECLARE\b|$)', body_content, flags=re.IGNORECASE | re.DOTALL)
+        # # Simplify regex to just capture everything until OPEN or next DECLARE or end, handling FOR UPDATE inside
+        # # Actually, simpler: DECLARE ... CURSOR FOR ... [FOR UPDATE]
+        # # We can try to capture line-based or until OPEN.
+        # # Let's retain the original logic but extend the matching group to consume "FOR UPDATE" if present at the end of declaration.
+
+        # # New strategy: Find DECLARE ... CURSOR FOR ...
+        # # Then consume content until 'OPEN cursor_name' or 'DEALLOCATE' or 'DECLARE'
+        # # But for now, let's just make the simple regex robust for trailing FOR UPDATE
+
+        # # Re-reading user issue: "FOR UPDATE" is on a new line.
+        # # The original regex: r'DECLARE\s+([a-zA-Z0-9_]+)\s+CURSOR\s+FOR\s+(.*)'
+        # # This matches until end of line? ".+" matches except newline. re.DOTALL not used in original snippet?
+        # # Original: flags=re.IGNORECASE (no DOTALL). So it stops at newline.
+        # # User Code:
+        # # declare access_cursor cursor
+        # # for select ...
+        # # for update
+        # # open access_cursor
+
+        # The body_content passed here has newlines.
+        cursor_matches = re.finditer(r'DECLARE\s+([a-zA-Z0-9_]+)\s+CURSOR\s+FOR\s+(.+?)(\s+FOR\s+UPDATE)?(?=\s+OPEN|\s+DECLARE|\s+SELECT|\s+SET|\s+FETCH|\s+BEGIN|$)', body_content, flags=re.IGNORECASE | re.DOTALL)
+
+        for cm in cursor_matches:
+            c_name = cm.group(1)
+            c_def = cm.group(2).strip()
+            for_upd = cm.group(3)
+            if for_upd:
+                 c_def += " " + for_upd.strip()
+            declarations.append(f"{c_name} CURSOR FOR {c_def};")
+
+        # Cleanup: Remove the matched text from body
+        # We need to construct a regex that matches exactly what we found to remove it
+        body_content = re.sub(r'DECLARE\s+[a-zA-Z0-9_]+\s+CURSOR\s+FOR\s+.+?(\s+FOR\s+UPDATE)?(?=\s+OPEN|\s+DECLARE|\s+SELECT|\s+SET|\s+FETCH|\s+BEGIN|$)', '', body_content, flags=re.IGNORECASE | re.DOTALL)
+
+        # 8. Control Flow & Assignments
+
+        # Misc Conversions (Before flow control to ensure valid statements)
+        body_content = re.sub(r'fetch\s+([a-zA-Z0-9_]+)\s+into\s+(.*)', r'FETCH \1 INTO \2;', body_content, flags=re.IGNORECASE)
+
+        def print_replacer(match):
+             content = match.group(1).strip()
+             # Split by comma respecting parens
+             args = self._split_respecting_parens(match.group(1))
+
+             if not args:
+                  return "RAISE NOTICE '';"
+
+             first_arg = args[0]
+             rest_args = args[1:]
+
+             # Check if first arg is a string literal
+             if first_arg.startswith("'") and first_arg.endswith("'"):
+                  # It's a format string
+                  msg = first_arg
+                  if rest_args:
+                       return f"RAISE NOTICE {msg}, {', '.join(rest_args)};"
+                  else:
+                       return f"RAISE NOTICE {msg};"
+             else:
+                  # First arg is a variable or expression
+                  # treat as RAISE NOTICE '%', arg
+                  # Use %s for generic? PG RAISE NOTICE uses %
+                  # If multiple args, we construct specific format string?
+                  # Sybase PRINT "val" prints val.
+                  # PG RAISE NOTICE '%', val.
+
+                  # If multiple args: PRINT @a, @b -> RAISE NOTICE '%, %', @a, @b
+                  format_str = ", ".join(["%"] * len(args))
+                  return f"RAISE NOTICE '{format_str}', {', '.join(args)};"
+
+        body_content = re.sub(r'print\s+(.+?)(?=;|\n|$)', print_replacer, body_content, flags=re.IGNORECASE)
+        body_content = re.sub(r'open\s+([a-zA-Z0-9_]+)', r'OPEN \1;', body_content, flags=re.IGNORECASE)
+        body_content = re.sub(r'close\s+([a-zA-Z0-9_]+)', r'CLOSE \1;', body_content, flags=re.IGNORECASE)
+        body_content = re.sub(r'deallocate\s+cursor\s+([a-zA-Z0-9_]+)', r'DEALLOCATE \1;', body_content, flags=re.IGNORECASE)
+
+        # BREAK -> EXIT;
+        body_content = re.sub(r'\bBREAK\b', 'EXIT;', body_content, flags=re.IGNORECASE)
+
+        # Handle @@sqlstatus (Cursor status)
+        # @@sqlstatus = 0 -> FOUND
+        # @@sqlstatus != 0 -> NOT FOUND (Commonly used for loop break)
+        # 1. Replace "@@sqlstatus != 0" (and variants)
+        # We look for IF (@@sqlstatus!=0) ...
+        # Regex to capture optional whitespace: @@sqlstatus\s*!=\s*0
+        # Replace with NOT FOUND
+        body_content = re.sub(r'@@sqlstatus\s*!=\s*0', 'NOT FOUND', body_content, flags=re.IGNORECASE)
+        # 2. Replace "@@sqlstatus = 0"
+        body_content = re.sub(r'@@sqlstatus\s*=\s*0', 'FOUND', body_content, flags=re.IGNORECASE)
+        # 3. Handle simple "IF (@@sqlstatus)" which implies non-zero? No, usually compared.
+        # But some code might use > 0.
+        body_content = re.sub(r'@@sqlstatus\s*>\s*0', 'NOT FOUND', body_content, flags=re.IGNORECASE)
+
+        # 8.0 Pre-process END ELSE to avoid breaking IF-ELSE chains
+        # T-SQL: IF ... BEGIN ... END ELSE ...
+        # PG: IF ... THEN ... ELSE ... END IF;
+        # We replace "END ELSE" with "ELSE" so the first block merges into the structure,
+        # and the final END closes the whole IF.
+
+        # FIX: Ensure semicolon before ELSE/ELSIF if missing
+        # Sybase often allows: stmt \n ELSE
+        # PG needs: stmt; \n ELSE
+        # Regex updated to handle comments: stmt -- comment \n ELSE -> stmt; -- comment \n ELSE
+        body_content = re.sub(r'([^;\s])([ \t]*(?:--[^\n]*|/\*.*?\*/[ \t]*)?)\n\s*(ELSE|ELSIF)\b', r'\1;\2\n\3', body_content, flags=re.IGNORECASE)
+
+        body_content = re.sub(r'END\s*;?\s+ELSE', r'ELSE', body_content, flags=re.IGNORECASE | re.MULTILINE)
+
+        # 8.05 Temp Table Handling (# -> tt_)
+        # Global replacements of #name with tt_name
+        # Note: Do this BEFORE select into transformer so we can detect tt_name
+        body_content = re.sub(r'#([a-zA-Z0-9_]+)', r'tt_\1', body_content)
+
+        # 8.1 Select Into (Handle BEFORE simple assignment to catch FROM clauses even multiline)
+        # SELECT var = col FROM ... -> SELECT col INTO var FROM ...
+        def select_into_transformer(match):
+            content = match.group(1) # content between SELECT and FROM
+            rest = match.group(2) # FROM ...
+
+            # Check for generic SELECT ... INTO table syntax (converted from #table -> tt_table)
+            # We convert to DROP TABLE IF EXISTS ...; CREATE TEMP TABLE ... AS SELECT ...
+            # look for `INTO tt_([a-zA-Z0-9_]+)`
+
+            into_match = re.search(r'\bINTO\s+(tt_[a-zA-Z0-9_]+)', content, flags=re.IGNORECASE)
+            if into_match:
+                table_name = into_match.group(1)
+                # Remove `INTO table_name` from content
+                # Be careful to remove exactly the match
+                # Use split/join or sub
+                new_content = re.sub(r'\bINTO\s+tt_[a-zA-Z0-9_]+\s*', '', content, flags=re.IGNORECASE)
+
+                # Check if new_content ends with comma (failed parse?) or handled correctly?
+                # Usually standard SQL: SELECT a, b INTO #t ...
+
+                return f"DROP TABLE IF EXISTS {table_name}; CREATE TEMP TABLE {table_name} AS SELECT {new_content} {rest}"
+
+            if '=' in content:
+                parts = self._split_respecting_parens(content)
+                vars_list = []
+                cols_list = []
+                for asm in parts:
+                    if '=' in asm:
+                        side_l, side_r = asm.split('=', 1)
+                        vars_list.append(side_l.strip())
+                        cols_list.append(side_r.strip())
+                    else:
+                        cols_list.append(asm)
+
+                if vars_list:
+                    return f"SELECT {', '.join(cols_list)} INTO {', '.join(vars_list)} {rest}"
+
+            return match.group(0)
+
+        # Use DOTALL to match newlines in the SELECT ... FROM
+        body_content = re.sub(r'SELECT\s+(.+?)\s+(FROM\s+.*)', select_into_transformer, body_content, flags=re.IGNORECASE | re.DOTALL)
+
+        # 8.2 Simple Assignment: SELECT var = val (no FROM)
+        def simple_assignment(match):
+            full_match = match.group(0)
+            if 'FROM' in full_match.upper():
+                return full_match
+
+            content = match.group(1).strip() # content after SELECT
+
+            if '=' not in content:
+                return full_match
+
+            parts = self._split_respecting_parens(content)
+            assignments = []
+            is_assignment = True
+            for part in parts:
+                if '=' in part:
+                     side_l, side_r = part.split('=', 1)
+                     assignments.append(f"{side_l.strip()} := {side_r.strip()}")
+                else:
+                     is_assignment = False
+
+            if is_assignment and assignments:
+                return "; ".join(assignments) + ";"
+            return full_match
+
+        # Match SELECT until newline or semicolon
+        body_content = re.sub(r'SELECT\s+([^;\n]+)', simple_assignment, body_content, flags=re.IGNORECASE)
+
+
+        # IF / WHILE
+        # Mark BLOCK IFs to distinguish from Single Line IFs
+        # Use DOTALL to match newlines in condition
+        # Ensure we don't match too greedily if nested
+        # But (.*?) is non-greedy.
+        body_content = re.sub(r'IF\s+(.*?)\s+BEGIN', r'IF \1 THEN --BLOCK', body_content, flags=re.IGNORECASE | re.DOTALL)
+        body_content = re.sub(r'WHILE\s+(.*?)\s+BEGIN', r'WHILE \1 LOOP', body_content, flags=re.IGNORECASE | re.DOTALL)
+        body_content = re.sub(r'ELSE\s+BEGIN', r'ELSE --BLOCK', body_content, flags=re.IGNORECASE)
+
+        # Single Line IF (no BEGIN)
+        def single_line_if(match):
+            cond = match.group(1)
+            if 'THEN' in cond.upper():
+                return match.group(0)
+            return f"IF {cond} THEN --SINGLE" # Mark as single
+
+        # Expanded lookahead to include EXIT(BREAK), CONTINUE, PRINT, etc.
+        # Original: (?=\s+(?:UPDATE|INSERT|DELETE|SELECT|RETURN|RAISE|PERFORM|FETCH|OPEN|CLOSE|DEALLOCATE))
+        # New tokens: EXIT, CONTINUE, PRINT (handled later as markers)
+        # Also need to handle 'BREAK' which is now 'EXIT'
+        # Added BEGIN to lookahead to prevent single line match if BEGIN follows (though IF..BEGIN regex above should catch it first)
+
+        # Note: We already replaced BREAK -> EXIT above.
+
+        body_content = re.sub(r'(?<!\bTABLE\s)IF\s+(.+?)(?=\s+(?:UPDATE|INSERT|DELETE|SELECT|RETURN|RAISE|PERFORM|FETCH|OPEN|CLOSE|DEALLOCATE|EXIT|CONTINUE|PRINT|BEGIN))', single_line_if, body_content, flags=re.IGNORECASE)
+        body_content = re.sub(r'(?<!\bTABLE\s)IF\s+(.+?)\s*$', single_line_if, body_content, flags=re.IGNORECASE | re.MULTILINE)
+
+        # Line processing to close blocks and single IFs
+        lines = body_content.split('\n')
+        new_lines = []
+        stack = [] # 'IF_BLOCK', 'LOOP'
+        pending_single_if = False
+        in_dml = False # Track if we are inside a DML statement
+
+
+        new_lines = []
+        stack = []
+        pending_single_if = False
+        in_dml = False
+
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            stripped = line.strip()
+
+            # Remove our markers
+            is_block_if = '--BLOCK' in line
+            is_single_if = '--SINGLE' in line
+
+            clean_line = line.replace('--BLOCK', '').replace('--SINGLE', '')
+
+            # Detect rowcount usage
+            has_rowcount = '@@rowcount' in clean_line.lower() or 'sql%rowcount' in clean_line.lower()
+
+            # Stopper Logic (Close previous DML)
+            stopper_match = re.search(r'^\b(IF|WHILE|RETURN|BEGIN|END|RAISE|PRINT|FETCH|OPEN|CLOSE|DEALLOCATE|INSERT|UPDATE|DELETE)\b', stripped, flags=re.IGNORECASE)
+            if in_dml and stopper_match:
+                 if new_lines:
+                      prev = new_lines[-1]
+                      if not prev.strip().endswith(';'):
+                           new_lines[-1] = prev + ";"
+                 if has_rowcount:
+                      new_lines.append("GET DIAGNOSTICS _rowcount = ROW_COUNT;")
+                 in_dml = False
+
+            # Starter Logic (Open new DML)
+            dml_start_match = re.search(r'^\b(UPDATE|INSERT|DELETE|SELECT)\b', stripped, flags=re.IGNORECASE)
+            if dml_start_match:
+                 in_dml = True
+
+            # Simple Closure Logic
+            if in_dml and stripped.endswith(';'):
+                 if has_rowcount:
+                      clean_line += " GET DIAGNOSTICS _rowcount = ROW_COUNT;"
+                 in_dml = False
+
+            if is_block_if:
+                stack.append('IF_BLOCK')
+            elif re.search(r'WHILE\s+.*\s+LOOP', line, flags=re.IGNORECASE):
+                stack.append('LOOP')
+
+            if is_single_if:
+                if clean_line.rstrip().endswith('THEN'):
+                    pending_single_if = True
+                    new_lines.append(clean_line)
+                else:
+                    # Single line IF with statement on same line: IF ... THEN stmt
+                    # Check next line for ELSE
+                    next_is_else = False
+                    if i + 1 < len(lines):
+                         next_line = lines[i+1].strip()
+                         # Check for ELSE or ELSE --BLOCK
+                         if re.match(r'^ELSE\b', next_line, flags=re.IGNORECASE):
+                              next_is_else = True
+
+                    if next_is_else:
+                         # Treat as if we are entering an ELSE block for a single IF
+                         # We do NOT append END IF;
+                         # Push a state to stack indicating we are in an IF that needs closing after ELSE
+                         stack.append('IF_SINGLE_ELSE')
+                         new_lines.append(clean_line)
+                    else:
+                         new_lines.append(clean_line + " END IF;")
+                i += 1
+                continue
+
+            if pending_single_if and stripped:
+                # We just processed the statement for a pending single IF
+                # Check next line for ELSE
+                next_is_else = False
+                if i + 1 < len(lines):
+                        next_line = lines[i+1].strip()
+                        if re.match(r'^ELSE\b', next_line, flags=re.IGNORECASE):
+                            next_is_else = True
+
+                if next_is_else:
+                     stack.append('IF_SINGLE_ELSE')
+                     new_lines.append(clean_line)
+                else:
+                     new_lines.append(clean_line + " END IF;")
+
+                pending_single_if = False
+                i += 1
+                continue
+
+            # Standard END handling
+            if re.match(r'^END\s*;?$', stripped, flags=re.IGNORECASE):
+                if stack:
+                    block = stack.pop()
+                    if block == 'IF_BLOCK':
+                        new_lines.append("END IF;")
+                    elif block == 'LOOP':
+                        new_lines.append("END LOOP;")
+                    elif block == 'IF_SINGLE_ELSE':
+                         # If we hit END while in IF_SINGLE_ELSE, it means the ELSE block finished?
+                         # Usually ELSE for single IF doesn't have END unless it was a block ELSE.
+                         # But wait, if it was 'ELSE --BLOCK', it would have pushed IF_BLOCK?
+                         # No, 'ELSE --BLOCK' is just a line.
+                         new_lines.append("END IF;") # Close the ELSE's IF
+                    else:
+                        new_lines.append(clean_line)
+                else:
+                    new_lines.append("END;")
+            else:
+                 # Check if this line is ELSE.
+                 # If we match ELSE, and we are in IF_SINGLE_ELSE, we just print ELSE.
+                 # The 'IF_SINGLE_ELSE' state remains until the statement AFTER else is done?
+                 # Wait.
+                 # If we are in IF_SINGLE_ELSE state, it means we had `IF ... stmt` (no END IF) `ELSE`.
+                 # So we are now processing `ELSE`.
+                 # If `ELSE` is `ELSE --BLOCK` (converted from `ELSE BEGIN`), then `is_block_if` would be true?
+                 # No, `is_block_if` checks `--BLOCK`. My regex replaced `ELSE BEGIN` with `ELSE`.
+                 # I should probably replace `ELSE BEGIN` with `ELSE --BLOCK` to track it.
+
+                 new_lines.append(clean_line)
+
+                 # If we are in 'IF_SINGLE_ELSE' state, and we just emitted a statement that is NOT 'ELSE',
+                 # that implies the single-line ELSE body is finished.
+                 # UNLESS the statement was 'ELSE' itself.
+
+                 is_else_line = re.match(r'^ELSE\b', stripped, flags=re.IGNORECASE)
+                 if stack and stack[-1] == 'IF_SINGLE_ELSE' and not is_else_line:
+                      # We just processed the body of the else. Close it.
+                      stack.pop()
+                      new_lines[-1] += " END IF;"
+
+            i += 1
+
+        # Fallback closure
+        if pending_single_if:
+             new_lines.append("END IF;")
+
+
+        # If DML is still open at end of body (e.g. because END was stripped), close it
+        if in_dml:
+             if new_lines and not new_lines[-1].strip().endswith(';'):
+                  new_lines[-1] += ";"
+             if has_rowcount:
+                  new_lines.append("GET DIAGNOSTICS _rowcount = ROW_COUNT;")
+
+        body_content = '\n'.join(new_lines)
+
+        # Fix ENDs
+        lines = body_content.split('\n')
+        new_lines = []
+        stack = []
+
+        for line in lines:
+            stripped = line.strip()
+            if re.search(r'IF\s+.*\s+THEN', line, flags=re.IGNORECASE):
+                stack.append('IF')
+            elif re.search(r'WHILE\s+.*\s+LOOP', line, flags=re.IGNORECASE):
+                stack.append('LOOP')
+
+            # Check for END
+            if re.match(r'^END\s*;?$', stripped, flags=re.IGNORECASE):
+                if stack:
+                    block = stack.pop()
+                    if block == 'IF':
+                        new_lines.append(line.upper().replace('END', 'END IF;'))
+                    elif block == 'LOOP':
+                        new_lines.append(line.upper().replace('END', 'END LOOP;'))
+                    else:
+                        new_lines.append('END;')
+                else:
+                    new_lines.append('END;')
+            else:
+                 new_lines.append(line)
+
+        body_content = '\n'.join(new_lines)
+
+        body_content = re.sub(r'RETURN\s+\d+', 'RETURN', body_content, flags=re.IGNORECASE)
+
+        # Check for Output parameters to adjust RETURNs and RETURNS clause
+        output_params = []
+        if header_match:
+             # Re-parse params_str to find output params
+             # This is a bit rough, assuming comma separation on top level
+             # Better to trust our params parsing if we had it structured.
+             # We can regex search for 'OUTPUT' or 'OUT' in params_str
+             # params_str: "@id int output, @val varchar(10)"
+             # We need to count them.
+
+             # Split by comma respecting parens (not strictly needed for just counting OUTPUT keywords, mostly)
+             # But let's look at the generated pg_params_str.
+             # It has INOUT for output params.
+             # "INOUT geraet_id BIGINT"
+
+             output_params = re.findall(r'\b(INOUT|OUT)\b', pg_params_str, flags=re.IGNORECASE)
+
+        def cleaner_return(match):
+             expr = match.group(1).strip()
+             terminator = match.group(2)
+             if not expr:
+                  return f"RETURN;{terminator}"
+             return f"RETURN; /* {expr} */{terminator}"
+
+        # Match RETURN <expr> until semicolon or newline or end of string OR 'END' keyword
+        # Apply to ALL returns because Sybase status codes are not used in PG functions
+        body_content = re.sub(r'RETURN\b\s*(.*?)(\;|\n|\bEND\b|$)', cleaner_return, body_content, flags=re.IGNORECASE)
+
+        if output_params:
+             # If we have output parameters, replacement is already done above.
+             if len(output_params) > 1:
+                  returns_clause = "RETURNS RECORD"
+             else:
+                  # If we have 1 OUT param, PG usually implies RETURNS <type> of that param,
+                  # OR if defined as INOUT in signature, we can use RETURNS void or matches?
+                  # Actually, if parameters are DEFINED as INOUT, function returns VOID? No.
+                  # In PG, if you use OUT/INOUT params, you usually do RETURNS RECORD (if multiple)
+                  # or RETURNS <type> (if single OUT), OR RETURNS SETOF ...
+                  # But wait, PG docs: "If there are OUT or INOUT parameters, the RETURNS clause
+                  # can be omitted (equivalent to RETURNS record) or can specify the result type."
+                  # "If RETURNS void is used, output parameters are not allowed." -> ERROR user saw!
+
+                  # So we must NOT return VOID.
+                  # We can return "RECORD" generally, or rely on PG inferring it if we omit it?
+                  # We must specify something if we used 'RETURNS void' before.
+
+                  # Safest: "RETURNS RECORD" if multiple.
+                  # If single, we should ideally match the type, but "RETURNS RECORD" works too?
+                  # Actually, if we use INOUT in declaration, "RETURNS <type>" is expected if single?
+                  # Or "RETURNS SETOF <type>"?
+
+                  # User error: "function result type must be bigint because of OUT parameters"
+                  # This implies PG expects the type of the single OUT param.
+                  pass
+                  # We need to extract the type of the single OUT param.
+                  # pg_params_str: "techauftrag_id BIGINT, INOUT geraet_id BIGINT =0"
+                  # We can try to extract the type.
+
+        # Determine RETURNS clause
+        returns_clause = "RETURNS void"
+        if output_params:
+             if len(output_params) > 1:
+                  returns_clause = "RETURNS RECORD"
+             else:
+                  # Extract type of the single INOUT param
+                  # Look for "INOUT param_name TYPE"
+                  single_out = re.search(r'\b(?:INOUT|OUT)\s+[a-zA-Z0-9_]+\s+([a-zA-Z0-9_]+(?:\(.*\))?)', pg_params_str, flags=re.IGNORECASE)
+                  if single_out:
+                       returns_clause = f"RETURNS {single_out.group(1)}"
+                  else:
+                       returns_clause = "RETURNS RECORD" # Fallback
+
+        # Other types mapping in body
+        # Custom type substitutions first
+        body_content = self._apply_data_type_substitutions(body_content)
+        body_content = self._apply_udt_to_base_type_substitutions(body_content, settings)
+        for sybase_type, pg_type in types_mapping.items():
+            body_content = re.sub(rf'\b{re.escape(sybase_type)}\b', pg_type, body_content, flags=re.IGNORECASE)
+
+
+
+        # 9. Assembly
+        final_code = f"CREATE OR REPLACE FUNCTION {func_schema}.{func_name}({pg_params_str})\n"
+        final_code += f"{returns_clause} AS $$\n"
+
+        if declarations:
+            final_code += "DECLARE\n"
+            for decl in declarations:
+                final_code += f"    {decl}\n"
+
+        final_code += "BEGIN\n"
+        final_code += body_content
+        final_code += "\nEND;\n$$ LANGUAGE plpgsql;"
+
+        return final_code
 
     def fetch_sequences(self, table_schema: str, table_name: str):
         pass
@@ -1294,44 +3231,609 @@ class SybaseASEConnector(DatabaseConnector):
             raise e
 
     def convert_trigger(self, settings):
-        trigger_name = settings['trigger_name']
+        """
+        Parser-based conversion for triggers (V2).
+        Returns full DDL (CREATE FUNCTION + CREATE TRIGGER).
+        """
         trigger_code = settings['trigger_sql']
-        source_schema = settings['source_schema']
+        trigger_name = self.config_parser.convert_names_case(settings['trigger_name'])
         target_schema = settings['target_schema']
-        table_list = settings['table_list']
-        return ''
+        target_table = self.config_parser.convert_names_case(settings['target_table'])
+        target_db_type = settings['target_db_type']
+
+        # --- Pre-processing ---
+
+        # 0. Encapsulate comments
+        trigger_code = re.sub(r'--([^\n]*)', r'/*\1*/', trigger_code)
+
+        # 1. Remove GO
+        trigger_code = re.sub(r'\bGO\b', '', trigger_code, flags=re.IGNORECASE)
+
+        # Pre-process Sybase specific join syntax (Missing in original V2)
+        # *= -> = /* left_outer */
+        # =* -> = /* right_outer */
+        trigger_code = re.sub(r'\*=', '= /* left_outer */', trigger_code)
+        trigger_code = re.sub(r'=\*', '= /* right_outer */', trigger_code)
+
+        # 1.5 Rename Local Variables (@var -> locvar_var)
+        trigger_code = self._rename_sybase_local_variables(trigger_code)
+
+        # 1.6 Handle Global Variables
+        has_rowcount = '@@rowcount' in trigger_code.lower()
+
+        # Replace @@rowcount with locvar_rowcount
+        trigger_code = re.sub(r'@@rowcount\b', 'locvar_rowcount', trigger_code, flags=re.IGNORECASE)
+        # Replace @@error with placeholder (SQLSTATE breaks parsing)
+        trigger_code = re.sub(r'@@error\b', 'locvar_error_placeholder', trigger_code, flags=re.IGNORECASE)
+        # Replace @@trancount with global_trancount
+        trigger_code = re.sub(r'@@trancount\b', 'global_trancount', trigger_code, flags=re.IGNORECASE)
+
+        # 2. Extract Body (After AS)
+        as_match = re.search(r'\bAS\b', trigger_code, flags=re.IGNORECASE)
+        body_content = trigger_code
+        if as_match:
+             body_content = trigger_code[as_match.end():].strip()
+
+        # 3. Global Replacements specific to Triggers (MOVED TO AST TRANSFORM)
+        # body_content = re.sub(r'\binserted\b', 'NEW', body_content, flags=re.IGNORECASE)
+        # body_content = re.sub(r'\bdeleted\b', 'OLD', body_content, flags=re.IGNORECASE)
+        # body_content = re.sub(r'\bFROM\s+(?:NEW|OLD)\b', '', body_content, flags=re.IGNORECASE)
+
+        # IF UPDATE(col) -> IF locvar_sybase_update_func(col) (To avoid parser confusion with UPDATE keyword)
+        def if_update_replacer(match):
+            col = match.group(1)
+            # return f"NEW.{col} IS DISTINCT FROM OLD.{col}"
+            return f"locvar_sybase_update_func({col})"
+        body_content = re.sub(r'\bUPDATE\(([a-zA-Z0-9_]+)\)', if_update_replacer, body_content, flags=re.IGNORECASE)
+
+        # 4. Extract Declarations (Ported from convert_funcproc_code_v2)
+        declarations = []
+        types_mapping = self.get_types_mapping({'target_db_type': target_db_type})
+
+        declaration_replacer = lambda m: self._declaration_replacer(m, settings, types_mapping, declarations)
+
+        # Expanded lookahead for declaration end
+        body_content = re.sub(r'DECLARE\s+(?![@#])[a-zA-Z0-9_].*?(?=\bBEGIN\b|\bEND\b|\bIF\b|\bWHILE\b|\bSELECT\b|\bINSERT\b|\bUPDATE\b|\bDELETE\b|\bRETURN\b|\bSET\b|\bFETCH\b|\bOPEN\b|\bCLOSE\b|\bDEALLOCATE\b|\bDECLARE\b|\bEXEC\b|\bEXECUTE\b|\bPRINT\b|\bRAISERROR\b|\bWAITFOR\b|\bCOMMIT\b|\bROLLBACK\b|\bSAVE\b|$)', declaration_replacer, body_content, flags=re.IGNORECASE | re.DOTALL)
+
+        # 5. Convert Statements (using _convert_stmts logic)
+        # 5. Convert Statements (using _convert_stmts logic)
+        # Note: _convert_stmts handles block scanning logic internally now
+        converted_statements = self._convert_stmts(body_content, settings, is_nested=False, is_trigger=True, has_rowcount=has_rowcount)
+
+        final_stmts_clean = []
+        for stmt in converted_statements:
+             stmt_stripped = stmt.strip()
+             if stmt_stripped.upper().startswith('DECLARE '):
+                  declarations.append(stmt_stripped)
+             else:
+                  final_stmts_clean.append(stmt)
+
+        if has_rowcount:
+             declarations.insert(0, "locvar_rowcount INTEGER;")
+
+        if 'global_trancount' in trigger_code.lower():
+             declarations.insert(0, "global_trancount INTEGER DEFAULT 1;")
+
+        final_body = "\n".join(final_stmts_clean)
+
+        # Post-processing: Replace locvar_sybase_update_func(col) with NEW.col IS DISTINCT FROM OLD.col
+        # This handles the result of if_update_replacer after parsing/generation
+        def update_func_replacer(match):
+             # match group 1: optional quote
+             # match group 2: column name
+             # match group 3: optional quote (should match group 1)
+             # Use simplified regex since we know how sqlglot generates output (likely quoted)
+
+             # Regex to capture: locvar_sybase_update_func( "col" ) or ( col )
+             content = match.group(1)
+             return f"NEW.{content} IS DISTINCT FROM OLD.{content}"
+
+        final_body = re.sub(r'locvar_sybase_update_func\((.*?)\)', update_func_replacer, final_body, flags=re.IGNORECASE)
+
+        # 6. Event Extraction
+        events = re.findall(r'for\s+([a-z, ]+?)(?:\s+as\b|$)', trigger_code, re.IGNORECASE)
+        pg_events = "INSERT OR UPDATE OR DELETE"
+        if events:
+             event_list = events[0].replace(' ', '').upper().split(',')
+             pg_events = ' OR '.join(event_list)
+
+        # 7. Assemble DDL
+        pg_func = f"""CREATE OR REPLACE FUNCTION {target_schema}.{trigger_name}_func()
+RETURNS trigger AS $$
+DECLARE
+{chr(10).join(declarations)}
+BEGIN
+{final_body}
+RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+"""
+
+        pg_trigger = f"""CREATE TRIGGER {trigger_name}
+AFTER {pg_events} ON "{target_schema}"."{target_table}"
+FOR EACH ROW
+EXECUTE FUNCTION {target_schema}.{trigger_name}_func();
+"""
+        return pg_func + '\n' + pg_trigger
+
+    # def convert_trigger_v1(self, settings):
+    #     trigger_name = self.config_parser.convert_names_case(settings['trigger_name'])
+    #     trigger_code = settings['trigger_sql']
+
+    #     # 0. Encapsulate comments
+    #     # Convert -- comment to /* comment */ to prevent breaking code
+    #     trigger_code = re.sub(r'--([^\n]*)', r'/*\1*/', trigger_code)
+
+    #     target_schema = settings['target_schema']
+    #     target_table = self.config_parser.convert_names_case(settings['target_table'])
+    #     target_db_type = settings['target_db_type']
+
+    #     # 1. Basic Cleanup
+    #     converted_code = re.sub(r'\bGO\b', '', trigger_code, flags=re.IGNORECASE)
+
+    #     # 2. Extract Body (After AS)
+    #     # Pattern: CREATE TRIGGER ... AS [BEGIN] ... [END]
+    #     # or ... FOR INSERT AS ...
+    #     as_match = re.search(r'\bAS\b', converted_code, flags=re.IGNORECASE)
+    #     if as_match:
+    #         body_content = converted_code[as_match.end():].strip()
+    #     else:
+    #         body_content = converted_code # Fallback?
+
+    #     # Remove outer BEGIN/END if present
+    #     if re.match(r'^BEGIN\b', body_content, flags=re.IGNORECASE):
+    #         body_content = re.sub(r'^BEGIN', '', body_content, count=1, flags=re.IGNORECASE).strip()
+    #         body_content = re.sub(r'END\s*$', '', body_content, flags=re.IGNORECASE).strip()
+
+    #     # 3. Variable Declarations
+    #     types_mapping = self.get_types_mapping({'target_db_type': target_db_type})
+    #     declarations = []
+
+    #     # Pre-process: Rename specific conflicting variables globally before stripping @
+    #     # e.g. @date -> @v_date (Keep @ so DECLARE regex matches it)
+    #     body_content = re.sub(r'@date\b', '@v_date', body_content, flags=re.IGNORECASE)
+
+    #     def declaration_replacer(match):
+    #         full_decl = match.group(0)
+    #         content = full_decl[7:].strip() # len('DECLARE') = 7
+
+    #         content_clean = content.replace('@', '')
+    #         # Custom type substitutions first
+    #         content_clean = self._apply_data_type_substitutions(content_clean)
+    #         content_clean = self._apply_udt_to_base_type_substitutions(content_clean, settings)
+    #         for sybase_type, pg_type in types_mapping.items():
+    #             content_clean = re.sub(rf'\b{re.escape(sybase_type)}\b', pg_type, content_clean, flags=re.IGNORECASE)
+
+    #         parts = self._split_respecting_parens(content_clean)
+    #         for part in parts:
+    #             declarations.append(part.strip() + ';')
+
+    #         return '' # Remove from body
+
+    #     self.config_parser.print_log_message('DEBUG', "Starting variable declaration extraction...")
+    #     body_content = re.sub(r'DECLARE\s+@.*?(?=\bBEGIN\b|\bIF\b|\bWHILE\b|\bSELECT\b|\bINSERT\b|\bUPDATE\b|\bDELETE\b|\bRETURN\b|\bSET\b|\bFETCH\b|\bOPEN\b|\bCLOSE\b|\bDEALLOCATE\b|\bDECLARE\b|$)', declaration_replacer, body_content, flags=re.IGNORECASE | re.DOTALL)
+    #     self.config_parser.print_log_message('DEBUG', "Variable declaration extraction complete.")
+
+    #     # 4. Global Replacements
+    #     # Functions
+    #     function_map = self.get_sql_functions_mapping({ 'target_db_type': target_db_type })
+    #     for sybase_func, pg_equiv in function_map.items():
+    #         escaped_src_func = re.escape(sybase_func)
+    #         body_content = re.sub(escaped_src_func, pg_equiv, body_content, flags=re.IGNORECASE)
+
+    #     # Type substitutions in body
+    #     self.config_parser.print_log_message('DEBUG', "Starting global type substitutions...")
+    #     body_content = self._apply_data_type_substitutions(body_content)
+    #     body_content = self._apply_udt_to_base_type_substitutions(body_content, settings)
+    #     for sybase_type, pg_type in types_mapping.items():
+    #         body_content = re.sub(rf'\b{re.escape(sybase_type)}\b', pg_type, body_content, flags=re.IGNORECASE)
+
+    #     # Remove @
+    #     body_content = re.sub(r'(?<!@)@([a-zA-Z0-9_]+)', r'\1', body_content)
+
+    #     # INSERTED/DELETED -> NEW/OLD
+    #     body_content = re.sub(r'\binserted\b', 'NEW', body_content, flags=re.IGNORECASE)
+    #     body_content = re.sub(r'\bdeleted\b', 'OLD', body_content, flags=re.IGNORECASE)
+
+    #     # Sybase Specific Cleanups
+    #     # @@trancount -> 1 (Assume transaction active)
+    #     body_content = re.sub(r'@@trancount', '1', body_content, flags=re.IGNORECASE)
+    #     # Remove SET chained/transaction commands
+    #     body_content = re.sub(r'SET\s+chained\s+\w+', '', body_content, flags=re.IGNORECASE)
+    #     body_content = re.sub(r'SET\s+transaction\s+isolation\s+level\s+\d+', '', body_content, flags=re.IGNORECASE)
+
+    #     # PRINT -> RAISE NOTICE
+    #     def print_replacer(match):
+    #          content = match.group(1).strip()
+    #          args = self._split_respecting_parens(content)
+    #          if not args:
+    #               return "RAISE NOTICE '';"
+    #          first_arg = args[0]
+    #          rest_args = args[1:]
+    #          if first_arg.startswith("'") and first_arg.endswith("'"):
+    #               msg = first_arg
+    #               if rest_args:
+    #                    return f"RAISE NOTICE {msg}, {', '.join(rest_args)};"
+    #               else:
+    #                    return f"RAISE NOTICE {msg};"
+    #          else:
+    #               format_str = ", ".join(["%"] * len(args))
+    #               return f"RAISE NOTICE '{format_str}', {', '.join(args)};"
+
+    #     body_content = re.sub(r'print\s+(.+?)(?=;|\n|$)', print_replacer, body_content, flags=re.IGNORECASE)
+
+    #     # 5. Assignments and Selects
+
+    #     # Select Into
+    #     def select_into_transformer(match):
+    #         content = match.group(1)
+    #         rest = match.group(2)
+
+    #         # Clean up FROM NEW/OLD in rest
+    #         # If rest contains "FROM NEW" or "FROM OLD", we strip it if it's the only thing or logic suggests.
+    #         from_match = re.search(r'FROM\s+(.*?)(?:\bWHERE\b|\bGROUP\b|\bORDER\b|$)', rest, re.IGNORECASE)
+    #         if from_match:
+    #             table_list = from_match.group(1)
+    #             # Remove comments
+    #             table_list = re.sub(r'--.*', '', table_list)
+    #             table_list = re.sub(r'/\*.*?\*/', '', table_list, flags=re.DOTALL)
+
+    #             tables = self._split_respecting_parens(table_list)
+    #             clean_tables = []
+    #             for t in tables:
+    #                 t_clean = t.strip()
+    #                 if not t_clean:
+    #                     continue
+    #                 # Check first word (table name) against keywords
+    #                 # NEW alias -> NEW. NEW -> NEW.
+    #                 first_word = t_clean.split()[0].upper()
+    #                 if first_word not in ('NEW', 'OLD', 'INSERTED', 'DELETED'):
+    #                     clean_tables.append(t)
+
+    #             if not clean_tables:
+    #                # No tables left, remove FROM clause entirely
+    #                start, end = from_match.span()
+    #                # Simply remove the match range from rest
+    #                rest = rest[:start] + rest[end:]
+
+    #         if '=' in content:
+    #             parts = self._split_respecting_parens(content)
+    #             vars_list = []
+    #             cols_list = []
+    #             for asm in parts:
+    #                 if '=' in asm:
+    #                     side_l, side_r = asm.split('=', 1)
+    #                     vars_list.append(side_l.strip())
+    #                     cols_list.append(side_r.strip())
+    #                 else:
+    #                     cols_list.append(asm)
+    #             if vars_list:
+    #                 return f"SELECT {', '.join(cols_list)} INTO {', '.join(vars_list)} {rest}"
+    #         return match.group(0)
+
+    #     # Regex must ensure we don't cross statement boundaries (UPDATE, INSERT, etc.)
+    #     # Added SELECT to lookahead to prevent merging multiple SELECTs
+    #     # Also constrained matches after FROM to statement boundaries
+    #     body_content = re.sub(r'SELECT\s+((?:(?!\b(?:UPDATE|INSERT|DELETE|IF|WHILE|RETURN|BEGIN|END|SELECT)\b).)+?)\s+(FROM\s+(?:(?!\b(?:UPDATE|INSERT|DELETE|IF|WHILE|RETURN|BEGIN|END|SELECT)\b).)+)', select_into_transformer, body_content, flags=re.IGNORECASE | re.DOTALL)
+
+    #     # Cleanup: Remove FROM NEW/OLD from SELECT statements if they persist
+    #     # e.g. "SELECT ... INTO ... FROM NEW" -> "SELECT ... INTO ..."
+    #     body_content = re.sub(r'(SELECT\s+[^;]+?)\s+FROM\s+(?:NEW|OLD|INSERTED|DELETED)\b', r'\1', body_content, flags=re.IGNORECASE | re.DOTALL)
+
+    #     # Simple Assignments
+    #     def simple_assignment(match):
+    #         full_match = match.group(0)
+    #         if 'FROM' in full_match.upper():
+    #             return full_match
+    #         content = match.group(1).strip()
+    #         if '=' not in content:
+    #             return full_match
+
+    #         parts = self._split_respecting_parens(content)
+    #         assignments = []
+    #         is_assignment = True
+    #         for part in parts:
+    #             if '=' in part:
+    #                 side_l, side_r = part.split('=', 1)
+    #                 assignments.append(f"{side_l.strip()} := {side_r.strip()}")
+    #             else:
+    #                 is_assignment = False
+
+    #         if is_assignment and assignments:
+    #             return "; ".join(assignments) + ";"
+    #         return full_match
+
+    #     body_content = re.sub(r'SELECT\s+([^;\n]+)', simple_assignment, body_content, flags=re.IGNORECASE)
+
+    #     # 6. UPDATE ... FROM fixes
+    #     # If UPDATE target ... FROM target, table2 -> FROM table2
+    #     # Need to parse UPDATE target
+
+    #     def update_from_fix(match):
+    #         target = match.group(1)
+    #         set_clause = match.group(2)
+    #         from_clause = match.group(3)
+    #         rest = match.group(4)
+
+    #         # Parse FROM tables
+    #         # Sybase FROM t1, t2
+    #         # PG FROM t2 (if t1 is target)
+    #         tables = self._split_respecting_parens(from_clause)
+    #         new_tables = []
+    #         for t in tables:
+    #             t_clean = t.strip()
+    #             # Check alias? "table alias" or "table AS alias"
+    #             # If target matches table name or alias
+    #             # Simplifying: check if target string is contained
+    #             # Remove target table
+    #             if target.lower() == t_clean.lower():
+    #                 continue # Skip target
+    #             # Check for "target alias"
+    #             if t_clean.lower().startswith(target.lower() + ' ') or t_clean.lower().startswith(target.lower() + '\t'):
+    #                  continue
+
+    #             # Also remove NEW and OLD from FROM clause in triggers
+    #             if t_clean.upper() in ('NEW', 'OLD', 'INSERTED', 'DELETED'):
+    #                 continue
+
+    #             new_tables.append(t)
+
+    #         if new_tables:
+    #             return f"UPDATE {target} {set_clause} FROM {', '.join(new_tables)} {rest}"
+    #         else:
+    #             # If no tables left (self update only), remove FROM
+    #             return f"UPDATE {target} {set_clause} {rest}"
+
+    #     # Regex: UPDATE target SET ... FROM ... [WHERE...]
+    #     # Be careful matching SET ... FROM
+    #     body_content = re.sub(r'UPDATE\s+([a-zA-Z0-9_]+)\s+(SET\s+.*?)\s+FROM\s+(.*?)(\bWHERE\b|\bGROUP\b|\bORDER\b|$)', update_from_fix, body_content, flags=re.IGNORECASE | re.DOTALL)
+
+    #     # 7. String Concatenation Fix (+ -> ||)
+    #     # Heuristic: '...' + ... or ... + '...'
+    #     body_content = re.sub(r"('\s*)\+\s*", r"\1 || ", body_content)
+    #     body_content = re.sub(r"\s*\+\s*(')", r" || \1", body_content)
+
+    #     # 8. Control Flow (IF/WHILE) - Minimal support as per trigger usage
+
+    #     # IF UPDATE(column) -> IF NEW.column IS DISTINCT FROM OLD.column
+    #     # Needs to happen before IF regex
+    #     def if_update_replacer(match):
+    #         col = match.group(1)
+    #         # Sybase: IF UPDATE(col)
+    #         # PG: IF NEW.col IS DISTINCT FROM OLD.col
+    #         return f"IF NEW.{col} IS DISTINCT FROM OLD.{col}"
+
+    #     body_content = re.sub(r'IF\s+UPDATE\(([\w]+)\)', if_update_replacer, body_content, flags=re.IGNORECASE)
+
+    #     # Rollback Trigger
+    #     # rollback trigger [with raiserror number 'message']
+    #     # rollback transaction ...
+    #     # Replace with RAISE EXCEPTION
+    #     def rollback_replacer(match):
+    #         # Try to capture message if present
+    #         # Pattern: rollback trigger with raiserror 99999 'Message'
+    #         rest = match.group(1) if match.lastindex >= 1 else ''
+    #         message = "Trigger Rollback"
+
+    #         # Extract message string '...'
+    #         msg_match = re.search(r"'([^']+)'", rest)
+    #         if msg_match:
+    #             message = msg_match.group(1)
+
+    #         return f"RAISE EXCEPTION '{message}';"
+
+    #     body_content = re.sub(r'rollback\s+(?:trigger|transaction)\s*(.*)', rollback_replacer, body_content, flags=re.IGNORECASE)
+
+    #     # FIX: Ensure semicolon before ELSE/ELSIF if missing
+    #     # Regex updated to handle comments
+    #     body_content = re.sub(r'([^;\s])([ \t]*(?:--[^\n]*|/\*.*?\*/[ \t]*)?)\n\s*(ELSE|ELSIF)\b', r'\1;\2\n\3', body_content, flags=re.IGNORECASE)
+
+    #     # ELSE IF -> ELSIF
+    #     body_content = re.sub(r'ELSE\s+IF', 'ELSIF', body_content, flags=re.IGNORECASE)
+
+    #     # IF replacement with DOTALL support for multiline conditions
+    #     body_content = re.sub(r'IF\s+(.*?)\s+BEGIN', r'IF \1 THEN', body_content, flags=re.IGNORECASE | re.DOTALL)
+
+    #     # Standardize other keywords
+    #     body_content = re.sub(r'WHILE\s+(.*?)\s+BEGIN', r'WHILE \1 LOOP', body_content, flags=re.IGNORECASE)
+    #     body_content = re.sub(r'ELSE\s+BEGIN', r'ELSE', body_content, flags=re.IGNORECASE)
+    #     body_content = re.sub(r'END\s*;?\s+ELSE', r'ELSE', body_content, flags=re.IGNORECASE)
+
+
+    #     # END replacement (simple approach for now, triggers usually simple)
+    #     # But we stripped outer END. Inner ENDs need closure.
+    #     # If we replaced BEGIN with THEN/LOOP, we need END IF/LOOP.
+    #     # Let's use the stack logic if we really want to be safe, or just END IF for triggers?
+    #     # User trigger has IF?
+    #     # "IF UPDATE(column)" was handled in old code.
+    #     body_content = re.sub(r'if\s+UPDATE\([a-zA-Z_]+\)', '-- IF UPDATE(column) not supported', body_content, flags=re.IGNORECASE)
+
+    #     # Fix inner ENDs
+    #     # Reuse logic from convert_funcproc_code manually or simplified
+    #     lines = body_content.split('\n')
+    #     new_lines = []
+    #     stack = []
+    #     for line in lines:
+    #         stripped = line.strip()
+    #         if re.search(r'IF\s+.*\s+THEN', line, flags=re.IGNORECASE):
+    #             stack.append('IF')
+    #         elif re.search(r'WHILE\s+.*\s+LOOP', line, flags=re.IGNORECASE):
+    #             stack.append('LOOP')
+
+    #         if re.match(r'^END\s*;?$', stripped, flags=re.IGNORECASE):
+    #             if stack:
+    #                 block = stack.pop()
+    #                 if block == 'IF':
+    #                     new_lines.append("END IF;")
+    #                 elif block == 'LOOP':
+    #                     new_lines.append("END LOOP;")
+    #                 else:
+    #                     new_lines.append('END;')
+    #             else:
+    #                 new_lines.append('END;') # Should not happen if outer stripped
+    #         else:
+    #             new_lines.append(line)
+    #     body_content = '\n'.join(new_lines)
+
+    #     # 9. Semicolon Heuristic (Ensure statements end with ;)
+    #     lines = body_content.split('\n')
+    #     final_lines = []
+    #     statement_buffer = []
+
+    #     def flush_buffer(buf):
+    #         if not buf: return
+
+    #         # Find last non-empty line index
+    #         last_idx = -1
+    #         for i in range(len(buf) - 1, -1, -1):
+    #             line_stripped = buf[i].strip()
+    #             if line_stripped:
+    #                 # Skip comments
+    #                 if line_stripped.startswith('/*') or line_stripped.startswith('--'):
+    #                     continue
+    #                 last_idx = i
+    #                 break
+
+    #         if last_idx != -1:
+    #             s = buf[last_idx].rstrip()
+
+    #             # Remove trailing comments for check (to avoid adding ; to BEGIN -- comment)
+    #             s_code = re.sub(r'--.*', '', s)
+    #             s_code = re.sub(r'/\*.*?\*/', '', s_code, flags=re.DOTALL)
+    #             s_code = s_code.strip()
+
+    #             # Don't add if ends with ; or block openers/closers that don't need it
+    #             ignore_ends = ('BEGIN', 'THEN', 'LOOP', 'ELSE', ';')
+    #             if not s_code.upper().endswith(ignore_ends):
+    #                 # Check if it started with a command that needs ;
+    #                 combined = " ".join([b.strip() for b in buf]) # Join all lines to check full start
+    #                 # Remove comments from check
+    #                 combined_code = re.sub(r'--.*', '', combined).strip()
+
+    #                 first_word = combined_code.split()[0].upper()
+
+    #                 # Also check assignments "var := val"
+    #                 # Remove strings to avoid false positives like IF x = ':='
+    #                 combined_no_strings = re.sub(r"'.*?'", '', combined_code)
+    #                 is_assignment = ':=' in combined_no_strings
+
+    #                 # Keywords requiring semicolon
+    #                 needs_semi = ('UPDATE', 'INSERT', 'DELETE', 'SELECT', 'PERFORM', 'CALL', 'WITH', 'MERGE', 'RAISE')
+
+    #                 if first_word in needs_semi or is_assignment:
+    #                      buf[last_idx] = s + ';'
+
+    #         final_lines.extend(buf)
+
+    #     for line in lines:
+    #         stripped = line.strip()
+    #         # Start of new statement?
+    #         is_start = False
+    #         # Check forkeywords that start statements
+    #         if re.match(r'^(UPDATE|INSERT|DELETE|SELECT|IF|WHILE|RETURN|END|DECLARE|BEGIN|RAISE)\b', stripped, re.IGNORECASE):
+    #             is_start = True
+    #         elif ':=' in line: # Assignment line?
+    #              is_start = True
+
+    #         if is_start:
+    #              flush_buffer(statement_buffer)
+    #              statement_buffer = [line]
+    #         else:
+    #              statement_buffer.append(line)
+
+    #     flush_buffer(statement_buffer)
+    #     body_content = '\n'.join(final_lines)
+
+    #     # 10. Return
+    #     # Only replace RETURN word boundary.
+    #     # Handle RETURN result? Sybase triggers don't typically return values like functions, but RETURN without args exits.
+    #     # If RETURN 1 or RETURN @var, we might need to be careful.
+    #     # For now, converting standalone RETURN to RETURN NEW;
+    #     body_content = re.sub(r'\bRETURN\b', 'RETURN NEW;', body_content, flags=re.IGNORECASE)
+    #     # If RETURN NEW; NEW; (double) -> fix
+    #     body_content = body_content.replace('RETURN NEW; NEW;', 'RETURN NEW;')
+
+    #     # Event parsing
+    #     events = re.findall(r'for\s+([a-z, ]+?)(?:\s+as\b|$)', trigger_code, re.IGNORECASE)
+    #     events = events[0].replace(' ', '').upper().split(',') if events else []
+    #     pg_events = ' OR '.join(events)
+
+    #     # Assemble
+    #     pg_func = f"""CREATE OR REPLACE FUNCTION {trigger_name}_func()
+    #         RETURNS trigger AS $$
+    #         DECLARE
+    #         {chr(10).join(declarations)}
+    #         BEGIN
+    #         {body_content.strip()}
+    #         RETURN NEW;
+    #         END;
+    #         $$ LANGUAGE plpgsql;
+    #         """
+
+    #     pg_trigger = f"""CREATE TRIGGER {trigger_name}
+    #         AFTER {pg_events} ON "{target_schema}"."{target_table}"
+    #         FOR EACH ROW
+    #         EXECUTE FUNCTION {trigger_name}_func();
+    #         """
+
+    #     return pg_func + '\n' + pg_trigger
 
     def fetch_triggers(self, table_id, schema_name, table_name):
         trigger_data = {}
         order_num = 1
         query = f"""
-            SELECT
-                DISTINCT
-                o.name,
-                o.id,
-                o.sysstat
-            FROM syscomments c, sysobjects o
-            WHERE o.id=c.id
-                AND user_name(o.uid) = '{schema_name}'
-                AND type in ('TR')
-                AND (o.sysstat & 8 = 8)
-            ORDER BY o.name
+            SELECT DISTINCT
+                tr.name AS trigger_name,
+                tr.id AS trigger_id,
+                tr.sysstat,
+                c.text,
+                c.colid
+            FROM sysobjects tr
+            JOIN sysdepends d ON tr.id = d.id
+            JOIN sysobjects tbl ON d.depid = tbl.id
+            JOIN syscomments c ON tr.id = c.id
+            WHERE
+                tbl.id = {table_id}
+                AND tr.type = 'TR'
+                AND tbl.type = 'U'
+            ORDER BY tr.id, c.colid
         """
-        self.config_parser.print_log_message('DEBUG3', f"Fetching function/procedure names for schema {schema_name}")
+        self.config_parser.print_log_message('DEBUG3', f"Fetching triggers for table {table_name}")
         self.config_parser.print_log_message('DEBUG3', f"Query: {query}")
         self.connect()
         cursor = self.connection.cursor()
         cursor.execute(query)
+        triggers_text = {}
         for row in cursor.fetchall():
+            trigger_name = row[0]
+            trigger_id = row[1]
+            sysstat = row[2]
+            text_part = row[3]
+            colid = row[4]
+
+            if trigger_name not in triggers_text:
+                triggers_text[trigger_name] = {
+                    'id': trigger_id,
+                    'sysstat': sysstat,
+                    'text_parts': []
+                }
+
+            triggers_text[trigger_name]['text_parts'].append((colid, text_part))
+
+        # Sort text parts by colid and concatenate
+        for trigger_name, trigger_info in triggers_text.items():
+            trigger_info['text_parts'].sort(key=lambda x: x[0])
+            concatenated_sql = ''.join([part[1] for part in trigger_info['text_parts']])
+
             trigger_data[order_num] = {
-                'name': row[0],
-                'id': row[1],
-                'sysstat': row[2],
-                'event': '',
-                'new': '',
-                'old': '',
-                'sql': '',
-                'comment': ''
+            'name': trigger_name,
+            'id': trigger_info['id'],
+            'sysstat': trigger_info['sysstat'],
+            'event': '',
+            'new': '',
+            'old': '',
+            'sql': concatenated_sql,
+            'comment': ''
             }
             order_num += 1
         cursor.close()
@@ -1478,8 +3980,123 @@ class SybaseASEConnector(DatabaseConnector):
                     return sqlglot.exp.Anonymous(this=mapped)
             return node
 
+
+        def transform_sybase_joins(expression):
+            # Check for EQ nodes with outer join comments
+            outer_joins = []
+            for node in expression.find_all(sqlglot.exp.EQ):
+                if node.comments and any('left_outer' in c for c in node.comments):
+                    outer_joins.append((node, 'LEFT'))
+                elif node.comments and any('right_outer' in c for c in node.comments):
+                    outer_joins.append((node, 'RIGHT'))
+
+            for node, join_type in outer_joins:
+                # LEFT JOIN: A *= B -> left=A, right=B (preserves A, B is null supplying)
+                # RIGHT JOIN: A =* B -> left=A, right=B (preserves B, A is null supplying)
+
+                null_supplying_col = node.right if join_type == 'LEFT' else node.left
+
+                # Identify target table from null supplying column
+                target_alias = ""
+                if isinstance(null_supplying_col, sqlglot.exp.Column):
+                     target_alias = null_supplying_col.table
+
+                if not target_alias:
+                    continue
+
+                select_node = node.find_ancestor(sqlglot.exp.Select)
+                if not select_node:
+                    continue
+
+                # Find target table in FROM clause
+                target_table_node = None
+                from_clause = select_node.args.get('from')
+                if from_clause:
+                     for child in from_clause.expressions:
+                         # 1. Direct match (Table or Aliased Subquery)
+                         if child.alias_or_name == target_alias:
+                             target_table_node = child
+                             break
+
+                         # 2. Wrapper match (Subquery/Paren without explicit alias, containing the table)
+                         # e.g. FROM (table) -> child is Subquery/Paren
+                         child_tables = list(child.find_all(sqlglot.exp.Table))
+                         if len(child_tables) == 1 and child_tables[0].alias_or_name == target_alias:
+                             target_table_node = child
+                             break
+
+                if target_table_node:
+                    # Remove from FROM clause
+                    from_clause.expressions.remove(target_table_node)
+
+                    # Create JOIN
+                    join_condition = node.copy()
+                    join_condition.comments = None
+
+                    join = sqlglot.exp.Join(
+                        this=target_table_node,
+                        kind="LEFT",
+                        on=join_condition
+                    )
+
+                    # Add to Select joins
+                    if "joins" not in select_node.args:
+                        select_node.args["joins"] = []
+                    select_node.args["joins"].append(join)
+
+                    # Replace condition in WHERE with TRUE
+                    node.replace(sqlglot.exp.Boolean(this=True))
+
+            return expression
+
+        def convert_string_concatenation(node):
+            if isinstance(node, sqlglot.exp.Add):
+                left = node.left
+                right = node.right
+                is_left_string = left.is_string or (isinstance(left, sqlglot.exp.Cast) and left.to.this.name.upper() in ('VARCHAR', 'CHAR', 'TEXT', 'NVARCHAR', 'NCHAR', 'UNIVARCHAR', 'UNICHAR'))
+                is_right_string = right.is_string or (isinstance(right, sqlglot.exp.Cast) and right.to.this.name.upper() in ('VARCHAR', 'CHAR', 'TEXT', 'NVARCHAR', 'NCHAR', 'UNIVARCHAR', 'UNICHAR'))
+
+                if is_left_string or is_right_string:
+                    # Conversion needed
+                    new_left = left
+                    new_right = right
+
+                    # Cast non-string operands to text to avoid type errors in PostgreSQL
+                    if not is_left_string:
+                         new_left = sqlglot.exp.Cast(this=left, to=sqlglot.exp.DataType.build('text'))
+                    if not is_right_string:
+                         new_right = sqlglot.exp.Cast(this=right, to=sqlglot.exp.DataType.build('text'))
+
+                    return sqlglot.exp.DPipe(this=new_left, expression=new_right)
+            return node
+
         self.config_parser.print_log_message('DEBUG3', f"settings in convert_view_code: {settings}")
         converted_code = settings['view_code']
+
+        # Apply remote_objects_substitution
+        remote_subs = self.config_parser.get_remote_objects_substitution()
+        if remote_subs:
+            iterator = remote_subs.items() if isinstance(remote_subs, dict) else remote_subs
+            for source_obj, target_obj in iterator:
+                if source_obj and target_obj:
+                    # Case-insensitive replacement
+                    converted_code = re.sub(re.escape(source_obj), target_obj, converted_code, flags=re.IGNORECASE)
+                    self.config_parser.print_log_message('DEBUG', f"Applied remote object substitution: {source_obj} -> {target_obj}")
+
+        # Pre-process Sybase specific join syntax
+        # *= -> = /* left_outer */
+        # =* -> = /* right_outer */
+        # Pre-process Sybase specific join syntax
+        # *= -> = /* left_outer */
+        # =* -> = /* right_outer */
+        converted_code = re.sub(r'\*=', '= /* left_outer */', converted_code)
+        converted_code = re.sub(r'=\*', '= /* right_outer */', converted_code)
+
+        # Remove 'noholdlock' hints (often interpreted as aliases)
+        converted_code = re.sub(r'\bnoholdlock\b', '', converted_code, flags=re.IGNORECASE)
+
+        converted_code = self._apply_udt_to_base_type_substitutions(converted_code, settings)
+
         if settings['target_db_type'] == 'postgresql':
 
             try:
@@ -1490,6 +4107,13 @@ class SybaseASEConnector(DatabaseConnector):
 
             # double quote column names
             parsed_code = parsed_code.transform(quote_column_names)
+
+            # Transform Sybase Joins
+            parsed_code = transform_sybase_joins(parsed_code)
+
+            # Convert string concatenation + to ||
+            parsed_code = parsed_code.transform(convert_string_concatenation)
+
             self.config_parser.print_log_message('DEBUG3', f"Double quoted columns: {parsed_code.sql()}")
 
             # replace source schema with target schema
@@ -1527,7 +4151,75 @@ class SybaseASEConnector(DatabaseConnector):
         pass
 
     def fetch_user_defined_types(self, schema: str):
-        pass
+        # Fetch user defined types
+        # We look for entries in systypes where usertype > 100 (user defined)
+        # We join with a second instance of systypes to get the base physical type name.
+
+        # Note: In ASE, types define length/prec/scale.
+        # Variable length types: varchar, char, nvarchar, nchar, varbinary, binary -> use length
+        # Numeric types: numeric, decimal -> use prec, scale
+
+        query = """
+            SELECT
+                u.name as schema_name,
+                t.name as type_name,
+                t.length,
+                t.prec,
+                t.scale,
+                bt.name as base_type_name
+            FROM dbo.systypes t
+            JOIN dbo.sysusers u ON t.uid = u.uid
+            LEFT JOIN dbo.systypes bt ON t.type = bt.type AND bt.usertype < 100
+            WHERE t.usertype > 100
+            ORDER BY t.name
+        """
+
+        self.connect()
+        cursor = self.connection.cursor()
+        self.config_parser.print_log_message('DEBUG', "Fetching user defined types")
+        cursor.execute(query)
+        rows = cursor.fetchall()
+
+        udts = {}
+        order_num = 1
+
+        for row in rows:
+            schema_name = row[0]
+            type_name = row[1]
+            length = row[2]
+            prec = row[3]
+            scale = row[4]
+            base_type = row[5]
+
+            # Construct SQL definition
+            if not base_type:
+                # Should not happen for valid UDTs referencing standard types
+                base_type = "UNKNOWN"
+
+            # Create source type SQL for reference (Sybase DDL)
+            type_sql = base_type.upper()
+            base_lower = base_type.lower()
+
+            if base_lower in ('varchar', 'char', 'nvarchar', 'nchar', 'varbinary', 'binary', 'univarchar', 'unichar'):
+                type_sql += f"({length})"
+            elif base_lower in ('numeric', 'decimal'):
+                type_sql += f"({prec},{scale})"
+
+            udts[order_num] = {
+                'schema_name': schema_name,
+                'type_name': type_name,
+                'sql': type_sql,
+                'base_type': base_type,
+                'length': length,
+                'prec': prec,
+                'scale': scale,
+                'comment': ''
+            }
+            order_num += 1
+
+        cursor.close()
+        self.disconnect()
+        return udts
 
     def get_table_size(self, table_schema: str, table_name: str):
         query = f"""

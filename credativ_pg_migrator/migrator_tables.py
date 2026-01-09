@@ -286,17 +286,19 @@ class MigratorTables:
             query = f"""
                 SELECT target_default_value
                 FROM "{self.protocol_schema}".default_values_substitution
-                WHERE lower(trim(%s)) ~ lower(trim(column_name))
-                AND lower(trim(%s)) ~ lower(trim(source_column_data_type))
-                AND lower(trim(%s::TEXT)) ~ lower(trim(default_value_value::TEXT))
+                WHERE (lower(trim(%s)) ~ lower(trim(column_name)) OR lower(trim(%s)) ILIKE lower(trim(column_name)) OR lower(trim(column_name)) = '')
+                AND (lower(trim(%s)) ~ lower(trim(source_column_data_type)) OR lower(trim(%s)) ILIKE lower(trim(source_column_data_type)) OR lower(trim(source_column_data_type)) = '')
+                AND (lower(trim(%s::TEXT)) ~ lower(trim(default_value_value::TEXT)) OR lower(trim(%s::TEXT)) ILIKE lower(trim(default_value_value::TEXT)) )
+                ORDER BY CASE WHEN default_value_value LIKE '%%(?i)%%' THEN 1 ELSE 2 END
             """
             cursor = self.protocol_connection.connection.cursor()
-            cursor.execute(query, (check_column_name, check_column_data_type, check_default_value))
+            cursor.execute(query, (check_column_name, check_column_name, check_column_data_type, check_column_data_type,  check_default_value, check_default_value))
             result = cursor.fetchone()
             self.config_parser.print_log_message( 'DEBUG3', f"0 check_default_values_substitution {check_column_name}, {check_column_data_type}, {check_default_value} query: {query} - {result}")
 
-            if result:
+            if result is not None:
                 target_default_value = result[0]
+                self.config_parser.print_log_message( 'DEBUG3', f"0 check_default_values_substitution found direct match: {target_default_value}")
             else:
                 query = f"""
                     SELECT target_default_value
@@ -309,8 +311,10 @@ class MigratorTables:
                 cursor.execute(query, (check_column_name, check_column_data_type, check_default_value))
                 result = cursor.fetchone()
                 self.config_parser.print_log_message( 'DEBUG3', f"1 check_default_values_substitution {check_column_name}, {check_column_data_type}, {check_default_value} query: {query} - {result}")
-                if result:
+
+                if result is not None:
                     target_default_value = result[0]
+                    self.config_parser.print_log_message( 'DEBUG3', f"1 check_default_values_substitution found ILIKE match: {target_default_value}")
                 else:
                     query = f"""
                         SELECT target_default_value
@@ -322,8 +326,10 @@ class MigratorTables:
                     cursor.execute(query, (check_column_data_type, check_default_value))
                     result = cursor.fetchone()
                     self.config_parser.print_log_message( 'DEBUG3', f"2 check_default_values_substitution {check_column_name}, {check_column_data_type}, {check_default_value} query: {query} - {result}")
-                    if result:
+
+                    if result is not None:
                         target_default_value = result[0]
+                        self.config_parser.print_log_message( 'DEBUG3', f"2 check_default_values_substitution found data type match: {target_default_value}")
                     else:
                         query = f"""
                             SELECT target_default_value
@@ -335,9 +341,12 @@ class MigratorTables:
                         cursor.execute(query, (check_default_value,))
                         result = cursor.fetchone()
                         self.config_parser.print_log_message( 'DEBUG3', f"3 check_default_values_substitution {check_column_name}, {check_column_data_type}, {check_default_value} query: {query} - {result}")
-                        if result:
+
+                        if result is not None:
                             target_default_value = result[0]
+                            self.config_parser.print_log_message( 'DEBUG3', f"3 check_default_values_substitution found default value match: {target_default_value}")
             cursor.close()
+
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"Error checking default values substitution for {check_column_name}, {check_column_data_type}, {check_default_value}.")
             self.config_parser.print_log_message('ERROR', e)
@@ -419,7 +428,7 @@ class MigratorTables:
             AND subtask_name = %s
             RETURNING *
         """
-        params = ('TRUE' if success else 'FALSE', message, task_name, subtask_name)
+        params = ('TRUE' if str(success).upper() == 'TRUE' else 'FALSE', message, task_name, subtask_name)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -461,6 +470,7 @@ class MigratorTables:
             target_schema_name TEXT,
             target_type_name TEXT,
             target_type_sql TEXT,
+            target_basic_type TEXT,
             type_comment TEXT,
             task_created TIMESTAMP DEFAULT clock_timestamp(),
             task_started TIMESTAMP,
@@ -472,23 +482,24 @@ class MigratorTables:
         self.config_parser.print_log_message('DEBUG3', f"Table {table_name} created in schema {self.protocol_schema}")
 
     def insert_user_defined_type(self, settings):
-        ## source_schema_name, source_type_name, source_type_sql, target_schema_name, target_type_name, target_type_sql, type_comment
+        ## source_schema_name, source_type_name, source_type_sql, target_schema_name, target_type_name, target_type_sql, target_basic_type, type_comment
         source_schema_name = settings['source_schema_name']
         source_type_name = settings['source_type_name']
         source_type_sql = settings['source_type_sql']
         target_schema_name = settings['target_schema_name']
         target_type_name = settings['target_type_name']
         target_type_sql = settings['target_type_sql']
+        target_basic_type = settings.get('target_basic_type')
         type_comment = settings['type_comment']
 
         table_name = self.config_parser.get_protocol_name_user_defined_types()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
-            (source_schema_name, source_type_name, source_type_sql, target_schema_name, target_type_name, target_type_sql, type_comment)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            (source_schema_name, source_type_name, source_type_sql, target_schema_name, target_type_name, target_type_sql, target_basic_type, type_comment)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (source_schema_name, source_type_name, source_type_sql, target_schema_name, target_type_name, target_type_sql, type_comment)
+        params = (source_schema_name, source_type_name, source_type_sql, target_schema_name, target_type_name, target_type_sql, target_basic_type, type_comment)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -498,6 +509,7 @@ class MigratorTables:
             self.config_parser.print_log_message( 'DEBUG3', f"insert_user_defined_type: returned row: {row}")
             user_defined_type_row = self.decode_user_defined_type_row(row)
             self.insert_protocol('user_defined_type', target_type_name, 'create', target_type_sql, None, None, None, 'info', None, user_defined_type_row['id'])
+            return user_defined_type_row['id']
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"insert_user_defined_type: Error inserting user defined type {target_type_name} into {table_name}.")
             self.config_parser.print_log_message('ERROR', e)
@@ -513,7 +525,8 @@ class MigratorTables:
             WHERE id = %s
             RETURNING *
         """
-        params = ('TRUE' if success else 'FALSE', message, row_id)
+        params = ('TRUE' if str(success).upper() == 'TRUE' else 'FALSE', message.replace('"', ''), row_id)
+        self.config_parser.print_log_message( 'DEBUG3', f"update_user_defined_type_status: query: {query}, params: {params}")
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -552,7 +565,13 @@ class MigratorTables:
             'target_schema_name': row[4],
             'target_type_name': row[5],
             'target_type_sql': row[6],
-            'type_comment': row[7]
+            'target_basic_type': row[7],
+            'type_comment': row[8],
+            'task_created': row[9],
+            'task_started': row[10],
+            'task_completed': row[11],
+            'success': row[12],
+            'message': row[13]
         }
 
     def create_table_for_domains(self):
@@ -725,7 +744,7 @@ class MigratorTables:
             row = cursor.fetchone()
             cursor.close()
 
-            default_value_row = self.decode_user_defined_type_row(row)
+            default_value_row = self.decode_default_value_row(row)
             self.config_parser.print_log_message( 'DEBUG3', f"insert_default_value: returned row: {default_value_row}")
             self.insert_protocol('default_value', default_value_name, 'create', None, None, None, None, 'info', None, default_value_row['id'])
         except Exception as e:
@@ -743,7 +762,7 @@ class MigratorTables:
             WHERE id = %s
             RETURNING *
         """
-        params = ('TRUE' if success else 'FALSE', message, row_id)
+        params = ('TRUE' if str(success).upper() == 'TRUE' else 'FALSE', message, row_id)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -1774,7 +1793,7 @@ class MigratorTables:
         WHERE object_protocol_id = %s
         AND object_type = %s
         """
-        params = ('TRUE' if execution_success else 'FALSE', execution_error_message, execution_results, object_protocol_id, object_type)
+        params = ('TRUE' if str(execution_success).upper() == 'TRUE' else 'FALSE', execution_error_message, execution_results, object_protocol_id, object_type)
         self.config_parser.print_log_message('DEBUG', f"update_protocol: Executing query with params: {params}")
         try:
             self.protocol_connection.execute_query(query, params)

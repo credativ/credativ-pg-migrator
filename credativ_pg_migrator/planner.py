@@ -376,6 +376,7 @@ class Planner:
                 settings = {
                     'table_schema': self.source_schema,
                     'table_name': table_info['table_name'],
+                    'target_db_type': self.config_parser.get_target_db_type(),
                 }
                 table_description = self.source_connection.get_table_description(settings)
                 table_description = table_description['table_description'] if 'table_description' in table_description else ''
@@ -642,16 +643,19 @@ class Planner:
 
             if self.config_parser.should_migrate_triggers():
                 triggers = self.source_connection.fetch_triggers(table_info['id'], self.source_schema, table_info['table_name'])
-                self.config_parser.print_log_message( 'DEBUG', f"Triggers: {triggers}")
+                self.config_parser.print_log_message( 'DEBUG', f"Number of triggers: {len(triggers) if triggers else 0}, Triggers: {triggers}")
                 if triggers:
                     for _, trigger_details in triggers.items():
 
                         converted_code = self.source_connection.convert_trigger({
                                 'source_schema': self.config_parser.get_source_schema(),
+                                'source_table': table_info['table_name'],
                                 'target_schema': self.config_parser.get_target_schema(),
+                                'target_table': table_info['table_name'],
                                 'trigger_name': trigger_details['name'],
                                 'trigger_sql': trigger_details['sql'],
-                                'table_list': []
+                                'table_list': [],
+                                'target_db_type': self.config_parser.get_target_db_type(),
                             })
 
                         self.config_parser.print_log_message( 'DEBUG', f"Source trigger code: {trigger_details['sql']}")
@@ -818,26 +822,64 @@ class Planner:
         self.config_parser.print_log_message( 'INFO', "Planner - Views processed successfully.")
 
     def run_prepare_user_defined_types(self):
-        self.config_parser.print_log_message( 'INFO', "Planner - Preparing user defined types...")
+        self.config_parser.print_log_message('INFO', "Planner - Preparing user defined types...")
         user_defined_types = self.source_connection.fetch_user_defined_types(self.source_schema)
-        self.config_parser.print_log_message( 'DEBUG', f"User defined types: {user_defined_types}")
+
+        # Get types mapping for type conversion
+        settings = {'target_db_type': self.config_parser.get_target_db_type()}
+        types_mapping = self.source_connection.get_types_mapping(settings)
+        # Create case-insensitive mapping
+        types_mapping = {k.lower(): v for k, v in types_mapping.items()}
+
+        self.config_parser.print_log_message('DEBUG', f"User defined types: {user_defined_types}")
+
         if user_defined_types:
             for order_num, type_info in user_defined_types.items():
-                type_sql = type_info['sql']
-                self.config_parser.print_log_message( 'DEBUG', f"Source type SQL: {type_sql}")
-                converted_type_sql = type_sql.replace(f'{self.source_schema}.', f'{self.target_schema}.')
-                self.config_parser.print_log_message( 'DEBUG', f"Converted type SQL: {converted_type_sql}")
+                type_name = type_info['type_name']
+                base_type = type_info.get('base_type', '')
+                length = type_info.get('length', '')
+                prec = type_info.get('prec', '')
+                scale = type_info.get('scale', '')
+                source_type_sql = type_info['sql']
+
+                self.config_parser.print_log_message('DEBUG', f"Source type: {type_name}, Base: {base_type}")
+
+                # Resolve target type
+                base_lower = base_type.lower()
+                target_base_type = types_mapping.get(base_lower, base_type.upper()).upper()
+
+                # Construct definition part
+                # Check for types that usually don't need length/prec in PG
+                no_length_types = ('BOOLEAN', 'BOOL', 'TEXT', 'BYTEA', 'DATE', 'TIMESTAMP', 'TIME', 'INTEGER', 'BIGINT', 'SMALLINT', 'Double Precision')
+
+                definition = target_base_type
+                if target_base_type not in no_length_types:
+                    if base_lower in ('varchar', 'char', 'nvarchar', 'nchar', 'varbinary', 'binary', 'univarchar', 'unichar'):
+                         definition += f"({length})"
+                    elif base_lower in ('numeric', 'decimal'):
+                         definition += f"({prec},{scale})"
+
+                # Construct DDL: CREATE DOMAIN "target_schema"."type_name" AS definition;
+                # Note: IF NOT EXISTS is not standard for CREATE DOMAIN in all versions, but we can try exception handling or standard CREATE
+                # Using simple CREATE DOMAIN as insert_user_defined_type expects SQL to execute.
+                # However, planner usually prepares 'target_type_sql' which is then executed.
+
+                # Using 'AS' syntax for domains
+                target_type_sql = f'CREATE DOMAIN "{self.target_schema}"."{type_name}" AS {definition};'
+
+                self.config_parser.print_log_message('DEBUG', f"Converted type SQL: {target_type_sql}")
 
                 self.migrator_tables.insert_user_defined_type({
                     'source_schema_name': self.source_schema,
-                    'source_type_name': type_info['type_name'],
-                    'source_type_sql': type_sql,
+                    'source_type_name': type_name,
+                    'source_type_sql': source_type_sql,
                     'target_schema_name': self.target_schema,
-                    'target_type_name': type_info['type_name'],
-                    'target_type_sql': converted_type_sql,
-                    'type_comment':  type_info['comment'],
+                    'target_type_name': type_name,
+                    'target_type_sql': target_type_sql,
+                    'target_basic_type': target_base_type,
+                    'type_comment': type_info['comment'],
                 })
-                self.config_parser.print_log_message('INFO', f"User defined type {type_info['type_name']} processed successfully.")
+                self.config_parser.print_log_message('INFO', f"User defined type {type_name} processed successfully.")
             self.config_parser.print_log_message('INFO', "Planner - User defined types processed successfully.")
         else:
             self.config_parser.print_log_message('INFO', "No user defined types found.")

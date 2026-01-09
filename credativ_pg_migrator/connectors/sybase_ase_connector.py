@@ -1945,6 +1945,7 @@ class SybaseASEConnector(DatabaseConnector):
                 return self.convert_funcproc_code_v1(settings)
             except Exception as v1_e:
                 return f"/* CRITICAL FAILURE IN V1/V2: {e} / {v1_e} */\n" + settings.get('funcproc_code', '')
+
     def convert_funcproc_code_v1(self, settings):
         funcproc_code = settings['funcproc_code']
         target_db_type = settings['target_db_type']

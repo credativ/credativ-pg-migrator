@@ -643,7 +643,7 @@ class Planner:
 
             if self.config_parser.should_migrate_triggers():
                 triggers = self.source_connection.fetch_triggers(table_info['id'], self.source_schema, table_info['table_name'])
-                self.config_parser.print_log_message( 'DEBUG', f"Number of triggers: {len(triggers)}, Triggers: {triggers}")
+                self.config_parser.print_log_message( 'DEBUG', f"Number of triggers: {len(triggers) if triggers else 0}, Triggers: {triggers}")
                 if triggers:
                     for _, trigger_details in triggers.items():
 

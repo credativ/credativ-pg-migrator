@@ -1359,9 +1359,10 @@ class PostgreSQLConnector(DatabaseConnector):
             SELECT
                 oid,
                 relname as viewname,
-                obj_description(oid, 'pg_class') as view_comment
+                obj_description(oid, 'pg_class') as view_comment,
+                relkind
             FROM pg_class
-            WHERE relkind = 'v'
+            WHERE relkind IN ('v', 'm')
             AND relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = '{source_schema}')
             AND relname NOT LIKE 'pg_%'
             ORDER BY viewname
@@ -1371,11 +1372,13 @@ class PostgreSQLConnector(DatabaseConnector):
             cursor = self.connection.cursor()
             cursor.execute(query)
             for row in cursor.fetchall():
+                view_type = 'MATERIALIZED VIEW' if row[3] == 'm' else 'VIEW'
                 views[order_num] = {
                     'id': row[0],
                     'schema_name': source_schema,
                     'view_name': row[1],
-                    'comment': row[2]
+                    'comment': row[2],
+                    'view_type': view_type
                 }
                 order_num += 1
             cursor.close()
@@ -1388,15 +1391,7 @@ class PostgreSQLConnector(DatabaseConnector):
 
     def fetch_view_code(self, settings):
         view_id = settings['view_id']
-        # source_schema = settings['source_schema']
-        # source_view_name = settings['source_view_name']
-        # target_schema = settings['target_schema']
-        # target_view_name = settings['target_view_name']
-        query = f"""
-            SELECT definition
-            FROM pg_views
-            WHERE (schemaname||'.'||viewname)::regclass::oid = {view_id}
-        """
+        query = f"SELECT pg_get_viewdef({view_id}, true)"
         try:
             self.connect()
             cursor = self.connection.cursor()
@@ -1412,7 +1407,15 @@ class PostgreSQLConnector(DatabaseConnector):
 
     def convert_view_code(self, settings: dict):
         view_code = settings['view_code']
-        return view_code
+        view_name = settings['target_view_name']
+        target_schema = settings['target_schema']
+        view_type = settings.get('view_type', 'VIEW')
+
+        ddl = f'CREATE {view_type} "{target_schema}"."{view_name}" AS {view_code}'
+        if not ddl.strip().endswith(';'):
+             ddl += ';'
+        
+        return ddl
 
     def fetch_user_defined_types(self, schema: str):
         user_defined_types = {}

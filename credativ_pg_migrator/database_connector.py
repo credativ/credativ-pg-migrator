@@ -666,5 +666,12 @@ class DatabaseConnector(ABC):
         """
         pass
 
+    def migrate_sequences(self, target_connector, settings):
+        """
+        Migrate sequences from source to target database.
+        Returns True if successful, False otherwise.
+        """
+        return True
+
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

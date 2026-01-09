@@ -71,6 +71,9 @@ class MsSQLConnector(DatabaseConnector):
         else:
             self.config_parser.print_log_message('ERROR', f"Unsupported target database type: {target_db_type}")
 
+    def migrate_sequences(self, target_connector, settings):
+        return True
+
     def fetch_table_names(self, table_schema: str):
         query = f"""
             SELECT

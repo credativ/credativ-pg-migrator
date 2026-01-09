@@ -292,6 +292,9 @@ class SybaseASEConnector(DatabaseConnector):
             declarations.append(part.strip() + ';')
         return ''
 
+    def migrate_sequences(self, target_connector, settings):
+        return True
+
     def fetch_table_names(self, table_schema: str):
         # 2048 = proxy table referencing remote table
         query = f"""

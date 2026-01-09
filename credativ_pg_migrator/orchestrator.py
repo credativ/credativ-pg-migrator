@@ -65,6 +65,9 @@ class Orchestrator:
 
             # In case of crash recovery, we currently continue from this point as in normal migration
             if not self.config_parser.is_dry_run():
+                self.run_migrate_sequences()
+                self.check_pausing_resuming()
+                
                 self.run_migrate_tables()
                 self.check_pausing_resuming()
 
@@ -1618,5 +1621,23 @@ class Orchestrator:
             self.config_parser.wait_for_resume()
             self.config_parser.print_log_message('INFO', f"Orchestrator resumed.")
 
+    def run_migrate_sequences(self):
+        """
+        Migrate sequences from source to target database.
+        """
+        self.config_parser.print_log_message('INFO', "Starting sequence migration...")
+        self.migrator_tables.update_main_status('Sequence Migration', '', False, 'running')
+        
+        settings = {
+            'source_schema': self.config_parser.get_source_schema(),
+            'target_schema': self.config_parser.get_target_schema(),
+        }
+        
+        try:
+            self.source_connection.migrate_sequences(self.target_connection, settings)
+            self.migrator_tables.update_main_status('Sequence Migration', '', True, 'finished OK')
+        except Exception as e:
+            self.handle_error(e, 'Sequence Migration')
+    
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

@@ -524,7 +524,7 @@ class ConfigParser:
             elif message_level == 'DEBUG3':
                 self.logger.debug('DEBUG3: ' + message)
             else:
-                self.logger.info(message)
+                self.logger.info(message_level.upper() + ': ' + message)
 
     def get_indent(self):
         return self.config.get('migrator', {}).get('indent', MigratorConstants.get_default_indent())

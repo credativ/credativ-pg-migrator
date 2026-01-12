@@ -98,6 +98,128 @@ class PostgreSQLConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', e)
             raise
 
+    def get_table_description(self, settings) -> dict:
+        table_schema = settings['table_schema']
+        table_name = settings['table_name']
+        output = []
+        output.append(f'Table "{table_schema}"."{table_name}"')
+        self.config_parser.print_log_message('DEBUG3', f"PostgreSQL connector: Getting table description for {table_schema}.{table_name}")
+
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+
+            # 1. Attributes (Columns)
+            # Fetch: Column, Type, Nullable, Default
+            query_columns = f"""
+                SELECT column_name, data_type, is_nullable, column_default
+                FROM information_schema.columns
+                WHERE table_schema = '{table_schema}' AND table_name = '{table_name}'
+                ORDER BY ordinal_position
+            """
+            cursor.execute(query_columns)
+            columns = cursor.fetchall()
+
+            if columns:
+                headers = ['Column', 'Type', 'Nullable', 'Default']
+                rows = []
+                for col in columns:
+                    name = str(col[0]) if col[0] is not None else ''
+                    dtype = str(col[1]) if col[1] is not None else ''
+                    nullable = str(col[2]) if col[2] is not None else ''
+                    default = str(col[3]) if col[3] is not None else ''
+                    rows.append([name, dtype, nullable, default])
+
+                # Calculate column widths
+                widths = [len(h) for h in headers]
+                for row in rows:
+                    for i, val in enumerate(row):
+                        if len(val) > widths[i]:
+                            widths[i] = len(val)
+
+                # Format Table
+                header_line = " | ".join(h.ljust(widths[i]) for i, h in enumerate(headers))
+                output.append(header_line)
+                divider_line = "-+-".join("-" * widths[i] for i in range(len(widths)))
+                output.append(divider_line)
+
+                for row in rows:
+                    line = " | ".join(row[i].ljust(widths[i]) for i in range(len(row)))
+                    output.append(line)
+
+            output.append("")
+
+            # 2. Indexes
+            # Use pg_indexes as information_schema standard does not fully cover indexes in PG
+            query_indexes = f"""
+                SELECT indexname, indexdef
+                FROM pg_indexes
+                WHERE schemaname = '{table_schema}' AND tablename = '{table_name}'
+            """
+            cursor.execute(query_indexes)
+            indexes = cursor.fetchall()
+            if indexes:
+                output.append("Indexes:")
+                for idx in indexes:
+                    output.append(f"    {idx[1]}")
+
+            # 3. Constraints
+            # Use pg_constraint for robust definition
+            query_constraints = f"""
+                SELECT conname, pg_get_constraintdef(oid), contype
+                FROM pg_constraint
+                WHERE conrelid = '"{table_schema}"."{table_name}"'::regclass
+            """
+            cursor.execute(query_constraints)
+            pg_cons = cursor.fetchall()
+
+            check_constraints = []
+            fk_constraints = []
+
+            for con in pg_cons:
+                name = con[0]
+                definition = con[1]
+                contype = con[2] # c=check, f=foreign key, p=primary key, u=unique
+
+                # Primary keys and Unique constraints are typically listed in Indexes section (as matching indexes)
+                # So we focus on Checks and Foreign Keys here similar to psql output
+                if contype == 'c':
+                    check_constraints.append(f"    \"{name}\" CHECK {definition}")
+                elif contype == 'f':
+                    fk_constraints.append(f"    \"{name}\" {definition}")
+
+            if check_constraints:
+                output.append("Check constraints:")
+                output.extend(check_constraints)
+
+            if fk_constraints:
+                output.append("Foreign-key constraints:")
+                output.extend(fk_constraints)
+
+            # 4. Triggers (Optional but good for \d+)
+            # Use simple query from information_schema
+            query_triggers = f"""
+                SELECT trigger_name, action_timing, event_manipulation
+                FROM information_schema.triggers
+                WHERE event_object_schema = '{table_schema}' AND event_object_table = '{table_name}'
+            """
+            cursor.execute(query_triggers)
+            triggers = cursor.fetchall()
+            if triggers:
+                output.append("Triggers:")
+                for trig in triggers:
+                    output.append(f"    {trig[0]} {trig[1]} {trig[2]}")
+
+            cursor.close()
+            self.disconnect()
+
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error getting table description for {table_schema}.{table_name}: {e}")
+            return {'table_description': f"Error: {str(e)}"}
+
+        self.config_parser.print_log_message('DEBUG3', f"Table description for {table_schema}.{table_name}: {output}")
+        return {'table_description': "\\n".join(output)}
+
     def fetch_table_columns(self, settings) -> dict:
         table_schema = settings['table_schema']
         table_name = settings['table_name']
@@ -1427,9 +1549,9 @@ class PostgreSQLConnector(DatabaseConnector):
         source_schema = settings['source_schema']
         target_schema = settings['target_schema']
         migrator_tables = settings.get('migrator_tables')
-        
+
         self.config_parser.print_log_message('INFO', f"Migrating sequences from {source_schema} to {target_schema}...")
-        
+
         query = f"""
             SELECT c.relname, c.oid
             FROM pg_class c
@@ -1437,7 +1559,7 @@ class PostgreSQLConnector(DatabaseConnector):
             WHERE n.nspname = '{source_schema}'
               AND c.relkind = 'S'
         """
-        
+
         try:
             self.connect()
             target_connector.connect() # Ensure target is connected
@@ -1445,13 +1567,13 @@ class PostgreSQLConnector(DatabaseConnector):
             cursor.execute(query)
             sequences = cursor.fetchall() # list of (name, oid) matches
             cursor.close()
-            
+
             for seq_row in sequences:
                 seq_name = seq_row[0]
                 seq_oid = seq_row[1]
-                
+
                 self.config_parser.print_log_message('DEBUG', f"Processing sequence: {seq_name}")
-                
+
                 # Insert into protocol table if migrator_tables is available
                 # We don't have table/column info here as we are migrating all sequences in schema
                 if migrator_tables:
@@ -1466,7 +1588,7 @@ class PostgreSQLConnector(DatabaseConnector):
                         self.config_parser.print_log_message('ERROR', f"Failed to insert sequence {seq_name} into protocol: {e}")
 
                 details = self.get_sequence_details(source_schema, seq_name)
-                
+
                 # Fetch current value separately as it's not in pg_sequence catalog
                 # Re-connect because get_sequence_details closes the connection
                 self.connect()
@@ -1478,36 +1600,36 @@ class PostgreSQLConnector(DatabaseConnector):
                 is_called = curr_val_row[1]
                 cursor.close()
                 self.disconnect()
-                
+
                 # Generate CREATE SEQUENCE
                 # Details: min_value, max_value, increment_by, cycle, cache_size, start_value
-                # We use START WITH = last_value to ensure it picks up where it left off, 
-                # OR we use START WITH = min_value and then setval? 
+                # We use START WITH = last_value to ensure it picks up where it left off,
+                # OR we use START WITH = min_value and then setval?
                 # Postgres dump usually does CREATE SEQUENCE ...; SELECT setval(...);
-                
+
                 # If we use setval, CREATE SEQUENCE can just use defaults or original properties.
                 # However, if we want `START WITH` to be correct for a fresh init, we might want original start_value (which we have in details['start_value'])
                 # But `last_value` is the critical runtime state.
-                
+
                 cycle_str = "CYCLE" if details['cycle'] else "NO CYCLE"
                 create_sql = f"""CREATE SEQUENCE IF NOT EXISTS "{target_schema}"."{seq_name}"
-                    INCREMENT BY {details['increment_by']} 
-                    MINVALUE {details['min_value']} 
-                    MAXVALUE {details['max_value']} 
-                    START WITH {details['start_value']} 
-                    CACHE {details['cache_size']} 
+                    INCREMENT BY {details['increment_by']}
+                    MINVALUE {details['min_value']}
+                    MAXVALUE {details['max_value']}
+                    START WITH {details['start_value']}
+                    CACHE {details['cache_size']}
                     {cycle_str};
                 """
-                
+
                 setval_sql = f"SELECT setval('\"{target_schema}\".\"{seq_name}\"', {last_value}, {'true' if is_called else 'false'});"
-                
+
                 self.config_parser.print_log_message('DEBUG', f"Sequence {seq_name} SQL: {create_sql}")
                 self.config_parser.print_log_message('DEBUG', f"Sequence {seq_name} SETVAL: {setval_sql}")
-                
+
                 try:
                     target_connector.execute_query(create_sql)
                     target_connector.execute_query(setval_sql)
-                    
+
                     if migrator_tables:
                         # Update protocol with success and the setval SQL used
                         # Note: update_sequence_status doesn't update SQL. insert check above put empty SQL.
@@ -1515,19 +1637,19 @@ class PostgreSQLConnector(DatabaseConnector):
                         # Maybe we should DELETE and re-INSERT or just update status?
                         # insert_sequence puts it in 'sequences' table.
                         # update_sequence_status updates 'sequences' table.
-                        # If I want to save the SQL, I might need to update it. 
+                        # If I want to save the SQL, I might need to update it.
                         # But migrator_tables implementation of update_sequence_status only updates success/message/time.
                         # So I should probably insert with the SQL if I can generate it before?
                         # No, I generate it later.
-                        # I'll just leave SQL empty or put "See logs" if I can't update it. 
+                        # I'll just leave SQL empty or put "See logs" if I can't update it.
                         # Or I accept that the protocol table won't show the SQL.
                         migrator_tables.update_sequence_status(seq_oid, True, 'migrated OK')
-                        
+
                 except Exception as ex:
                     self.config_parser.print_log_message('ERROR', f"Failed to migrate sequence {seq_name}: {ex}")
                     if migrator_tables:
                         migrator_tables.update_sequence_status(seq_oid, False, str(ex))
-            
+
             self.disconnect()
             target_connector.disconnect()
             return True
@@ -1803,10 +1925,6 @@ class PostgreSQLConnector(DatabaseConnector):
     def fetch_default_values(self, settings) -> dict:
         # Placeholder for fetching default values
         return {}
-
-    def get_table_description(self, settings) -> dict:
-        # Placeholder for fetching table description
-        return { 'table_description': '' }
 
     def testing_select(self):
         return "SELECT 1"

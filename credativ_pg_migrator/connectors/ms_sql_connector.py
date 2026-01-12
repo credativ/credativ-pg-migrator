@@ -2028,6 +2028,7 @@ EXECUTE FUNCTION "{func_schema}"."{func_name}"();
              return [f"/* PARSING FAILED: {e} */\n" + body_content]
 
         converted_statements = []
+        active_rowcount_limit = 0
         def clean_pg_sql(pg_sql):
              # @@FETCH_STATUS
              pg_sql = re.sub(r'@@FETCH_STATUS\s*=\s*0', 'FOUND', pg_sql, flags=re.IGNORECASE)
@@ -2071,7 +2072,15 @@ EXECUTE FUNCTION "{func_schema}"."{func_name}"();
             return node
 
         def process_node(expression):
+             nonlocal active_rowcount_limit
              if not expression: return None
+
+             # Check for SET ROWCOUNT
+             if isinstance(expression, exp.Command) and expression.this.upper() == 'SET':
+                  m = re.match(r'ROWCOUNT\s+(\d+)', expression.expression or '', re.IGNORECASE)
+                  if m:
+                       active_rowcount_limit = int(m.group(1))
+                       return f"/* SET ROWCOUNT {active_rowcount_limit} converted to LIMIT */"
 
              is_block = isinstance(expression, Block) or type(expression).__name__ == 'Block'
              if is_block:
@@ -2203,6 +2212,10 @@ EXECUTE FUNCTION "{func_schema}"."{func_name}"();
                       return "\n".join(assignments)
 
              pg_sql = expression.sql(dialect='postgres')
+
+             # Apply ROWCOUNT limit if detected (and no explicit LIMIT exists)
+             if active_rowcount_limit > 0 and isinstance(expression, exp.Select) and not expression.args.get('limit'):
+                  pg_sql += f" LIMIT {active_rowcount_limit}"
 
              # Handle Implicit Return (SELECT -> RETURN QUERY SELECT)
              # Must not be an assignment (handled above) or INTO (handled by SQLGlot usually, or check args)

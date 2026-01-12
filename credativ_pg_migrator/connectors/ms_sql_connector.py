@@ -24,6 +24,166 @@ import re
 import traceback
 import time
 import datetime
+import sqlglot
+from sqlglot import exp, TokenType
+from sqlglot.dialects import TSQL
+import logging
+
+# Define Custom Block Expression
+class Block(exp.Expression):
+    arg_types = {"expressions": True}
+
+# Register Block with Postgres Generator to allow fallback generation
+from sqlglot.dialects.postgres import Postgres
+
+def block_handler(self, expression):
+    # Ensure all statements in a block end with a semicolon
+    statements = []
+    for e in expression.expressions:
+        stmt = self.sql(e).strip()
+        if stmt and not stmt.endswith(';'):
+            stmt += ';'
+        statements.append(stmt)
+    return "\n".join(statements)
+
+Postgres.Generator.TRANSFORMS[Block] = block_handler
+
+class CustomTSQL(TSQL):
+    class Tokenizer(TSQL.Tokenizer):
+        COMMANDS = TSQL.Tokenizer.COMMANDS - {TokenType.COMMAND, TokenType.SET}
+
+    class Parser(TSQL.Parser):
+        config_parser = None
+
+        def _parse_alias(self, this, explicit=False):
+             # FIX: Explicitly prevent UPDATE/INSERT/DELETE/MERGE/SET from being aliases
+             # usage of keywords as aliases without AS is weird in implicit statement boundary contexts
+             if self._curr.token_type in (TokenType.UPDATE, TokenType.INSERT, TokenType.DELETE, TokenType.MERGE, TokenType.SET):
+                  return this
+             return super()._parse_alias(this, explicit)
+
+        def _parse_command_custom(self):
+            # Intercept PRINT to parse expression
+            # Also helper for SET non-greedy parsing
+
+            prev_is_print = self._prev.text.upper() == 'PRINT' if self._prev else False
+            curr_is_print = self._curr.text.upper() == 'PRINT' if self._curr else False
+
+            if curr_is_print:
+                 self._advance()
+            elif not prev_is_print:
+                 if self._prev.text.upper() == 'SET':
+                      # SET already consumed by dispatcher mechanism?
+                      # Handle SET non-greedily: Stop at new statement keywords or semicolon
+                      expressions = []
+                      balance = 0
+                      while self._curr:
+                           if self._curr.token_type in (TokenType.SEMICOLON, TokenType.END):
+                                break
+
+                           if balance == 0:
+                                txt = self._curr.text.upper()
+                                if txt in ('SELECT', 'UPDATE', 'INSERT', 'DELETE', 'BEGIN', 'IF', 'WHILE', 'RETURN', 'DECLARE', 'CREATE', 'TRUNCATE', 'GO'):
+                                     break
+
+                           if self._curr.token_type == TokenType.L_PAREN:
+                                balance += 1
+                           elif self._curr.token_type == TokenType.R_PAREN:
+                                balance -= 1
+
+                           expressions.append(self._curr.text)
+                           self._advance()
+
+                      return exp.Command(this='SET', expression=exp.Literal.string(" ".join(expressions)))
+
+                 # Not a PRINT or SET command
+                 return self._parse_command()
+
+            # Use _parse_conjunction to avoid consuming END (as alias)
+            return exp.Command(this='PRINT', expression=self._parse_conjunction())
+        STATEMENT_PARSERS = TSQL.Parser.STATEMENT_PARSERS.copy()
+        STATEMENT_PARSERS[TokenType.COMMAND] = _parse_command_custom
+        STATEMENT_PARSERS[TokenType.SET] = _parse_command_custom
+
+        def _parse_block(self):
+            if not self._match(TokenType.BEGIN):
+                 pass
+
+            expressions = []
+            loop_counter = 0
+            last_token_idx = -1
+
+            while self._curr and self._curr.token_type != TokenType.END:
+                 loop_counter += 1
+                 if loop_counter > 100000:
+                      raise Exception(f"Potential Infinite Loop in _parse_block at token {self._curr}")
+
+                 # Check progress
+                 current_idx = self._index
+                 if current_idx == last_token_idx:
+                      # Stuck?
+                      msg = f"DEBUG: Processed token {self._curr} but did not advance. Force advance."
+                      if self.config_parser:
+                           self.config_parser.print_log_message('DEBUG', msg)
+                      else:
+                           logging.debug(msg)
+                      self._advance()
+                 last_token_idx = current_idx
+
+                 stmt = self._parse_statement()
+                 if stmt:
+                      expressions.append(stmt)
+                 self._match(TokenType.SEMICOLON)
+
+            self._match(TokenType.END)
+            return Block(expressions=expressions)
+
+        def _parse_if(self):
+            res = self.expression(
+                 exp.If,
+                 this=self._parse_conjunction(),
+                 true=self._parse_statement(),
+                 false=self._parse_statement() if self._match(TokenType.ELSE) else None,
+            )
+            return res
+
+        STATEMENT_PARSERS[TokenType.BEGIN] = lambda self: self._parse_block()
+        if hasattr(TokenType, 'IF'):
+             STATEMENT_PARSERS[getattr(TokenType, 'IF')] = lambda self: self._parse_if()
+
+        def _parse(self, parse_method, raw_tokens, sql=None):
+            self.reset()
+            self.sql = sql or ""
+            self._tokens = raw_tokens
+            self._index = -1
+            self._advance()
+
+            expressions = []
+            while self._curr:
+                if self._match(TokenType.SEMICOLON):
+                     continue
+
+                stmt = parse_method(self)
+                if not stmt:
+                     if self._curr:
+                          self.raise_error("Invalid expression / Unexpected token")
+                     break
+                expressions.append(stmt)
+            return expressions
+
+    class Generator(TSQL.Generator):
+        TRANSFORMS = TSQL.Generator.TRANSFORMS.copy()
+
+        def _block_handler(self, expression):
+            # Block handler needs to process children
+            # Since sqlglot generator expects strings, we need to generate sql for children
+            stmts = []
+            if hasattr(expression, 'expressions'):
+                for e in expression.expressions:
+                    stmts.append(self.sql(e))
+            return "\\n".join(stmts)
+
+        TRANSFORMS[Block] = _block_handler
 
 class MsSQLConnector(DatabaseConnector):
     def __init__(self, config_parser, source_or_target):
@@ -519,9 +679,139 @@ class MsSQLConnector(DatabaseConnector):
             raise
 
     def convert_view_code(self, settings: dict):
+        def quote_column_names(node):
+            if isinstance(node, sqlglot.exp.Column) and node.name:
+                node.set("this", sqlglot.exp.Identifier(this=node.name, quoted=True))
+            if isinstance(node, sqlglot.exp.Alias) and isinstance(node.args.get("alias"), sqlglot.exp.Identifier):
+                alias = node.args["alias"]
+                if not alias.args.get("quoted"):
+                    alias.set("quoted", True)
+            return node
+
+        def replace_schema_names(node):
+            if isinstance(node, sqlglot.exp.Table):
+                schema = node.args.get("db")
+                if schema and schema.name == settings['source_schema']:
+                    node.set("db", sqlglot.exp.Identifier(this=settings['target_schema'], quoted=False))
+            return node
+
+        def quote_schema_and_table_names(node):
+            if isinstance(node, sqlglot.exp.Table):
+                # Quote schema name if present
+                schema = node.args.get("db")
+                if schema and not schema.args.get("quoted"):
+                    schema.set("quoted", True)
+                # Quote table name
+                table = node.args.get("this")
+                if table and not table.args.get("quoted"):
+                    table.set("quoted", True)
+            return node
+
+        def replace_functions(node):
+            mapping = self.get_sql_functions_mapping({ 'target_db_type': settings['target_db_type'] })
+            # Prepare mapping for function names (without parentheses)
+            func_name_map = {}
+            for k, v in mapping.items():
+                if k.endswith('('):
+                    func_name_map[k[:-1].lower()] = v[:-1] if v.endswith('(') else v
+                elif k.endswith('()'):
+                    func_name_map[k[:-2].lower()] = v
+                else:
+                    func_name_map[k.lower()] = v
+
+            if isinstance(node, sqlglot.exp.Anonymous):
+                func_name = node.name.lower()
+                if func_name in func_name_map:
+                    mapped = func_name_map[func_name]
+                    # If mapped is a function name, replace the function name
+                    if '(' not in mapped:
+                        node.set("this", sqlglot.exp.Identifier(this=mapped, quoted=False))
+                    else:
+                        # For mappings like 'year(' -> 'extract(year from '
+                        # We need to rewrite the function call
+                        if mapped.startswith('extract('):
+                            # e.g. year(t1.b) -> extract(year from t1.b)
+                            arg = node.args.get("expressions")
+                            if arg and len(arg) == 1:
+                                part = func_name
+                                return sqlglot.exp.Extract(
+                                    this=sqlglot.exp.Identifier(this=part, quoted=False),
+                                    expression=arg[0]
+                                )
+                        else:
+                            # Iterate over the mapping to handle function name replacements
+                            for orig, repl in mapping.items():
+                                # Handle mappings ending with '(' (function calls)
+                                if orig.endswith('(') and func_name == orig[:-1].lower():
+                                    if repl.endswith('('):
+                                        node.set("this", sqlglot.exp.Identifier(this=repl[:-1], quoted=False))
+                                    else:
+                                        node.set("this", sqlglot.exp.Identifier(this=repl, quoted=False))
+                                    break
+                                # Handle mappings ending with '()' (function calls with no args)
+                                elif orig.endswith('()') and func_name == orig[:-2].lower():
+                                    node.set("this", sqlglot.exp.Identifier(this=repl, quoted=False))
+                                    break
+                    # For direct function name replacements, handled above
+                # For functions like getdate(), getutcdate(), etc.
+                elif func_name + "()" in func_name_map:
+                    mapped = func_name_map[func_name + "()"]
+                    return sqlglot.exp.Anonymous(this=mapped)
+            return node
+
+        def transform_sybase_joins(expression):
+            # Check for EQ nodes with outer join comments (sqlglot default parsing of *=)
+            # OR check for 'outer_join' property if parsing handles it.
+            # sqlglot T-SQL might parse *= as normal EQ, or custom.
+            # Since we didn't inject the scanner pre-processor for *= yet (it's in Sybase v2 conversion),
+            # we rely on sqlglot.
+            # MSSQL views likely use standard ANSI JOINs, but legacy syntax exists.
+            # We assume ANSI joins for now, or sqlglot handles standard T-SQL.
+            return expression
+
         view_code = settings['view_code']
-        # ...existing code from SybaseASEConnector.convert_view_code...
-        pass
+        view_code = view_code.replace('"', '').replace('[', '').replace(']', '')
+
+        # Remove CREATE VIEW header if present (as fetch_view_code returns full definition)
+        # Use regex to find AS and take everything after
+        # But be careful about header comments or AS in options.
+        if "CREATE VIEW" in view_code.upper():
+             match = re.search(r'CREATE\s+VIEW\s+.*?\s+AS\s+(.*)', view_code, re.IGNORECASE | re.DOTALL)
+             if match:
+                 view_code = match.group(1)
+
+        cleaned_view_code = view_code
+
+        CustomTSQL.Parser.config_parser = self.config_parser
+        try:
+            expressions = sqlglot.parse(cleaned_view_code, read=CustomTSQL)
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Failed to parse view code: {e}")
+            return f"-- ERROR parsing view: {e}\n/*\n{cleaned_view_code}\n*/"
+
+        transformed_sqls = []
+        for expression in expressions:
+            try:
+                # Apply transformations
+                expression = expression.transform(quote_column_names)
+                expression = expression.transform(replace_functions)
+                expression = expression.transform(replace_schema_names)
+                expression = expression.transform(quote_schema_and_table_names)
+                # expression = transform_sybase_joins(expression) # Not needed if standard SQL
+
+                pg_sql = expression.sql(dialect='postgres')
+                transformed_sqls.append(pg_sql)
+            except Exception as e:
+                self.config_parser.print_log_message('ERROR', f"Failed to transform expression: {e}")
+                transformed_sqls.append(f"-- ERROR transforming: {e}")
+
+        final_select_sql = "\n".join(transformed_sqls)
+
+        target_schema = settings['target_schema']
+        target_view_name = settings['target_view_name']
+        
+        final_view_sql = f"CREATE OR REPLACE VIEW {target_schema}.\"{target_view_name}\" AS\n{final_select_sql};"
+        return final_view_sql
 
     def migrate_table(self, migrate_target_connection, settings):
         part_name = 'initialize'

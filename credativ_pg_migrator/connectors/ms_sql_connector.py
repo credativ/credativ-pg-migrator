@@ -2016,8 +2016,16 @@ EXECUTE FUNCTION "{func_schema}"."{func_name}"();
         processed_body = body_content
 
          # --- Handle Sybase/MSSQL Outer Joins (*= and =*) before parsing ---
-        processed_body = re.sub(r"([\w\.]+)\s*\*\=\s*([\w\.]+)", r"locvar_sybase_outer_join(\1, \2)", processed_body)
-        processed_body = re.sub(r"([\w\.]+)\s*\=\*\s*([\w\.]+)", r"locvar_sybase_right_join(\1, \2)", processed_body)
+        processed_body = re.sub(
+            r'((?:\[[^\]]+\]|"[^"]+"|[\w]+)(?:\.(?:\[[^\]]+\]|"[^"]+"|[\w]+))*)\s*\*\=\s*((?:\[[^\]]+\]|"[^"]+"|[\w]+)(?:\.(?:\[[^\]]+\]|"[^"]+"|[\w]+))*)',
+            r"locvar_sybase_outer_join(\1, \2)",
+            processed_body,
+        )
+        processed_body = re.sub(
+            r'((?:\[[^\]]+\]|"[^"]+"|[\w]+)(?:\.(?:\[[^\]]+\]|"[^"]+"|[\w]+))*)\s*\=\*\s*((?:\[[^\]]+\]|"[^"]+"|[\w]+)(?:\.(?:\[[^\]]+\]|"[^"]+"|[\w]+))*)',
+            r"locvar_sybase_right_join(\1, \2)",
+            processed_body,
+        )
 
         CustomTSQL.Parser.config_parser = self.config_parser
 

@@ -754,14 +754,14 @@ class MsSQLConnector(DatabaseConnector):
         # Support names with spaces [Name with Space] or "Name" or Name
         # Regex to match CREATE [OR ALTER] {PROC|PROCEDURE|FUNCTION} [schema.]name ...
 
-        type_match = re.search(r'CREATE\s+(?:OR\s+ALTER\s+)?(PROC|PROCEDURE|FUNCTION)\s+(?:\[?(\w+)\]?\.?)?\[?([\w\s]+)\]?', funcproc_code, re.IGNORECASE)
+        type_match = re.search(r'CREATE\s+(?:OR\s+ALTER\s+)?(PROC|PROCEDURE|FUNCTION)\s+(?:\[?(\w+)\]?\.\[?)?(\[.*?\]|[\w]+)', funcproc_code, re.IGNORECASE)
 
         if not type_match:
              return f"/* FAILED TO PARSE DEFINITION */\n{funcproc_code}"
 
         obj_type_raw = type_match.group(1).upper()
         # schema_name = type_match.group(2) # Ignore source schema, use target_schema
-        obj_name = type_match.group(3)
+        obj_name = type_match.group(3).strip('[]"')
 
         is_proc = 'PROC' in obj_type_raw
         pg_type = 'PROCEDURE' if is_proc else 'FUNCTION'
@@ -2084,6 +2084,28 @@ EXECUTE FUNCTION "{func_schema}"."{func_name}"();
                             return f"RAISE EXCEPTION {msg_sql}, {arg_str};"
                        else:
                             return f"RAISE EXCEPTION {msg_sql};"
+
+             # Handle SELECT @var = value (Assignment without FROM)
+             if isinstance(expression, exp.Select) and not expression.args.get('from'):
+                 is_assignment = True
+                 assignments = []
+                 for e in expression.expressions:
+                     # Check for EQ node (v = x)
+                     if isinstance(e, exp.EQ):
+                         left = e.this
+                         right = e.expression
+                         # Check if left is variable
+                         if isinstance(left, exp.Identifier) and (left.this.startswith('locvar_') or left.this.startswith('global_')):
+                              assignments.append(f"{left.this} := {right.sql(dialect='postgres')};")
+                         else:
+                              is_assignment = False
+                              break
+                     else:
+                         is_assignment = False
+                         break
+
+                 if is_assignment and assignments:
+                      return "\n".join(assignments)
 
              pg_sql = expression.sql(dialect='postgres')
 

@@ -67,7 +67,7 @@ class Orchestrator:
             if not self.config_parser.is_dry_run():
                 self.run_migrate_sequences()
                 self.check_pausing_resuming()
-                
+
                 self.run_migrate_tables()
                 self.check_pausing_resuming()
 
@@ -1626,19 +1626,19 @@ class Orchestrator:
         Migrate sequences from source to target database.
         """
         self.config_parser.print_log_message('INFO', "Starting sequence migration...")
-        self.migrator_tables.update_main_status('Sequence Migration', '', False, 'running')
-        
+        self.migrator_tables.insert_main('Orchestrator', 'sequences migration')
+
         settings = {
             'source_schema': self.config_parser.get_source_schema(),
             'target_schema': self.config_parser.get_target_schema(),
             'migrator_tables': self.migrator_tables,
         }
-        
+
         try:
             self.source_connection.migrate_sequences(self.target_connection, settings)
-            self.migrator_tables.update_main_status('Sequence Migration', '', True, 'finished OK')
+            self.migrator_tables.update_main_status('Orchestrator', 'sequences migration', True, 'finished OK')
         except Exception as e:
             self.handle_error(e, 'Sequence Migration')
-    
+
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

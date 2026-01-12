@@ -690,13 +690,16 @@ class MsSQLConnector(DatabaseConnector):
             rows = cursor.fetchall()
             cursor.close()
 
-            funcprocs = []
+            funcprocs = {}
+            order_num = 1
             for row in rows:
-                funcprocs.append({
+                funcprocs[order_num] = {
                     'id': row[0],
                     'name': row[1],
-                    'type': row[2]
-                })
+                    'type': row[2],
+                    'comment': ''
+                }
+                order_num += 1
             self.disconnect()
             return funcprocs
         except Exception as e:

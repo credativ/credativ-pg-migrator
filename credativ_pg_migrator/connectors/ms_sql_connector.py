@@ -62,12 +62,12 @@ class CustomTSQL(TSQL):
                   # Check standard TokenTypes
                   if self._curr.token_type in (TokenType.UPDATE, TokenType.INSERT, TokenType.DELETE, TokenType.MERGE, TokenType.SET, TokenType.SELECT):
                        return this
-                  
+
                   # Check text for others (PRINT, RAISERROR, etc might be Commands or Vars)
                   txt = self._curr.text.upper()
                   if txt in ('PRINT', 'RAISERROR', 'EXEC', 'EXECUTE', 'IF', 'WHILE', 'BEGIN', 'DECLARE', 'CREATE', 'GO', 'ELSE'):
                        return this
-                       
+
              return super()._parse_alias(this, explicit)
 
         def _parse_command_custom(self):
@@ -1345,21 +1345,21 @@ END;
 $$ LANGUAGE plpgsql;
 """
 
-        # Construct Trigger
-        refs = []
-        if 'INSERT' in events or 'UPDATE' in events:
-             refs.append("NEW TABLE AS inserted")
-        if 'DELETE' in events or 'UPDATE' in events:
-             refs.append("OLD TABLE AS deleted")
+        # Construct Trigger (Changed to Row Level to support NEW/OLD replacement)
+        # Transition tables (inserted/deleted) are replaced by NEW/OLD record access by AST transformer
 
-        ref_clause = "REFERENCING " + " ".join(refs) if refs and timing != 'INSTEAD OF' else ""
         events_str = " OR ".join(events)
+
+        # NOTE: MSSQL Triggers are statement-level by default but access 'inserted' set.
+        # User requested mapping 'inserted' -> NEW and 'deleted' -> OLD.
+        # This implies running FOR EACH ROW.
+        # Warning: This changes semantics if the logic was doing set-based aggregation.
+        # But for row-processing logic (select @var = col from inserted), this conversion is correct.
 
         trigger_ddl = f"""
 CREATE TRIGGER "{trigger_name}"
 {timing} {events_str} ON "{target_schema}"."{table_name}"
-{ref_clause}
-FOR EACH STATEMENT
+FOR EACH ROW
 EXECUTE FUNCTION "{func_schema}"."{func_name}"();
 """
 
@@ -1367,6 +1367,95 @@ EXECUTE FUNCTION "{func_schema}"."{func_name}"();
 
 
     def execute_query(self, query: str, params=None):
+        pass # Placeholder
+
+    def _transform_trigger_tables(self, expression):
+
+        # Transform MSSQL 'inserted'/'deleted' table usage to PG 'NEW'/'OLD' record usage
+        # This requires AST modification:
+        # 1. Remove 'inserted'/'deleted' from FROM/JOINs.
+        # 2. Rename columns referencing them to use NEW/OLD as table alias.
+
+        table_map = {'inserted': 'NEW', 'deleted': 'OLD'}
+        aliases = {}
+
+        # 1. Identify aliases first (Scan)
+        from_clause = expression.args.get('from')
+        joins = expression.args.get('joins') or []
+
+
+
+        if from_clause:
+            for item in from_clause.expressions:
+                if isinstance(item, exp.Table) and item.name.lower() in table_map:
+                    aliases[item.alias_or_name] = table_map[item.name.lower()]
+
+        for j in joins:
+            if isinstance(j.this, exp.Table) and j.this.name.lower() in table_map:
+                aliases[j.this.alias_or_name] = table_map[j.this.name.lower()]
+
+        # 2. Transform Logic
+        def transformer(node):
+            if isinstance(node, exp.Column):
+                tbl = node.table
+                if tbl and tbl in aliases:
+                    # Replace with Aliased Column (NEW/OLD)
+                    return exp.Column(
+                        this=node.this,
+                        table=exp.Identifier(this=aliases[tbl], quoted=False)
+                    )
+            return node
+
+        expression = expression.transform(transformer)
+
+        # 3. Handle Table Removal and Join Promotion
+        # Re-access FROM after transform
+        from_clause = expression.args.get('from')
+        joins = expression.args.get('joins') or []
+
+        if from_clause:
+            new_froms = []
+            for item in from_clause.expressions:
+                if isinstance(item, exp.Table) and item.name.lower() in table_map:
+                    continue
+                new_froms.append(item)
+
+            from_clause.set('expressions', new_froms)
+
+            # If new_froms is empty, we MUST promote a JOIN if available, or empty FROM
+            if not new_froms:
+                if joins:
+                    first_join = joins.pop(0)
+                    new_table = first_join.this
+                    condition = first_join.args.get('on')
+
+                    # Set FROM to new_table
+                    from_clause.set('expressions', [new_table])
+
+                    # Move conditions to WHERE
+                    if condition:
+                        expression.where(condition, copy=False)
+
+                    expression.set('joins', joins)
+                else:
+                    # No JOINs, so just empty FROM (SELECT NEW.col)
+                    expression.set('from', None)
+
+        # 4. Filter JOINs that are strictly transition tables (if not promoted)
+        joins = expression.args.get('joins') or []
+        new_joins = []
+        for j in joins:
+            if isinstance(j.this, exp.Table) and j.this.name.lower() in table_map:
+                # Merge logic: if explicit JOIN condition exists, move it to WHERE
+                # e.g. JOIN inserted ON i.id = t.id -> WHERE NEW.id = t.id
+                condition = j.args.get('on')
+                if condition:
+                     expression.where(condition, copy=False)
+                continue
+            new_joins.append(j)
+        expression.set('joins', new_joins)
+
+        return expression
         # ...existing code from SybaseASEConnector.execute_query...
         pass
 
@@ -1760,21 +1849,21 @@ EXECUTE FUNCTION "{func_schema}"."{func_name}"();
                        msg_node = args[0]
                        # Next 2 are severity, state (skipped in PG RAISE usually, or mapped)
                        # Rest are arguments
-                       
+
                        # PG Syntax: RAISE [LEVEL] 'format', arg1, arg2
                        # We need to construct this string
-                       
+
                        msg_sql = msg_node.sql(dialect='postgres')
-                       
+
                        other_args = []
                        if len(args) > 3:
                             for a in args[3:]:
                                  other_args.append(a.sql(dialect='postgres'))
-                       
-                       # Handling params replacement in message? 
+
+                       # Handling params replacement in message?
                        # PG uses % to replace arguments positional? Yes.
                        # MSSQL uses %d, %s etc. PG raise format uses %
-                       
+
                        arg_str = ", ".join(other_args)
                        if arg_str:
                             return f"RAISE EXCEPTION {msg_sql}, {arg_str};"
@@ -1797,7 +1886,7 @@ EXECUTE FUNCTION "{func_schema}"."{func_name}"();
                    p_arg = expression.expression
                    # Clean it
                    return f"RAISE NOTICE {p_arg};"
-             
+
              # Fallback regex for PRINT if not caught above (e.g. if parsed as func)
              if "PRINT" in pg_sql.upper():
                   match_p = re.search(r"PRINT\s+(.*)", pg_sql, re.IGNORECASE)
@@ -1933,9 +2022,7 @@ EXECUTE FUNCTION "{func_schema}"."{func_name}"();
              text = re.sub(rf'\b{re.escape(udt)}\b', info['base_type'], text, flags=re.IGNORECASE)
         return text
 
-    def _transform_trigger_tables(self, expression):
-        # For MSSQL Statement Triggers using Transition Tables, we leave 'inserted'/'deleted' as is.
-        return expression
+
 
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

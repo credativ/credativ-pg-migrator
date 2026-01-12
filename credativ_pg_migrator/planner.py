@@ -379,6 +379,7 @@ class Planner:
                     'target_db_type': self.config_parser.get_target_db_type(),
                 }
                 table_description = self.source_connection.get_table_description(settings)
+                self.config_parser.print_log_message( 'DEBUG3', f"Table description: {table_description}")
                 table_description = table_description['table_description'] if 'table_description' in table_description else ''
                 self.config_parser.print_log_message( 'DEBUG', f"Table description: {table_description}")
                 source_columns = self.source_connection.fetch_table_columns(settings)

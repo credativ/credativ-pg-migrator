@@ -989,6 +989,7 @@ class OracleConnector(DatabaseConnector):
         return {}
 
     def get_table_description(self, settings) -> dict:
+        self.config_parser.print_log_message('DEBUG3', f"Oracle connector: Getting table description for {settings['table_schema']}.{settings['table_name']}")
         table_schema = settings['table_schema']
         table_name = settings['table_name']
         output = ""

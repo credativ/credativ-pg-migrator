@@ -451,13 +451,14 @@ class Orchestrator:
             if ((settings['drop_tables'] and not settings['resume_after_crash'])
                 or (settings['resume_after_crash'] and settings['drop_unfinished_tables'])
                 or (settings['resume_after_crash'] and not worker_target_connection.target_table_exists(target_schema, target_table))):
-                self.config_parser.print_log_message( 'DEBUG', f"Worker {worker_id}: Dropping table {target_table}...")
                 part_name = 'drop table'
                 repeat_count = 0
+                drop_query = f'DROP TABLE IF EXISTS "{target_schema}"."{target_table}" CASCADE'
+                self.config_parser.print_log_message( 'DEBUG', f"Worker {worker_id}: Dropping table {target_table} - Query: {drop_query}")
                 ## Retry dropping the table if it fails due to locks or other issues
                 while True:
                     try:
-                        worker_target_connection.execute_query(f"DROP TABLE IF EXISTS {target_schema}.{target_table} CASCADE")
+                        worker_target_connection.execute_query(drop_query)
                         break
                     except Exception as e:
                         if repeat_count > 5:
@@ -708,7 +709,7 @@ class Orchestrator:
                                                 if lob_col_name is not None and lob_col_index is not None:
                                                     self.config_parser.print_log_message('INFO', f"Worker {worker_id}: LOB column {lob_col_name} found in target table {target_table} - index: {lob_col_index}, type: {lob_col_type}")
 
-                                                    select_datafiles_sql = f"""SELECT DISTINCT coalesce(split_part({lob_col_name},',',3), '0,0,0') as datafile, count(*) as occurrences FROM {target_schema}.{table_name_for_lob_import} group by 1 order by 1;"""
+                                                    select_datafiles_sql = f"""SELECT DISTINCT coalesce(split_part({lob_col_name},',',3), '0,0,0') as datafile, count(*) as occurrences FROM "{target_schema}"."{table_name_for_lob_import}" group by 1 order by 1;"""
 
                                                     datafiles_cursor = worker_target_connection.connection.cursor()
                                                     datafiles_cursor.execute(select_datafiles_sql)

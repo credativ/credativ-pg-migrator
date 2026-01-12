@@ -1333,6 +1333,13 @@ class Orchestrator:
                     self.config_parser.print_log_message('INFO', f"Migrating {funcproc_type} {funcproc_data['name']}.")
                     try:
                         funcproc_code = self.source_connection.fetch_funcproc_code(funcproc_id)
+                        
+                        # Handle dict return (with implicit schema) for logging/DB
+                        funcproc_code_str = funcproc_code
+                        if isinstance(funcproc_code, dict):
+                             funcproc_code_str = funcproc_code.get('definition', '') or ''
+                        else:
+                             funcproc_code_str = str(funcproc_code) if funcproc_code else ''
 
                         table_names = []
                         view_names = []
@@ -1365,18 +1372,18 @@ class Orchestrator:
                                 self.config_parser.print_log_message( 'DEBUG', f"Funcs/Procs - remote objects substituting {row[0]} with {row[1]}")
                                 converted_code = re.sub(re.escape(row[0]), row[1], converted_code, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
 
-                        self.migrator_tables.insert_funcprocs(self.source_schema, funcproc_data['name'], funcproc_id, funcproc_code, self.target_schema, funcproc_data['name'], converted_code, funcproc_data['comment'])
-
+                        self.migrator_tables.insert_funcprocs(self.source_schema, funcproc_data['name'], funcproc_id, funcproc_code_str, self.target_schema, funcproc_data['name'], converted_code, funcproc_data['comment'])
+                        
                         if converted_code is not None and converted_code.strip():
                             self.config_parser.print_log_message('INFO', f"Creating {funcproc_type} {funcproc_data['name']} in target database.")
                             self.target_connection.connect()
-
+                            
                             if self.target_connection.session_settings:
                                 self.config_parser.print_log_message( 'DEBUG', f"Executing session settings: {self.target_connection.session_settings}")
                                 self.target_connection.execute_query(self.target_connection.session_settings)
-
+                            
                             self.target_connection.execute_query(converted_code)
-                            self.config_parser.print_log_message( 'DEBUG', f"[OK] Source code for {funcproc_data['name']}: {funcproc_code}")
+                            self.config_parser.print_log_message( 'DEBUG', f"[OK] Source code for {funcproc_data['name']}: {funcproc_code_str}")
                             self.config_parser.print_log_message( 'DEBUG', f"[OK] Converted code for {funcproc_data['name']}: {converted_code}")
                             self.migrator_tables.update_funcproc_status(funcproc_id, True, 'migrated OK')
                         else:

@@ -717,28 +717,79 @@ class MsSQLConnector(DatabaseConnector):
             return []
 
     def fetch_funcproc_code(self, funcproc_id: int):
-        query = f"""
+        # 1. Fetch Definition
+        query_def = f"""
             SELECT m.definition
             FROM sys.sql_modules m
             WHERE m.object_id = {funcproc_id}
         """
+
+        # 2. Fetch Return Schema (for implicit result sets in Procedures)
+        # Using sys.dm_exec_describe_first_result_set (SQL Server 2012+)
+        query_schema = f"""
+            SELECT
+                name,
+                system_type_name,
+                max_length,
+                precision,
+                scale,
+                is_nullable
+            FROM sys.dm_exec_describe_first_result_set_for_object({funcproc_id}, 0)
+            WHERE name IS NOT NULL
+        """
+
         try:
             self.connect()
             cursor = self.connection.cursor()
-            cursor.execute(query)
+
+            # Fetch Code
+            cursor.execute(query_def)
             row = cursor.fetchone()
+            definition = row[0] if row else None
+
+            schema = []
+            if definition:
+                try:
+                    cursor.execute(query_schema)
+                    schema_rows = cursor.fetchall()
+                    for s in schema_rows:
+                        # Col Name, Type, Len, Prec, Scale, Nullable
+                        schema.append({
+                            'name': s[0],
+                            'type': s[1],
+                            'length': s[2],
+                            'precision': s[3],
+                            'scale': s[4],
+                            'nullable': s[5]
+                        })
+                except Exception as ex_schema:
+                    # DMV might not exist or parsing error
+                    self.config_parser.print_log_message('DEBUG', f"Schema discovery failed (ignoring): {ex_schema}")
+                    pass
+
             cursor.close()
             self.disconnect()
 
-            if row:
-                return row[0]
+            if definition:
+                return {
+                    'definition': definition,
+                    'return_schema': schema
+                }
             return None
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"Error fetching function/procedure code for id {funcproc_id}: {e}")
             return None
 
     def convert_funcproc_code(self, settings):
-        funcproc_code = settings['funcproc_code']
+        funcproc_code_input = settings['funcproc_code']
+        # Handle dict input (with schema) vs string input
+        if isinstance(funcproc_code_input, dict):
+             funcproc_code = funcproc_code_input.get('definition', '')
+             implicit_return_schema = funcproc_code_input.get('return_schema', [])
+        else:
+             funcproc_code = str(funcproc_code_input)
+             implicit_return_schema = []
+
         # target_db_type = settings['target_db_type'] # Unused
         # source_schema = settings['source_schema'] # Unused
         target_schema = settings['target_schema']
@@ -765,7 +816,25 @@ class MsSQLConnector(DatabaseConnector):
 
         is_proc = 'PROC' in obj_type_raw
         pg_type = 'PROCEDURE' if is_proc else 'FUNCTION'
-        self.config_parser.print_log_message('DEBUG', f"DEBUG Parsing: obj_type_raw={obj_type_raw}, is_proc={is_proc}, pg_type={pg_type}")
+
+        is_implicit_return = False
+        if is_proc and implicit_return_schema:
+             pg_type = 'FUNCTION'
+             is_implicit_return = True
+
+        self.config_parser.print_log_message('DEBUG', f"DEBUG Parsing: obj_type_raw={obj_type_raw}, is_proc={is_proc}, pg_type={pg_type}, implicit_return={is_implicit_return}")
+
+
+
+
+
+        # I must include the middle parts.
+
+        # NOTE: To minimize context size, I will break this into two edits if needed, or include the whole block.
+        # Lines 766 to 848 is ~80 lines.
+
+
+
 
         # 3. separate Body from Header
         # Usually AS begins the body. But parameters can be complex.
@@ -805,7 +874,7 @@ class MsSQLConnector(DatabaseConnector):
         if has_rowcount:
              declarations.append('_rowcount INTEGER;')
 
-        converted_stmts = self._convert_stmts(processed_body, settings, has_rowcount=has_rowcount)
+        converted_stmts = self._convert_stmts(processed_body, settings, has_rowcount=has_rowcount, implicit_return=is_implicit_return)
         pg_body_content = "\n".join(converted_stmts)
 
         # 4. Construct Header (Parameters)
@@ -819,7 +888,28 @@ class MsSQLConnector(DatabaseConnector):
 
         # Look for RETURNS clause (for functions)
         returns_clause = "RETURNS VOID" # Default for proc? No, Proc has no return
-        if not is_proc:
+
+        if is_implicit_return:
+             # Construct RETURNS TABLE for implicit result sets
+             col_defs = []
+             for col in implicit_return_schema:
+                  c_name = col['name']
+                  c_type = col.get('system_type_name', 'text') # Default text
+
+                  # Map column type
+                  t_mapped = self._apply_data_type_substitutions(c_type)
+                  t_mapped = self._apply_udt_to_base_type_substitutions(t_mapped, settings)
+                  for ms, pg_tgt in types_mapping.items():
+                       t_mapped = re.sub(rf'\b{re.escape(ms)}\b', pg_tgt, t_mapped, flags=re.IGNORECASE)
+
+                  col_defs.append(f'"{c_name}" {t_mapped}')
+
+             if col_defs:
+                  returns_clause = f"RETURNS TABLE ({', '.join(col_defs)})"
+             else:
+                  returns_clause = "RETURNS VOID" # Schema was empty?
+
+        elif not is_proc:
              ret_match = re.search(r'\bRETURNS\s+(.*)', header_clean, re.IGNORECASE)
              if ret_match:
                   ret_type_raw = ret_match.group(1).strip()
@@ -908,7 +998,7 @@ class MsSQLConnector(DatabaseConnector):
 
         ddl = f"""
 CREATE OR REPLACE {pg_type} "{target_schema}".{pg_name}({pg_params_str})
-{returns_clause if not is_proc else ''}
+{returns_clause if pg_type == 'FUNCTION' else ''}
 AS $$
 {decl_section}
 BEGIN
@@ -1921,7 +2011,7 @@ EXECUTE FUNCTION "{func_schema}"."{func_name}"();
 
 
 
-    def _convert_stmts(self, body_content, settings, is_nested=False, has_rowcount=False, is_trigger=False):
+    def _convert_stmts(self, body_content, settings, is_nested=False, has_rowcount=False, is_trigger=False, implicit_return=False):
         import base64
         processed_body = body_content
 
@@ -2113,6 +2203,11 @@ EXECUTE FUNCTION "{func_schema}"."{func_name}"();
                       return "\n".join(assignments)
 
              pg_sql = expression.sql(dialect='postgres')
+
+             # Handle Implicit Return (SELECT -> RETURN QUERY SELECT)
+             # Must not be an assignment (handled above) or INTO (handled by SQLGlot usually, or check args)
+             if implicit_return and isinstance(expression, exp.Select) and not expression.args.get('into'):
+                  pg_sql = f"RETURN QUERY {pg_sql}"
 
              if pg_sql.strip().upper() == 'BEGIN': return None
 

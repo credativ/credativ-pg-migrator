@@ -711,6 +711,9 @@ class MsSQLConnector(DatabaseConnector):
             raise
 
     def convert_view_code(self, settings: dict):
+        # Fetch UDT map for substitution
+        udt_lookup_map = self._get_udt_map()
+
         def quote_column_names(node):
             if isinstance(node, sqlglot.exp.Column) and node.name and node.name != '*':
                 node.set("this", sqlglot.exp.Identifier(this=node.name, quoted=True))
@@ -800,12 +803,10 @@ class MsSQLConnector(DatabaseConnector):
             if isinstance(node, sqlglot.exp.DataType):
                 # Check if the type is a UDT
                 type_name = node.this.name if hasattr(node.this, 'name') else str(node.this)
-                if type_name in settings.get('udts', {}):
-                     udt_info = settings['udts'][type_name]
-                     # Replace with system type definition
-                     # We can parse the definition back into a DataType or just string replace if simple
-                     # Simplest is to replace the DataType node with a new one based on system_type
-                     return sqlglot.exp.DataType.build(udt_info['definition'])
+                
+                if type_name in udt_lookup_map:
+                     udt_info = udt_lookup_map[type_name]
+                     return sqlglot.exp.DataType.build(udt_info['sql']) # Use 'sql' or 'definition'
             return node
 
         def transform_sybase_joins(expression):
@@ -1235,6 +1236,7 @@ class MsSQLConnector(DatabaseConnector):
             cursor.execute(query)
             rows = cursor.fetchall()
 
+            order_num = 1
             for row in rows:
                 type_name = row[0]
                 system_type = row[1].upper()
@@ -1245,21 +1247,24 @@ class MsSQLConnector(DatabaseConnector):
                 # Construct definition
                 definition = system_type
                 if self.is_string_type(system_type) and max_length != -1:
-                    # max_length is in bytes. For nvarchar/nchar, it's 2x chars.
-                    # But often in DDL we just want the base type if let postgres handle it?
-                    # Or we reproduce the constraint.
-                    # Simpler is to map to the system type name for now,
-                    # but if we want full definition:
                     length = max_length // 2 if system_type in ('NCHAR', 'NVARCHAR') else max_length
                     definition = f"{system_type}({length})"
                 elif self.is_numeric_type(system_type):
                     if system_type in ('DECIMAL', 'NUMERIC'):
                         definition = f"{system_type}({precision}, {scale})"
 
-                udts[type_name] = {
-                    'system_type': system_type,
-                    'definition': definition
+                # Structure expected by Planner: keyed by integer order_num
+                udts[order_num] = {
+                    'type_name': type_name,
+                    'base_type': system_type,
+                    'length': max_length,
+                    'prec': precision,
+                    'scale': scale,
+                    'sql': definition,
+                    'schema_name': schema,
+                    'comment': ''
                 }
+                order_num += 1
 
             cursor.close()
             self.disconnect()
@@ -1267,6 +1272,14 @@ class MsSQLConnector(DatabaseConnector):
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"Error fetching UDTs: {e}")
             return {}
+
+    def _get_udt_map(self):
+        """ Helper to get a map of UDT name -> definition for conversion logic """
+        udts_full = self.fetch_user_defined_types('dbo')
+        udt_map = {}
+        for k, v in udts_full.items():
+            udt_map[v['type_name']] = v
+        return udt_map
 
     def get_sequence_current_value(self, sequence_name: str):
         pass

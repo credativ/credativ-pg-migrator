@@ -717,20 +717,25 @@ class MsSQLConnector(DatabaseConnector):
             return node
 
         def replace_schema_names(node):
-            if isinstance(node, sqlglot.exp.Table):
+            if isinstance(node, (sqlglot.exp.Table, sqlglot.exp.Column)):
                 schema = node.args.get("db")
                 if schema and schema.name == settings['source_schema']:
                     node.set("db", sqlglot.exp.Identifier(this=settings['target_schema'], quoted=False))
             return node
 
         def quote_schema_and_table_names(node):
-            if isinstance(node, sqlglot.exp.Table):
+            if isinstance(node, (sqlglot.exp.Table, sqlglot.exp.Column)):
                 # Quote schema name if present
                 schema = node.args.get("db")
                 if schema and not schema.args.get("quoted"):
                     schema.set("quoted", True)
+                
                 # Quote table name
-                table = node.args.get("this")
+                if isinstance(node, sqlglot.exp.Table):
+                    table = node.args.get("this")
+                else:
+                    table = node.args.get("table")
+
                 if table and not table.args.get("quoted"):
                     table.set("quoted", True)
             return node
@@ -798,28 +803,20 @@ class MsSQLConnector(DatabaseConnector):
             return expression
 
         view_code = settings['view_code']
-        view_code = view_code.replace('"', '').replace('[', '').replace(']', '')
-
-        # Remove CREATE VIEW header if present (as fetch_view_code returns full definition)
-        # Use regex to find AS and take everything after
-        # But be careful about header comments or AS in options.
-        if "CREATE VIEW" in view_code.upper():
-             match = re.search(r'CREATE\s+VIEW\s+.*?\s+AS\s+(.*)', view_code, re.IGNORECASE | re.DOTALL)
-             if match:
-                 view_code = match.group(1)
-
-        cleaned_view_code = view_code
-
         CustomTSQL.Parser.config_parser = self.config_parser
         try:
-            expressions = sqlglot.parse(cleaned_view_code, read=CustomTSQL)
+            expressions = sqlglot.parse(view_code, read=CustomTSQL)
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"Failed to parse view code: {e}")
-            return f"-- ERROR parsing view: {e}\n/*\n{cleaned_view_code}\n*/"
+            return f"-- ERROR parsing view: {e}\n/*\n{view_code}\n*/"
 
         transformed_sqls = []
         for expression in expressions:
             try:
+                # Unwrap CREATE VIEW to get the inner SELECT/query
+                if isinstance(expression, sqlglot.exp.Create):
+                    expression = expression.expression
+
                 # Apply transformations
                 expression = expression.transform(quote_column_names)
                 expression = expression.transform(replace_functions)
@@ -838,7 +835,7 @@ class MsSQLConnector(DatabaseConnector):
         target_schema = settings['target_schema']
         target_view_name = settings['target_view_name']
         
-        final_view_sql = f"CREATE OR REPLACE VIEW {target_schema}.\"{target_view_name}\" AS\n{final_select_sql};"
+        final_view_sql = f"CREATE OR REPLACE VIEW \"{target_schema}\".\"{target_view_name}\" AS\n{final_select_sql};"
         return final_view_sql
 
     def migrate_table(self, migrate_target_connection, settings):
@@ -934,10 +931,10 @@ class MsSQLConnector(DatabaseConnector):
                         # elif col['data_type'].lower() == 'set':
                         #     select_columns_list.append(f"cast(`{col['column_name']}` as char(4000)) as `{col['column_name']}`")
                         # else:
-                        select_columns_list.append(f'''{col['column_name']}''')
+                        select_columns_list.append(f'''[{col['column_name']}]''')
 
                         insert_columns_list.append(f'''"{self.config_parser.convert_names_case(col['column_name'])}"''')
-                        orderby_columns_list.append(f'''"{col['column_name']}"''')
+                        orderby_columns_list.append(f'''[{col['column_name']}]''')
 
                     select_columns = ', '.join(select_columns_list)
                     insert_columns = ', '.join(insert_columns_list)
@@ -963,7 +960,7 @@ class MsSQLConnector(DatabaseConnector):
                     #         query += f" WHERE {migration_limitation}"
                     # else:
 
-                    query = f"SELECT {select_columns} FROM {source_schema}.{source_table}"
+                    query = f"SELECT {select_columns} FROM [{source_schema}].[{source_table}]"
                     if migration_limitation:
                         query += f" WHERE {migration_limitation}"
                     primary_key_columns = migrator_tables.select_primary_key(source_schema, source_table)

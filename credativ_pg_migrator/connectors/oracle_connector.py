@@ -73,6 +73,9 @@ class OracleConnector(DatabaseConnector):
         else:
             self.config_parser.print_log_message('ERROR', f"Unsupported target database type: {target_db_type}")
 
+    def migrate_sequences(self, target_connector, settings):
+        return True
+
     def fetch_table_names(self, table_schema: str):
         query = f"""
             SELECT table_name
@@ -986,6 +989,7 @@ class OracleConnector(DatabaseConnector):
         return {}
 
     def get_table_description(self, settings) -> dict:
+        self.config_parser.print_log_message('DEBUG3', f"Oracle connector: Getting table description for {settings['table_schema']}.{settings['table_name']}")
         table_schema = settings['table_schema']
         table_name = settings['table_name']
         output = ""

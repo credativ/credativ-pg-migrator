@@ -80,6 +80,7 @@ def main():
         orchestrator = Orchestrator(config_parser)
         orchestrator.run()
 
+        logger.logger.info(f"""{MigratorConstants.get_full_name()}, version: {MigratorConstants.get_version()}""")
         logger.logger.info("Migration Done")
         logger.stop_logging()
 

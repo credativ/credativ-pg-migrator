@@ -76,6 +76,9 @@ class InformixConnector(DatabaseConnector):
         else:
             self.config_parser.print_log_message('ERROR', f"Unsupported target database type: {target_db_type}")
 
+    def migrate_sequences(self, target_connector, settings):
+        return True
+
     def fetch_table_names(self, table_schema: str):
         query = f"""
             SELECT tabid, tabname
@@ -1788,6 +1791,7 @@ class InformixConnector(DatabaseConnector):
 
     def get_table_description(self, settings) -> dict:
         # Placeholder for fetching table description
+        self.config_parser.print_log_message('DEBUG3', f"Informix connector: Getting table description for {settings['table_schema']}.{settings['table_name']}")
         return { 'table_description': '' }
 
     def testing_select(self):

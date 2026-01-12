@@ -55,13 +55,19 @@ class PostgreSQLConnector(DatabaseConnector):
     def fetch_table_names(self, schema: str = 'public'):
         query = f"""
             SELECT
-                oid,
-                relname,
-                obj_description(oid, 'pg_class') as table_comment
-            FROM pg_class
-            WHERE relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = '{schema}')
-            AND relkind in ('r', 'p')
-            ORDER BY relname
+                c.oid,
+                c.relname,
+                obj_description(c.oid, 'pg_class') as table_comment,
+                c.relkind,
+                c.relispartition,
+                pg_get_partkeydef(c.oid) as partition_key_def,
+                pg_get_expr(c.relpartbound, c.oid) as partition_bound,
+                (SELECT relname FROM pg_class WHERE oid = i.inhparent) as parent_table
+            FROM pg_class c
+            LEFT JOIN pg_inherits i ON c.oid = i.inhrelid
+            WHERE c.relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = '{schema}')
+            AND c.relkind in ('r', 'p')
+            ORDER BY c.relname
         """
         self.config_parser.print_log_message('DEBUG3', f"Reading table names for {schema}")
         self.config_parser.print_log_message('DEBUG3', f"Query: {query}")
@@ -76,7 +82,12 @@ class PostgreSQLConnector(DatabaseConnector):
                     'id': row[0],
                     'schema_name': schema,
                     'table_name': row[1],
-                    'comment': row[2]
+                    'comment': row[2],
+                    'relkind': row[3],
+                    'relispartition': row[4],
+                    'partition_key_def': row[5],
+                    'partition_bound': row[6],
+                    'parent_table': row[7]
                 }
                 order_num += 1
             cursor.close()
@@ -86,6 +97,128 @@ class PostgreSQLConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
             self.config_parser.print_log_message('ERROR', e)
             raise
+
+    def get_table_description(self, settings) -> dict:
+        table_schema = settings['table_schema']
+        table_name = settings['table_name']
+        output = []
+        output.append(f'Table "{table_schema}"."{table_name}"')
+        self.config_parser.print_log_message('DEBUG3', f"PostgreSQL connector: Getting table description for {table_schema}.{table_name}")
+
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+
+            # 1. Attributes (Columns)
+            # Fetch: Column, Type, Nullable, Default
+            query_columns = f"""
+                SELECT column_name, data_type, is_nullable, column_default
+                FROM information_schema.columns
+                WHERE table_schema = '{table_schema}' AND table_name = '{table_name}'
+                ORDER BY ordinal_position
+            """
+            cursor.execute(query_columns)
+            columns = cursor.fetchall()
+
+            if columns:
+                headers = ['Column', 'Type', 'Nullable', 'Default']
+                rows = []
+                for col in columns:
+                    name = str(col[0]) if col[0] is not None else ''
+                    dtype = str(col[1]) if col[1] is not None else ''
+                    nullable = str(col[2]) if col[2] is not None else ''
+                    default = str(col[3]) if col[3] is not None else ''
+                    rows.append([name, dtype, nullable, default])
+
+                # Calculate column widths
+                widths = [len(h) for h in headers]
+                for row in rows:
+                    for i, val in enumerate(row):
+                        if len(val) > widths[i]:
+                            widths[i] = len(val)
+
+                # Format Table
+                header_line = " | ".join(h.ljust(widths[i]) for i, h in enumerate(headers))
+                output.append(header_line)
+                divider_line = "-+-".join("-" * widths[i] for i in range(len(widths)))
+                output.append(divider_line)
+
+                for row in rows:
+                    line = " | ".join(row[i].ljust(widths[i]) for i in range(len(row)))
+                    output.append(line)
+
+            output.append("")
+
+            # 2. Indexes
+            # Use pg_indexes as information_schema standard does not fully cover indexes in PG
+            query_indexes = f"""
+                SELECT indexname, indexdef
+                FROM pg_indexes
+                WHERE schemaname = '{table_schema}' AND tablename = '{table_name}'
+            """
+            cursor.execute(query_indexes)
+            indexes = cursor.fetchall()
+            if indexes:
+                output.append("Indexes:")
+                for idx in indexes:
+                    output.append(f"    {idx[1]}")
+
+            # 3. Constraints
+            # Use pg_constraint for robust definition
+            query_constraints = f"""
+                SELECT conname, pg_get_constraintdef(oid), contype
+                FROM pg_constraint
+                WHERE conrelid = '"{table_schema}"."{table_name}"'::regclass
+            """
+            cursor.execute(query_constraints)
+            pg_cons = cursor.fetchall()
+
+            check_constraints = []
+            fk_constraints = []
+
+            for con in pg_cons:
+                name = con[0]
+                definition = con[1]
+                contype = con[2] # c=check, f=foreign key, p=primary key, u=unique
+
+                # Primary keys and Unique constraints are typically listed in Indexes section (as matching indexes)
+                # So we focus on Checks and Foreign Keys here similar to psql output
+                if contype == 'c':
+                    check_constraints.append(f"    \"{name}\" CHECK {definition}")
+                elif contype == 'f':
+                    fk_constraints.append(f"    \"{name}\" {definition}")
+
+            if check_constraints:
+                output.append("Check constraints:")
+                output.extend(check_constraints)
+
+            if fk_constraints:
+                output.append("Foreign-key constraints:")
+                output.extend(fk_constraints)
+
+            # 4. Triggers (Optional but good for \d+)
+            # Use simple query from information_schema
+            query_triggers = f"""
+                SELECT trigger_name, action_timing, event_manipulation
+                FROM information_schema.triggers
+                WHERE event_object_schema = '{table_schema}' AND event_object_table = '{table_name}'
+            """
+            cursor.execute(query_triggers)
+            triggers = cursor.fetchall()
+            if triggers:
+                output.append("Triggers:")
+                for trig in triggers:
+                    output.append(f"    {trig[0]} {trig[1]} {trig[2]}")
+
+            cursor.close()
+            self.disconnect()
+
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error getting table description for {table_schema}.{table_name}: {e}")
+            return {'table_description': f"Error: {str(e)}"}
+
+        self.config_parser.print_log_message('DEBUG3', f"Table description for {table_schema}.{table_name}: {output}")
+        return {'table_description': "\\n".join(output)}
 
     def fetch_table_columns(self, settings) -> dict:
         table_schema = settings['table_schema']
@@ -185,6 +318,24 @@ class PostgreSQLConnector(DatabaseConnector):
         migrator_tables = settings['migrator_tables']
         create_table_sql = ""
         create_table_sql_parts = []
+
+        if self.config_parser.get_source_db_type() == 'postgresql':
+           table_info_list = self.fetch_table_names(source_schema)
+           # Find key for current table
+           current_table_info = None
+           for key, val in table_info_list.items():
+               if val['table_name'] == source_table:
+                   current_table_info = val
+                   break
+
+           if current_table_info:
+               if current_table_info.get('relispartition'):
+                   # It is a partition. Generate CREATE TABLE ... PARTITION OF ...
+                   parent_table = current_table_info.get('parent_table')
+                   partition_bound = current_table_info.get('partition_bound')
+                   # For partition, we don't list columns as they are inherited
+                   create_table_sql = f"""CREATE TABLE "{target_schema}"."{target_table_name}" PARTITION OF "{target_schema}"."{parent_table}" {partition_bound}"""
+                   return create_table_sql
 
         self.config_parser.print_log_message('DEBUG', f"Creating DDL for table {target_schema}.{target_table_name}, case handling: {self.config_parser.get_names_case_handling()}")
 
@@ -343,7 +494,7 @@ class PostgreSQLConnector(DatabaseConnector):
 
             if column_default != '':
                 if (('CHAR' in column_data_type or column_data_type in ('TEXT'))
-                    and ('||' in column_default or '(' in column_default or ')' in column_default)):
+                    and ('||' in column_default or '(' in column_default or ')' in column_default or '::' in column_default)):
                     # default value is here NOT quoted
                     create_column_sql += f""" DEFAULT {column_default}""".replace("''", "'")
                 elif 'CHAR' in column_data_type or column_data_type in ('TEXT'):
@@ -391,7 +542,12 @@ class PostgreSQLConnector(DatabaseConnector):
             create_table_sql_parts.append(create_column_sql)
 
         create_table_sql = ", ".join(create_table_sql_parts)
-        create_table_sql = f"""CREATE TABLE "{target_schema}"."{target_table_name}" ({create_table_sql})"""
+
+        if self.config_parser.get_source_db_type() == 'postgresql' and current_table_info and current_table_info.get('relkind') == 'p':
+            partition_key_def = current_table_info.get('partition_key_def')
+            create_table_sql = f"""CREATE TABLE "{target_schema}"."{target_table_name}" ({create_table_sql}) PARTITION BY {partition_key_def}"""
+        else:
+            create_table_sql = f"""CREATE TABLE "{target_schema}"."{target_table_name}" ({create_table_sql})"""
         return create_table_sql
 
     def is_string_type(self, column_type: str) -> bool:
@@ -549,6 +705,7 @@ class PostgreSQLConnector(DatabaseConnector):
                 obj_description(oid, 'pg_constraint') as constraint_comment
             FROM pg_constraint
             WHERE conrelid = '{source_table_id}'::regclass
+            AND contype NOT IN ('n')
         """
         try:
             self.connect()
@@ -669,7 +826,61 @@ class PostgreSQLConnector(DatabaseConnector):
         return create_constraint_query
 
     def fetch_triggers(self, table_id: int, table_schema: str, table_name: str):
-        pass
+        triggers = {}
+        order_num = 1
+        query = f"""
+            SELECT
+                t.oid,
+                t.tgname,
+                pg_get_triggerdef(t.oid) as definition,
+                t.tgtype::text,
+                t.tgisinternal,
+                t.tgenabled,
+                obj_description(t.oid, 'pg_trigger') as comment,
+                t.tgtype
+            FROM pg_trigger t
+            JOIN pg_class c ON t.tgrelid = c.oid
+            JOIN pg_namespace n ON c.relnamespace = n.oid
+            WHERE c.oid = {table_id}
+            AND NOT t.tgisinternal
+        """
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            for row in cursor.fetchall():
+                # Detect event and timing from tgtype (bitmask) or just rely on definition
+                # tgtype definition:
+                # 2 = BEFORE
+                # 0 = AFTER (default?) -> actually checking bits
+                # It is easier to rely on pg_get_triggerdef for the full SQL.
+                # But planner expects decomposed values: event, new, old, etc?
+                # looking at planner.py:
+                # trigger_details['event']
+                # trigger_details['new']
+                # trigger_details['old']
+                # trigger_details['sql']
+
+                # For PG, we simply put the full definition in 'sql'.
+                # The other fields might be purely informational for logging or other connectors.
+
+                triggers[order_num] = {
+                    'id': row[0],
+                    'name': row[1],
+                    'sql': row[2],
+                    'event': 'See SQL', # simplified
+                    'new': '',
+                    'old': '',
+                    'comment': row[6]
+                }
+                order_num += 1
+            cursor.close()
+            self.disconnect()
+            return triggers
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
+            raise
 
     def execute_query(self, query: str, params=None):
         with self.connection.cursor() as cursor:
@@ -874,7 +1085,7 @@ class PostgreSQLConnector(DatabaseConnector):
                             for order_num, column in source_columns.items():
                                 column_name = column['column_name']
                                 column_type = column['data_type']
-                                if column_type in ['bytea']:
+                                if column_type in ['bytea'] and record[column_name] is not None:
                                     record[column_name] = record[column_name].tobytes()
 
                         # Insert batch into target table
@@ -1077,20 +1288,75 @@ class PostgreSQLConnector(DatabaseConnector):
         return inserted_rows
 
     def fetch_funcproc_names(self, schema: str):
-        pass
+        funcprocs = {}
+        order_num = 1
+        query = f"""
+            SELECT
+                p.oid,
+                p.proname,
+                pg_get_function_identity_arguments(p.oid) as arguments,
+                obj_description(p.oid, 'pg_proc') as comment,
+                p.prokind
+            FROM pg_proc p
+            JOIN pg_namespace n ON p.pronamespace = n.oid
+            WHERE n.nspname = '{schema}'
+              AND p.prokind IN ('f', 'p')
+            ORDER BY p.proname
+        """
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            for row in cursor.fetchall():
+                func_type = 'PROCEDURE' if row[4] == 'p' else 'FUNCTION'
+                funcprocs[order_num] = {
+                    'id': row[0],
+                    'name': row[1],
+                    'header': f"{row[1]}({row[2]})",
+                    'comment': row[3],
+                    'type': func_type
+                }
+                order_num += 1
+            cursor.close()
+            self.disconnect()
+            return funcprocs
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
+            raise
 
     def fetch_funcproc_code(self, funcproc_id: int):
-        pass
+        query = f"SELECT pg_get_functiondef({funcproc_id})"
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            code = cursor.fetchone()[0]
+            cursor.close()
+            self.disconnect()
+            return code
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
+            raise
 
     def convert_funcproc_code(self, settings):
         funcproc_code = settings['funcproc_code']
-        target_db_type = settings['target_db_type']
+        # target_db_type = settings['target_db_type']
         source_schema = settings['source_schema']
         target_schema = settings['target_schema']
-        table_list = settings['table_list']
-        view_list = settings['view_list']
-        converted_code = ''
-        # placeholder for actual conversion logic
+
+        # Simple schema replacement if they differ
+        converted_code = funcproc_code
+        if source_schema != target_schema:
+            # Replace schema references
+            # Use loose matching or generic replace for source_schema
+            # This is risky if schema name is common word, but standard practice in this simple migration
+            # Better: Replace "source_schema". with "target_schema".
+            converted_code = converted_code.replace(f'"{source_schema}".', f'"{target_schema}".')
+            # Also without quotes?
+            converted_code = converted_code.replace(f'{source_schema}.', f'{target_schema}.')
+
         return converted_code
 
     def handle_error(self, e, description=None):
@@ -1130,11 +1396,14 @@ class PostgreSQLConnector(DatabaseConnector):
             cursor = self.connection.cursor()
             cursor.execute(query)
             for row in cursor.fetchall():
+                sequence_details = self.get_sequence_details(table_schema, row[0])
+
                 sequence_data[order_num] = {
                     'name': row[0],
                     'id': row[1],
                     'column_name': row[2],
-                    'set_sequence_sql': row[3]
+                    'set_sequence_sql': row[3],
+                    'details': sequence_details # Embed details
                 }
             cursor.close()
             # self.disconnect()
@@ -1144,8 +1413,47 @@ class PostgreSQLConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', e)
 
     def get_sequence_details(self, sequence_owner, sequence_name):
-        # Placeholder for fetching sequence details
-        return {}
+        query = f"""
+            SELECT
+                s.seqmin,
+                s.seqmax,
+                s.seqincrement,
+                s.seqcycle,
+                s.seqcache,
+                s.seqstart
+            FROM pg_sequence s
+            JOIN pg_class c ON s.seqrelid = c.oid
+            JOIN pg_namespace n ON c.relnamespace = n.oid
+            WHERE n.nspname = '{sequence_owner}'
+              AND c.relname = '{sequence_name}'
+        """
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            result = cursor.fetchone()
+            cursor.close()
+            self.disconnect()
+
+            if result:
+                return {
+                    'name': sequence_name,
+                    'min_value': result[0],
+                    'max_value': result[1],
+                    'increment_by': result[2],
+                    'cycle': result[3],
+                    'cache_size': result[4],
+                    'last_value': result[5], # seqstart is 'start value', current value needs get_sequence_current_value
+                    'start_value': result[5],
+                    'comment': ''
+                }
+            else:
+                return None
+
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error executing sequence query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
+            raise
 
     def get_sequence_current_value(self, sequence_id: int):
         try:
@@ -1187,8 +1495,18 @@ class PostgreSQLConnector(DatabaseConnector):
         cursor.close()
         return size
 
-    def convert_trigger(self, trigger_id: int, target_db_type: str, target_schema: str):
-        pass
+    def convert_trigger(self, settings: dict):
+        trigger_sql = settings['trigger_sql']
+        source_schema = settings['source_schema']
+        target_schema = settings['target_schema']
+
+        # Simple schema replacement
+        converted_code = trigger_sql
+        if source_schema != target_schema:
+             converted_code = converted_code.replace(f'"{source_schema}".', f'"{target_schema}".')
+             converted_code = converted_code.replace(f'{source_schema}.', f'{target_schema}.')
+
+        return converted_code
 
     def fetch_views_names(self, source_schema: str):
         views = {}
@@ -1197,9 +1515,10 @@ class PostgreSQLConnector(DatabaseConnector):
             SELECT
                 oid,
                 relname as viewname,
-                obj_description(oid, 'pg_class') as view_comment
+                obj_description(oid, 'pg_class') as view_comment,
+                relkind
             FROM pg_class
-            WHERE relkind = 'v'
+            WHERE relkind IN ('v', 'm')
             AND relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = '{source_schema}')
             AND relname NOT LIKE 'pg_%'
             ORDER BY viewname
@@ -1209,11 +1528,13 @@ class PostgreSQLConnector(DatabaseConnector):
             cursor = self.connection.cursor()
             cursor.execute(query)
             for row in cursor.fetchall():
+                view_type = 'MATERIALIZED VIEW' if row[3] == 'm' else 'VIEW'
                 views[order_num] = {
                     'id': row[0],
                     'schema_name': source_schema,
                     'view_name': row[1],
-                    'comment': row[2]
+                    'comment': row[2],
+                    'view_type': view_type
                 }
                 order_num += 1
             cursor.close()
@@ -1224,17 +1545,127 @@ class PostgreSQLConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', e)
             raise
 
+    def migrate_sequences(self, target_connector, settings):
+        source_schema = settings['source_schema']
+        target_schema = settings['target_schema']
+        migrator_tables = settings.get('migrator_tables')
+
+        self.config_parser.print_log_message('INFO', f"Migrating sequences from {source_schema} to {target_schema}...")
+
+        query = f"""
+            SELECT c.relname, c.oid
+            FROM pg_class c
+            JOIN pg_namespace n ON c.relnamespace = n.oid
+            WHERE n.nspname = '{source_schema}'
+              AND c.relkind = 'S'
+        """
+
+        try:
+            self.connect()
+            target_connector.connect() # Ensure target is connected
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            sequences = cursor.fetchall() # list of (name, oid) matches
+            cursor.close()
+
+            for seq_row in sequences:
+                seq_name = seq_row[0]
+                seq_oid = seq_row[1]
+
+                self.config_parser.print_log_message('DEBUG', f"Processing sequence: {seq_name}")
+
+                # Insert into protocol table if migrator_tables is available
+                # We don't have table/column info here as we are migrating all sequences in schema
+                if migrator_tables:
+                    try:
+                        # set_sequence_sql will be populated later, but we need to insert first to get ID/track start?
+                        # insert_sequence(self, sequence_id, schema_name, table_name, column_name, sequence_name, set_sequence_sql)
+                        # We'll update it later or insert it now with placeholders?
+                        # Usually insert happens before work starts to track 'started', but insert_sequence seems to just log existence?
+                        # Looking at other methods, insert_* usually logs the item and then update_* sets status.
+                        migrator_tables.insert_sequence(seq_oid, source_schema, '', '', seq_name, '')
+                    except Exception as e:
+                        self.config_parser.print_log_message('ERROR', f"Failed to insert sequence {seq_name} into protocol: {e}")
+
+                details = self.get_sequence_details(source_schema, seq_name)
+
+                # Fetch current value separately as it's not in pg_sequence catalog
+                # Re-connect because get_sequence_details closes the connection
+                self.connect()
+                curr_val_query = f"SELECT last_value, is_called FROM {source_schema}.{seq_name}"
+                cursor = self.connection.cursor()
+                cursor.execute(curr_val_query)
+                curr_val_row = cursor.fetchone()
+                last_value = curr_val_row[0]
+                is_called = curr_val_row[1]
+                cursor.close()
+                self.disconnect()
+
+                # Generate CREATE SEQUENCE
+                # Details: min_value, max_value, increment_by, cycle, cache_size, start_value
+                # We use START WITH = last_value to ensure it picks up where it left off,
+                # OR we use START WITH = min_value and then setval?
+                # Postgres dump usually does CREATE SEQUENCE ...; SELECT setval(...);
+
+                # If we use setval, CREATE SEQUENCE can just use defaults or original properties.
+                # However, if we want `START WITH` to be correct for a fresh init, we might want original start_value (which we have in details['start_value'])
+                # But `last_value` is the critical runtime state.
+
+                cycle_str = "CYCLE" if details['cycle'] else "NO CYCLE"
+                create_sql = f"""CREATE SEQUENCE IF NOT EXISTS "{target_schema}"."{seq_name}"
+                    INCREMENT BY {details['increment_by']}
+                    MINVALUE {details['min_value']}
+                    MAXVALUE {details['max_value']}
+                    START WITH {details['start_value']}
+                    CACHE {details['cache_size']}
+                    {cycle_str};
+                """
+
+                setval_sql = f"SELECT setval('\"{target_schema}\".\"{seq_name}\"', {last_value}, {'true' if is_called else 'false'});"
+
+                self.config_parser.print_log_message('DEBUG', f"Sequence {seq_name} SQL: {create_sql}")
+                self.config_parser.print_log_message('DEBUG', f"Sequence {seq_name} SETVAL: {setval_sql}")
+
+                try:
+                    target_connector.execute_query(create_sql)
+                    target_connector.execute_query(setval_sql)
+
+                    if migrator_tables:
+                        # Update protocol with success and the setval SQL used
+                        # Note: update_sequence_status doesn't update SQL. insert check above put empty SQL.
+                        # Ideally we should have inserted SQL there. But we didn't have it yet.
+                        # Maybe we should DELETE and re-INSERT or just update status?
+                        # insert_sequence puts it in 'sequences' table.
+                        # update_sequence_status updates 'sequences' table.
+                        # If I want to save the SQL, I might need to update it.
+                        # But migrator_tables implementation of update_sequence_status only updates success/message/time.
+                        # So I should probably insert with the SQL if I can generate it before?
+                        # No, I generate it later.
+                        # I'll just leave SQL empty or put "See logs" if I can't update it.
+                        # Or I accept that the protocol table won't show the SQL.
+                        migrator_tables.update_sequence_status(seq_oid, True, 'migrated OK')
+
+                except Exception as ex:
+                    self.config_parser.print_log_message('ERROR', f"Failed to migrate sequence {seq_name}: {ex}")
+                    if migrator_tables:
+                        migrator_tables.update_sequence_status(seq_oid, False, str(ex))
+
+            self.disconnect()
+            target_connector.disconnect()
+            return True
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error migrating sequences: {e}")
+            self.disconnect()
+            # Try to disconnect target if possible, though it might be closed/failed
+            try:
+                target_connector.disconnect()
+            except:
+                pass
+            raise
+
     def fetch_view_code(self, settings):
         view_id = settings['view_id']
-        # source_schema = settings['source_schema']
-        # source_view_name = settings['source_view_name']
-        # target_schema = settings['target_schema']
-        # target_view_name = settings['target_view_name']
-        query = f"""
-            SELECT definition
-            FROM pg_views
-            WHERE (schemaname||'.'||viewname)::regclass::oid = {view_id}
-        """
+        query = f"SELECT pg_get_viewdef({view_id}, true)"
         try:
             self.connect()
             cursor = self.connection.cursor()
@@ -1250,28 +1681,38 @@ class PostgreSQLConnector(DatabaseConnector):
 
     def convert_view_code(self, settings: dict):
         view_code = settings['view_code']
-        return view_code
+        view_name = settings['target_view_name']
+        target_schema = settings['target_schema']
+        view_type = settings.get('view_type', 'VIEW')
+
+        ddl = f'CREATE {view_type} "{target_schema}"."{view_name}" AS {view_code}'
+        if not ddl.strip().endswith(';'):
+             ddl += ';'
+
+        return ddl
 
     def fetch_user_defined_types(self, schema: str):
         user_defined_types = {}
         order_num = 1
-        query = f"""
-            SELECT t.typnamespace::regnamespace::text as schemaname, typname as type_name,
-                'CREATE TYPE "'||t.typnamespace::regnamespace||'"."'||typname||'" As ENUM ('||string_agg(''''||e.enumlabel||'''', ',' ORDER BY e.enumsortorder)::text||');' AS elements,
-                obj_description(t.oid, 'pg_type') as type_comment
-            FROM pg_type AS t
-            LEFT JOIN pg_enum AS e ON e.enumtypid = t.oid
-            WHERE t.typnamespace::regnamespace::text NOT IN ('pg_catalog', 'information_schema')
-            AND t.typtype = 'e'
-            AND t.typcategory = 'E'
-            GROUP BY t.oid ORDER BY t.typnamespace::regnamespace, typname;
-        """
+        self.connect()
+        cursor = self.connection.cursor()
+
         try:
-            self.connect()
-            cursor = self.connection.cursor()
-            cursor.execute(query)
-            rows = cursor.fetchall()
-            for row in rows:
+            # 1. ENUMS
+            query_enum = f"""
+                SELECT t.typnamespace::regnamespace::text as schemaname, typname as type_name,
+                    'CREATE TYPE "'||t.typnamespace::regnamespace||'"."'||typname||'" AS ENUM ('||string_agg(''''||e.enumlabel||'''', ',' ORDER BY e.enumsortorder)::text||');' AS elements,
+                    obj_description(t.oid, 'pg_type') as type_comment
+                FROM pg_type AS t
+                JOIN pg_enum AS e ON e.enumtypid = t.oid
+                JOIN pg_namespace n ON t.typnamespace = n.oid
+                WHERE n.nspname = '{schema}'
+                AND t.typtype = 'e'
+                GROUP BY t.oid, t.typnamespace, t.typname
+                ORDER BY t.typname;
+            """
+            cursor.execute(query_enum)
+            for row in cursor.fetchall():
                 user_defined_types[order_num] = {
                     'schema_name': row[0],
                     'type_name': row[1],
@@ -1279,12 +1720,91 @@ class PostgreSQLConnector(DatabaseConnector):
                     'comment': row[3]
                 }
                 order_num += 1
+
+            # 2. Composite Types
+            query_composite = f"""
+                SELECT
+                    n.nspname,
+                    t.typname,
+                    pg_catalog.obj_description(t.oid, 'pg_type'),
+                    (
+                        SELECT string_agg('"'||a.attname||'" '||pg_catalog.format_type(a.atttypid, a.atttypmod), ', ' ORDER BY a.attnum)
+                        FROM pg_attribute a
+                        WHERE a.attrelid = t.typrelid AND a.attnum > 0 AND NOT a.attisdropped
+                    ) as attributes
+                FROM pg_type t
+                JOIN pg_namespace n ON t.typnamespace = n.oid
+                JOIN pg_class c ON t.typrelid = c.oid
+                WHERE t.typtype = 'c'
+                  AND c.relkind = 'c'
+                  AND n.nspname = '{schema}'
+                ORDER BY t.typname
+            """
+            cursor.execute(query_composite)
+            for row in cursor.fetchall():
+                schema_name = row[0]
+                type_name = row[1]
+                comment = row[2]
+                attributes = row[3]
+                sql = f'CREATE TYPE "{schema_name}"."{type_name}" AS ({attributes});'
+
+                user_defined_types[order_num] = {
+                    'schema_name': schema_name,
+                    'type_name': type_name,
+                    'sql': sql,
+                    'comment': comment
+                }
+                order_num += 1
+
+            # 3. Range Types
+            query_range = f"""
+                SELECT
+                    n.nspname,
+                    t.typname,
+                    pg_catalog.obj_description(t.oid, 'pg_type'),
+                    r.rngsubtype::regtype::text,
+                    (SELECT c.collname FROM pg_collation c WHERE c.oid = r.rngcollation AND c.collname != 'default') as collation,
+                    r.rngcanonical::regproc::text,
+                    r.rngsubdiff::regproc::text
+                FROM pg_type t
+                JOIN pg_range r ON r.rngtypid = t.oid
+                JOIN pg_namespace n ON t.typnamespace = n.oid
+                WHERE n.nspname = '{schema}'
+                ORDER BY t.typname
+            """
+            cursor.execute(query_range)
+            for row in cursor.fetchall():
+                schema_name = row[0]
+                type_name = row[1]
+                comment = row[2]
+                subtype = row[3]
+                collation = row[4]
+                canonical = row[5]
+                subdiff = row[6]
+
+                parts = [f"SUBTYPE = {subtype}"]
+                if collation:
+                    parts.append(f"COLLATION = {collation}")
+                if canonical and canonical != '-':
+                    parts.append(f"CANONICAL = {canonical}")
+                if subdiff and subdiff != '-':
+                    parts.append(f"SUBDIFF = {subdiff}")
+
+                sql = f'CREATE TYPE "{schema_name}"."{type_name}" AS RANGE ({", ".join(parts)});'
+
+                user_defined_types[order_num] = {
+                    'schema_name': schema_name,
+                    'type_name': type_name,
+                    'sql': sql,
+                    'comment': comment
+                }
+                order_num += 1
+
             cursor.close()
             self.disconnect()
             return user_defined_types
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
-            self.config_parser.print_log_message('ERROR', e)
+            self.config_parser.print_log_message('ERROR', f"Error fetching UDTs: {e}")
             raise
 
     def prepare_session_settings(self):
@@ -1322,34 +1842,89 @@ class PostgreSQLConnector(DatabaseConnector):
             raise
 
     def fetch_domains(self, schema: str):
-        # Placeholder for fetching domains
-        return {}
+        domains = {}
+        order_num = 1
+        # Fetch domains (Base type, Default, Not Null, Constraints)
+        query = f"""
+            SELECT
+                n.nspname as domain_schema,
+                t.typname as domain_name,
+                pg_catalog.format_type(t.typbasetype, t.typtypmod) as domain_data_type,
+                t.typnotnull,
+                t.typdefault,
+                pg_catalog.obj_description(t.oid, 'pg_type') as comment,
+                (SELECT string_agg(pg_get_constraintdef(r.oid), ' ') FROM pg_constraint r WHERE r.contypid = t.oid) as constraints
+            FROM pg_type t
+            JOIN pg_namespace n ON t.typnamespace = n.oid
+            LEFT JOIN pg_class c ON c.oid = t.typrelid
+            WHERE t.typtype = 'd'
+              AND n.nspname = '{schema}'
+            ORDER BY t.typname
+        """
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            for row in cursor.fetchall():
+                domains[order_num] = {
+                    'domain_schema': row[0],
+                    'domain_name': row[1],
+                    'domain_data_type': row[2],
+                    'domain_not_null': row[3],
+                    'domain_default': row[4],
+                    'domain_comment': row[5],
+                    'source_domain_check_sql': row[6], # Can be None
+                    'source_domain_sql': f"CREATE DOMAIN \"{row[0]}\".\"{row[1]}\" AS {row[2]}", # Simplified for now, real construction happen in get_create_domain_sql
+                }
+                order_num += 1
+            cursor.close()
+            self.disconnect()
+            return domains
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
+            raise
 
     def get_create_domain_sql(self, settings):
         create_domain_sql = ""
         domain_name = settings['domain_name']
         target_schema = settings['target_schema']
-        domain_check_sql = settings['source_domain_check_sql']
+        domain_check_sql = settings.get('source_domain_check_sql')
         domain_data_type = settings['domain_data_type']
-        domain_comment = settings['domain_comment']
-        migrated_as = settings['migrated_as'] if 'migrated_as' in settings else 'CHECK CONSTRAINT'
+        domain_default = settings.get('domain_default')
+        domain_not_null = settings.get('domain_not_null')
+
+        migrated_as = settings.get('migrated_as', 'CHECK CONSTRAINT')
 
         if migrated_as == 'CHECK CONSTRAINT':
-            create_domain_sql = f"""CHECK({domain_check_sql})"""
+             # Fallback logic if needed, but primarily used for sybase patterns
+             if domain_check_sql:
+                create_domain_sql = f"""CHECK({domain_check_sql})"""
+             else:
+                create_domain_sql = ""
         else:
-            create_domain_sql = f"""CREATE DOMAIN "{target_schema}"."{domain_name}" AS {domain_data_type} CHECK({domain_check_sql})"""
+            # Construct standard CREATE DOMAIN
+            sql_parts = [f'CREATE DOMAIN "{target_schema}"."{domain_name}" AS {domain_data_type}']
 
-        # if domain_comment:
-        #     create_domain_sql += f" COMMENT '{domain_comment}'"
+            if domain_default is not None:
+                sql_parts.append(f"DEFAULT {domain_default}")
+
+            if domain_not_null:
+                sql_parts.append("NOT NULL")
+
+            if domain_check_sql:
+                # pg_get_constraintdef already allows CHECK (...).
+                # If multiple constraints were aggregated, they might look like CHECK (...) CHECK (...)
+                # We just append them.
+                sql_parts.append(domain_check_sql)
+
+            create_domain_sql = " ".join(sql_parts) + ";"
+
         return create_domain_sql
 
     def fetch_default_values(self, settings) -> dict:
         # Placeholder for fetching default values
         return {}
-
-    def get_table_description(self, settings) -> dict:
-        # Placeholder for fetching table description
-        return { 'table_description': '' }
 
     def testing_select(self):
         return "SELECT 1"

@@ -292,6 +292,9 @@ class SybaseASEConnector(DatabaseConnector):
             declarations.append(part.strip() + ';')
         return ''
 
+    def migrate_sequences(self, target_connector, settings):
+        return True
+
     def fetch_table_names(self, table_schema: str):
         # 2048 = proxy table referencing remote table
         query = f"""
@@ -4322,6 +4325,7 @@ EXECUTE FUNCTION {target_schema}.{trigger_name}_func();
         return ""
 
     def get_table_description(self, settings) -> dict:
+        self.config_parser.print_log_message('DEBUG3', f"Sybase ASE connector: Getting table description for {settings['table_schema']}.{settings['table_name']}")
         table_schema = settings['table_schema']
         table_name = settings['table_name']
         output = ""

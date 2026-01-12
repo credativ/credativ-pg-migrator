@@ -379,6 +379,7 @@ class Planner:
                     'target_db_type': self.config_parser.get_target_db_type(),
                 }
                 table_description = self.source_connection.get_table_description(settings)
+                self.config_parser.print_log_message( 'DEBUG3', f"Table description: {table_description}")
                 table_description = table_description['table_description'] if 'table_description' in table_description else ''
                 self.config_parser.print_log_message( 'DEBUG', f"Table description: {table_description}")
                 source_columns = self.source_connection.fetch_table_columns(settings)
@@ -803,6 +804,8 @@ class Planner:
                     'source_schema': self.config_parser.get_source_schema(),
                     'target_schema': self.config_parser.get_target_schema(),
                     'target_db_type': self.config_parser.get_target_db_type(),
+                    'target_view_name': view_info['view_name'], # Pass name
+                    'view_type': view_info.get('view_type', 'VIEW'), # Pass type
                 })
 
                 self.config_parser.print_log_message( 'DEBUG', "Checking for remote objects substitution in view SQL...")
@@ -865,7 +868,10 @@ class Planner:
                 # However, planner usually prepares 'target_type_sql' which is then executed.
 
                 # Using 'AS' syntax for domains
-                target_type_sql = f'CREATE DOMAIN "{self.target_schema}"."{type_name}" AS {definition};'
+                if definition:
+                    target_type_sql = f'CREATE DOMAIN "{self.target_schema}"."{type_name}" AS {definition};'
+                else:
+                    target_type_sql = source_type_sql.replace(f'"{type_info.get("schema_name", self.source_schema)}".', f'"{self.target_schema}".') if source_type_sql else ''
 
                 self.config_parser.print_log_message('DEBUG', f"Converted type SQL: {target_type_sql}")
 
@@ -887,6 +893,8 @@ class Planner:
     def run_prepare_domains(self):
         self.config_parser.print_log_message('INFO', "Planner - Preparing domains...")
         migrated_as = 'CHECK CONSTRAINT'
+        if self.config_parser.get_target_db_type() == 'postgresql':
+            migrated_as = 'DOMAIN'
         domains = self.source_connection.fetch_domains(self.source_schema)
         self.config_parser.print_log_message( 'DEBUG', f"Domains found in source database: {domains}")
         if domains:

@@ -1337,9 +1337,9 @@ class Orchestrator:
                         # Handle dict return (with implicit schema) for logging/DB
                         funcproc_code_str = funcproc_code
                         if isinstance(funcproc_code, dict):
-                             funcproc_code_str = funcproc_code.get('definition', '') or ''
+                            funcproc_code_str = funcproc_code.get('definition', '') or ''
                         else:
-                             funcproc_code_str = str(funcproc_code) if funcproc_code else ''
+                            funcproc_code_str = str(funcproc_code) if funcproc_code else ''
 
                         table_names = []
                         view_names = []

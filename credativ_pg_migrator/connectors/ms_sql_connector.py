@@ -708,7 +708,7 @@ class MsSQLConnector(DatabaseConnector):
 
     def convert_view_code(self, settings: dict):
         def quote_column_names(node):
-            if isinstance(node, sqlglot.exp.Column) and node.name:
+            if isinstance(node, sqlglot.exp.Column) and node.name and node.name != '*':
                 node.set("this", sqlglot.exp.Identifier(this=node.name, quoted=True))
             if isinstance(node, sqlglot.exp.Alias) and isinstance(node.args.get("alias"), sqlglot.exp.Identifier):
                 alias = node.args["alias"]

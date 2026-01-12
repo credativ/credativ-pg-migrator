@@ -1633,12 +1633,39 @@ EXECUTE FUNCTION "{func_schema}"."{func_name}"();
              # @@ROWCOUNT (Specific handling before generic global replace)
              pg_sql = re.sub(r'@@rowcount', '_rowcount', pg_sql, flags=re.IGNORECASE)
 
-             # Generic Replacement Rules
-             # @@var -> global_var
+             # Generic Replacement Rules (Fallback for non-AST reachable code)
              pg_sql = re.sub(r'(?<!\w)@@([a-zA-Z0-9_]+)', r'global_\1', pg_sql)
-             # @var -> locvar_var
              pg_sql = re.sub(r'(?<!\w)@([a-zA-Z0-9_]+)', r'locvar_\1', pg_sql)
+             # Also handle $var for parameters that skipped generic AST transform or string literals
+             pg_sql = re.sub(r'(?<!\w)\$([a-zA-Z][a-zA-Z0-9_]*)', r'locvar_\1', pg_sql)
              return pg_sql
+
+        # AST Transformer for variables
+        def transform_variables_ast(node):
+            if isinstance(node, (exp.Parameter, exp.SessionParameter)):
+                 # Convert Parameter(@var) -> Identifier(locvar_var)
+                 # Check if 'this' is Identifier or string
+                 val = node.this.this if isinstance(node.this, exp.Identifier) else str(node.this)
+
+                 # Session Params usually @@
+                 if '@@' in val:
+                      return exp.Identifier(this=val.replace('@@', 'global_'), quoted=False)
+
+                 # Normal Params @ or just name
+                 if val.startswith('@'):
+                      new_name = val.replace('@', 'locvar_')
+                 else:
+                      new_name = f"locvar_{val}"
+
+                 return exp.Identifier(this=new_name, quoted=False)
+
+            if isinstance(node, exp.Identifier):
+                 val = node.this
+                 if val.startswith('@@'):
+                      return exp.Identifier(this=val.replace('@@', 'global_'), quoted=False)
+                 elif val.startswith('@'):
+                      return exp.Identifier(this=val.replace('@', 'locvar_'), quoted=False)
+            return node
 
         def process_node(expression):
              if not expression: return None
@@ -1767,6 +1794,10 @@ EXECUTE FUNCTION "{func_schema}"."{func_name}"();
         for expression in parsed:
              if is_trigger:
                  expression = self._transform_trigger_tables(expression)
+
+             # Apply Variable Rename Transform
+             expression = expression.transform(transform_variables_ast)
+
              res = process_node(expression)
              if res:
                   converted_statements.append(res)

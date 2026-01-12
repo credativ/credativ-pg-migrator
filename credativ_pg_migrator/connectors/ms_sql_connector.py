@@ -58,8 +58,16 @@ class CustomTSQL(TSQL):
         def _parse_alias(self, this, explicit=False):
              # FIX: Explicitly prevent UPDATE/INSERT/DELETE/MERGE/SET from being aliases
              # usage of keywords as aliases without AS is weird in implicit statement boundary contexts
-             if self._curr and self._curr.token_type in (TokenType.UPDATE, TokenType.INSERT, TokenType.DELETE, TokenType.MERGE, TokenType.SET):
-                  return this
+             if self._curr:
+                  # Check standard TokenTypes
+                  if self._curr.token_type in (TokenType.UPDATE, TokenType.INSERT, TokenType.DELETE, TokenType.MERGE, TokenType.SET, TokenType.SELECT):
+                       return this
+                  
+                  # Check text for others (PRINT, RAISERROR, etc might be Commands or Vars)
+                  txt = self._curr.text.upper()
+                  if txt in ('PRINT', 'RAISERROR', 'EXEC', 'EXECUTE', 'IF', 'WHILE', 'BEGIN', 'DECLARE', 'CREATE', 'GO', 'ELSE'):
+                       return this
+                       
              return super()._parse_alias(this, explicit)
 
         def _parse_command_custom(self):
@@ -1741,6 +1749,38 @@ EXECUTE FUNCTION "{func_schema}"."{func_name}"();
                  if isinstance(expression, exp.Return):
                      return "RETURN NULL;"
 
+             # Check for RAISERROR (Anonymous function call in AST)
+             # RAISERROR ('msg', 16, 1, arg1, arg2...)
+             is_raiserror = isinstance(expression, exp.Anonymous) and expression.this.upper() == 'RAISERROR'
+             if is_raiserror:
+                  # expression.expressions contains args
+                  args = expression.expressions
+                  if args:
+                       # First arg is message
+                       msg_node = args[0]
+                       # Next 2 are severity, state (skipped in PG RAISE usually, or mapped)
+                       # Rest are arguments
+                       
+                       # PG Syntax: RAISE [LEVEL] 'format', arg1, arg2
+                       # We need to construct this string
+                       
+                       msg_sql = msg_node.sql(dialect='postgres')
+                       
+                       other_args = []
+                       if len(args) > 3:
+                            for a in args[3:]:
+                                 other_args.append(a.sql(dialect='postgres'))
+                       
+                       # Handling params replacement in message? 
+                       # PG uses % to replace arguments positional? Yes.
+                       # MSSQL uses %d, %s etc. PG raise format uses %
+                       
+                       arg_str = ", ".join(other_args)
+                       if arg_str:
+                            return f"RAISE EXCEPTION {msg_sql}, {arg_str};"
+                       else:
+                            return f"RAISE EXCEPTION {msg_sql};"
+
              pg_sql = expression.sql(dialect='postgres')
 
              if pg_sql.strip().upper() == 'BEGIN': return None
@@ -1750,14 +1790,15 @@ EXECUTE FUNCTION "{func_schema}"."{func_name}"();
              if has_rowcount and isinstance(expression, (exp.Insert, exp.Update, exp.Delete, exp.Select)):
                    pg_sql += ";\nGET DIAGNOSTICS _rowcount = ROW_COUNT"
 
-             # RAISERROR for MSSQL: RAISERROR(msg, sev, state)
-             if "RAISERROR" in pg_sql.upper():
-                  match_re = re.search(r"RAISERROR\s*\(\s*(.+?)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)", pg_sql, re.IGNORECASE)
-                  if match_re:
-                        msg_expr = match_re.group(1)
-                        pg_sql = f"RAISE EXCEPTION {msg_expr}"
-
-             # PRINT
+             # PRINT (Command or Anonymous)
+             # If parsed as usage of PRINT command
+             if isinstance(expression, exp.Command) and expression.this.upper() == 'PRINT':
+                  # expression.expression is the text
+                   p_arg = expression.expression
+                   # Clean it
+                   return f"RAISE NOTICE {p_arg};"
+             
+             # Fallback regex for PRINT if not caught above (e.g. if parsed as func)
              if "PRINT" in pg_sql.upper():
                   match_p = re.search(r"PRINT\s+(.*)", pg_sql, re.IGNORECASE)
                   if match_p:

@@ -227,9 +227,37 @@ class MsSQLConnector(DatabaseConnector):
         """ Returns a dictionary of SQL functions mapping for the target database """
         target_db_type = settings['target_db_type']
         if target_db_type == 'postgresql':
-            return {}
+            return {
+                'getdate()': 'current_timestamp',
+                'getutcdate()': "timezone('UTC', now())",
+                'sysdatetime()': 'current_timestamp',
+                'year(': 'extract(year from ',
+                'month(': 'extract(month from ',
+                'day(': 'extract(day from ',
+                'db_name()': 'current_database()',
+                'original_db_name()': 'current_database()',
+                'suser_name()': 'current_user',
+                'suser_sname()': 'current_user',
+                'user_name()': 'current_user',
+                'len(': 'length(',
+                'datalength(': 'octet_length(',
+                'isnull(': 'coalesce(',
+                'substring(': 'substring(',
+                'charindex(': 'position(',
+                'replace(': 'replace(',
+                'stuff(': 'overlay(',
+                'lower(': 'lower(',
+                'upper(': 'upper(',
+                'ltrim(': 'ltrim(',
+                'rtrim(': 'rtrim(',
+                'space(': "repeat(' ', ",
+                'replicate(': 'repeat(',
+                # 'dateadd(': "mapped via transpiler custom logic often or requires complex rewriting",
+                # 'datediff(': "requires age() logic",
+            }
         else:
             self.config_parser.print_log_message('ERROR', f"Unsupported target database type: {target_db_type}")
+            return {}
 
     def migrate_sequences(self, target_connector, settings):
         return True

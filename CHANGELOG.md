@@ -4,6 +4,13 @@
 
 - 2026.01.12
 
+  - Fixes in MSSQL connector
+    - repaired conversion of views to PostgreSQL views - now views are converted to PostgreSQL views with correct data types, added conversion of MSSQL functions to PostgreSQL functions
+    - fix in fetching foreign key constraints from MSSQL database - now it uses correct schema name for referenced table
+    - implemented proper conversion of native SQL functions from MSSQL to PostgreSQL syntax
+
+- 2026.01.10
+
   - Fixes in PostgreSQL connector
     - repaired conversion of sequences to PostgreSQL sequences - now sequences are converted to PostgreSQL sequences with correct start value and increment
     - repaired conversion of domains to PostgreSQL domains - now domains are converted to PostgreSQL domains with correct data type and default value

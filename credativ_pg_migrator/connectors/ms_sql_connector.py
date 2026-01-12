@@ -765,7 +765,6 @@ class MsSQLConnector(DatabaseConnector):
                 except Exception as ex_schema:
                     # DMV might not exist or parsing error
                     self.config_parser.print_log_message('DEBUG', f"Schema discovery failed (ignoring): {ex_schema}")
-                    pass
 
             cursor.close()
             self.disconnect()

@@ -765,6 +765,7 @@ class MsSQLConnector(DatabaseConnector):
 
         is_proc = 'PROC' in obj_type_raw
         pg_type = 'PROCEDURE' if is_proc else 'FUNCTION'
+        self.config_parser.print_log_message('DEBUG', f"DEBUG Parsing: obj_type_raw={obj_type_raw}, is_proc={is_proc}, pg_type={pg_type}")
 
         # 3. separate Body from Header
         # Usually AS begins the body. But parameters can be complex.
@@ -836,8 +837,8 @@ class MsSQLConnector(DatabaseConnector):
                        # scalar type
                        ret_mapped = self._apply_data_type_substitutions(ret_type_raw)
                        ret_mapped = self._apply_udt_to_base_type_substitutions(ret_mapped, settings)
-                       for ms_type, pg_type in types_mapping.items():
-                           ret_mapped = re.sub(rf'\b{re.escape(ms_type)}\b', pg_type, ret_mapped, flags=re.IGNORECASE)
+                       for ms_type, pg_target_type in types_mapping.items():
+                           ret_mapped = re.sub(rf'\b{re.escape(ms_type)}\b', pg_target_type, ret_mapped, flags=re.IGNORECASE)
                        returns_clause = f"RETURNS {ret_mapped}"
 
                   # Remove RETURNS from params string
@@ -883,8 +884,8 @@ class MsSQLConnector(DatabaseConnector):
                     p_type = self._apply_udt_to_base_type_substitutions(p_type, settings)
 
                     # Apply built-in mapping
-                    for ms_type, pg_type in types_mapping.items():
-                        p_type = re.sub(rf'\b{re.escape(ms_type)}\b', pg_type, p_type, flags=re.IGNORECASE)
+                    for ms_type, pg_target_type in types_mapping.items():
+                        p_type = re.sub(rf'\b{re.escape(ms_type)}\b', pg_target_type, p_type, flags=re.IGNORECASE)
 
                     # Handle OUTPUT
                     mode = "INOUT " if "OUTPUT" in p_rest.upper() else ""
@@ -2090,6 +2091,10 @@ EXECUTE FUNCTION "{func_schema}"."{func_name}"();
                  is_assignment = True
                  assignments = []
                  for e in expression.expressions:
+                     # Unwrap Alias (e.g. SELECT @v=1 END -> parsed as Alias)
+                     if isinstance(e, exp.Alias):
+                          e = e.this
+
                      # Check for EQ node (v = x)
                      if isinstance(e, exp.EQ):
                          left = e.this

@@ -2149,9 +2149,9 @@ class MigratorTables:
             raise
 
     def insert_sequence(self, sequence_id, schema_name, table_name, column_name, sequence_name, set_sequence_sql):
-        table_name = self.config_parser.get_protocol_name_sequences()
+        protocol_table_name = self.config_parser.get_protocol_name_sequences()
         query = f"""
-            INSERT INTO "{self.protocol_schema}"."{table_name}"
+            INSERT INTO "{self.protocol_schema}"."{protocol_table_name}"
             (sequence_id, schema_name, table_name, column_name, sequence_name, set_sequence_sql)
             VALUES (%s, %s, %s, %s, %s, %s)
             RETURNING *
@@ -2167,7 +2167,7 @@ class MigratorTables:
             self.config_parser.print_log_message('DEBUG3', f"insert_sequence: Returned row: {sequence_row}")
             self.insert_protocol('sequence', sequence_name, 'create', set_sequence_sql, None, None, None, 'info', None, sequence_row['sequence_id'])
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"insert_sequence: Error inserting sequence info {sequence_name} into {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"insert_sequence: Error inserting sequence info {sequence_name} into {protocol_table_name}.")
             self.config_parser.print_log_message('ERROR', f"insert_sequence: Exception: {e}")
             raise
 

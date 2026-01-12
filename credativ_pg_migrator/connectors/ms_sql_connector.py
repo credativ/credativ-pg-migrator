@@ -58,7 +58,7 @@ class CustomTSQL(TSQL):
         def _parse_alias(self, this, explicit=False):
              # FIX: Explicitly prevent UPDATE/INSERT/DELETE/MERGE/SET from being aliases
              # usage of keywords as aliases without AS is weird in implicit statement boundary contexts
-             if self._curr.token_type in (TokenType.UPDATE, TokenType.INSERT, TokenType.DELETE, TokenType.MERGE, TokenType.SET):
+             if self._curr and self._curr.token_type in (TokenType.UPDATE, TokenType.INSERT, TokenType.DELETE, TokenType.MERGE, TokenType.SET):
                   return this
              return super()._parse_alias(this, explicit)
 
@@ -83,7 +83,7 @@ class CustomTSQL(TSQL):
 
                            if balance == 0:
                                 txt = self._curr.text.upper()
-                                if txt in ('SELECT', 'UPDATE', 'INSERT', 'DELETE', 'BEGIN', 'IF', 'WHILE', 'RETURN', 'DECLARE', 'CREATE', 'TRUNCATE', 'GO'):
+                                if txt in ('SELECT', 'UPDATE', 'INSERT', 'DELETE', 'BEGIN', 'IF', 'WHILE', 'RETURN', 'DECLARE', 'CREATE', 'TRUNCATE', 'GO', 'ELSE', 'SET', 'PRINT', 'RAISERROR', 'EXEC', 'EXECUTE'):
                                      break
 
                            if self._curr.token_type == TokenType.L_PAREN:
@@ -101,9 +101,49 @@ class CustomTSQL(TSQL):
 
             # Use _parse_conjunction to avoid consuming END (as alias)
             return exp.Command(this='PRINT', expression=self._parse_conjunction())
+
+        def _parse_rollback_custom(self):
+             # Custom parsing for ROLLBACK to avoid greedy consumption of END or other keywords
+             # T-SQL: ROLLBACK [ { TRAN | TRANSACTION } [ savepoint_name | @savepoint_variable ] ]
+             # PG: ROLLBACK [ WORK | TRANSACTION ] [ AND [ NO ] CHAIN ]
+
+             # Consume ROLLBACK (already consumed by dispatcher? No, matched by key)
+             # But this is called via STATEMENT_PARSERS
+             # If we are here, we are at the start.
+
+             # Actually, STATEMENT_PARSERS are calleed after token matching?
+             # No, TSQL.Parser.STATEMENT_PARSERS maps TokenType -> function.
+             # The loop is: if token in STATEMENT_PARSERS, call it.
+             # The function assumes it's at that token (or just after?)
+             # Standard _parse_rollback consumes tokens.
+             # We should consume ROLLBACK first if not already?
+             # Wait, generic parser usually consumes the triggering token?
+             # No, standard functions often consume. e.g. _parse_if calls self._match(TokenType.ELSE).
+             # Let's verify existing parsers. e.g. _parse_select starts by consuming SELECT.
+
+             if self._match(TokenType.ROLLBACK) or self._match(TokenType.COMMAND):
+                  pass
+
+             # Handle optional TRANSACTION / WORK
+             # Use text match if token attribute missing or just to be safe across versions
+             if self._curr:
+                  txt = self._curr.text.upper()
+                  if txt in ('TRANSACTION', 'TRAN', 'WORK'):
+                       self._advance()
+
+             # Ignore savepoints for migration simplicity/safety for now, or match ID only
+             # Ensuring we don't eat 'END'
+             if self._curr and self._curr.token_type not in (TokenType.END, TokenType.SEMICOLON, TokenType.ELSE):
+                 pass # Could match identifier here if needed, but risky.
+
+             return exp.Rollback()
+
         STATEMENT_PARSERS = TSQL.Parser.STATEMENT_PARSERS.copy()
         STATEMENT_PARSERS[TokenType.COMMAND] = _parse_command_custom
         STATEMENT_PARSERS[TokenType.SET] = _parse_command_custom
+        # Override ROLLBACK if it exists as a token
+        if hasattr(TokenType, 'ROLLBACK'):
+             STATEMENT_PARSERS[TokenType.ROLLBACK] = _parse_rollback_custom
 
         def _parse_block(self):
             if not self._match(TokenType.BEGIN):
@@ -122,6 +162,13 @@ class CustomTSQL(TSQL):
                  current_idx = self._index
                  if current_idx == last_token_idx:
                       # Stuck?
+
+                      # Detect orphaned ELSE -> Incorrectly parsed block boundary or lost ELSE IF
+                      if self._curr.token_type == TokenType.ELSE:
+                           if self.config_parser:
+                                self.config_parser.print_log_message('DEBUG', "Encoutered ELSE in Block. Treating as implicit block end.")
+                           break
+
                       msg = f"DEBUG: Processed token {self._curr} but did not advance. Force advance."
                       if self.config_parser:
                            self.config_parser.print_log_message('DEBUG', msg)
@@ -1222,7 +1269,7 @@ class MsSQLConnector(DatabaseConnector):
         source_schema = settings['source_schema']
         target_schema = settings['target_schema']
         table_list = settings['table_list']
-        
+
         # Clean up code
         trigger_code = trigger_code.strip()
 
@@ -1230,62 +1277,62 @@ class MsSQLConnector(DatabaseConnector):
         # ON [Schema].[Table]
         table_match = re.search(r'ON\s+(?:\[?(\w+)\]?\.)?\[?(\w+)\]?', trigger_code, re.IGNORECASE)
         table_name = table_match.group(2) if table_match else "UNKNOWN_TABLE"
-        
+
         # Events
         events = []
         if re.search(r'\bINSERT\b', trigger_code, re.IGNORECASE): events.append('INSERT')
         if re.search(r'\bUPDATE\b', trigger_code, re.IGNORECASE): events.append('UPDATE')
         if re.search(r'\bDELETE\b', trigger_code, re.IGNORECASE): events.append('DELETE')
-        
+
         # Timing
-        timing = 'AFTER' 
+        timing = 'AFTER'
         if re.search(r'\bINSTEAD\s+OF\b', trigger_code, re.IGNORECASE):
             timing = 'INSTEAD OF'
 
         # Body Isolation
         body_match = re.search(r'CREATE\s+TRIGGER\s+.*?\s+AS\s+(.*)', trigger_code, re.IGNORECASE | re.DOTALL)
         body_start = body_match.group(1) if body_match else ""
-        
+
         if not body_start:
              return f"/* COULD NOT ISOLATE BODY FOR {trigger_name} */ {trigger_code}"
 
         # --- Conversion Logic adhering to Sybase pattern ---
-        
+
         # 1. Variable Declarations Extraction
         declarations = []
         types_mapping = self.get_types_mapping(settings)
-        
+
         # Helper wrapper for replacer
         declaration_replacer = lambda m: self._declaration_replacer(m, settings, types_mapping, declarations)
-        
+
         # Extract declarations
         body_content = re.sub(r'DECLARE\s+@.*?(?=\bBEGIN\b|\bIF\b|\bWHILE\b|\bSELECT\b|\bINSERT\b|\bUPDATE\b|\bDELETE\b|\bRETURN\b|\bSET\b|\bFETCH\b|\bOPEN\b|\bCLOSE\b|\bDEALLOCATE\b|\bDECLARE\b|$)', declaration_replacer, body_start, flags=re.IGNORECASE | re.DOTALL)
 
         # 2. UDT & Type Substitutions
         body_content = self._apply_data_type_substitutions(body_content)
         body_content = self._apply_udt_to_base_type_substitutions(body_content, settings)
-        
+
         # 3. Convert Statements
         has_rowcount = '@@rowcount' in body_content.lower()
         if has_rowcount:
              declarations.append('_rowcount INTEGER;')
-        
+
         converted_stmts = self._convert_stmts(body_content, settings, has_rowcount=has_rowcount, is_trigger=True)
         pg_body = "\n".join(converted_stmts)
 
         # Construct Function
         func_name = f"tf_{trigger_name}"
         func_schema = target_schema
-        
+
         decl_section = "DECLARE\n" + "\n".join(declarations) if declarations else ""
-        
+
         func_ddl = f"""
 CREATE OR REPLACE FUNCTION "{func_schema}"."{func_name}"()
 RETURNS TRIGGER AS $$
 {decl_section}
 BEGIN
 {pg_body}
-RETURN NULL; 
+RETURN NULL;
 END;
 $$ LANGUAGE plpgsql;
 """
@@ -1296,10 +1343,10 @@ $$ LANGUAGE plpgsql;
              refs.append("NEW TABLE AS inserted")
         if 'DELETE' in events or 'UPDATE' in events:
              refs.append("OLD TABLE AS deleted")
-        
+
         ref_clause = "REFERENCING " + " ".join(refs) if refs and timing != 'INSTEAD OF' else ""
         events_str = " OR ".join(events)
-        
+
         trigger_ddl = f"""
 CREATE TRIGGER "{trigger_name}"
 {timing} {events_str} ON "{target_schema}"."{table_name}"
@@ -1578,6 +1625,21 @@ EXECUTE FUNCTION "{func_schema}"."{func_name}"();
              return [f"/* PARSING FAILED: {e} */\n" + body_content]
 
         converted_statements = []
+        def clean_pg_sql(pg_sql):
+             # @@FETCH_STATUS
+             pg_sql = re.sub(r'@@FETCH_STATUS\s*=\s*0', 'FOUND', pg_sql, flags=re.IGNORECASE)
+             pg_sql = re.sub(r'@@FETCH_STATUS\s*(?:!=|<>)\s*0', 'NOT FOUND', pg_sql, flags=re.IGNORECASE)
+
+             # @@ROWCOUNT (Specific handling before generic global replace)
+             pg_sql = re.sub(r'@@rowcount', '_rowcount', pg_sql, flags=re.IGNORECASE)
+
+             # Generic Replacement Rules
+             # @@var -> global_var
+             pg_sql = re.sub(r'(?<!\w)@@([a-zA-Z0-9_]+)', r'global_\1', pg_sql)
+             # @var -> locvar_var
+             pg_sql = re.sub(r'(?<!\w)@([a-zA-Z0-9_]+)', r'locvar_\1', pg_sql)
+             return pg_sql
+
         def process_node(expression):
              if not expression: return None
 
@@ -1593,6 +1655,7 @@ EXECUTE FUNCTION "{func_schema}"."{func_name}"();
              is_if = isinstance(expression, exp.If) or expression.key == 'if' or type(expression).__name__ == 'If'
              if is_if:
                   cond_sql = expression.this.sql(dialect='postgres')
+                  cond_sql = clean_pg_sql(cond_sql)
                   true_node = expression.args.get('true')
                   false_node = expression.args.get('false')
                   true_sql = process_node(true_node) if true_node else ""
@@ -1679,19 +1742,23 @@ EXECUTE FUNCTION "{func_schema}"."{func_name}"();
              # sqlglot sometimes outputs SET v = 1, which works in PG for session vars, but plpgsql needs :=
              if pg_sql.strip().upper().startswith("SET "):
                  # Try to convert to assignment
-                 match_set = re.match(r"SET\s+([a-zA-Z0-9_]+)\s*=\s*(.*)", pg_sql, re.IGNORECASE)
+                 # Update regex to support @ and @@ in variable names
+                 match_set = re.match(r"SET\s+([@a-zA-Z0-9_]+)\s*=\s*(.*)", pg_sql, re.IGNORECASE)
                  if match_set:
-                     var = match_set.group(1).replace('@', '')
+                     var_raw = match_set.group(1)
                      val = match_set.group(2)
+
+                     if '@@' in var_raw:
+                          var = var_raw.replace('@@', 'global_')
+                     elif '@' in var_raw:
+                          var = var_raw.replace('@', 'locvar_')
+                     else:
+                          var = var_raw
+
                      pg_sql = f"{var} := {val}"
 
-             # @@FETCH_STATUS
-             pg_sql = re.sub(r'@@FETCH_STATUS\s*=\s*0', 'FOUND', pg_sql, flags=re.IGNORECASE)
-             pg_sql = re.sub(r'@@FETCH_STATUS\s*(?:!=|<>)\s*0', 'NOT FOUND', pg_sql, flags=re.IGNORECASE)
-
-             # Clean @
-             pg_sql = re.sub(r'(?<!\w)@([a-zA-Z0-9_]+)', r'\1', pg_sql)
-             pg_sql = re.sub(r'@@rowcount', '_rowcount', pg_sql, flags=re.IGNORECASE)
+             # Clean result
+             pg_sql = clean_pg_sql(pg_sql)
 
              if not skip_semicolon and not pg_sql.strip().endswith(';'):
                  pg_sql += ';'
@@ -1772,8 +1839,11 @@ EXECUTE FUNCTION "{func_schema}"."{func_name}"();
             for sybase_type, pg_type in types_mapping.items():
                 d = re.sub(rf'\b{re.escape(sybase_type)}\b', pg_type, d, flags=re.IGNORECASE)
 
-            # Remove @
-            d = d.replace('@', '')
+            # Variable Rename Rules
+            if '@@' in d:
+                 d = d.replace('@@', 'global_')
+            elif '@' in d:
+                 d = d.replace('@', 'locvar_')
 
             # Initialization
             d = d.replace('=', ':=')

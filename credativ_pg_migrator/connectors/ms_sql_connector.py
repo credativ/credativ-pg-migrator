@@ -672,15 +672,36 @@ class MsSQLConnector(DatabaseConnector):
                 p.name AS name,
                 CASE
                     WHEN p.type = 'P' THEN 'Procedure'
-                    WHEN p.type = 'FN' THEN 'Function'
+                    WHEN p.type IN ('FN', 'TF', 'IF') THEN 'Function'
+                    ELSE 'Unknown'
                 END AS type
             FROM sys.objects p
             JOIN sys.schemas s ON p.schema_id = s.schema_id
-            WHERE s.name = '{schema}' AND p.type IN ('P', 'FN')
+            WHERE s.name = '{schema}'
+              AND p.type IN ('P', 'FN', 'TF', 'IF')
+              AND p.is_ms_shipped = 0
             ORDER BY p.name
         """
-        # ...existing code from SybaseASEConnector.fetch_funcproc_names...
-        pass
+        self.config_parser.print_log_message('DEBUG3', f"fetch_funcproc_names: query: {query}")
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            cursor.close()
+
+            funcprocs = []
+            for row in rows:
+                funcprocs.append({
+                    'id': row[0],
+                    'name': row[1],
+                    'type': row[2]
+                })
+            self.disconnect()
+            return funcprocs
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error fetching function/procedure names: {e}")
+            return []
 
     def fetch_funcproc_code(self, funcproc_id: int):
         query = f"""
@@ -688,8 +709,18 @@ class MsSQLConnector(DatabaseConnector):
             FROM sys.sql_modules m
             WHERE m.object_id = {funcproc_id}
         """
-        # ...existing code from SybaseASEConnector.fetch_funcproc_code...
-        pass
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            row = cursor.fetchone()
+            cursor.close()
+
+            if row:
+                return row[0]
+            return None
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error fetching function/procedure code for id {funcproc_id}: {e}")
+            return None
 
     def convert_funcproc_code(self, settings):
         funcproc_code = settings['funcproc_code']

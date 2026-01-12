@@ -713,10 +713,12 @@ class MsSQLConnector(DatabaseConnector):
             WHERE m.object_id = {funcproc_id}
         """
         try:
+            self.connect()
             cursor = self.connection.cursor()
             cursor.execute(query)
             row = cursor.fetchone()
             cursor.close()
+            self.disconnect()
 
             if row:
                 return row[0]
@@ -727,14 +729,177 @@ class MsSQLConnector(DatabaseConnector):
 
     def convert_funcproc_code(self, settings):
         funcproc_code = settings['funcproc_code']
-        target_db_type = settings['target_db_type']
-        source_schema = settings['source_schema']
+        # target_db_type = settings['target_db_type'] # Unused
+        # source_schema = settings['source_schema'] # Unused
         target_schema = settings['target_schema']
-        table_list = settings['table_list']
-        view_list = settings['view_list']
-        converted_code = ''
-        # placeholder for actual conversion logic
-        return converted_code
+        # table_list = settings['table_list']
+        # view_list = settings['view_list']
+
+        # 1. Cleanup
+        funcproc_code = funcproc_code.strip()
+        # Remove usage of GO
+        funcproc_code = re.sub(r'\bGO\b', '', funcproc_code, flags=re.IGNORECASE)
+
+        # 2. Identify Type and Name
+        # Support names with spaces [Name with Space] or "Name" or Name
+        # Regex to match CREATE [OR ALTER] {PROC|PROCEDURE|FUNCTION} [schema.]name ...
+
+        type_match = re.search(r'CREATE\s+(?:OR\s+ALTER\s+)?(PROC|PROCEDURE|FUNCTION)\s+(?:\[?(\w+)\]?\.?)?\[?([\w\s]+)\]?', funcproc_code, re.IGNORECASE)
+
+        if not type_match:
+             return f"/* FAILED TO PARSE DEFINITION */\n{funcproc_code}"
+
+        obj_type_raw = type_match.group(1).upper()
+        # schema_name = type_match.group(2) # Ignore source schema, use target_schema
+        obj_name = type_match.group(3)
+
+        is_proc = 'PROC' in obj_type_raw
+        pg_type = 'PROCEDURE' if is_proc else 'FUNCTION'
+
+        # 3. separate Body from Header
+        # Usually AS begins the body. But parameters can be complex.
+        # Simple heuristic: Split on first AS not inside parens?
+        # Or just use the regex to extract finding the FIRST AS after the CREATE line.
+
+        # Better: Convert the whole thing using declaration processing first
+
+        # Extract Variables (Parameters + Body Locals)
+        # We need to distinguish parameters because they go into the signature.
+
+        # Regex to find parameters section
+        # Logic: From Object Name end to 'AS'
+
+        header_end_match = re.search(r'\bAS\b', funcproc_code, re.IGNORECASE)
+        if not header_end_match:
+             return f"/* COULD NOT FIND 'AS' KEYWORD */\n{funcproc_code}"
+
+        header_part = funcproc_code[:header_end_match.start()]
+        body_part = funcproc_code[header_end_match.end():]
+
+        # Process Body declarations
+        declarations = []
+        types_mapping = self.get_types_mapping(settings)
+
+        declaration_replacer = lambda m: self._declaration_replacer(m, settings, types_mapping, declarations)
+
+        # Replace DECLAREs in body
+        processed_body = re.sub(r'DECLARE\s+@.*?(?=\bBEGIN\b|\bIF\b|\bWHILE\b|\bSELECT\b|\bINSERT\b|\bUPDATE\b|\bDELETE\b|\bRETURN\b|\bSET\b|\bFETCH\b|\bOPEN\b|\bCLOSE\b|\bDEALLOCATE\b|\bDECLARE\b|$)', declaration_replacer, body_part, flags=re.IGNORECASE | re.DOTALL)
+
+        # Apply substitutions
+        processed_body = self._apply_data_type_substitutions(processed_body)
+        processed_body = self._apply_udt_to_base_type_substitutions(processed_body, settings)
+
+        # Convert Body Statements
+        has_rowcount = '@@rowcount' in processed_body.lower()
+        if has_rowcount:
+             declarations.append('_rowcount INTEGER;')
+
+        converted_stmts = self._convert_stmts(processed_body, settings, has_rowcount=has_rowcount)
+        pg_body_content = "\n".join(converted_stmts)
+
+        # 4. Construct Header (Parameters)
+        # We need to parse parameters from header_part
+        # This is tricky without a full parser.
+        # Basic approach: Extract everything after name until AS.
+        # But wait, header_part INCLUDES the Name.
+
+        # Let's clean header part: remove CREATE ... Name
+        header_clean = header_part[type_match.end():].strip()
+
+        # Look for RETURNS clause (for functions)
+        returns_clause = "RETURNS VOID" # Default for proc? No, Proc has no return
+        if not is_proc:
+             ret_match = re.search(r'\bRETURNS\s+(.*)', header_clean, re.IGNORECASE)
+             if ret_match:
+                  ret_type_raw = ret_match.group(1).strip()
+                  # Clean wrapping parens if table variable
+                  # If returns table -> RETURNS TABLE (...)
+
+                  # Apply Type mapping
+                  # For now: simple string replacement or simple parsing
+                  # Check if it has @var TABLE
+                  if 'TABLE' in ret_type_raw.upper():
+                       returns_clause = f"RETURNS TABLE ({ret_type_raw.split('TABLE')[-1].strip()})"
+                       # Need to fix types inside TABLE(...) definition too? Yes.
+                       returns_clause = self._apply_data_type_substitutions(returns_clause)
+                  else:
+                       # scalar type
+                       ret_mapped = self._apply_data_type_substitutions(ret_type_raw)
+                       ret_mapped = self._apply_udt_to_base_type_substitutions(ret_mapped, settings)
+                       returns_clause = f"RETURNS {ret_mapped}"
+
+                  # Remove RETURNS from params string
+                  header_clean = header_clean[:ret_match.start()].strip()
+             else:
+                  returns_clause = "RETURNS VOID" # Scalar func must have return?
+
+        # Parse Parameters string `header_clean`
+        # @p1 int, @p2 varchar(10) ...
+        # Need to map types and replace @ with nothing or _
+
+        pg_params = []
+        if header_clean:
+            # Clean outer parens if they exist (optional in TSQL)
+            if header_clean.startswith('(') and header_clean.endswith(')'):
+                header_clean = header_clean[1:-1]
+
+            # Split by comma respecting parens (for decimal(10,2))
+            # Reuse _split_respecting_parens but it doesn't handle comma.
+            # Lazy split:
+            param_parts = self._split_respecting_parens(header_clean)
+            # Wait, _split_respecting_parens doesn't split by comma.
+            # It tokenizes? No, viewing it: it looks like it iterates char by char but doesn't return list...
+            # Ah, `view_file` cut off `_split_respecting_parens` implementation.
+
+            # Assume naive split for now or regex
+            params_list = re.split(r',(?![^(]*\))', header_clean)
+
+            for p in params_list:
+                p = p.strip()
+                if not p: continue
+
+                # Format: @name type [= default] [OUTPUT] [READONLY]
+                # Regex search
+                p_match = re.search(r'@([\w]+)\s+([\w\(\)]+)(.*)', p)
+                if p_match:
+                    p_name = p_match.group(1)
+                    p_type = p_match.group(2)
+                    p_rest = p_match.group(3) or ""
+
+                    # Map type
+                    p_type = self._apply_data_type_substitutions(p_type)
+                    p_type = self._apply_udt_to_base_type_substitutions(p_type, settings)
+
+                    # Handle OUTPUT
+                    mode = "INOUT " if "OUTPUT" in p_rest.upper() else ""
+
+                    # Handle Default
+                    default_val = ""
+                    def_match = re.search(r'=\s*([^ ]+)', p_rest)
+                    if def_match:
+                        default_val = f" DEFAULT {def_match.group(1)}"
+
+                    pg_params.append(f"{mode}locvar_{p_name} {p_type}{default_val}")
+
+        pg_params_str = ", ".join(pg_params)
+
+        # 5. Assembly
+        # Quote Object Name for PG
+        pg_name = f'"{obj_name}"'
+
+        decl_section = "DECLARE\n" + "\n".join(declarations) if declarations else ""
+
+        ddl = f"""
+CREATE OR REPLACE {pg_type} "{target_schema}".{pg_name}({pg_params_str})
+{returns_clause if not is_proc else ''}
+AS $$
+{decl_section}
+BEGIN
+{pg_body_content}
+END;
+$$ LANGUAGE plpgsql;
+"""
+        return ddl
 
     def fetch_views_names(self, owner_name):
         views = {}

@@ -453,6 +453,9 @@ class MsSQLConnector(DatabaseConnector):
                 'BIGDATETIME': 'TIMESTAMP',
                 'DATE': 'DATE',
                 'DATETIME': 'TIMESTAMP',
+                'DATETIME2': 'TIMESTAMP',
+                'DATETIMEOFFSET': 'TIMESTAMPTZ',
+                'BIGTIME': 'TIMESTAMP',
                 'SMALLDATETIME': 'TIMESTAMP',
                 'TIME': 'TIME',
                 'TIMESTAMP': 'TIMESTAMP',
@@ -474,26 +477,33 @@ class MsSQLConnector(DatabaseConnector):
                 'BINARY': 'BYTEA',
                 'VARBINARY': 'BYTEA',
                 'IMAGE': 'BYTEA',
+                'GEOMETRY': 'BYTEA',
+                'GEOGRAPHY': 'BYTEA',
+                'HIERARCHYID': 'BYTEA',
                 'CHAR': 'CHAR',
                 'NCHAR': 'CHAR',
                 'UNICHAR': 'CHAR',
                 'NVARCHAR': 'VARCHAR',
+                'UNIVARCHAR': 'VARCHAR',
                 'TEXT': 'TEXT',
+                'NTEXT': 'TEXT',
                 'SYSNAME': 'TEXT',
                 'LONGSYSNAME': 'TEXT',
-                'LONG VARCHAR': 'VARCHAR',
-                'LONG NVARCHAR': 'VARCHAR',
-                'UNICHAR': 'CHAR',
+                'LONG VARCHAR': 'TEXT',
+                'LONG NVARCHAR': 'TEXT',
                 'UNITEXT': 'TEXT',
-                'UNIVARCHAR': 'VARCHAR',
                 'VARCHAR': 'VARCHAR',
+                'XML': 'XML',
 
                 'CLOB': 'TEXT',
                 'DECIMAL': 'DECIMAL',
                 'DOUBLE PRECISION': 'DOUBLE PRECISION',
                 'FLOAT': 'FLOAT',
                 'INTERVAL': 'INTERVAL',
-                'MONEY': 'MONEY',
+                # 'MONEY': 'MONEY',
+                # 'SMALLMONEY': 'MONEY',
+                'MONEY': 'INTEGER',
+                'SMALLMONEY': 'INTEGER',
                 'NUMERIC': 'NUMERIC',
                 'REAL': 'REAL',
                 'SERIAL8': 'BIGSERIAL',
@@ -826,6 +836,8 @@ class MsSQLConnector(DatabaseConnector):
                        # scalar type
                        ret_mapped = self._apply_data_type_substitutions(ret_type_raw)
                        ret_mapped = self._apply_udt_to_base_type_substitutions(ret_mapped, settings)
+                       for ms_type, pg_type in types_mapping.items():
+                           ret_mapped = re.sub(rf'\b{re.escape(ms_type)}\b', pg_type, ret_mapped, flags=re.IGNORECASE)
                        returns_clause = f"RETURNS {ret_mapped}"
 
                   # Remove RETURNS from params string
@@ -869,6 +881,10 @@ class MsSQLConnector(DatabaseConnector):
                     # Map type
                     p_type = self._apply_data_type_substitutions(p_type)
                     p_type = self._apply_udt_to_base_type_substitutions(p_type, settings)
+
+                    # Apply built-in mapping
+                    for ms_type, pg_type in types_mapping.items():
+                        p_type = re.sub(rf'\b{re.escape(ms_type)}\b', pg_type, p_type, flags=re.IGNORECASE)
 
                     # Handle OUTPUT
                     mode = "INOUT " if "OUTPUT" in p_rest.upper() else ""
@@ -2213,6 +2229,27 @@ EXECUTE FUNCTION "{func_schema}"."{func_name}"();
         return ""
 
     def _apply_data_type_substitutions(self, text):
+        """
+        Apply data type substitutions defined in the configuration.
+        """
+        substitutions = self.config_parser.get_data_types_substitution()
+        if not substitutions:
+            return text
+
+        for entry in substitutions:
+            if len(entry) != 5:
+                continue
+
+            source_type = entry[2]
+            target_type = entry[3]
+
+            if source_type:
+                try:
+                    pattern = re.compile(rf'\b{source_type}\b', flags=re.IGNORECASE)
+                    text = pattern.sub(target_type, text)
+                except re.error:
+                    self.config_parser.print_log_message('WARNING', f"Invalid regex in data_types_substitution: {source_type}")
+
         return text
 
     def _apply_udt_to_base_type_substitutions(self, text, settings):

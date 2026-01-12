@@ -1222,136 +1222,84 @@ class MsSQLConnector(DatabaseConnector):
         source_schema = settings['source_schema']
         target_schema = settings['target_schema']
         table_list = settings['table_list']
-
+        
         # Clean up code
         trigger_code = trigger_code.strip()
 
-        # Parse logic
-        CustomTSQL.Parser.config_parser = self.config_parser
-        try:
-             # Just like view, try to parse.
-             # Triggers are simpler structure: CREATE TRIGGER ... ON ... [AFTER/FOR] ... AS ...
-             expressions = sqlglot.parse(trigger_code, read=CustomTSQL)
-        except Exception as e:
-             self.config_parser.print_log_message('ERROR', f"Failed to parse trigger {trigger_name}: {e}")
-             return f"/* FAILED TO PARSE TRIGGER {trigger_name} */\n{trigger_code}"
-
-        if not expressions:
-            return f"/* EMPTY PARSE FOR TRIGGER {trigger_name} */"
-
-        create_trigger_stmt = expressions[0]
-        if not isinstance(create_trigger_stmt, sqlglot.exp.Create) or create_trigger_stmt.kind != 'TRIGGER':
-            # Maybe it wrapped in something else? unique batch?
-            # Fallback to Regex extraction if AST fails specific node check
-            pass
-
-        # Extract info
-        # sqlglot Create Trigger Structure:
-        # this = Identifier(name)
-        # properties (table, timing, events)
-        # expression = body (usually BEGIN...END or just stmt)
-
-        # We need:
-        # 1. Event (INSERT, UPDATE, DELETE)
-        # 2. Timing (AFTER, INSTEAD OF) - MSSQL 'FOR' is same as 'AFTER'
-        # 3. Table Name (ON ...)
-        # 4. Body
-
-        # Regex is often more robust for header extraction in T-SQL because of variations
+        # Regular Expressions to extract info
         # ON [Schema].[Table]
         table_match = re.search(r'ON\s+(?:\[?(\w+)\]?\.)?\[?(\w+)\]?', trigger_code, re.IGNORECASE)
         table_name = table_match.group(2) if table_match else "UNKNOWN_TABLE"
-
+        
         # Events
         events = []
         if re.search(r'\bINSERT\b', trigger_code, re.IGNORECASE): events.append('INSERT')
         if re.search(r'\bUPDATE\b', trigger_code, re.IGNORECASE): events.append('UPDATE')
         if re.search(r'\bDELETE\b', trigger_code, re.IGNORECASE): events.append('DELETE')
-
+        
         # Timing
-        timing = 'AFTER' # Default
+        timing = 'AFTER' 
         if re.search(r'\bINSTEAD\s+OF\b', trigger_code, re.IGNORECASE):
             timing = 'INSTEAD OF'
 
         # Body Isolation
-        # Find 'AS' keyword.
-        # CAUTION: 'AS' can be used in aliases.
-        # CREATE TRIGGER ... ON ... AS ...
-        # Regex: CREATE TRIGGER .*? AS (.*)
         body_match = re.search(r'CREATE\s+TRIGGER\s+.*?\s+AS\s+(.*)', trigger_code, re.IGNORECASE | re.DOTALL)
         body_start = body_match.group(1) if body_match else ""
-
+        
         if not body_start:
              return f"/* COULD NOT ISOLATE BODY FOR {trigger_name} */ {trigger_code}"
 
-        # Transpile Body
-        try:
-             # Use the View conversion logic UDTs and Functions map?
-             # Yes, we should probably reuse replace_udts/replace_functions if possible
-             # For now, relying on sqlglot generic transpile + manual fixes
+        # --- Conversion Logic adhering to Sybase pattern ---
+        
+        # 1. Variable Declarations Extraction
+        declarations = []
+        types_mapping = self.get_types_mapping(settings)
+        
+        # Helper wrapper for replacer
+        declaration_replacer = lambda m: self._declaration_replacer(m, settings, types_mapping, declarations)
+        
+        # Extract declarations
+        body_content = re.sub(r'DECLARE\s+@.*?(?=\bBEGIN\b|\bIF\b|\bWHILE\b|\bSELECT\b|\bINSERT\b|\bUPDATE\b|\bDELETE\b|\bRETURN\b|\bSET\b|\bFETCH\b|\bOPEN\b|\bCLOSE\b|\bDEALLOCATE\b|\bDECLARE\b|$)', declaration_replacer, body_start, flags=re.IGNORECASE | re.DOTALL)
 
-             # UDT Map
-             udt_lookup_map = self._get_udt_map()
-
-             parsed_body = sqlglot.parse(body_start, read=CustomTSQL)
-             transpiled_stmts = []
-
-             for stmt in parsed_body:
-                 # Apply UDT replacement and function replacement manually?
-                 # Or rely on sqlglot dialect default?
-                 # Let's apply UDT replacement at least
-
-                 def replace_udts(node):
-                    if isinstance(node, sqlglot.exp.DataType):
-                        type_name = node.this.name if hasattr(node.this, 'name') else str(node.this)
-                        if type_name in udt_lookup_map:
-                             udt_info = udt_lookup_map[type_name]
-                             return sqlglot.exp.DataType.build(udt_info['sql'])
-                    return node
-
-                 stmt = stmt.transform(replace_udts)
-
-                 # Function replacements
-                 # ... (Ideally reuse replace_functions from view, but scope is local there. Copy pasting for now or genericize later)
-                 # Keeping simple for iteration 1:
-                 transpiled = stmt.sql(dialect='postgres')
-                 transpiled_stmts.append(transpiled)
-
-             pg_body = "\n".join(transpiled_stmts)
-
-        except Exception as e:
-             pg_body = f"/* TRANSPILATION FAILED: {e} */\n{body_start}"
+        # 2. UDT & Type Substitutions
+        body_content = self._apply_data_type_substitutions(body_content)
+        body_content = self._apply_udt_to_base_type_substitutions(body_content, settings)
+        
+        # 3. Convert Statements
+        has_rowcount = '@@rowcount' in body_content.lower()
+        if has_rowcount:
+             declarations.append('_rowcount INTEGER;')
+        
+        converted_stmts = self._convert_stmts(body_content, settings, has_rowcount=has_rowcount, is_trigger=True)
+        pg_body = "\n".join(converted_stmts)
 
         # Construct Function
         func_name = f"tf_{trigger_name}"
         func_schema = target_schema
-
+        
+        decl_section = "DECLARE\n" + "\n".join(declarations) if declarations else ""
+        
         func_ddl = f"""
 CREATE OR REPLACE FUNCTION "{func_schema}"."{func_name}"()
 RETURNS TRIGGER AS $$
+{decl_section}
 BEGIN
 {pg_body}
-RETURN NULL; -- Statement triggers usually return NULL
+RETURN NULL; 
 END;
 $$ LANGUAGE plpgsql;
 """
 
         # Construct Trigger
-        # Handle Reference Clausses for Statement Triggers
-        # Referencing NEW TABLE AS inserted OLD TABLE AS deleted
         refs = []
         if 'INSERT' in events or 'UPDATE' in events:
              refs.append("NEW TABLE AS inserted")
         if 'DELETE' in events or 'UPDATE' in events:
              refs.append("OLD TABLE AS deleted")
-
+        
         ref_clause = "REFERENCING " + " ".join(refs) if refs and timing != 'INSTEAD OF' else ""
-        # Note: INSTEAD OF triggers (on Views) don't support Transition Tables in PG.
-        # But MSSQL INSTEAD OF can be on Tables too?
-        # If INSTEAD OF, we might have issues matching semantics 1:1 without rewriting 'inserted/deleted' to aliases.
-
         events_str = " OR ".join(events)
-
+        
         trigger_ddl = f"""
 CREATE TRIGGER "{trigger_name}"
 {timing} {events_str} ON "{target_schema}"."{table_name}"
@@ -1361,6 +1309,7 @@ EXECUTE FUNCTION "{func_schema}"."{func_name}"();
 """
 
         return f"{func_ddl}\n{trigger_ddl}"
+
 
     def execute_query(self, query: str, params=None):
         # ...existing code from SybaseASEConnector.execute_query...
@@ -1609,6 +1558,242 @@ EXECUTE FUNCTION "{func_schema}"."{func_name}"();
         rows = cursor.fetchall()
         cursor.close()
         return rows
+
+
+
+    def _convert_stmts(self, body_content, settings, is_nested=False, has_rowcount=False, is_trigger=False):
+        import base64
+        processed_body = body_content
+
+         # --- Handle Sybase/MSSQL Outer Joins (*= and =*) before parsing ---
+        processed_body = re.sub(r"([\w\.]+)\s*\*\=\s*([\w\.]+)", r"locvar_sybase_outer_join(\1, \2)", processed_body)
+        processed_body = re.sub(r"([\w\.]+)\s*\=\*\s*([\w\.]+)", r"locvar_sybase_right_join(\1, \2)", processed_body)
+
+        CustomTSQL.Parser.config_parser = self.config_parser
+
+        try:
+             parsed = sqlglot.parse(processed_body.strip(), read=CustomTSQL)
+        except Exception as e:
+             self.config_parser.print_log_message('ERROR', f"Global parsing failed: {e}")
+             return [f"/* PARSING FAILED: {e} */\n" + body_content]
+
+        converted_statements = []
+        def process_node(expression):
+             if not expression: return None
+
+             is_block = isinstance(expression, Block) or type(expression).__name__ == 'Block'
+             if is_block:
+                  stmts = []
+                  if hasattr(expression, 'expressions'):
+                       for e in expression.expressions:
+                            s = process_node(e)
+                            if s: stmts.append(s)
+                  return "\n".join(stmts)
+
+             is_if = isinstance(expression, exp.If) or expression.key == 'if' or type(expression).__name__ == 'If'
+             if is_if:
+                  cond_sql = expression.this.sql(dialect='postgres')
+                  true_node = expression.args.get('true')
+                  false_node = expression.args.get('false')
+                  true_sql = process_node(true_node) if true_node else ""
+                  pg_sql = f"IF {cond_sql} THEN\n{true_sql}"
+                  if false_node:
+                       false_sql = process_node(false_node)
+                       pg_sql += f"\nELSE\n{false_sql}"
+                  pg_sql += "\nEND IF;"
+                  return pg_sql
+
+             # ... Outer Join AST Transformation (Same as Sybase) ...
+             try:
+                 where = expression.find(exp.Where)
+                 joins_to_add = []
+                 if where:
+                      for func in where.find_all(exp.Anonymous):
+                           fname = func.this
+                           if fname.upper() in ('LOCVAR_SYBASE_OUTER_JOIN', 'LOCVAR_SYBASE_RIGHT_JOIN'):
+                                kind = 'LEFT' if fname.upper() == 'LOCVAR_SYBASE_OUTER_JOIN' else 'RIGHT'
+                                left = func.expressions[0]
+                                right = func.expressions[1]
+                                table_name = right.table if isinstance(right, exp.Column) else None
+                                if table_name:
+                                    joins_to_add.append({
+                                        'table': table_name,
+                                        'condition': exp.EQ(this=left, expression=right),
+                                        'node': func,
+                                        'kind': kind
+                                    })
+                      for j in joins_to_add:
+                           j['node'].replace(exp.TRUE)
+
+                 from_clause = expression.args.get('from')
+                 if from_clause and joins_to_add:
+                      new_froms = []
+                      tables_to_remove = [j['table'] for j in joins_to_add]
+                      for f in from_clause.expressions:
+                           if isinstance(f, exp.Table) and f.alias_or_name in tables_to_remove:
+                               continue
+                           new_froms.append(f)
+                      for j in joins_to_add:
+                           join_expr = exp.Join(
+                               this=exp.Table(this=exp.Identifier(this=j['table'], quoted=False)),
+                               kind=j['kind'],
+                               on=j['condition']
+                           )
+                           new_froms.append(join_expr)
+                      from_clause.set('expressions', new_froms)
+             except:
+                  pass
+
+             pg_sql = ""
+             skip_semicolon = False
+
+             if is_trigger:
+                 if isinstance(expression, exp.Return):
+                     return "RETURN NULL;"
+
+             pg_sql = expression.sql(dialect='postgres')
+
+             if pg_sql.strip().upper() == 'BEGIN': return None
+
+             pg_sql = pg_sql.replace('locvar_error_placeholder', 'SQLSTATE')
+
+             if has_rowcount and isinstance(expression, (exp.Insert, exp.Update, exp.Delete, exp.Select)):
+                   pg_sql += ";\nGET DIAGNOSTICS _rowcount = ROW_COUNT"
+
+             # RAISERROR for MSSQL: RAISERROR(msg, sev, state)
+             if "RAISERROR" in pg_sql.upper():
+                  match_re = re.search(r"RAISERROR\s*\(\s*(.+?)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)", pg_sql, re.IGNORECASE)
+                  if match_re:
+                        msg_expr = match_re.group(1)
+                        pg_sql = f"RAISE EXCEPTION {msg_expr}"
+
+             # PRINT
+             if "PRINT" in pg_sql.upper():
+                  match_p = re.search(r"PRINT\s+(.*)", pg_sql, re.IGNORECASE)
+                  if match_p:
+                       pg_sql = f"RAISE NOTICE {match_p.group(1)}"
+
+             # Assignments (MSSQL variable assignment usually via SET or SELECT)
+             # sqlglot might output: _rowcount = ROW_COUNT (valid PG)
+             # But T-SQL SET @v = 1 -> PG v := 1
+             # sqlglot sometimes outputs SET v = 1, which works in PG for session vars, but plpgsql needs :=
+             if pg_sql.strip().upper().startswith("SET "):
+                 # Try to convert to assignment
+                 match_set = re.match(r"SET\s+([a-zA-Z0-9_]+)\s*=\s*(.*)", pg_sql, re.IGNORECASE)
+                 if match_set:
+                     var = match_set.group(1).replace('@', '')
+                     val = match_set.group(2)
+                     pg_sql = f"{var} := {val}"
+
+             # @@FETCH_STATUS
+             pg_sql = re.sub(r'@@FETCH_STATUS\s*=\s*0', 'FOUND', pg_sql, flags=re.IGNORECASE)
+             pg_sql = re.sub(r'@@FETCH_STATUS\s*(?:!=|<>)\s*0', 'NOT FOUND', pg_sql, flags=re.IGNORECASE)
+
+             # Clean @
+             pg_sql = re.sub(r'(?<!\w)@([a-zA-Z0-9_]+)', r'\1', pg_sql)
+             pg_sql = re.sub(r'@@rowcount', '_rowcount', pg_sql, flags=re.IGNORECASE)
+
+             if not skip_semicolon and not pg_sql.strip().endswith(';'):
+                 pg_sql += ';'
+             return pg_sql
+
+        for expression in parsed:
+             if is_trigger:
+                 expression = self._transform_trigger_tables(expression)
+             res = process_node(expression)
+             if res:
+                  converted_statements.append(res)
+
+        return converted_statements
+
+    def _split_respecting_parens(self, text):
+        parts = []
+        current = ""
+        depth = 0
+        in_quote = False
+        quote_char = ''
+
+        for char in text:
+            if in_quote:
+                current += char
+                if char == quote_char:
+                    in_quote = False
+            else:
+                if char == "'" or char == '"':
+                    in_quote = True
+                    quote_char = char
+                    current += char
+                elif char == '(':
+                    depth += 1
+                    current += char
+                elif char == ')':
+                    depth -= 1
+                    current += char
+                elif char == ',' and depth == 0:
+                    parts.append(current.strip())
+                    current = ""
+                else:
+                    current += char
+        if current:
+            parts.append(current.strip())
+        return parts
+
+    def get_types_mapping(self, settings):
+        # Basic mapping for variable declarations
+        return {
+            'nvarchar': 'varchar',
+            'nchar': 'char',
+            'datetime': 'timestamp',
+            'datetime2': 'timestamp',
+            'money': 'numeric(19,4)',
+            'smallmoney': 'numeric(10,4)',
+            'tinyint': 'smallint',
+            'bit': 'boolean',
+            'image': 'bytea',
+            'uniqueidentifier': 'uuid',
+            'varbinary': 'bytea',
+            'binary': 'bytea',
+            'rowversion': 'bytea',
+            'timestamp': 'bytea',
+            'xml': 'xml',
+            'sql_variant': 'text'
+        }
+
+    def _declaration_replacer(self, match, settings, types_mapping, declarations):
+        content = match.group(0).strip()
+        # Remove DECLARE
+        content = re.sub(r'^DECLARE\s+', '', content, flags=re.IGNORECASE).strip()
+
+        defs = self._split_respecting_parens(content)
+
+        for d in defs:
+            d = d.strip()
+            # Replace type
+            for sybase_type, pg_type in types_mapping.items():
+                d = re.sub(rf'\b{re.escape(sybase_type)}\b', pg_type, d, flags=re.IGNORECASE)
+
+            # Remove @
+            d = d.replace('@', '')
+
+            # Initialization
+            d = d.replace('=', ':=')
+
+            declarations.append(d + ';')
+
+        return ""
+
+    def _apply_data_type_substitutions(self, text):
+        return text
+
+    def _apply_udt_to_base_type_substitutions(self, text, settings):
+        udt_map = self._get_udt_map()
+        for udt, info in udt_map.items():
+             text = re.sub(rf'\b{re.escape(udt)}\b', info['base_type'], text, flags=re.IGNORECASE)
+        return text
+
+    def _transform_trigger_tables(self, expression):
+        # For MSSQL Statement Triggers using Transition Tables, we leave 'inserted'/'deleted' as is.
+        return expression
 
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

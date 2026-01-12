@@ -141,10 +141,10 @@ class Planner:
                     self.config_parser.print_log_message('INFO', "Cannot drop the 'public' schema - skipping drop of schema.")
                 else:
                     self.config_parser.print_log_message('INFO', f"Dropping target schema '{self.target_schema}'...")
-                    self.target_connection.execute_query(f"DROP SCHEMA IF EXISTS {self.target_schema} CASCADE")
+                    self.target_connection.execute_query(f'DROP SCHEMA IF EXISTS "{self.target_schema}" CASCADE')
 
             self.config_parser.print_log_message( 'DEBUG', f"Creating target schema '{self.target_schema}' if it does not exist...")
-            self.target_connection.execute_query(f"CREATE SCHEMA IF NOT EXISTS {self.target_schema}")
+            self.target_connection.execute_query(f'CREATE SCHEMA IF NOT EXISTS "{self.target_schema}"')
             self.target_connection.disconnect()
 
             self.run_pre_migration_script()
@@ -460,7 +460,7 @@ class Planner:
                                     query = f"""
                                         SELECT min({table_partitioning_columns}) as min_value,
                                         max({table_partitioning_columns}) as max_value
-                                        FROM {self.source_schema}.{table_info['table_name']}
+                                        FROM "{self.source_schema}"."{table_info['table_name']}"
                                         """
                                     self.source_connection.connect()
                                     self.config_parser.print_log_message( 'DEBUG', f"Query to get min/max values for partitioning: {query}")

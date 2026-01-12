@@ -24,6 +24,221 @@ import re
 import traceback
 import time
 import datetime
+import sqlglot
+from sqlglot import exp, TokenType
+from sqlglot.dialects import TSQL
+import logging
+
+# Define Custom Block Expression
+class Block(exp.Expression):
+    arg_types = {"expressions": True}
+
+# Register Block with Postgres Generator to allow fallback generation
+from sqlglot.dialects.postgres import Postgres
+
+def block_handler(self, expression):
+    # Ensure all statements in a block end with a semicolon
+    statements = []
+    for e in expression.expressions:
+        stmt = self.sql(e).strip()
+        if stmt and not stmt.endswith(';'):
+            stmt += ';'
+        statements.append(stmt)
+    return "\n".join(statements)
+
+Postgres.Generator.TRANSFORMS[Block] = block_handler
+
+class CustomTSQL(TSQL):
+    class Tokenizer(TSQL.Tokenizer):
+        COMMANDS = TSQL.Tokenizer.COMMANDS - {TokenType.COMMAND, TokenType.SET}
+
+    class Parser(TSQL.Parser):
+        config_parser = None
+
+        def _parse_alias(self, this, explicit=False):
+             # FIX: Explicitly prevent UPDATE/INSERT/DELETE/MERGE/SET from being aliases
+             # usage of keywords as aliases without AS is weird in implicit statement boundary contexts
+             if self._curr:
+                  # Check standard TokenTypes
+                  if self._curr.token_type in (TokenType.UPDATE, TokenType.INSERT, TokenType.DELETE, TokenType.MERGE, TokenType.SET, TokenType.SELECT):
+                       return this
+
+                  # Check text for others (PRINT, RAISERROR, etc might be Commands or Vars)
+                  txt = self._curr.text.upper()
+                  if txt in ('PRINT', 'RAISERROR', 'EXEC', 'EXECUTE', 'IF', 'WHILE', 'BEGIN', 'DECLARE', 'CREATE', 'GO', 'ELSE'):
+                       return this
+
+             return super()._parse_alias(this, explicit)
+
+        def _parse_command_custom(self):
+            # Intercept PRINT to parse expression
+            # Also helper for SET non-greedy parsing
+
+            prev_is_print = self._prev.text.upper() == 'PRINT' if self._prev else False
+            curr_is_print = self._curr.text.upper() == 'PRINT' if self._curr else False
+
+            if curr_is_print:
+                 self._advance()
+            elif not prev_is_print:
+                 if self._prev.text.upper() == 'SET':
+                      # SET already consumed by dispatcher mechanism?
+                      # Handle SET non-greedily: Stop at new statement keywords or semicolon
+                      expressions = []
+                      balance = 0
+                      while self._curr:
+                           if self._curr.token_type in (TokenType.SEMICOLON, TokenType.END):
+                                break
+
+                           if balance == 0:
+                                txt = self._curr.text.upper()
+                                if txt in ('SELECT', 'UPDATE', 'INSERT', 'DELETE', 'BEGIN', 'IF', 'WHILE', 'RETURN', 'DECLARE', 'CREATE', 'TRUNCATE', 'GO', 'ELSE', 'SET', 'PRINT', 'RAISERROR', 'EXEC', 'EXECUTE'):
+                                     break
+
+                           if self._curr.token_type == TokenType.L_PAREN:
+                                balance += 1
+                           elif self._curr.token_type == TokenType.R_PAREN:
+                                balance -= 1
+
+                           expressions.append(self._curr.text)
+                           self._advance()
+
+                      return exp.Command(this='SET', expression=exp.Literal.string(" ".join(expressions)))
+
+                 # Not a PRINT or SET command
+                 return self._parse_command()
+
+            # Use _parse_conjunction to avoid consuming END (as alias)
+            return exp.Command(this='PRINT', expression=self._parse_conjunction())
+
+        def _parse_rollback_custom(self):
+             # Custom parsing for ROLLBACK to avoid greedy consumption of END or other keywords
+             # T-SQL: ROLLBACK [ { TRAN | TRANSACTION } [ savepoint_name | @savepoint_variable ] ]
+             # PG: ROLLBACK [ WORK | TRANSACTION ] [ AND [ NO ] CHAIN ]
+
+             # Consume ROLLBACK (already consumed by dispatcher? No, matched by key)
+             # But this is called via STATEMENT_PARSERS
+             # If we are here, we are at the start.
+
+             # Actually, STATEMENT_PARSERS are calleed after token matching?
+             # No, TSQL.Parser.STATEMENT_PARSERS maps TokenType -> function.
+             # The loop is: if token in STATEMENT_PARSERS, call it.
+             # The function assumes it's at that token (or just after?)
+             # Standard _parse_rollback consumes tokens.
+             # We should consume ROLLBACK first if not already?
+             # Wait, generic parser usually consumes the triggering token?
+             # No, standard functions often consume. e.g. _parse_if calls self._match(TokenType.ELSE).
+             # Let's verify existing parsers. e.g. _parse_select starts by consuming SELECT.
+
+             if self._match(TokenType.ROLLBACK) or self._match(TokenType.COMMAND):
+                  pass
+
+             # Handle optional TRANSACTION / WORK
+             # Use text match if token attribute missing or just to be safe across versions
+             if self._curr:
+                  txt = self._curr.text.upper()
+                  if txt in ('TRANSACTION', 'TRAN', 'WORK'):
+                       self._advance()
+
+             # Ignore savepoints for migration simplicity/safety for now, or match ID only
+             # Ensuring we don't eat 'END'
+             if self._curr and self._curr.token_type not in (TokenType.END, TokenType.SEMICOLON, TokenType.ELSE):
+                 pass # Could match identifier here if needed, but risky.
+
+             return exp.Rollback()
+
+        STATEMENT_PARSERS = TSQL.Parser.STATEMENT_PARSERS.copy()
+        STATEMENT_PARSERS[TokenType.COMMAND] = _parse_command_custom
+        STATEMENT_PARSERS[TokenType.SET] = _parse_command_custom
+        # Override ROLLBACK if it exists as a token
+        if hasattr(TokenType, 'ROLLBACK'):
+             STATEMENT_PARSERS[TokenType.ROLLBACK] = _parse_rollback_custom
+
+        def _parse_block(self):
+            if not self._match(TokenType.BEGIN):
+                 pass
+
+            expressions = []
+            loop_counter = 0
+            last_token_idx = -1
+
+            while self._curr and self._curr.token_type != TokenType.END:
+                 loop_counter += 1
+                 if loop_counter > 100000:
+                      raise Exception(f"Potential Infinite Loop in _parse_block at token {self._curr}")
+
+                 # Check progress
+                 current_idx = self._index
+                 if current_idx == last_token_idx:
+                      # Stuck?
+
+                      # Detect orphaned ELSE -> Incorrectly parsed block boundary or lost ELSE IF
+                      if self._curr.token_type == TokenType.ELSE:
+                           if self.config_parser:
+                                self.config_parser.print_log_message('DEBUG', "Encountered ELSE in Block. Treating as implicit block end.")
+                           break
+
+                      msg = f"DEBUG: Processed token {self._curr} but did not advance. Force advance."
+                      if self.config_parser:
+                           self.config_parser.print_log_message('DEBUG', msg)
+                      else:
+                           logging.debug(msg)
+                      self._advance()
+                 last_token_idx = current_idx
+
+                 stmt = self._parse_statement()
+                 if stmt:
+                      expressions.append(stmt)
+                 self._match(TokenType.SEMICOLON)
+
+            self._match(TokenType.END)
+            return Block(expressions=expressions)
+
+        def _parse_if(self):
+            res = self.expression(
+                 exp.If,
+                 this=self._parse_conjunction(),
+                 true=self._parse_statement(),
+                 false=self._parse_statement() if self._match(TokenType.ELSE) else None,
+            )
+            return res
+
+        STATEMENT_PARSERS[TokenType.BEGIN] = lambda self: self._parse_block()
+        if hasattr(TokenType, 'IF'):
+             STATEMENT_PARSERS[getattr(TokenType, 'IF')] = lambda self: self._parse_if()
+
+        def _parse(self, parse_method, raw_tokens, sql=None):
+            self.reset()
+            self.sql = sql or ""
+            self._tokens = raw_tokens
+            self._index = -1
+            self._advance()
+
+            expressions = []
+            while self._curr:
+                if self._match(TokenType.SEMICOLON):
+                     continue
+
+                stmt = parse_method(self)
+                if not stmt:
+                     if self._curr:
+                          self.raise_error("Invalid expression / Unexpected token")
+                     break
+                expressions.append(stmt)
+            return expressions
+
+    class Generator(TSQL.Generator):
+        TRANSFORMS = TSQL.Generator.TRANSFORMS.copy()
+
+        def _block_handler(self, expression):
+            # Block handler needs to process children
+            # Since sqlglot generator expects strings, we need to generate sql for children
+            stmts = []
+            if hasattr(expression, 'expressions'):
+                for e in expression.expressions:
+                    stmts.append(self.sql(e))
+            return "\\n".join(stmts)
+
+        TRANSFORMS[Block] = _block_handler
 
 class MsSQLConnector(DatabaseConnector):
     def __init__(self, config_parser, source_or_target):
@@ -67,9 +282,37 @@ class MsSQLConnector(DatabaseConnector):
         """ Returns a dictionary of SQL functions mapping for the target database """
         target_db_type = settings['target_db_type']
         if target_db_type == 'postgresql':
-            return {}
+            return {
+                'getdate()': 'current_timestamp',
+                'getutcdate()': "timezone('UTC', now())",
+                'sysdatetime()': 'current_timestamp',
+                'year(': 'extract(year from ',
+                'month(': 'extract(month from ',
+                'day(': 'extract(day from ',
+                'db_name()': 'current_database()',
+                'original_db_name()': 'current_database()',
+                'suser_name()': 'current_user',
+                'suser_sname()': 'current_user',
+                'user_name()': 'current_user',
+                'len(': 'length(',
+                'datalength(': 'octet_length(',
+                'isnull(': 'coalesce(',
+                'substring(': 'substring(',
+                'charindex(': 'position(',
+                'replace(': 'replace(',
+                'stuff(': 'overlay(',
+                'lower(': 'lower(',
+                'upper(': 'upper(',
+                'ltrim(': 'ltrim(',
+                'rtrim(': 'rtrim(',
+                'space(': "repeat(' ', ",
+                'replicate(': 'repeat(',
+                # 'dateadd(': "mapped via transpiler custom logic often or requires complex rewriting",
+                # 'datediff(': "requires age() logic",
+            }
         else:
             self.config_parser.print_log_message('ERROR', f"Unsupported target database type: {target_db_type}")
+            return {}
 
     def migrate_sequences(self, target_connector, settings):
         return True
@@ -132,7 +375,10 @@ class MsSQLConnector(DatabaseConnector):
                 SELECT
                     c.column_id AS ordinal_position,
                     c.name AS column_name,
-                    t.name AS data_type,
+                    CASE
+                        WHEN t.is_user_defined = 1 THEN st.name
+                        ELSE t.name
+                    END AS data_type,
                     c.max_length AS length,
                     c.precision AS numeric_precision,
                     c.scale AS numeric_scale,
@@ -143,6 +389,7 @@ class MsSQLConnector(DatabaseConnector):
                 JOIN sys.tables tb ON c.object_id = tb.object_id
                 JOIN sys.schemas s ON tb.schema_id = s.schema_id
                 JOIN sys.types t ON c.user_type_id = t.user_type_id
+                LEFT JOIN sys.types st ON t.system_type_id = st.user_type_id AND st.is_user_defined = 0
                 LEFT JOIN sys.default_constraints dc ON c.default_object_id = dc.object_id
                 WHERE s.name = '{table_schema}' AND tb.name = '{table_name}'
                 ORDER BY c.column_id
@@ -206,6 +453,9 @@ class MsSQLConnector(DatabaseConnector):
                 'BIGDATETIME': 'TIMESTAMP',
                 'DATE': 'DATE',
                 'DATETIME': 'TIMESTAMP',
+                'DATETIME2': 'TIMESTAMP',
+                'DATETIMEOFFSET': 'TIMESTAMPTZ',
+                'BIGTIME': 'TIMESTAMP',
                 'SMALLDATETIME': 'TIMESTAMP',
                 'TIME': 'TIME',
                 'TIMESTAMP': 'TIMESTAMP',
@@ -227,26 +477,33 @@ class MsSQLConnector(DatabaseConnector):
                 'BINARY': 'BYTEA',
                 'VARBINARY': 'BYTEA',
                 'IMAGE': 'BYTEA',
+                'GEOMETRY': 'BYTEA',
+                'GEOGRAPHY': 'BYTEA',
+                'HIERARCHYID': 'BYTEA',
                 'CHAR': 'CHAR',
                 'NCHAR': 'CHAR',
                 'UNICHAR': 'CHAR',
                 'NVARCHAR': 'VARCHAR',
+                'UNIVARCHAR': 'VARCHAR',
                 'TEXT': 'TEXT',
+                'NTEXT': 'TEXT',
                 'SYSNAME': 'TEXT',
                 'LONGSYSNAME': 'TEXT',
-                'LONG VARCHAR': 'VARCHAR',
-                'LONG NVARCHAR': 'VARCHAR',
-                'UNICHAR': 'CHAR',
+                'LONG VARCHAR': 'TEXT',
+                'LONG NVARCHAR': 'TEXT',
                 'UNITEXT': 'TEXT',
-                'UNIVARCHAR': 'VARCHAR',
                 'VARCHAR': 'VARCHAR',
+                'XML': 'XML',
 
                 'CLOB': 'TEXT',
                 'DECIMAL': 'DECIMAL',
                 'DOUBLE PRECISION': 'DOUBLE PRECISION',
                 'FLOAT': 'FLOAT',
                 'INTERVAL': 'INTERVAL',
-                'MONEY': 'MONEY',
+                # 'MONEY': 'MONEY',
+                # 'SMALLMONEY': 'MONEY',
+                'MONEY': 'NUMERIC(19,4)',
+                'SMALLMONEY': 'NUMERIC(10,4)',
                 'NUMERIC': 'NUMERIC',
                 'REAL': 'REAL',
                 'SERIAL8': 'BIGSERIAL',
@@ -366,11 +623,13 @@ class MsSQLConnector(DatabaseConnector):
             cc.constraint_columns,
             rt.name AS referenced_table,
             rc.referenced_columns,
-            pt.name AS constraint_table
+            pt.name AS constraint_table,
+            rs.name AS referenced_schema
             FROM sys.foreign_keys fk
             JOIN ConstraintColumns cc ON fk.name = cc.constraint_name
             JOIN ReferencedColumns rc ON fk.name = rc.constraint_name
             JOIN sys.tables rt ON fk.referenced_object_id = rt.object_id
+            JOIN sys.schemas rs ON rt.schema_id = rs.schema_id
             JOIN sys.tables pt ON fk.parent_object_id = pt.object_id
             WHERE fk.parent_object_id = {source_table_id}
             ORDER BY fk.name
@@ -389,6 +648,7 @@ class MsSQLConnector(DatabaseConnector):
                 constraint_columns = constraint[2].strip()
                 referenced_table = constraint[3].strip()
                 referenced_columns = constraint[4].strip()
+                referenced_schema = constraint[6].strip()
                 constraint_owner = ''
 
                 table_constraints[order_num] = {
@@ -396,7 +656,7 @@ class MsSQLConnector(DatabaseConnector):
                     'constraint_type': constraint_type,
                     'constraint_owner': constraint_owner,
                     'constraint_columns': constraint_columns,
-                    'referenced_table_schema': '',
+                    'referenced_table_schema': referenced_schema,
                     'referenced_table_name': referenced_table,
                     'referenced_columns': referenced_columns,
                     'constraint_sql': '',
@@ -422,35 +682,330 @@ class MsSQLConnector(DatabaseConnector):
                 p.name AS name,
                 CASE
                     WHEN p.type = 'P' THEN 'Procedure'
-                    WHEN p.type = 'FN' THEN 'Function'
+                    WHEN p.type IN ('FN', 'TF', 'IF') THEN 'Function'
+                    ELSE 'Unknown'
                 END AS type
             FROM sys.objects p
             JOIN sys.schemas s ON p.schema_id = s.schema_id
-            WHERE s.name = '{schema}' AND p.type IN ('P', 'FN')
+            WHERE s.name = '{schema}'
+              AND p.type IN ('P', 'FN', 'TF', 'IF')
+              AND p.is_ms_shipped = 0
             ORDER BY p.name
         """
-        # ...existing code from SybaseASEConnector.fetch_funcproc_names...
-        pass
+        self.config_parser.print_log_message('DEBUG3', f"fetch_funcproc_names: query: {query}")
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            cursor.close()
+
+            funcprocs = {}
+            order_num = 1
+            for row in rows:
+                funcprocs[order_num] = {
+                    'id': row[0],
+                    'name': row[1],
+                    'type': row[2],
+                    'comment': ''
+                }
+                order_num += 1
+            self.disconnect()
+            return funcprocs
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error fetching function/procedure names: {e}")
+            return []
 
     def fetch_funcproc_code(self, funcproc_id: int):
-        query = f"""
+        # 1. Fetch Definition
+        query_def = f"""
             SELECT m.definition
             FROM sys.sql_modules m
             WHERE m.object_id = {funcproc_id}
         """
-        # ...existing code from SybaseASEConnector.fetch_funcproc_code...
-        pass
+
+        # 2. Fetch Return Schema (for implicit result sets in Procedures)
+        # Using sys.dm_exec_describe_first_result_set (SQL Server 2012+)
+        query_schema = f"""
+            SELECT
+                name,
+                system_type_name,
+                max_length,
+                precision,
+                scale,
+                is_nullable
+            FROM sys.dm_exec_describe_first_result_set_for_object({funcproc_id}, 0)
+            WHERE name IS NOT NULL
+        """
+
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+
+            # Fetch Code
+            cursor.execute(query_def)
+            row = cursor.fetchone()
+            definition = row[0] if row else None
+
+            schema = []
+            if definition:
+                try:
+                    cursor.execute(query_schema)
+                    schema_rows = cursor.fetchall()
+                    for s in schema_rows:
+                        # Col Name, Type, Len, Prec, Scale, Nullable
+                        schema.append({
+                            'name': s[0],
+                            'type': s[1],
+                            'length': s[2],
+                            'precision': s[3],
+                            'scale': s[4],
+                            'nullable': s[5]
+                        })
+                except Exception as ex_schema:
+                    # DMV might not exist or parsing error
+                    self.config_parser.print_log_message('DEBUG', f"Schema discovery failed (ignoring): {ex_schema}")
+
+            cursor.close()
+            self.disconnect()
+
+            if definition:
+                return {
+                    'definition': definition,
+                    'return_schema': schema
+                }
+            return None
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error fetching function/procedure code for id {funcproc_id}: {e}")
+            return None
 
     def convert_funcproc_code(self, settings):
-        funcproc_code = settings['funcproc_code']
-        target_db_type = settings['target_db_type']
-        source_schema = settings['source_schema']
+        funcproc_code_input = settings['funcproc_code']
+        # Handle dict input (with schema) vs string input
+        if isinstance(funcproc_code_input, dict):
+             funcproc_code = funcproc_code_input.get('definition', '')
+             implicit_return_schema = funcproc_code_input.get('return_schema', [])
+        else:
+             funcproc_code = str(funcproc_code_input)
+             implicit_return_schema = []
+
+        # target_db_type = settings['target_db_type'] # Unused
+        # source_schema = settings['source_schema'] # Unused
         target_schema = settings['target_schema']
-        table_list = settings['table_list']
-        view_list = settings['view_list']
-        converted_code = ''
-        # placeholder for actual conversion logic
-        return converted_code
+        # table_list = settings['table_list']
+        # view_list = settings['view_list']
+
+        # 1. Cleanup
+        funcproc_code = funcproc_code.strip()
+        # Remove usage of GO
+        funcproc_code = re.sub(r'\bGO\b', '', funcproc_code, flags=re.IGNORECASE)
+
+        # 2. Identify Type and Name
+        # Support names with spaces [Name with Space] or "Name" or Name
+        # Regex to match CREATE [OR ALTER] {PROC|PROCEDURE|FUNCTION} [schema.]name ...
+
+        type_match = re.search(r'CREATE\s+(?:OR\s+ALTER\s+)?(PROC|PROCEDURE|FUNCTION)\s+(?:(\[.*?\]|".*?"|[\w]+)\.)?(\[.*?\]|".*?"|[\w]+)', funcproc_code, re.IGNORECASE)
+
+        if not type_match:
+             return f"/* FAILED TO PARSE DEFINITION */\n{funcproc_code}"
+
+        obj_type_raw = type_match.group(1).upper()
+        # schema_name = type_match.group(2) # Ignore source schema, use target_schema
+        obj_name = type_match.group(3).strip('[]"')
+
+        is_proc = 'PROC' in obj_type_raw
+        pg_type = 'PROCEDURE' if is_proc else 'FUNCTION'
+
+        is_implicit_return = False
+        if is_proc and implicit_return_schema:
+             pg_type = 'FUNCTION'
+             is_implicit_return = True
+
+        self.config_parser.print_log_message('DEBUG', f"DEBUG Parsing: obj_type_raw={obj_type_raw}, is_proc={is_proc}, pg_type={pg_type}, implicit_return={is_implicit_return}")
+
+
+
+
+
+        # I must include the middle parts.
+
+        # NOTE: To minimize context size, I will break this into two edits if needed, or include the whole block.
+        # Lines 766 to 848 is ~80 lines.
+
+
+
+
+        # 3. separate Body from Header
+        # Usually AS begins the body. But parameters can be complex.
+        # Simple heuristic: Split on first AS not inside parens?
+        # Or just use the regex to extract finding the FIRST AS after the CREATE line.
+
+        # Better: Convert the whole thing using declaration processing first
+
+        # Extract Variables (Parameters + Body Locals)
+        # We need to distinguish parameters because they go into the signature.
+
+        # Regex to find parameters section
+        # Logic: From Object Name end to 'AS'
+
+        header_end_match = re.search(r'\bAS\b', funcproc_code, re.IGNORECASE)
+        if not header_end_match:
+             return f"/* COULD NOT FIND 'AS' KEYWORD */\n{funcproc_code}"
+
+        header_part = funcproc_code[:header_end_match.start()]
+        body_part = funcproc_code[header_end_match.end():]
+
+        # Process Body declarations
+        declarations = []
+        types_mapping = self.get_types_mapping(settings)
+
+        declaration_replacer = lambda m: self._declaration_replacer(m, settings, types_mapping, declarations)
+
+        # Replace DECLAREs in body
+        processed_body = re.sub(r'DECLARE\s+@.*?(?=\bBEGIN\b|\bIF\b|\bWHILE\b|\bSELECT\b|\bINSERT\b|\bUPDATE\b|\bDELETE\b|\bRETURN\b|\bSET\b|\bFETCH\b|\bOPEN\b|\bCLOSE\b|\bDEALLOCATE\b|\bDECLARE\b|$)', declaration_replacer, body_part, flags=re.IGNORECASE | re.DOTALL)
+
+        # Apply substitutions
+        processed_body = self._apply_data_type_substitutions(processed_body)
+        processed_body = self._apply_udt_to_base_type_substitutions(processed_body, settings)
+
+        # Convert Body Statements
+        has_rowcount = '@@rowcount' in processed_body.lower()
+        if has_rowcount:
+             declarations.append('_rowcount INTEGER;')
+
+        converted_stmts = self._convert_stmts(processed_body, settings, has_rowcount=has_rowcount, implicit_return=is_implicit_return)
+        pg_body_content = "\n".join(converted_stmts)
+
+        # 4. Construct Header (Parameters)
+        # We need to parse parameters from header_part
+        # This is tricky without a full parser.
+        # Basic approach: Extract everything after name until AS.
+        # But wait, header_part INCLUDES the Name.
+
+        # Let's clean header part: remove CREATE ... Name
+        header_clean = header_part[type_match.end():].strip()
+
+        # Look for RETURNS clause (for functions)
+        returns_clause = "RETURNS VOID" # Default for proc? No, Proc has no return
+
+        if is_implicit_return:
+             # Construct RETURNS TABLE for implicit result sets
+             col_defs = []
+             for col in implicit_return_schema:
+                  c_name = col['name']
+                  c_type = col.get('system_type_name', 'text') # Default text
+
+                  # Map column type
+                  t_mapped = self._apply_data_type_substitutions(c_type)
+                  t_mapped = self._apply_udt_to_base_type_substitutions(t_mapped, settings)
+                  for ms, pg_tgt in types_mapping.items():
+                       t_mapped = re.sub(rf'\b{re.escape(ms)}\b', pg_tgt, t_mapped, flags=re.IGNORECASE)
+
+                  col_defs.append(f'"{c_name}" {t_mapped}')
+
+             if col_defs:
+                  returns_clause = f"RETURNS TABLE ({', '.join(col_defs)})"
+             else:
+                  returns_clause = "RETURNS VOID" # Schema was empty?
+
+        elif not is_proc:
+             ret_match = re.search(r'\bRETURNS\s+(.*)', header_clean, re.IGNORECASE)
+             if ret_match:
+                  ret_type_raw = ret_match.group(1).strip()
+                  # Clean wrapping parens if table variable
+                  # If returns table -> RETURNS TABLE (...)
+
+                  # Apply Type mapping
+                  # For now: simple string replacement or simple parsing
+                  # Check if it has @var TABLE
+                  if 'TABLE' in ret_type_raw.upper():
+                       returns_clause = f"RETURNS TABLE ({ret_type_raw.split('TABLE')[-1].strip()})"
+                       # Need to fix types inside TABLE(...) definition too? Yes.
+                       returns_clause = self._apply_data_type_substitutions(returns_clause)
+                  else:
+                       # scalar type
+                       ret_mapped = self._apply_data_type_substitutions(ret_type_raw)
+                       ret_mapped = self._apply_udt_to_base_type_substitutions(ret_mapped, settings)
+                       for ms_type, pg_target_type in types_mapping.items():
+                           ret_mapped = re.sub(rf'\b{re.escape(ms_type)}\b', pg_target_type, ret_mapped, flags=re.IGNORECASE)
+                       returns_clause = f"RETURNS {ret_mapped}"
+
+                  # Remove RETURNS from params string
+                  header_clean = header_clean[:ret_match.start()].strip()
+             else:
+                  returns_clause = "RETURNS VOID" # Scalar func must have return?
+
+        # Parse Parameters string `header_clean`
+        # @p1 int, @p2 varchar(10) ...
+        # Need to map types and replace @ with nothing or _
+
+        pg_params = []
+        if header_clean:
+            # Clean outer parens if they exist (optional in TSQL)
+            if header_clean.startswith('(') and header_clean.endswith(')'):
+                header_clean = header_clean[1:-1]
+
+            # Split by comma respecting parens (for decimal(10,2))
+            # Reuse _split_respecting_parens but it doesn't handle comma.
+            # Lazy split:
+            param_parts = self._split_respecting_parens(header_clean)
+            # Wait, _split_respecting_parens doesn't split by comma.
+            # It tokenizes? No, viewing it: it looks like it iterates char by char but doesn't return list...
+            # Ah, `view_file` cut off `_split_respecting_parens` implementation.
+
+            # Assume naive split for now or regex
+            params_list = re.split(r',(?![^(]*\))', header_clean)
+
+            for p in params_list:
+                p = p.strip()
+                if not p: continue
+
+                # Format: @name type [= default] [OUTPUT] [READONLY]
+                # Regex search
+                p_match = re.search(r'@([\w]+)\s+([\w\(\)]+)(.*)', p)
+                if p_match:
+                    p_name = p_match.group(1)
+                    p_type = p_match.group(2)
+                    p_rest = p_match.group(3) or ""
+
+                    # Map type
+                    p_type = self._apply_data_type_substitutions(p_type)
+                    p_type = self._apply_udt_to_base_type_substitutions(p_type, settings)
+
+                    # Apply built-in mapping
+                    for ms_type, pg_target_type in types_mapping.items():
+                        p_type = re.sub(rf'\b{re.escape(ms_type)}\b', pg_target_type, p_type, flags=re.IGNORECASE)
+
+                    # Handle OUTPUT
+                    mode = "INOUT " if "OUTPUT" in p_rest.upper() else ""
+
+                    # Handle Default
+                    default_val = ""
+                    def_match = re.search(r'=\s*([^ ]+)', p_rest)
+                    if def_match:
+                        default_val = f" DEFAULT {def_match.group(1)}"
+
+                    pg_params.append(f"{mode}locvar_{p_name} {p_type}{default_val}")
+
+        pg_params_str = ", ".join(pg_params)
+
+        # 5. Assembly
+        # Quote Object Name for PG
+        pg_name = f'"{obj_name}"'
+
+        decl_section = "DECLARE\n" + "\n".join(declarations) if declarations else ""
+
+        ddl = f"""
+CREATE OR REPLACE {pg_type} "{target_schema}".{pg_name}({pg_params_str})
+{returns_clause if pg_type == 'FUNCTION' else ''}
+AS $$
+{decl_section}
+BEGIN
+{pg_body_content}
+END;
+$$ LANGUAGE plpgsql;
+"""
+        return ddl
 
     def fetch_views_names(self, owner_name):
         views = {}
@@ -516,9 +1071,150 @@ class MsSQLConnector(DatabaseConnector):
             raise
 
     def convert_view_code(self, settings: dict):
+        # Fetch UDT map for substitution
+        udt_lookup_map = self._get_udt_map()
+
+        def quote_column_names(node):
+            if isinstance(node, sqlglot.exp.Column) and node.name and node.name != '*':
+                node.set("this", sqlglot.exp.Identifier(this=node.name, quoted=True))
+            if isinstance(node, sqlglot.exp.Alias) and isinstance(node.args.get("alias"), sqlglot.exp.Identifier):
+                alias = node.args["alias"]
+                if not alias.args.get("quoted"):
+                    alias.set("quoted", True)
+            return node
+
+        def replace_schema_names(node):
+            if isinstance(node, (sqlglot.exp.Table, sqlglot.exp.Column)):
+                schema = node.args.get("db")
+                if schema and schema.name == settings['source_schema']:
+                    node.set("db", sqlglot.exp.Identifier(this=settings['target_schema'], quoted=False))
+            return node
+
+        def quote_schema_and_table_names(node):
+            if isinstance(node, (sqlglot.exp.Table, sqlglot.exp.Column)):
+                # Quote schema name if present
+                schema = node.args.get("db")
+                if schema and not schema.args.get("quoted"):
+                    schema.set("quoted", True)
+
+                # Quote table name
+                if isinstance(node, sqlglot.exp.Table):
+                    table = node.args.get("this")
+                else:
+                    table = node.args.get("table")
+
+                if table and not table.args.get("quoted"):
+                    table.set("quoted", True)
+            return node
+
+        def replace_functions(node):
+            mapping = self.get_sql_functions_mapping({ 'target_db_type': settings['target_db_type'] })
+            # Prepare mapping for function names (without parentheses)
+            func_name_map = {}
+            for k, v in mapping.items():
+                if k.endswith('('):
+                    func_name_map[k[:-1].lower()] = v[:-1] if v.endswith('(') else v
+                elif k.endswith('()'):
+                    func_name_map[k[:-2].lower()] = v
+                else:
+                    func_name_map[k.lower()] = v
+
+            if isinstance(node, sqlglot.exp.Anonymous):
+                func_name = node.name.lower()
+                if func_name in func_name_map:
+                    mapped = func_name_map[func_name]
+                    # If mapped is a function name, replace the function name
+                    if '(' not in mapped:
+                        node.set("this", sqlglot.exp.Identifier(this=mapped, quoted=False))
+                    else:
+                        # For mappings like 'year(' -> 'extract(year from '
+                        # We need to rewrite the function call
+                        if mapped.startswith('extract('):
+                            # e.g. year(t1.b) -> extract(year from t1.b)
+                            arg = node.args.get("expressions")
+                            if arg and len(arg) == 1:
+                                part = func_name
+                                return sqlglot.exp.Extract(
+                                    this=sqlglot.exp.Identifier(this=part, quoted=False),
+                                    expression=arg[0]
+                                )
+                        else:
+                            # Iterate over the mapping to handle function name replacements
+                            for orig, repl in mapping.items():
+                                # Handle mappings ending with '(' (function calls)
+                                if orig.endswith('(') and func_name == orig[:-1].lower():
+                                    if repl.endswith('('):
+                                        node.set("this", sqlglot.exp.Identifier(this=repl[:-1], quoted=False))
+                                    else:
+                                        node.set("this", sqlglot.exp.Identifier(this=repl, quoted=False))
+                                    break
+                                # Handle mappings ending with '()' (function calls with no args)
+                                elif orig.endswith('()') and func_name == orig[:-2].lower():
+                                    node.set("this", sqlglot.exp.Identifier(this=repl, quoted=False))
+                                    break
+                    # For direct function name replacements, handled above
+                # For functions like getdate(), getutcdate(), etc.
+                elif func_name + "()" in func_name_map:
+                    mapped = func_name_map[func_name + "()"]
+                    return sqlglot.exp.Anonymous(this=mapped)
+            return node
+
+        def replace_udts(node):
+            if isinstance(node, sqlglot.exp.DataType):
+                # Check if the type is a UDT
+                type_name = node.this.name if hasattr(node.this, 'name') else str(node.this)
+
+                if type_name in udt_lookup_map:
+                     udt_info = udt_lookup_map[type_name]
+                     return sqlglot.exp.DataType.build(udt_info['sql']) # Use 'sql' or 'definition'
+            return node
+
+        def transform_sybase_joins(expression):
+            # Check for EQ nodes with outer join comments (sqlglot default parsing of *=)
+            # OR check for 'outer_join' property if parsing handles it.
+            # sqlglot T-SQL might parse *= as normal EQ, or custom.
+            # Since we didn't inject the scanner pre-processor for *= yet (it's in Sybase v2 conversion),
+            # we rely on sqlglot.
+            # MSSQL views likely use standard ANSI JOINs, but legacy syntax exists.
+            # We assume ANSI joins for now, or sqlglot handles standard T-SQL.
+            return expression
+
         view_code = settings['view_code']
-        # ...existing code from SybaseASEConnector.convert_view_code...
-        pass
+        CustomTSQL.Parser.config_parser = self.config_parser
+        try:
+            expressions = sqlglot.parse(view_code, read=CustomTSQL)
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Failed to parse view code: {e}")
+            return f"-- ERROR parsing view: {e}\n/*\n{view_code}\n*/"
+
+        transformed_sqls = []
+        for expression in expressions:
+            try:
+                # Unwrap CREATE VIEW to get the inner SELECT/query
+                if isinstance(expression, sqlglot.exp.Create):
+                    expression = expression.expression
+
+                # Apply transformations
+                expression = expression.transform(quote_column_names)
+                expression = expression.transform(replace_functions)
+                expression = expression.transform(replace_schema_names)
+                expression = expression.transform(quote_schema_and_table_names)
+                expression = expression.transform(replace_udts)
+                # expression = transform_sybase_joins(expression) # Not needed if standard SQL
+
+                pg_sql = expression.sql(dialect='postgres')
+                transformed_sqls.append(pg_sql)
+            except Exception as e:
+                self.config_parser.print_log_message('ERROR', f"Failed to transform expression: {e}")
+                transformed_sqls.append(f"-- ERROR transforming: {e}")
+
+        final_select_sql = "\n".join(transformed_sqls)
+
+        target_schema = settings['target_schema']
+        target_view_name = settings['target_view_name']
+
+        final_view_sql = f"CREATE OR REPLACE VIEW \"{target_schema}\".\"{target_view_name}\" AS\n{final_select_sql};"
+        return final_view_sql
 
     def migrate_table(self, migrate_target_connection, settings):
         part_name = 'initialize'
@@ -613,10 +1309,10 @@ class MsSQLConnector(DatabaseConnector):
                         # elif col['data_type'].lower() == 'set':
                         #     select_columns_list.append(f"cast(`{col['column_name']}` as char(4000)) as `{col['column_name']}`")
                         # else:
-                        select_columns_list.append(f'''{col['column_name']}''')
+                        select_columns_list.append(f'''[{col['column_name']}]''')
 
                         insert_columns_list.append(f'''"{self.config_parser.convert_names_case(col['column_name'])}"''')
-                        orderby_columns_list.append(f'''"{col['column_name']}"''')
+                        orderby_columns_list.append(f'''[{col['column_name']}]''')
 
                     select_columns = ', '.join(select_columns_list)
                     insert_columns = ', '.join(insert_columns_list)
@@ -642,7 +1338,7 @@ class MsSQLConnector(DatabaseConnector):
                     #         query += f" WHERE {migration_limitation}"
                     # else:
 
-                    query = f"SELECT {select_columns} FROM {source_schema}.{source_table}"
+                    query = f"SELECT {select_columns} FROM [{source_schema}].[{source_table}]"
                     if migration_limitation:
                         query += f" WHERE {migration_limitation}"
                     primary_key_columns = migrator_tables.select_primary_key(source_schema, source_table)
@@ -812,15 +1508,259 @@ class MsSQLConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Full stack trace: {traceback.format_exc()}")
             raise e
 
-    def fetch_triggers(self, schema_name, table_name):
-        # ...existing code from SybaseASEConnector.fetch_triggers...
-        pass
+    def fetch_triggers(self, table_id, schema_name, table_name):
+        triggers = {}
+        order_num = 1
+        query = f"""
+            SELECT
+                t.name AS trigger_name,
+                s.name AS schema_name,
+                m.definition AS trigger_definition,
+                te.type_desc AS event_type,
+                t.is_disabled,
+                t.object_id
+            FROM sys.triggers t
+            JOIN sys.tables tb ON t.parent_id = tb.object_id
+            JOIN sys.schemas s ON tb.schema_id = s.schema_id
+            JOIN sys.sql_modules m ON t.object_id = m.object_id
+            JOIN sys.trigger_events te ON t.object_id = te.object_id
+            WHERE s.name = '{schema_name}' AND tb.name = '{table_name}'
+        """
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            rows = cursor.fetchall()
 
-    def convert_trigger(self, trigger_name, trigger_code, source_schema, target_schema, table_list):
-        # ...existing code from SybaseASEConnector.convert_trigger...
-        pass
+            # Group events by trigger
+            trigger_data = {}
+            for row in rows:
+                trigger_name = row[0]
+                schema = row[1]
+                definition = row[2]
+                event = row[3] # e.g. INSERT, UPDATE, DELETE
+                is_disabled = row[4]
+                object_id = row[5]
+
+                if trigger_name not in trigger_data:
+                    trigger_data[trigger_name] = {
+                        'schema_name': schema,
+                        'trigger_name': trigger_name,
+                        'trigger_code': definition,
+                        'events': {event},
+                        'is_disabled': is_disabled,
+                        'object_id': object_id
+                    }
+                else:
+                    trigger_data[trigger_name]['events'].add(event)
+
+            for name, data in trigger_data.items():
+                events_list = list(data['events'])
+                triggers[order_num] = {
+                    'name': data['trigger_name'],
+                    'trigger_owner': data['schema_name'],
+                    'sql': data['trigger_code'],
+                    'event': ' OR '.join(events_list), # Planner expects 'event' string
+                    'new': 'inserted' if 'INSERT' in events_list or 'UPDATE' in events_list else None,
+                    'old': 'deleted' if 'DELETE' in events_list or 'UPDATE' in events_list else None,
+                    'status': 'DISABLED' if data['is_disabled'] else 'ENABLED',
+                    'comment': '',
+                    'id': data['object_id']
+                }
+                order_num += 1
+
+            cursor.close()
+            self.disconnect()
+            return triggers
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error fetching triggers: {e}")
+            return {}
+
+    def convert_trigger(self, settings):
+        trigger_name = settings['trigger_name']
+        trigger_code = settings['trigger_sql']
+        source_schema = settings['source_schema']
+        target_schema = settings['target_schema']
+        table_list = settings['table_list']
+
+        # Clean up code
+        trigger_code = trigger_code.strip()
+
+        # Regular Expressions to extract info
+        # ON [Schema].[Table]
+        table_match = re.search(r'ON\s+(?:\[?(\w+)\]?\.)?\[?(\w+)\]?', trigger_code, re.IGNORECASE)
+        table_name = table_match.group(2) if table_match else "UNKNOWN_TABLE"
+
+        # Events
+        events = []
+        if re.search(r'\bINSERT\b', trigger_code, re.IGNORECASE): events.append('INSERT')
+        if re.search(r'\bUPDATE\b', trigger_code, re.IGNORECASE): events.append('UPDATE')
+        if re.search(r'\bDELETE\b', trigger_code, re.IGNORECASE): events.append('DELETE')
+
+        # Timing
+        timing = 'AFTER'
+        if re.search(r'\bINSTEAD\s+OF\b', trigger_code, re.IGNORECASE):
+            timing = 'INSTEAD OF'
+
+        # Body Isolation
+        body_match = re.search(r'CREATE\s+TRIGGER\s+.*?\s+AS\s+(.*)', trigger_code, re.IGNORECASE | re.DOTALL)
+        body_start = body_match.group(1) if body_match else ""
+
+        if not body_start:
+             return f"/* COULD NOT ISOLATE BODY FOR {trigger_name} */ {trigger_code}"
+
+        # --- Conversion Logic adhering to Sybase pattern ---
+
+        # 1. Variable Declarations Extraction
+        declarations = []
+        types_mapping = self.get_types_mapping(settings)
+
+        # Helper wrapper for replacer
+        declaration_replacer = lambda m: self._declaration_replacer(m, settings, types_mapping, declarations)
+
+        # Extract declarations
+        body_content = re.sub(r'DECLARE\s+@.*?(?=\bBEGIN\b|\bIF\b|\bWHILE\b|\bSELECT\b|\bINSERT\b|\bUPDATE\b|\bDELETE\b|\bRETURN\b|\bSET\b|\bFETCH\b|\bOPEN\b|\bCLOSE\b|\bDEALLOCATE\b|\bDECLARE\b|$)', declaration_replacer, body_start, flags=re.IGNORECASE | re.DOTALL)
+
+        # 2. UDT & Type Substitutions
+        body_content = self._apply_data_type_substitutions(body_content)
+        body_content = self._apply_udt_to_base_type_substitutions(body_content, settings)
+
+        # 3. Convert Statements
+        has_rowcount = '@@rowcount' in body_content.lower()
+        if has_rowcount:
+             declarations.append('_rowcount INTEGER;')
+
+        converted_stmts = self._convert_stmts(body_content, settings, has_rowcount=has_rowcount, is_trigger=True)
+        pg_body = "\n".join(converted_stmts)
+
+        # Construct Function
+        func_name = f"tf_{trigger_name}"
+        func_schema = target_schema
+
+        decl_section = "DECLARE\n" + "\n".join(declarations) if declarations else ""
+
+        func_ddl = f"""
+CREATE OR REPLACE FUNCTION "{func_schema}"."{func_name}"()
+RETURNS TRIGGER AS $$
+{decl_section}
+BEGIN
+{pg_body}
+RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+"""
+
+        # Construct Trigger (Changed to Row Level to support NEW/OLD replacement)
+        # Transition tables (inserted/deleted) are replaced by NEW/OLD record access by AST transformer
+
+        events_str = " OR ".join(events)
+
+        # NOTE: MSSQL Triggers are statement-level by default but access 'inserted' set.
+        # User requested mapping 'inserted' -> NEW and 'deleted' -> OLD.
+        # This implies running FOR EACH ROW.
+        # Warning: This changes semantics if the logic was doing set-based aggregation.
+        # But for row-processing logic (select @var = col from inserted), this conversion is correct.
+
+        trigger_ddl = f"""
+CREATE TRIGGER "{trigger_name}"
+{timing} {events_str} ON "{target_schema}"."{table_name}"
+FOR EACH ROW
+EXECUTE FUNCTION "{func_schema}"."{func_name}"();
+"""
+
+        return f"{func_ddl}\n{trigger_ddl}"
+
 
     def execute_query(self, query: str, params=None):
+        pass # Placeholder
+
+    def _transform_trigger_tables(self, expression):
+
+        # Transform MSSQL 'inserted'/'deleted' table usage to PG 'NEW'/'OLD' record usage
+        # This requires AST modification:
+        # 1. Remove 'inserted'/'deleted' from FROM/JOINs.
+        # 2. Rename columns referencing them to use NEW/OLD as table alias.
+
+        table_map = {'inserted': 'NEW', 'deleted': 'OLD'}
+        aliases = {}
+
+        # 1. Identify aliases first (Scan)
+        from_clause = expression.args.get('from')
+        joins = expression.args.get('joins') or []
+
+
+
+        if from_clause:
+            for item in from_clause.expressions:
+                if isinstance(item, exp.Table) and item.name.lower() in table_map:
+                    aliases[item.alias_or_name] = table_map[item.name.lower()]
+
+        for j in joins:
+            if isinstance(j.this, exp.Table) and j.this.name.lower() in table_map:
+                aliases[j.this.alias_or_name] = table_map[j.this.name.lower()]
+
+        # 2. Transform Logic
+        def transformer(node):
+            if isinstance(node, exp.Column):
+                tbl = node.table
+                if tbl and tbl in aliases:
+                    # Replace with Aliased Column (NEW/OLD)
+                    return exp.Column(
+                        this=node.this,
+                        table=exp.Identifier(this=aliases[tbl], quoted=False)
+                    )
+            return node
+
+        expression = expression.transform(transformer)
+
+        # 3. Handle Table Removal and Join Promotion
+        # Re-access FROM after transform
+        from_clause = expression.args.get('from')
+        joins = expression.args.get('joins') or []
+
+        if from_clause:
+            new_froms = []
+            for item in from_clause.expressions:
+                if isinstance(item, exp.Table) and item.name.lower() in table_map:
+                    continue
+                new_froms.append(item)
+
+            from_clause.set('expressions', new_froms)
+
+            # If new_froms is empty, we MUST promote a JOIN if available, or empty FROM
+            if not new_froms:
+                if joins:
+                    first_join = joins.pop(0)
+                    new_table = first_join.this
+                    condition = first_join.args.get('on')
+
+                    # Set FROM to new_table
+                    from_clause.set('expressions', [new_table])
+
+                    # Move conditions to WHERE
+                    if condition:
+                        expression.where(condition, copy=False)
+
+                    expression.set('joins', joins)
+                else:
+                    # No JOINs, so just empty FROM (SELECT NEW.col)
+                    expression.set('from', None)
+
+        # 4. Filter JOINs that are strictly transition tables (if not promoted)
+        joins = expression.args.get('joins') or []
+        new_joins = []
+        for j in joins:
+            if isinstance(j.this, exp.Table) and j.this.name.lower() in table_map:
+                # Merge logic: if explicit JOIN condition exists, move it to WHERE
+                # e.g. JOIN inserted ON i.id = t.id -> WHERE NEW.id = t.id
+                condition = j.args.get('on')
+                if condition:
+                     expression.where(condition, copy=False)
+                continue
+            new_joins.append(j)
+        expression.set('joins', new_joins)
+
+        return expression
         # ...existing code from SybaseASEConnector.execute_query...
         pass
 
@@ -883,16 +1823,67 @@ class MsSQLConnector(DatabaseConnector):
     def fetch_user_defined_types(self, schema: str):
         query = """
             SELECT
-                s.name AS type_name,
-                s.system_type_id AS system_type_id,
-                s.user_type_id AS user_type_id,
-                s.max_length AS max_length,
-                s.is_nullable AS is_nullable
-            FROM sys.types s
-            WHERE s.is_user_defined = 1
+                t.name AS type_name,
+                st.name AS system_type_name,
+                t.max_length,
+                t.precision,
+                t.scale,
+                t.is_nullable
+            FROM sys.types t
+            JOIN sys.types st ON t.system_type_id = st.user_type_id
+            WHERE t.is_user_defined = 1 AND st.is_user_defined = 0
         """
-        # ...existing code from SybaseASEConnector.fetch_user_defined_types...
-        pass
+        try:
+            udts = {}
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            rows = cursor.fetchall()
+
+            order_num = 1
+            for row in rows:
+                type_name = row[0]
+                system_type = row[1].upper()
+                max_length = row[2]
+                precision = row[3]
+                scale = row[4]
+
+                # Construct definition
+                definition = system_type
+                if self.is_string_type(system_type) and max_length != -1:
+                    length = max_length // 2 if system_type in ('NCHAR', 'NVARCHAR') else max_length
+                    definition = f"{system_type}({length})"
+                elif self.is_numeric_type(system_type):
+                    if system_type in ('DECIMAL', 'NUMERIC'):
+                        definition = f"{system_type}({precision}, {scale})"
+
+                # Structure expected by Planner: keyed by integer order_num
+                udts[order_num] = {
+                    'type_name': type_name,
+                    'base_type': system_type,
+                    'length': max_length,
+                    'prec': precision,
+                    'scale': scale,
+                    'sql': definition,
+                    'schema_name': schema,
+                    'comment': ''
+                }
+                order_num += 1
+
+            cursor.close()
+            self.disconnect()
+            return udts
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error fetching UDTs: {e}")
+            return {}
+
+    def _get_udt_map(self):
+        """ Helper to get a map of UDT name -> definition for conversion logic """
+        udts_full = self.fetch_user_defined_types('dbo')
+        udt_map = {}
+        for k, v in udts_full.items():
+            udt_map[v['type_name']] = v
+        return udt_map
 
     def get_sequence_current_value(self, sequence_name: str):
         pass
@@ -1016,6 +2007,400 @@ class MsSQLConnector(DatabaseConnector):
         rows = cursor.fetchall()
         cursor.close()
         return rows
+
+
+
+    def _convert_stmts(self, body_content, settings, is_nested=False, has_rowcount=False, is_trigger=False, implicit_return=False):
+        import base64
+        processed_body = body_content
+
+         # --- Handle Sybase/MSSQL Outer Joins (*= and =*) before parsing ---
+        processed_body = re.sub(
+            r'((?:\[[^\]]+\]|"[^"]+"|[\w]+)(?:\.(?:\[[^\]]+\]|"[^"]+"|[\w]+))*)\s*\*\=\s*((?:\[[^\]]+\]|"[^"]+"|[\w]+)(?:\.(?:\[[^\]]+\]|"[^"]+"|[\w]+))*)',
+            r"locvar_sybase_outer_join(\1, \2)",
+            processed_body,
+        )
+        processed_body = re.sub(
+            r'((?:\[[^\]]+\]|"[^"]+"|[\w]+)(?:\.(?:\[[^\]]+\]|"[^"]+"|[\w]+))*)\s*\=\*\s*((?:\[[^\]]+\]|"[^"]+"|[\w]+)(?:\.(?:\[[^\]]+\]|"[^"]+"|[\w]+))*)',
+            r"locvar_sybase_right_join(\1, \2)",
+            processed_body,
+        )
+
+        CustomTSQL.Parser.config_parser = self.config_parser
+
+        try:
+             parsed = sqlglot.parse(processed_body.strip(), read=CustomTSQL)
+        except Exception as e:
+             self.config_parser.print_log_message('ERROR', f"Global parsing failed: {e}")
+             return [f"/* PARSING FAILED: {e} */\n" + body_content]
+
+        converted_statements = []
+        active_rowcount_limit = 0
+        def clean_pg_sql(pg_sql):
+             # @@FETCH_STATUS
+             pg_sql = re.sub(r'@@FETCH_STATUS\s*=\s*0', 'FOUND', pg_sql, flags=re.IGNORECASE)
+             pg_sql = re.sub(r'@@FETCH_STATUS\s*(?:!=|<>)\s*0', 'NOT FOUND', pg_sql, flags=re.IGNORECASE)
+
+             # @@ROWCOUNT (Specific handling before generic global replace)
+             pg_sql = re.sub(r'@@rowcount', '_rowcount', pg_sql, flags=re.IGNORECASE)
+
+             # Generic Replacement Rules (Fallback for non-AST reachable code)
+             pg_sql = re.sub(r'(?<!\w)@@([a-zA-Z0-9_]+)', r'global_\1', pg_sql)
+             pg_sql = re.sub(r'(?<!\w)@([a-zA-Z0-9_]+)', r'locvar_\1', pg_sql)
+             # Also handle $var for parameters that skipped generic AST transform or string literals
+             pg_sql = re.sub(r'(?<!\w)\$([a-zA-Z][a-zA-Z0-9_]*)', r'locvar_\1', pg_sql)
+             return pg_sql
+
+        # AST Transformer for variables
+        def transform_variables_ast(node):
+            if isinstance(node, (exp.Parameter, exp.SessionParameter)):
+                 # Convert Parameter(@var) -> Identifier(locvar_var)
+                 # Check if 'this' is Identifier or string
+                 val = node.this.this if isinstance(node.this, exp.Identifier) else str(node.this)
+
+                 # Session Params usually @@
+                 if '@@' in val:
+                      return exp.Identifier(this=val.replace('@@', 'global_'), quoted=False)
+
+                 # Normal Params @ or just name
+                 if val.startswith('@'):
+                      new_name = val.replace('@', 'locvar_')
+                 else:
+                      new_name = f"locvar_{val}"
+
+                 return exp.Identifier(this=new_name, quoted=False)
+
+            if isinstance(node, exp.Identifier):
+                 val = node.this
+                 if val.startswith('@@'):
+                      return exp.Identifier(this=val.replace('@@', 'global_'), quoted=False)
+                 elif val.startswith('@'):
+                      return exp.Identifier(this=val.replace('@', 'locvar_'), quoted=False)
+            return node
+
+        def process_node(expression):
+             nonlocal active_rowcount_limit
+             if not expression: return None
+
+             # Check for SET ROWCOUNT
+             if isinstance(expression, exp.Command) and expression.this.upper() == 'SET':
+                  m = re.match(r'ROWCOUNT\s+(\d+)', expression.expression or '', re.IGNORECASE)
+                  if m:
+                       active_rowcount_limit = int(m.group(1))
+                       return f"/* SET ROWCOUNT {active_rowcount_limit} converted to LIMIT */"
+
+             is_block = isinstance(expression, Block) or type(expression).__name__ == 'Block'
+             if is_block:
+                  stmts = []
+                  if hasattr(expression, 'expressions'):
+                       for e in expression.expressions:
+                            s = process_node(e)
+                            if s: stmts.append(s)
+                  return "\n".join(stmts)
+
+             is_if = isinstance(expression, exp.If) or expression.key == 'if' or type(expression).__name__ == 'If'
+             if is_if:
+                  cond_sql = expression.this.sql(dialect='postgres')
+                  cond_sql = clean_pg_sql(cond_sql)
+                  true_node = expression.args.get('true')
+                  false_node = expression.args.get('false')
+                  true_sql = process_node(true_node) if true_node else ""
+                  pg_sql = f"IF {cond_sql} THEN\n{true_sql}"
+                  if false_node:
+                       false_sql = process_node(false_node)
+                       pg_sql += f"\nELSE\n{false_sql}"
+                  pg_sql += "\nEND IF;"
+                  return pg_sql
+
+             # ... Outer Join AST Transformation (Same as Sybase) ...
+             try:
+                 where = expression.find(exp.Where)
+                 joins_to_add = []
+                 if where:
+                      for func in where.find_all(exp.Anonymous):
+                           fname = func.this
+                           if fname.upper() in ('LOCVAR_SYBASE_OUTER_JOIN', 'LOCVAR_SYBASE_RIGHT_JOIN'):
+                                kind = 'LEFT' if fname.upper() == 'LOCVAR_SYBASE_OUTER_JOIN' else 'RIGHT'
+                                left = func.expressions[0]
+                                right = func.expressions[1]
+                                table_name = right.table if isinstance(right, exp.Column) else None
+                                if table_name:
+                                    joins_to_add.append({
+                                        'table': table_name,
+                                        'condition': exp.EQ(this=left, expression=right),
+                                        'node': func,
+                                        'kind': kind
+                                    })
+                      for j in joins_to_add:
+                           j['node'].replace(exp.TRUE)
+
+                 from_clause = expression.args.get('from')
+                 if from_clause and joins_to_add:
+                      new_froms = []
+                      tables_to_remove = [j['table'] for j in joins_to_add]
+                      for f in from_clause.expressions:
+                           if isinstance(f, exp.Table) and f.alias_or_name in tables_to_remove:
+                               continue
+                           new_froms.append(f)
+                      for j in joins_to_add:
+                           join_expr = exp.Join(
+                               this=exp.Table(this=exp.Identifier(this=j['table'], quoted=False)),
+                               kind=j['kind'],
+                               on=j['condition']
+                           )
+                           new_froms.append(join_expr)
+                      from_clause.set('expressions', new_froms)
+             except:
+                  pass
+
+             pg_sql = ""
+             skip_semicolon = False
+
+             if is_trigger:
+                 if isinstance(expression, exp.Return):
+                     return "RETURN NULL;"
+
+             # Check for RAISERROR (Anonymous function call in AST)
+             # RAISERROR ('msg', 16, 1, arg1, arg2...)
+             is_raiserror = isinstance(expression, exp.Anonymous) and expression.this.upper() == 'RAISERROR'
+             if is_raiserror:
+                  # expression.expressions contains args
+                  args = expression.expressions
+                  if args:
+                       # First arg is message
+                       msg_node = args[0]
+                       # Next 2 are severity, state (skipped in PG RAISE usually, or mapped)
+                       # Rest are arguments
+
+                       # PG Syntax: RAISE [LEVEL] 'format', arg1, arg2
+                       # We need to construct this string
+
+                       msg_sql = msg_node.sql(dialect='postgres')
+
+                       other_args = []
+                       if len(args) > 3:
+                            for a in args[3:]:
+                                 other_args.append(a.sql(dialect='postgres'))
+
+                       # Handling params replacement in message?
+                       # PG uses % to replace arguments positional? Yes.
+                       # MSSQL uses %d, %s etc. PG raise format uses %
+
+                       arg_str = ", ".join(other_args)
+                       if arg_str:
+                            return f"RAISE EXCEPTION {msg_sql}, {arg_str};"
+                       else:
+                            return f"RAISE EXCEPTION {msg_sql};"
+
+             # Handle SELECT @var = value (Assignment without FROM)
+             if isinstance(expression, exp.Select) and not expression.args.get('from'):
+                 is_assignment = True
+                 assignments = []
+                 for e in expression.expressions:
+                     # Unwrap Alias (e.g. SELECT @v=1 END -> parsed as Alias)
+                     if isinstance(e, exp.Alias):
+                          e = e.this
+
+                     # Check for EQ node (v = x)
+                     if isinstance(e, exp.EQ):
+                         left = e.this
+                         right = e.expression
+                         # Check if left is variable
+                         if isinstance(left, exp.Identifier) and (left.this.startswith('locvar_') or left.this.startswith('global_')):
+                              assignments.append(f"{left.this} := {right.sql(dialect='postgres')};")
+                         else:
+                              is_assignment = False
+                              break
+                     else:
+                         is_assignment = False
+                         break
+
+                 if is_assignment and assignments:
+                      return "\n".join(assignments)
+
+             pg_sql = expression.sql(dialect='postgres')
+
+             # Apply ROWCOUNT limit if detected (and no explicit LIMIT exists)
+             if active_rowcount_limit > 0 and isinstance(expression, exp.Select) and not expression.args.get('limit'):
+                  pg_sql += f" LIMIT {active_rowcount_limit}"
+
+             # Handle Implicit Return (SELECT -> RETURN QUERY SELECT)
+             # Must not be an assignment (handled above) or INTO (handled by SQLGlot usually, or check args)
+             if implicit_return and isinstance(expression, exp.Select) and not expression.args.get('into'):
+                  pg_sql = f"RETURN QUERY {pg_sql}"
+
+             if pg_sql.strip().upper() == 'BEGIN': return None
+
+             pg_sql = pg_sql.replace('locvar_error_placeholder', 'SQLSTATE')
+
+             if has_rowcount and isinstance(expression, (exp.Insert, exp.Update, exp.Delete, exp.Select)):
+                   pg_sql += ";\nGET DIAGNOSTICS _rowcount = ROW_COUNT"
+
+             # PRINT (Command or Anonymous)
+             # If parsed as usage of PRINT command
+             if isinstance(expression, exp.Command) and expression.this.upper() == 'PRINT':
+                  # expression.expression is the text
+                   p_arg = expression.expression
+                   # Clean it
+                   return f"RAISE NOTICE {p_arg};"
+
+             # Fallback regex for PRINT if not caught above (e.g. if parsed as func)
+             if "PRINT" in pg_sql.upper():
+                  match_p = re.search(r"PRINT\s+(.*)", pg_sql, re.IGNORECASE)
+                  if match_p:
+                       pg_sql = f"RAISE NOTICE {match_p.group(1)}"
+
+             # Assignments (MSSQL variable assignment usually via SET or SELECT)
+             # sqlglot might output: _rowcount = ROW_COUNT (valid PG)
+             # But T-SQL SET @v = 1 -> PG v := 1
+             # sqlglot sometimes outputs SET v = 1, which works in PG for session vars, but plpgsql needs :=
+             if pg_sql.strip().upper().startswith("SET "):
+                 # Try to convert to assignment
+                 # Update regex to support @ and @@ in variable names
+                 match_set = re.match(r"SET\s+([@a-zA-Z0-9_]+)\s*=\s*(.*)", pg_sql, re.IGNORECASE)
+                 if match_set:
+                     var_raw = match_set.group(1)
+                     val = match_set.group(2)
+
+                     if '@@' in var_raw:
+                          var = var_raw.replace('@@', 'global_')
+                     elif '@' in var_raw:
+                          var = var_raw.replace('@', 'locvar_')
+                     else:
+                          var = var_raw
+
+                     pg_sql = f"{var} := {val}"
+
+             # Clean result
+             pg_sql = clean_pg_sql(pg_sql)
+
+             if not skip_semicolon and not pg_sql.strip().endswith(';'):
+                 pg_sql += ';'
+             return pg_sql
+
+        for expression in parsed:
+             if is_trigger:
+                 expression = self._transform_trigger_tables(expression)
+
+             # Apply Variable Rename Transform
+             expression = expression.transform(transform_variables_ast)
+
+             res = process_node(expression)
+             if res:
+                  converted_statements.append(res)
+
+        return converted_statements
+
+    def _split_respecting_parens(self, text):
+        parts = []
+        current = ""
+        depth = 0
+        in_quote = False
+        quote_char = ''
+
+        for char in text:
+            if in_quote:
+                current += char
+                if char == quote_char:
+                    in_quote = False
+            else:
+                if char == "'" or char == '"':
+                    in_quote = True
+                    quote_char = char
+                    current += char
+                elif char == '(':
+                    depth += 1
+                    current += char
+                elif char == ')':
+                    depth -= 1
+                    current += char
+                elif char == ',' and depth == 0:
+                    parts.append(current.strip())
+                    current = ""
+                else:
+                    current += char
+        if current:
+            parts.append(current.strip())
+        return parts
+
+    def get_types_mapping(self, settings):
+        # Basic mapping for variable declarations
+        return {
+            'nvarchar': 'varchar',
+            'nchar': 'char',
+            'datetime': 'timestamp',
+            'datetime2': 'timestamp',
+            'money': 'numeric(19,4)',
+            'smallmoney': 'numeric(10,4)',
+            'tinyint': 'smallint',
+            'bit': 'boolean',
+            'image': 'bytea',
+            'uniqueidentifier': 'uuid',
+            'varbinary': 'bytea',
+            'binary': 'bytea',
+            'rowversion': 'bytea',
+            'timestamp': 'bytea',
+            'xml': 'xml',
+            'sql_variant': 'text'
+        }
+
+    def _declaration_replacer(self, match, settings, types_mapping, declarations):
+        content = match.group(0).strip()
+        # Remove DECLARE
+        content = re.sub(r'^DECLARE\s+', '', content, flags=re.IGNORECASE).strip()
+
+        defs = self._split_respecting_parens(content)
+
+        for d in defs:
+            d = d.strip()
+            # Replace type
+            for sybase_type, pg_type in types_mapping.items():
+                d = re.sub(rf'\b{re.escape(sybase_type)}\b', pg_type, d, flags=re.IGNORECASE)
+
+            # Variable Rename Rules
+            if '@@' in d:
+                 d = d.replace('@@', 'global_')
+            elif '@' in d:
+                 d = d.replace('@', 'locvar_')
+
+            # Initialization
+            d = d.replace('=', ':=')
+
+            declarations.append(d + ';')
+
+        return ""
+
+    def _apply_data_type_substitutions(self, text):
+        """
+        Apply data type substitutions defined in the configuration.
+        """
+        substitutions = self.config_parser.get_data_types_substitution()
+        if not substitutions:
+            return text
+
+        for entry in substitutions:
+            if len(entry) != 5:
+                continue
+
+            source_type = entry[2]
+            target_type = entry[3]
+
+            if source_type:
+                try:
+                    pattern = re.compile(rf'\b{source_type}\b', flags=re.IGNORECASE)
+                    text = pattern.sub(target_type, text)
+                except re.error:
+                    self.config_parser.print_log_message('WARNING', f"Invalid regex in data_types_substitution: {source_type}")
+
+        return text
+
+    def _apply_udt_to_base_type_substitutions(self, text, settings):
+        udt_map = self._get_udt_map()
+        for udt, info in udt_map.items():
+             text = re.sub(rf'\b{re.escape(udt)}\b', info['base_type'], text, flags=re.IGNORECASE)
+        return text
+
+
 
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

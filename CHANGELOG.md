@@ -1,8 +1,17 @@
 # Changelog
 
-## 0.11.2 - 2026.01.12
+## 0.11.1 - 2026.01.12
 
 - 2026.01.12
+
+  - Improvements & Fixes in MSSQL connector
+    - repaired conversion of views to PostgreSQL views - now views are converted to PostgreSQL views with correct data types, added conversion of MSSQL functions to PostgreSQL functions
+    - fix in fetching foreign key constraints from MSSQL database - now it uses correct schema name for referenced table
+    - implemented proper conversion of native SQL functions from MSSQL to PostgreSQL syntax
+    - implemented conversion of user defined data types
+    - implemented rudimentary conversion of triggers / functions / procedures - alpha version for further development - but already usable for not complicated use cases
+
+- 2026.01.10
 
   - Fixes in PostgreSQL connector
     - repaired conversion of sequences to PostgreSQL sequences - now sequences are converted to PostgreSQL sequences with correct start value and increment

@@ -9,6 +9,7 @@
     - fix in fetching foreign key constraints from MSSQL database - now it uses correct schema name for referenced table
     - implemented proper conversion of native SQL functions from MSSQL to PostgreSQL syntax
     - implemented conversion of user defined data types
+    - implemented rudimentary conversion of triggers / functions / procedures - alpha version for further development - but already usable for not complicated use cases
 
 - 2026.01.10
 

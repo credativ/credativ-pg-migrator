@@ -174,7 +174,7 @@ class CustomTSQL(TSQL):
                       # Detect orphaned ELSE -> Incorrectly parsed block boundary or lost ELSE IF
                       if self._curr.token_type == TokenType.ELSE:
                            if self.config_parser:
-                                self.config_parser.print_log_message('DEBUG', "Encoutered ELSE in Block. Treating as implicit block end.")
+                                self.config_parser.print_log_message('DEBUG', "Encountered ELSE in Block. Treating as implicit block end.")
                            break
 
                       msg = f"DEBUG: Processed token {self._curr} but did not advance. Force advance."

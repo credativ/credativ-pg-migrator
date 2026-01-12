@@ -805,7 +805,7 @@ class MsSQLConnector(DatabaseConnector):
         # Support names with spaces [Name with Space] or "Name" or Name
         # Regex to match CREATE [OR ALTER] {PROC|PROCEDURE|FUNCTION} [schema.]name ...
 
-        type_match = re.search(r'CREATE\s+(?:OR\s+ALTER\s+)?(PROC|PROCEDURE|FUNCTION)\s+(?:\[?(\w+)\]?\.\[?)?(\[.*?\]|[\w]+)', funcproc_code, re.IGNORECASE)
+        type_match = re.search(r'CREATE\s+(?:OR\s+ALTER\s+)?(PROC|PROCEDURE|FUNCTION)\s+(?:(\[.*?\]|".*?"|[\w]+)\.)?(\[.*?\]|".*?"|[\w]+)', funcproc_code, re.IGNORECASE)
 
         if not type_match:
              return f"/* FAILED TO PARSE DEFINITION */\n{funcproc_code}"

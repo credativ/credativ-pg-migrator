@@ -803,7 +803,7 @@ class MsSQLConnector(DatabaseConnector):
             if isinstance(node, sqlglot.exp.DataType):
                 # Check if the type is a UDT
                 type_name = node.this.name if hasattr(node.this, 'name') else str(node.this)
-                
+
                 if type_name in udt_lookup_map:
                      udt_info = udt_lookup_map[type_name]
                      return sqlglot.exp.DataType.build(udt_info['sql']) # Use 'sql' or 'definition'
@@ -1148,13 +1148,219 @@ class MsSQLConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Full stack trace: {traceback.format_exc()}")
             raise e
 
-    def fetch_triggers(self, schema_name, table_name):
-        # ...existing code from SybaseASEConnector.fetch_triggers...
-        pass
+    def fetch_triggers(self, table_id, schema_name, table_name):
+        triggers = {}
+        order_num = 1
+        query = f"""
+            SELECT
+                t.name AS trigger_name,
+                s.name AS schema_name,
+                m.definition AS trigger_definition,
+                te.type_desc AS event_type,
+                t.is_disabled,
+                t.object_id
+            FROM sys.triggers t
+            JOIN sys.tables tb ON t.parent_id = tb.object_id
+            JOIN sys.schemas s ON tb.schema_id = s.schema_id
+            JOIN sys.sql_modules m ON t.object_id = m.object_id
+            JOIN sys.trigger_events te ON t.object_id = te.object_id
+            WHERE s.name = '{schema_name}' AND tb.name = '{table_name}'
+        """
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            rows = cursor.fetchall()
 
-    def convert_trigger(self, trigger_name, trigger_code, source_schema, target_schema, table_list):
-        # ...existing code from SybaseASEConnector.convert_trigger...
-        pass
+            # Group events by trigger
+            trigger_data = {}
+            for row in rows:
+                trigger_name = row[0]
+                schema = row[1]
+                definition = row[2]
+                event = row[3] # e.g. INSERT, UPDATE, DELETE
+                is_disabled = row[4]
+                object_id = row[5]
+
+                if trigger_name not in trigger_data:
+                    trigger_data[trigger_name] = {
+                        'schema_name': schema,
+                        'trigger_name': trigger_name,
+                        'trigger_code': definition,
+                        'events': {event},
+                        'is_disabled': is_disabled,
+                        'object_id': object_id
+                    }
+                else:
+                    trigger_data[trigger_name]['events'].add(event)
+
+            for name, data in trigger_data.items():
+                events_list = list(data['events'])
+                triggers[order_num] = {
+                    'name': data['trigger_name'],
+                    'trigger_owner': data['schema_name'],
+                    'sql': data['trigger_code'],
+                    'event': ' OR '.join(events_list), # Planner expects 'event' string
+                    'new': 'inserted' if 'INSERT' in events_list or 'UPDATE' in events_list else None,
+                    'old': 'deleted' if 'DELETE' in events_list or 'UPDATE' in events_list else None,
+                    'status': 'DISABLED' if data['is_disabled'] else 'ENABLED',
+                    'comment': '',
+                    'id': data['object_id']
+                }
+                order_num += 1
+
+            cursor.close()
+            self.disconnect()
+            return triggers
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error fetching triggers: {e}")
+            return {}
+
+    def convert_trigger(self, settings):
+        trigger_name = settings['trigger_name']
+        trigger_code = settings['trigger_sql']
+        source_schema = settings['source_schema']
+        target_schema = settings['target_schema']
+        table_list = settings['table_list']
+
+        # Clean up code
+        trigger_code = trigger_code.strip()
+
+        # Parse logic
+        CustomTSQL.Parser.config_parser = self.config_parser
+        try:
+             # Just like view, try to parse.
+             # Triggers are simpler structure: CREATE TRIGGER ... ON ... [AFTER/FOR] ... AS ...
+             expressions = sqlglot.parse(trigger_code, read=CustomTSQL)
+        except Exception as e:
+             self.config_parser.print_log_message('ERROR', f"Failed to parse trigger {trigger_name}: {e}")
+             return f"/* FAILED TO PARSE TRIGGER {trigger_name} */\n{trigger_code}"
+
+        if not expressions:
+            return f"/* EMPTY PARSE FOR TRIGGER {trigger_name} */"
+
+        create_trigger_stmt = expressions[0]
+        if not isinstance(create_trigger_stmt, sqlglot.exp.Create) or create_trigger_stmt.kind != 'TRIGGER':
+            # Maybe it wrapped in something else? unique batch?
+            # Fallback to Regex extraction if AST fails specific node check
+            pass
+
+        # Extract info
+        # sqlglot Create Trigger Structure:
+        # this = Identifier(name)
+        # properties (table, timing, events)
+        # expression = body (usually BEGIN...END or just stmt)
+
+        # We need:
+        # 1. Event (INSERT, UPDATE, DELETE)
+        # 2. Timing (AFTER, INSTEAD OF) - MSSQL 'FOR' is same as 'AFTER'
+        # 3. Table Name (ON ...)
+        # 4. Body
+
+        # Regex is often more robust for header extraction in T-SQL because of variations
+        # ON [Schema].[Table]
+        table_match = re.search(r'ON\s+(?:\[?(\w+)\]?\.)?\[?(\w+)\]?', trigger_code, re.IGNORECASE)
+        table_name = table_match.group(2) if table_match else "UNKNOWN_TABLE"
+
+        # Events
+        events = []
+        if re.search(r'\bINSERT\b', trigger_code, re.IGNORECASE): events.append('INSERT')
+        if re.search(r'\bUPDATE\b', trigger_code, re.IGNORECASE): events.append('UPDATE')
+        if re.search(r'\bDELETE\b', trigger_code, re.IGNORECASE): events.append('DELETE')
+
+        # Timing
+        timing = 'AFTER' # Default
+        if re.search(r'\bINSTEAD\s+OF\b', trigger_code, re.IGNORECASE):
+            timing = 'INSTEAD OF'
+
+        # Body Isolation
+        # Find 'AS' keyword.
+        # CAUTION: 'AS' can be used in aliases.
+        # CREATE TRIGGER ... ON ... AS ...
+        # Regex: CREATE TRIGGER .*? AS (.*)
+        body_match = re.search(r'CREATE\s+TRIGGER\s+.*?\s+AS\s+(.*)', trigger_code, re.IGNORECASE | re.DOTALL)
+        body_start = body_match.group(1) if body_match else ""
+
+        if not body_start:
+             return f"/* COULD NOT ISOLATE BODY FOR {trigger_name} */ {trigger_code}"
+
+        # Transpile Body
+        try:
+             # Use the View conversion logic UDTs and Functions map?
+             # Yes, we should probably reuse replace_udts/replace_functions if possible
+             # For now, relying on sqlglot generic transpile + manual fixes
+
+             # UDT Map
+             udt_lookup_map = self._get_udt_map()
+
+             parsed_body = sqlglot.parse(body_start, read=CustomTSQL)
+             transpiled_stmts = []
+
+             for stmt in parsed_body:
+                 # Apply UDT replacement and function replacement manually?
+                 # Or rely on sqlglot dialect default?
+                 # Let's apply UDT replacement at least
+
+                 def replace_udts(node):
+                    if isinstance(node, sqlglot.exp.DataType):
+                        type_name = node.this.name if hasattr(node.this, 'name') else str(node.this)
+                        if type_name in udt_lookup_map:
+                             udt_info = udt_lookup_map[type_name]
+                             return sqlglot.exp.DataType.build(udt_info['sql'])
+                    return node
+
+                 stmt = stmt.transform(replace_udts)
+
+                 # Function replacements
+                 # ... (Ideally reuse replace_functions from view, but scope is local there. Copy pasting for now or genericize later)
+                 # Keeping simple for iteration 1:
+                 transpiled = stmt.sql(dialect='postgres')
+                 transpiled_stmts.append(transpiled)
+
+             pg_body = "\n".join(transpiled_stmts)
+
+        except Exception as e:
+             pg_body = f"/* TRANSPILATION FAILED: {e} */\n{body_start}"
+
+        # Construct Function
+        func_name = f"tf_{trigger_name}"
+        func_schema = target_schema
+
+        func_ddl = f"""
+CREATE OR REPLACE FUNCTION "{func_schema}"."{func_name}"()
+RETURNS TRIGGER AS $$
+BEGIN
+{pg_body}
+RETURN NULL; -- Statement triggers usually return NULL
+END;
+$$ LANGUAGE plpgsql;
+"""
+
+        # Construct Trigger
+        # Handle Reference Clausses for Statement Triggers
+        # Referencing NEW TABLE AS inserted OLD TABLE AS deleted
+        refs = []
+        if 'INSERT' in events or 'UPDATE' in events:
+             refs.append("NEW TABLE AS inserted")
+        if 'DELETE' in events or 'UPDATE' in events:
+             refs.append("OLD TABLE AS deleted")
+
+        ref_clause = "REFERENCING " + " ".join(refs) if refs and timing != 'INSTEAD OF' else ""
+        # Note: INSTEAD OF triggers (on Views) don't support Transition Tables in PG.
+        # But MSSQL INSTEAD OF can be on Tables too?
+        # If INSTEAD OF, we might have issues matching semantics 1:1 without rewriting 'inserted/deleted' to aliases.
+
+        events_str = " OR ".join(events)
+
+        trigger_ddl = f"""
+CREATE TRIGGER "{trigger_name}"
+{timing} {events_str} ON "{target_schema}"."{table_name}"
+{ref_clause}
+FOR EACH STATEMENT
+EXECUTE FUNCTION "{func_schema}"."{func_name}"();
+"""
+
+        return f"{func_ddl}\n{trigger_ddl}"
 
     def execute_query(self, query: str, params=None):
         # ...existing code from SybaseASEConnector.execute_query...

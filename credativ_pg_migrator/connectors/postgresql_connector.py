@@ -494,7 +494,7 @@ class PostgreSQLConnector(DatabaseConnector):
 
             if column_default != '':
                 if (('CHAR' in column_data_type or column_data_type in ('TEXT'))
-                    and ('||' in column_default or '(' in column_default or ')' in column_default)):
+                    and ('||' in column_default or '(' in column_default or ')' in column_default or '::' in column_default)):
                     # default value is here NOT quoted
                     create_column_sql += f""" DEFAULT {column_default}""".replace("''", "'")
                 elif 'CHAR' in column_data_type or column_data_type in ('TEXT'):

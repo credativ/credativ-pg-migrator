@@ -366,11 +366,13 @@ class MsSQLConnector(DatabaseConnector):
             cc.constraint_columns,
             rt.name AS referenced_table,
             rc.referenced_columns,
-            pt.name AS constraint_table
+            pt.name AS constraint_table,
+            rs.name AS referenced_schema
             FROM sys.foreign_keys fk
             JOIN ConstraintColumns cc ON fk.name = cc.constraint_name
             JOIN ReferencedColumns rc ON fk.name = rc.constraint_name
             JOIN sys.tables rt ON fk.referenced_object_id = rt.object_id
+            JOIN sys.schemas rs ON rt.schema_id = rs.schema_id
             JOIN sys.tables pt ON fk.parent_object_id = pt.object_id
             WHERE fk.parent_object_id = {source_table_id}
             ORDER BY fk.name
@@ -389,6 +391,7 @@ class MsSQLConnector(DatabaseConnector):
                 constraint_columns = constraint[2].strip()
                 referenced_table = constraint[3].strip()
                 referenced_columns = constraint[4].strip()
+                referenced_schema = constraint[6].strip()
                 constraint_owner = ''
 
                 table_constraints[order_num] = {
@@ -396,7 +399,7 @@ class MsSQLConnector(DatabaseConnector):
                     'constraint_type': constraint_type,
                     'constraint_owner': constraint_owner,
                     'constraint_columns': constraint_columns,
-                    'referenced_table_schema': '',
+                    'referenced_table_schema': referenced_schema,
                     'referenced_table_name': referenced_table,
                     'referenced_columns': referenced_columns,
                     'constraint_sql': '',

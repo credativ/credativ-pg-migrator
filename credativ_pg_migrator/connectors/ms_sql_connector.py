@@ -320,7 +320,10 @@ class MsSQLConnector(DatabaseConnector):
                 SELECT
                     c.column_id AS ordinal_position,
                     c.name AS column_name,
-                    t.name AS data_type,
+                    CASE
+                        WHEN t.is_user_defined = 1 THEN st.name
+                        ELSE t.name
+                    END AS data_type,
                     c.max_length AS length,
                     c.precision AS numeric_precision,
                     c.scale AS numeric_scale,
@@ -331,6 +334,7 @@ class MsSQLConnector(DatabaseConnector):
                 JOIN sys.tables tb ON c.object_id = tb.object_id
                 JOIN sys.schemas s ON tb.schema_id = s.schema_id
                 JOIN sys.types t ON c.user_type_id = t.user_type_id
+                LEFT JOIN sys.types st ON t.system_type_id = st.user_type_id AND st.is_user_defined = 0
                 LEFT JOIN sys.default_constraints dc ON c.default_object_id = dc.object_id
                 WHERE s.name = '{table_schema}' AND tb.name = '{table_name}'
                 ORDER BY c.column_id
@@ -729,7 +733,7 @@ class MsSQLConnector(DatabaseConnector):
                 schema = node.args.get("db")
                 if schema and not schema.args.get("quoted"):
                     schema.set("quoted", True)
-                
+
                 # Quote table name
                 if isinstance(node, sqlglot.exp.Table):
                     table = node.args.get("this")
@@ -792,6 +796,18 @@ class MsSQLConnector(DatabaseConnector):
                     return sqlglot.exp.Anonymous(this=mapped)
             return node
 
+        def replace_udts(node):
+            if isinstance(node, sqlglot.exp.DataType):
+                # Check if the type is a UDT
+                type_name = node.this.name if hasattr(node.this, 'name') else str(node.this)
+                if type_name in settings.get('udts', {}):
+                     udt_info = settings['udts'][type_name]
+                     # Replace with system type definition
+                     # We can parse the definition back into a DataType or just string replace if simple
+                     # Simplest is to replace the DataType node with a new one based on system_type
+                     return sqlglot.exp.DataType.build(udt_info['definition'])
+            return node
+
         def transform_sybase_joins(expression):
             # Check for EQ nodes with outer join comments (sqlglot default parsing of *=)
             # OR check for 'outer_join' property if parsing handles it.
@@ -822,6 +838,7 @@ class MsSQLConnector(DatabaseConnector):
                 expression = expression.transform(replace_functions)
                 expression = expression.transform(replace_schema_names)
                 expression = expression.transform(quote_schema_and_table_names)
+                expression = expression.transform(replace_udts)
                 # expression = transform_sybase_joins(expression) # Not needed if standard SQL
 
                 pg_sql = expression.sql(dialect='postgres')
@@ -834,7 +851,7 @@ class MsSQLConnector(DatabaseConnector):
 
         target_schema = settings['target_schema']
         target_view_name = settings['target_view_name']
-        
+
         final_view_sql = f"CREATE OR REPLACE VIEW \"{target_schema}\".\"{target_view_name}\" AS\n{final_select_sql};"
         return final_view_sql
 
@@ -1201,16 +1218,55 @@ class MsSQLConnector(DatabaseConnector):
     def fetch_user_defined_types(self, schema: str):
         query = """
             SELECT
-                s.name AS type_name,
-                s.system_type_id AS system_type_id,
-                s.user_type_id AS user_type_id,
-                s.max_length AS max_length,
-                s.is_nullable AS is_nullable
-            FROM sys.types s
-            WHERE s.is_user_defined = 1
+                t.name AS type_name,
+                st.name AS system_type_name,
+                t.max_length,
+                t.precision,
+                t.scale,
+                t.is_nullable
+            FROM sys.types t
+            JOIN sys.types st ON t.system_type_id = st.user_type_id
+            WHERE t.is_user_defined = 1 AND st.is_user_defined = 0
         """
-        # ...existing code from SybaseASEConnector.fetch_user_defined_types...
-        pass
+        try:
+            udts = {}
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            rows = cursor.fetchall()
+
+            for row in rows:
+                type_name = row[0]
+                system_type = row[1].upper()
+                max_length = row[2]
+                precision = row[3]
+                scale = row[4]
+
+                # Construct definition
+                definition = system_type
+                if self.is_string_type(system_type) and max_length != -1:
+                    # max_length is in bytes. For nvarchar/nchar, it's 2x chars.
+                    # But often in DDL we just want the base type if let postgres handle it?
+                    # Or we reproduce the constraint.
+                    # Simpler is to map to the system type name for now,
+                    # but if we want full definition:
+                    length = max_length // 2 if system_type in ('NCHAR', 'NVARCHAR') else max_length
+                    definition = f"{system_type}({length})"
+                elif self.is_numeric_type(system_type):
+                    if system_type in ('DECIMAL', 'NUMERIC'):
+                        definition = f"{system_type}({precision}, {scale})"
+
+                udts[type_name] = {
+                    'system_type': system_type,
+                    'definition': definition
+                }
+
+            cursor.close()
+            self.disconnect()
+            return udts
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"Error fetching UDTs: {e}")
+            return {}
 
     def get_sequence_current_value(self, sequence_name: str):
         pass

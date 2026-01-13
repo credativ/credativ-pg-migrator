@@ -3274,6 +3274,8 @@ class SybaseASEConnector(DatabaseConnector):
         # --- Pre-processing ---
 
         # 0. Encapsulate comments
+        # Fix: Convert dash-only lines (dividers) to block comments to prevent tokenizer crash
+        trigger_code = re.sub(r'^\s*(-{2,})\s*$', r'/* separator */', trigger_code, flags=re.MULTILINE)
         trigger_code = re.sub(r'--([^\n]*)', r'/*\1*/', trigger_code)
 
         # 1. Remove GO
@@ -4349,6 +4351,8 @@ EXECUTE FUNCTION {target_schema}.{trigger_name}_func();
             domains[rule_name]['source_domain_sql'] = domains[rule_name]['source_domain_sql'].replace('\n', ' ')
 
             domain_check_sql = domains[rule_name]['source_domain_sql']
+            # Fix: Remove "CONSTRAINT name CHECK" prefix to prevent nested CHECK(CONSTRAINT...CHECK(...))
+            domain_check_sql = re.sub(r'CONSTRAINT\s+[\w\.]+\s+CHECK', '', domain_check_sql, flags=re.IGNORECASE)
             domain_check_sql = re.sub(r'@\w+', 'VALUE', domain_check_sql)
             domain_check_sql = re.sub(r'create rule', '', domain_check_sql, flags=re.IGNORECASE)
             domain_check_sql = re.sub(rf"{re.escape(domains[rule_name]['domain_name'])}\s+AS", '', domain_check_sql, flags=re.IGNORECASE)

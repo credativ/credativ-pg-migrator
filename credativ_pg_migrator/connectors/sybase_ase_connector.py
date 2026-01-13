@@ -1369,11 +1369,19 @@ class SybaseASEConnector(DatabaseConnector):
 
                 # Fix: Handle both OUTPUT and OUT (Truncation Strategy)
                 # Detect OUTPUT or OUT and strip it AND everything after it (comments, trailing chars)
-                output_match = re.search(r'\s+(OUTPUT|OUT)\b', p_clean, flags=re.IGNORECASE)
+                # Fix: Handle both OUTPUT and OUT (Truncation Strategy)
+                # Detect OUTPUT or OUT and strip it AND everything after it (comments, trailing chars)
+                # Regex update: Handle tabs, spaces, newlines, and start of string.
+                # Also explicit check for OUT at end of string.
+                output_match = re.search(r'(?:[\s\t\n\r]+|^)(OUTPUT|OUT)\b', p_clean, flags=re.IGNORECASE)
+                if not output_match:
+                     # Fallback: Check strictly at end of string
+                     output_match = re.search(r'\b(OUTPUT|OUT)$', p_clean.strip(), flags=re.IGNORECASE)
+
                 if output_match:
                     self.config_parser.print_log_message('DEBUG', f"PARAM_CHECK Regex MATCHED on: '{p_clean}'")
                     # Replace regex: match keyword and everything to end of string
-                    p_clean = re.sub(r'\s+(OUTPUT|OUT)\b.*', '', p_clean, flags=re.IGNORECASE | re.DOTALL).strip()
+                    p_clean = re.sub(r'(?:[\s\t]+|^)(OUTPUT|OUT)\b.*', '', p_clean, flags=re.IGNORECASE | re.DOTALL).strip()
                     if not p_clean.lower().startswith("inout "):
                         p_clean = "INOUT " + p_clean
                     
@@ -1428,6 +1436,52 @@ class SybaseASEConnector(DatabaseConnector):
         body_content = re.sub(r'\bOPEN\s+([a-zA-Z0-9_]+)', mask_open, body_content, flags=re.IGNORECASE)
         body_content = re.sub(r'\bCLOSE\s+([a-zA-Z0-9_]+)', mask_close, body_content, flags=re.IGNORECASE)
         body_content = re.sub(r'\bDEALLOCATE\s+(?:CURSOR\s+)?([a-zA-Z0-9_]+)', mask_deallocate, body_content, flags=re.IGNORECASE)
+        
+        # Fix: Convert SELECT @var = val to SET @var = val (Single assignment)
+        # This helps sqlglot parse assignments correctly instead of boolean expressions in projection.
+        # We only target simple single assignments to avoid breaking multi-variable SELECTs.
+        # Fix: Convert SELECT locvar_var = val to SELECT @locvar_var = val (Single assignment)
+        # We need to restore '@' because sqlglot expects '@' to recognize it as a variable assignment in TSQL.
+        # 6.7 Handle SELECT variable assignments (convert to SET)
+        # Sybase allows 'SELECT @a = 1, @b = 2'. sqlglot T-SQL parser struggles with this in SELECT.
+        # We convert valid variable assignment blocks to 'SET @a = 1; SET @b = 2;'.
+        def convert_select_to_set(match):
+            block = match.group(1)
+            # 1. Restore @ prefix for locvar_ variables in this block so sqlglot treats them as vars
+            block = block.replace('locvar_', '@locvar_')
+            
+            # 2. Split by comma used as separator between assignments
+            # We look for a comma followed by whitespace and a variable assignment start (@locvar_)
+            # This avoids splitting commas inside functions or string literals (mostly)
+            # Pattern: comma, optional whitespace, @locvar_
+            items = re.split(r',\s*(?=@locvar_)', block)
+            
+            # 3. Reconstruct as SET statements
+            # Clean up whitespace and join
+            cleaned_items = [item.strip() for item in items if item.strip()]
+            new_block = ";\nSET ".join(cleaned_items)
+            return "SET " + new_block + ";"
+
+        # Regex matches SELECT followed by locvar_ assignment, spanning lines, until next keyword
+        funcproc_code = re.sub(
+            r'(?i)^\s*SELECT\s+(locvar_[a-zA-Z0-9_]+\s*=\s*.+?)(?=\s+(?:SELECT|IF|WHILE|BEGIN|END|RETURN|INSERT|UPDATE|DELETE|ELSE|PRINT|EXEC)\b|\Z)', 
+            convert_select_to_set, 
+            funcproc_code, 
+            flags=re.IGNORECASE | re.DOTALL | re.MULTILINE
+        )
+
+        # 6.8 Handle Sybase specific globals
+        # @@identity -> lastval() (Postgres equivalent)
+        funcproc_code = re.sub(r'@@identity', 'lastval()', funcproc_code, flags=re.IGNORECASE)
+        # Handle $$identity if it appears (from legacy/artifacts)
+        funcproc_code = re.sub(re.escape('$$identity'), 'lastval()', funcproc_code, flags=re.IGNORECASE)
+        # Handle $$procid -> 0 (placeholder)
+        funcproc_code = re.sub(re.escape('$$procid'), '0', funcproc_code, flags=re.IGNORECASE)
+
+        # 6.9 explicitly map @locvar back to locvar for specific single-line cases missed above
+        # (This acts as a cleanup/fallback if the block regex missed simple cases)
+        funcproc_code = re.sub(r'(?i)^\s*SELECT\s+@?(locvar_[a-zA-Z0-9_]+)\s*=', r'SET @\1 =', funcproc_code, flags=re.MULTILINE)
+        
         # self.config_parser.print_log_message('DEBUG', f"Body after masking:\n{body_content[:1000]}")
 
         # --- Pre-process Declarations (Variables) ---
@@ -1446,6 +1500,16 @@ class SybaseASEConnector(DatabaseConnector):
         # This leverages the existing RAISERROR masking logic to produce a clean RAISE EXCEPTION 'msg'
         # instead of a hardcoded "Transaction Rollback Not Supported" + detached string literal.
         body_content = re.sub(r'(?i)\brollback\s+transaction\s+print\s+(["\'])(.*?)\1', r'RAISERROR 50000 \1\2\1', body_content)
+
+        # Fix: Replace Sybase Globals
+        # $$identity -> lastval() (Postgres equivalent for last inserted id)
+        # Use re.escape to handle literal $$ safety
+        body_content = re.sub(re.escape('$$identity'), 'lastval()', body_content, flags=re.IGNORECASE)
+        # $$procid -> 0 (placeholder, OBJECT_ID not directly compatible)
+        body_content = re.sub(r'\$\$procid', '0', body_content, flags=re.IGNORECASE)
+
+        # Fix: Remove SET NOCOUNT ON/OFF
+        body_content = re.sub(r'\bSET\s+NOCOUNT\s+(ON|OFF)\b', '', body_content, flags=re.IGNORECASE)
 
         # RAISERROR conversion (Masking Strategy)
         def raiserror_replacer(match):

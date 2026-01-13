@@ -1245,10 +1245,13 @@ class SybaseASEConnector(DatabaseConnector):
         # self.config_parser.print_log_message('DEBUG', f"V2 Input Code FULL:\n{repr(funcproc_code)}")
         # self.config_parser.print_log_message('DEBUG', f"Input Len: {len(funcproc_code)}")
 
-        # --- Pre-processing (Ported from V1 & Enhancements) ---
-
-        # 0. Encapsulate comments
-        funcproc_code = re.sub(r'--([^\n]*)', r'/*\1*/', funcproc_code)
+        # Fix: REMOVE dash-only lines (dividers) completely to prevent tokenizer crash
+        funcproc_code = re.sub(r'^\s*(-{2,})\s*$', r'', funcproc_code, flags=re.MULTILINE)
+        
+        # Fix: DELETE ALL '--' comments (inline or line-start).
+        # Log analysis showed 'Global parsing failed' on 'SELECT ... -- comment'
+        # CAUTION: This might strip '--' inside strings, but necessary to unblock parser.
+        funcproc_code = re.sub(r'--.*$', r'', funcproc_code, flags=re.MULTILINE)
 
         # 1. Remove GO
         funcproc_code = re.sub(r'\bGO\b', '', funcproc_code, flags=re.IGNORECASE)
@@ -1359,10 +1362,22 @@ class SybaseASEConnector(DatabaseConnector):
 
             for p in param_parts:
                 p_clean = p.strip()
-                output_match = re.search(r'\bOUTPUT\b', p_clean, flags=re.IGNORECASE)
+                
+                # Debug logging for OUT parameter issue
+                if 'OUT' in p_clean.upper():
+                    self.config_parser.print_log_message('DEBUG', f"PARAM_CHECK OUT detected: '{p_clean}'")
+
+                # Fix: Handle both OUTPUT and OUT (Truncation Strategy)
+                # Detect OUTPUT or OUT and strip it AND everything after it (comments, trailing chars)
+                output_match = re.search(r'\s+(OUTPUT|OUT)\b', p_clean, flags=re.IGNORECASE)
                 if output_match:
-                    p_clean = re.sub(r'\bOUTPUT\b', '', p_clean, flags=re.IGNORECASE).strip()
-                    p_clean = "INOUT " + p_clean
+                    self.config_parser.print_log_message('DEBUG', f"PARAM_CHECK Regex MATCHED on: '{p_clean}'")
+                    # Replace regex: match keyword and everything to end of string
+                    p_clean = re.sub(r'\s+(OUTPUT|OUT)\b.*', '', p_clean, flags=re.IGNORECASE | re.DOTALL).strip()
+                    if not p_clean.lower().startswith("inout "):
+                        p_clean = "INOUT " + p_clean
+                    
+                    self.config_parser.print_log_message('DEBUG', f"PARAM_CHECK Result: '{p_clean}'")
 
                 for sybase_type, pg_type in types_mapping.items():
                     p_clean = re.sub(rf'\b{re.escape(sybase_type)}\b', pg_type, p_clean, flags=re.IGNORECASE)
@@ -1515,6 +1530,11 @@ class SybaseASEConnector(DatabaseConnector):
         # Construct DDL
         # Use EXTRACTED func_schema if valid, else settings
         schema_to_use = func_schema if func_schema else settings['target_schema']
+        
+        # KEY REPAIR: Force map 'dbo' to target_schema to avoid "schema dbo does not exist"
+        # Harden check for whitespace/case
+        if schema_to_use and schema_to_use.strip().lower() == 'dbo':
+            schema_to_use = settings['target_schema']
 
         ddl = f"CREATE OR REPLACE FUNCTION {schema_to_use}.{proc_name}({pg_params_str})\n"
         ddl += f"{returns_clause} AS $$\n"
@@ -3274,9 +3294,11 @@ class SybaseASEConnector(DatabaseConnector):
         # --- Pre-processing ---
 
         # 0. Encapsulate comments
-        # Fix: Convert dash-only lines (dividers) to block comments to prevent tokenizer crash
-        trigger_code = re.sub(r'^\s*(-{2,})\s*$', r'/* separator */', trigger_code, flags=re.MULTILINE)
-        trigger_code = re.sub(r'--([^\n]*)', r'/*\1*/', trigger_code)
+        # Fix: REMOVE dash-only lines completely
+        trigger_code = re.sub(r'^\s*(-{2,})\s*$', r'', trigger_code, flags=re.MULTILINE)
+        
+        # Fix: DELETE ALL '--' comments (inline or line-start)
+        trigger_code = re.sub(r'--.*$', r'', trigger_code, flags=re.MULTILINE)
 
         # 1. Remove GO
         trigger_code = re.sub(r'\bGO\b', '', trigger_code, flags=re.IGNORECASE)

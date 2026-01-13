@@ -58,10 +58,24 @@ class CustomTSQL(TSQL):
     class Parser(TSQL.Parser):
         config_parser = None
 
+        def _parse_statement(self):
+            # FIX: Handle RETURN which appears as VAR in this sqlglot versions TSQL dialect
+            if self._curr.text.upper() == 'RETURN':
+                 return self._parse_return_custom()
+            return super()._parse_statement()
+
+        def _parse_return_custom(self):
+             self._advance() # Consumes RETURN
+             # TSQL RETURN can return a value
+             return exp.Return(this=self._parse_expression())
+
         def _parse_alias(self, this, explicit=False):
              # FIX: Explicitly prevent UPDATE/INSERT/DELETE/MERGE/SET from being aliases
              # usage of keywords as aliases without AS is weird in implicit statement boundary contexts
-             if self._curr and self._curr.token_type in (TokenType.UPDATE, TokenType.INSERT, TokenType.DELETE, TokenType.MERGE, TokenType.SET):
+             if self._curr and (
+                 self._curr.token_type in (TokenType.UPDATE, TokenType.INSERT, TokenType.DELETE, TokenType.MERGE, TokenType.SET)
+                 or (self._curr.text.upper() == 'RETURN')
+             ):
                   return this
              return super()._parse_alias(this, explicit)
 
@@ -1413,6 +1427,11 @@ class SybaseASEConnector(DatabaseConnector):
         # Fix: Expanded lookahead to include EXEC, PRINT, END, RAISERROR, etc. to prevent swallowing.
         body_content = re.sub(r'DECLARE\s+(?![@#])[a-zA-Z0-9_].*?(?=\bBEGIN\b|\bEND\b|\bIF\b|\bWHILE\b|\bSELECT\b|\bINSERT\b|\bUPDATE\b|\bDELETE\b|\bRETURN\b|\bSET\b|\bFETCH\b|\bOPEN\b|\bCLOSE\b|\bDEALLOCATE\b|\bDECLARE\b|\bEXEC\b|\bEXECUTE\b|\bPRINT\b|\bRAISERROR\b|\bWAITFOR\b|\bCOMMIT\b|\bROLLBACK\b|\bSAVE\b|$)', declaration_replacer, body_content, flags=re.IGNORECASE | re.DOTALL)
 
+        # Fix: Convert ROLLBACK TRANSACTION ... PRINT "msg" to RAISERROR 50000 "msg"
+        # This leverages the existing RAISERROR masking logic to produce a clean RAISE EXCEPTION 'msg'
+        # instead of a hardcoded "Transaction Rollback Not Supported" + detached string literal.
+        body_content = re.sub(r'(?i)\brollback\s+transaction\s+print\s+(["\'])(.*?)\1', r'RAISERROR 50000 \1\2\1', body_content)
+
         # RAISERROR conversion (Masking Strategy)
         def raiserror_replacer(match):
             code = match.group(1)
@@ -1422,7 +1441,7 @@ class SybaseASEConnector(DatabaseConnector):
             # Mask as SELECT 'RAISERROR_CMD:code' AS _cmd, msg AS _msg
             return f"SELECT 'RAISERROR_CMD:{code}' AS _cmd, {msg} AS _msg"
 
-        body_content = re.sub(r'RAISERROR\s+(\d+)\s+(["\'].*?["\'])', raiserror_replacer, body_content, flags=re.IGNORECASE)
+        body_content = re.sub(r'RAISERROR\s+(\d+)\s+((?:"(?:[^"]|"")*"|\'(?:[^\']|\'\')*\'))', raiserror_replacer, body_content, flags=re.IGNORECASE)
 
         # --- Manual Recursion for IF/WHILE Blocks (Bypass sqlglot T-SQL parser issues) ---
         # We find IF ... BEGIN ... END and mask as SELECT 'MASKED_BLOCK:IF:cond:base64body'
@@ -1472,7 +1491,7 @@ class SybaseASEConnector(DatabaseConnector):
 
         # Inject _rowcount declaration
         if has_rowcount:
-             declarations.insert(0, "_rowcount INTEGER;")
+             declarations.insert(0, "locvar_rowcount INTEGER;")
 
         final_body = "\n".join(final_stmts_clean)
 
@@ -1592,7 +1611,11 @@ class SybaseASEConnector(DatabaseConnector):
 
         # FIX: Handle PRINT "string" -> PRINT 'string' to avoid parser issues
         # Use a non-greedy regex to capture double-quoted strings after PRINT
-        processed_body = re.sub(r'(?i)\bPRINT\s+"(.*?)"', r"PRINT '\1'", processed_body)
+        def print_replacer(match):
+             content = match.group(1)
+             content = content.replace("'", "''")
+             return f"PRINT '{content}'"
+        processed_body = re.sub(r'(?i)\bPRINT\s+"(.*?)"', print_replacer, processed_body)
 
         # --- Use sqlglot to parse the cleaned body ---
         # CustomTSQL is defined at module level
@@ -1866,7 +1889,7 @@ class SybaseASEConnector(DatabaseConnector):
              # Post-processing
              pg_sql = re.sub(r'(?<!\w)@([a-zA-Z0-9_]+)', r'\1', pg_sql)
              pg_sql = re.sub(r",\s*(LEFT|RIGHT|FULL)\s+JOIN", r" \1 JOIN", pg_sql, flags=re.IGNORECASE)
-             pg_sql = re.sub(r'@@rowcount', '_rowcount', pg_sql, flags=re.IGNORECASE)
+             pg_sql = re.sub(r'@@rowcount', 'locvar_rowcount', pg_sql, flags=re.IGNORECASE)
 
              # Fix sqlglot 'INTERVAL variable unit' generation
              pg_sql = re.sub(
@@ -3301,6 +3324,20 @@ class SybaseASEConnector(DatabaseConnector):
 
         # Expanded lookahead for declaration end
         body_content = re.sub(r'DECLARE\s+(?![@#])[a-zA-Z0-9_].*?(?=\bBEGIN\b|\bEND\b|\bIF\b|\bWHILE\b|\bSELECT\b|\bINSERT\b|\bUPDATE\b|\bDELETE\b|\bRETURN\b|\bSET\b|\bFETCH\b|\bOPEN\b|\bCLOSE\b|\bDEALLOCATE\b|\bDECLARE\b|\bEXEC\b|\bEXECUTE\b|\bPRINT\b|\bRAISERROR\b|\bWAITFOR\b|\bCOMMIT\b|\bROLLBACK\b|\bSAVE\b|$)', declaration_replacer, body_content, flags=re.IGNORECASE | re.DOTALL)
+
+        # Fix: Convert ROLLBACK TRANSACTION ... PRINT "msg" to RAISERROR 50000 "msg"
+        body_content = re.sub(r'(?i)\brollback\s+transaction\s+print\s+(["\'])(.*?)\1', r'RAISERROR 50000 \1\2\1', body_content)
+
+        # RAISERROR conversion (Masking Strategy)
+        def raiserror_replacer(match):
+            code = match.group(1)
+            msg = match.group(2)
+            if msg.startswith('"'):
+                msg = "'"+ msg[1:-1].replace("'", "''") + "'"
+            # Mask as SELECT 'RAISERROR_CMD:code' AS _cmd, msg AS _msg
+            return f"SELECT 'RAISERROR_CMD:{code}' AS _cmd, {msg} AS _msg"
+
+        body_content = re.sub(r'RAISERROR\s+(\d+)\s+((?:"(?:[^"]|"")*"|\'(?:[^\']|\'\')*\'))', raiserror_replacer, body_content, flags=re.IGNORECASE)
 
         # 5. Convert Statements (using _convert_stmts logic)
         # 5. Convert Statements (using _convert_stmts logic)

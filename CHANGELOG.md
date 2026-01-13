@@ -1,6 +1,11 @@
 # Changelog
 
-## 0.11.1 - 2026.01.12
+## 0.11.1 - 2026.01.13
+
+- 2026.01.13
+
+  - Fixes in Sybase ASE connector
+    - Improved check of existing domain for compatible data types
 
 - 2026.01.12
 

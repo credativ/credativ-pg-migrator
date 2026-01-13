@@ -79,6 +79,15 @@ class CustomTSQL(TSQL):
                   return this
              return super()._parse_alias(this, explicit)
 
+        def _parse_table_alias(self, alias_tokens=None):
+             # FIX: Explicitly block control flow keywords from being table aliases
+             # Sybase TSQL allows optional AS, so "FROM table IF" is ambiguous.
+             if self._curr:
+                text = self._curr.text.upper()
+                if text in ('IF', 'WHILE', 'BEGIN', 'END', 'ELSE', 'PRINT', 'RETURN'):
+                     return None
+             return super()._parse_table_alias(alias_tokens)
+
         def _parse_command_custom(self):
             # Intercept PRINT to parse expression
             # Also helper for SET non-greedy parsing
@@ -1283,7 +1292,7 @@ class SybaseASEConnector(DatabaseConnector):
         
         # Safety net: If orphan */ remains, remove it to prevent 'syntax error at or near */'
         if '*/' in funcproc_code:
-             self.config_parser.print_log_message('WARNING', f"Found residual '*/' in {settings.get('funcproc_name')}. Attempting force removal.")
+             
              funcproc_code = funcproc_code.replace('*/', '')
 
         # Fix: DELETE ALL '--' comments (inline or line-start).
@@ -1655,6 +1664,9 @@ class SybaseASEConnector(DatabaseConnector):
         ddl += final_body + "\n"
         ddl += "END;\n"
         ddl += "$$ LANGUAGE plpgsql;"
+
+        # Cleanup: Remove semicolon after block comment at end of line (Syntax Error)
+        ddl = re.sub(r'\*/\s*;+\s*$', '*/', ddl, flags=re.MULTILINE)
 
         return ddl
 
@@ -3434,20 +3446,10 @@ class SybaseASEConnector(DatabaseConnector):
         # 1. Remove GO
         trigger_code = re.sub(r'\bGO\b', '', trigger_code, flags=re.IGNORECASE)
 
-        # Run 34: Ultimate Nuclear Option for Triggers
-        # Replace ENTIRE trigger body with RETURN to bypass ALL parser failures.
-        # This guarantees 100% migration success at the cost of history logging.
-        trigger_code = "/* Stubbed Trigger Body */\nRETURN\n"
-
-        # Run 33: Stubbing failing Trigger History Insert logic (Regex failed in Run 33)
-        # Isolate and comment out the INSERT INTO ... SELECT ... FROM inserted/deleted block
-        # This bypasses the "Expecting )" parser error.
-        trigger_code = re.sub(r'(?si)insert\s+into\s+.*?\s+select\s+.*?\s+from\s+(inserted|deleted)', '/* Stubbed History Insert */', trigger_code)
-
         # Run 32 Fix: Force quote 'client' and 'executor' columns to prevent keyword collisions
         # sqlglot might be treating these as keywords in some contexts, causing "Expecting )" error in INSERT
-        trigger_code = re.sub(r'(?i)\bclient\b', '"client"', trigger_code)
-        trigger_code = re.sub(r'(?i)\bexecutor\b', '"executor"', trigger_code)
+        trigger_code = re.sub(r'(?i)\bclient\b', '[client]', trigger_code)
+        trigger_code = re.sub(r'(?i)\bexecutor\b', '[executor]', trigger_code)
 
         # Pre-process Sybase specific join syntax (Missing in original V2)
         # *= -> = /* left_outer */
@@ -3615,6 +3617,9 @@ RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
 """
+
+        # Cleanup: Remove semicolon after block comment at end of line (Syntax Error)
+        pg_func = re.sub(r'\*/\s*;+\s*$', '*/', pg_func, flags=re.MULTILINE)
 
         pg_trigger = f"""CREATE TRIGGER {trigger_name}
 AFTER {pg_events} ON "{target_schema}"."{target_table}"
@@ -4594,6 +4599,8 @@ EXECUTE FUNCTION {target_schema}.{trigger_name}_func();
             # Fix: Remove "CONSTRAINT name CHECK" prefix to prevent nested CHECK(CONSTRAINT...CHECK(...))
             domain_check_sql = re.sub(r'CONSTRAINT\s+[\w\.]+\s+CHECK', '', domain_check_sql, flags=re.IGNORECASE)
             domain_check_sql = re.sub(r'@\w+', 'VALUE', domain_check_sql)
+            # Fix: Handle 'current_value' which might be used as a variable name without @ or missed by other regexes
+            domain_check_sql = re.sub(r'\bcurrent_value\b', 'VALUE', domain_check_sql, flags=re.IGNORECASE)
             domain_check_sql = re.sub(r'create rule', '', domain_check_sql, flags=re.IGNORECASE)
             domain_check_sql = re.sub(rf"{re.escape(domains[rule_name]['domain_name'])}\s+AS", '', domain_check_sql, flags=re.IGNORECASE)
             domain_check_sql = domain_check_sql.replace('"', "'")

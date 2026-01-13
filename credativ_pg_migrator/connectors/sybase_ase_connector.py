@@ -4628,6 +4628,8 @@ EXECUTE FUNCTION {target_schema}.{trigger_name}_func();
             domain_check_sql = re.sub(r'@\w+', 'VALUE', domain_check_sql)
             # Fix: Handle 'current_value' which might be used as a variable name without @ or missed by other regexes
             domain_check_sql = re.sub(r'\bcurrent_value\b', 'VALUE', domain_check_sql, flags=re.IGNORECASE)
+            domain_check_sql = re.sub(r'\bmax_value\b', 'VALUE', domain_check_sql, flags=re.IGNORECASE)
+            domain_check_sql = re.sub(r'\bmin_value\b', 'VALUE', domain_check_sql, flags=re.IGNORECASE)
             domain_check_sql = re.sub(r'create rule', '', domain_check_sql, flags=re.IGNORECASE)
             domain_check_sql = re.sub(rf"{re.escape(domains[rule_name]['domain_name'])}\s+AS", '', domain_check_sql, flags=re.IGNORECASE)
             domain_check_sql = domain_check_sql.replace('"', "'")

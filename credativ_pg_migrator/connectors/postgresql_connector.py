@@ -1913,10 +1913,12 @@ class PostgreSQLConnector(DatabaseConnector):
                 sql_parts.append("NOT NULL")
 
             if domain_check_sql:
-                # pg_get_constraintdef already allows CHECK (...).
-                # If multiple constraints were aggregated, they might look like CHECK (...) CHECK (...)
-                # We just append them.
-                sql_parts.append(domain_check_sql)
+                # Rules might be raw expressions like "VALUE > 0"
+                # Postgres constraints are "CHECK (VALUE > 0)"
+                if not domain_check_sql.strip().upper().startswith("CHECK"):
+                    sql_parts.append(f"CHECK ({domain_check_sql})")
+                else:
+                    sql_parts.append(domain_check_sql)
 
             create_domain_sql = " ".join(sql_parts) + ";"
 

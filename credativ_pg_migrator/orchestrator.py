@@ -241,6 +241,10 @@ class Orchestrator:
                             msg = f"Domain {type_data['target_type_name']} with underlying type {target_basic_type} already exists (normalized match: {norm_existing}). Skipping."
                             self.config_parser.print_log_message('INFO', msg)
                             self.migrator_tables.update_user_defined_type_status(type_data['id'], True, 'skipped (exists)')
+                        elif target_basic_type and self._are_types_compatible(norm_existing, norm_target):
+                             msg = f"Domain {type_data['target_type_name']} already exists with compatible underlying type: {existing_type} (expected: {target_basic_type}). Normalized: {norm_existing} vs {norm_target}. Skipping creation (WARNING)."
+                             self.config_parser.print_log_message('WARNING', msg)
+                             self.migrator_tables.update_user_defined_type_status(type_data['id'], True, 'skipped (compatible)')
                         else:
                             msg = f"Domain {type_data['target_type_name']} already exists but with different underlying type: {existing_type} (expected: {target_basic_type}). Normalized: {norm_existing} vs {norm_target}. Skipping creation."
                             self.config_parser.print_log_message('ERROR', msg)
@@ -285,6 +289,32 @@ class Orchestrator:
         }
 
         return mapping.get(dt, dt)
+
+    def _are_types_compatible(self, type1, type2):
+        """Check if two normalized types are compatible enough to be considered a warning instead of error."""
+        if not type1 or not type2: return False
+        t1 = type1.lower()
+        t2 = type2.lower()
+
+        # String compatibility
+        string_types = {'text', 'varchar', 'char', 'bpchar'}
+        if t1 in string_types and t2 in string_types:
+            return True
+
+        # Numeric compatibility
+        int_types = {'int', 'int2', 'int8', 'smallint', 'bigint', 'integer'}
+        float_types = {'float4', 'float8', 'real', 'double precision', 'numeric', 'decimal'}
+        # Allow int <-> int
+        if t1 in int_types and t2 in int_types:
+            return True
+        # Allow float <-> float/numeric
+        if t1 in float_types and t2 in float_types:
+            return True
+        # Allow int -> float/numeric (but maybe not vice versa strict? For now allow if one is numeric)
+        if (t1 in int_types and t2 in float_types) or (t1 in float_types and t2 in int_types):
+            return True
+
+        return False
 
     def run_create_domains(self):
         self.migrator_tables.insert_main('Orchestrator', 'domains migration')

@@ -61,7 +61,7 @@ class CustomTSQL(TSQL):
         def _parse_alias(self, this, explicit=False):
              # FIX: Explicitly prevent UPDATE/INSERT/DELETE/MERGE/SET from being aliases
              # usage of keywords as aliases without AS is weird in implicit statement boundary contexts
-             if self._curr.token_type in (TokenType.UPDATE, TokenType.INSERT, TokenType.DELETE, TokenType.MERGE, TokenType.SET):
+             if self._curr and self._curr.token_type in (TokenType.UPDATE, TokenType.INSERT, TokenType.DELETE, TokenType.MERGE, TokenType.SET):
                   return this
              return super()._parse_alias(this, explicit)
 
@@ -1590,6 +1590,10 @@ class SybaseASEConnector(DatabaseConnector):
         # Regex for Right Outer Join (=*)
         processed_body = re.sub(r"([\w\.]+)\s*\=\*\s*([\w\.]+)", r"locvar_sybase_right_join(\1, \2)", processed_body)
 
+        # FIX: Handle PRINT "string" -> PRINT 'string' to avoid parser issues
+        # Use a non-greedy regex to capture double-quoted strings after PRINT
+        processed_body = re.sub(r'(?i)\bPRINT\s+"(.*?)"', r"PRINT '\1'", processed_body)
+
         # --- Use sqlglot to parse the cleaned body ---
         # CustomTSQL is defined at module level
         CustomTSQL.Parser.config_parser = self.config_parser
@@ -1886,7 +1890,7 @@ class SybaseASEConnector(DatabaseConnector):
 
         # # Inject _rowcount declaration
         # if has_rowcount:
-        #      declarations.insert(0, "_rowcount INTEGER;")
+        declarations.insert(0, "locvar_rowcount INTEGER;")
 
         # final_body = "\n".join(final_stmts_clean)
 
@@ -2148,9 +2152,9 @@ class SybaseASEConnector(DatabaseConnector):
         # Handle @@rowcount
         has_rowcount = '@@rowcount' in body_content.lower()
         if has_rowcount:
-             declarations.append('_rowcount INTEGER;')
+             declarations.append('locvar_rowcount INTEGER;')
              # Replace usage
-             body_content = re.sub(r'@@rowcount', '_rowcount', body_content, flags=re.IGNORECASE)
+             body_content = re.sub(r'@@rowcount', 'locvar_rowcount', body_content, flags=re.IGNORECASE)
 
         # RAISERROR conversion
         # Sybase: RAISERROR num "msg" or RAISERROR num 'msg'
@@ -4298,11 +4302,12 @@ EXECUTE FUNCTION {target_schema}.{trigger_name}_func();
             """
             cursor.execute(query)
             row = cursor.fetchone()
-            if row:
+            if row and row[0]: # Check for row AND non-null value
                 basic_data_type = row[0]
                 domains[rule_name]['domain_data_type'] = basic_data_type
             else:
-                domains[rule_name]['domain_data_type'] = None
+                self.config_parser.print_log_message('WARNING', f"Could not determine basic data type for rule/domain {rule_name}. Defaulting to 'text'.")
+                domains[rule_name]['domain_data_type'] = 'text'
 
             domains[rule_name]['source_domain_sql'] = domains[rule_name]['source_domain_sql'].replace('\n', ' ')
 

@@ -323,10 +323,17 @@ class Orchestrator:
         if len(domains) > 0:
             for domain_row in domains:
                 domain_data = self.migrator_tables.decode_domain_row(domain_row)
-                self.config_parser.print_log_message('INFO', f"Creating domain {domain_data['target_domain_name']} in target database using SQL: {domain_data['target_domain_sql']}")
+                
+                # Fix: Convert Sybase 'convert(type, val)' to Postgres 'CAST(val AS type)' in CHECK constraints
+                domain_sql = domain_data['target_domain_sql']
+                if 'convert(' in domain_sql.lower():
+                     domain_sql = re.sub(r'convert\(([^,]+),\s*([^)]+)\)', r'CAST(\2 AS \1)', domain_sql, flags=re.IGNORECASE)
+                     self.config_parser.print_log_message('INFO', f"Repaired DOMAIN SQL: {domain_sql}")
+
+                self.config_parser.print_log_message('INFO', f"Creating domain {domain_data['target_domain_name']} in target database using SQL: {domain_sql}")
                 try:
                     self.target_connection.connect()
-                    self.target_connection.execute_query(domain_data['target_domain_sql'])
+                    self.target_connection.execute_query(domain_sql)
                     self.migrator_tables.update_domain_status(domain_data['id'], True, 'migrated OK')
                     self.config_parser.print_log_message('INFO', f"Domain {domain_data['target_domain_name']} created successfully.")
                     self.target_connection.disconnect()
@@ -1288,6 +1295,10 @@ class Orchestrator:
                         self.migrator_tables.update_constraint_status(constraint_data['id'], False, f'''ERROR: referenced table {referenced_target_table['target_schema']}.{referenced_target_table['target_table']} does not exist''')
                         return False
 
+                # Fix: Convert Sybase 'convert(type, val)' to Postgres 'CAST(val AS type)' in CHECK constraints
+                # Example: convert(numeric(30), "current_value") -> CAST("current_value" AS numeric(30))
+                create_constraint_sql = re.sub(r'convert\(([^,]+),\s*([^)]+)\)', r'CAST(\2 AS \1)', create_constraint_sql, flags=re.IGNORECASE)
+
                 self.config_parser.print_log_message( 'DEBUG', f"Worker {worker_id}: Creating constraint with SQL: {create_constraint_sql}")
 
                 query = f'''SET SESSION search_path TO {constraint_data['target_schema']};'''
@@ -1407,6 +1418,17 @@ class Orchestrator:
                         self.migrator_tables.insert_funcprocs(self.source_schema, funcproc_data['name'], funcproc_id, funcproc_code_str, self.target_schema, funcproc_data['name'], converted_code, funcproc_data['comment'])
                         
                         if converted_code is not None and converted_code.strip():
+                            # Fix: Global cleanup of 'dbo.' schema prefix if migrating from Sybase dbo
+                            # This acts as a safety net for V1 fallback code or incomplete V2 conversions
+                            if hasattr(self, 'source_schema') and self.source_schema and self.source_schema.lower() == 'dbo' and self.target_schema.lower() != 'dbo':
+                                self.config_parser.print_log_message('DEBUG', f"Stripping 'dbo.' schema prefix and replacing with '{self.target_schema}.'")
+                                converted_code = re.sub(r'(?i)\bdbo\.', f'{self.target_schema}.', converted_code)
+
+                            # Fix: Normalize BOOLEAN defaults (0/1 -> FALSE/TRUE) for Postgres compatibility
+                            # V1 fallback often leaves BIT defaults as 0/1, which Postgres rejects for BOOLEAN types.
+                            converted_code = re.sub(r'(?i)(BOOLEAN\s*DEFAULT\s*|BOOLEAN\s*=\s*)0\b', r'\1FALSE', converted_code)
+                            converted_code = re.sub(r'(?i)(BOOLEAN\s*DEFAULT\s*|BOOLEAN\s*=\s*)1\b', r'\1TRUE', converted_code)
+
                             self.config_parser.print_log_message('INFO', f"Creating {funcproc_type} {funcproc_data['name']} in target database.")
                             self.target_connection.connect()
                             

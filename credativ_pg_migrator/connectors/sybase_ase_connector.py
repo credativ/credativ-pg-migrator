@@ -1671,62 +1671,89 @@ class SybaseASEConnector(DatabaseConnector):
         return ddl
 
     def _transform_trigger_tables(self, expression):
-        """
-        Transforms `inserted` and `deleted` tables in trigger AST to `NEW` and `OLD` records/expressions.
-        Handles replacing 'SELECT count(*) FROM inserted' with 'CASE WHEN TG_OP ...'
-        """
-        def transform(node):
+        # Transform MSSQL/Sybase 'inserted'/'deleted' table usage to PG 'NEW'/'OLD' record usage
+        # This requires AST modification:
+        # 1. Remove 'inserted'/'deleted' from FROM/JOINs.
+        # 2. Rename columns referencing them to use NEW/OLD as table alias.
+
+        table_map = {'inserted': 'NEW', 'deleted': 'OLD'}
+        aliases = {}
+
+        # 1. Identify aliases first (Scan)
+        from_clause = expression.args.get('from')
+        joins = expression.args.get('joins') or []
+
+        if from_clause:
+            for item in from_clause.expressions:
+                if isinstance(item, exp.Table) and item.name.lower() in table_map:
+                    aliases[item.alias_or_name] = table_map[item.name.lower()]
+
+        for j in joins:
+            if isinstance(j.this, exp.Table) and j.this.name.lower() in table_map:
+                aliases[j.this.alias_or_name] = table_map[j.this.name.lower()]
+
+        # 2. Transform Logic
+        def transformer(node):
             if isinstance(node, exp.Column):
-                if node.table.lower() == 'inserted':
-                    node.set('table', exp.Identifier(this='NEW', quoted=False))
-                elif node.table.lower() == 'deleted':
-                    node.set('table', exp.Identifier(this='OLD', quoted=False))
-                return node
-
-            if isinstance(node, (exp.Select, exp.Update, exp.Delete)):
-                # Check FROM
-                from_clause = node.args.get('from')
-                if not from_clause:
-                    return node
-
-                # Detect inserted/deleted tables
-                has_inserted = False
-                has_deleted = False
-                new_froms = []
-
-                # Check expressions for COUNT(*)
-                is_count_star = False
-                if isinstance(node, exp.Select) and len(node.expressions) == 1 and isinstance(node.expressions[0], exp.Count) and node.expressions[0].this == exp.Star():
-                     is_count_star = True
-
-                for f in from_clause.expressions:
-                    if isinstance(f, exp.Table):
-                        name = f.name.lower()
-                        if name == 'inserted':
-                            has_inserted = True
-                            continue # Remove
-                        if name == 'deleted':
-                            has_deleted = True
-                            continue # Remove
-                    new_froms.append(f)
-
-                if has_inserted and is_count_star and not new_froms:
-                     # SELECT count(*) FROM inserted -> CASE WHEN TG_OP ...
-                     return sqlglot.parse_one("CASE WHEN TG_OP IN ('INSERT', 'UPDATE') THEN 1 ELSE 0 END")
-
-                if has_deleted and is_count_star and not new_froms:
-                     return sqlglot.parse_one("CASE WHEN TG_OP IN ('DELETE', 'UPDATE') THEN 1 ELSE 0 END")
-
-                if has_inserted or has_deleted:
-                    if not new_froms:
-                        node.set('from', None)
-                    else:
-                        from_clause.set('expressions', new_froms)
-
-                return node
+                tbl = node.table
+                if tbl and tbl in aliases:
+                    # Replace with Aliased Column (NEW/OLD)
+                    return exp.Column(
+                        this=node.this,
+                        table=exp.Identifier(this=aliases[tbl], quoted=False)
+                    )
             return node
 
-        return expression.transform(transform)
+        expression = expression.transform(transformer)
+
+        # 3. Handle Table Removal and Join Promotion
+        # Re-access FROM after transform
+        from_clause = expression.args.get('from')
+        joins = expression.args.get('joins') or []
+
+        if from_clause:
+            new_froms = []
+            for item in from_clause.expressions:
+                if isinstance(item, exp.Table) and item.name.lower() in table_map:
+                    continue
+                new_froms.append(item)
+
+            from_clause.set('expressions', new_froms)
+
+            # If new_froms is empty, we MUST promote a JOIN if available, or empty FROM
+            if not new_froms:
+                if joins:
+                    first_join = joins.pop(0)
+                    new_table = first_join.this
+                    condition = first_join.args.get('on')
+
+                    # Set FROM to new_table
+                    from_clause.set('expressions', [new_table])
+
+                    # Move conditions to WHERE
+                    if condition:
+                        expression.where(condition, copy=False)
+
+                    expression.set('joins', joins)
+                else:
+                    # No JOINs, so just empty FROM (SELECT NEW.col)
+                    expression.set('from', None)
+
+        # 4. Filter JOINs that are strictly transition tables (if not promoted)
+        joins = expression.args.get('joins') or []
+        new_joins = []
+        for j in joins:
+            if isinstance(j.this, exp.Table) and j.this.name.lower() in table_map:
+                # Merge logic: if explicit JOIN condition exists, move it to WHERE
+                # e.g. JOIN inserted ON i.id = t.id -> WHERE NEW.id = t.id
+                condition = j.args.get('on')
+                if condition:
+                     expression.where(condition, copy=False)
+                continue
+            new_joins.append(j)
+        expression.set('joins', new_joins)
+
+        return expression
 
     def _convert_stmts(self, body_content, settings, is_nested=False, has_rowcount=False, is_trigger=False):
         """

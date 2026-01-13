@@ -1942,6 +1942,17 @@ class SybaseASEConnector(DatabaseConnector):
              self.config_parser.print_log_message('DEBUG', f"FALLTHROUGH GENERIC! Type: {type(expression).__name__}, Key: {expression.key if hasattr(expression, 'key') else 'None'}")
              # self.config_parser.print_log_message('DEBUG', f"DUMP: {expression}") # Can be verbose
 
+             # Fix: Sybase "double quotes" in INSERT VALUES -> Single Quotes
+             if isinstance(expression, exp.Insert):
+                  vals = expression.args.get('expression')
+                  if isinstance(vals, exp.Values):
+                       for vlist in vals.expressions:
+                            if hasattr(vlist, 'expressions'):
+                                 for i, item in enumerate(vlist.expressions):
+                                      if isinstance(item, exp.Identifier) and item.quoted:
+                                           # Replace "val" with 'val'
+                                           vlist.expressions[i] = exp.Literal.string(item.this)
+
              pg_sql = expression.sql(dialect='postgres')
 
              if pg_sql.strip().upper() == 'BEGIN':

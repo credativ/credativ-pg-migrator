@@ -1,6 +1,7 @@
 lib/*.zip
 prompts/
 tests/
+testing_examples/
 *.tar.gz
 credativ_pg_migrator/*.tar.gz
 credativ_pg_migrator/*.log

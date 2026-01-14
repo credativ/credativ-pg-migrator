@@ -49,7 +49,63 @@ def block_handler(self, expression):
         statements.append(stmt)
     return "\n".join(statements)
 
+def if_handler(self, expression):
+    condition = self.sql(expression, "this")
+    true_statement = self.sql(expression, "true").strip()
+
+    # Ensure true_statement ends with semicolon if it's not a block
+    if true_statement and not true_statement.endswith(';') and not true_statement.endswith('END IF;'):
+         true_statement += ';'
+
+    sql = f"IF {condition} THEN\n    {true_statement}"
+
+    false_expression = expression.args.get("false")
+    if false_expression:
+        # Handle ELSIF (Recursive IF in false branch)
+        if isinstance(false_expression, exp.If):
+             # Recursively call if_handler (via self.sql) but strip the "IF " prefix to merge into ELSIF
+             # Actually, simpler: Generate the child IF, then look at it.
+             # But self.sql(false_expression) will return "IF ... END IF;"
+             # We want "ELSIF ... "
+             # So we can manually process the child node here to flatten the structure.
+
+             child_condition = self.sql(false_expression, "this")
+             child_true = self.sql(false_expression, "true").strip()
+             if child_true and not child_true.endswith(';') and not child_true.endswith('END IF;'):
+                  child_true += ';'
+
+             # Append ELSIF block
+             sql += f"\nELSIF {child_condition} THEN\n    {child_true}"
+
+             # Recurse for the child's false branch
+             curr_false = false_expression.args.get("false")
+             while isinstance(curr_false, exp.If):
+                  child_cond = self.sql(curr_false, "this")
+                  child_tr = self.sql(curr_false, "true").strip()
+                  if child_tr and not child_tr.endswith(';') and not child_tr.endswith('END IF;'):
+                       child_tr += ';'
+                  sql += f"\nELSIF {child_cond} THEN\n    {child_tr}"
+                  curr_false = curr_false.args.get("false")
+
+             # Final ELSE if remaining
+             if curr_false:
+                  false_stmt = self.sql(curr_false).strip()
+                  if false_stmt and not false_stmt.endswith(';') and not false_stmt.endswith('END IF;'):
+                       false_stmt += ';'
+                  sql += f"\nELSE\n    {false_stmt}"
+
+        else:
+             false_statement = self.sql(false_expression).strip()
+             if false_statement:
+                 if not false_statement.endswith(';') and not false_statement.endswith('END IF;'):
+                      false_statement += ';'
+                 sql += f"\nELSE\n    {false_statement}"
+
+    sql += "\nEND IF;"
+    return sql
+
 Postgres.Generator.TRANSFORMS[Block] = block_handler
+Postgres.Generator.TRANSFORMS[exp.If] = if_handler
 
 class CustomTSQL(TSQL):
     class Tokenizer(TSQL.Tokenizer):
@@ -70,13 +126,16 @@ class CustomTSQL(TSQL):
              return exp.Return(this=self._parse_expression())
 
         def _parse_alias(self, this, explicit=False):
-             # FIX: Explicitly prevent UPDATE/INSERT/DELETE/MERGE/SET from being aliases
+             # FIX: Explicitly prevent UPDATE/INSERT/DELETE/MERGE/SET/END/ELSE/IF/SELECT/etc from being aliases
              # usage of keywords as aliases without AS is weird in implicit statement boundary contexts
-             if self._curr and (
-                 self._curr.token_type in (TokenType.UPDATE, TokenType.INSERT, TokenType.DELETE, TokenType.MERGE, TokenType.SET)
-                 or (self._curr.text.upper() == 'RETURN')
-             ):
-                  return this
+             if self._curr:
+                 if self._curr.token_type in (
+                     TokenType.UPDATE, TokenType.INSERT, TokenType.DELETE, TokenType.MERGE, TokenType.SET,
+                     TokenType.END, TokenType.ELSE, TokenType.IF, TokenType.BEGIN,
+                     TokenType.SELECT, TokenType.COMMAND, TokenType.COMMIT, TokenType.ROLLBACK,
+                     getattr(TokenType, 'EXECUTE', None) # Safely access EXECUTE if exists
+                 ) or (self._curr.text.upper() in ('RETURN', 'RAISERROR', 'WAITFOR', 'SAVE', 'WHILE', 'EXEC', 'DECLARE', 'PRINT')):
+                      return this
              return super()._parse_alias(this, explicit)
 
         def _parse_table_alias(self, alias_tokens=None):
@@ -109,7 +168,7 @@ class CustomTSQL(TSQL):
                  elif is_set_curr:
                       # Not consumed yet, consume it now
                       self._advance()
-                 
+
                  # Re-check prev/curr context. Since we consumed or confirmed previous consumption:
                  if is_set_prev or is_set_curr:
                       # SET already consumed by dispatcher mechanism or by us above
@@ -122,7 +181,7 @@ class CustomTSQL(TSQL):
 
                            if balance == 0:
                                 txt = self._curr.text.upper()
-                                if txt in ('SELECT', 'UPDATE', 'INSERT', 'DELETE', 'BEGIN', 'IF', 'WHILE', 'RETURN', 'DECLARE', 'CREATE', 'TRUNCATE', 'GO'):
+                                if txt in ('SELECT', 'UPDATE', 'INSERT', 'DELETE', 'BEGIN', 'IF', 'WHILE', 'RETURN', 'DECLARE', 'CREATE', 'TRUNCATE', 'GO', 'ELSE'):
                                      break
 
                            if self._curr.token_type == TokenType.L_PAREN:
@@ -178,13 +237,47 @@ class CustomTSQL(TSQL):
             return Block(expressions=expressions)
 
         def _parse_if(self):
-            res = self.expression(
-                 exp.If,
-                 this=self._parse_conjunction(),
-                 true=self._parse_statement(),
-                 false=self._parse_statement() if self._match(TokenType.ELSE) else None,
-            )
-            return res
+             this = self._parse_conjunction()
+
+             if self._match(TokenType.THEN):
+                  # Standard SQL Mode: IF ... THEN ... [ELSE ...] END IF
+                  # Parse statements until ELSE or END
+                  statements = []
+                  while self._curr and self._curr.token_type not in (TokenType.ELSE, TokenType.END):
+                       stmt = self._parse_statement()
+                       if stmt:
+                           statements.append(stmt)
+                       self._match(TokenType.SEMICOLON)
+
+                  true = self.expression(Block, expressions=statements)
+
+                  false = None
+                  if self._match(TokenType.ELSE):
+                       # Parse statements until END
+                       statements = []
+                       while self._curr and self._curr.token_type != TokenType.END:
+                            stmt = self._parse_statement()
+                            if stmt:
+                                statements.append(stmt)
+                            self._match(TokenType.SEMICOLON)
+                       false = self.expression(Block, expressions=statements)
+
+                  self._match(TokenType.END)
+                  self._match(TokenType.IF) # Optional IF in END IF? Usually mandatory in Standard SQL, but loose check is safer
+
+             else:
+                  # T-SQL Mode: IF ... statement [ELSE statement]
+                  true = self._parse_statement()
+                  self._match(TokenType.SEMICOLON) # Allow semicolon before ELSE
+                  false = self._parse_statement() if self._match(TokenType.ELSE) else None
+
+             res = self.expression(
+                  exp.If,
+                  this=this,
+                  true=true,
+                  false=false,
+             )
+             return res
 
         STATEMENT_PARSERS[TokenType.BEGIN] = lambda self: self._parse_block()
         if hasattr(TokenType, 'IF'):
@@ -1269,7 +1362,7 @@ class SybaseASEConnector(DatabaseConnector):
 
         # Fix: REMOVE dash-only lines (dividers) completely to prevent tokenizer crash
         funcproc_code = re.sub(r'^\s*(-{2,})\s*$', r'', funcproc_code, flags=re.MULTILINE)
-        
+
         # Run 34: Stubbing failing patindex logic with validated robust regex
         # Replaces patindex('%[^...]%', ...) with 0 to skip validation
         funcproc_code = re.sub(r"(?i)patindex\s*\(\s*'%\[\^.*?\]%'\s*,\s*locvar_userpart\s*\)", "0", funcproc_code)
@@ -1289,10 +1382,10 @@ class SybaseASEConnector(DatabaseConnector):
         # Double pass to handle simple nesting cases
         funcproc_code = re.sub(r'/\*.*?\*/', r'', funcproc_code, flags=re.DOTALL)
         funcproc_code = re.sub(r'/\*.*?\*/', r'', funcproc_code, flags=re.DOTALL)
-        
+
         # Safety net: If orphan */ remains, remove it to prevent 'syntax error at or near */'
         if '*/' in funcproc_code:
-             
+
              funcproc_code = funcproc_code.replace('*/', '')
 
         # Fix: DELETE ALL '--' comments (inline or line-start).
@@ -1517,7 +1610,7 @@ class SybaseASEConnector(DatabaseConnector):
             items = re.split(r',\s*(?=@?\w+[\t ]*=)', block)
             cleaned_items = [item.strip() for item in items if item.strip()]
             new_block = ";\nSET ".join(cleaned_items)
-            return "SET " + new_block + ";"
+            return "SET " + new_block + "\n;"
 
         # self.config_parser.print_log_message('DEBUG', f"[DEBUG] Code before SELECT regex:\n{funcproc_code[:1000]}...")
         # Apply transformation to body_content
@@ -1563,7 +1656,7 @@ class SybaseASEConnector(DatabaseConnector):
             if stmt.strip().upper().startswith('BEGIN'):
                 return full
             return f"{cond} \nBEGIN\n{stmt}\nEND"
-            
+
         body_content = re.sub(r"(?ims)(IF\s*\(.*?\))\s*(SET\s+.*?;)", wrap_if_set, body_content)
 
         # RAISERROR conversion (Masking Strategy)
@@ -1671,89 +1764,50 @@ class SybaseASEConnector(DatabaseConnector):
         return ddl
 
     def _transform_trigger_tables(self, expression):
-        # Transform MSSQL/Sybase 'inserted'/'deleted' table usage to PG 'NEW'/'OLD' record usage
-        # This requires AST modification:
-        # 1. Remove 'inserted'/'deleted' from FROM/JOINs.
-        # 2. Rename columns referencing them to use NEW/OLD as table alias.
-
         table_map = {'inserted': 'NEW', 'deleted': 'OLD'}
         aliases = {}
 
-        # 1. Identify aliases first (Scan)
-        from_clause = expression.args.get('from')
-        joins = expression.args.get('joins') or []
-
-        if from_clause:
-            for item in from_clause.expressions:
-                if isinstance(item, exp.Table) and item.name.lower() in table_map:
-                    aliases[item.alias_or_name] = table_map[item.name.lower()]
-
-        for j in joins:
-            if isinstance(j.this, exp.Table) and j.this.name.lower() in table_map:
-                aliases[j.this.alias_or_name] = table_map[j.this.name.lower()]
-
-        # 2. Transform Logic
+        # 1. Scan and Remove Tables
+        # Convert to list to avoid modification issues during iteration
+        for table in list(expression.find_all(exp.Table)):
+            name = table.name.lower()
+            if name in table_map:
+                target_alias = table_map[name]
+                aliases[table.alias_or_name] = target_alias
+                
+                # Remove logic
+                parent = table.parent
+                if isinstance(parent, exp.From):
+                    if table in parent.expressions:
+                        parent.expressions.remove(table)
+                    if not parent.expressions:
+                        # FROM is empty. Remove FROM from statement.
+                        grandparent = parent.parent
+                        if grandparent:
+                            grandparent.set('from', None)
+                elif isinstance(parent, exp.Join):
+                     grandparent = parent.parent
+                     if grandparent:
+                          joins = grandparent.args.get('joins')
+                          if joins and parent in joins:
+                               # Start of Join Promotion logic
+                               condition = parent.args.get('on')
+                               if condition:
+                                   grandparent.where(condition, copy=False)
+                               joins.remove(parent)
+        
+        # 2. Transform Columns
         def transformer(node):
             if isinstance(node, exp.Column):
-                tbl = node.table
-                if tbl and tbl in aliases:
-                    # Replace with Aliased Column (NEW/OLD)
-                    return exp.Column(
-                        this=node.this,
-                        table=exp.Identifier(this=aliases[tbl], quoted=False)
-                    )
+                 tbl = node.table
+                 if tbl and tbl in aliases:
+                     return exp.Column(
+                         this=node.this,
+                         table=exp.Identifier(this=aliases[tbl], quoted=False)
+                     )
             return node
 
-        expression = expression.transform(transformer)
-
-        # 3. Handle Table Removal and Join Promotion
-        # Re-access FROM after transform
-        from_clause = expression.args.get('from')
-        joins = expression.args.get('joins') or []
-
-        if from_clause:
-            new_froms = []
-            for item in from_clause.expressions:
-                if isinstance(item, exp.Table) and item.name.lower() in table_map:
-                    continue
-                new_froms.append(item)
-
-            from_clause.set('expressions', new_froms)
-
-            # If new_froms is empty, we MUST promote a JOIN if available, or empty FROM
-            if not new_froms:
-                if joins:
-                    first_join = joins.pop(0)
-                    new_table = first_join.this
-                    condition = first_join.args.get('on')
-
-                    # Set FROM to new_table
-                    from_clause.set('expressions', [new_table])
-
-                    # Move conditions to WHERE
-                    if condition:
-                        expression.where(condition, copy=False)
-
-                    expression.set('joins', joins)
-                else:
-                    # No JOINs, so just empty FROM (SELECT NEW.col)
-                    expression.set('from', None)
-
-        # 4. Filter JOINs that are strictly transition tables (if not promoted)
-        joins = expression.args.get('joins') or []
-        new_joins = []
-        for j in joins:
-            if isinstance(j.this, exp.Table) and j.this.name.lower() in table_map:
-                # Merge logic: if explicit JOIN condition exists, move it to WHERE
-                # e.g. JOIN inserted ON i.id = t.id -> WHERE NEW.id = t.id
-                condition = j.args.get('on')
-                if condition:
-                     expression.where(condition, copy=False)
-                continue
-            new_joins.append(j)
-        expression.set('joins', new_joins)
-
-        return expression
+        return expression.transform(transformer)
 
     def _convert_stmts(self, body_content, settings, is_nested=False, has_rowcount=False, is_trigger=False):
         """
@@ -1800,7 +1854,7 @@ class SybaseASEConnector(DatabaseConnector):
         except Exception as e:
              traceback.print_exc()
              self.config_parser.print_log_message('ERROR', f"Global parsing failed for code: {body_content[:100]}... Error: {e}")
-             
+
              # Run 32 Debug: Dump FULL failing code to file (APPEND mode) to capture all failures (Functions + Triggers)
              try:
                  debug_dump_path = "/tmp/debug_run32_all_failures.sql"
@@ -1820,7 +1874,6 @@ class SybaseASEConnector(DatabaseConnector):
         converted_statements = []
         def process_node(expression):
              if not expression: return None
-
              # Handle Blocks Recursively
              # Use extensive checks to catch Block processing
              is_block = isinstance(expression, Block) or type(expression).__name__ == 'Block'
@@ -1849,6 +1902,9 @@ class SybaseASEConnector(DatabaseConnector):
                        pg_sql += f"\nELSE\n{false_sql}"
                   pg_sql += "\nEND IF;"
                   return pg_sql
+
+             if is_trigger:
+                  self._transform_trigger_tables(expression)
 
              # --- AST Transformation for Sybase Outer Joins ---
              try:
@@ -1918,9 +1974,38 @@ class SybaseASEConnector(DatabaseConnector):
                   elif isinstance(expression, exp.Return):
                        return "RETURN NEW;"
                   elif isinstance(expression, exp.Command) and expression.this.upper() == 'SET':
+                       # Convert SET @var = val -> var = val;
                        expr_cmd = expression.expression.this if expression.expression else ""
-                       if not expr_cmd.strip().startswith('@'):
-                           return f"/* {expression.sql()} -- Ignored in Trigger */;"
+                       # Handles: @var = val, locvar_var = val
+                       # Simple regex to strip SET and formatting
+                       # Note: expr_cmd is the string after SET. e.g. "locvar_x = 1"
+                       # We just return it as is, because PL/pgSQL supports "var = val;"
+                       # But we must ensure no "SET" prefix is generated.
+                       clean_assign = expr_cmd.strip()
+                       return f"{clean_assign};"
+                  elif isinstance(expression, exp.Select):
+                       # Sybase Assignment in Select (Trigger context): SELECT @x = y
+                       assignments = []
+                       is_assign_select = False
+                       for e in expression.expressions:
+                           target_node = e
+                           if isinstance(e, exp.Alias):
+                               target_node = e.this
+                           
+                           if isinstance(target_node, exp.EQ):
+                               lhs = target_node.left
+                               # Check for variable on LHS (@var or locvar_)
+                               if isinstance(lhs, (exp.Identifier, exp.Column, exp.Parameter)):
+                                   name = lhs.sql().strip()
+                                   if name.startswith('@') or name.lower().startswith('locvar_'):
+                                       is_assign_select = True
+                                       val_sql = process_node(target_node.right)
+                                       # Strip @ if present for final var name (pg variable)
+                                       clean_name = name.replace('@', '')
+                                       assignments.append(f"{clean_name} = {val_sql};")
+                       
+                       if is_assign_select:
+                           return "\n".join(assignments)
 
              # Catch-all debug for confusing failures
              # Handle CASE Recursively (in case IF was parsed as CASE)
@@ -3506,7 +3591,7 @@ class SybaseASEConnector(DatabaseConnector):
         # Use simple replacements to guarantee parsing success (avoid complex nested functions in SET)
         trigger_code = re.sub(r'substring\(\s*suser_name\(\)\s*,\s*\d+\s*,\s*\d+\s*\)', "'current_user'", trigger_code, flags=re.IGNORECASE)
         trigger_code = re.sub(r'substring\(\s*current_user\s*,\s*\d+\s*,\s*\d+\s*\)', "'current_user'", trigger_code, flags=re.IGNORECASE)
-        
+
         trigger_code = re.sub(r'suser_name\(\)', "'current_user'", trigger_code, flags=re.IGNORECASE)
         trigger_code = re.sub(r'getdate\(\)', 'CURRENT_TIMESTAMP', trigger_code, flags=re.IGNORECASE)
 
@@ -3519,9 +3604,12 @@ class SybaseASEConnector(DatabaseConnector):
 
         def convert_select_to_set(match):
             block = match.group(1)
+            # Skip if FROM is present (Trigger logic will handle it via AST)
+            if re.search(r'\bFROM\b', block, re.IGNORECASE):
+                return match.group(0)
             # Log replacement for debugging
             # self.config_parser.print_log_message('DEBUG', f"REPLACING SELECT BLOCK: {block[:50]}...")
-            
+
             # Use generic split looking for "comma, space, variable, ="
             items = re.split(r',\s*(?=@?\w+[\t ]*=)', block)
             cleaned_items = [item.strip() for item in items if item.strip()]
@@ -3529,7 +3617,7 @@ class SybaseASEConnector(DatabaseConnector):
             return "SET " + new_block + ";"
 
         # Apply transformation to body_content
-        # Note: We apply this mainly to body logic, but here trigger_code includes everything. 
+        # Note: We apply this mainly to body logic, but here trigger_code includes everything.
         # Using trigger_code is fine as Declarations are extracted later.
         trigger_code = select_assignment_pattern.sub(convert_select_to_set, trigger_code)
 
@@ -3544,7 +3632,7 @@ class SybaseASEConnector(DatabaseConnector):
             if stmt.strip().upper().startswith('BEGIN'):
                 return full
             return f"{cond} \nBEGIN\n{stmt}\nEND"
-            
+
         trigger_code = re.sub(r"(?ims)(IF\s*\(.*?\))\s*(SET\s+.*?;)", wrap_if_set, trigger_code)
 
         # Fix: Handle ROLLBACK TRIGGER (Sybase specific) -> RAISERROR (Generic)
@@ -4408,7 +4496,7 @@ EXECUTE FUNCTION {target_schema}.{trigger_name}_func();
         # Fix: Pre-process common Sybase CONVERT styles to Postgres to_char/cast
         # Style 108/8: hh:mm:ss -> to_char(..., 'HH24:MI:SS')
         converted_code = re.sub(r'convert\s*\(\s*(?:varchar|char)\s*\(\s*8\s*\)\s*,\s*(.*?)\s*,\s*(?:108|8)\s*\)', r"to_char(\1, 'HH24:MI:SS')", converted_code, flags=re.IGNORECASE)
-        
+
         # Generic CONVERT(type, val) -> CAST(val AS type)
         # Note: sqlglot often handles this, but Sybase 'varchar' without length can be issue
         def convert_replacer(match):
@@ -4418,7 +4506,7 @@ EXECUTE FUNCTION {target_schema}.{trigger_name}_func();
             if dtype.lower() == 'int': dtype = 'integer'
             if dtype.lower() == 'datetime': dtype = 'timestamp'
             return f"CAST({val} AS {dtype})"
-            
+
         # Match convert(type, val) - simplistic, watch out for nested parens (this is best effort regex)
         # We only target simple cases to help parser. Complex cases rely on sqlglot 'tsql' read.
         # converted_code = re.sub(r'convert\s*\(\s*([a-zA-Z0-9_]+(?:\(.*\))?)\s*,\s*([^,]+?)\s*\)', convert_replacer, converted_code, flags=re.IGNORECASE)

@@ -363,9 +363,9 @@ class SybaseASEConnector(DatabaseConnector):
         target_db_type = settings['target_db_type']
         if target_db_type == 'postgresql':
             return {
-                'getdate()': 'current_timestamp',
+                'getdate()': 'CURRENT_TIMESTAMP',
                 'getutcdate()': "timezone('UTC', now())",
-                'datetime': 'current_timestamp',
+                # 'datetime': 'current_timestamp', # Removed: This breaks variable declarations (datetime type)
                 'year(': 'extract(year from ',
                 'month(': 'extract(month from ',
                 'day(': 'extract(day from ',
@@ -373,6 +373,7 @@ class SybaseASEConnector(DatabaseConnector):
                 'db_name()': 'current_database()',
                 'dbo.suser_name()': 'current_user',
                 'dbo.user_sname()': 'current_user',
+                'substring(suser_name(), 1, 15)': 'current_user', # Specific match MUST be before suser_name()
                 'suser_name()': 'current_user',
                 'user_name()': 'current_user',
                 'len(': 'length(',
@@ -1597,7 +1598,7 @@ class SybaseASEConnector(DatabaseConnector):
         # Run 15 Fix: Add (?ims) flags, expand lookahead keywords (SET, RAISERROR, etc).
         # Run 16 Fix: Use \s+ after SELECT to handle newlines between SELECT and first variable.
         select_assignment_pattern = re.compile(
-            r"(?ims)^[\t ]*SELECT\s+(@?\w+[\t ]*=[\t ]*.*?(?:,[\t ]*@?\w+[\t ]*=[\t ]*.*?)*)(?=\s+(?:SELECT|IF|WHILE|BEGIN|END|RETURN|INSERT|UPDATE|DELETE|ELSE|PRINT|EXEC|SET|RAISERROR|WAITFOR|COMMIT|ROLLBACK|SAVE))",
+            r"(?ims)^[\t ]*SELECT\s+(@?\w+[\t ]*=[\t ]*.*?(?:,[\t ]*@?\w+[\t ]*=[\t ]*.*?)*)(?=\s+(?:SELECT|IF|WHILE|BEGIN|END|RETURN|INSERT|UPDATE|DELETE|ELSE|PRINT|EXEC|SET|RAISERROR|WAITFOR|COMMIT|ROLLBACK|SAVE|\Z))",
             re.MULTILINE | re.DOTALL
         )
 
@@ -1721,6 +1722,8 @@ class SybaseASEConnector(DatabaseConnector):
              declarations.insert(0, "locvar_rowcount INTEGER;")
 
         final_body = "\n".join(final_stmts_clean)
+        # Cleanup: Remove double semicolons (duplication artifact)
+        final_body = re.sub(r';\s*;', ';', final_body)
 
         # --- Clean Parameters (Ported Logic) ---
         # NO OP - handled at start
@@ -1774,7 +1777,7 @@ class SybaseASEConnector(DatabaseConnector):
             if name in table_map:
                 target_alias = table_map[name]
                 aliases[table.alias_or_name] = target_alias
-                
+
                 # Remove logic
                 parent = table.parent
                 if isinstance(parent, exp.From):
@@ -1795,7 +1798,7 @@ class SybaseASEConnector(DatabaseConnector):
                                if condition:
                                    grandparent.where(condition, copy=False)
                                joins.remove(parent)
-        
+
         # 2. Transform Columns
         def transformer(node):
             if isinstance(node, exp.Column):
@@ -1805,6 +1808,28 @@ class SybaseASEConnector(DatabaseConnector):
                          this=node.this,
                          table=exp.Identifier(this=aliases[tbl], quoted=False)
                      )
+                 # Heuristic: If unqualified and only 1 transition table found, map to it.
+                 # Avoid mapping variables (locvar_, @) or system keywords
+                 if not tbl and len(aliases) == 1:
+                     # Safety: Check if we are inside a SELECT that reads from OTHER tables
+                     # If so, do not map unqualified columns (assume they belong to that table)
+                     ancestor_select = node.find_ancestor(exp.Select)
+                     if ancestor_select:
+                         from_clause = ancestor_select.args.get('from')
+                         # If FROM exists and has tables (after 'inserted' removal), it means other tables are present
+                         if from_clause and from_clause.expressions:
+                              # Check if any expression is a Table
+                              if any(isinstance(e, exp.Table) for e in from_clause.expressions):
+                                  return node
+
+                     name = node.this.alias_or_name
+                     if not name.lower().startswith('locvar_') and not name.startswith('@'):
+                         # Get the single target alias (NEW or OLD)
+                         target = list(aliases.values())[0]
+                         return exp.Column(
+                             this=node.this,
+                             table=exp.Identifier(this=target, quoted=False)
+                         )
             return node
 
         return expression.transform(transformer)
@@ -1852,24 +1877,41 @@ class SybaseASEConnector(DatabaseConnector):
              # Use Custom TSQL dialect to support nested BEGIN/END blocks in IF statements
              parsed = sqlglot.parse(processed_body.strip(), read=CustomTSQL)
         except Exception as e:
-             traceback.print_exc()
-             self.config_parser.print_log_message('ERROR', f"Global parsing failed for code: {body_content[:100]}... Error: {e}")
-
-             # Run 32 Debug: Dump FULL failing code to file (APPEND mode) to capture all failures (Functions + Triggers)
+             # Fallback to standard TSQL if custom parser crashes (e.g. environment issues)
+             self.config_parser.print_log_message('WARNING', f"CustomTSQL parser failed ({e}), falling back to standard TSQL.")
              try:
-                 debug_dump_path = "/tmp/debug_run32_all_failures.sql"
-                 with open(debug_dump_path, 'a') as f:
-                     f.write(f"\n/* ========================================================= */\n")
-                     f.write(f"/* ERROR: {e} */\n")
-                     f.write(f"/* CONTEXT: {settings.get('funcproc_name') or settings.get('trigger_name') or 'unknown'} */\n")
-                     f.write(f"/* ========================================================= */\n")
-                     f.write(body_content)
-                     f.write(f"\n/* --------------------------------------------------------- */\n")
-                 self.config_parser.print_log_message('ERROR', f"FAILED CODE APPENDED TO: {debug_dump_path}")
-             except Exception as write_err:
-                 self.config_parser.print_log_message('ERROR', f"Failed to dump debug code: {write_err}")
+                 parsed = sqlglot.parse(processed_body.strip(), read='tsql')
+             except Exception as e_std:
+                 # Fallback Level 3: Regex Cleaning (If standard parser crashes, e.g. AttributeError: IF in old sqlglot)
+                 self.config_parser.print_log_message('WARNING', f"Standard TSQL parser failed ({e_std}), falling back to Regex Cleaning.")
+                 try:
+                     # Basic Regex cleaning to ensure valid PG syntax if parsing fails totally
+                     # 1. Ensure IF has THEN
+                     regex_body = re.sub(r'IF\s*\((.*?)\)\s*(?!THEN)', r'IF (\1) THEN ', processed_body, flags=re.IGNORECASE)
+                     # 2. Ensure END IF existence (Simple check, might be fragile but better than crash)
+                     # 3. Handle specific SET syntax that might be left over
+                     # 4. Return as a single "statement" to be wrapped
+                     return [regex_body]
+                 except Exception as e_regex:
+                     self.config_parser.print_log_message('ERROR', f"Regex fallback failed: {e_regex}")
+                     self.config_parser.print_log_message('ERROR', f"Global parsing failed for code: {body_content[:100]}... Error: {e}")
+                     self.config_parser.print_log_message('ERROR', f"Traceback: {traceback.format_exc()}")
 
-             return [f"/* PARSING FAILED: {e} */\n" + body_content]
+                 # Run 32 Debug: Dump FULL failing code to file (APPEND mode) to capture all failures (Functions + Triggers)
+                 try:
+                     debug_dump_path = "/tmp/debug_run32_all_failures.sql"
+                     with open(debug_dump_path, 'a') as f:
+                         f.write(f"\n/* ========================================================= */\n")
+                         f.write(f"/* ERROR: {e} */\n")
+                         f.write(f"/* CONTEXT: {settings.get('funcproc_name') or settings.get('trigger_name') or 'unknown'} */\n")
+                         f.write(f"/* ========================================================= */\n")
+                         f.write(body_content)
+                         f.write(f"\n/* --------------------------------------------------------- */\n")
+                     self.config_parser.print_log_message('ERROR', f"FAILED CODE APPENDED TO: {debug_dump_path}")
+                 except Exception as write_err:
+                     self.config_parser.print_log_message('ERROR', f"Failed to dump debug code: {write_err}")
+
+                 return [f"/* PARSING FAILED: {e} */\n" + body_content]
 
         converted_statements = []
         def process_node(expression):
@@ -1975,13 +2017,21 @@ class SybaseASEConnector(DatabaseConnector):
                        return "RETURN NEW;"
                   elif isinstance(expression, exp.Command) and expression.this.upper() == 'SET':
                        # Convert SET @var = val -> var = val;
-                       expr_cmd = expression.expression.this if expression.expression else ""
+                       expr_cmd = ""
+                       if expression.expression:
+                           if isinstance(expression.expression, str):
+                               expr_cmd = expression.expression
+                           elif hasattr(expression.expression, 'this'):
+                               expr_cmd = expression.expression.this
+                           else:
+                               expr_cmd = str(expression.expression)
+                       
                        # Handles: @var = val, locvar_var = val
                        # Simple regex to strip SET and formatting
                        # Note: expr_cmd is the string after SET. e.g. "locvar_x = 1"
                        # We just return it as is, because PL/pgSQL supports "var = val;"
                        # But we must ensure no "SET" prefix is generated.
-                       clean_assign = expr_cmd.strip()
+                       clean_assign = expr_cmd.strip().rstrip(';')
                        return f"{clean_assign};"
                   elif isinstance(expression, exp.Select):
                        # Sybase Assignment in Select (Trigger context): SELECT @x = y
@@ -1991,7 +2041,7 @@ class SybaseASEConnector(DatabaseConnector):
                            target_node = e
                            if isinstance(e, exp.Alias):
                                target_node = e.this
-                           
+
                            if isinstance(target_node, exp.EQ):
                                lhs = target_node.left
                                # Check for variable on LHS (@var or locvar_)
@@ -2003,7 +2053,7 @@ class SybaseASEConnector(DatabaseConnector):
                                        # Strip @ if present for final var name (pg variable)
                                        clean_name = name.replace('@', '')
                                        assignments.append(f"{clean_name} = {val_sql};")
-                       
+
                        if is_assign_select:
                            return "\n".join(assignments)
 
@@ -2102,14 +2152,14 @@ class SybaseASEConnector(DatabaseConnector):
                      assignments = []
                      is_var_assignment = False
                      for e in expression.expressions:
-                          if isinstance(e, exp.EQ):
-                               left = e.this
-                               right = e.expression
-                               lname = left.sql(dialect='postgres')
-                               if 'locvar_' in lname or '@' in lname:
-                                    assignments.append((lname.replace('@',''), right))
-                          else:
-                               break
+                           if isinstance(e, exp.EQ):
+                                left = e.this
+                                right = e.expression
+                                lname = left.sql(dialect='postgres')
+                                if 'locvar_' in lname or '@' in lname:
+                                     assignments.append((lname.replace('@',''), right))
+                           # Removed the 'else: break' here to allow full iteration
+
                      if assignments and len(assignments) == len(expression.expressions):
                           is_var_assignment = True
 
@@ -2180,6 +2230,10 @@ class SybaseASEConnector(DatabaseConnector):
                  r"(\1 * INTERVAL '1 \2')",
                  pg_sql
              )
+
+             # Safe blanking of orphan BEGIN/END *statements* (not blocks)
+             if pg_sql.strip().upper() in ('BEGIN', 'END'):
+                 return ""
 
              if not skip_semicolon and not pg_sql.strip().endswith(';'):
                  pg_sql += ';'
@@ -3587,18 +3641,20 @@ class SybaseASEConnector(DatabaseConnector):
         has_rowcount = '@@rowcount' in trigger_code.lower()
 
         # Fix: Helper function to replace Sybase functions with Postgres equivalents BEFORE parsing
-        # This fixes parser confusion (e.g. suser_name() inside substring) and ensures valid PG output
-        # Use simple replacements to guarantee parsing success (avoid complex nested functions in SET)
-        trigger_code = re.sub(r'substring\(\s*suser_name\(\)\s*,\s*\d+\s*,\s*\d+\s*\)', "'current_user'", trigger_code, flags=re.IGNORECASE)
-        trigger_code = re.sub(r'substring\(\s*current_user\s*,\s*\d+\s*,\s*\d+\s*\)', "'current_user'", trigger_code, flags=re.IGNORECASE)
-
-        trigger_code = re.sub(r'suser_name\(\)', "'current_user'", trigger_code, flags=re.IGNORECASE)
-        trigger_code = re.sub(r'getdate\(\)', 'CURRENT_TIMESTAMP', trigger_code, flags=re.IGNORECASE)
+        # Use simple replacements from mapping to guarantee parsing success
+        func_mapping = self.get_sql_functions_mapping(settings)
+        for sybase_func, pg_func in func_mapping.items():
+            # Use regex to handle case-insensitivity and ensure safe replacement (not inside words)
+            # Escape the key for regex safety (handles parentheses)
+            pattern = re.escape(sybase_func)
+            # For functions like getdate(), we match exactly.
+            # We assume mappings in get_sql_functions_mapping are robust.
+            trigger_code = re.sub(pattern, pg_func, trigger_code, flags=re.IGNORECASE)
 
         # Fix: Convert SELECT variable assignments for Triggers (Ported from convert_funcproc_code_v2)
         # Sybase allows 'SELECT @a = 1, @b = 2'. sqlglot T-SQL parser struggles.
         select_assignment_pattern = re.compile(
-            r"(?ims)^[\t ]*SELECT\s+(@?\w+[\t ]*=[\t ]*.*?(?:,[\t ]*@?\w+[\t ]*=[\t ]*.*?)*)(?=\s+(?:SELECT|IF|WHILE|BEGIN|END|RETURN|INSERT|UPDATE|DELETE|ELSE|PRINT|EXEC|SET|RAISERROR|WAITFOR|COMMIT|ROLLBACK|SAVE))",
+            r"(?ims)^[\t ]*SELECT\s+(@?\w+[\t ]*=[\t ]*.*?(?:,[\t ]*@?\w+[\t ]*=[\t ]*.*?)*)(?=\s+(?:SELECT|IF|WHILE|BEGIN|END|RETURN|INSERT|UPDATE|DELETE|ELSE|PRINT|EXEC|SET|RAISERROR|WAITFOR|COMMIT|ROLLBACK|SAVE|\Z))",
             re.MULTILINE | re.DOTALL
         )
 
@@ -3614,7 +3670,7 @@ class SybaseASEConnector(DatabaseConnector):
             items = re.split(r',\s*(?=@?\w+[\t ]*=)', block)
             cleaned_items = [item.strip() for item in items if item.strip()]
             new_block = ";\nSET ".join(cleaned_items)
-            return "SET " + new_block + ";"
+            return "SET " + new_block # Removed trailing semicolon to avoid double semicolon generation
 
         # Apply transformation to body_content
         # Note: We apply this mainly to body logic, but here trigger_code includes everything.
@@ -3622,7 +3678,8 @@ class SybaseASEConnector(DatabaseConnector):
         trigger_code = select_assignment_pattern.sub(convert_select_to_set, trigger_code)
 
         # Fix: Convert single-line SELECT @locvar = val (catch residuals)
-        trigger_code = re.sub(r'(?i)^\s*SELECT\s+@?(locvar_[a-zA-Z0-9_]+)\s*=', r'SET @\1 =', trigger_code, flags=re.MULTILINE)
+        # DISABLE AGGRESSIVE REGEX: This breaks SELECT ... FROM ... assignments by converting them to SET before AST can handle them.
+        # trigger_code = re.sub(r'(?i)^\s*SELECT\s+@?(locvar_[a-zA-Z0-9_]+)\s*=', r'SET @\1 =', trigger_code, flags=re.MULTILINE)
 
         # Fix: Wrap single-line IF (...) SET ... statements in BEGIN...END (Ported from funcproc)
         def wrap_if_set(match):
@@ -3733,13 +3790,15 @@ class SybaseASEConnector(DatabaseConnector):
              pg_events = ' OR '.join(event_list)
 
         # 7. Assemble DDL
+        if not final_body.strip().upper().endswith('RETURN NEW;'):
+            final_body += "\nRETURN NEW;"
+
         pg_func = f"""CREATE OR REPLACE FUNCTION {target_schema}.{trigger_name}_func()
 RETURNS trigger AS $$
 DECLARE
 {chr(10).join(declarations)}
 BEGIN
 {final_body}
-RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
 """

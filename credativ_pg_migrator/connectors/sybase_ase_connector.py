@@ -385,6 +385,7 @@ class SybaseASEConnector(DatabaseConnector):
                 'stuff(': 'overlay(',
                 'dateadd(': "now() + interval '",  # requires more complex logic
                 'datediff(': "age(",  # requires more logic
+                'replicate(': 'repeat(',
             }
         else:
             self.config_parser.print_log_message('ERROR', f"Unsupported target database type: {target_db_type}")
@@ -791,8 +792,8 @@ class SybaseASEConnector(DatabaseConnector):
                 'INTERVAL': 'INTERVAL',
                 # 'MONEY': 'MONEY',
                 # 'SMALLMONEY': 'MONEY',
-                'MONEY': 'INTEGER',
-                'SMALLMONEY': 'INTEGER',
+                'MONEY': 'NUMERIC',
+                'SMALLMONEY': 'NUMERIC',
                 'NUMERIC': 'NUMERIC',
                 'REAL': 'REAL',
                 'SERIAL8': 'BIGSERIAL',
@@ -1790,7 +1791,7 @@ class SybaseASEConnector(DatabaseConnector):
                             grandparent.set('from', None)
                             # Run 33 Fix: Handle SELECT * when FROM is removed
                             if isinstance(grandparent, exp.Select):
-                                # Replace * with NEW.* 
+                                # Replace * with NEW.*
                                 new_exprs = []
                                 has_transformed = False
                                 for e in grandparent.expressions:
@@ -1800,7 +1801,7 @@ class SybaseASEConnector(DatabaseConnector):
                                          has_transformed = True
                                     else:
                                          new_exprs.append(e)
-                                
+
                                 if has_transformed:
                                      grandparent.set('expressions', new_exprs)
                 elif isinstance(parent, exp.Join):
@@ -1867,22 +1868,22 @@ class SybaseASEConnector(DatabaseConnector):
             if match_keyword:
                 keyword = match_keyword.group(1).upper()
                 target_suffix = 'THEN' if keyword == 'IF' else 'LOOP'
-                
+
                 # Check for standalone word boundary check manually if needed, but \b handles it
                 # Ensure we are not inside another word (e.g. ENDIF) - strictly speaking we start at i
-                if i > 0 and text[i-1].isalnum(): 
+                if i > 0 and text[i-1].isalnum():
                      out.append(text[i])
                      i += 1
                      continue
 
                 out.append(text[i:i+match_keyword.end()])
                 i += match_keyword.end()
-                
+
                 # Skip whitespace to (
                 while i < n and text[i].isspace():
                     out.append(text[i])
                     i += 1
-                
+
                 if i < n and text[i] == '(':
                     out.append('(')
                     i += 1
@@ -1893,11 +1894,11 @@ class SybaseASEConnector(DatabaseConnector):
                         elif c == ')': depth -= 1
                         out.append(c)
                         i += 1
-                    
+
                     # Post-condition: Check for THEN/LOOP
                     rest = text[i:]
                     match_suffix = re.match(r'\s*' + target_suffix + r'\b', rest, re.IGNORECASE)
-                    
+
                     if match_suffix:
                         # It exists, replace the whitespace with \nSUFFIX
                         out.append(f'\n{target_suffix}')
@@ -1965,17 +1966,17 @@ class SybaseASEConnector(DatabaseConnector):
                      # 1. Ensure IF has THEN (Using robust paren counting)
 
                      regex_body = self._enforce_strict_formatting(processed_body)
-                     
+
                      if is_trigger:
                          # Run 35 Fix: Handle inserted/deleted assignments in fallback mode
                          # We need to handle: SELECT @v1 = c1, @v2 = c2 FROM inserted
                          # Strategy: Identify SELECT ... FROM inserted/deleted blocks and transform them.
-                         
+
                          def trigger_select_replacer(match):
                              content = match.group(1)
                              table = match.group(2).lower()
                              prefix = "NEW" if table == 'inserted' else "OLD"
-                             
+
                              # Check for INTO (e.g. SELECT * INTO #tmp FROM inserted)
                              if re.search(r'\bINTO\b', content, re.IGNORECASE):
                                  return match.group(0)
@@ -2003,11 +2004,11 @@ class SybaseASEConnector(DatabaseConnector):
                                  else:
                                      # Just a column? SELECT col FROM inserted
                                      new_stmts.append(f"{prefix}.{asm}")
-                             
+
                              if is_assignment_block:
                                  # Filter out non-assignment parts if we are in assignment mode?
                                  # Or just return assignments.
-                                 # Sybase allows SELECT @v=1, col -> returns result set AND assigns. 
+                                 # Sybase allows SELECT @v=1, col -> returns result set AND assigns.
                                  # PG doesn't support this easily. We prioritize assignment.
                                  final_stmts = [s for s in new_stmts if ':=' in s]
                                  return ";\n".join(final_stmts) + ";"
@@ -2027,7 +2028,7 @@ class SybaseASEConnector(DatabaseConnector):
                          regex_body = re.sub(r'\bdeleted\b', 'OLD', regex_body, flags=re.IGNORECASE)
                          # Explicitly remove FROM NEW/OLD
                          regex_body = re.sub(r'\bFROM\s+(?:NEW|OLD)\b', '', regex_body, flags=re.IGNORECASE)
-                         
+
                          # Handle SELECT var = val (assignments without FROM)
                          regex_body = re.sub(r'SELECT\s+([@\w]+)\s*=\s*([\w\.]+)', r'\1 := \2', regex_body, flags=re.IGNORECASE)
 
@@ -2156,7 +2157,7 @@ class SybaseASEConnector(DatabaseConnector):
                            msg_match = re.search(r"'([^']+)'", raw)
                            msg = msg_match.group(1) if msg_match else "Trigger Rollback"
                            return f"RAISE EXCEPTION '{msg}';"
-                       
+
                        # Fallback for other commands (e.g. unparsed SELECT blocks)
                        raw = expression.sql()
                        # Apply trigger replacements
@@ -2171,7 +2172,7 @@ class SybaseASEConnector(DatabaseConnector):
                            # Check if it looks like assignment
                            if '=' not in content:
                                return full_match
-                           
+
                            # Split by comma respecting parens
                            try:
                                parts = self._split_respecting_parens(content)
@@ -2207,7 +2208,7 @@ class SybaseASEConnector(DatabaseConnector):
 
                        raw = re.sub(r"SELECT 'RAISERROR_CMD:\d+' AS _cmd, (.*?) AS _msg", raiserror_unmasker, raw, flags=re.IGNORECASE)
 
-                       
+
                        # Basic cleanup of leftovers
                        if raw.strip().upper().startswith('BEGIN') and raw.strip().upper().endswith('END'):
                             # Try to strip outer BEGIN/END if it's just wrapping
@@ -2228,7 +2229,7 @@ class SybaseASEConnector(DatabaseConnector):
                                expr_cmd = expression.expression.this
                            else:
                                expr_cmd = str(expression.expression)
-                       
+
                        # Handles: @var = val, locvar_var = val
                        # Simple regex to strip SET and formatting
                        # Note: expr_cmd is the string after SET. e.g. "locvar_x = 1"
@@ -3811,14 +3812,11 @@ class SybaseASEConnector(DatabaseConnector):
         # --- Pre-processing ---
 
         # 0. Encapsulate comments
-        # Fix: REMOVE dash-only lines completely
-        trigger_code = re.sub(r'^\s*(-{2,})\s*$', r'', trigger_code, flags=re.MULTILINE)
+        # Fix: Convert -- comment to /* comment */ (Rule Compliance)
+        # Handle case where -- comment ends with */ (remove it to avoid nesting)
+        trigger_code = re.sub(r'--([^\r\n]*?)(?:\*/)?\s*$', r'/*\1*/', trigger_code, flags=re.MULTILINE)
 
-        # Fix: DELETE ALL '--' comments (inline or line-start)
-        trigger_code = re.sub(r'--.*$', r'', trigger_code, flags=re.MULTILINE)
-
-        # Fix: DELETE ALL '/* ... */' comments (multiline)
-        trigger_code = re.sub(r'/\*.*?\*/', r'', trigger_code, flags=re.DOTALL)
+        # Note: We do NOT delete /* */ comments here. We preserve them.
 
         # 1. Remove GO
         trigger_code = re.sub(r'\bGO\b', '', trigger_code, flags=re.IGNORECASE)
@@ -3869,8 +3867,12 @@ class SybaseASEConnector(DatabaseConnector):
             # Use generic split looking for "comma, space, variable, ="
             items = re.split(r',\s*(?=@?\w+[\t ]*=)', block)
             cleaned_items = [item.strip() for item in items if item.strip()]
-            new_block = ";\nSET ".join(cleaned_items)
-            return "SET " + new_block # Removed trailing semicolon to avoid double semicolon generation
+            # Convert to "var = val" (PL/pgSQL compatible) instead of "SET var = val"
+            # We trust the parser or subsequent formatting to handle ":=" vs "="
+            # But sqlglot might parse "var = val" as comparison if not careful.
+            # Using "locvar_var = val" usually works as assignment in blocks.
+            new_block = ";\n".join(cleaned_items)
+            return new_block + ";" # Append trailing semicolon (Fix for missing semicolon)
 
         # Apply transformation to body_content
         # Note: We apply this mainly to body logic, but here trigger_code includes everything.
@@ -3881,16 +3883,17 @@ class SybaseASEConnector(DatabaseConnector):
         # DISABLE AGGRESSIVE REGEX: This breaks SELECT ... FROM ... assignments by converting them to SET before AST can handle them.
         # trigger_code = re.sub(r'(?i)^\s*SELECT\s+@?(locvar_[a-zA-Z0-9_]+)\s*=', r'SET @\1 =', trigger_code, flags=re.MULTILINE)
 
-        # Fix: Wrap single-line IF (...) SET ... statements in BEGIN...END (Ported from funcproc)
+        # Fix: Wrap single-line IF (...) var = val statements in BEGIN...END (Ported from funcproc)
         def wrap_if_set(match):
             full = match.group(0)
             cond = match.group(1)
             stmt = match.group(2)
             if stmt.strip().upper().startswith('BEGIN'):
                 return full
-            return f"{cond} \nBEGIN\n{stmt}\nEND"
+            return f"{cond} \nBEGIN\n{stmt};\nEND"
 
-        trigger_code = re.sub(r"(?ims)(IF\s*\(.*?\))\s*(SET\s+.*?;)", wrap_if_set, trigger_code)
+        # Updated regex to match assignments without SET keyword as well
+        trigger_code = re.sub(r"(?ims)(IF\s*\(.*?\))\s*((?:locvar_|@)\w+\s*=.*?;)", wrap_if_set, trigger_code)
 
         # Fix: Handle ROLLBACK TRIGGER (Sybase specific) -> RAISERROR (Generic)
         # This allows the subsequent raiserror_replacer to mask it.
@@ -3999,30 +4002,40 @@ class SybaseASEConnector(DatabaseConnector):
             r_code = match.group(1)
             r_msg = match.group(2)
             return f"RAISE EXCEPTION {r_msg} USING ERRCODE = '{r_code}'"
-        
+
         # Matches: SELECT 'RAISERROR_CMD:50000' AS _cmd, 'msg' AS _msg
         # Note: We need to match the potential trailing semicolon or context if AST result added it
         final_body = re.sub(r"SELECT\s+'RAISERROR_CMD:(\d+)'\s+AS\s+_cmd,\s+(.*?)\s+AS\s+_msg(?:;)?", raiserror_unmasker, final_body, flags=re.IGNORECASE)
-        
+
         # Rule: All key words END, END IF, END LOOP, END WHILE must be followed by ;
         final_body = re.sub(r'\b(END(?:\s+(?:IF|LOOP|WHILE))?)\s*(?!;)', r'\1;', final_body, flags=re.IGNORECASE)
 
         # Rule: All cases of doubled semicolons ;; or semicolon followed by whitespaces and another semicolon must be replaced with single semicolon ;
         final_body = re.sub(r';\s*;', ';', final_body)
-        
+
+        # Cleanup: Remove phantom IF; artifacts (caused by parser confusion/split)
+        final_body = re.sub(r'^\s*IF;\s*$', '', final_body, flags=re.MULTILINE)
+
         # Rule: If character ; is alone on a line, it must be attached to the previous line.
         final_body = re.sub(r'\n\s*;', ';', final_body)
-        
+
         # Cleanup: Ensure newlines between statements (e.g. END;IF -> END;\nIF)
         final_body = re.sub(r';(IF|BEGIN|RETURN|END|UPDATE|INSERT|DELETE|SELECT|ELSE)', r';\n\1', final_body, flags=re.IGNORECASE)
 
         # Fix: Convert bare RETURN to RETURN NEW; in triggers (prevents syntax error)
         # Capture trailing whitespace to preserve newlines
+        # Avoid double NEW if already present (e.g. from existing logic)
         final_body = re.sub(r'\bRETURN(\s*)(?!NEW|OLD|NULL)', r'RETURN NEW\1', final_body, flags=re.IGNORECASE)
+        # Cleanup: Remove double NEW if it slipped in
+        final_body = re.sub(r'\bRETURN\s+NEW\s+NEW\b', 'RETURN NEW', final_body, flags=re.IGNORECASE)
 
         # 7. Assemble DDL
-        if not final_body.strip().upper().endswith('RETURN NEW;'):
-            final_body += "\nRETURN NEW;"
+        # Check if RETURN NEW is already at the end of the logic (ignoring END;)
+        stripped_body = final_body.strip().upper()
+        if not (stripped_body.endswith('RETURN NEW;') or stripped_body.endswith('RETURN NEW')):
+             # Check if last statement is already RETURN NEW (regex check)
+             if not re.search(r'RETURN\s+NEW\s*;?\s*$', final_body.rstrip(), flags=re.IGNORECASE):
+                 final_body += "\nRETURN NEW;"
 
         pg_func = f"""CREATE OR REPLACE FUNCTION {target_schema}.{trigger_name}_func()
 RETURNS trigger AS $$

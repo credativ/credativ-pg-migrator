@@ -1788,6 +1788,25 @@ class SybaseASEConnector(DatabaseConnector):
                         grandparent = parent.parent
                         if grandparent:
                             grandparent.set('from', None)
+                            # Run 33 Fix: Handle SELECT * when FROM is removed
+                            if isinstance(grandparent, exp.Select):
+                                if grandparent.is_star:
+                                    # Replace * with NEW.* 
+                                    # Technically PL/pgSQL doesn't support SELECT NEW.* without INTO. 
+                                    # But for INSERT INTO ... SELECT * FROM inserted, we need SELECT NEW.* (or just VALUES(NEW.*))
+                                    # sqlglot "SELECT *" is represented by "*" in expressions usually?
+                                    # grandparent.expressions might contain Star
+                                    new_exprs = []
+                                    for e in grandparent.expressions:
+                                        if isinstance(e, exp.Star):
+                                             # Replace with Column(this=*, table=NEW) ?
+                                             # Or just let it be. Postgres "INSERT INTO t VALUES (NEW.*)" is valid-ish? 
+                                             # actually "INSERT INTO t SELECT NEW.*" works.
+                                             # So we map * -> NEW.*
+                                             new_exprs.append(exp.Column(this=exp.Star(), table=exp.Identifier(this=target_alias, quoted=False)))
+                                        else:
+                                             new_exprs.append(e)
+                                    grandparent.set('expressions', new_exprs)
                 elif isinstance(parent, exp.Join):
                      grandparent = parent.parent
                      if grandparent:
@@ -1826,10 +1845,12 @@ class SybaseASEConnector(DatabaseConnector):
                      if not name.lower().startswith('locvar_') and not name.startswith('@'):
                          # Get the single target alias (NEW or OLD)
                          target = list(aliases.values())[0]
-                         return exp.Column(
+                         new_col = exp.Column(
                              this=node.this,
                              table=exp.Identifier(this=target, quoted=False)
                          )
+                         return new_col
+
             return node
 
         return expression.transform(transformer)
@@ -1888,6 +1909,18 @@ class SybaseASEConnector(DatabaseConnector):
                      # Basic Regex cleaning to ensure valid PG syntax if parsing fails totally
                      # 1. Ensure IF has THEN
                      regex_body = re.sub(r'IF\s*\((.*?)\)\s*(?!THEN)', r'IF (\1) THEN ', processed_body, flags=re.IGNORECASE)
+                     
+                     if is_trigger:
+                         # Run 33 Fix: Handle inserted/deleted in fallback mode
+                         regex_body = re.sub(r'\binserted\b', 'NEW', regex_body, flags=re.IGNORECASE)
+                         regex_body = re.sub(r'\bdeleted\b', 'OLD', regex_body, flags=re.IGNORECASE)
+                         # Explicitly remove FROM NEW/OLD
+                         regex_body = re.sub(r'\bFROM\s+(?:NEW|OLD)\b', '', regex_body, flags=re.IGNORECASE)
+                         # Handle SELECT var = val (basic regex attempt)
+                         # SELECT locvar_x = col -> locvar_x := NEW.col (assuming FROM was removed and mapped to NEW)
+                         # This is risky regex, but better than "SELECT x=y"
+                         regex_body = re.sub(r'SELECT\s+([@\w]+)\s*=\s*([\w\.]+)', r'\1 := \2', regex_body, flags=re.IGNORECASE)
+
                      # 2. Ensure END IF existence (Simple check, might be fragile but better than crash)
                      # 3. Handle specific SET syntax that might be left over
                      # 4. Return as a single "statement" to be wrapped
@@ -2006,11 +2039,71 @@ class SybaseASEConnector(DatabaseConnector):
              skip_semicolon = False
 
              if is_trigger:
-                  if isinstance(expression, exp.Command) and 'ROLLBACK' in expression.this.upper():
+                  if isinstance(expression, exp.Command):
+                       # Check for ROLLBACK TRIGGER specifically
+                       if 'ROLLBACK' in expression.this.upper():
+                           raw = expression.sql()
+                           msg_match = re.search(r"'([^']+)'", raw)
+                           msg = msg_match.group(1) if msg_match else "Trigger Rollback"
+                           return f"RAISE EXCEPTION '{msg}';"
+                       
+                       # Fallback for other commands (e.g. unparsed SELECT blocks)
                        raw = expression.sql()
-                       msg_match = re.search(r"'([^']+)'", raw)
-                       msg = msg_match.group(1) if msg_match else "Trigger Rollback"
-                       return f"RAISE EXCEPTION '{msg}';"
+                       # Apply trigger replacements
+                       raw = re.sub(r'\binserted\b', 'NEW', raw, flags=re.IGNORECASE)
+                       raw = re.sub(r'\bdeleted\b', 'OLD', raw, flags=re.IGNORECASE)
+                       raw = re.sub(r'\bFROM\s+(?:NEW|OLD)\b', '', raw, flags=re.IGNORECASE)
+                       # Handle SELECT var = val assignments
+                       # Use a loop to find and transform all assignment SELECTs
+                       def select_replacer(match):
+                           full_match = match.group(0)
+                           content = match.group(1) # Content after SELECT
+                           # Check if it looks like assignment
+                           if '=' not in content:
+                               return full_match
+                           
+                           # Split by comma respecting parens
+                           try:
+                               parts = self._split_respecting_parens(content)
+                               new_parts = []
+                               for part in parts:
+                                   if '=' in part:
+                                       l, r = part.split('=', 1)
+                                       # Strip @ from variable name if present? Sybase @var -> PG var
+                                       # or rely on later cleaning? Let's just use :=
+                                       new_parts.append(f"{l.strip()} := {r.strip()}")
+                                   else:
+                                       # Not assignment? Maybe simple select?
+                                       pass
+                               if new_parts:
+                                   return "; ".join(new_parts) + ";"
+                           except:
+                               pass
+                           return full_match
+
+                       # Regex to find SELECT blocks until next keyword or end
+                       # We assume FROM was removed
+                       raw = re.sub(r'SELECT\s+((?:(?!\b(?:SELECT|INSERT|UPDATE|DELETE|IF|WHILE|BEGIN|END|RETURN|SET|FROM)\b).)+)', select_replacer, raw, flags=re.IGNORECASE | re.DOTALL)
+
+                       # Unmask RAISERROR
+                       # Pattern from raiserror_replacer: SELECT 'RAISERROR_CMD:code' AS _cmd, msg AS _msg
+                       def raiserror_unmasker(match):
+                           msg_raw = match.group(1)
+                           if msg_raw.startswith("'") and msg_raw.endswith("'"):
+                               msg_clean = msg_raw[1:-1].replace("''", "'")
+                           else:
+                               msg_clean = msg_raw
+                           return f"RAISE EXCEPTION '{msg_clean}';"
+
+                       raw = re.sub(r"SELECT 'RAISERROR_CMD:\d+' AS _cmd, (.*?) AS _msg", raiserror_unmasker, raw, flags=re.IGNORECASE)
+
+                       
+                       # Basic cleanup of leftovers
+                       if raw.strip().upper().startswith('BEGIN') and raw.strip().upper().endswith('END'):
+                            # Try to strip outer BEGIN/END if it's just wrapping
+                            pass
+
+                       return raw
                   elif isinstance(expression, exp.Rollback):
                        return "RAISE EXCEPTION 'Transaction Rollback Not Supported in Trigger';"
                   elif isinstance(expression, exp.Return):

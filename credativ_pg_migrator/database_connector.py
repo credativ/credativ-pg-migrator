@@ -40,15 +40,17 @@ class DatabaseConnector(ABC):
     @abstractmethod
     def get_sql_functions_mapping(self, settings):
         """
-        settings - dictionary with the following keys
-            - target_db_type: str - target database type
-        Maps SQL functions from the source database to the corresponding SQL functions in the target database.
-        Example:
+        Purpose: Maps SQL functions from the source database to the corresponding SQL functions in the target database.
+        Input parameters:
+            settings - dictionary with the following keys:
+                - target_db_type: str - target database type
+        Output:
         { 'suser_name': 'current_user',
           'getdate': 'current_timestamp',
           '@@nestlevel': None,
           ...
         }
+        Notes:
         If the function is not supported in the target database, it is mapped to None.
         If some function is not included in the mapping, it is understood as "function is the same in both databases"
         """
@@ -72,13 +74,15 @@ class DatabaseConnector(ABC):
     @abstractmethod
     def get_table_description(self, settings) -> dict:
         """
-        settings - dictionary with the following keys
-            - table_schema: str,
-            - table_name: str,
-        Fetch a description of the table returned by the source database.
-        Content depends on the database type.
-        Added for better observability of the migration process.
-        Returns a simple dictionary:
+        Purpose: Fetch a description of the table returned by the source database.
+        Input parameters:
+            settings - dictionary with the following keys
+                - table_schema: str,
+                - table_name: str,
+        Notes:
+            Content depends on the database type.
+            Added for better observability of the migration process.
+        Returns:
             - 'table_description': description of the table from the source database
         """
         pass
@@ -86,16 +90,18 @@ class DatabaseConnector(ABC):
     @abstractmethod
     def fetch_table_columns(self, settings) -> dict:
         """
-        settings - dictionary with the following keys
-            - table_schema: str,
-            - table_name: str,
-        Returns a dictionary describing the schema of the specific table
-        Items names and values correspond with INFORMATION_SCHEMA.COLUMNS table
-        In case of legacy databases, content is suplied from system tables
-        Columns starting with 'replaced_*' store substituted values
-        Some connectors might add specific columns but these are not recognized by other connectors
-        Not all columns are used in all connectors
-
+        Purpose: Fetch a dictionary describing the schema of the specific table
+        Input parameters:
+            settings - dictionary with the following keys
+                - table_schema: str,
+                - table_name: str,
+        Notes:
+            Items names and values correspond with INFORMATION_SCHEMA.COLUMNS table
+            In case of legacy databases, content is suplied from system tables
+            Columns starting with 'replaced_*' store substituted values
+            Some connectors might add specific columns but these are not recognized by other connectors
+            Not all columns are used in all connectors
+        Returns:
         { column_ordinary_number: {
             'column_name':
                 - full column name, in the format taken from system tables
@@ -155,10 +161,13 @@ class DatabaseConnector(ABC):
     @abstractmethod
     def fetch_default_values(self, settings) -> dict:
         """
-        Relevant only for database that support independently created named default values
-        settings - dictionary with the following keys
-            - table_schema: str,
-        Returns a dictionary describing the default values
+        Purpose: Fetch a dictionary describing the default values
+        Input parameters:
+            settings - dictionary with the following keys
+                - table_schema: str,
+        Notes:
+            Relevant only for database that support independently created named default values
+        Returns:
         { ordinary_value: {
             - 'default_value_schema':
                 - schema name / owner name of the default value
@@ -178,28 +187,38 @@ class DatabaseConnector(ABC):
     @abstractmethod
     def is_string_type(self, column_type: str) -> bool:
         """
-        Check if the column type is a string type.
-        Returns True if it is a string type, False otherwise.
-        Legacy databases had very different types of string types, therefore this function
+        Purpose: Check if the column type is a string type.
+        Input parameters:
+            column_type: str
+        Returns:
+            True if it is a string type, False otherwise.
+        Notes:
+            Legacy databases had very different types of string types, therefore this function
         """
         pass
 
     @abstractmethod
     def is_numeric_type(self, column_type: str) -> bool:
         """
-        Check if the column type is a numeric type.
-        Returns True if it is a numeric type, False otherwise.
-        Legacy databases had very different types of numeric types, therefore this function
+        Purpose: Check if the column type is a numeric type.
+        Input parameters:
+            column_type: str
+        Returns:
+            True if it is a numeric type, False otherwise.
+        Notes:
+            Legacy databases had very different types of numeric types, therefore this function
         """
         pass
 
     @abstractmethod
     def get_types_mapping(self, settings):
         """
-        settings - dictionary with the following keys
-            - target_db_type: str - target database type
-        Converts the columns of one source table to the target database type and SQL syntax.
-        Returns dictionary of types mapping between source and target database.
+        Purpose: Converts the columns of one source table to the target database type and SQL syntax.
+        Input parameters:
+            settings - dictionary with the following keys
+                - target_db_type: str - target database type
+        Returns:
+            dictionary of types mapping between source and target database.
         Example:
         { 'INT': 'INTEGER',
           'VARCHAR2': 'VARCHAR',
@@ -214,12 +233,13 @@ class DatabaseConnector(ABC):
     @abstractmethod
     def get_create_table_sql(self, settings):
         """
-        This function is currently relevant only for target database
+        Purpose: This function is currently relevant only for target database
         Centralizes creation of SQL DDL statement
-        settings - dictionary with the following keys
-            - target_db_type: str - target database type
-            - target_schema: str - schema name of the table in the target database
-            - target_table_name: str - table name in the source database
+        Input parameters:
+            settings - dictionary with the following keys
+                - target_db_type: str - target database type
+                - target_schema: str - schema name of the table in the target database
+                - target_table_name: str - table name in the source database
             - source_columns: dict - dictionary of columns to be converted
             - converted_columns: dict - dictionary of converted columns
         Returns:
@@ -230,7 +250,7 @@ class DatabaseConnector(ABC):
     @abstractmethod
     def migrate_table(self, migrate_target_connection, settings):
         """
-        Migrate a table from source to target database.
+        Purpose: Migrate a table from source to target database.
         Procedure is used inside a worker thread.
         Returns dictionary migration_stats:
         {
@@ -247,25 +267,28 @@ class DatabaseConnector(ABC):
     @abstractmethod
     def fetch_indexes(self, settings):
         """
-        Fetch indexes for a table.
+        Purpose: Fetch indexes for a table.
         Information_schema on some databases does not contain specific table/view for indexes.
         Therefore columns names in returned dictionary are arbitrary
-        settings - dictionary with the following keys
-            - source_table_id:
-                - internal ID of the table in the source database - if it is available
-                - public internal ID does not exist for example in MySQL
-            - source_table_schema:
-                - schema name of the table in the source database
-            - source_table_name:
-                - table name in the source database
-        Some databases use table_id for finding indexes, some need table_name and schema_name.
+        Input parameters:
+            settings - dictionary with the following keys
+                - source_table_id:
+                    - internal ID of the table in the source database - if it is available
+                    - public internal ID does not exist for example in MySQL
+                - source_table_schema:
+                    - schema name of the table in the source database
+                - source_table_name:
+                    - table name in the source database
+        Notes:
+            Some databases use table_id for finding indexes, some need table_name and schema_name.
+        Returns:
+            dictionary contains all indexes for the table - both primary and secondary indexes.
+            PRIMARY KEYs are usually listed both in the indexes and constraints.
+            For our purposes, we include them into indexes, because they should be created before
+            references to them are used.
 
-        Returned dictionary contains all indexes for the table - both primary and secondary indexes.
-        PRIMARY KEYs are usually listed both in the indexes and constraints.
-        For our purposes, we include them into indexes, because they should be created before
-        references to them are used.
-
-        Returns a dictionary:
+        Returns:
+            dictionary:
             { ordinary_number: {
                 'index_name': index_name,
                 'index_type': index_type,   # INDEX, UNIQUE, PRIMARY KEY
@@ -295,21 +318,26 @@ class DatabaseConnector(ABC):
     @abstractmethod
     def get_create_index_sql(self, settings):
         """
+        Purpose: Get SQL statement to create an index in the target database.
         This function is currently relevant only for target database
         Centralizes creation of SQL DDL statement for indexes
-        settings:
-            -
+        settings - dictionary with the following keys
+            - index_name
+            - index_type
+            - index_columns
+            - target_schema
+            - target_table
         """
 
     @abstractmethod
     def fetch_constraints(self, settings):
         """
+        Purpose: Fetch constraints for a table.
         settings - dictionary with the following keys
             - source_table_id: id of the table in the source database (does not exist in MySQL)
             - source_table_schema: schema name of the table in the source database
             - source_table_name: table name in the source database
 
-        Fetch constraints for a table.
         Returns a dictionary:
             { ordinary_number: {
                 'constraint_name': constraint_name:
@@ -348,14 +376,26 @@ class DatabaseConnector(ABC):
         This function is currently relevant only for target database
         Centralizes creation of SQL DDL statement for constraints
         settings:
-            -
+            - source_db_type
+            - target_schema
+            - target_table
+            - target_columns
+            - constraint_name
+            - constraint_type
+            - constraint_owner
+            - constraint_columns
+            - referenced_table_schema
+            - referenced_table_name
+            - referenced_columns
+            - constraint_sql
+            - constraint_status
         """
         pass
 
     @abstractmethod
     def fetch_triggers(self, table_id: int, table_schema: str, table_name: str):
         """
-        Fetch triggers for a table.
+        Purpose: Fetch triggers for a table.
         Returns a dictionary:
             { ordinary_number: {
                 'id': trigger_id,
@@ -372,12 +412,15 @@ class DatabaseConnector(ABC):
 
     @abstractmethod
     def convert_trigger(self, trig: str, settings: dict):
+        """
+        Purpose: Convert trigger's SQL code from source database to the target SQL code for the target database.
+        """
         pass
 
     @abstractmethod
     def fetch_funcproc_names(self, schema: str):
         """
-        Fetch function and procedure names in the specified schema.
+        Purpose: Fetch function and procedure names in the specified schema.
         Returns: dict
         { ordinary_number: {
             'name': funcproc_name:
@@ -392,7 +435,7 @@ class DatabaseConnector(ABC):
     @abstractmethod
     def fetch_funcproc_code(self, funcproc_id: int):
         """
-        Fetch the code of a function or procedure.
+        Purpose: Fetch the code of a function or procedure.
         Returns a string with the code.
         """
         pass
@@ -400,23 +443,25 @@ class DatabaseConnector(ABC):
     @abstractmethod
     def convert_funcproc_code(self, settings):
         """
-        settings - dictionary with the following keys:
-            - funcproc_code: str - code of the function or procedure in the source database
-            - target_db_type: str - target database type
-            - source_schema: str - schema name of the function or procedure in the source database
-            - target_schema: str - schema name of the function or procedure in the target database
-            - table_list: list - list of all tables in the migrated schema
+        Purpose: Convert function or procedure to the target database type.
+        Input:
+            settings - dictionary with the following keys:
+                - funcproc_code: str - code of the function or procedure in the source database
+                - target_db_type: str - target database type
+                - source_schema: str - schema name of the function or procedure in the source database
+                - target_schema: str - schema name of the function or procedure in the target database
+                - table_list: list - list of all tables in the migrated schema
             - view_list: list - list of all views in the migrated schema
 
-        Convert function or procedure to the target database type.
-        table_list - contains the list of all tables in the target schema - used for adding target_schema prefix to table names in the function code.
+        Notes:
+            table_list - contains the list of all tables in the target schema - used for adding target_schema prefix to table names in the function code.
         """
         pass
 
     @abstractmethod
     def fetch_sequences(self, table_schema: str, table_name: str):
         """
-        Fetch sequences for the specified schema and table.
+        Purpose: Fetch sequences for the specified schema and table.
         This function is only relevant for target databases that uses sequences.
         Returns: dict
         { ordinary_number: {
@@ -432,7 +477,7 @@ class DatabaseConnector(ABC):
     @abstractmethod
     def get_sequence_details(self, sequence_owner, sequence_name):
         """
-        Returns the details of a sequence.
+        Purpose: Returns the details of a sequence.
         Returns: dict
         { ordinary_number: {
             'name': sequence_name:
@@ -452,7 +497,7 @@ class DatabaseConnector(ABC):
     @abstractmethod
     def fetch_views_names(self, source_schema: str):
         """
-        Fetch view names in the specified schema.
+        Purpose: Fetch view names in the specified schema.
         Returns: dict
         { ordinary_number: {
             'id': view_id,
@@ -467,13 +512,14 @@ class DatabaseConnector(ABC):
     @abstractmethod
     def fetch_view_code(self, settings):
         """
-        settings - dictionary with the following keys
-            - view_id: id of the view in the source database (does not exist in MySQL)
-            - source_schema: schema name of the view in the source database
-            - source_view_name: view name in the source database
-            - target_schema: target schema name
-            - target_view_name: target view name
-        Fetch the code of a view.
+        Purpose: Fetch the code of a view.
+        Input:
+            settings - dictionary with the following keys
+                - view_id: id of the view in the source database (does not exist in MySQL)
+                - source_schema: schema name of the view in the source database
+                - source_view_name: view name in the source database
+                - target_schema: target schema name
+                - target_view_name: target view name
         Returns a string with the code.
         """
         pass
@@ -481,7 +527,15 @@ class DatabaseConnector(ABC):
     @abstractmethod
     def convert_view_code(self, view_code: str, settings: dict):
         """
-        Convert view to the target database type.
+        Purpose: Convert view to the target database type.
+        Input:
+            view_code: str - view code in the source database
+            settings - dictionary with the following keys
+                - target_db_type: target database type
+                - source_schema: schema name of the view in the source database
+                - source_view_name: view name in the source database
+                - target_schema: target schema name
+                - target_view_name: target view name
         table_list - contains the list of all tables in the target schema - used for adding target_schema prefix to table names in the view code.
         """
         pass
@@ -489,55 +543,84 @@ class DatabaseConnector(ABC):
     @abstractmethod
     def get_sequence_current_value(self, sequence_id: int):
         """
-        Returns the current value of the sequence.
+        Purpose: Returns the current value of the sequence.
+        Input:
+            sequence_id: id of the sequence in the source database
+        Returns:
+            current_value: current value of the sequence
         """
         pass
 
     @abstractmethod
     def execute_query(self, query: str, params=None):
         """
-        Executes a generic query in the connected database.
+        Purpose: Executes a generic query in the connected database.
+        Input:
+            query: str - query to execute
+            params: tuple - parameters for the query
         """
         pass
 
     @abstractmethod
     def execute_sql_script(self, script_path: str):
-        """Execute SQL script."""
+        """
+        Purpose: Execute SQL script.
+        Input:
+            script_path: str - path to the SQL script
+        """
         pass
 
     @abstractmethod
     def begin_transaction(self):
-        """Begins a transaction."""
+        """
+        Purpose: Begins a transaction.
+        """
         pass
 
     @abstractmethod
     def commit_transaction(self):
-        """Commits the current transaction."""
+        """
+        Purpose: Commits the current transaction.
+        """
         pass
 
     @abstractmethod
     def rollback_transaction(self):
-        """Rolls back the current transaction."""
+        """
+        Purpose: Rolls back the current transaction.
+        """
         pass
 
     @abstractmethod
     def get_rows_count(self, table_schema: str, table_name: str):
         """
-        Returns a number of rows in a table
+        Purpose: Returns a number of rows in a table.
+        Input:
+            table_schema: str - schema name of the table
+            table_name: str - table name
+        Returns:
+            rows_count: int - number of rows in the table
         """
         pass
 
     @abstractmethod
     def get_table_size(self, table_schema: str, table_name: str):
         """
-        Returns a size of the table in bytes
+        Purpose: Returns a size of the table in bytes.
+        Input:
+            table_schema: str - schema name of the table
+            table_name: str - table name
+        Returns:
+            table_size: int - size of the table in bytes
         """
         pass
 
     @abstractmethod
     def fetch_user_defined_types(self, schema: str):
         """
-        Returns user defined types in the specified schema / all schemas - depending on the database.
+        Purpose: Returns user defined types in the specified schema / all schemas - depending on the database.
+        Input:
+            schema: str - schema name
         Returns: dict
         { ordinary_number: {
             'schema_name': schema_name,
@@ -552,9 +635,9 @@ class DatabaseConnector(ABC):
     @abstractmethod
     def fetch_domains(self, schema: str):
         """
-        Returns domains in the specified schema / all schemas - depending on the database.
-        If schema is empty, all schemas are searched.
-
+        Purpose: Returns domains in the specified schema / all schemas - depending on the database.
+        Input:
+            schema: str - schema name
         Returns: dict
         { ordinal_identifier: {
             'domain_schema': schema_name,
@@ -577,17 +660,18 @@ class DatabaseConnector(ABC):
     @abstractmethod
     def get_create_domain_sql(self, settings):
         """
+        Purpose: Centralizes creation of SQL DDL statement for domains.
         This function is currently relevant only for target database
-        Centralizes creation of SQL DDL statement for domains
-        settings:
-            -
+        Input:
+            settings:
+                -
         """
         pass
 
     @abstractmethod
     def testing_select(self):
         """
-        Simple select statement to test the connection - like "SELECT 1"
+        Purpose: Simple select statement to test the connection - like "SELECT 1"
         Some databases require special form of statement
         """
         pass
@@ -595,7 +679,7 @@ class DatabaseConnector(ABC):
     @abstractmethod
     def get_database_version(self):
         """
-        Returns the version of the database.
+        Purpose: Returns the version of the database.
         This is used for debugging purposes and for checking compatibility with the migrator.
         """
         pass
@@ -603,7 +687,7 @@ class DatabaseConnector(ABC):
     @abstractmethod
     def get_database_size(self):
         """
-        Returns the size of the database in bytes.
+        Purpose: Returns the size of the database in bytes.
         This is used for debugging purposes and for checking compatibility with the migrator.
         """
         pass
@@ -611,9 +695,12 @@ class DatabaseConnector(ABC):
     @abstractmethod
     def get_top_n_tables(self, settings):
         """
-        Settings - dictionary with the following keys
-            - source_schema: str - schema name of the tables to be checked
-        Returns a dictionary with the top N tables in the specified schema.
+        Purpose: Returns a dictionary with the top N tables in the specified schema.
+        Input:
+            settings - dictionary with the following keys
+                - source_schema: str - schema name of the tables to be checked
+        Returns:
+            a dictionary with the top N tables in the specified schema.
         The dictionary contains the following keys:
             - 'by_rows': dict - top tables by number of rows
             - 'by_size': dict - top tables by size in bytes
@@ -636,10 +723,12 @@ class DatabaseConnector(ABC):
     @abstractmethod
     def get_top_fk_dependencies(self, settings):
         """
-        Fetch top foreign key dependencies in the specified schema.
-        settings - dictionary with the following keys
-            - source_schema: str - schema name of the tables to be checked
-        Returns a dictionary with the top foreign key dependencies.
+        Purpose: Fetch top foreign key dependencies in the specified schema.
+        Input:
+            settings - dictionary with the following keys
+                - source_schema: str - schema name of the tables to be checked
+        Returns:
+            a dictionary with the top foreign key dependencies.
         Each of these keys contains a dictionary with structure like this:
         { ordinary_number: {
             'owner': owner_name,
@@ -654,22 +743,35 @@ class DatabaseConnector(ABC):
     @abstractmethod
     def target_table_exists(self, target_schema, target_table):
         """
-        Check if the target table exists in the target database.
-        Returns True if the table exists, False otherwise.
+        Purpose: Check if the target table exists in the target database.
+        Input:
+            target_schema: str - schema name of the table
+            target_table: str - table name
+        Returns:
+            True if the table exists, False otherwise.
         """
         pass
 
     @abstractmethod
     def fetch_all_rows(self, query):
         """
-        Fetch all rows from the database using the provided query.
+        Purpose: Fetch all rows from the database using the provided query.
+        Input:
+            query: str - query to execute
+        Returns:
+            rows: list of rows
         """
         pass
 
     def migrate_sequences(self, target_connector, settings):
         """
-        Migrate sequences from source to target database.
-        Returns True if successful, False otherwise.
+        Purpose: Migrate sequences from source to target database.
+        Input:
+            target_connector: DatabaseConnector - target database connector
+            settings: dictionary with the following keys
+                - source_schema: str - schema name of the sequences to be migrated
+        Returns:
+            True if successful, False otherwise.
         """
         return True
 

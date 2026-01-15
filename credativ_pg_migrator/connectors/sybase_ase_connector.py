@@ -1790,23 +1790,19 @@ class SybaseASEConnector(DatabaseConnector):
                             grandparent.set('from', None)
                             # Run 33 Fix: Handle SELECT * when FROM is removed
                             if isinstance(grandparent, exp.Select):
-                                if grandparent.is_star:
-                                    # Replace * with NEW.* 
-                                    # Technically PL/pgSQL doesn't support SELECT NEW.* without INTO. 
-                                    # But for INSERT INTO ... SELECT * FROM inserted, we need SELECT NEW.* (or just VALUES(NEW.*))
-                                    # sqlglot "SELECT *" is represented by "*" in expressions usually?
-                                    # grandparent.expressions might contain Star
-                                    new_exprs = []
-                                    for e in grandparent.expressions:
-                                        if isinstance(e, exp.Star):
-                                             # Replace with Column(this=*, table=NEW) ?
-                                             # Or just let it be. Postgres "INSERT INTO t VALUES (NEW.*)" is valid-ish? 
-                                             # actually "INSERT INTO t SELECT NEW.*" works.
-                                             # So we map * -> NEW.*
-                                             new_exprs.append(exp.Column(this=exp.Star(), table=exp.Identifier(this=target_alias, quoted=False)))
-                                        else:
-                                             new_exprs.append(e)
-                                    grandparent.set('expressions', new_exprs)
+                                # Replace * with NEW.* 
+                                new_exprs = []
+                                has_transformed = False
+                                for e in grandparent.expressions:
+                                    if isinstance(e, exp.Star):
+                                         # Replace with Column(this=*, table=target_alias)
+                                         new_exprs.append(exp.Column(this=exp.Star(), table=exp.Identifier(this=target_alias, quoted=False)))
+                                         has_transformed = True
+                                    else:
+                                         new_exprs.append(e)
+                                
+                                if has_transformed:
+                                     grandparent.set('expressions', new_exprs)
                 elif isinstance(parent, exp.Join):
                      grandparent = parent.parent
                      if grandparent:
@@ -1854,6 +1850,65 @@ class SybaseASEConnector(DatabaseConnector):
             return node
 
         return expression.transform(transformer)
+
+    def _enforce_strict_formatting(self, text):
+        """
+        Shared helper to enforce strict PL/pgSQL formatting rules:
+        1. IF conditions followed by THEN on a new line.
+        2. WHILE conditions followed by LOOP on a new line.
+        Uses balanced parenthesis counting for robust condition detection.
+        """
+        out = []
+        i = 0
+        n = len(text)
+        while i < n:
+            # Check for IF or WHILE
+            match_keyword = re.match(r'(IF|WHILE)\b', text[i:], re.IGNORECASE)
+            if match_keyword:
+                keyword = match_keyword.group(1).upper()
+                target_suffix = 'THEN' if keyword == 'IF' else 'LOOP'
+                
+                # Check for standalone word boundary check manually if needed, but \b handles it
+                # Ensure we are not inside another word (e.g. ENDIF) - strictly speaking we start at i
+                if i > 0 and text[i-1].isalnum(): 
+                     out.append(text[i])
+                     i += 1
+                     continue
+
+                out.append(text[i:i+match_keyword.end()])
+                i += match_keyword.end()
+                
+                # Skip whitespace to (
+                while i < n and text[i].isspace():
+                    out.append(text[i])
+                    i += 1
+                
+                if i < n and text[i] == '(':
+                    out.append('(')
+                    i += 1
+                    depth = 1
+                    while i < n and depth > 0:
+                        c = text[i]
+                        if c == '(': depth += 1
+                        elif c == ')': depth -= 1
+                        out.append(c)
+                        i += 1
+                    
+                    # Post-condition: Check for THEN/LOOP
+                    rest = text[i:]
+                    match_suffix = re.match(r'\s*' + target_suffix + r'\b', rest, re.IGNORECASE)
+                    
+                    if match_suffix:
+                        # It exists, replace the whitespace with \nSUFFIX
+                        out.append(f'\n{target_suffix}')
+                        i += match_suffix.end()
+                    else:
+                        # It's missing, append it
+                        out.append(f'\n{target_suffix}')
+                continue
+            out.append(text[i])
+            i += 1
+        return "".join(out)
 
     def _convert_stmts(self, body_content, settings, is_nested=False, has_rowcount=False, is_trigger=False):
         """
@@ -1907,11 +1962,59 @@ class SybaseASEConnector(DatabaseConnector):
                  self.config_parser.print_log_message('WARNING', f"Standard TSQL parser failed ({e_std}), falling back to Regex Cleaning.")
                  try:
                      # Basic Regex cleaning to ensure valid PG syntax if parsing fails totally
-                     # 1. Ensure IF has THEN
-                     regex_body = re.sub(r'IF\s*\((.*?)\)\s*(?!THEN)', r'IF (\1) THEN ', processed_body, flags=re.IGNORECASE)
+                     # 1. Ensure IF has THEN (Using robust paren counting)
+                     def fix_if_then(text):
+                         out = []
+                         i = 0
+                         n = len(text)
+                         while i < n:
+                             # Check for IF
+                             match_if = re.match(r'IF\b', text[i:], re.IGNORECASE)
+                             if match_if:
+                                 out.append(text[i:i+match_if.end()])
+                                 i += match_if.end()
+                                 # Skip whitespace to (
+                                 while i < n and text[i].isspace():
+                                     out.append(text[i])
+                                     i += 1
+                                 
+                                 if i < n and text[i] == '(':
+                                     # Parens loop
+                                     out.append('(')
+                                     i += 1
+                                     depth = 1
+                                     while i < n and depth > 0:
+                                         c = text[i]
+                                         if c == '(': depth += 1
+                                         elif c == ')': depth -= 1
+                                         out.append(c)
+                                         i += 1
+                                     
+                                     # Check for THEN
+                                     # Scan forward skipping whitespace/comments
+                                     # Simple lookahead
+                                     rest = text[i:]
+                                     match_then = re.match(r'\s*THEN\b', rest, re.IGNORECASE)
+                                     if not match_then:
+                                         out.append('\nTHEN ')
+                                     else:
+                                         # Ensure newline
+                                         if '\n' not in rest[:match_then.start()]:
+                                             out.append('\n')
+                                 continue
+                             out.append(text[i])
+                             i += 1
+                         return "".join(out)
+
+                     regex_body = self._enforce_strict_formatting(processed_body)
                      
                      if is_trigger:
                          # Run 33 Fix: Handle inserted/deleted in fallback mode
+                         
+                         # Handle SELECT * FROM inserted -> SELECT NEW.*
+                         regex_body = re.sub(r'SELECT\s+\*\s+FROM\s+inserted\b', 'SELECT NEW.*', regex_body, flags=re.IGNORECASE)
+                         regex_body = re.sub(r'SELECT\s+\*\s+FROM\s+deleted\b', 'SELECT OLD.*', regex_body, flags=re.IGNORECASE)
+
                          regex_body = re.sub(r'\binserted\b', 'NEW', regex_body, flags=re.IGNORECASE)
                          regex_body = re.sub(r'\bdeleted\b', 'OLD', regex_body, flags=re.IGNORECASE)
                          # Explicitly remove FROM NEW/OLD
@@ -2221,13 +2324,10 @@ class SybaseASEConnector(DatabaseConnector):
                         if match_cmd:
                               pg_sql = match_cmd.group(1)
                               is_cursor_cmd = True
-                   elif "'RAISERROR_CMD:" in pg_sql:
-                        match_raise = re.search(r"'RAISERROR_CMD:(\d+)'\s+AS\s+_cmd,\s+(.*?)\s+AS\s+_msg", pg_sql, re.IGNORECASE)
-                        if match_raise:
-                              r_code = match_raise.group(1)
-                              r_msg = match_raise.group(2)
                               pg_sql = f"RAISE EXCEPTION {r_msg} USING ERRCODE = '{r_code}'"
                               is_raise_cmd = True
+                   # DELETED: 'RAISERROR_CMD' unmasking moved to convert_trigger post-processing logic
+                   # This allows it to work for both AST-parsed statements AND regex fallback bodies.
 
              if not is_cursor_cmd and not is_raise_cmd and not is_block_cmd:
                  # 2. Normal PRINT -> RAISE NOTICE
@@ -3881,6 +3981,37 @@ class SybaseASEConnector(DatabaseConnector):
         if events:
              event_list = events[0].replace(' ', '').upper().split(',')
              pg_events = ' OR '.join(event_list)
+
+        # 6.5. Formatting Post-Processing (Run 34)
+        # Rule: Key word THEN must be added on the new line after the last ) character of the condition.
+        # Use shared helper which now also handles WHILE ... LOOP
+        final_body = self._enforce_strict_formatting(final_body)
+
+        # Post-Processing: Unmask RAISERROR (Moved from AST loop to support fallback)
+        def raiserror_unmasker(match):
+            r_code = match.group(1)
+            r_msg = match.group(2)
+            return f"RAISE EXCEPTION {r_msg} USING ERRCODE = '{r_code}'"
+        
+        # Matches: SELECT 'RAISERROR_CMD:50000' AS _cmd, 'msg' AS _msg
+        # Note: We need to match the potential trailing semicolon or context if AST result added it
+        final_body = re.sub(r"SELECT\s+'RAISERROR_CMD:(\d+)'\s+AS\s+_cmd,\s+(.*?)\s+AS\s+_msg(?:;)?", raiserror_unmasker, final_body, flags=re.IGNORECASE)
+        
+        # Rule: All key words END, END IF, END LOOP, END WHILE must be followed by ;
+        final_body = re.sub(r'\b(END(?:\s+(?:IF|LOOP|WHILE))?)\s*(?!;)', r'\1;', final_body, flags=re.IGNORECASE)
+
+        # Rule: All cases of doubled semicolons ;; or semicolon followed by whitespaces and another semicolon must be replaced with single semicolon ;
+        final_body = re.sub(r';\s*;', ';', final_body)
+        
+        # Rule: If character ; is alone on a line, it must be attached to the previous line.
+        final_body = re.sub(r'\n\s*;', ';', final_body)
+        
+        # Cleanup: Ensure newlines between statements (e.g. END;IF -> END;\nIF)
+        final_body = re.sub(r';(IF|BEGIN|RETURN|END|UPDATE|INSERT|DELETE|SELECT|ELSE)', r';\n\1', final_body, flags=re.IGNORECASE)
+
+        # Fix: Convert bare RETURN to RETURN NEW; in triggers (prevents syntax error)
+        # Capture trailing whitespace to preserve newlines
+        final_body = re.sub(r'\bRETURN(\s*)(?!NEW|OLD|NULL)', r'RETURN NEW\1', final_body, flags=re.IGNORECASE)
 
         # 7. Assemble DDL
         if not final_body.strip().upper().endswith('RETURN NEW;'):

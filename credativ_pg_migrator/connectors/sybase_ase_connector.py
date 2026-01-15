@@ -1963,55 +1963,63 @@ class SybaseASEConnector(DatabaseConnector):
                  try:
                      # Basic Regex cleaning to ensure valid PG syntax if parsing fails totally
                      # 1. Ensure IF has THEN (Using robust paren counting)
-                     def fix_if_then(text):
-                         out = []
-                         i = 0
-                         n = len(text)
-                         while i < n:
-                             # Check for IF
-                             match_if = re.match(r'IF\b', text[i:], re.IGNORECASE)
-                             if match_if:
-                                 out.append(text[i:i+match_if.end()])
-                                 i += match_if.end()
-                                 # Skip whitespace to (
-                                 while i < n and text[i].isspace():
-                                     out.append(text[i])
-                                     i += 1
-                                 
-                                 if i < n and text[i] == '(':
-                                     # Parens loop
-                                     out.append('(')
-                                     i += 1
-                                     depth = 1
-                                     while i < n and depth > 0:
-                                         c = text[i]
-                                         if c == '(': depth += 1
-                                         elif c == ')': depth -= 1
-                                         out.append(c)
-                                         i += 1
-                                     
-                                     # Check for THEN
-                                     # Scan forward skipping whitespace/comments
-                                     # Simple lookahead
-                                     rest = text[i:]
-                                     match_then = re.match(r'\s*THEN\b', rest, re.IGNORECASE)
-                                     if not match_then:
-                                         out.append('\nTHEN ')
-                                     else:
-                                         # Ensure newline
-                                         if '\n' not in rest[:match_then.start()]:
-                                             out.append('\n')
-                                 continue
-                             out.append(text[i])
-                             i += 1
-                         return "".join(out)
 
                      regex_body = self._enforce_strict_formatting(processed_body)
                      
                      if is_trigger:
-                         # Run 33 Fix: Handle inserted/deleted in fallback mode
+                         # Run 35 Fix: Handle inserted/deleted assignments in fallback mode
+                         # We need to handle: SELECT @v1 = c1, @v2 = c2 FROM inserted
+                         # Strategy: Identify SELECT ... FROM inserted/deleted blocks and transform them.
                          
-                         # Handle SELECT * FROM inserted -> SELECT NEW.*
+                         def trigger_select_replacer(match):
+                             content = match.group(1)
+                             table = match.group(2).lower()
+                             prefix = "NEW" if table == 'inserted' else "OLD"
+                             
+                             # Check for INTO (e.g. SELECT * INTO #tmp FROM inserted)
+                             if re.search(r'\bINTO\b', content, re.IGNORECASE):
+                                 return match.group(0)
+
+                             # Split content by comma
+                             assignments = content.split(',')
+                             new_stmts = []
+                             is_assignment_block = False
+
+                             for asm in assignments:
+                                 asm = asm.strip()
+                                 # match var = col (supporting @var or locvar_var)
+                                 m_asm = re.match(r'([@\w]+)\s*=\s*([\w\.]+)', asm)
+                                 if m_asm:
+                                     var = m_asm.group(1)
+                                     col = m_asm.group(2)
+                                     new_stmts.append(f"{var} := {prefix}.{col}")
+                                     is_assignment_block = True
+                                 elif asm == '*':
+                                     # Handle SELECT * FROM inserted
+                                     # If this is part of assignment block, we ignore it? Or PERFORM?
+                                     # If this is purely SELECT *, it's likely a subquery.
+                                     new_stmts.append(f"{prefix}.*")
+                                     pass
+                                 else:
+                                     # Just a column? SELECT col FROM inserted
+                                     new_stmts.append(f"{prefix}.{asm}")
+                             
+                             if is_assignment_block:
+                                 # Filter out non-assignment parts if we are in assignment mode?
+                                 # Or just return assignments.
+                                 # Sybase allows SELECT @v=1, col -> returns result set AND assigns. 
+                                 # PG doesn't support this easily. We prioritize assignment.
+                                 final_stmts = [s for s in new_stmts if ':=' in s]
+                                 return ";\n".join(final_stmts) + ";"
+                             else:
+                                 # No assignments, likely a subquery or check
+                                 # Return SELECT col, col...
+                                 return f"SELECT {', '.join(new_stmts)}"
+
+                         # Apply replacing for SELECT ... FROM inserted|deleted
+                         regex_body = re.sub(r'SELECT\s+(.*?)\s+FROM\s+(inserted|deleted)\b', trigger_select_replacer, regex_body, flags=re.IGNORECASE | re.DOTALL)
+
+                         # Handle SELECT * FROM inserted -> SELECT NEW.* (if not caught by above)
                          regex_body = re.sub(r'SELECT\s+\*\s+FROM\s+inserted\b', 'SELECT NEW.*', regex_body, flags=re.IGNORECASE)
                          regex_body = re.sub(r'SELECT\s+\*\s+FROM\s+deleted\b', 'SELECT OLD.*', regex_body, flags=re.IGNORECASE)
 
@@ -2019,9 +2027,8 @@ class SybaseASEConnector(DatabaseConnector):
                          regex_body = re.sub(r'\bdeleted\b', 'OLD', regex_body, flags=re.IGNORECASE)
                          # Explicitly remove FROM NEW/OLD
                          regex_body = re.sub(r'\bFROM\s+(?:NEW|OLD)\b', '', regex_body, flags=re.IGNORECASE)
-                         # Handle SELECT var = val (basic regex attempt)
-                         # SELECT locvar_x = col -> locvar_x := NEW.col (assuming FROM was removed and mapped to NEW)
-                         # This is risky regex, but better than "SELECT x=y"
+                         
+                         # Handle SELECT var = val (assignments without FROM)
                          regex_body = re.sub(r'SELECT\s+([@\w]+)\s*=\s*([\w\.]+)', r'\1 := \2', regex_body, flags=re.IGNORECASE)
 
                      # 2. Ensure END IF existence (Simple check, might be fragile but better than crash)

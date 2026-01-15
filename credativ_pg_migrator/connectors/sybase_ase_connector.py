@@ -438,6 +438,13 @@ class SybaseASEConnector(DatabaseConnector):
     def _declaration_replacer(self, match, settings, types_mapping, declarations):
         full_decl = match.group(0)
         content = full_decl[7:].strip() # len('DECLARE') = 7
+        
+        # Remove comments before processing declarations
+        # Remove single-line comments (-- comment)
+        content = re.sub(r'--[^\n]*', '', content)
+        # Remove block comments (/* comment */)
+        content = re.sub(r'/\*.*?\*/', '', content, flags=re.DOTALL)
+        
         content_clean = content.replace('@', '')
         content_clean = self._apply_data_type_substitutions(content_clean)
         content_clean = self._apply_udt_to_base_type_substitutions(content_clean, settings)
@@ -446,7 +453,10 @@ class SybaseASEConnector(DatabaseConnector):
 
         parts = self._split_respecting_parens(content_clean)
         for part in parts:
-            declarations.append(part.strip() + ';')
+            part_stripped = part.strip()
+            # Skip empty parts or parts that are only whitespace/newlines
+            if part_stripped and not part_stripped.isspace():
+                declarations.append(part_stripped + ';')
         return ''
 
     def migrate_sequences(self, target_connector, settings):
@@ -3883,67 +3893,77 @@ class SybaseASEConnector(DatabaseConnector):
 
         def convert_select_to_set(match):
             block = match.group(1)
-            # Skip if FROM is present (Trigger logic will handle it via AST)
+            # Skip if FROM is present (will be handled by specialized logic above)
             if re.search(r'\bFROM\b', block, re.IGNORECASE):
                 return match.group(0)
-            # Log replacement for debugging
-            # self.config_parser.print_log_message('DEBUG', f"REPLACING SELECT BLOCK: {block[:50]}...")
-
+            
+            # Handle SELECT @var = (subquery) pattern
+            # This needs special treatment as it's a scalar subquery assignment
+            subquery_pattern = r'(@?\w+)\s*=\s*\(([^)]+SELECT[^)]+)\)'
+            if re.search(subquery_pattern, block, re.IGNORECASE | re.DOTALL):
+                # Convert SELECT @var = (SELECT ...) to SELECT (SELECT ...) INTO var
+                def fix_subquery_assignment(m):
+                    var = m.group(1).strip()
+                    subq = m.group(2).strip()
+                    return f"SELECT ({subq}) INTO {var}"
+                
+                block = re.sub(subquery_pattern, fix_subquery_assignment, block, flags=re.IGNORECASE | re.DOTALL)
+                return block + ";"
+            
             # Use generic split looking for "comma, space, variable, ="
             items = re.split(r',\s*(?=@?\w+[\t ]*=)', block)
             cleaned_items = [item.strip() for item in items if item.strip()]
-            # Convert to "var = val" (PL/pgSQL compatible) instead of "SET var = val"
-            # We trust the parser or subsequent formatting to handle ":=" vs "="
-            # But sqlglot might parse "var = val" as comparison if not careful.
-            # Using "locvar_var = val" usually works as assignment in blocks.
-            new_block = ";\n".join(cleaned_items)
-            return new_block + ";" # Append trailing semicolon (Fix for missing semicolon)
+            # Convert to "var := val" (PL/pgSQL assignment operator)
+            assignments = []
+            for item in cleaned_items:
+                if '=' in item:
+                    var, val = item.split('=', 1)
+                    assignments.append(f"{var.strip()} := {val.strip()}")
+            
+            new_block = ";\n".join(assignments) if assignments else block
+            return new_block + ";"
 
-        # Fix: Specialized handler for Trigger assignments with SELECT ... FROM inserted
-        # This MUST happen before general SELECT replacement to capture the context
-        # Fix: Specialized handler for Trigger assignments with SELECT ... FROM inserted
-        # This MUST happen before general SELECT replacement to capture the context
+        # Fix: Specialized handler for Trigger assignments with SELECT ... FROM inserted/deleted
+        # This converts: SELECT @a = col1, @b = col2 FROM inserted
+        # To: SELECT col1, col2 INTO locvar_a, locvar_b FROM NEW
         def trigger_select_inserted_replacer(match):
-             content = match.group(1) # The assignment part: @a=b, @c=d
-             table_alias = "NEW" if match.group(2).lower() == 'inserted' else "OLD"
+             content = match.group(1).strip() # The assignment part: @a=col1, @b=col2
+             table_name = match.group(2).lower() # inserted or deleted
+             table_alias = "NEW" if table_name == 'inserted' else "OLD"
+             from_clause = match.group(3) if match.lastindex >= 3 else "" # Optional WHERE/JOIN etc
              
-             # Split by regex looking for comma followed by variable assignment
-             # or simply split by comma if we assume standard syntax
-             items = re.split(r',\s*(?=@?\w+[\t ]*=)', content)
-             assignments = []
+             # Split assignments by comma (but not inside parentheses/subqueries)
+             # Simple split for now - advanced regex would handle nested ()
+             items = re.split(r',\s*(?=@?\w+\s*=)', content)
+             variables = []
+             columns = []
+             
              for item in items:
                  item = item.strip()
                  if '=' in item:
                      var, col = item.split('=', 1)
-                     var = var.strip()
-                     col = col.strip()
-                     assignments.append(f"{var} := {table_alias}.{col};")
+                     variables.append(var.strip())
+                     columns.append(col.strip())
              
-             return "\n".join(assignments)
+             # Build PostgreSQL syntax: SELECT col1, col2 INTO var1, var2 FROM NEW
+             if variables and columns:
+                 vars_list = ', '.join(variables)
+                 cols_list = ', '.join(columns)
+                 result = f"SELECT {cols_list} INTO {vars_list} FROM {table_alias}"
+                 if from_clause:
+                     result += from_clause
+                 return result + ";"
+             
+             return match.group(0) # Fallback
 
-        # Regex to capture SELECT @v=col, ... FROM inserted/deleted
-        # matches: SELECT (assignments) FROM (inserted|deleted)
-        trigger_code = re.sub(r'(?i)SELECT\s+(.+?)\s+FROM\s+(inserted|deleted)', 
-                              trigger_select_inserted_replacer, 
-                              trigger_code)
-
-        # Fix: Specialized handler for Trigger assignments with SELECT ... FROM inserted
-        # This MUST happen before general SELECT replacement to capture the context
-        def trigger_select_inserted_replacer(match):
-             content = match.group(1) # The assignment part: @v=col, ...
-             # We assume FROM inserted/deleted is present in the full match context or we check explicitly
-             # But here we are just looking at the SELECT body.
-             # Actually, simpler to regex the whole statement including FROM.
-             return match.group(0) # Logic moved below
-
-        # Regex to capture SELECT @v=col FROM inserted
-        # We convert this to: v := NEW.col;
-        trigger_code = re.sub(r'(?i)SELECT\s+(@?\w+\s*=\s*\w+)\s+FROM\s+inserted', 
-                              lambda m: m.group(1).replace('=', ':= NEW.') + ';', 
-                              trigger_code)
-        trigger_code = re.sub(r'(?i)SELECT\s+(@?\w+\s*=\s*\w+)\s+FROM\s+deleted', 
-                              lambda m: m.group(1).replace('=', ':= OLD.') + ';', 
-                              trigger_code)
+        # Regex to capture SELECT @v=col, @x=col2 FROM inserted [WHERE/other clauses]
+        # Must match entire SELECT statement including WHERE, ORDER BY, etc.
+        trigger_code = re.sub(
+            r'(?i)SELECT\s+(.+?)\s+FROM\s+(inserted|deleted)(\s+(?:WHERE|ORDER|GROUP|HAVING|JOIN|INNER|LEFT|RIGHT|OUTER).*?)?(?=\s*(?:--|$|;|\n\s*(?:SELECT|IF|WHILE|BEGIN|END|RETURN|INSERT|UPDATE|DELETE|ELSE|DECLARE)))',
+            trigger_select_inserted_replacer,
+            trigger_code,
+            flags=re.DOTALL
+        )
 
         # Apply transformation to body_content
         # Note: We apply this mainly to body logic, but here trigger_code includes everything.
@@ -4139,10 +4159,19 @@ EXECUTE FUNCTION {target_schema}.{trigger_name}_func();
         # 8. RETURN NEW must be followed by ;
         text = re.sub(r'\bRETURN\s+NEW(?!;)', 'RETURN NEW;', text, flags=re.IGNORECASE)
         
-        # 10. locvar_var = <value> must be followed by ;
-        text = re.sub(r'\b(locvar_\w+)\s*=\s*([^;\n]+)(?=$|\n)', r'\1 = \2;', text)
+        # 10. locvar_var = <value> must be followed by ; (but not if already has semicolon)
+        # Match assignment statements that are NOT already followed by semicolon
+        # Also handle := operator and = operator
+        text = re.sub(r'\b(locvar_\w+)\s*(:?=)\s*([^;\n]+?)(?=\s*$|\s*\n)', r'\1 \2 \3;', text, flags=re.MULTILINE)
         
-        # 14. Doubled semicolons again
+        # Fix: Ensure SET statements have semicolons
+        # SET locvar_var = value (without FROM clause) needs semicolon
+        text = re.sub(r'\bSET\s+(locvar_\w+)\s*=\s*([^;\n]+?)(?=\s*$|\s*\n)(?!\s*FROM)', r'SET \1 = \2;', text, flags=re.MULTILINE | re.IGNORECASE)
+        
+        # Fix: SELECT...INTO statements need semicolons
+        text = re.sub(r'(SELECT\s+.+?\s+INTO\s+.+?)(?=\s*$|\s*\n)(?!;)', r'\1;', text, flags=re.MULTILINE | re.IGNORECASE | re.DOTALL)
+        
+        # 14. Doubled semicolons again (after all additions)
         text = re.sub(r';\s*;', ';', text)
         
         return text

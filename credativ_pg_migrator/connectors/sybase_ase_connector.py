@@ -175,6 +175,7 @@ class CustomTSQL(TSQL):
                       # Handle SET non-greedily: Stop at new statement keywords or semicolon
                       expressions = []
                       balance = 0
+                      has_assignment = False
                       while self._curr:
                            if self._curr.token_type in (TokenType.SEMICOLON, TokenType.END):
                                 break
@@ -183,16 +184,41 @@ class CustomTSQL(TSQL):
                                 txt = self._curr.text.upper()
                                 if txt in ('SELECT', 'UPDATE', 'INSERT', 'DELETE', 'BEGIN', 'IF', 'WHILE', 'RETURN', 'DECLARE', 'CREATE', 'TRUNCATE', 'GO', 'ELSE'):
                                      break
+                                
+                                # Check for assignment
+                                if self._curr.token_type == TokenType.EQ:
+                                     has_assignment = True
+                                     # Replace = with := for PL/pgSQL assignment
+                                     expressions.append(':=')
+                                     self._advance()
+                                     continue
 
                            if self._curr.token_type == TokenType.L_PAREN:
                                 balance += 1
                            elif self._curr.token_type == TokenType.R_PAREN:
                                 balance -= 1
-
-                           expressions.append(self._curr.text)
+                            
+                           token_text = self._curr.text
+                           # Preserve quotes for strings
+                           if self._curr.token_type == TokenType.STRING:
+                               token_text = f"'{token_text}'"
+                               
+                           expressions.append(token_text)
                            self._advance()
 
-                      return exp.Command(this='SET', expression=exp.Literal.string(" ".join(expressions)))
+                      # If it was an assignment (e.g. SET x = 1), return as raw expression without SET keyword
+                      if has_assignment:
+                           # PL/pgSQL: x := 1;
+                           # Use exp.Property to wrap the raw string to avoid quoting like a literal
+                           # exp.Var or exp.Identifier with quoted=False might work but valid SQL requires structure.
+                           # However, the generator just calls .sql().
+                           # Let's use exp.Literal with is_string=False? No.
+                           # Use exp.Raw to pass through exactly what we parsed.
+                           # SQLGlot compatibility: exp.Raw might not exist. Use Identifier(quoted=False).
+                           return exp.Identifier(this=" ".join(expressions), quoted=False)
+                      else:
+                           # Standard SET command (e.g. SET TIMEZONE...)
+                           return exp.Command(this='SET', expression=exp.Literal.string(" ".join(expressions)))
 
                  # Not a PRINT or SET command
                  return self._parse_command()

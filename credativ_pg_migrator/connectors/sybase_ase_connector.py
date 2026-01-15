@@ -2018,7 +2018,9 @@ class SybaseASEConnector(DatabaseConnector):
                                  return f"SELECT {', '.join(new_stmts)}"
 
                          # Apply replacing for SELECT ... FROM inserted|deleted
-                         regex_body = re.sub(r'SELECT\s+(.*?)\s+FROM\s+(inserted|deleted)\b', trigger_select_replacer, regex_body, flags=re.IGNORECASE | re.DOTALL)
+                         # Use stricter regex to avoid crossing statement boundaries
+                         # Matches: SELECT (non-FROM content) FROM (inserted|deleted)
+                         regex_body = re.sub(r'(?i)SELECT\s+((?:(?!\bFROM\b).)+?)\s+FROM\s+(inserted|deleted)\b', trigger_select_replacer, regex_body, flags=re.IGNORECASE | re.DOTALL)
 
                          # Handle SELECT * FROM inserted -> SELECT NEW.* (if not caught by above)
                          regex_body = re.sub(r'SELECT\s+\*\s+FROM\s+inserted\b', 'SELECT NEW.*', regex_body, flags=re.IGNORECASE)
@@ -3811,10 +3813,7 @@ class SybaseASEConnector(DatabaseConnector):
 
         # --- Pre-processing ---
 
-        # 0. Encapsulate comments
-        # Fix: Convert -- comment to /* comment */ (Rule Compliance)
-        # Handle case where -- comment ends with */ (remove it to avoid nesting)
-        trigger_code = re.sub(r'--([^\r\n]*?)(?:\*/)?\s*$', r'/*\1*/', trigger_code, flags=re.MULTILINE)
+
 
         # Note: We do NOT delete /* */ comments here. We preserve them.
 
@@ -3873,6 +3872,52 @@ class SybaseASEConnector(DatabaseConnector):
             # Using "locvar_var = val" usually works as assignment in blocks.
             new_block = ";\n".join(cleaned_items)
             return new_block + ";" # Append trailing semicolon (Fix for missing semicolon)
+
+        # Fix: Specialized handler for Trigger assignments with SELECT ... FROM inserted
+        # This MUST happen before general SELECT replacement to capture the context
+        # Fix: Specialized handler for Trigger assignments with SELECT ... FROM inserted
+        # This MUST happen before general SELECT replacement to capture the context
+        def trigger_select_inserted_replacer(match):
+             content = match.group(1) # The assignment part: @a=b, @c=d
+             table_alias = "NEW" if match.group(2).lower() == 'inserted' else "OLD"
+             
+             # Split by regex looking for comma followed by variable assignment
+             # or simply split by comma if we assume standard syntax
+             items = re.split(r',\s*(?=@?\w+[\t ]*=)', content)
+             assignments = []
+             for item in items:
+                 item = item.strip()
+                 if '=' in item:
+                     var, col = item.split('=', 1)
+                     var = var.strip()
+                     col = col.strip()
+                     assignments.append(f"{var} := {table_alias}.{col};")
+             
+             return "\n".join(assignments)
+
+        # Regex to capture SELECT @v=col, ... FROM inserted/deleted
+        # matches: SELECT (assignments) FROM (inserted|deleted)
+        trigger_code = re.sub(r'(?i)SELECT\s+(.+?)\s+FROM\s+(inserted|deleted)', 
+                              trigger_select_inserted_replacer, 
+                              trigger_code)
+
+        # Fix: Specialized handler for Trigger assignments with SELECT ... FROM inserted
+        # This MUST happen before general SELECT replacement to capture the context
+        def trigger_select_inserted_replacer(match):
+             content = match.group(1) # The assignment part: @v=col, ...
+             # We assume FROM inserted/deleted is present in the full match context or we check explicitly
+             # But here we are just looking at the SELECT body.
+             # Actually, simpler to regex the whole statement including FROM.
+             return match.group(0) # Logic moved below
+
+        # Regex to capture SELECT @v=col FROM inserted
+        # We convert this to: v := NEW.col;
+        trigger_code = re.sub(r'(?i)SELECT\s+(@?\w+\s*=\s*\w+)\s+FROM\s+inserted', 
+                              lambda m: m.group(1).replace('=', ':= NEW.') + ';', 
+                              trigger_code)
+        trigger_code = re.sub(r'(?i)SELECT\s+(@?\w+\s*=\s*\w+)\s+FROM\s+deleted', 
+                              lambda m: m.group(1).replace('=', ':= OLD.') + ';', 
+                              trigger_code)
 
         # Apply transformation to body_content
         # Note: We apply this mainly to body logic, but here trigger_code includes everything.
@@ -4022,12 +4067,7 @@ class SybaseASEConnector(DatabaseConnector):
         # Cleanup: Ensure newlines between statements (e.g. END;IF -> END;\nIF)
         final_body = re.sub(r';(IF|BEGIN|RETURN|END|UPDATE|INSERT|DELETE|SELECT|ELSE)', r';\n\1', final_body, flags=re.IGNORECASE)
 
-        # Fix: Convert bare RETURN to RETURN NEW; in triggers (prevents syntax error)
-        # Capture trailing whitespace to preserve newlines
-        # Avoid double NEW if already present (e.g. from existing logic)
-        final_body = re.sub(r'\bRETURN(\s*)(?!NEW|OLD|NULL)', r'RETURN NEW\1', final_body, flags=re.IGNORECASE)
-        # Cleanup: Remove double NEW if it slipped in
-        final_body = re.sub(r'\bRETURN\s+NEW\s+NEW\b', 'RETURN NEW', final_body, flags=re.IGNORECASE)
+
 
         # 7. Assemble DDL
         # Check if RETURN NEW is already at the end of the logic (ignoring END;)
@@ -4049,6 +4089,9 @@ $$ LANGUAGE plpgsql;
 
         # Cleanup: Remove semicolon after block comment at end of line (Syntax Error)
         pg_func = re.sub(r'\*/\s*;+\s*$', '*/', pg_func, flags=re.MULTILINE)
+        
+        # FINAL SANITIZATION per Rule F (Strict Order)
+        pg_func = self._sanitize_output(pg_func)
 
         pg_trigger = f"""CREATE TRIGGER {trigger_name}
 AFTER {pg_events} ON "{target_schema}"."{target_table}"
@@ -4056,6 +4099,27 @@ FOR EACH ROW
 EXECUTE FUNCTION {target_schema}.{trigger_name}_func();
 """
         return pg_func + '\n' + pg_trigger
+
+    def _sanitize_output(self, text):
+        """
+        Applies strict sanitization rules at the very end of conversion.
+        See Rule F in sybase_conversion_rules.md.
+        """
+        # SAFE version (Rules 1, 8, 10, 14)
+        
+        # 1. Doubled semicolons or ; + whitespace + ; -> ;
+        text = re.sub(r';\s*;', ';', text)
+        
+        # 8. RETURN NEW must be followed by ;
+        text = re.sub(r'\bRETURN\s+NEW(?!;)', 'RETURN NEW;', text, flags=re.IGNORECASE)
+        
+        # 10. locvar_var = <value> must be followed by ;
+        text = re.sub(r'\b(locvar_\w+)\s*=\s*([^;\n]+)(?=$|\n)', r'\1 = \2;', text)
+        
+        # 14. Doubled semicolons again
+        text = re.sub(r';\s*;', ';', text)
+        
+        return text
 
     # def convert_trigger_v1(self, settings):
     #     trigger_name = self.config_parser.convert_names_case(settings['trigger_name'])

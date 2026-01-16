@@ -4226,6 +4226,45 @@ EXECUTE FUNCTION {target_schema}.{trigger_name}_func();
         # Capitalize NULL keyword (only as standalone word, not in identifiers)
         text = re.sub(r'\bnull\b', 'NULL', text, flags=re.IGNORECASE)
         
+        # ===== IF/ELSIF/END IF BLOCK STRUCTURE FIXES =====
+        
+        # Step 1: Normalize IF/ELSIF keywords and move THEN to same line
+        # Pattern: if(condition)\nTHEN -> IF (condition) THEN  
+        text = re.sub(r'\bif\s*\(', r'IF (', text, flags=re.IGNORECASE)
+        text = re.sub(r'\belsif\s*\(', r'ELSIF (', text, flags=re.IGNORECASE)
+        text = re.sub(r'\)\s*\n\s*THEN\s*\n', r') THEN\n', text, flags=re.MULTILINE)
+        text = re.sub(r'\)\s*\n\s*THEN', r') THEN', text, flags=re.MULTILINE)
+        
+        # Step 2: Remove unnecessary BEGIN...END; blocks around single assignment statements
+        # Pattern: THEN \nBEGIN\nlocvar := value;\nEND; -> THEN\nlocvar := value;
+        text = re.sub(
+            r'(THEN)\s*\n\s*BEGIN\s*\n\s*([a-zA-Z_][a-zA-Z0-9_]*\s*:=\s*[^;]+;)\s*\n\s*END;',
+            r'\1\n        \2',
+            text,
+            flags=re.MULTILINE
+        )
+        
+        # Step 3: Remove BEGIN...END wrapper around nested IF blocks that have multiple branches
+        # Pattern: THEN\n        BEGIN\n            IF ... ELSIF ... END;\n        END; 
+        # Replace with: THEN\n            IF ... ELSIF ... END IF;
+        text = re.sub(
+            r'(ELSIF[^T]+THEN)\s*\n\s+BEGIN\s*\n(\s+IF\s*\([^)]+\)\s*THEN[^$]+?)\s+END;\s*\n\s+ELSIF',
+            r'\1\n\2 END IF;\nELSIF',
+            text,
+            flags=re.MULTILINE | re.DOTALL
+        )
+        
+        # Step 4: Add END IF; to close IF blocks 
+        # Replace END; before ELSIF with END IF;
+        text = re.sub(r';\s*\n\s*END;\s*\nELSIF', r';\nEND IF;\nELSIF', text, flags=re.MULTILINE)
+        
+        # Step 5: Replace the final END; before $$ with END IF;
+        text = re.sub(r'(;|NULL;)\s*\n\s*END;\s*\n\s*\$\$', r'\1\nEND IF;\n$$', text, flags=re.MULTILINE)
+        
+        # Step 6: Capitalize BEGIN
+        text = re.sub(r'\bbegin\b', 'BEGIN', text, flags=re.IGNORECASE)
+
+        
         # Replace Sybase functions with PostgreSQL equivalents
         text = re.sub(r'\bgetDate\s*\(\s*\)', 'CURRENT_TIMESTAMP', text, flags=re.IGNORECASE)
         text = re.sub(r'\bCURRENT_TIMESTAMP\s*\(\s*\)', 'CURRENT_TIMESTAMP', text, flags=re.IGNORECASE)

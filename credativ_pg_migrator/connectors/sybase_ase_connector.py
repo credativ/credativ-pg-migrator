@@ -4228,42 +4228,127 @@ EXECUTE FUNCTION {target_schema}.{trigger_name}_func();
         
         # ===== IF/ELSIF/END IF BLOCK STRUCTURE FIXES =====
         
-        # Step 1: Normalize IF/ELSIF keywords and move THEN to same line
-        # Pattern: if(condition)\nTHEN -> IF (condition) THEN  
-        text = re.sub(r'\bif\s*\(', r'IF (', text, flags=re.IGNORECASE)
-        text = re.sub(r'\belsif\s*\(', r'ELSIF (', text, flags=re.IGNORECASE)
-        text = re.sub(r'\)\s*\n\s*THEN\s*\n', r') THEN\n', text, flags=re.MULTILINE)
-        text = re.sub(r'\)\s*\n\s*THEN', r') THEN', text, flags=re.MULTILINE)
+        # PRESERVE BEGIN...END BLOCKS - ONLY ADD END IF; WHERE NEEDED
+        # Rule from sybase_conversion_rules.md: "BEGIN...END blocks must be preserved"
         
-        # Step 2: Remove unnecessary BEGIN...END; blocks around single assignment statements
-        # Pattern: THEN \nBEGIN\nlocvar := value;\nEND; -> THEN\nlocvar := value;
-        text = re.sub(
-            r'(THEN)\s*\n\s*BEGIN\s*\n\s*([a-zA-Z_][a-zA-Z0-9_]*\s*:=\s*[^;]+;)\s*\n\s*END;',
-            r'\1\n        \2',
-            text,
-            flags=re.MULTILINE
-        )
-        
-        # Step 3: Remove BEGIN...END wrapper around nested IF blocks that have multiple branches
-        # Pattern: THEN\n        BEGIN\n            IF ... ELSIF ... END;\n        END; 
-        # Replace with: THEN\n            IF ... ELSIF ... END IF;
-        text = re.sub(
-            r'(ELSIF[^T]+THEN)\s*\n\s+BEGIN\s*\n(\s+IF\s*\([^)]+\)\s*THEN[^$]+?)\s+END;\s*\n\s+ELSIF',
-            r'\1\n\2 END IF;\nELSIF',
-            text,
-            flags=re.MULTILINE | re.DOTALL
-        )
-        
-        # Step 4: Add END IF; to close IF blocks 
-        # Replace END; before ELSIF with END IF;
-        text = re.sub(r';\s*\n\s*END;\s*\nELSIF', r';\nEND IF;\nELSIF', text, flags=re.MULTILINE)
-        
-        # Step 5: Replace the final END; before $$ with END IF;
-        text = re.sub(r'(;|NULL;)\s*\n\s*END;\s*\n\s*\$\$', r'\1\nEND IF;\n$$', text, flags=re.MULTILINE)
-        
-        # Step 6: Capitalize BEGIN
+        # Step 0: Uppercase BEGIN, END, IF, ELSIF, THEN for consistency
         text = re.sub(r'\bbegin\b', 'BEGIN', text, flags=re.IGNORECASE)
-
+        text = re.sub(r'\bend\b', 'END', text, flags=re.IGNORECASE)
+        text = re.sub(r'\bif\b', 'IF', text, flags=re.IGNORECASE)
+        text = re.sub(r'\belsif\b', 'ELSIF', text, flags=re.IGNORECASE)
+        text = re.sub(r'\bthen\b', 'THEN', text, flags=re.IGNORECASE)
+        
+        # Step 1: Add semicolons to all END statements that don't have them
+        text = re.sub(r'\bEND\b(?!\s*IF)(?!\s*;)', 'END;', text)
+        text = re.sub(r'\bEND\s+IF\b(?!\s*;)', 'END IF;', text)
+        
+        # Step 2: Move THEN to same line as condition for readability
+        text = re.sub(r'\)\s*\n\s*then\b', ') THEN', text, flags=re.IGNORECASE | re.MULTILINE)
+        
+        # Step 2b: Fix ELSIF spacing - ensure there's a space between ELSIF and (
+        text = re.sub(r'\bELSIF\s*\(', 'ELSIF (', text, flags=re.IGNORECASE)
+        
+        # Step 3: Track IF blocks and ensure each has END IF;
+        # CRITICAL: BEGIN...END blocks must NOT be converted to END IF;
+        lines = text.split('\n')
+        result_lines = []
+        
+        # Stack to track blocks: each entry is {'type': 'IF' or 'BEGIN', 'line': line_number}
+        block_stack = []
+        
+        for i, line in enumerate(lines):
+            stripped = line.strip().upper()
+            orig_line = line  # Keep original line for output
+            
+            # Track BEGIN - push onto stack
+            if re.match(r'BEGIN\s*;?\s*$', stripped):
+                block_stack.append({'type': 'BEGIN', 'line': i})
+                result_lines.append(orig_line)
+                continue
+            
+            # Track IF (but NOT ELSIF) - push onto stack
+            if re.match(r'IF\s*\(', stripped) and 'ELSIF' not in stripped:
+                block_stack.append({'type': 'IF', 'line': i})
+                result_lines.append(orig_line)
+                continue
+            
+            # ELSIF doesn't add to stack (it's part of existing IF block)
+            if re.match(r'ELSIF\s*\(', stripped):
+                result_lines.append(orig_line)
+                continue
+            
+            # END IF; is already correct - pop IF from stack
+            if re.match(r'END\s+IF\s*;?\s*$', stripped):
+                # Pop most recent IF from stack
+                for j in range(len(block_stack) - 1, -1, -1):
+                    if block_stack[j]['type'] == 'IF':
+                        block_stack.pop(j)
+                        break
+                result_lines.append(orig_line)
+                continue
+            
+            # END; - check what it closes
+            if re.match(r'END\s*;?\s*$', stripped):
+                # Check if we need to close any IF blocks before closing a BEGIN
+                # If the stack has [... BEGIN, IF, ...], the END should close the IF first
+                # But if the stack has [... IF, BEGIN], the END closes the BEGIN
+                
+                if block_stack:
+                    # Find the most recent BEGIN or IF
+                    begin_idx = None
+                    if_idx = None
+                    for j in range(len(block_stack) - 1, -1, -1):
+                        if block_stack[j]['type'] == 'BEGIN' and begin_idx is None:
+                            begin_idx = j
+                        if block_stack[j]['type'] == 'IF' and if_idx is None:
+                            if_idx = j
+                    
+                    # If there's an IF after the most recent BEGIN, this END closes the BEGIN
+                    # But first we need to close the IF!
+                    if begin_idx is not None and if_idx is not None and if_idx > begin_idx:
+                        # There's an unclosed IF inside a BEGIN block
+                        # Add END IF; first, then END; for the BEGIN
+                        result_lines.append(re.sub(r'END\s*;?\s*$', 'END IF;', orig_line, flags=re.IGNORECASE))
+                        block_stack.pop(if_idx)  # Remove the IF
+                        # Calculate correct indentation for the END;
+                        indent = ' ' * (len(orig_line) - len(orig_line.lstrip()))
+                        result_lines.append(indent + 'END;')
+                        # Adjust index after first pop
+                        adjusted_begin_idx = begin_idx if if_idx > begin_idx else begin_idx - 1
+                        block_stack.pop(adjusted_begin_idx)  # Remove the BEGIN
+                    elif if_idx is not None and (begin_idx is None or if_idx > begin_idx):
+                        # Most recent block is IF - convert END; to END IF;
+                        result_lines.append(re.sub(r'END\s*;?\s*$', 'END IF;', orig_line, flags=re.IGNORECASE))
+                        block_stack.pop(if_idx)
+                    elif begin_idx is not None:
+                        # Most recent block is BEGIN - keep as END;
+                        result_lines.append(orig_line)
+                        block_stack.pop(begin_idx)
+                    else:
+                        # Shouldn't happen, but keep as-is
+                        result_lines.append(orig_line)
+                else:
+                    # No blocks in stack - this is a standalone END; (probably function closure)
+                    result_lines.append(orig_line)
+                continue
+            
+            # For any other line, just add it
+            result_lines.append(orig_line)
+        
+        text = '\n'.join(result_lines)
+        
+        # Debug: Log the sanitized output (without func_name since it's not available here)
+        logging.debug("Sanitized IF/ELSIF/END IF structure")
+        
+        # Step 4: Ensure proper function closure before $$
+        # If last statement before $$ is END IF;, we need an END; to close the function body
+        if re.search(r'END\s+IF\s*;\s*\n\s*\$\$', text, re.IGNORECASE):
+            text = re.sub(
+                r'(END\s+IF\s*;)\s*\n(\s*\$\$)',
+                r'\1\n    END;\n\2',
+                text,
+                flags=re.IGNORECASE
+            )
         
         # Replace Sybase functions with PostgreSQL equivalents
         text = re.sub(r'\bgetDate\s*\(\s*\)', 'CURRENT_TIMESTAMP', text, flags=re.IGNORECASE)

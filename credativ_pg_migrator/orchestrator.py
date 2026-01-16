@@ -338,8 +338,14 @@ class Orchestrator:
                     self.config_parser.print_log_message('INFO', f"Domain {domain_data['target_domain_name']} created successfully.")
                     self.target_connection.disconnect()
                 except Exception as e:
-                    self.migrator_tables.update_domain_status(domain_data['id'], False, f'ERROR: {e}')
-                    self.handle_error(e, f"create_domain {domain_data['target_domain_name']}")
+                    # Check if error is due to domain already existing
+                    error_msg = str(e).lower()
+                    if 'already exists' in error_msg or 'duplicate' in error_msg:
+                        self.config_parser.print_log_message('WARNING', f"Domain {domain_data['target_domain_name']} already exists, skipping.")
+                        self.migrator_tables.update_domain_status(domain_data['id'], True, 'already exists, skipped')
+                    else:
+                        self.migrator_tables.update_domain_status(domain_data['id'], False, f'ERROR: {e}')
+                        self.handle_error(e, f"create_domain {domain_data['target_domain_name']}")
             self.config_parser.print_log_message('INFO', "Domains migrated successfully.")
         else:
             self.config_parser.print_log_message('INFO', "No domains found to migrate.")

@@ -445,6 +445,16 @@ class SybaseASEConnector(DatabaseConnector):
         # Remove block comments (/* comment */)
         content = re.sub(r'/\*.*?\*/', '', content, flags=re.DOTALL)
         
+        # After removing comments, check if anything is left
+        if not content.strip():
+            return ''  # Comment-only DECLARE, skip it
+        
+        # Check for common comment phrases that might remain
+        content_lower = content.lower().strip()
+        if content_lower in ['local variables', 'declare local variables', 'variables', 
+                             'local variable', 'declare variable']:
+            return ''  # Skip comment-like phrases
+        
         content_clean = content.replace('@', '')
         content_clean = self._apply_data_type_substitutions(content_clean)
         content_clean = self._apply_udt_to_base_type_substitutions(content_clean, settings)
@@ -454,9 +464,13 @@ class SybaseASEConnector(DatabaseConnector):
         parts = self._split_respecting_parens(content_clean)
         for part in parts:
             part_stripped = part.strip()
-            # Skip empty parts or parts that are only whitespace/newlines
-            if part_stripped and not part_stripped.isspace():
-                declarations.append(part_stripped + ';')
+            # Skip empty parts, whitespace-only, or common comment phrases
+            if (part_stripped and not part_stripped.isspace() and 
+                part_stripped.lower() not in ['local variables', 'variables', 'local variable']):
+                # Additional check: must contain a data type indicator
+                if re.search(r'\b(integer|bigint|varchar|text|timestamp|numeric|boolean|date|time)\b', 
+                           part_stripped, re.IGNORECASE):
+                    declarations.append(part_stripped + ';')
         return ''
 
     def migrate_sequences(self, target_connector, settings):
@@ -1562,13 +1576,21 @@ class SybaseASEConnector(DatabaseConnector):
                     # Replace regex: match keyword and everything to end of string
                     p_clean = re.sub(r'(?:[\s\t]+|^)(OUTPUT|OUT)\b.*', '', p_clean, flags=re.IGNORECASE | re.DOTALL).strip()
                     if not p_clean.lower().startswith("inout "):
-                        # Run 14 Fix: Append DEFAULT NULL to satisfy Postgres signature requirements
-                        p_clean = "INOUT " + p_clean + " DEFAULT NULL"
+                        # Remove any existing '= NULL' or '= null' - PostgreSQL INOUT params cannot have DEFAULT values
+                        p_clean = re.sub(r'\s*=\s*(NULL|null)\s*$', '', p_clean, flags=re.IGNORECASE).strip()
+                        # Convert to INOUT parameter (PostgreSQL doesn't support DEFAULT for INOUT)
+                        p_clean = "INOUT " + p_clean
 
                     self.config_parser.print_log_message('DEBUG', f"PARAM_CHECK Result: '{p_clean}'")
 
                 for sybase_type, pg_type in types_mapping.items():
                     p_clean = re.sub(rf'\b{re.escape(sybase_type)}\b', pg_type, p_clean, flags=re.IGNORECASE)
+                
+                # Fix double quotes in default values: = "value" -> = 'value'
+                p_clean = re.sub(r'=\s*"([^"]+)"', r"= '\1'", p_clean)
+                
+                # Fix BYTEA(n) -> BYTEA (PostgreSQL doesn't support length modifier on BYTEA)
+                p_clean = re.sub(r'\bBYTEA\s*\(\d+\)', 'BYTEA', p_clean, flags=re.IGNORECASE)
 
                 processed_params.append(p_clean)
 
@@ -1800,6 +1822,9 @@ class SybaseASEConnector(DatabaseConnector):
 
         # Cleanup: Remove semicolon after block comment at end of line (Syntax Error)
         ddl = re.sub(r'\*/\s*;+\s*$', '*/', ddl, flags=re.MULTILINE)
+        
+        # FINAL SANITIZATION per Rule F (Strict Order)
+        ddl = self._sanitize_output(ddl)
 
         return ddl
 
@@ -2258,7 +2283,7 @@ class SybaseASEConnector(DatabaseConnector):
                   elif isinstance(expression, exp.Return):
                        return "RETURN NEW;"
                   elif isinstance(expression, exp.Command) and expression.this.upper() == 'SET':
-                       # Convert SET @var = val -> var = val;
+                       # Convert SET @var = val -> var := val;
                        expr_cmd = ""
                        if expression.expression:
                            if isinstance(expression.expression, str):
@@ -2269,11 +2294,22 @@ class SybaseASEConnector(DatabaseConnector):
                                expr_cmd = str(expression.expression)
 
                        # Handles: @var = val, locvar_var = val
-                       # Simple regex to strip SET and formatting
-                       # Note: expr_cmd is the string after SET. e.g. "locvar_x = 1"
-                       # We just return it as is, because PL/pgSQL supports "var = val;"
-                       # But we must ensure no "SET" prefix is generated.
+                       # Note: expr_cmd is the string after SET. e.g. "locvar_x = 1" or "locvar_x := 1"
+                       # Convert = to := for PL/pgSQL assignment
                        clean_assign = expr_cmd.strip().rstrip(';')
+                       
+                       # Replace = with := if not already :=
+                       if ' := ' not in clean_assign:
+                           # Find the = sign (not within quotes/strings)
+                           clean_assign = re.sub(r'\s*=\s*', ' := ', clean_assign, count=1)
+                       
+                       # Capitalize NULL keyword
+                       clean_assign = re.sub(r'\bnull\b', 'NULL', clean_assign, flags=re.IGNORECASE)
+                       
+                       # Replace common Sybase functions with PostgreSQL equivalents
+                       clean_assign = re.sub(r'\bgetDate\s*\(\s*\)', 'CURRENT_TIMESTAMP', clean_assign, flags=re.IGNORECASE)
+                       clean_assign = re.sub(r'\bCURRENT_TIMESTAMP\s*\(\s*\)', 'CURRENT_TIMESTAMP', clean_assign, flags=re.IGNORECASE)
+                       
                        return f"{clean_assign};"
                   elif isinstance(expression, exp.Select):
                        # Sybase Assignment in Select (Trigger context): SELECT @x = y
@@ -3899,16 +3935,29 @@ class SybaseASEConnector(DatabaseConnector):
             
             # Handle SELECT @var = (subquery) pattern
             # This needs special treatment as it's a scalar subquery assignment
-            subquery_pattern = r'(@?\w+)\s*=\s*\(([^)]+SELECT[^)]+)\)'
-            if re.search(subquery_pattern, block, re.IGNORECASE | re.DOTALL):
-                # Convert SELECT @var = (SELECT ...) to SELECT (SELECT ...) INTO var
+            # Pattern: SELECT @var = (SELECT col FROM table WHERE...)
+            # Use a better pattern that matches the entire parenthesized subquery
+            subquery_pattern = r'(locvar_\w+)\s*=\s*\(\s*(SELECT\s+(?:[^()]+|\([^()]*\))*)\s*\)'
+            if re.search(subquery_pattern, block, re.IGNORECASE):
+                # Convert to: SELECT ... INTO var (extract subquery, remove outer parens)
                 def fix_subquery_assignment(m):
                     var = m.group(1).strip()
                     subq = m.group(2).strip()
-                    return f"SELECT ({subq}) INTO {var}"
+                    # For SELECT col FROM table, we want: SELECT col INTO var FROM table
+                    # Insert INTO after first SELECT and column list
+                    parts = re.split(r'\bFROM\b', subq, maxsplit=1, flags=re.IGNORECASE)
+                    if len(parts) == 2:
+                        select_cols = parts[0].strip()
+                        from_clause = parts[1].strip()
+                        # Remove SELECT keyword temporarily
+                        select_cols = re.sub(r'^SELECT\s+', '', select_cols, flags=re.IGNORECASE)
+                        return f"SELECT {select_cols} INTO {var} FROM {from_clause}"
+                    else:
+                        # No FROM clause, simple value assignment
+                        return f"{var} := {subq}"
                 
-                block = re.sub(subquery_pattern, fix_subquery_assignment, block, flags=re.IGNORECASE | re.DOTALL)
-                return block + ";"
+                block = re.sub(subquery_pattern, fix_subquery_assignment, block, flags=re.IGNORECASE)
+                return "SELECT " + block + ";"
             
             # Use generic split looking for "comma, space, variable, ="
             items = re.split(r',\s*(?=@?\w+[\t ]*=)', block)
@@ -3925,34 +3974,32 @@ class SybaseASEConnector(DatabaseConnector):
 
         # Fix: Specialized handler for Trigger assignments with SELECT ... FROM inserted/deleted
         # This converts: SELECT @a = col1, @b = col2 FROM inserted
-        # To: SELECT col1, col2 INTO locvar_a, locvar_b FROM NEW
+        # To: locvar_a = NEW.col1; locvar_b = NEW.col2;
+        # According to conversion rules: map columns directly to NEW/OLD, NO FROM clause
         def trigger_select_inserted_replacer(match):
              content = match.group(1).strip() # The assignment part: @a=col1, @b=col2
              table_name = match.group(2).lower() # inserted or deleted
              table_alias = "NEW" if table_name == 'inserted' else "OLD"
-             from_clause = match.group(3) if match.lastindex >= 3 else "" # Optional WHERE/JOIN etc
+             # Note: We ignore any WHERE clause after FROM inserted/deleted as it's not standard
+             # Sybase triggers use inserted/deleted as transition tables, not queryable with WHERE
              
              # Split assignments by comma (but not inside parentheses/subqueries)
-             # Simple split for now - advanced regex would handle nested ()
              items = re.split(r',\s*(?=@?\w+\s*=)', content)
-             variables = []
-             columns = []
+             assignments = []
              
              for item in items:
                  item = item.strip()
                  if '=' in item:
                      var, col = item.split('=', 1)
-                     variables.append(var.strip())
-                     columns.append(col.strip())
+                     var_clean = var.strip()
+                     col_clean = col.strip()
+                     # Map column reference to NEW/OLD.column
+                     assignments.append(f"{var_clean} = {table_alias}.{col_clean}")
              
-             # Build PostgreSQL syntax: SELECT col1, col2 INTO var1, var2 FROM NEW
-             if variables and columns:
-                 vars_list = ', '.join(variables)
-                 cols_list = ', '.join(columns)
-                 result = f"SELECT {cols_list} INTO {vars_list} FROM {table_alias}"
-                 if from_clause:
-                     result += from_clause
-                 return result + ";"
+             # Build PostgreSQL syntax: Direct assignments
+             if assignments:
+                 result = ";\n".join(assignments) + ";"
+                 return result
              
              return match.group(0) # Fallback
 
@@ -4156,20 +4203,89 @@ EXECUTE FUNCTION {target_schema}.{trigger_name}_func();
         # 1. Doubled semicolons or ; + whitespace + ; -> ;
         text = re.sub(r';\s*;', ';', text)
         
+        # Fix: Convert any remaining SELECT assignments (in case they slipped through earlier processing)
+        # Pattern: select locvar_var = value -> locvar_var := value
+        text = re.sub(
+            r'^\s*select\s+(locvar_\w+)\s*=\s*(.+?)$',
+            r'\1 := \2;',
+            text,
+            flags=re.MULTILINE | re.IGNORECASE
+        )
+        
+        # Fix: Remove SET keyword from assignments (SET locvar_var = -> locvar_var := or SET locvar_var := -> locvar_var :=)
+        text = re.sub(r'\bSET\s+(locvar_\w+)', r'\1', text, flags=re.IGNORECASE)
+        
+        # Fix: Convert remaining = to := in locvar assignments (but not in WHERE clauses or comparisons)
+        # Match locvar_name = value (where value is not another =)
+        # Use word boundary and space requirement to avoid matching comparisons
+        text = re.sub(r'^\s*(locvar_\w+)\s*=\s+(?!=)', r'\1 := ', text, flags=re.MULTILINE)
+        
+        # Fix: Convert ELSE IF to ELSIF per PostgreSQL best practices
+        text = re.sub(r'\belse\s+if\b', 'ELSIF', text, flags=re.IGNORECASE)
+        
+        # Capitalize NULL keyword (only as standalone word, not in identifiers)
+        text = re.sub(r'\bnull\b', 'NULL', text, flags=re.IGNORECASE)
+        
+        # Replace Sybase functions with PostgreSQL equivalents
+        text = re.sub(r'\bgetDate\s*\(\s*\)', 'CURRENT_TIMESTAMP', text, flags=re.IGNORECASE)
+        text = re.sub(r'\bCURRENT_TIMESTAMP\s*\(\s*\)', 'CURRENT_TIMESTAMP', text, flags=re.IGNORECASE)
+        
         # 8. RETURN NEW must be followed by ;
         text = re.sub(r'\bRETURN\s+NEW(?!;)', 'RETURN NEW;', text, flags=re.IGNORECASE)
         
-        # 10. locvar_var = <value> must be followed by ; (but not if already has semicolon)
+        # 10. locvar_var := <value> must be followed by ; (but not if already has semicolon)
         # Match assignment statements that are NOT already followed by semicolon
-        # Also handle := operator and = operator
-        text = re.sub(r'\b(locvar_\w+)\s*(:?=)\s*([^;\n]+?)(?=\s*$|\s*\n)', r'\1 \2 \3;', text, flags=re.MULTILINE)
+        text = re.sub(r'\b(locvar_\w+)\s*(:=)\s*([^;\n]+?)(?=\s*$|\s*\n)', r'\1 \2 \3;', text, flags=re.MULTILINE)
         
-        # Fix: Ensure SET statements have semicolons
-        # SET locvar_var = value (without FROM clause) needs semicolon
-        text = re.sub(r'\bSET\s+(locvar_\w+)\s*=\s*([^;\n]+?)(?=\s*$|\s*\n)(?!\s*FROM)', r'SET \1 = \2;', text, flags=re.MULTILINE | re.IGNORECASE)
+        # Fix: Remove incorrectly placed semicolons in INSERT statements
+        # INSERT INTO table(...); VALUES(...) -> INSERT INTO table(...) VALUES(...)
+        text = re.sub(
+            r'(INSERT\s+INTO\s+[^;]+\([^)]*\))\s*;\s*(VALUES\s*\()',
+            r'\1\n            \2',
+            text,
+            flags=re.IGNORECASE
+        )
         
-        # Fix: SELECT...INTO statements need semicolons
-        text = re.sub(r'(SELECT\s+.+?\s+INTO\s+.+?)(?=\s*$|\s*\n)(?!;)', r'\1;', text, flags=re.MULTILINE | re.IGNORECASE | re.DOTALL)
+        # Fix: Remove incorrectly placed semicolons in UPDATE statements
+        # UPDATE table; SET ... -> UPDATE table SET ...
+        text = re.sub(
+            r'(UPDATE\s+[\w.]+)\s*;\s*(SET\s+)',
+            r'\1\n                    \2',
+            text,
+            flags=re.IGNORECASE
+        )
+        
+        # Fix: Now ensure complete DML statements end with semicolon
+        # INSERT INTO ... VALUES (...) <- add semicolon here if missing
+        text = re.sub(
+            r'(INSERT\s+INTO\s+[^;]+VALUES\s*\([^)]*\))(?!\s*;)',
+            r'\1;',
+            text,
+            flags=re.IGNORECASE | re.DOTALL
+        )
+        
+        # UPDATE ... WHERE ... <- add semicolon here if missing
+        text = re.sub(
+            r'(UPDATE\s+[^;]+?WHERE\s+[^;]+?)(?=\s*$|\s*\n\s*(?:END|IF|ELSE|RETURN|BEGIN))',
+            r'\1;',
+            text,
+            flags=re.IGNORECASE | re.DOTALL
+        )
+        
+        # DELETE FROM ... WHERE ... <- add semicolon here if missing
+        text = re.sub(
+            r'(DELETE\s+FROM\s+[^;]+?)(?=\s*$|\s*\n\s*(?:END|IF|ELSE|RETURN|BEGIN))',
+            r'\1;',
+            text,
+            flags=re.IGNORECASE | re.DOTALL
+        )
+        
+        # Fix: SELECT...INTO statements need semicolons if not already present
+        text = re.sub(r'(SELECT\s+.+?\s+INTO\s+.+?FROM\s+.+?)(?=\s*(?:\n|$)(?!;))', r'\1;', text, flags=re.MULTILINE | re.IGNORECASE | re.DOTALL)
+        
+        # Fix: Simple assignment statements (var = value;) should use :=
+        # This catches remaining = that should be :=
+        text = re.sub(r'^(\s*)(locvar_\w+)\s*=\s*([^=;]+?);', r'\1\2 := \3;', text, flags=re.MULTILINE)
         
         # 14. Doubled semicolons again (after all additions)
         text = re.sub(r';\s*;', ';', text)

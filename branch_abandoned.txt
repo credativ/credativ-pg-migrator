@@ -1,0 +1,2 @@
+This branch sybase_mssql_improvements_20260113 failed
+I preserve it for reference, but I abandon it because changes are unstable and optimization goes in circles

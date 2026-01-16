@@ -2142,9 +2142,83 @@ class SybaseASEConnector(DatabaseConnector):
 
                  return [f"/* PARSING FAILED: {e} */\n" + body_content]
 
+        # Comment Protection Map
+        comment_map = {}
+
+        # Helper to protect comments from sqlglot parsing by converting them to SELECT placeholders
+        def protect_comments(text):
+             # Regex to capture Strings (single quote), Block Comments, Line Comments
+             # We must match strings to avoid matching comments inside strings
+             pattern = re.compile(r"('(?:''|[^'])*')|(/\*.*?\*/)|(--[^\n]*)", re.DOTALL)
+
+             def replace(match):
+                 s = match.group(0)
+                 if match.group(1): # It's a string, keep it
+                     return s
+
+                 # It's a comment (Group 2 or 3)
+                 cid = len(comment_map)
+                 comment_map[cid] = s
+
+                 # Preserve line count
+                 newlines = s.count('\n')
+                 # Use a placeholder statement. SELECT '...' is safe.
+                 # Add semicolon to encourage splitting
+                 return f"SELECT '___CMT_{cid}___';" + ("\n" * newlines)
+
+             return pattern.sub(replace, text)
+
+        # Apply protection
+        protected_content = protect_comments(body_content)
+
+        try:
+             # Parse the protected content
+             parsed = sqlglot.parse(protected_content, read='tsql')
+        except Exception as e:
+             # Fallback to original content on parse failure
+             parsed = []
+             self.config_parser.print_log_message('DEBUG', f"Parse failed on protected content: {e}")
+             # Try parsing original as fallback? Or fail gracefully?
+             # Let's try parsing original body_content if protected fails
+             try:
+                 parsed = sqlglot.parse(body_content, read='tsql')
+             except:
+                 parsed = []
+
         converted_statements = []
-        def process_node(expression):
+        def process_node_impl(expression):
              if not expression: return None
+
+             def handle_set_command(expression):
+                 # Convert SET @var = val -> var := val;
+                 expr_cmd = ""
+                 if expression.expression:
+                     if isinstance(expression.expression, str):
+                         expr_cmd = expression.expression
+                     elif hasattr(expression.expression, 'this'):
+                         expr_cmd = expression.expression.this
+                     else:
+                         expr_cmd = str(expression.expression)
+
+                 # Handles: @var = val, locvar_var = val
+                 # Note: expr_cmd is the string after SET. e.g. "locvar_x = 1" or "locvar_x := 1"
+                 # Convert = to := for PL/pgSQL assignment
+                 clean_assign = expr_cmd.strip().rstrip(';')
+
+                 # Replace = with := if not already :=
+                 if ' := ' not in clean_assign:
+                     # Find the = sign (not within quotes/strings)
+                     clean_assign = re.sub(r'\s*=\s*', ' := ', clean_assign, count=1)
+
+                 # Capitalize NULL keyword
+                 clean_assign = re.sub(r'\bnull\b', 'NULL', clean_assign, flags=re.IGNORECASE)
+
+                 # Replace common Sybase functions with PostgreSQL equivalents
+                 clean_assign = re.sub(r'\bgetDate\s*\(\s*\)', 'CURRENT_TIMESTAMP', clean_assign, flags=re.IGNORECASE)
+                 clean_assign = re.sub(r'\bCURRENT_TIMESTAMP\s*\(\s*\)', 'CURRENT_TIMESTAMP', clean_assign, flags=re.IGNORECASE)
+
+                 return f"{clean_assign};"
+
              # Handle Blocks Recursively
              # Use extensive checks to catch Block processing
              is_block = isinstance(expression, Block) or type(expression).__name__ == 'Block'
@@ -2244,6 +2318,9 @@ class SybaseASEConnector(DatabaseConnector):
                            msg = msg_match.group(1) if msg_match else "Trigger Rollback"
                            return f"RAISE EXCEPTION '{msg}';"
 
+                       if expression.this.upper() == 'SET':
+                           return handle_set_command(expression)
+
                        # Fallback for other commands (e.g. unparsed SELECT blocks)
                        raw = expression.sql()
                        # Apply trigger replacements
@@ -2305,35 +2382,6 @@ class SybaseASEConnector(DatabaseConnector):
                        return "RAISE EXCEPTION 'Transaction Rollback Not Supported in Trigger';"
                   elif isinstance(expression, exp.Return):
                        return "RETURN NEW;"
-                  elif isinstance(expression, exp.Command) and expression.this.upper() == 'SET':
-                       # Convert SET @var = val -> var := val;
-                       expr_cmd = ""
-                       if expression.expression:
-                           if isinstance(expression.expression, str):
-                               expr_cmd = expression.expression
-                           elif hasattr(expression.expression, 'this'):
-                               expr_cmd = expression.expression.this
-                           else:
-                               expr_cmd = str(expression.expression)
-
-                       # Handles: @var = val, locvar_var = val
-                       # Note: expr_cmd is the string after SET. e.g. "locvar_x = 1" or "locvar_x := 1"
-                       # Convert = to := for PL/pgSQL assignment
-                       clean_assign = expr_cmd.strip().rstrip(';')
-
-                       # Replace = with := if not already :=
-                       if ' := ' not in clean_assign:
-                           # Find the = sign (not within quotes/strings)
-                           clean_assign = re.sub(r'\s*=\s*', ' := ', clean_assign, count=1)
-
-                       # Capitalize NULL keyword
-                       clean_assign = re.sub(r'\bnull\b', 'NULL', clean_assign, flags=re.IGNORECASE)
-
-                       # Replace common Sybase functions with PostgreSQL equivalents
-                       clean_assign = re.sub(r'\bgetDate\s*\(\s*\)', 'CURRENT_TIMESTAMP', clean_assign, flags=re.IGNORECASE)
-                       clean_assign = re.sub(r'\bCURRENT_TIMESTAMP\s*\(\s*\)', 'CURRENT_TIMESTAMP', clean_assign, flags=re.IGNORECASE)
-
-                       return f"{clean_assign};"
                   elif isinstance(expression, exp.Select):
                        # Sybase Assignment in Select (Trigger context): SELECT @x = y
                        assignments = []
@@ -2389,15 +2437,16 @@ class SybaseASEConnector(DatabaseConnector):
                                            # Replace "val" with 'val'
                                            vlist.expressions[i] = exp.Literal.string(item.this)
 
-             pg_sql = expression.sql(dialect='postgres')
+             use_comments = not (hasattr(expression, 'comments') and expression.comments)
+             pg_sql = expression.sql(dialect='postgres', comments=use_comments)
 
              # Handling standalone BEGIN/END keywords
              if pg_sql.strip().upper() == 'BEGIN':
                   return "BEGIN" # Return BEGIN without semicolon
              if pg_sql.strip().upper() == 'END':
                   return "END;" # Return END with semicolon (or rely on skip_semicolon logic below)
-                  # If we return END;, the logic at 2541 checks for ;. So "END;" ends with ;. It won't double it.
-                  
+                  # If we return END;, the logic at 2541 checks for ;. It won't double it.
+
              pg_sql = pg_sql.replace('locvar_error_placeholder', 'SQLSTATE')
 
              is_special_cmd = "MASKED_BLOCK:" in pg_sql or "'CURSOR_CMD:" in pg_sql or "'RAISERROR_CMD:" in pg_sql
@@ -2443,17 +2492,20 @@ class SybaseASEConnector(DatabaseConnector):
                    # This allows it to work for both AST-parsed statements AND regex fallback bodies.
 
              if not is_cursor_cmd and not is_raise_cmd and not is_block_cmd:
-                 # 2. Normal PRINT -> RAISE NOTICE
-                 if isinstance(expression, exp.Command) and expression.this.upper().startswith('PRINT'):
-                     # Reuse regex from original
-                     msg_match = re.search(r'PRINT\s+(.*)', expression.this, re.IGNORECASE)
-                     if msg_match:
-                         pg_sql = f"RAISE NOTICE {msg_match.group(1).strip()}"
-                     else:
-                         pg_sql = f"RAISE NOTICE 'PRINT found'"
+                  # 2. Normal PRINT -> RAISE NOTICE
+                  if isinstance(expression, exp.Command) and expression.this.upper().startswith('PRINT'):
+                      # Reuse regex from original
+                      msg_match = re.search(r'PRINT\s+(.*)', expression.this, re.IGNORECASE)
+                      if msg_match:
+                          pg_sql = f"RAISE NOTICE {msg_match.group(1).strip()}"
+                      else:
+                          pg_sql = f"RAISE NOTICE 'PRINT found'"
+
+                  elif isinstance(expression, exp.Command) and expression.this.upper() == 'SET':
+                      return handle_set_command(expression)
 
                  # 3. SELECT Assignments & SELECT INTO
-                 elif isinstance(expression, exp.Select):
+                  elif isinstance(expression, exp.Select):
                      generated = pg_sql
                      assignments = []
                      is_var_assignment = False
@@ -2493,7 +2545,7 @@ class SybaseASEConnector(DatabaseConnector):
                                pg_sql = f"DROP TABLE IF EXISTS {table}; CREATE TEMP TABLE {table} AS {select_part}"
 
                  # 4. EXEC -> PERFORM
-                 elif isinstance(expression, exp.Command) and (expression.this.upper().startswith('EXEC') or expression.this.upper().startswith('EXECUTE')):
+                  elif isinstance(expression, exp.Command) and (expression.this.upper().startswith('EXEC') or expression.this.upper().startswith('EXECUTE')):
                       gen_sql = pg_sql # already generated
                       match_exec_assign = re.match(r'(?:EXEC|EXECUTE)\s+([a-zA-Z0-9_]+)\s*=\s*([a-zA-Z0-9_\.]+)(.*)', gen_sql, re.IGNORECASE)
                       match_exec = re.match(r'(?:EXEC|EXECUTE)\s+([a-zA-Z0-9_\.]+)(.*)', gen_sql, re.IGNORECASE)
@@ -2512,18 +2564,18 @@ class SybaseASEConnector(DatabaseConnector):
                           pg_sql = f"PERFORM {proc}{args}"
 
                  # 5. RETURN
-                 elif isinstance(expression, exp.Return):
+                  elif isinstance(expression, exp.Return):
                       pg_sql = "RETURN" # Helper triggers handle actual return usually (RETURN NEW done above)
 
                  # 6. IF/WHILE catch-all (if not caught by recursive handler)
-                 elif isinstance(expression, exp.If):
+                  elif isinstance(expression, exp.If):
                       if 'END IF' not in pg_sql.upper(): pg_sql += " END IF"
-                 elif hasattr(exp, 'While') and isinstance(expression, exp.While):
+                  elif hasattr(exp, 'While') and isinstance(expression, exp.While):
                       pass # handled by sqlglot?
 
-                 # Fix DEALLOCATE
-                 if pg_sql.upper().startswith('DEALLOCATE CURSOR '): pg_sql = pg_sql.replace('DEALLOCATE CURSOR ', 'DEALLOCATE ')
-                 if pg_sql.upper().startswith('CLOSE CURSOR '): pg_sql = pg_sql.replace('CLOSE CURSOR ', 'CLOSE ')
+             # Fix DEALLOCATE
+             if pg_sql.upper().startswith('DEALLOCATE CURSOR '): pg_sql = pg_sql.replace('DEALLOCATE CURSOR ', 'DEALLOCATE ')
+             if pg_sql.upper().startswith('CLOSE CURSOR '): pg_sql = pg_sql.replace('CLOSE CURSOR ', 'CLOSE ')
 
              # Post-processing
              # Mask before aggressive regexes to protect strings
@@ -2547,7 +2599,7 @@ class SybaseASEConnector(DatabaseConnector):
              if pg_sql.strip().upper() in ('BEGIN', 'END'):
                  if pg_sql.strip().upper() == 'BEGIN':
                       # Preserve BEGIN if it came through (standalone) - Skip Semicolon
-                      skip_semicolon = True 
+                      skip_semicolon = True
                       return "BEGIN"
                  if pg_sql.strip().upper() == 'END':
                       # Preserve END if it came through (standalone) - Ensure Semicolon
@@ -2557,12 +2609,61 @@ class SybaseASEConnector(DatabaseConnector):
                  pg_sql += ';'
              return pg_sql
 
+        def process_node(expression):
+             res = process_node_impl(expression)
+
+             if res:
+                  # Unmask placeholders found in the result
+                  # Matches patterns like: SELECT '___CMT_123___'; or '___CMT_123___'
+                  def unmask_replacer(match):
+                       cid_str = match.group(1) if match.group(1) else match.group(2)
+                       if cid_str:
+                            cid = int(cid_str)
+                            return comment_map.get(cid, match.group(0))
+                       return match.group(0)
+
+                  # Pattern 1: Protected SELECT statement (with optional semicolon and SELECT keyword)
+                  # Note: sqlglot might have formatted it as SELECT '...' or just '...'
+                  res = re.sub(r"(?:SELECT\s+)?'___CMT_(\d+)___'\s*;?", unmask_replacer, res, flags=re.IGNORECASE)
+
+                  # Pattern 2: Raw placeholder (stripped quotes?)
+                  res = re.sub(r"___CMT_(\d+)___", unmask_replacer, res, flags=re.IGNORECASE)
+
+             if res and hasattr(expression, 'comments') and expression.comments:
+                  cmts = []
+                  for c in expression.comments:
+                       if '\n' in c: cmts.append(f"/*{c}*/")
+                       else: cmts.append(f"--{c}")
+                  return "\n".join(cmts) + "\n" + res
+             return res
+
+        last_lineno = None
         for expression in parsed:
              if is_trigger:
                  expression = self._transform_trigger_tables(expression)
              res = process_node(expression)
              if res:
+                  # Preserve empty lines
+                  # If we have line number info, check gap
+                  curr_lineno = getattr(expression, 'lineno', None)
+                  if last_lineno is not None and curr_lineno is not None:
+                      diff = curr_lineno - last_lineno
+                      # E.g. stmt1 at 1, stmt2 at 3. diff=2. 1 empty line.
+                      # stmt1 at 1, stmt2 at 2. diff=1. 0 empty lines.
+                      if diff > 1:
+                          # Insert empty lines (diff - 1)
+                          converted_statements.append("\n" * (diff - 1))
+
                   converted_statements.append(res)
+                  # Approximate new last_lineno based on sqlglot parsing state
+                  # Or just trust next expression lineno?
+                  # Ideally we update last_lineno to end of this statement.
+                  # But sqlglot expression doesn't handle end_lineno reliably.
+                  # Using the start lineno of THIS statement as "last seen start"
+                  # doesn't help with gaps AFTER it.
+                  # Using START of next - START of this is rough but preserves relative vertical rhythm.
+                  if curr_lineno is not None:
+                       last_lineno = curr_lineno
 
         return converted_statements
 

@@ -1,0 +1,37 @@
+DEBUG: _parse_statement. curr=SET
+DEBUG: _parse_statement. curr=SET
+DEBUG: _parse_statement. curr=SET
+DEBUG: _parse_statement. curr=SET
+DEBUG: _parse_statement. curr=SET
+DEBUG: _parse_statement. curr=SET
+DEBUG: _parse_statement. curr=SET
+DEBUG: _parse_statement. curr=SET
+DEBUG: _parse_statement. curr=SET
+Traceback (most recent call last):
+  File "/home/josef/github.com/credativ/credativ-pg-migrator/tsql_convertor_gemini.py", line 145, in convert_file
+    converted_code = self.convert_code(code)
+                     ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/josef/github.com/credativ/credativ-pg-migrator/tsql_convertor_gemini.py", line 160, in convert_code
+    elif is_proc or is_func: return self._convert_funcproc(code)
+                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/josef/github.com/credativ/credativ-pg-migrator/tsql_convertor_gemini.py", line 176, in _convert_funcproc
+    pg_body, declarations = self._process_body(body_content)
+                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/josef/github.com/credativ/credativ-pg-migrator/tsql_convertor_gemini.py", line 298, in _process_body
+    parsed = sqlglot.parse(body_content, read=CustomTSQL)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3/dist-packages/sqlglot/__init__.py", line 64, in parse
+    return dialect.parse(sql, **opts)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3/dist-packages/sqlglot/dialects/dialect.py", line 157, in parse
+    return self.parser(**opts).parse(self.tokenizer.tokenize(sql), sql)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3/dist-packages/sqlglot/parser.py", line 703, in parse
+    return self._parse(
+           ^^^^^^^^^^^^
+  File "/usr/lib/python3/dist-packages/sqlglot/parser.py", line 769, in _parse
+    self.raise_error("Invalid expression / Unexpected token")
+  File "/usr/lib/python3/dist-packages/sqlglot/parser.py", line 812, in raise_error
+    raise error
+sqlglot.errors.ParseError: Invalid expression / Unexpected token. Line 1, Col: 338.
+  ar_Unbekannt = '40'; SET locvar_KeineEinwilligung = '50'; SET locvar_AusdruecklicheAblehnung = '60' [4mSET[0m locvar_permissionStatus = null if(locvar_propertyTypeId in (77,79,82,85,100,102,110,111)) /* OptOut

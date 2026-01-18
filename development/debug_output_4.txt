@@ -1,0 +1,200 @@
+DEBUG: Body Content Start: SET locvar_OptIn = 1; SET locvar_OptOut = 2; SET locvar_AusdruecklicheEinwilligungTelefonisch = '10'; SET locvar_AusdruecklicheEinwilligungOnline = '11'; SET locvar_MutmasslicheEinwilligung = '20'; SE
+DEBUG: Body Content End: yValue,8,1) = '1') /* Vertriebskontaktstatus Freenet*/
+        SET locvar_permissionStatus = locvar_OptOut;else if(locvar_propertyTypeId in (132, 133, 134))
+        SET locvar_permissionStatus = null;
+DEBUG: Manual Tokenize Count: 162
+Token 0: SET (TokenType.SET) Line 1
+Token 1: locvar_OptIn (TokenType.VAR) Line 1
+Token 2: = (TokenType.EQ) Line 1
+Token 3: 1 (TokenType.NUMBER) Line 1
+Token 4: ; (TokenType.SEMICOLON) Line 1
+Token 5: SET (TokenType.SET) Line 1
+Token 6: locvar_OptOut (TokenType.VAR) Line 1
+Token 7: = (TokenType.EQ) Line 1
+Token 8: 2 (TokenType.NUMBER) Line 1
+Token 9: ; (TokenType.SEMICOLON) Line 1
+Token 10: SET (TokenType.SET) Line 1
+Token 11: locvar_AusdruecklicheEinwilligungTelefonisch (TokenType.VAR) Line 1
+Token 12: = (TokenType.EQ) Line 1
+Token 13: 10 (TokenType.STRING) Line 1
+Token 14: ; (TokenType.SEMICOLON) Line 1
+Token 15: SET (TokenType.SET) Line 1
+Token 16: locvar_AusdruecklicheEinwilligungOnline (TokenType.VAR) Line 1
+Token 17: = (TokenType.EQ) Line 1
+Token 18: 11 (TokenType.STRING) Line 1
+Token 19: ; (TokenType.SEMICOLON) Line 1
+Token 20: SET (TokenType.SET) Line 1
+Token 21: locvar_MutmasslicheEinwilligung (TokenType.VAR) Line 1
+Token 22: = (TokenType.EQ) Line 1
+Token 23: 20 (TokenType.STRING) Line 1
+Token 24: ; (TokenType.SEMICOLON) Line 1
+Token 25: SET (TokenType.SET) Line 1
+Token 26: locvar_Firmenkunde (TokenType.VAR) Line 1
+Token 27: = (TokenType.EQ) Line 1
+Token 28: 30 (TokenType.STRING) Line 1
+Token 29: ; (TokenType.SEMICOLON) Line 1
+Token 30: SET (TokenType.SET) Line 1
+Token 31: locvar_Unbekannt (TokenType.VAR) Line 1
+Token 32: = (TokenType.EQ) Line 1
+Token 33: 40 (TokenType.STRING) Line 1
+Token 34: ; (TokenType.SEMICOLON) Line 1
+Token 35: SET (TokenType.SET) Line 1
+Token 36: locvar_KeineEinwilligung (TokenType.VAR) Line 1
+Token 37: = (TokenType.EQ) Line 1
+Token 38: 50 (TokenType.STRING) Line 1
+Token 39: ; (TokenType.SEMICOLON) Line 1
+Token 40: SET (TokenType.SET) Line 1
+Token 41: locvar_AusdruecklicheAblehnung (TokenType.VAR) Line 1
+Token 42: = (TokenType.EQ) Line 1
+Token 43: 60 (TokenType.STRING) Line 1
+Token 44: ; (TokenType.SEMICOLON) Line 1
+Token 45: SET (TokenType.SET) Line 1
+Token 46: locvar_permissionStatus (TokenType.VAR) Line 1
+Token 47: = (TokenType.EQ) Line 1
+Token 48: null (TokenType.NULL) Line 1
+Token 49: ; (TokenType.SEMICOLON) Line 1
+Token 50: if (TokenType.IF) Line 1
+Token 51: ( (TokenType.L_PAREN) Line 1
+Token 52: locvar_propertyTypeId (TokenType.VAR) Line 1
+Token 53: in (TokenType.IN) Line 1
+Token 54: ( (TokenType.L_PAREN) Line 1
+Token 55: 77 (TokenType.NUMBER) Line 1
+Token 56: , (TokenType.COMMA) Line 1
+Token 57: 79 (TokenType.NUMBER) Line 1
+Token 58: , (TokenType.COMMA) Line 1
+Token 59: 82 (TokenType.NUMBER) Line 1
+Token 60: , (TokenType.COMMA) Line 1
+Token 61: 85 (TokenType.NUMBER) Line 1
+Token 62: , (TokenType.COMMA) Line 1
+Token 63: 100 (TokenType.NUMBER) Line 1
+Token 64: , (TokenType.COMMA) Line 1
+Token 65: 102 (TokenType.NUMBER) Line 1
+Token 66: , (TokenType.COMMA) Line 1
+Token 67: 110 (TokenType.NUMBER) Line 1
+Token 68: , (TokenType.COMMA) Line 1
+Token 69: 111 (TokenType.NUMBER) Line 1
+Token 70: ) (TokenType.R_PAREN) Line 1
+Token 71: ) (TokenType.R_PAREN) Line 1
+Token 72: SET (TokenType.SET) Line 2
+Token 73: locvar_permissionStatus (TokenType.VAR) Line 2
+Token 74: = (TokenType.EQ) Line 2
+Token 75: locvar_OptOut (TokenType.VAR) Line 2
+Token 76: ; (TokenType.SEMICOLON) Line 2
+Token 77: else (TokenType.ELSE) Line 2
+Token 78: if (TokenType.IF) Line 2
+Token 79: ( (TokenType.L_PAREN) Line 2
+Token 80: locvar_propertyTypeId (TokenType.VAR) Line 2
+Token 81: in (TokenType.IN) Line 2
+Token 82: ( (TokenType.L_PAREN) Line 2
+Token 83: 117 (TokenType.NUMBER) Line 2
+Token 84: , (TokenType.COMMA) Line 2
+Token 85: 118 (TokenType.NUMBER) Line 2
+Token 86: , (TokenType.COMMA) Line 2
+Token 87: 119 (TokenType.NUMBER) Line 2
+Token 88: , (TokenType.COMMA) Line 2
+Token 89: 120 (TokenType.NUMBER) Line 2
+Token 90: ) (TokenType.R_PAREN) Line 2
+Token 91: ) (TokenType.R_PAREN) Line 2
+Token 92: begin (TokenType.BEGIN) Line 3
+Token 93: if (TokenType.IF) Line 4
+Token 94: ( (TokenType.L_PAREN) Line 4
+Token 95: locvar_propertyValue (TokenType.VAR) Line 4
+Token 96: in (TokenType.IN) Line 4
+Token 97: ( (TokenType.L_PAREN) Line 4
+Token 98: locvar_AusdruecklicheEinwilligungTelefonisch (TokenType.VAR) Line 4
+Token 99: , (TokenType.COMMA) Line 4
+Token 100: locvar_AusdruecklicheEinwilligungOnline (TokenType.VAR) Line 4
+Token 101: ) (TokenType.R_PAREN) Line 4
+Token 102: ) (TokenType.R_PAREN) Line 4
+Token 103: SET (TokenType.SET) Line 5
+Token 104: locvar_permissionStatus (TokenType.VAR) Line 5
+Token 105: = (TokenType.EQ) Line 5
+Token 106: locvar_OptIn (TokenType.VAR) Line 5
+Token 107: ; (TokenType.SEMICOLON) Line 5
+Token 108: else (TokenType.ELSE) Line 5
+Token 109: if (TokenType.IF) Line 5
+Token 110: ( (TokenType.L_PAREN) Line 5
+Token 111: locvar_propertyValue (TokenType.VAR) Line 5
+Token 112: = (TokenType.EQ) Line 5
+Token 113: locvar_AusdruecklicheAblehnung (TokenType.VAR) Line 5
+Token 114: ) (TokenType.R_PAREN) Line 5
+Token 115: SET (TokenType.SET) Line 6
+Token 116: locvar_permissionStatus (TokenType.VAR) Line 6
+Token 117: = (TokenType.EQ) Line 6
+Token 118: locvar_OptOut (TokenType.VAR) Line 6
+Token 119: ; (TokenType.SEMICOLON) Line 6
+Token 120: end (TokenType.END) Line 6
+Token 121: else (TokenType.ELSE) Line 7
+Token 122: if (TokenType.IF) Line 7
+Token 123: ( (TokenType.L_PAREN) Line 7
+Token 124: locvar_propertyTypeId (TokenType.VAR) Line 7
+Token 125: = (TokenType.EQ) Line 7
+Token 126: 115 (TokenType.NUMBER) Line 7
+Token 127: and (TokenType.AND) Line 7
+Token 128: SUBSTRING (TokenType.VAR) Line 7
+Token 129: ( (TokenType.L_PAREN) Line 7
+Token 130: locvar_propertyValue (TokenType.VAR) Line 7
+Token 131: , (TokenType.COMMA) Line 7
+Token 132: 8 (TokenType.NUMBER) Line 7
+Token 133: , (TokenType.COMMA) Line 7
+Token 134: 1 (TokenType.NUMBER) Line 7
+Token 135: ) (TokenType.R_PAREN) Line 7
+Token 136: = (TokenType.EQ) Line 7
+Token 137: 1 (TokenType.STRING) Line 7
+Token 138: ) (TokenType.R_PAREN) Line 7
+Token 139: SET (TokenType.SET) Line 8
+Token 140: locvar_permissionStatus (TokenType.VAR) Line 8
+Token 141: = (TokenType.EQ) Line 8
+Token 142: locvar_OptOut (TokenType.VAR) Line 8
+Token 143: ; (TokenType.SEMICOLON) Line 8
+Token 144: else (TokenType.ELSE) Line 8
+Token 145: if (TokenType.IF) Line 8
+Token 146: ( (TokenType.L_PAREN) Line 8
+Token 147: locvar_propertyTypeId (TokenType.VAR) Line 8
+Token 148: in (TokenType.IN) Line 8
+Token 149: ( (TokenType.L_PAREN) Line 8
+Token 150: 132 (TokenType.NUMBER) Line 8
+Token 151: , (TokenType.COMMA) Line 8
+Token 152: 133 (TokenType.NUMBER) Line 8
+Token 153: , (TokenType.COMMA) Line 8
+Token 154: 134 (TokenType.NUMBER) Line 8
+Token 155: ) (TokenType.R_PAREN) Line 8
+Token 156: ) (TokenType.R_PAREN) Line 8
+Token 157: SET (TokenType.SET) Line 9
+Token 158: locvar_permissionStatus (TokenType.VAR) Line 9
+Token 159: = (TokenType.EQ) Line 9
+Token 160: null (TokenType.NULL) Line 9
+Token 161: ; (TokenType.SEMICOLON) Line 9
+DEBUG: _curr is None. Inspecting Parser attributes:
+DEBUG: Tokens len: 26 Index: 26
+Traceback (most recent call last):
+  File "/home/josef/github.com/credativ/credativ-pg-migrator/tsql_convertor_gemini.py", line 138, in convert_file
+    converted_code = self.convert_code(code)
+                     ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/josef/github.com/credativ/credativ-pg-migrator/tsql_convertor_gemini.py", line 153, in convert_code
+    elif is_proc or is_func: return self._convert_funcproc(code)
+                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/josef/github.com/credativ/credativ-pg-migrator/tsql_convertor_gemini.py", line 169, in _convert_funcproc
+    pg_body, declarations = self._process_body(body_content)
+                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/josef/github.com/credativ/credativ-pg-migrator/tsql_convertor_gemini.py", line 300, in _process_body
+    parsed = sqlglot.parse(body_content, read=CustomTSQL)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3/dist-packages/sqlglot/__init__.py", line 64, in parse
+    return dialect.parse(sql, **opts)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3/dist-packages/sqlglot/dialects/dialect.py", line 157, in parse
+    return self.parser(**opts).parse(self.tokenizer.tokenize(sql), sql)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3/dist-packages/sqlglot/parser.py", line 703, in parse
+    return self._parse(
+           ^^^^^^^^^^^^
+  File "/usr/lib/python3/dist-packages/sqlglot/parser.py", line 769, in _parse
+    self.raise_error("Invalid expression / Unexpected token")
+  File "/usr/lib/python3/dist-packages/sqlglot/parser.py", line 812, in raise_error
+    raise error
+sqlglot.errors.ParseError: Invalid expression / Unexpected token. Line 2, Col: 53.
+  (77,79,82,85,100,102,110,111)) /* OptOut only*/
+        SET locvar_permissionStatus = locvar_OptOut;[4melse[0m if(locvar_propertyTypeId in (117,118,119,120)) /* OptIn or OptOut*/
+        begin
+            if(lo

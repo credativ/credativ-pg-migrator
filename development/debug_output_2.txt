@@ -1,0 +1,50 @@
+DEBUG: Body Content Length: 1192
+DEBUG: Entering _parse_command_custom for locvar_OptIn
+DEBUG: Entering _parse_command_custom for locvar_OptOut
+DEBUG: Entering _parse_command_custom for locvar_AusdruecklicheEinwilligungTelefonisch
+DEBUG: Entering _parse_command_custom for locvar_AusdruecklicheEinwilligungOnline
+DEBUG: Entering _parse_command_custom for locvar_MutmasslicheEinwilligung
+DEBUG: Entering _parse_command_custom for locvar_Firmenkunde
+DEBUG: Entering _parse_command_custom for locvar_Unbekannt
+DEBUG: Entering _parse_command_custom for locvar_KeineEinwilligung
+DEBUG: Entering _parse_command_custom for locvar_AusdruecklicheAblehnung
+DEBUG: Entering _parse_command_custom for locvar_permissionStatus
+DEBUG: Inside _parse_if
+DEBUG: Entering _parse_command_custom for locvar_permissionStatus
+DEBUG: Checking ELSE. Curr: None Type: None
+DEBUG: Tokens Dump around here:
+Traceback (most recent call last):
+  File "/home/josef/github.com/credativ/credativ-pg-migrator/tsql_convertor_gemini.py", line 143, in convert_file
+    converted_code = self.convert_code(code)
+                     ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/josef/github.com/credativ/credativ-pg-migrator/tsql_convertor_gemini.py", line 158, in convert_code
+    elif is_proc or is_func: return self._convert_funcproc(code)
+                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/josef/github.com/credativ/credativ-pg-migrator/tsql_convertor_gemini.py", line 174, in _convert_funcproc
+    pg_body, declarations = self._process_body(body_content)
+                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/josef/github.com/credativ/credativ-pg-migrator/tsql_convertor_gemini.py", line 297, in _process_body
+    parsed = sqlglot.parse(body_content, read=CustomTSQL)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3/dist-packages/sqlglot/__init__.py", line 64, in parse
+    return dialect.parse(sql, **opts)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3/dist-packages/sqlglot/dialects/dialect.py", line 157, in parse
+    return self.parser(**opts).parse(self.tokenizer.tokenize(sql), sql)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3/dist-packages/sqlglot/parser.py", line 703, in parse
+    return self._parse(
+           ^^^^^^^^^^^^
+  File "/usr/lib/python3/dist-packages/sqlglot/parser.py", line 766, in _parse
+    expressions.append(parse_method(self))
+                       ^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3/dist-packages/sqlglot/parser.py", line 896, in _parse_statement
+    return self.STATEMENT_PARSERS[self._prev.token_type](self)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/josef/github.com/credativ/credativ-pg-migrator/tsql_convertor_gemini.py", line 111, in <lambda>
+    if hasattr(TokenType, 'IF'): STATEMENT_PARSERS[getattr(TokenType, 'IF')] = lambda self: self._parse_if()
+                                                                                            ^^^^^^^^^^^^^^^^
+  File "/home/josef/github.com/credativ/credativ-pg-migrator/tsql_convertor_gemini.py", line 95, in _parse_if
+    start = max(0, self._idx - 5)
+                   ^^^^^^^^^
+AttributeError: 'Parser' object has no attribute '_idx'

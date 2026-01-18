@@ -1,0 +1,37 @@
+DEBUG: _curr is None. Inspecting Parser attributes:
+DEBUG: Attrs: ['ADD_CONSTRAINT_TOKENS', 'BITWISE', 'COLUMN_OPERATORS', 'COMPARISON', 'CONJUNCTION', 'CONSTRAINT_PARSERS', 'CREATABLES', 'EQUALITY', 'EXPRESSION_PARSERS', 'FACTOR', 'FUNCTIONS', 'FUNCTION_PARSERS', 'FUNC_TOKENS', 'ID_VAR_TOKENS', 'JOIN_KINDS', 'JOIN_SIDES', 'LAMBDAS', 'MODIFIABLES', 'NESTED_TYPE_TOKENS', 'NO_PAREN_FUNCTIONS', 'NO_PAREN_FUNCTION_PARSERS', 'PLACEHOLDER_PARSERS', 'PRIMARY_PARSERS', 'PROPERTY_PARSERS', 'QUERY_MODIFIER_PARSERS', 'RANGE_PARSERS', 'RESERVED_KEYWORDS', 'RETURNS_TABLE_TOKENS', 'SET_OPERATIONS', 'SET_PARSERS', 'SHOW_PARSERS', 'STATEMENT_PARSERS', 'STRICT_CAST', 'SUBQUERY_PREDICATES', 'TABLE_ALIAS_TOKENS', 'TERM', 'TIMESTAMPS', 'TRANSACTION_KIND', 'TRIM_TYPES', 'TYPE_TOKENS', 'UNARY_PARSERS', 'UPDATE_ALIAS_TOKENS', 'VAR_LENGTH_DATATYPES', 'WINDOW_ALIAS_TOKENS', '_advance', '_advance_any', '_curr', '_default_parse_set_item', '_find_parser', '_find_sql', '_find_token', '_index', '_match', '_match_l_paren', '_match_pair', '_match_r_paren', '_match_set', '_match_text_seq', '_match_texts', '_next', '_parse', '_parse_add_column', '_parse_add_constraint', '_parse_afterjournal', '_parse_alias', '_parse_alter', '_parse_as_command', '_parse_at_time_zone', '_parse_between', '_parse_bitwise', '_parse_block', '_parse_blockcompression', '_parse_boolean', '_parse_bracket', '_parse_cache', '_parse_case', '_parse_cast', '_parse_character_set', '_parse_checksum', '_parse_column', '_parse_column_constraint', '_parse_column_def', '_parse_command', '_parse_command_custom', '_parse_commit_or_rollback', '_parse_comparison', '_parse_conjunction', '_parse_constraint', '_parse_convert', '_parse_create', '_parse_create_like', '_parse_create_table_index', '_parse_csv', '_parse_cte', '_parse_datablocksize', '_parse_ddl_select', '_parse_definer', '_parse_delete', '_parse_derived_table_values', '_parse_describe', '_parse_distkey', '_parse_drop', '_parse_drop_column', '_parse_drop_partition', '_parse_equality', '_parse_escape', '_parse_except', '_parse_exists', '_parse_expression', '_parse_extract', '_parse_factor', '_parse_fallback', '_parse_field', '_parse_foreign_key', '_parse_freespace', '_parse_from', '_parse_function', '_parse_group', '_parse_grouping_set', '_parse_grouping_sets', '_parse_having', '_parse_hint', '_parse_id_var', '_parse_identifier', '_parse_if', '_parse_in', '_parse_index', '_parse_insert', '_parse_into', '_parse_introducer', '_parse_is', '_parse_join', '_parse_join_hint', '_parse_join_side_and_kind', '_parse_journal', '_parse_key_constraint_options', '_parse_lambda', '_parse_lateral', '_parse_limit', '_parse_load_data', '_parse_lock', '_parse_log', '_parse_match_recognize', '_parse_merge', '_parse_mergeblockratio', '_parse_named_window', '_parse_national', '_parse_null', '_parse_number', '_parse_offset', '_parse_order', '_parse_ordered', '_parse_partition', '_parse_partition_by', '_parse_partitioned_by', '_parse_pivot', '_parse_pivots', '_parse_placeholder', '_parse_position', '_parse_primary', '_parse_primary_key', '_parse_properties', '_parse_property', '_parse_property_assignment', '_parse_property_before', '_parse_qualify', '_parse_query_modifiers', '_parse_range', '_parse_references', '_parse_replace', '_parse_returns', '_parse_row', '_parse_row_format', '_parse_schema', '_parse_select', '_parse_select_or_expression', '_parse_session_parameter', '_parse_set', '_parse_set_item', '_parse_set_operations', '_parse_show', '_parse_slice', '_parse_sort', '_parse_sortkey', '_parse_star', '_parse_statement', '_parse_string', '_parse_string_agg', '_parse_struct_kwargs', '_parse_subquery', '_parse_substring', '_parse_system_time', '_parse_table', '_parse_table_alias', '_parse_table_parts', '_parse_table_sample', '_parse_term', '_parse_tokens', '_parse_transaction', '_parse_trim', '_parse_type', '_parse_types', '_parse_udf_kwarg', '_parse_unary', '_parse_uncache', '_parse_unique', '_parse_unnamed_constraint', '_parse_unnest', '_parse_update', '_parse_user_defined_function', '_parse_value', '_parse_var', '_parse_var_or_string', '_parse_where', '_parse_window', '_parse_window_clause', '_parse_window_spec', '_parse_with', '_parse_with_property', '_parse_withisolatedloading', '_parse_withjournaltable', '_parse_wrapped', '_parse_wrapped_csv', '_parse_wrapped_id_vars', '_prev', '_prev_comments', '_replace_columns_with_dots', '_replace_lambda', '_retreat', '_set_trie', '_show_trie', '_tokens', 'alias_post_tablesample', 'check_errors', 'error_level', 'error_message_context', 'errors', 'expression', 'index_offset', 'max_errors', 'null_ordering', 'parse', 'parse_into', 'raise_error', 'reset', 'sql', 'unnest_column_only', 'validate_expression']
+DEBUG: Index: 26
+DEBUG: Tokens len: 26
+DEBUG: Token at index 26: EOF
+DEBUG: Prev Token: <Token token_type: TokenType.VAR, text: locvar_OptOut, line: 2, col: 39, comments: []>
+Traceback (most recent call last):
+  File "/home/josef/github.com/credativ/credativ-pg-migrator/tsql_convertor_gemini.py", line 149, in convert_file
+    converted_code = self.convert_code(code)
+                     ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/josef/github.com/credativ/credativ-pg-migrator/tsql_convertor_gemini.py", line 164, in convert_code
+    elif is_proc or is_func: return self._convert_funcproc(code)
+                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/josef/github.com/credativ/credativ-pg-migrator/tsql_convertor_gemini.py", line 180, in _convert_funcproc
+    pg_body, declarations = self._process_body(body_content)
+                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/josef/github.com/credativ/credativ-pg-migrator/tsql_convertor_gemini.py", line 299, in _process_body
+    parsed = sqlglot.parse(body_content, read=CustomTSQL)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3/dist-packages/sqlglot/__init__.py", line 64, in parse
+    return dialect.parse(sql, **opts)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3/dist-packages/sqlglot/dialects/dialect.py", line 157, in parse
+    return self.parser(**opts).parse(self.tokenizer.tokenize(sql), sql)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3/dist-packages/sqlglot/parser.py", line 703, in parse
+    return self._parse(
+           ^^^^^^^^^^^^
+  File "/usr/lib/python3/dist-packages/sqlglot/parser.py", line 769, in _parse
+    self.raise_error("Invalid expression / Unexpected token")
+  File "/usr/lib/python3/dist-packages/sqlglot/parser.py", line 812, in raise_error
+    raise error
+sqlglot.errors.ParseError: Invalid expression / Unexpected token. Line 2, Col: 53.
+  (77,79,82,85,100,102,110,111)) /* OptOut only*/
+        SET locvar_permissionStatus = locvar_OptOut;[4melse[0m if(locvar_propertyTypeId in (117,118,119,120)) /* OptIn or OptOut*/
+        begin
+            if(lo

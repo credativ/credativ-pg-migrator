@@ -1,0 +1,55 @@
+DEBUG: Entering _parse_command_custom for locvar_OptIn
+DEBUG: SET Command parsed: locvar_OptIn = 1
+DEBUG: Entering _parse_command_custom for locvar_OptOut
+DEBUG: SET Command parsed: locvar_OptOut = 2
+DEBUG: Entering _parse_command_custom for locvar_AusdruecklicheEinwilligungTelefonisch
+DEBUG: SET Command parsed: locvar_AusdruecklicheEinwilligungTelefonisch = 10
+DEBUG: Entering _parse_command_custom for locvar_AusdruecklicheEinwilligungOnline
+DEBUG: SET Command parsed: locvar_AusdruecklicheEinwilligungOnline = 11
+DEBUG: Entering _parse_command_custom for locvar_MutmasslicheEinwilligung
+DEBUG: SET Command parsed: locvar_MutmasslicheEinwilligung = 20
+DEBUG: Entering _parse_command_custom for locvar_Firmenkunde
+DEBUG: SET Command parsed: locvar_Firmenkunde = 30
+DEBUG: Entering _parse_command_custom for locvar_Unbekannt
+DEBUG: SET Command parsed: locvar_Unbekannt = 40
+DEBUG: Entering _parse_command_custom for locvar_KeineEinwilligung
+DEBUG: SET Command parsed: locvar_KeineEinwilligung = 50
+DEBUG: Entering _parse_command_custom for locvar_AusdruecklicheAblehnung
+DEBUG: SET Command parsed: locvar_AusdruecklicheAblehnung = 60
+DEBUG: Entering _parse_command_custom for locvar_permissionStatus
+DEBUG: SET Command parsed: locvar_permissionStatus = null
+DEBUG: Inside _parse_if
+DEBUG: Entering _parse_command_custom for locvar_permissionStatus
+DEBUG: SET Command parsed: locvar_permissionStatus = locvar_OptOut
+DEBUG: Checking ELSE. Curr: None Type: None
+Traceback (most recent call last):
+  File "/home/josef/github.com/credativ/credativ-pg-migrator/tsql_convertor_gemini.py", line 141, in convert_file
+    converted_code = self.convert_code(code)
+                     ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/josef/github.com/credativ/credativ-pg-migrator/tsql_convertor_gemini.py", line 156, in convert_code
+    elif is_proc or is_func: return self._convert_funcproc(code)
+                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/josef/github.com/credativ/credativ-pg-migrator/tsql_convertor_gemini.py", line 172, in _convert_funcproc
+    pg_body, declarations = self._process_body(body_content)
+                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/josef/github.com/credativ/credativ-pg-migrator/tsql_convertor_gemini.py", line 291, in _process_body
+    parsed = sqlglot.parse(body_content, read=CustomTSQL)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3/dist-packages/sqlglot/__init__.py", line 64, in parse
+    return dialect.parse(sql, **opts)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3/dist-packages/sqlglot/dialects/dialect.py", line 157, in parse
+    return self.parser(**opts).parse(self.tokenizer.tokenize(sql), sql)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3/dist-packages/sqlglot/parser.py", line 703, in parse
+    return self._parse(
+           ^^^^^^^^^^^^
+  File "/usr/lib/python3/dist-packages/sqlglot/parser.py", line 769, in _parse
+    self.raise_error("Invalid expression / Unexpected token")
+  File "/usr/lib/python3/dist-packages/sqlglot/parser.py", line 812, in raise_error
+    raise error
+sqlglot.errors.ParseError: Invalid expression / Unexpected token. Line 2, Col: 53.
+  (77,79,82,85,100,102,110,111)) /* OptOut only*/
+        SET locvar_permissionStatus = locvar_OptOut;[4melse[0m if(locvar_propertyTypeId in (117,118,119,120)) /* OptIn or OptOut*/
+        begin
+            if(lo

@@ -493,6 +493,16 @@ class PostgreSQLConnector(DatabaseConnector):
                     column_default = column_info['replaced_column_default_value'].strip()
 
             if column_default != '':
+                # Remove SQL Server syntax artifacts like () around default values
+                column_default = column_default.strip()
+
+                # Remove outer parentheses if present (SQL Server specific)
+                if column_default.startswith('(') and column_default.endswith(')'):
+                    column_default = column_default[1:-1].strip()
+
+                # Skip empty defaults
+                if not column_default:
+                    column_default = ''
                 if (('CHAR' in column_data_type or column_data_type in ('TEXT'))
                     and ('||' in column_default or '(' in column_default or ')' in column_default or '::' in column_default)):
                     # default value is here NOT quoted

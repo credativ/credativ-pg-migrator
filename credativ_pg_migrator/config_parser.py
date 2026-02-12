@@ -101,6 +101,12 @@ class ConfigParser:
     def get_source_db_type(self):
         return self.config['source']['type']
 
+    def get_source_db_version(self):
+        return self.config['source'].get('version', None)
+
+    def set_source_db_version(self, version):
+        self.config['source']['version'] = version
+
     def get_connectivity(self, source_or_target):
         return self.config[source_or_target].get('connectivity', None)
 
@@ -170,7 +176,8 @@ class ConfigParser:
             if connectivity == 'odbc':
                 return f"DRIVER={db_config['odbc']['driver']};SERVER={db_config['host']};PORT={db_config['port']};DATABASE={db_config['database']};UID={db_config['username']};PWD={db_config['password']}"
             elif connectivity == 'jdbc':
-                return f"jdbc:sqlserver://{db_config['host']}:{db_config['port']};databaseName={db_config['database']};user={db_config['username']};password={db_config['password']}"
+                conn_str = f"jdbc:sqlserver://{db_config['host']}:{db_config['port']};databaseName={db_config['database']};user={db_config['username']};password={db_config['password']};{db_config.get('connection_string_options', '')}"
+                return re.sub(r';+', ';', conn_str).rstrip(';')
             else:
                 raise ValueError(f"Unsupported MSSQL connectivity: {connectivity}")
         elif db_config['type'] == 'mysql':
@@ -218,7 +225,7 @@ class ConfigParser:
         return self.get_connect_string('target')
 
     def get_system_catalog(self):
-        return self.config.get('system_catalog', 'NONE').upper()
+        return self.config['source'].get('system_catalog', 'NONE').upper()
 
     ## Migrator
     def get_migrator_config(self):

@@ -48,6 +48,12 @@ source:
   # connectivity type - "jdbc", "odbc", "native"
   # "native" does not have any additional section
   connectivity: "odbc"
+  # connection_string_options currently used only for MS SQL Server - JDBC connectivity
+  # will be appended to the connection string
+  # multiple options should be separated by semicolons - format: "key1=value1;key2=value2;..."
+  # Code cleans up eventually occurring multiple semicolons
+  connection_string_options: "encrypt=true;trustServerCertificate=true;domain=CCSPQA;authenticationScheme=ntlm;integratedSecurity=true;serverName=server.some.domain"
+
   jdbc:
     driver: "com.sybase.jdbc4.jdbc.SybDriver"
     libraries: "../lib/jdbc/jconn4.jar"

@@ -13,6 +13,7 @@ else
     pip install --upgrade pip
     pip install wheel
     pip install setuptools
+    pip install pyinstaller
     echo "Installing required libraries..."
     pip install -r requirements.txt
 fi

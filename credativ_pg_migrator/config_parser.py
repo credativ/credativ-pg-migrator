@@ -898,7 +898,7 @@ class ConfigParser:
                     if s == '':
                         return None
                     if expected_type in ('TEXT', 'VARCHAR', 'CHAR'):
-                        if s == '\ ':
+                        if s == r'\ ':
                             return ''
                         return str(s)
                     if expected_type in ('INT', 'INTEGER', 'SMALLINT', 'BIGINT'):

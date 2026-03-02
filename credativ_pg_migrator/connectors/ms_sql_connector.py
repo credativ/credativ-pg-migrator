@@ -547,7 +547,7 @@ class MsSQLConnector(DatabaseConnector):
                     1, 2, ''
                 ) AS column_list
             FROM sys.indexes i
-            WHERE i.object_id = {source_table_id}
+            WHERE i.object_id = {source_table_id} AND i.type > 0
             ORDER BY i.name
         """
         try:
@@ -559,10 +559,12 @@ class MsSQLConnector(DatabaseConnector):
 
             for index in indexes:
                 self.config_parser.print_log_message('DEBUG', f"Processing index: {index}")
+                if index[0] is None:
+                    continue
                 index_name = index[0].strip()
                 index_unique = index[1]  ## integer 0 or 1
                 index_primary_key = index[2]  ## integer 0 or 1
-                index_columns = index[3].strip()
+                index_columns = index[3].strip() if index[3] else ''
                 index_owner = ''
 
                 table_indexes[order_num] = {
@@ -1305,13 +1307,16 @@ $$ LANGUAGE plpgsql;
                         self.config_parser.print_log_message('DEBUG2',
                                                             f"Worker {worker_id}: Table {source_schema}.{source_table}: Processing column {col['column_name']} ({order_num}) with data type {col['data_type']}")
 
-                        # if col['data_type'].lower() == 'datetime':
-                        #     select_columns_list.append(f"TO_CHAR({col['column_name']}, '%Y-%m-%d %H:%M:%S') as {col['column_name']}")
-                        #     select_columns_list.append(f"ST_asText(`{col['column_name']}`) as `{col['column_name']}`")
-                        # elif col['data_type'].lower() == 'set':
-                        #     select_columns_list.append(f"cast(`{col['column_name']}` as char(4000)) as `{col['column_name']}`")
-                        # else:
-                        select_columns_list.append(f'''[{col['column_name']}]''')
+                        target_type_check = migrator_tables.check_data_types_substitution({
+                            'table_name': source_table,
+                            'column_name': col['column_name'],
+                            'check_type': col['data_type']
+                        })
+
+                        if target_type_check and target_type_check.lower() in ('bool', 'boolean'):
+                            select_columns_list.append(f'''CASE WHEN [{col['column_name']}] = 1 THEN 'true' WHEN [{col['column_name']}] = 0 THEN 'false' ELSE NULL END AS [{col['column_name']}]''')
+                        else:
+                            select_columns_list.append(f'''[{col['column_name']}]''')
 
                         insert_columns_list.append(f'''"{self.config_parser.convert_names_case(col['column_name'])}"''')
                         orderby_columns_list.append(f'''[{col['column_name']}]''')

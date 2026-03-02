@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.11.2 - 2026.03.02
+
+- 2026.03.02
+
+  - Fixes in MSSQL connector
+    - fixed fetch_indexes crashing on NULL index names (heap structures) and NULL column lists
+    - implemented correct casting for MSSQL `bit` to PostgreSQL `bool` during data migration based on user data_types_substitution configuration
+
 ## 0.11.1 - 2026.01.12
 
 - 2026.01.12

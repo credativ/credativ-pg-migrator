@@ -258,6 +258,10 @@ class DatabaseConnector(ABC):
                 - schema name of the table in the source database
             - source_table_name:
                 - table name in the source database
+            - source_db_type:
+                - type of the source database
+            - source_db_version:
+                - version of the source database
         Some databases use table_id for finding indexes, some need table_name and schema_name.
 
         Returned dictionary contains all indexes for the table - both primary and secondary indexes.

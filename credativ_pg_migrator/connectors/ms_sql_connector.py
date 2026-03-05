@@ -427,8 +427,8 @@ class MsSQLConnector(DatabaseConnector):
                     'character_maximum_length': character_maximum_length,
                     'numeric_precision': numeric_precision,
                     'numeric_scale': numeric_scale,
-                    'is_nullable': is_nullable,
-                    'is_identity': is_identity,
+                    'is_nullable': 'YES' if is_nullable else 'NO',
+                    'is_identity': 'YES' if is_identity else 'NO',
                     'column_default_value': column_default,
                     'comment': ''
                 }
@@ -537,12 +537,17 @@ class MsSQLConnector(DatabaseConnector):
                 i.name AS index_name,
                 i.is_unique,
                 i.is_primary_key,
-                STRING_AGG('"' + c.name + '"', ', ') WITHIN GROUP (ORDER BY ic.index_column_id) AS column_list
+                STUFF(
+                    (SELECT ', "' + c.name + '"'
+                     FROM sys.index_columns ic2
+                     JOIN sys.columns c ON ic2.object_id = c.object_id AND ic2.column_id = c.column_id
+                     WHERE ic2.object_id = {source_table_id} AND ic2.index_id = i.index_id
+                     ORDER BY ic2.index_column_id
+                     FOR XML PATH('')),
+                    1, 2, ''
+                ) AS column_list
             FROM sys.indexes i
-            JOIN sys.index_columns ic ON i.object_id = ic.object_id AND i.index_id = ic.index_id
-            JOIN sys.columns c ON ic.object_id = c.object_id AND ic.column_id = c.column_id
-            WHERE i.object_id = {source_table_id}
-            GROUP BY i.name, i.is_unique, i.is_primary_key
+            WHERE i.object_id = {source_table_id} AND i.type > 0
             ORDER BY i.name
         """
         try:
@@ -554,10 +559,12 @@ class MsSQLConnector(DatabaseConnector):
 
             for index in indexes:
                 self.config_parser.print_log_message('DEBUG', f"Processing index: {index}")
+                if index[0] is None:
+                    continue
                 index_name = index[0].strip()
                 index_unique = index[1]  ## integer 0 or 1
                 index_primary_key = index[2]  ## integer 0 or 1
-                index_columns = index[3].strip()
+                index_columns = index[3].strip() if index[3] else ''
                 index_owner = ''
 
                 table_indexes[order_num] = {
@@ -596,38 +603,35 @@ class MsSQLConnector(DatabaseConnector):
 
         order_num = 1
         table_constraints = {}
+        """
+        The following was not tested so far but as STRING_ARG is not available in MSSQL-Service 2016 I just replaced it with this
+        """
         query = f"""
-            WITH ConstraintColumns AS (
             SELECT
                 fk.name AS constraint_name,
-                STRING_AGG('"' + cc.name + '"', ', ') WITHIN GROUP (ORDER BY cc.column_id) AS constraint_columns
+                'FOREIGN KEY' AS constraint_type,
+                STUFF(
+                    (SELECT ', "' + cc.name + '"'
+                     FROM sys.foreign_key_columns fkc2
+                     JOIN sys.columns cc ON fkc2.parent_object_id = cc.object_id AND fkc2.parent_column_id = cc.column_id
+                     WHERE fkc2.constraint_object_id = fk.object_id
+                     ORDER BY cc.column_id
+                     FOR XML PATH('')),
+                    1, 2, ''
+                ) AS constraint_columns,
+                rt.name AS referenced_table,
+                STUFF(
+                    (SELECT ', "' + rc.name + '"'
+                     FROM sys.foreign_key_columns fkc3
+                     JOIN sys.columns rc ON fkc3.referenced_object_id = rc.object_id AND fkc3.referenced_column_id = rc.column_id
+                     WHERE fkc3.constraint_object_id = fk.object_id
+                     ORDER BY rc.column_id
+                     FOR XML PATH('')),
+                    1, 2, ''
+                ) AS referenced_columns,
+                pt.name AS constraint_table,
+                rs.name AS referenced_schema
             FROM sys.foreign_keys fk
-            JOIN sys.foreign_key_columns fkc ON fk.object_id = fkc.constraint_object_id
-            JOIN sys.columns cc ON fkc.parent_object_id = cc.object_id AND fkc.parent_column_id = cc.column_id
-            WHERE fk.parent_object_id = {source_table_id}
-            GROUP BY fk.name
-            ),
-            ReferencedColumns AS (
-            SELECT
-                fk.name AS constraint_name,
-                STRING_AGG('"' + rc.name + '"', ', ') WITHIN GROUP (ORDER BY rc.column_id) AS referenced_columns
-            FROM sys.foreign_keys fk
-            JOIN sys.foreign_key_columns fkc ON fk.object_id = fkc.constraint_object_id
-            JOIN sys.columns rc ON fkc.referenced_object_id = rc.object_id AND fkc.referenced_column_id = rc.column_id
-            WHERE fk.parent_object_id = {source_table_id}
-            GROUP BY fk.name
-            )
-            SELECT
-            fk.name AS constraint_name,
-            'FOREIGN KEY' AS constraint_type,
-            cc.constraint_columns,
-            rt.name AS referenced_table,
-            rc.referenced_columns,
-            pt.name AS constraint_table,
-            rs.name AS referenced_schema
-            FROM sys.foreign_keys fk
-            JOIN ConstraintColumns cc ON fk.name = cc.constraint_name
-            JOIN ReferencedColumns rc ON fk.name = rc.constraint_name
             JOIN sys.tables rt ON fk.referenced_object_id = rt.object_id
             JOIN sys.schemas rs ON rt.schema_id = rs.schema_id
             JOIN sys.tables pt ON fk.parent_object_id = pt.object_id
@@ -1303,13 +1307,16 @@ $$ LANGUAGE plpgsql;
                         self.config_parser.print_log_message('DEBUG2',
                                                             f"Worker {worker_id}: Table {source_schema}.{source_table}: Processing column {col['column_name']} ({order_num}) with data type {col['data_type']}")
 
-                        # if col['data_type'].lower() == 'datetime':
-                        #     select_columns_list.append(f"TO_CHAR({col['column_name']}, '%Y-%m-%d %H:%M:%S') as {col['column_name']}")
-                        #     select_columns_list.append(f"ST_asText(`{col['column_name']}`) as `{col['column_name']}`")
-                        # elif col['data_type'].lower() == 'set':
-                        #     select_columns_list.append(f"cast(`{col['column_name']}` as char(4000)) as `{col['column_name']}`")
-                        # else:
-                        select_columns_list.append(f'''[{col['column_name']}]''')
+                        target_type_check = migrator_tables.check_data_types_substitution({
+                            'table_name': source_table,
+                            'column_name': col['column_name'],
+                            'check_type': col['data_type']
+                        })
+
+                        if target_type_check and target_type_check.lower() in ('bool', 'boolean'):
+                            select_columns_list.append(f'''CASE WHEN [{col['column_name']}] = 1 THEN 'true' WHEN [{col['column_name']}] = 0 THEN 'false' ELSE NULL END AS [{col['column_name']}]''')
+                        else:
+                            select_columns_list.append(f'''[{col['column_name']}]''')
 
                         insert_columns_list.append(f'''"{self.config_parser.convert_names_case(col['column_name'])}"''')
                         orderby_columns_list.append(f'''[{col['column_name']}]''')

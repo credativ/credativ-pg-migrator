@@ -558,6 +558,8 @@ class Planner:
                     'source_table_id': table_info['id'],
                     'source_table_name': table_info['table_name'],
                     'source_table_schema': self.source_schema,
+                    'source_db_type': self.config_parser.get_source_db_type(),
+                    'source_db_version': self.config_parser.get_source_db_version(),
                     'target_table_schema': self.target_schema,
                     'target_table_name': table_info['table_name'],
                     'target_columns': target_columns,

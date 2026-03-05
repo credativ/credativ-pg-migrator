@@ -214,14 +214,14 @@ class InformixConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', e)
             raise
 
-    def fetch_views_names(self, source_schema: str):
+    def fetch_views_names(self, source_schema_name: str):
         views = {}
         order_num = 1
         query = f"""
             SELECT DISTINCT v.tabid, t.tabname
             FROM sysviews v
             JOIN systables t on v.tabid = t.tabid
-            WHERE t.owner = '{source_schema}'
+            WHERE t.owner = '{source_schema_name}'
             ORDER BY t.tabname
         """
         try:
@@ -231,7 +231,7 @@ class InformixConnector(DatabaseConnector):
             for row in cursor.fetchall():
                 views[order_num] = {
                     'id': row[0],
-                    'schema_name': source_schema,
+                    'schema_name': source_schema_name,
                     'view_name': row[1],
                     'comment': ''
                 }
@@ -246,9 +246,9 @@ class InformixConnector(DatabaseConnector):
 
     def fetch_view_code(self, settings):
         view_id = settings['view_id']
-        # source_schema = settings['source_schema']
+        # source_schema_name = settings['source_schema_name']
         # source_view_name = settings['source_view_name']
-        # target_schema = settings['target_schema']
+        # target_schema_name = settings['target_schema_name']
         # target_view_name = settings['target_view_name']
         query = f"""
         SELECT v.viewtext
@@ -268,7 +268,7 @@ class InformixConnector(DatabaseConnector):
     def convert_view_code(self, settings: dict):
         view_code = settings['view_code']
         converted_view_code = view_code
-        converted_view_code = converted_view_code.replace(f'''"{settings['source_schema']}".''', f'''"{settings['target_schema']}".''')
+        converted_view_code = converted_view_code.replace(f'''"{settings['source_schema_name']}".''', f'''"{settings['target_schema_name']}".''')
         return converted_view_code
 
     def get_types_mapping(self, settings):
@@ -606,8 +606,8 @@ class InformixConnector(DatabaseConnector):
     def convert_funcproc_code(self, settings):
         funcproc_code = settings['funcproc_code']
         target_db_type = settings['target_db_type']
-        source_schema = settings['source_schema']
-        target_schema = settings['target_schema']
+        source_schema_name = settings['source_schema_name']
+        target_schema_name = settings['target_schema_name']
         table_list = settings['table_list']
         view_list = settings['view_list']
 
@@ -719,10 +719,10 @@ class InformixConnector(DatabaseConnector):
                 flags=re.IGNORECASE
             )
 
-            # Replace source_schema in the function/procedure name with target_schema
+            # Replace source_schema_name in the function/procedure name with target_schema_name
             postgresql_code = re.sub(
-                rf'CREATE\s+(FUNCTION|PROCEDURE)\s+"{source_schema}"\.',
-                rf'CREATE \1 "{target_schema}".',
+                rf'CREATE\s+(FUNCTION|PROCEDURE)\s+"{source_schema_name}"\.',
+                rf'CREATE \1 "{target_schema_name}".',
                 postgresql_code,
                 flags=re.IGNORECASE
             )
@@ -866,28 +866,28 @@ class InformixConnector(DatabaseConnector):
             self.config_parser.print_log_message('DEBUG3', f'Processing step 7: Replacing source schema and table names with target schema and table names ({len(table_list)} tables)')
 
             for table in table_list:
-                # self.config_parser.print_log_message('DEBUG3', f'Replacing table {table} from schema {source_schema} to {target_schema}')
+                # self.config_parser.print_log_message('DEBUG3', f'Replacing table {table} from schema {source_schema_name} to {target_schema_name}')
 
-                source_table_pattern = re.compile(rf'("{source_schema}"\.)?"{table}"')
-                target_table = f'"{target_schema}"."{table}"'
-                postgresql_code = source_table_pattern.sub(target_table, postgresql_code)
+                source_table_pattern = re.compile(rf'("{source_schema_name}"\.)?"{table}"')
+                target_table_name = f'"{target_schema_name}"."{table}"'
+                postgresql_code = source_table_pattern.sub(target_table_name, postgresql_code)
 
                 source_table_pattern = re.compile(rf'\b{table}\b')
-                postgresql_code = source_table_pattern.sub(target_table, postgresql_code)
+                postgresql_code = source_table_pattern.sub(target_table_name, postgresql_code)
 
             for view in view_list:
-                # self.config_parser.print_log_message('DEBUG3', f'Replacing view {view} from schema {source_schema} to {target_schema}')
+                # self.config_parser.print_log_message('DEBUG3', f'Replacing view {view} from schema {source_schema_name} to {target_schema_name}')
 
-                source_view_pattern = re.compile(rf'("{source_schema}"\.)?"{view}"')
-                target_view = f'"{target_schema}"."{view}"'
+                source_view_pattern = re.compile(rf'("{source_schema_name}"\.)?"{view}"')
+                target_view = f'"{target_schema_name}"."{view}"'
                 postgresql_code = source_view_pattern.sub(target_view, postgresql_code)
 
                 source_view_pattern = re.compile(rf'\b{view}\b')
                 postgresql_code = source_view_pattern.sub(target_view, postgresql_code)
 
-            # Remove second occurrence of "target_schema" in %TYPE declarations
+            # Remove second occurrence of "target_schema_name" in %TYPE declarations
             postgresql_code = re.sub(
-                                    rf'("{target_schema}"\."\w+"\.)"{target_schema}"\.("\w+"%TYPE)',
+                                    rf'("{target_schema_name}"\."\w+"\.)"{target_schema_name}"\.("\w+"%TYPE)',
                                     rf'\1\2', postgresql_code,
                                     flags=re.MULTILINE | re.IGNORECASE)
 
@@ -1090,13 +1090,13 @@ class InformixConnector(DatabaseConnector):
         order_by_clause = ''
         try:
             worker_id = settings['worker_id']
-            source_schema = settings['source_schema']
-            source_table = settings['source_table']
+            source_schema_name = settings['source_schema_name']
+            source_table_name = settings['source_table_name']
             source_table_id = settings['source_table_id']
             source_columns = settings['source_columns']
-            # target_schema = self.config_parser.convert_names_case(settings['target_schema'])
-            target_schema = settings['target_schema']  ## target schema is used as it is defined in the config file, no conversion to upper/lower case
-            target_table = self.config_parser.convert_names_case(settings['target_table'])
+            # target_schema_name = self.config_parser.convert_names_case(settings['target_schema_name'])
+            target_schema_name = settings['target_schema_name']  ## target schema is used as it is defined in the config file, no conversion to upper/lower case
+            target_table_name = self.config_parser.convert_names_case(settings['target_table_name'])
             target_columns = settings['target_columns']
             batch_size = settings['batch_size']
             migrator_tables = settings['migrator_tables']
@@ -1106,8 +1106,8 @@ class InformixConnector(DatabaseConnector):
             resume_after_crash = settings['resume_after_crash']
             drop_unfinished_tables = settings['drop_unfinished_tables']
 
-            source_table_rows = self.get_rows_count(source_schema, source_table, migration_limitation)
-            target_table_rows = migrate_target_connection.get_rows_count(target_schema, target_table)
+            source_table_rows = self.get_rows_count(source_schema_name, source_table_name, migration_limitation)
+            target_table_rows = migrate_target_connection.get_rows_count(target_schema_name, target_table_name)
 
             total_chunks = self.config_parser.get_total_chunks(source_table_rows, chunk_size)
             if chunk_size == -1:
@@ -1125,16 +1125,16 @@ class InformixConnector(DatabaseConnector):
             protocol_id = migrator_tables.insert_data_migration({
                 'worker_id': worker_id,
                 'source_table_id': source_table_id,
-                'source_schema': source_schema,
-                'source_table': source_table,
-                'target_schema': target_schema,
-                'target_table': target_table,
+                'source_schema_name': source_schema_name,
+                'source_table_name': source_table_name,
+                'target_schema_name': target_schema_name,
+                'target_table_name': target_table_name,
                 'source_table_rows': source_table_rows,
                 'target_table_rows': target_table_rows,
             })
 
             if source_table_rows == 0:
-                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {source_table} is empty - skipping data migration.")
+                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {source_table_name} is empty - skipping data migration.")
                 migrator_tables.update_data_migration_status({
                         'row_id': protocol_id,
                         'success': True,
@@ -1152,14 +1152,14 @@ class InformixConnector(DatabaseConnector):
 
                 if source_table_rows > target_table_rows:
 
-                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Source table {source_table}: {source_table_rows} rows / Target table {target_table}: {target_table_rows} rows - starting data migration.")
+                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Source table {source_table_name}: {source_table_rows} rows / Target table {target_table_name}: {target_table_rows} rows - starting data migration.")
 
                     select_columns_list = []
                     orderby_columns_list = []
                     insert_columns_list = []
                     for order_num, col in source_columns.items():
                         self.config_parser.print_log_message('DEBUG2',
-                                                            f"Worker {worker_id}: Table {source_schema}.{source_table}: Processing column {col['column_name']} ({order_num}) with data type {col['data_type']}")
+                                                            f"Worker {worker_id}: Table {source_schema_name}.{source_table_name}: Processing column {col['column_name']} ({order_num}) with data type {col['data_type']}")
 
                         if col['data_type'].lower() == 'datetime':
                             select_columns_list.append(f"TO_CHAR({col['column_name']}, '%Y-%m-%d %H:%M:%S') as {col['column_name']}")
@@ -1183,7 +1183,7 @@ class InformixConnector(DatabaseConnector):
 
                     if resume_after_crash and not drop_unfinished_tables:
                         chunk_number = self.config_parser.get_total_chunks(target_table_rows, chunk_size)
-                        self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Resuming migration for table {source_schema}.{source_table} from chunk {chunk_number} with data chunk size {chunk_size}.")
+                        self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Resuming migration for table {source_schema_name}.{source_table_name} from chunk {chunk_number} with data chunk size {chunk_size}.")
                         chunk_offset = target_table_rows
                     else:
                         chunk_offset = (chunk_number - 1) * chunk_size
@@ -1191,14 +1191,14 @@ class InformixConnector(DatabaseConnector):
                     chunk_start_row_number = chunk_offset + 1
                     chunk_end_row_number = chunk_offset + chunk_size
 
-                    self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Migrating table {source_schema}.{source_table}: chunk {chunk_number}, data chunk size {chunk_size}, batch size {batch_size}, chunk offset {chunk_offset}, chunk end row number {chunk_end_row_number}, source table rows {source_table_rows}")
+                    self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Migrating table {source_schema_name}.{source_table_name}: chunk {chunk_number}, data chunk size {chunk_size}, batch size {batch_size}, chunk offset {chunk_offset}, chunk end row number {chunk_end_row_number}, source table rows {source_table_rows}")
                     order_by_clause = ''
 
-                    query = f'''SELECT SKIP {chunk_offset} {select_columns} FROM "{source_schema}".{source_table}'''
+                    query = f'''SELECT SKIP {chunk_offset} {select_columns} FROM "{source_schema_name}".{source_table_name}'''
                     if migration_limitation:
                         query += f" WHERE {migration_limitation}"
-                    primary_key_columns = migrator_tables.select_primary_key(source_schema, source_table)
-                    self.config_parser.print_log_message('DEBUG2', f"Worker {worker_id}: Primary key columns for {source_schema}.{source_table}: {primary_key_columns}")
+                    primary_key_columns = migrator_tables.select_primary_key(source_schema_name, source_table_name)
+                    self.config_parser.print_log_message('DEBUG2', f"Worker {worker_id}: Primary key columns for {source_schema_name}.{source_table_name}: {primary_key_columns}")
                     if primary_key_columns:
                         orderby_columns = primary_key_columns
                     order_by_clause = f""" ORDER BY {orderby_columns}"""
@@ -1226,7 +1226,7 @@ class InformixConnector(DatabaseConnector):
                         batch_number += 1
                         reading_end_time = time.time()
                         reading_duration = reading_end_time - reading_start_time
-                        self.config_parser.print_log_message('DEBUG',f"Worker {worker_id}: Fetched {len(records)} rows (batch {batch_number}) from source table {source_table}.")
+                        self.config_parser.print_log_message('DEBUG',f"Worker {worker_id}: Fetched {len(records)} rows (batch {batch_number}) from source table {source_table_name}.")
 
                         transforming_start_time = time.time()
                         records = [
@@ -1251,13 +1251,13 @@ class InformixConnector(DatabaseConnector):
                                     record[column_name] = bool(record[column_name])
 
                         # Insert batch into target table
-                        self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Starting insert of {len(records)} rows from source table {source_table}")
+                        self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Starting insert of {len(records)} rows from source table {source_table_name}")
                         transforming_end_time = time.time()
                         transforming_duration = transforming_end_time - transforming_start_time
                         inserting_start_time = time.time()
                         inserted_rows = migrate_target_connection.insert_batch({
-                            'target_schema': target_schema,
-                            'target_table': target_table,
+                            'target_schema_name': target_schema_name,
+                            'target_table_name': target_table_name,
                             'target_columns': target_columns,
                             'data': records,
                             'worker_id': worker_id,
@@ -1278,8 +1278,8 @@ class InformixConnector(DatabaseConnector):
                         batch_start_str = batch_start_dt.strftime('%Y-%m-%d %H:%M:%S.%f')
                         batch_end_str = batch_end_dt.strftime('%Y-%m-%d %H:%M:%S.%f')
                         migrator_tables.insert_batches_stats({
-                            'source_schema': source_schema,
-                            'source_table': source_table,
+                            'source_schema_name': source_schema_name,
+                            'source_table_name': source_table_name,
                             'source_table_id': source_table_id,
                             'chunk_number': chunk_number,
                             'batch_number': batch_number,
@@ -1296,7 +1296,7 @@ class InformixConnector(DatabaseConnector):
                         msg = (
                             f"Worker {worker_id}: Inserted {inserted_rows} "
                             f"(total: {total_inserted_rows} from: {source_table_rows} "
-                            f"({percent_done}%)) rows into target table '{target_table}': "
+                            f"({percent_done}%)) rows into target table '{target_table_name}': "
                             f"Batch {batch_number} duration: {batch_duration:.2f} seconds "
                             f"(r: {reading_duration:.2f}, t: {transforming_duration:.2f}, w: {inserting_duration:.2f})"
                         )
@@ -1305,13 +1305,13 @@ class InformixConnector(DatabaseConnector):
                         batch_start_time = time.time()
                         reading_start_time = batch_start_time
 
-                    target_table_rows = migrate_target_connection.get_rows_count(target_schema, target_table)
-                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Target table {target_schema}.{target_table} has {target_table_rows} rows")
+                    target_table_rows = migrate_target_connection.get_rows_count(target_schema_name, target_table_name)
+                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Target table {target_schema_name}.{target_table_name} has {target_table_rows} rows")
 
                     shortest_batch_seconds = min(batch_durations) if batch_durations else 0
                     longest_batch_seconds = max(batch_durations) if batch_durations else 0
                     average_batch_seconds = sum(batch_durations) / len(batch_durations) if batch_durations else 0
-                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Migrated {total_inserted_rows} rows from {source_table} to {target_schema}.{target_table} in {batch_number} batches: "
+                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Migrated {total_inserted_rows} rows from {source_table_name} to {target_schema_name}.{target_table_name} in {batch_number} batches: "
                                                             f"Shortest batch: {shortest_batch_seconds:.2f} seconds, "
                                                             f"Longest batch: {longest_batch_seconds:.2f} seconds, "
                                                             f"Average batch: {average_batch_seconds:.2f} seconds")
@@ -1319,7 +1319,7 @@ class InformixConnector(DatabaseConnector):
                     cursor.close()
 
                 elif source_table_rows <= target_table_rows:
-                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Source table {source_table} has {source_table_rows} rows, which is less than or equal to target table {target_table} with {target_table_rows} rows. No data migration needed.")
+                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Source table {source_table_name} has {source_table_rows} rows, which is less than or equal to target table {target_table_name} with {target_table_rows} rows. No data migration needed.")
 
                 migration_stats = {
                     'rows_migrated': total_inserted_rows,
@@ -1332,7 +1332,7 @@ class InformixConnector(DatabaseConnector):
 
                 self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Migration stats: {migration_stats}")
                 if source_table_rows <= target_table_rows or chunk_number >= total_chunks:
-                    self.config_parser.print_log_message('DEBUG3', f"Worker {worker_id}: Setting migration status to finished for table {source_table} (chunk {chunk_number}/{total_chunks})")
+                    self.config_parser.print_log_message('DEBUG3', f"Worker {worker_id}: Setting migration status to finished for table {source_table_name} (chunk {chunk_number}/{total_chunks})")
                     migration_stats['finished'] = True
                     migrator_tables.update_data_migration_status({
                         'row_id': protocol_id,
@@ -1348,10 +1348,10 @@ class InformixConnector(DatabaseConnector):
                 migrator_tables.insert_data_chunk({
                     'worker_id': worker_id,
                     'source_table_id': source_table_id,
-                    'source_schema': source_schema,
-                    'source_table': source_table,
-                    'target_schema': target_schema,
-                    'target_table': target_table,
+                    'source_schema_name': source_schema_name,
+                    'source_table_name': source_table_name,
+                    'target_schema_name': target_schema_name,
+                    'target_table_name': target_table_name,
                     'source_table_rows': source_table_rows,
                     'target_table_rows': target_table_rows,
                     'chunk_number': chunk_number,
@@ -1606,7 +1606,7 @@ class InformixConnector(DatabaseConnector):
                             if "execute procedure" in action:
                                 # action = re.sub("execute procedure", "", action, flags=re.IGNORECASE) ## keep it for further processing
                                 action = re.sub("with trigger references", "", action, flags=re.IGNORECASE)
-                                action = action.replace(settings['source_schema'], settings['target_schema'])
+                                action = action.replace(settings['source_schema_name'], settings['target_schema_name'])
                             proc_calls[order_num] = action.strip()
                             order_num += 1
 
@@ -1622,14 +1622,14 @@ class InformixConnector(DatabaseConnector):
 
                         if when_conditions[i]:
                             func_body_lines.append(f"    IF {when_conditions[i]} THEN")
-                            func_body_lines.append(f"        {proc_call.replace(settings['source_schema'], settings['target_schema'])};")
+                            func_body_lines.append(f"        {proc_call.replace(settings['source_schema_name'], settings['target_schema_name'])};")
                             func_body_lines.append("    END IF;")
 
                     if re.search(r'for each row', trig, re.IGNORECASE) and after_all_commands:
                         func_body_lines.append(f"""    /* AFTER part */""")
                         for after_command in after_all_commands:
                             if after_command:
-                                func_body_lines.append(f"""    {after_command.replace(f'''"{settings['source_schema']}"''', f'''"{settings['target_schema']}"''')};""")
+                                func_body_lines.append(f"""    {after_command.replace(f'''"{settings['source_schema_name']}"''', f'''"{settings['target_schema_name']}"''')};""")
 
                     if ((not re.search(r'for each row', trig, re.IGNORECASE) or re.search(r'before', trig, re.IGNORECASE))
                         and after_all_commands):
@@ -1637,11 +1637,11 @@ class InformixConnector(DatabaseConnector):
                         func_body_lines.append("/* AFTER clause not migrated */")
                         for after_command in after_all_commands:
                             if after_command:
-                                func_body_lines.append(f"/*    {after_command.replace(settings['source_schema'], settings['target_schema'])}; */")
+                                func_body_lines.append(f"/*    {after_command.replace(settings['source_schema_name'], settings['target_schema_name'])}; */")
 
                     self.config_parser.print_log_message('DEBUG3', f"func_body_lines: {func_body_lines}")
 
-                    func_code = f"""CREATE OR REPLACE FUNCTION "{settings['target_schema']}"."{function_name + str(counter)}"()
+                    func_code = f"""CREATE OR REPLACE FUNCTION "{settings['target_schema_name']}"."{function_name + str(counter)}"()
                         RETURNS trigger AS $$
                         BEGIN
                         {chr(10).join(func_body_lines)}
@@ -1652,7 +1652,7 @@ class InformixConnector(DatabaseConnector):
                     trigger_code = f"""CREATE TRIGGER "{trigger_name + str(counter)}" """
 
                     if re.search(r'for each row', trig, re.IGNORECASE):
-                        trigger_code += f"""\nAFTER {operation.upper()} ON "{table_schema.replace(settings['source_schema'], settings['target_schema'])}"."{table_name}" """
+                        trigger_code += f"""\nAFTER {operation.upper()} ON "{table_schema.replace(settings['source_schema_name'], settings['target_schema_name'])}"."{table_name}" """
 
                     if new_ref:
                         trigger_code += f"\nREFERENCING NEW TABLE AS {new_ref}"
@@ -1662,7 +1662,7 @@ class InformixConnector(DatabaseConnector):
                     if re.search(r'for each row', trig, re.IGNORECASE):
                         trigger_code += f"\nFOR EACH ROW"
 
-                    trigger_code += f"\nEXECUTE FUNCTION {schema.replace(settings['source_schema'], settings['target_schema'])}.{function_name + str(counter)}();"
+                    trigger_code += f"\nEXECUTE FUNCTION {schema.replace(settings['source_schema_name'], settings['target_schema_name'])}.{function_name + str(counter)}();"
                     counter += 1
 
                     pgsql_triggers.append(func_code + "\n\n" + trigger_code)
@@ -1677,7 +1677,7 @@ class InformixConnector(DatabaseConnector):
                         trigger_code = f"""CREATE TRIGGER "{trigger_name + str(counter)}" """
 
                         if re.search(r'for each row', trig, re.IGNORECASE):
-                            trigger_code += f"""\nAFTER {operation.upper()} ON "{table_schema.replace(settings['source_schema'], settings['target_schema'])}"."{table_name}" """
+                            trigger_code += f"""\nAFTER {operation.upper()} ON "{table_schema.replace(settings['source_schema_name'], settings['target_schema_name'])}"."{table_name}" """
 
                         if new_ref:
                             trigger_code += f"\nREFERENCING NEW TABLE AS {new_ref}"
@@ -1691,14 +1691,14 @@ class InformixConnector(DatabaseConnector):
                             proc_call = proc_call.replace("execute procedure", "")
                             trigger_code += f"\nEXECUTE FUNCTION {proc_call};"
                         else:
-                            func_code = f"""CREATE OR REPLACE FUNCTION "{settings['target_schema']}"."{function_name + str(counter)}"()
+                            func_code = f"""CREATE OR REPLACE FUNCTION "{settings['target_schema_name']}"."{function_name + str(counter)}"()
                                 RETURNS trigger AS $$
                                 BEGIN
-                                    {proc_call.replace(f'''"{settings['source_schema']}"''', f'''"{settings['target_schema']}"''')};
+                                    {proc_call.replace(f'''"{settings['source_schema_name']}"''', f'''"{settings['target_schema_name']}"''')};
                                     RETURN NEW;
                                 END;
                                 $$ LANGUAGE plpgsql;"""
-                            trigger_code += f"\nEXECUTE FUNCTION {settings['target_schema']}.{function_name + str(counter)}();"
+                            trigger_code += f"\nEXECUTE FUNCTION {settings['target_schema_name']}.{function_name + str(counter)}();"
                             counter += 1
 
                         pgsql_triggers.append(func_code + "\n\n" + trigger_code)
@@ -1908,10 +1908,10 @@ class InformixConnector(DatabaseConnector):
                         CASE WHEN bitand(flags, 1) = 1 THEN 'YES' ELSE 'NO' END AS has_rowid,
                         (select count(*) FROM sysconstraints ic JOIN systables it ON ic.tabid = it.tabid JOIN sysreferences ir ON ic.constrid = ir.constrid
                         JOIN systables irt ON ir.ptabid = irt.tabid JOIN sysconstraints ipc ON ir."primary" = ipc.constrid WHERE ic.constrtype = 'R' and irt.owner = t.owner and irt.tabname = t.tabname) as ref_fk_count
-                    from systables t where owner = '{settings['source_schema']}' {exclude_clause}
+                    from systables t where owner = '{settings['source_schema_name']}' {exclude_clause}
                     order by nrows desc limit {top_n}
                 """
-                self.config_parser.print_log_message('DEBUG2', f"Fetching top {top_n} tables BY ROWS for schema {settings['source_schema']} with query: {query}")
+                self.config_parser.print_log_message('DEBUG2', f"Fetching top {top_n} tables BY ROWS for schema {settings['source_schema_name']} with query: {query}")
                 self.connect()
                 cursor = self.connection.cursor()
                 cursor.execute(query)
@@ -1951,10 +1951,10 @@ class InformixConnector(DatabaseConnector):
                         CASE WHEN bitand(flags, 1) = 1 THEN 'YES' ELSE 'NO' END AS has_rowid,
                         (select count(*) FROM sysconstraints ic JOIN systables it ON ic.tabid = it.tabid JOIN sysreferences ir ON ic.constrid = ir.constrid
                         JOIN systables irt ON ir.ptabid = irt.tabid JOIN sysconstraints ipc ON ir."primary" = ipc.constrid WHERE ic.constrtype = 'R' and irt.owner = t.owner and irt.tabname = t.tabname) as ref_fk_count
-                    from systables t where owner = '{settings['source_schema']}' {exclude_clause}
+                    from systables t where owner = '{settings['source_schema_name']}' {exclude_clause}
                     order by size desc limit {top_n}
                 """
-                self.config_parser.print_log_message('DEBUG2', f"Fetching top {top_n} tables BY SIZE for schema {settings['source_schema']} with query: {query}")
+                self.config_parser.print_log_message('DEBUG2', f"Fetching top {top_n} tables BY SIZE for schema {settings['source_schema_name']} with query: {query}")
                 self.connect()
                 cursor = self.connection.cursor()
                 cursor.execute(query)
@@ -1994,12 +1994,12 @@ class InformixConnector(DatabaseConnector):
                         JOIN systables irt ON ir.ptabid = irt.tabid JOIN sysconstraints ipc ON ir."primary" = ipc.constrid WHERE ic.constrtype = 'R' and irt.owner = t.owner and irt.tabname = t.tabname) as ref_fk_count
                     from systables t
                     join syscolumns c on t.tabid = c.tabid
-                    where t.owner = '{settings['source_schema']}' {exclude_clause}
+                    where t.owner = '{settings['source_schema_name']}' {exclude_clause}
                     and c.colno > 0
                     group by t.owner, tabname, rowsize, nrows, size, fk_count, has_rowid
                     order by column_count desc limit {top_n}
                 """
-                self.config_parser.print_log_message('DEBUG2', f"Fetching top {top_n} tables BY COLUMNS for schema {settings['source_schema']} with query: {query}")
+                self.config_parser.print_log_message('DEBUG2', f"Fetching top {top_n} tables BY COLUMNS for schema {settings['source_schema_name']} with query: {query}")
                 self.connect()
                 cursor = self.connection.cursor()
                 cursor.execute(query)
@@ -2040,11 +2040,11 @@ class InformixConnector(DatabaseConnector):
                         JOIN systables irt ON ir.ptabid = irt.tabid JOIN sysconstraints ipc ON ir."primary" = ipc.constrid WHERE ic.constrtype = 'R' and irt.owner = t.owner and irt.tabname = t.tabname) as ref_fk_count
                     from systables t
                     join sysindexes i on t.tabid = i.tabid
-                    where t.owner = '{settings['source_schema']}' {exclude_clause}
+                    where t.owner = '{settings['source_schema_name']}' {exclude_clause}
                     group by t.owner, tabname, rowsize, nrows, size, fk_count, has_rowid
                     order by index_count desc limit {top_n}
                 """
-                self.config_parser.print_log_message('DEBUG2', f"Fetching top {top_n} tables BY INDEXES for schema {settings['source_schema']} with query: {query}")
+                self.config_parser.print_log_message('DEBUG2', f"Fetching top {top_n} tables BY INDEXES for schema {settings['source_schema_name']} with query: {query}")
                 self.connect()
                 cursor = self.connection.cursor()
                 cursor.execute(query)
@@ -2084,12 +2084,12 @@ class InformixConnector(DatabaseConnector):
                         JOIN systables irt ON ir.ptabid = irt.tabid JOIN sysconstraints ipc ON ir."primary" = ipc.constrid WHERE ic.constrtype = 'R' and irt.owner = t.owner and irt.tabname = t.tabname) as ref_fk_count
                     from systables t
                     join sysconstraints c on t.tabid = c.tabid
-                    where t.owner = '{settings['source_schema']}' {exclude_clause}
+                    where t.owner = '{settings['source_schema_name']}' {exclude_clause}
                     AND constrtype IN ('R', 'C')
                     group by t.owner, tabname, rowsize, nrows, size, constrtype, has_rowid
                     order by constraint_count desc limit {top_n}
                 """
-                self.config_parser.print_log_message('DEBUG2', f"Fetching top {top_n} tables BY CONSTRAINTS for schema {settings['source_schema']} with query: {query}")
+                self.config_parser.print_log_message('DEBUG2', f"Fetching top {top_n} tables BY CONSTRAINTS for schema {settings['source_schema_name']} with query: {query}")
                 self.connect()
                 cursor = self.connection.cursor()
                 cursor.execute(query)
@@ -2121,7 +2121,7 @@ class InformixConnector(DatabaseConnector):
 
     def get_top_fk_dependencies(self, settings):
         top_fk_dependencies = {}
-        source_schema = settings['source_schema']
+        source_schema_name = settings['source_schema_name']
 
         # exclude_tables can be a list of table names or regex patterns
         exclude_tables = self.config_parser.get_exclude_tables()
@@ -2147,11 +2147,11 @@ class InformixConnector(DatabaseConnector):
                         t.owner, t.tabname, COUNT(*) AS fk_count
                     FROM systables t
                     JOIN sysconstraints c ON t.tabid = c.tabid
-                    WHERE c.constrtype = 'R' AND t.owner = '{source_schema}' {exclude_clause}
+                    WHERE c.constrtype = 'R' AND t.owner = '{source_schema_name}' {exclude_clause}
                     GROUP BY t.owner, t.tabname
                     ORDER BY fk_count DESC LIMIT {top_n}
                 """
-                self.config_parser.print_log_message('DEBUG2', f"Fetching top {top_n} foreign key dependencies BY TABLES for schema {settings['source_schema']} with query: {query}")
+                self.config_parser.print_log_message('DEBUG2', f"Fetching top {top_n} foreign key dependencies BY TABLES for schema {settings['source_schema_name']} with query: {query}")
                 self.connect()
                 cursor = self.connection.cursor()
                 cursor.execute(query)
@@ -2194,12 +2194,12 @@ class InformixConnector(DatabaseConnector):
 
         return top_fk_dependencies
 
-    def target_table_exists(self, target_schema, target_table):
+    def target_table_exists(self, target_schema_name, target_table_name):
         try:
             query = f"""
                 SELECT COUNT(*)
                 FROM systables
-                WHERE owner = '{target_schema}' AND tabname = '{target_table}' AND tabtype = 'T'
+                WHERE owner = '{target_schema_name}' AND tabname = '{target_table_name}' AND tabtype = 'T'
             """
             self.config_parser.print_log_message('DEBUG3', f"Checking if target table exists with query: {query}")
             cursor = self.connection.cursor()

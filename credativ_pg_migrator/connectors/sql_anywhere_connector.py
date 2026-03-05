@@ -224,17 +224,17 @@ class SQLAnywhereConnector(DatabaseConnector):
         order_by_clause = ''
         try:
             worker_id = settings['worker_id']
-            source_schema = settings['source_schema']
-            source_table = settings['source_table']
+            source_schema_name = settings['source_schema_name']
+            source_table_name = settings['source_table_name']
             source_table_id = settings['source_table_id']
             source_columns = settings['source_columns']
-            # target_schema = self.config_parser.convert_names_case(settings['target_schema'])
-            target_schema = settings['target_schema'] ## target schema is used as it is defined in config, not converted to upper/lower case
-            target_table = self.config_parser.convert_names_case(settings['target_table'])
+            # target_schema_name = self.config_parser.convert_names_case(settings['target_schema_name'])
+            target_schema_name = settings['target_schema_name'] ## target schema is used as it is defined in config, not converted to upper/lower case
+            target_table_name = self.config_parser.convert_names_case(settings['target_table_name'])
             target_columns = settings['target_columns']
             batch_size = settings['batch_size']
             migrator_tables = settings['migrator_tables']
-            source_table_rows = self.get_rows_count(source_schema, source_table)
+            source_table_rows = self.get_rows_count(source_schema_name, source_table_name)
             target_table_rows = 0
             migration_limitation = settings['migration_limitation']
             chunk_size = settings['chunk_size']
@@ -242,8 +242,8 @@ class SQLAnywhereConnector(DatabaseConnector):
             resume_after_crash = settings['resume_after_crash']
             drop_unfinished_tables = settings['drop_unfinished_tables']
 
-            source_table_rows = self.get_rows_count(source_schema, source_table, migration_limitation)
-            target_table_rows = migrate_target_connection.get_rows_count(target_schema, target_table)
+            source_table_rows = self.get_rows_count(source_schema_name, source_table_name, migration_limitation)
+            target_table_rows = migrate_target_connection.get_rows_count(target_schema_name, target_table_name)
 
             total_chunks = self.config_parser.get_total_chunks(source_table_rows, chunk_size)
             if chunk_size == -1:
@@ -261,16 +261,16 @@ class SQLAnywhereConnector(DatabaseConnector):
             protocol_id = migrator_tables.insert_data_migration({
                 'worker_id': worker_id,
                 'source_table_id': source_table_id,
-                'source_schema': source_schema,
-                'source_table': source_table,
-                'target_schema': target_schema,
-                'target_table': target_table,
+                'source_schema_name': source_schema_name,
+                'source_table_name': source_table_name,
+                'target_schema_name': target_schema_name,
+                'target_table_name': target_table_name,
                 'source_table_rows': source_table_rows,
                 'target_table_rows': target_table_rows,
             })
 
             if source_table_rows == 0:
-                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {source_table} is empty - skipping data migration.")
+                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {source_table_name} is empty - skipping data migration.")
                 migrator_tables.update_data_migration_status({
                         'row_id': protocol_id,
                         'success': True,
@@ -287,14 +287,14 @@ class SQLAnywhereConnector(DatabaseConnector):
             else:
                 if source_table_rows > target_table_rows:
 
-                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Source table {source_table}: {source_table_rows} rows / Target table {target_table}: {target_table_rows} rows - starting data migration.")
+                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Source table {source_table_name}: {source_table_rows} rows / Target table {target_table_name}: {target_table_rows} rows - starting data migration.")
 
                     select_columns_list = []
                     orderby_columns_list = []
                     insert_columns_list = []
                     for order_num, col in source_columns.items():
                         self.config_parser.print_log_message('DEBUG2',
-                                                            f"Worker {worker_id}: Table {source_schema}.{source_table}: Processing column {col['column_name']} ({order_num}) with data type {col['data_type']}")
+                                                            f"Worker {worker_id}: Table {source_schema_name}.{source_table_name}: Processing column {col['column_name']} ({order_num}) with data type {col['data_type']}")
                         insert_columns_list.append(f'''"{self.config_parser.convert_names_case(col['column_name'])}"''')
                         orderby_columns_list.append(f'''"{col['column_name']}"''')
 
@@ -312,7 +312,7 @@ class SQLAnywhereConnector(DatabaseConnector):
 
                     if resume_after_crash and not drop_unfinished_tables:
                         chunk_number = self.config_parser.get_total_chunks(target_table_rows, chunk_size)
-                        self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Resuming migration for table {source_schema}.{source_table} from chunk {chunk_number} with data chunk size {chunk_size}.")
+                        self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Resuming migration for table {source_schema_name}.{source_table_name} from chunk {chunk_number} with data chunk size {chunk_size}.")
                         chunk_offset = target_table_rows
                     else:
                         chunk_offset = (chunk_number - 1) * chunk_size
@@ -320,15 +320,15 @@ class SQLAnywhereConnector(DatabaseConnector):
                     chunk_start_row_number = chunk_offset + 1
                     chunk_end_row_number = chunk_offset + chunk_size
 
-                    self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Migrating table {source_schema}.{source_table}: chunk {chunk_number}, data chunk size {chunk_size}, batch size {batch_size}, chunk offset {chunk_offset}, chunk end row number {chunk_end_row_number}, source table rows {source_table_rows}")
+                    self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Migrating table {source_schema_name}.{source_table_name}: chunk {chunk_number}, data chunk size {chunk_size}, batch size {batch_size}, chunk offset {chunk_offset}, chunk end row number {chunk_end_row_number}, source table rows {source_table_rows}")
                     order_by_clause = ''
 
                     part_name = 'fetch_data'
-                    query = f"SELECT TOP {chunk_size} START AT {chunk_start_row_number} {select_columns} FROM {source_schema}.{source_table}"
+                    query = f"SELECT TOP {chunk_size} START AT {chunk_start_row_number} {select_columns} FROM {source_schema_name}.{source_table_name}"
                     if migration_limitation:
                         query += f" WHERE {migration_limitation}"
-                    primary_key_columns = migrator_tables.select_primary_key(source_schema, source_table)
-                    self.config_parser.print_log_message('DEBUG2', f"Worker {worker_id}: Primary key columns for {source_schema}.{source_table}: {primary_key_columns}")
+                    primary_key_columns = migrator_tables.select_primary_key(source_schema_name, source_table_name)
+                    self.config_parser.print_log_message('DEBUG2', f"Worker {worker_id}: Primary key columns for {source_schema_name}.{source_table_name}: {primary_key_columns}")
                     if primary_key_columns:
                         orderby_columns = primary_key_columns
                     order_by_clause = f""" ORDER BY {orderby_columns}"""
@@ -356,7 +356,7 @@ class SQLAnywhereConnector(DatabaseConnector):
                         batch_number += 1
                         reading_end_time = time.time()
                         reading_duration = reading_end_time - reading_start_time
-                        self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Fetched {len(records)} rows (batch {batch_number}) from source table '{source_table}' using cursor")
+                        self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Fetched {len(records)} rows (batch {batch_number}) from source table '{source_table_name}' using cursor")
 
                         transforming_start_time = time.time()
                         records = [
@@ -380,13 +380,13 @@ class SQLAnywhereConnector(DatabaseConnector):
                                     # Convert integer to boolean
                                     record[column_name] = bool(record[column_name])
 
-                        self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Starting insert of {len(records)} rows from source table {source_table}")
+                        self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Starting insert of {len(records)} rows from source table {source_table_name}")
                         transforming_end_time = time.time()
                         transforming_duration = transforming_end_time - transforming_start_time
                         inserting_start_time = time.time()
                         inserted_rows = migrate_target_connection.insert_batch({
-                            'target_schema': target_schema,
-                            'target_table': target_table,
+                            'target_schema_name': target_schema_name,
+                            'target_table_name': target_table_name,
                             'target_columns': target_columns,
                             'data': records,
                             'worker_id': worker_id,
@@ -407,8 +407,8 @@ class SQLAnywhereConnector(DatabaseConnector):
                         batch_start_str = batch_start_dt.strftime('%Y-%m-%d %H:%M:%S.%f')
                         batch_end_str = batch_end_dt.strftime('%Y-%m-%d %H:%M:%S.%f')
                         migrator_tables.insert_batches_stats({
-                            'source_schema': source_schema,
-                            'source_table': source_table,
+                            'source_schema_name': source_schema_name,
+                            'source_table_name': source_table_name,
                             'source_table_id': source_table_id,
                                 'chunk_number': chunk_number,
                             'batch_number': batch_number,
@@ -425,7 +425,7 @@ class SQLAnywhereConnector(DatabaseConnector):
                         msg = (
                             f"Worker {worker_id}: Inserted {inserted_rows} "
                             f"(total: {total_inserted_rows} from: {source_table_rows} "
-                            f"({percent_done}%)) rows into target table '{target_table}': "
+                            f"({percent_done}%)) rows into target table '{target_table_name}': "
                             f"Batch {batch_number} duration: {batch_duration:.2f} seconds "
                             f"(r: {reading_duration:.2f}, t: {transforming_duration:.2f}, w: {inserting_duration:.2f})"
                         )
@@ -434,13 +434,13 @@ class SQLAnywhereConnector(DatabaseConnector):
                         batch_start_time = time.time()
                         reading_start_time = batch_start_time
 
-                    target_table_rows = migrate_target_connection.get_rows_count(target_schema, target_table)
-                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Target table {target_schema}.{target_table} has {target_table_rows} rows")
+                    target_table_rows = migrate_target_connection.get_rows_count(target_schema_name, target_table_name)
+                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Target table {target_schema_name}.{target_table_name} has {target_table_rows} rows")
 
                     shortest_batch_seconds = min(batch_durations) if batch_durations else 0
                     longest_batch_seconds = max(batch_durations) if batch_durations else 0
                     average_batch_seconds = sum(batch_durations) / len(batch_durations) if batch_durations else 0
-                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Migrated {total_inserted_rows} rows from {source_table} to {target_schema}.{target_table} in {batch_number} batches: "
+                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Migrated {total_inserted_rows} rows from {source_table_name} to {target_schema_name}.{target_table_name} in {batch_number} batches: "
                                                             f"Shortest batch: {shortest_batch_seconds:.2f} seconds, "
                                                             f"Longest batch: {longest_batch_seconds:.2f} seconds, "
                                                             f"Average batch: {average_batch_seconds:.2f} seconds")
@@ -448,7 +448,7 @@ class SQLAnywhereConnector(DatabaseConnector):
                     cursor.close()
 
                 elif source_table_rows <= target_table_rows:
-                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Source table {source_table} has {source_table_rows} rows, which is less than or equal to target table {target_table} with {target_table_rows} rows. No data migration needed.")
+                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Source table {source_table_name} has {source_table_rows} rows, which is less than or equal to target table {target_table_name} with {target_table_rows} rows. No data migration needed.")
 
                 migration_stats = {
                     'rows_migrated': total_inserted_rows,
@@ -461,7 +461,7 @@ class SQLAnywhereConnector(DatabaseConnector):
 
                 self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Migration stats: {migration_stats}")
                 if source_table_rows <= target_table_rows or chunk_number >= total_chunks:
-                    self.config_parser.print_log_message('DEBUG3', f"Worker {worker_id}: Setting migration status to finished for table {source_table} (chunk {chunk_number}/{total_chunks})")
+                    self.config_parser.print_log_message('DEBUG3', f"Worker {worker_id}: Setting migration status to finished for table {source_table_name} (chunk {chunk_number}/{total_chunks})")
                     migration_stats['finished'] = True
                     migrator_tables.update_data_migration_status({
                         'row_id': protocol_id,
@@ -477,10 +477,10 @@ class SQLAnywhereConnector(DatabaseConnector):
                 migrator_tables.insert_data_chunk({
                     'worker_id': worker_id,
                     'source_table_id': source_table_id,
-                    'source_schema': source_schema,
-                    'source_table': source_table,
-                    'target_schema': target_schema,
-                    'target_table': target_table,
+                    'source_schema_name': source_schema_name,
+                    'source_table_name': source_table_name,
+                    'target_schema_name': target_schema_name,
+                    'target_table_name': target_table_name,
                     'source_table_rows': source_table_rows,
                     'target_table_rows': target_table_rows,
                     'chunk_number': chunk_number,
@@ -662,8 +662,8 @@ class SQLAnywhereConnector(DatabaseConnector):
     def convert_funcproc_code(self, settings):
         funcproc_code = settings['funcproc_code']
         target_db_type = settings['target_db_type']
-        source_schema = settings['source_schema']
-        target_schema = settings['target_schema']
+        source_schema_name = settings['source_schema_name']
+        target_schema_name = settings['target_schema_name']
         table_list = settings['table_list']
         view_list = settings['view_list']
         converted_code = ''
@@ -677,10 +677,10 @@ class SQLAnywhereConnector(DatabaseConnector):
         # Placeholder for fetching sequence details
         return {}
 
-    def fetch_views_names(self, source_schema: str):
+    def fetch_views_names(self, source_schema_name: str):
         views = {}
         order_num = 1
-        query = f"""SELECT viewname FROM sys.sysviews WHERE vcreator = '{source_schema}'"""
+        query = f"""SELECT viewname FROM sys.sysviews WHERE vcreator = '{source_schema_name}'"""
         try:
             self.connect()
             cursor = self.connection.cursor()
@@ -688,7 +688,7 @@ class SQLAnywhereConnector(DatabaseConnector):
             for row in cursor.fetchall():
                 views[order_num] = {
                     'id': None,
-                    'schema_name': source_schema,
+                    'schema_name': source_schema_name,
                     'view_name': row[0],
                     'comment': ''
                 }
@@ -703,14 +703,14 @@ class SQLAnywhereConnector(DatabaseConnector):
 
     def fetch_view_code(self, settings):
         view_id = settings['view_id']
-        source_schema = settings['source_schema']
+        source_schema_name = settings['source_schema_name']
         source_view_name = settings['source_view_name']
-        target_schema = settings['target_schema']
+        target_schema_name = settings['target_schema_name']
         target_view_name = settings['target_view_name']
         query = f"""
             SELECT viewtext
             FROM sys.sysviews
-            WHERE vcreator = '{source_schema}'
+            WHERE vcreator = '{source_schema_name}'
             AND viewname = '{source_view_name}'
         """
         try:
@@ -848,7 +848,7 @@ class SQLAnywhereConnector(DatabaseConnector):
         top_tables['by_indexes'] = {}
         top_tables['by_constraints'] = {}
 
-        source_schema = settings.get('source_schema', 'public')
+        source_schema_name = settings.get('source_schema_name', 'public')
         try:
             order_num = 1
             top_n = self.config_parser.get_top_n_tables_by_rows()
@@ -859,17 +859,17 @@ class SQLAnywhereConnector(DatabaseConnector):
                         table_page_count
                     FROM sys.systable t
                     WHERE creator in (SELECT DISTINCT user_id
-                    FROM sys.SYSUSERPERM where user_name = '{source_schema}')
+                    FROM sys.SYSUSERPERM where user_name = '{source_schema_name}')
                     ORDER BY table_page_count DESC
                 """
-                self.config_parser.print_log_message('DEBUG3', f"Fetching top {top_n} tables by rows for schema {source_schema} with query: {query}")
+                self.config_parser.print_log_message('DEBUG3', f"Fetching top {top_n} tables by rows for schema {source_schema_name} with query: {query}")
                 self.connect()
                 cursor = self.connection.cursor()
                 cursor.execute(query)
                 order_num = 1
                 for row in cursor.fetchall():
                     top_tables['by_rows'][order_num] = {
-                        'owner': source_schema,
+                        'owner': source_schema_name,
                         'table_name': row[0].strip(),
                         'table_size': row[1]
                     }
@@ -888,13 +888,13 @@ class SQLAnywhereConnector(DatabaseConnector):
         top_fk_dependencies = {}
         return top_fk_dependencies
 
-    def target_table_exists(self, target_schema, target_table):
+    def target_table_exists(self, target_schema_name, target_table_name):
         query = f"""
             SELECT COUNT(*)
             FROM sys.systable
             WHERE creator in (SELECT DISTINCT user_id
-            FROM sys.SYSUSERPERM where user_name = '{target_schema}')
-            AND table_name = '{target_table}'
+            FROM sys.SYSUSERPERM where user_name = '{target_schema_name}')
+            AND table_name = '{target_table_name}'
         """
         try:
             self.connect()

@@ -67,13 +67,13 @@ source:
 
   # database locale - used for date and time formatting
   # currently working only for Informix
-  db_locale: "en_US.utf8"
+  db_locale: "en_US.utf8"source_schema_name
 
   # Global settings for using database export files as source of data for the migration, otherwise source table in the source database is used
   # This option is currently supported only for Informix
   #
   # If data files is found, it will be used instead of the source database
-  #   path - path to the data file(s), can contain placeholders for source_schema and source_table
+  #   path - path to the data file(s), can contain placeholders for source_schema and source_table_name
   #
   #   format - format of the data files, currently CSV, UNL, SQL formats are supported
   #            individual differences in names or settings for specific tables must be set in table_settings section for each table separately
@@ -93,19 +93,19 @@ source:
     # action to take if data file is not found
     #   error - raise an error and stop the migration
     #   skip - skip the table and continue with the migration
-    #   source_table - use source table from the source database instead of the data file
-    # default is "source_table"
+    #   source_table_name - use sourcesource_schema_namehe source database instead of the data file
+    # default is "source_table_name"
     on_missing_data_file: skip
 
     # CSV example - separate CSV files for some or all table are expected in the specified directory
     format: "CSV"
-    file: "/path/to/data/files/{{source_schema}}.{{source_table}}.csv"
+    file: "/path/to/data/files/{{source_schema_name}}.{{source_table_name}}.csv"source_schema_name
     delimiter: ","
     header: true  # if CSV files contain header line with column names, default is false
 
     # UNL example - separate UNL files for some or all table are expected in the specified directory
     format: "UNL"  # format of the data files - see above
-    file: "/path/to/data/files/{{source_schema}}.{{source_table}}.unl"  # path to the data file(s), can contain placeholders for source_schema and source_table, extension does not need to fit format name
+    file: "/path/to/data/files/{{source_schema}}.{{source_table_name}}.unl"  # path to the data file(s), can contain placeholders for source_schema and source_table_name, extension does not need to fit format name
     delimiter: "|"  # delimiter for CSV and UNL files, default is comma resp. "|"
     conversion_path: "/path/to/data/files/conversion"  # directory where converted CSV files will be stored, if not specified, default is the same as for the data files
     clean: false  # if true, remove converted CSV files after the migration, default is false
@@ -140,7 +140,7 @@ target:
   username: "postgres"
   password: "postgres"
   database: "target_database"
-  schema: "target_schema"
+  schema: "target_schema_name"
   # settings for the migration process
   # are optional, if present they will override the default settings in every connection
   # key is the name of the setting, value is the value of the setting
@@ -149,7 +149,7 @@ target:
     work_mem: '32MB'
     maintenance_work_mem: '512MB'
     role: 'target_owner'
-    search_path: "target_schema, public"
+    search_path: "target_schema_name, public"
 
 # recipe for the migration process
 migration:
@@ -197,13 +197,13 @@ migration:
   migrate_lob_values: false
 
   ## this is just a preparation for the future, not implemented yet
-  # target_lob_storage - if source database contains CLOB or BLOB columns, this setting defines how to store them in the target database
+  # target_lob_source_schema_namesource database contains CLOB or BLOB columns, this setting defines how to storsource_schema_name target database
   # this is global setting for the whole migration process - if missing, default is to store LOB values in the target database in bytea or text columns
   # "path" and "name" are used only if storage is set to "file"
   # target_lob_storage:
   #   storage: database # database, file
   #   path: "/path/to/lob/files"  # path to the directory with LOB files, used only if storage is set to file
-  #   name: "{{source_schema}}.{{source_table}}.lob"  # name of the LOB file, can contain placeholders for source_schema and source_table
+  #   name: "{{source_schema}}.{{source_table_name}}.lob"  # name of the LOB file, can contain placeholders for source_schema and source_table_name
 
   # automatic scheduled actions for the migration process
   # - list of actions to be performed at specific times during the migration process
@@ -263,13 +263,13 @@ table_settings:
       #   chunk_size: '2GB'
       #   workers: 4  # number of workers to use for parallel processing of the chunks, default is 4
 
-    ## currently not implemented, just a preparation for the future
+    ## currently source_schema_nameed, just a preparation for the futuresource_schema_name
     # individual target LOB storage settings for the table
     # for example global settings can be set to database, but for this table we want to store LOB values in files
     # target_lob_storage:
     #   storage: database # database, file
     #   path: "/path/to/lob/files"  # path to the directory with LOB files, used only if storage is set to file
-    #   name: "{{source_schema}}.{{source_table}}.lob"  # name of the LOB file, can contain placeholders for source_schema and source_table
+    #   name: "{{source_schema}}.{{source_table_name}}.lob"  # name of the LOB file, can contain placeholders for source_schema and source_table_name
 
   - table_name: "table2"
     batch_size: 20000
@@ -321,27 +321,27 @@ default_values_substitution:
   - ["", "", "%getdate()%", "statement_timestamp()"]   ## condition with % to catch also "create default job_lastchange as getdate()", "(getdate())" and similar options
   - ["", "", "db_name()", "current_database()"]
   - ["", "", "current_timestamp()", "current_timestamp"]
-  - ["", "bit", "b'0'", "false"]
+  - ["", "bitsource_schema_namealse"]
   - ["", "bit", "b'1'", "true"]
 
 # Substitutions for objects from other databases
 # Informix, Sybase ASE and some other databases allow to use objects from other databases
 # In PostgreSQL we must replace them with foreign tables linking to the original database
-# "source_db:source_schema.source_object", "target_schema.target_object"
+# "source_db:source_schema.source_object",source_schema_namema.target_object"
 remote_objects_substitution:
   - ["remotedb:dbo.table1", "remote_db.table1"]
 
 # Limitations for data migration
 # "Table name (or pattern)", "condition for limiting data (without WHERE)", "column name (or pattern) - use condition when column is present in the table", "row limit"
-#   - condition can contain placeholders {source_schema} and {source_table} to reference schema and table name for which condition will be applied
+#   - condition can contain placeholders {source_schema} and {source_table_name} to reference schema and table name for which condition will be applied
 #   - placeholders will be replaced with proper values during migration
-# row limit is optional, if specified, limitation will be applied only to tables with more than this number of rows
+# row limit is optional, if specified, lsource_schema_namel be applied only to tables with more than this number of rows
 #   - if row limit is not specified, limitation will be applied to all tables matching the pattern and having the specified column
 data_migration_limitation:
   - [".*", "date >= '2000-01-01'", "date", 1000000]
   - [".*", "movie_id in (select id from movies where date >= '2000-01-01')", "movie_id", 1000000]
   - ["movie_references", "referenced_id in (select id from movies where date >= '2000-01-01')", "referenced_id", 1000000]
-  - [".*", "id >= (select max(id) from {source_schema}.{source_table})", "id", 1000000]
+  - [".*", "id >= (select max(id) from {source_schema}.{source_table_name})", "id", 1000000]
 
 # Configurable partitioning for target tables
 # partitioning:

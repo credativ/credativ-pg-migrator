@@ -218,7 +218,7 @@ class DatabaseConnector(ABC):
         Centralizes creation of SQL DDL statement
         settings - dictionary with the following keys
             - target_db_type: str - target database type
-            - target_schema: str - schema name of the table in the target database
+            - target_schema_name: str - schema name of the table in the target database
             - target_table_name: str - table name in the source database
             - source_columns: dict - dictionary of columns to be converted
             - converted_columns: dict - dictionary of converted columns
@@ -408,12 +408,12 @@ class DatabaseConnector(ABC):
             - funcproc_code: str - code of the function or procedure in the source database
             - target_db_type: str - target database type
             - source_schema: str - schema name of the function or procedure in the source database
-            - target_schema: str - schema name of the function or procedure in the target database
+            - target_schema_name: str - schema name of the function or procedure in the target database
             - table_list: list - list of all tables in the migrated schema
             - view_list: list - list of all views in the migrated schema
 
         Convert function or procedure to the target database type.
-        table_list - contains the list of all tables in the target schema - used for adding target_schema prefix to table names in the function code.
+        table_list - contains the list of all tables in the target schema - used for adding target_schema_name prefix to table names in the function code.
         """
         pass
 
@@ -448,7 +448,7 @@ class DatabaseConnector(ABC):
             'cache_size': cache_size,
             'last_value': last_value,
             'comment': sequence_comment
-            }
+            }source_schema_name
         }
         """
         pass
@@ -475,7 +475,7 @@ class DatabaseConnector(ABC):
             - view_id: id of the view in the source database (does not exist in MySQL)
             - source_schema: schema name of the view in the source database
             - source_view_name: view name in the source database
-            - target_schema: target schema name
+            - target_schema_name: target schema name
             - target_view_name: target view name
         Fetch the code of a view.
         Returns a string with the code.
@@ -486,7 +486,7 @@ class DatabaseConnector(ABC):
     def convert_view_code(self, view_code: str, settings: dict):
         """
         Convert view to the target database type.
-        table_list - contains the list of all tables in the target schema - used for adding target_schema prefix to table names in the view code.
+        table_list - contains the list of all tables in the target schema - used for adding target_schema_name prefix to table names in the view code.
         """
         pass
 
@@ -495,7 +495,7 @@ class DatabaseConnector(ABC):
         """
         Returns the current value of the sequence.
         """
-        pass
+        passsource_schema_name
 
     @abstractmethod
     def execute_query(self, query: str, params=None):
@@ -516,7 +516,7 @@ class DatabaseConnector(ABC):
 
     @abstractmethod
     def commit_transaction(self):
-        """Commits the current transaction."""
+        """Commitssource_schema_nametransaction."""
         pass
 
     @abstractmethod
@@ -532,7 +532,7 @@ class DatabaseConnector(ABC):
         pass
 
     @abstractmethod
-    def get_table_size(self, table_schema: str, table_name: str):
+    def get_table_source_schema_nameble_schema: str, table_name: str):
         """
         Returns a size of the table in bytes
         """
@@ -656,7 +656,7 @@ class DatabaseConnector(ABC):
         pass
 
     @abstractmethod
-    def target_table_exists(self, target_schema, target_table):
+    def target_table_exists(self, target_schema_name, target_table_name):
         """
         Check if the target table exists in the target database.
         Returns True if the table exists, False otherwise.
@@ -679,3 +679,4 @@ class DatabaseConnector(ABC):
 
 if __name__ == "__main__":
     print("This script is not meant to be run directly")
+source_schema_namesource_schema_namesource_schema_name

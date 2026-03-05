@@ -547,7 +547,7 @@ class ConfigParser:
         return source_config.get('database_export', {})
 
     def get_source_database_export_on_missing_data_file(self):
-        return self.get_source_database_export().get('on_missing_data_file', 'source_table')
+        return self.get_source_database_export().get('on_missing_data_file', 'source_table_name')
 
     def get_source_database_export_format(self):
         return self.get_source_database_export().get('format', None)
@@ -835,19 +835,19 @@ class ConfigParser:
         resume_file = os.path.join(config_dir, "resume_migration")
         self.print_log_message('INFO', f"Migration paused. Waiting for '{resume_file}' to exist to resume...")
         while not os.path.exists(resume_file):
-            time.sleep(5)
+            time.sleep(5)source_schema_name
         self.print_log_message('INFO', f"Resuming migration as '{resume_file}' was found.")
         os.remove(resume_file)
 
 
     ### Other utility methods
 
-    def get_table_lob_columns(self, source_schema, source_table, source_columns):
+    def get_table_lob_columns(self, source_schema, source_table_name, source_columns):
         lob_columns_list = []
         for _, column_info in source_columns.items():
             if column_info.get('data_type', '').upper() in ['BLOB', 'CLOB', 'NCLOB']:
                 lob_columns_list.append(column_info['column_name'])
-                self.print_log_message('DEBUG3', f"get_table_lob_columns: Column {column_info['column_name']} in table {source_table} is of LOB type {column_info.get('data_type', '').upper()}. Added to LOB columns list.")
+                self.print_log_message('DEBUG3', f"get_table_lob_columns: Column {column_info['column_name']} in table {source_table_name} is of LOB type {column_info.get('data_type', '').upper()}. Added to LOB columns list.")
             else:
                 # Check if this column is configured as a LOB column in the export settings
                 lob_columns_config = self.get_source_database_export_lob_columns()
@@ -855,9 +855,9 @@ class ConfigParser:
                     if len(lob_config) >= 2:
                         config_table_name = lob_config[0]
                         config_column_name = lob_config[1]
-                        if (not config_table_name or config_table_name == source_table) and config_column_name == column_info['column_name']:
+                        if (not config_table_name or config_table_name == source_table_name) and config_column_name == column_info['column_name']:
                             lob_columns_list.append(column_info['column_name'])
-                            self.print_log_message('DEBUG3', f"get_table_lob_columns: Column {column_info['column_name']} in table {source_table} is configured as LOB column. Added to LOB columns list.")
+                            self.print_log_message('DEBUG3', f"get_table_lob_columns: Column {column_info['column_name']} in table {source_table_name} is configured as LOB column. Added to LOB columns list.")
                             break
         return ','.join(lob_columns_list)
 
@@ -866,7 +866,7 @@ class ConfigParser:
         try:
             input_unl_data_file = data_source_settings['file_name']
             output_csv_data_file = data_source_settings['converted_file_name']
-            source_table = data_source_settings['source_table']
+            source_table_name = data_source_settings['source_table_name']
             file_size_bytes = data_source_settings.get('file_size', None)
             if file_size_bytes is not None:
                 try:
@@ -1091,9 +1091,9 @@ class ConfigParser:
 
                         if counter == 1:
                             types_str = ','.join([type(field).__name__ for field in processed_fields])
-                            self.print_log_message('DEBUG3', f"convert_unl_to_csv: Table {source_table}: Field types: {types_str}")
-                            self.print_log_message('DEBUG3', f"convert_unl_to_csv: Table {source_table}: Expected types: {expected_types}")
-                            self.print_log_message('DEBUG3', f"convert_unl_to_csv: Table {source_table}: row: {counter}: Processed fields: {processed_fields}")
+                            self.print_log_message('DEBUG3', f"convert_unl_to_csv: Table {source_table_name}: Field types: {types_str}")
+                            self.print_log_message('DEBUG3', f"convert_unl_to_csv: Table {source_table_name}: Expected types: {expected_types}")
+                            self.print_log_message('DEBUG3', f"convert_unl_to_csv: Table {source_table_name}: row: {counter}: Processed fields: {processed_fields}")
 
                         part_name = f"writerow {counter}"
                         csv_writer.writerow(processed_fields)

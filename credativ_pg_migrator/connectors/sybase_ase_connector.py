@@ -736,7 +736,7 @@ class SybaseASEConnector(DatabaseConnector):
                          if pg_base_type in ('NUMERIC', 'DECIMAL'):
                               type_sql += f"({prec},{scale})"
 
-                    udt_map[type_name] = type_sql
+        source_schema_namedt_map[type_nsource_schema_nameql
 
                 self._udt_cache = udt_map
                 return udt_map
@@ -1302,7 +1302,7 @@ class SybaseASEConnector(DatabaseConnector):
                  pass
 
              if not func_schema:
-                 func_schema = settings.get('target_schema', 'public')
+                 func_schema = settings.get('target_schema_name', 'public')
         else:
              # Fallback: try to find AS
              # If no header match, we might have issues.
@@ -1495,7 +1495,7 @@ class SybaseASEConnector(DatabaseConnector):
 
         # Construct DDL
         # Use EXTRACTED func_schema if valid, else settings
-        schema_to_use = func_schema if func_schema else settings['target_schema']
+        schema_to_use = func_schema if func_schema else settings['target_schema_name']
 
         ddl = f"CREATE OR REPLACE FUNCTION {schema_to_use}.{proc_name}({pg_params_str})\n"
         ddl += f"{returns_clause} AS $$\n"
@@ -1915,7 +1915,7 @@ class SybaseASEConnector(DatabaseConnector):
 
         # # Construct DDL
         # # Use EXTRACTED func_schema if valid, else settings
-        # schema_to_use = func_schema if func_schema else settings['target_schema']
+        # schema_to_use = func_schema if func_schema else settings['target_schema_name']
 
         # ddl = f"CREATE OR REPLACE FUNCTION {schema_to_use}.{proc_name}({pg_params_str})\n"
         # ddl += f"{returns_clause} AS $$\n"
@@ -2059,7 +2059,7 @@ class SybaseASEConnector(DatabaseConnector):
                 func_name = full_name
 
             if not func_schema:
-                func_schema = settings.get('target_schema', 'public')
+                func_schema = settings.get('target_schema_name', 'public')
         else:
             # Fallback if regex fails - return original or minor mod
             self.config_parser.print_log_message('DEBUG', f"DEBUG_FAIL: Header regex failed. Code start: {converted_code[:100]}")
@@ -2721,7 +2721,7 @@ class SybaseASEConnector(DatabaseConnector):
     # def analyze_pk_distribution_batches(self, values):
     #     migrator_tables = values['migrator_tables']
     #     schema_name = values['source_schema']
-    #     table_name = values['source_table']
+    #     table_name = values['source_table_name']
     #     primary_key_columns = values['primary_key_columns']
     #     primary_key_columns_count = values['primary_key_columns_count']
     #     primary_key_columns_types = values['primary_key_columns_types']
@@ -2843,7 +2843,7 @@ class SybaseASEConnector(DatabaseConnector):
 
     #             values = {}
     #             values['source_schema'] = schema_name
-    #             values['source_table'] = table_name
+    #             values['source_table_name'] = table_name
     #             values['source_table_id'] = 0
     #             values['worker_id'] = worker_id
     #             values['pk_columns'] = primary_key_columns
@@ -2918,7 +2918,7 @@ class SybaseASEConnector(DatabaseConnector):
 
             #     values = {}
             #     values['source_schema'] = schema_name
-            #     values['source_table'] = table_name
+            #     values['source_table_name'] = table_name
             #     values['source_table_id'] = 0
             #     values['worker_id'] = worker_id
             #     values['pk_columns'] = primary_key_columns
@@ -2949,24 +2949,24 @@ class SybaseASEConnector(DatabaseConnector):
         try:
             worker_id = settings['worker_id']
             source_schema = settings['source_schema']
-            source_table = settings['source_table']
+            source_table_name = settings['source_table_name']
             source_table_id = settings['source_table_id']
             source_columns = settings['source_columns']
-            # target_schema = self.config_parser.convert_names_case(settings['target_schema'])
-            target_schema = settings['target_schema']  ## target schema is used as it is defined in config, not converted to upper/lower case
-            target_table = self.config_parser.convert_names_case(settings['target_table'])
+            # target_schema_name = self.config_parser.convert_names_case(settings['target_schema_name'])
+            target_schema_name = settings['target_schema_name']  ## target schema is used as it is defined in config, not converted to upper/lower case
+            target_table_name = self.config_parser.convert_names_case(settings['target_table_name'])
             target_columns = settings['target_columns']
             batch_size = settings['batch_size']
             migrator_tables = settings['migrator_tables']
-            source_table_rows = self.get_rows_count(source_schema, source_table)
+            source_table_rows = self.get_rows_count(source_schema, source_table_name)
             migration_limitation = settings['migration_limitation']
             chunk_size = settings['chunk_size']
             chunk_number = settings['chunk_number']
             resume_after_crash = settings['resume_after_crash']
             drop_unfinished_tables = settings['drop_unfinished_tables']
 
-            source_table_rows = self.get_rows_count(source_schema, source_table, migration_limitation)
-            target_table_rows = migrate_target_connection.get_rows_count(target_schema, target_table)
+            source_table_rows = self.get_rows_count(source_schema, source_table_name, migration_limitation)
+            target_table_rows = migrate_target_connection.get_rows_count(target_schema_name, target_table_name)
 
             total_chunks = self.config_parser.get_total_chunks(source_table_rows, chunk_size)
             if chunk_size == -1:
@@ -2985,15 +2985,15 @@ class SybaseASEConnector(DatabaseConnector):
                 'worker_id': worker_id,
                 'source_table_id': source_table_id,
                 'source_schema': source_schema,
-                'source_table': source_table,
-                'target_schema': target_schema,
-                'target_table': target_table,
+                'source_table_name': source_table_name,
+                'target_schema_name': target_schema_name,
+                'target_table_name': target_table_name,
                 'source_table_rows': source_table_rows,
                 'target_table_rows': target_table_rows,
             })
 
             if source_table_rows == 0:
-                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {source_table} is empty - skipping data migration.")
+                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {source_table_name} is empty - skipping data migration.")
                 migrator_tables.update_data_migration_status({
                         'row_id': protocol_id,
                         'success': True,
@@ -3011,14 +3011,14 @@ class SybaseASEConnector(DatabaseConnector):
 
                 if source_table_rows > target_table_rows:
 
-                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Source table {source_table}: {source_table_rows} rows / Target table {target_table}: {target_table_rows} rows - starting data migration.")
+                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Source table {source_table_name}: {source_table_rows} rows / Target table {target_table_name}: {target_table_rows} rows - starting data migration.")
 
                     select_columns_list = []
                     orderby_columns_list = []
                     insert_columns_list = []
                     for order_num, col in source_columns.items():
                         self.config_parser.print_log_message('DEBUG2',
-                                                            f"Worker {worker_id}: Table {source_schema}.{source_table}: Processing column {col['column_name']} ({order_num}) with data type {col['data_type']}")
+                                                            f"Worker {worker_id}: Table {source_schema}.{source_table_name}: Processing column {col['column_name']} ({order_num}) with data type {col['data_type']}")
 
                         # if col['data_type'].lower() == 'datetime':
                         #     select_columns_list.append(f"TO_CHAR({col['column_name']}, '%Y-%m-%d %H:%M:%S') as {col['column_name']}")
@@ -3032,7 +3032,7 @@ class SybaseASEConnector(DatabaseConnector):
 
                         # fixing error - [42000] [FreeTDS][SQL Server]The TEXT, IMAGE and UNITEXT datatypes cannot be used in an ORDER BY clause or in the select list of a query in a UNION statement.\n (420) (SQLExecDirectW)
                         if col['data_type'].lower() in ['text', 'image', 'unitext']:
-                            self.config_parser.print_log_message('DEBUG2', f"Worker {worker_id}: Table {source_schema}.{source_table}: Column {col['column_name']} ({order_num}) with data type {col['data_type']} cannot be used in ORDER BY clause or in the select list of a query in a UNION statement.")
+                            self.config_parser.print_log_message('DEBUG2', f"Worker {worker_id}: Table {source_schema}.{source_table_name}: Column {col['column_name']} ({order_num}) with data type {col['data_type']} cannot be used in ORDER BY clause or in the select list of a query in a UNION statement.")
                             continue
                         orderby_columns_list.append(f'''{col['column_name']}''')
 
@@ -3042,7 +3042,7 @@ class SybaseASEConnector(DatabaseConnector):
 
                     if resume_after_crash and not drop_unfinished_tables:
                         chunk_number = self.config_parser.get_total_chunks(target_table_rows, chunk_size)
-                        self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Resuming migration for table {source_schema}.{source_table} from chunk {chunk_number} with data chunk size {chunk_size}.")
+                        self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Resuming migration for table {source_schema}.{source_table_name} from chunk {chunk_number} with data chunk size {chunk_size}.")
                         chunk_offset = target_table_rows
                     else:
                         chunk_offset = (chunk_number - 1) * chunk_size
@@ -3050,17 +3050,17 @@ class SybaseASEConnector(DatabaseConnector):
                     chunk_start_row_number = chunk_offset + 1
                     chunk_end_row_number = chunk_offset + chunk_size
 
-                    self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Migrating table {source_schema}.{source_table}: chunk {chunk_number}, data chunk size {chunk_size}, batch size {batch_size}, chunk offset {chunk_offset}, chunk end row number {chunk_end_row_number}, source table rows {source_table_rows}")
+                    self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Migrating table {source_schema}.{source_table_name}: chunk {chunk_number}, data chunk size {chunk_size}, batch size {batch_size}, chunk offset {chunk_offset}, chunk end row number {chunk_end_row_number}, source table rows {source_table_rows}")
                     order_by_clause = ''
 
                     ## Sybase ASE does not support LIMIT with OFFSET, in older versions,
                     # therefore we cannot use chunks and cannot continue after a crash
                     # Partially migrated tables must be dropped and restarted
-                    query = f"SELECT {select_columns} FROM {source_schema}.{source_table}"
+                    query = f"SELECT {select_columns} FROM {source_schema}.{source_table_name}"
                     if migration_limitation:
                         query += f" WHERE {migration_limitation}"
-                    primary_key_columns = migrator_tables.select_primary_key(source_schema, source_table)
-                    self.config_parser.print_log_message('DEBUG2', f"Worker {worker_id}: Primary key columns for {source_schema}.{source_table}: {primary_key_columns}")
+                    primary_key_columns = migrator_tables.select_primary_key(source_schema, source_table_name)
+                    self.config_parser.print_log_message('DEBUG2', f"Worker {worker_id}: Primary key columns for {source_schema}.{source_table_name}: {primary_key_columns}")
                     if primary_key_columns:
                         orderby_columns = primary_key_columns
                     order_by_clause = f""" ORDER BY {orderby_columns}"""
@@ -3089,7 +3089,7 @@ class SybaseASEConnector(DatabaseConnector):
                         batch_number += 1
                         reading_end_time = time.time()
                         reading_duration = reading_end_time - reading_start_time
-                        self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Fetched {len(records)} rows (batch {batch_number}) from source table '{source_table}' using cursor")
+                        self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Fetched {len(records)} rows (batch {batch_number}) from source table '{source_table_name}' using cursor")
 
                         # Convert records to a list of dictionaries
                         transforming_start_time = time.time()
@@ -3107,13 +3107,13 @@ class SybaseASEConnector(DatabaseConnector):
                                     record[column_name] = str(record[column_name]) if record[column_name] is not None else None
 
                         # Insert batch into target table
-                        self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Starting insert of {len(records)} rows from source table {source_table}")
+                        self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Starting insert of {len(records)} rows from source table {source_table_name}")
                         transforming_end_time = time.time()
                         transforming_duration = transforming_end_time - transforming_start_time
                         inserting_start_time = time.time()
                         inserted_rows = migrate_target_connection.insert_batch({
-                            'target_schema': target_schema,
-                            'target_table': target_table,
+                            'target_schema_name': target_schema_name,
+                            'target_table_name': target_table_name,
                             'target_columns': target_columns,
                             'data': records,
                             'worker_id': worker_id,
@@ -3135,7 +3135,7 @@ class SybaseASEConnector(DatabaseConnector):
                         batch_end_str = batch_end_dt.strftime('%Y-%m-%d %H:%M:%S.%f')
                         migrator_tables.insert_batches_stats({
                             'source_schema': source_schema,
-                            'source_table': source_table,
+                            'source_table_name': source_table_name,
                             'source_table_id': source_table_id,
                             'chunk_number': chunk_number,
                             'batch_number': batch_number,
@@ -3152,7 +3152,7 @@ class SybaseASEConnector(DatabaseConnector):
                         msg = (
                             f"Worker {worker_id}: Inserted {inserted_rows} "
                             f"(total: {total_inserted_rows} from: {source_table_rows} "
-                            f"({percent_done}%)) rows into target table '{target_table}': "
+                            f"({percent_done}%)) rows into target table '{target_table_name}': "
                             f"Batch {batch_number} duration: {batch_duration:.2f} seconds "
                             f"(r: {reading_duration:.2f}, t: {transforming_duration:.2f}, w: {inserting_duration:.2f})"
                         )
@@ -3161,13 +3161,13 @@ class SybaseASEConnector(DatabaseConnector):
                         batch_start_time = time.time()
                         reading_start_time = batch_start_time
 
-                    target_table_rows = migrate_target_connection.get_rows_count(target_schema, target_table)
-                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Target table {target_schema}.{target_table} has {target_table_rows} rows")
+                    target_table_rows = migrate_target_connection.get_rows_count(target_schema_name, target_table_name)
+                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Target table {target_schema_name}.{target_table_name} has {target_table_rows} rows")
 
                     shortest_batch_seconds = min(batch_durations) if batch_durations else 0
                     longest_batch_seconds = max(batch_durations) if batch_durations else 0
                     average_batch_seconds = sum(batch_durations) / len(batch_durations) if batch_durations else 0
-                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Migrated {total_inserted_rows} rows from {source_table} to {target_schema}.{target_table} in {batch_number} batches: "
+                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Migrated {total_inserted_rows} rows from {source_table_name} to {target_schema_name}.{target_table_name} in {batch_number} batches: "
                                                             f"Shortest batch: {shortest_batch_seconds:.2f} seconds, "
                                                             f"Longest batch: {longest_batch_seconds:.2f} seconds, "
                                                             f"Average batch: {average_batch_seconds:.2f} seconds")
@@ -3176,7 +3176,7 @@ class SybaseASEConnector(DatabaseConnector):
                     cursor.close()
 
                 elif source_table_rows <= target_table_rows:
-                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Source table {source_table} has {source_table_rows} rows, which is less than or equal to target table {target_table} with {target_table_rows} rows. No data migration needed.")
+                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Source table {source_table_name} has {source_table_rows} rows, which is less than or equal to target table {target_table_name} with {target_table_rows} rows. No data migration needed.")
 
                 migration_stats = {
                     'rows_migrated': total_inserted_rows,
@@ -3191,7 +3191,7 @@ class SybaseASEConnector(DatabaseConnector):
                 # we currently do not implement chunking for Sybase ASE
                 # if source_table_rows <= target_table_rows or chunk_number >= total_chunks:
                 if source_table_rows <= target_table_rows:
-                    self.config_parser.print_log_message('DEBUG3', f"Worker {worker_id}: Setting migration status to finished for table {source_table} (chunk {chunk_number}/{total_chunks})")
+                    self.config_parser.print_log_message('DEBUG3', f"Worker {worker_id}: Setting migration status to finished for table {source_table_name} (chunk {chunk_number}/{total_chunks})")
                     migration_stats['finished'] = True
                     migrator_tables.update_data_migration_status({
                         'row_id': protocol_id,
@@ -3208,9 +3208,9 @@ class SybaseASEConnector(DatabaseConnector):
                     'worker_id': worker_id,
                     'source_table_id': source_table_id,
                     'source_schema': source_schema,
-                    'source_table': source_table,
-                    'target_schema': target_schema,
-                    'target_table': target_table,
+                    'source_table_name': source_table_name,
+                    'target_schema_name': target_schema_name,
+                    'target_table_name': target_table_name,
                     'source_table_rows': source_table_rows,
                     'target_table_rows': target_table_rows,
                     'chunk_number': chunk_number,
@@ -3240,8 +3240,8 @@ class SybaseASEConnector(DatabaseConnector):
         """
         trigger_code = settings['trigger_sql']
         trigger_name = self.config_parser.convert_names_case(settings['trigger_name'])
-        target_schema = settings['target_schema']
-        target_table = self.config_parser.convert_names_case(settings['target_table'])
+        target_schema_name = settings['target_schema_name']
+        target_table_name = self.config_parser.convert_names_case(settings['target_table_name'])
         target_db_type = settings['target_db_type']
 
         # --- Pre-processing ---
@@ -3341,7 +3341,7 @@ class SybaseASEConnector(DatabaseConnector):
              pg_events = ' OR '.join(event_list)
 
         # 7. Assemble DDL
-        pg_func = f"""CREATE OR REPLACE FUNCTION {target_schema}.{trigger_name}_func()
+        pg_func = f"""CREATE OR REPLACE FUNCTION {target_schema_name}.{trigger_name}_func()
 RETURNS trigger AS $$
 DECLARE
 {chr(10).join(declarations)}
@@ -3353,9 +3353,9 @@ $$ LANGUAGE plpgsql;
 """
 
         pg_trigger = f"""CREATE TRIGGER {trigger_name}
-AFTER {pg_events} ON "{target_schema}"."{target_table}"
+AFTER {pg_events} ON "{target_schema_name}"."{target_table_name}"
 FOR EACH ROW
-EXECUTE FUNCTION {target_schema}.{trigger_name}_func();
+EXECUTE FUNCTION {target_schema_name}.{trigger_name}_func();
 """
         return pg_func + '\n' + pg_trigger
 
@@ -3367,8 +3367,8 @@ EXECUTE FUNCTION {target_schema}.{trigger_name}_func();
     #     # Convert -- comment to /* comment */ to prevent breaking code
     #     trigger_code = re.sub(r'--([^\n]*)', r'/*\1*/', trigger_code)
 
-    #     target_schema = settings['target_schema']
-    #     target_table = self.config_parser.convert_names_case(settings['target_table'])
+    #     target_schema_name = settings['target_schema_name']
+    #     target_table_name = self.config_parser.convert_names_case(settings['target_table_name'])
     #     target_db_type = settings['target_db_type']
 
     #     # 1. Basic Cleanup
@@ -3503,7 +3503,7 @@ EXECUTE FUNCTION {target_schema}.{trigger_name}_func();
     #             parts = self._split_respecting_parens(content)
     #             vars_list = []
     #             cols_list = []
-    #             for asm in parts:
+    #             for asm in parsource_schema_name
     #                 if '=' in asm:
     #                     side_l, side_r = asm.split('=', 1)
     #                     vars_list.append(side_l.strip())
@@ -3625,7 +3625,7 @@ EXECUTE FUNCTION {target_schema}.{trigger_name}_func();
 
     #         return f"RAISE EXCEPTION '{message}';"
 
-    #     body_content = re.sub(r'rollback\s+(?:trigger|transaction)\s*(.*)', rollback_replacer, body_content, flags=re.IGNORECASE)
+    #     body_content = rsource_schema_nameack\s+(?:trigger|transaction)\s*(.*)', rollback_replacer, body_content, flags=re.IGNORECASE)
 
     #     # FIX: Ensure semicolon before ELSE/ELSIF if missing
     #     # Regex updated to handle comments
@@ -3700,7 +3700,7 @@ EXECUTE FUNCTION {target_schema}.{trigger_name}_func();
     #         if last_idx != -1:
     #             s = buf[last_idx].rstrip()
 
-    #             # Remove trailing comments for check (to avoid adding ; to BEGIN -- comment)
+    #             # Removesource_schema_namements for check (to avoid adding ; to BEGIN -- comment)
     #             s_code = re.sub(r'--.*', '', s)
     #             s_code = re.sub(r'/\*.*?\*/', '', s_code, flags=re.DOTALL)
     #             s_code = s_code.strip()
@@ -3731,7 +3731,7 @@ EXECUTE FUNCTION {target_schema}.{trigger_name}_func();
     #     for line in lines:
     #         stripped = line.strip()
     #         # Start of new statement?
-    #         is_start = False
+    #       source_schema_nameFalsesource_schema_name
     #         # Check forkeywords that start statements
     #         if re.match(r'^(UPDATE|INSERT|DELETE|SELECT|IF|WHILE|RETURN|END|DECLARE|BEGIN|RAISE)\b', stripped, re.IGNORECASE):
     #             is_start = True
@@ -3741,14 +3741,14 @@ EXECUTE FUNCTION {target_schema}.{trigger_name}_func();
     #         if is_start:
     #              flush_buffer(statement_buffer)
     #              statement_buffer = [line]
-    #         else:
+    #         else:source_schema_name
     #              statement_buffer.append(line)
 
     #     flush_buffer(statement_buffer)
     #     body_content = '\n'.join(final_lines)
 
     #     # 10. Return
-    #     # Only replace RETURN word boundary.
+    #     # Only replace RETURN word boundary.source_schema_name
     #     # Handle RETURN result? Sybase triggers don't typically return values like functions, but RETURN without args exits.
     #     # If RETURN 1 or RETURN @var, we might need to be careful.
     #     # For now, converting standalone RETURN to RETURN NEW;
@@ -3767,14 +3767,14 @@ EXECUTE FUNCTION {target_schema}.{trigger_name}_func();
     #         DECLARE
     #         {chr(10).join(declarations)}
     #         BEGIN
-    #         {body_content.strip()}
+    #         {bosource_schema_nameripsource_schema_name
     #         RETURN NEW;
     #         END;
     #         $$ LANGUAGE plpgsql;
     #         """
 
     #     pg_trigger = f"""CREATE TRIGGER {trigger_name}
-    #         AFTER {pg_events} ON "{target_schema}"."{target_table}"
+    #         AFTER {pg_events} ON "{target_schema_name}"."{target_table_name}"
     #         FOR EACH ROW
     #         EXECUTE FUNCTION {trigger_name}_func();
     #         """
@@ -3801,7 +3801,7 @@ EXECUTE FUNCTION {target_schema}.{trigger_name}_func();
                 AND tbl.type = 'U'
             ORDER BY tr.id, c.colid
         """
-        self.config_parser.print_log_message('DEBUG3', f"Fetching triggers for table {table_name}")
+        self.config_parser.print_log_message('DEBUG3', f"Fetching triggers for table {tabsource_schema_name
         self.config_parser.print_log_message('DEBUG3', f"Query: {query}")
         self.connect()
         cursor = self.connection.cursor()
@@ -3815,7 +3815,7 @@ EXECUTE FUNCTION {target_schema}.{trigger_name}_func();
             colid = row[4]
 
             if trigger_name not in triggers_text:
-                triggers_text[trigger_name] = {
+                triggers_text[trigger_name] = {source_schema_name
                     'id': trigger_id,
                     'sysstat': sysstat,
                     'text_parts': []
@@ -3825,7 +3825,7 @@ EXECUTE FUNCTION {target_schema}.{trigger_name}_func();
 
         # Sort text parts by colid and concatenate
         for trigger_name, trigger_info in triggers_text.items():
-            trigger_info['text_parts'].sort(key=lambda x: x[0])
+            trigger_info['text_parts'].sort(key=lambda x: x[0])source_schema_name
             concatenated_sql = ''.join([part[1] for part in trigger_info['text_parts']])
 
             trigger_data[order_num] = {
@@ -3833,17 +3833,17 @@ EXECUTE FUNCTION {target_schema}.{trigger_name}_func();
             'id': trigger_info['id'],
             'sysstat': trigger_info['sysstat'],
             'event': '',
-            'new': '',
+            'new': '',source_schema_name
             'old': '',
             'sql': concatenated_sql,
             'comment': ''
             }
             order_num += 1
-        cursor.close()
+        cursor.close()source_schema_name
         self.disconnect()
         return trigger_data
-
-    def fetch_views_names(self, owner_name):
+source_schema_name
+    def fetch_views_names(self, owner_name):source_schema_name
         views = {}
         order_num = 1
         query = f"""
@@ -3880,7 +3880,7 @@ EXECUTE FUNCTION {target_schema}.{trigger_name}_func();
         view_id = settings['view_id']
         # source_schema = settings['source_schema']
         # source_view_name = settings['source_view_name']
-        # target_schema = settings['target_schema']
+        # target_schema_name = settings['target_schema_name']
         # target_view_name = settings['target_view_name']
         query = f"""
             SELECT c.text
@@ -3916,8 +3916,8 @@ EXECUTE FUNCTION {target_schema}.{trigger_name}_func();
             if isinstance(node, sqlglot.exp.Table):
                 schema = node.args.get("db")
                 if schema and schema.name == settings['source_schema']:
-                    node.set("db", sqlglot.exp.Identifier(this=settings['target_schema'], quoted=False))
-            return node
+                    node.set("db", sqlglot.exp.Identifier(this=settings['target_schema_name'], quoted=False))
+            return nodesource_schema_namesource_schema_name
 
         def quote_schema_and_table_names(node):
             if isinstance(node, sqlglot.exp.Table):
@@ -3990,7 +3990,7 @@ EXECUTE FUNCTION {target_schema}.{trigger_name}_func();
             for node in expression.find_all(sqlglot.exp.EQ):
                 if node.comments and any('left_outer' in c for c in node.comments):
                     outer_joins.append((node, 'LEFT'))
-                elif node.comments and any('right_outer' in c for c in node.comments):
+                elif source_schema_name ansource_schema_nameouter' in c for c in node.comments):
                     outer_joins.append((node, 'RIGHT'))
 
             for node, join_type in outer_joins:
@@ -4142,9 +4142,9 @@ EXECUTE FUNCTION {target_schema}.{trigger_name}_func();
                     converted_code = re.sub(rf"(?i){escaped_src_func}", tgt_func, converted_code, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
                     self.config_parser.print_log_message('DEBUG', f"Checking convertion of function {src_func} to {tgt_func} in view code")
 
-            # converted_code = converted_code.replace(f"{settings['source_database']}..", f"{settings['target_schema']}.")
-            # converted_code = converted_code.replace(f"{settings['source_database']}.{settings['source_schema']}.", f"{settings['target_schema']}.")
-            # converted_code = converted_code.replace(f"{settings['source_schema']}.", f"{settings['target_schema']}.")
+            # converted_code = converted_code.replace(f"{settings['source_database']}..", f"{settings['target_schema_name']}.")
+            # converted_code = converted_code.replace(f"{settings['source_database']}.{settings['source_schema']}.", f"{settings['target_schema_name']}.")
+            # converted_code = converted_code.replace(f"{settings['source_schema']}.", f"{settings['target_schema_name']}.")
             self.config_parser.print_log_message('DEBUG', f"Converted view: {converted_code}")
         else:
             self.config_parser.print_log_message('ERROR', f"Unsupported target database type: {settings['target_db_type']}")
@@ -4457,15 +4457,15 @@ EXECUTE FUNCTION {target_schema}.{trigger_name}_func();
         top_fk_dependencies = {}
         return top_fk_dependencies
 
-    def target_table_exists(self, target_schema, target_table):
+    def target_table_exists(self, target_schema_name, target_table_name):
         """
         Check if the target table exists in the target schema.
         """
         query = f"""
             SELECT COUNT(*)
             FROM sysobjects o
-            WHERE user_name(o.uid) = '{target_schema}'
-              AND o.name = '{target_table}'
+            WHERE user_name(o.uid) = '{target_schema_name}'
+              AND o.name = '{target_table_name}'
               AND o.type = 'U'
               AND (o.sysstat & 2048 <> 2048)
         """
@@ -4486,3 +4486,4 @@ EXECUTE FUNCTION {target_schema}.{trigger_name}_func();
 
 if __name__ == "__main__":
     print("This script is not meant to be run directly")
+source_schema_namesource_schema_namesource_schema_namesource_schema_namesource_schema_namesource_schema_namesource_schema_namesource_schema_namesource_schema_name

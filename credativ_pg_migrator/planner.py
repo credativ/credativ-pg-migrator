@@ -32,8 +32,8 @@ class Planner:
         self.target_connection = self.load_connector('target')
         self.migrator_tables = MigratorTables(self.logger, self.config_parser)
         self.on_error_action = self.config_parser.get_on_error_action()
-        self.source_schema = self.config_parser.get_source_schema()
-        self.target_schema = self.config_parser.get_target_schema()
+        self.source_schema_name = self.config_parser.get_source_schema()
+        self.target_schema_name = self.config_parser.get_target_schema()
         self.pre_script = self.config_parser.get_pre_migration_script()
         self.post_script = self.config_parser.get_post_migration_script()
         self.user_defined_types = {}
@@ -119,7 +119,7 @@ class Planner:
         try:
             self.config_parser.print_log_message('INFO', "Running pre-planning actions...")
 
-            self.config_parser.print_log_message( 'DEBUG', f"Target schema: {self.target_schema}")
+            self.config_parser.print_log_message( 'DEBUG', f"Target schema: {self.target_schema_name}")
             self.config_parser.print_log_message( 'DEBUG', f"Pre migration script: {self.pre_script}")
             self.config_parser.print_log_message( 'DEBUG', f"Post migration script: {self.post_script}")
 
@@ -137,14 +137,14 @@ class Planner:
                 self.target_connection.execute_query(self.target_connection.session_settings)
 
             if self.config_parser.should_drop_schema():
-                if self.target_schema.lower() == 'public':
+                if self.target_schema_name.lower() == 'public':
                     self.config_parser.print_log_message('INFO', "Cannot drop the 'public' schema - skipping drop of schema.")
                 else:
-                    self.config_parser.print_log_message('INFO', f"Dropping target schema '{self.target_schema}'...")
-                    self.target_connection.execute_query(f'DROP SCHEMA IF EXISTS "{self.target_schema}" CASCADE')
+                    self.config_parser.print_log_message('INFO', f"Dropping target schema '{self.target_schema_name}'...")
+                    self.target_connection.execute_query(f'DROP SCHEMA IF EXISTS "{self.target_schema_name}" CASCADE')
 
-            self.config_parser.print_log_message( 'DEBUG', f"Creating target schema '{self.target_schema}' if it does not exist...")
-            self.target_connection.execute_query(f'CREATE SCHEMA IF NOT EXISTS "{self.target_schema}"')
+            self.config_parser.print_log_message( 'DEBUG', f"Creating target schema '{self.target_schema_name}' if it does not exist...")
+            self.target_connection.execute_query(f'CREATE SCHEMA IF NOT EXISTS "{self.target_schema_name}"')
             self.target_connection.disconnect()
 
             self.run_pre_migration_script()
@@ -185,7 +185,7 @@ class Planner:
             source_db_size = self.source_connection.get_database_size()
             self.config_parser.print_log_message('INFO', f"Size: {source_db_size}")
 
-            source_db_top10_tables = self.source_connection.get_top_n_tables({'source_schema': self.source_schema})
+            source_db_top10_tables = self.source_connection.get_top_n_tables({'source_schema_name': self.source_schema_name})
             self.config_parser.print_log_message('INFO', "Top tables in source database (by various metrics):")
             if source_db_top10_tables:
                 for metric, tables in source_db_top10_tables.items():
@@ -298,7 +298,7 @@ class Planner:
                 self.config_parser.print_log_message('INFO', "No top tables data available.")
 
             # list Top foreign key dependencies
-            source_db_top_fk_dependencies = self.source_connection.get_top_fk_dependencies({'source_schema': self.source_schema})
+            source_db_top_fk_dependencies = self.source_connection.get_top_fk_dependencies({'source_schema_name': self.source_schema_name})
             self.config_parser.print_log_message('INFO', "Top foreign key dependencies in source database:")
             if source_db_top_fk_dependencies:
                 # Print as a nice table
@@ -326,7 +326,7 @@ class Planner:
             self.config_parser.print_log_message('INFO', f"Version: {target_db_version}")
             target_db_size = self.target_connection.get_database_size()
             # self.config_parser.print_log_message('INFO', f"Size: {target_db_size}")
-            # target_db_top10_tables = self.target_connection.get_top_n_tables({'source_schema': self.target_schema})
+            # target_db_top10_tables = self.target_connection.get_top_n_tables({'source_schema_name': self.target_schema_name})
             # self.config_parser.print_log_message('INFO', "Top largest tables in target database:")
             # self.config_parser.print_log_message('DEBUG', f"Target database Top tables: {target_db_top10_tables}")
             # for ord_num, table in target_db_top10_tables.items():
@@ -341,11 +341,11 @@ class Planner:
 
     def run_prepare_tables(self):
         self.config_parser.print_log_message('INFO', "Planner - Preparing tables...")
-        source_tables = self.source_connection.fetch_table_names(self.source_schema)
+        source_tables = self.source_connection.fetch_table_names(self.source_schema_name)
         include_tables = self.config_parser.get_include_tables()
         exclude_tables = self.config_parser.get_exclude_tables() or []
 
-        self.config_parser.print_log_message( 'DEBUG', f"Source schema: {self.source_schema}")
+        self.config_parser.print_log_message( 'DEBUG', f"Source schema: {self.source_schema_name}")
         self.config_parser.print_log_message( 'DEBUG', f"Source tables: {source_tables}")
         self.config_parser.print_log_message( 'DEBUG', f"Include tables: {include_tables}")
         self.config_parser.print_log_message( 'DEBUG', f"Exclude tables: {exclude_tables}")
@@ -374,7 +374,7 @@ class Planner:
             create_partitions_sql = ''
             try:
                 settings = {
-                    'table_schema': self.source_schema,
+                    'table_schema': self.source_schema_name,
                     'table_name': table_info['table_name'],
                     'target_db_type': self.config_parser.get_target_db_type(),
                 }
@@ -428,12 +428,12 @@ class Planner:
 
                 settings = {
                     'source_db_type': self.config_parser.get_source_db_type(),
-                    'source_schema': self.source_schema,
-                    'source_table': table_info['table_name'],
+                    'source_schema_name': self.source_schema_name,
+                    'source_table_name': table_info['table_name'],
                     'source_table_id': table_info['id'],
                     'target_db_type': self.config_parser.get_target_db_type(),
-                    'target_schema': self.target_schema,
-                    'target_table': table_info['table_name'],
+                    'target_schema_name': self.target_schema_name,
+                    'target_table_name': table_info['table_name'],
                     'source_columns': source_columns,
                     'migrator_tables': self.migrator_tables,
                 }
@@ -460,7 +460,7 @@ class Planner:
                                     query = f"""
                                         SELECT min({table_partitioning_columns}) as min_value,
                                         max({table_partitioning_columns}) as max_value
-                                        FROM "{self.source_schema}"."{table_info['table_name']}"
+                                        FROM "{self.source_schema_name}"."{table_info['table_name']}"
                                         """
                                     self.source_connection.connect()
                                     self.config_parser.print_log_message( 'DEBUG', f"Query to get min/max values for partitioning: {query}")
@@ -476,9 +476,9 @@ class Planner:
                                         if partitioning_case['date_range'] in ('year', 'month', 'week'):
                                             query = f"""
                                                 SELECT
-                                                    'CREATE TABLE IF NOT EXISTS "{self.target_schema}"."{table_info['table_name']}_{partitioning_case['date_range']}_' ||
+                                                    'CREATE TABLE IF NOT EXISTS "{self.target_schema_name}"."{table_info['table_name']}_{partitioning_case['date_range']}_' ||
                                                     to_char(gs.start_date, 'YYYYMMDD') || '" ' ||
-                                                    ' PARTITION OF "{self.target_schema}"."{table_info['table_name']}" ' ||
+                                                    ' PARTITION OF "{self.target_schema_name}"."{table_info['table_name']}" ' ||
                                                     ' FOR VALUES FROM (''' || to_char(gs.start_date, 'YYYY-MM-DD') ||
                                                     ''') TO (''' || to_char(gs.end_date, 'YYYY-MM-DD') || ''')' AS create_partition_sql
                                                 FROM (
@@ -506,21 +506,21 @@ class Planner:
                 self.config_parser.print_log_message( 'INFO', f"Counting rows in source table {table_info['table_name']}...")
                 self.source_connection.connect()
                 source_table_rows = self.source_connection.get_rows_count(
-                    self.source_schema,
+                    self.source_schema_name,
                     table_info['table_name'],
                 )
                 self.source_connection.disconnect()
                 self.config_parser.print_log_message( 'INFO', f"Source table {table_info['table_name']} has {source_table_rows} rows.")
 
                 self.migrator_tables.insert_tables({
-                    'source_schema': self.source_schema,
-                    'source_table': table_info['table_name'],
+                    'source_schema_name': self.source_schema_name,
+                    'source_table_name': table_info['table_name'],
                     'source_table_id': table_info['id'],
                     'source_columns': source_columns,
                     'source_table_rows': source_table_rows,
                     'source_table_description': table_description,
-                    'target_schema': self.target_schema,
-                    'target_table': table_info['table_name'],
+                    'target_schema_name': self.target_schema_name,
+                    'target_table_name': table_info['table_name'],
                     'target_columns': target_columns,
                     'target_table_rows': target_table_rows,
                     'target_table_sql': target_table_sql,
@@ -533,14 +533,14 @@ class Planner:
 
             except Exception as e:
                 self.migrator_tables.insert_tables({
-                    'source_schema': self.source_schema,
-                    'source_table': table_info['table_name'],
+                    'source_schema_name': self.source_schema_name,
+                    'source_table_name': table_info['table_name'],
                     'source_table_id': table_info['id'],
                     'source_columns': source_columns,
                     'source_table_rows': source_table_rows,
                     'source_table_description': table_description,
-                    'target_schema': self.target_schema,
-                    'target_table': table_info['table_name'],
+                    'target_schema_name': self.target_schema_name,
+                    'target_table_name': table_info['table_name'],
                     'target_columns': target_columns,
                     'target_table_rows': target_table_rows,
                     'target_table_sql': target_table_sql,
@@ -557,25 +557,25 @@ class Planner:
                 indexes = self.source_connection.fetch_indexes({
                     'source_table_id': table_info['id'],
                     'source_table_name': table_info['table_name'],
-                    'source_table_schema': self.source_schema,
+                    'source_table_schema': self.source_schema_name,
                     'source_db_type': self.config_parser.get_source_db_type(),
                     'source_db_version': self.config_parser.get_source_db_version(),
-                    'target_table_schema': self.target_schema,
+                    'target_table_schema': self.target_schema_name,
                     'target_table_name': table_info['table_name'],
                     'target_columns': target_columns,
                 })
                 self.config_parser.print_log_message( 'DEBUG', f"Indexes: {indexes}")
                 if indexes:
-                    for _, index_details in indexes.items():
+                    for _, indexsource_schema_namendexes.itesource_schema_name
                         values = {}
                         values['source_schema'] = self.source_schema
-                        values['source_table'] = table_info['table_name']
+                        values['source_table_name'] = table_info['table_name']
                         values['source_table_id'] = table_info['id']
                         values['index_owner'] = index_details['index_owner']
                         values['index_name'] = index_details['index_name']
                         values['index_type'] = index_details['index_type']
-                        values['target_schema'] = self.target_schema
-                        values['target_table'] = table_info['table_name']
+                        values['target_schema_name'] = self.target_schema_name
+                        values['target_table_name'] = table_info['table_name']
                         values['index_columns'] = index_details['index_columns']
                         values['index_comment'] = index_details['index_comment']
                         values['index_sql'] = self.target_connection.get_create_index_sql(values)
@@ -588,7 +588,7 @@ class Planner:
                 self.config_parser.print_log_message( 'INFO', "Skipping index migration.")
 
             if self.config_parser.should_migrate_constraints():
-                constraints = self.source_connection.fetch_constraints({
+                constraints = self.source_connecsource_schema_namenstraints({
                     'source_table_id': table_info['id'],
                     'source_table_schema': self.source_schema,
                     'source_table_name': table_info['table_name'],
@@ -597,12 +597,12 @@ class Planner:
                 if constraints:
                     for _, constraint_details in constraints.items():
 
-                        target_db_constraint_sql = self.target_connection.get_create_constraint_sql({
+                        targesource_schema_nament_sql =source_schema_nameconnection.get_create_constraint_sql({
                             'source_db_type': self.config_parser.get_source_db_type(),
                             'source_schema': self.source_schema,
-                            'source_table': table_info['table_name'],
-                            'target_schema': self.target_schema,
-                            'target_table': table_info['table_name'],
+                            'source_table_name': table_info['table_name'],
+                            'target_schema_name': self.target_schema_name,
+                            'target_table_name': table_info['table_name'],
                             'target_columns': target_columns,
                             'constraint_name': constraint_details['constraint_name'] if 'constraint_name' in constraint_details else '',
                             'constraint_type': constraint_details['constraint_type'] if 'constraint_type' in constraint_details else '',
@@ -618,12 +618,12 @@ class Planner:
                             'constraint_status': constraint_details['constraint_status'] if 'constraint_status' in constraint_details else '',
                         })
 
-                        self.migrator_tables.insert_constraint( {
+                        self.source_schema_namees.insersource_schema_name {
                             'source_table_id': table_info['id'],
                             'source_schema': self.source_schema,
-                            'source_table': table_info['table_name'],
-                            'target_schema': self.target_schema,
-                            'target_table': table_info['table_name'],
+                            'source_table_name': table_info['table_name'],
+                            'target_schema_name': self.target_schema_name,
+                            'target_table_name': table_info['table_name'],
                             'constraint_name': constraint_details['constraint_name'],
                             'constraint_type': constraint_details['constraint_type'],
                             'constraint_owner': constraint_details['constraint_owner'] if 'constraint_owner' in constraint_details else '',
@@ -643,18 +643,18 @@ class Planner:
                     self.config_parser.print_log_message('INFO', f"No constraints found for table {table_info['table_name']}.")
             else:
                 self.config_parser.print_log_message('INFO', "Skipping constraint migration.")
-
+source_schema_name
             if self.config_parser.should_migrate_triggers():
                 triggers = self.source_connection.fetch_triggers(table_info['id'], self.source_schema, table_info['table_name'])
                 self.config_parser.print_log_message( 'DEBUG', f"Number of triggers: {len(triggers) if triggers else 0}, Triggers: {triggers}")
                 if triggers:
                     for _, trigger_details in triggers.items():
-
+source_schema_name
                         converted_code = self.source_connection.convert_trigger({
                                 'source_schema': self.config_parser.get_source_schema(),
-                                'source_table': table_info['table_name'],
-                                'target_schema': self.config_parser.get_target_schema(),
-                                'target_table': table_info['table_name'],
+                                'source_table_name': table_info['table_name'],
+                                'target_schema_name': self.config_parser.get_target_schema(),
+                                'target_table_name': table_info['table_name'],
                                 'trigger_name': trigger_details['name'],
                                 'trigger_sql': trigger_details['sql'],
                                 'table_list': [],
@@ -663,12 +663,12 @@ class Planner:
 
                         self.config_parser.print_log_message( 'DEBUG', f"Source trigger code: {trigger_details['sql']}")
                         self.config_parser.print_log_message( 'DEBUG', f"Converted trigger code: {converted_code}")
-
+source_schema_name
                         self.migrator_tables.insert_trigger(
                             self.source_schema,
                             table_info['table_name'],
                             table_info['id'],
-                            self.target_schema,
+                            self.target_schema_name,
                             table_info['table_name'],
                             trigger_details['id'],
                             trigger_details['name'],
@@ -770,7 +770,7 @@ class Planner:
 
     def run_prepare_views(self):
         self.config_parser.print_log_message('INFO', "Planner - Preparing views...")
-        if self.config_parser.should_migrate_views():
+        if self.config_parser.should_migrate_views():source_schema_name
             self.config_parser.print_log_message('INFO', "Processing views...")
             views = self.source_connection.fetch_views_names(self.source_schema)
 
@@ -792,19 +792,19 @@ class Planner:
                     self.config_parser.print_log_message('INFO', f"View {view_info['view_name']} is excluded from migration.")
                     continue
                 self.config_parser.print_log_message('INFO', f"View {view_info['view_name']} is included for migration.")
-                view_sql = self.source_connection.fetch_view_code({
+                view_source_schema_nameurce_connection.fetch_view_code({
                     'view_id': view_info['id'],
                     'source_schema': self.config_parser.get_source_schema(),
                     'source_view_name': view_info['view_name'],
-                    'target_schema': self.config_parser.get_target_schema(),
+                    'target_schema_name': self.config_parser.get_target_schema(),
                     'target_view_name': view_info['view_name'],
                 })
                 self.config_parser.print_log_message( 'DEBUG', f"Source view SQL: {view_sql}")
                 converted_view_sql = self.source_connection.convert_view_code({
-                    'view_code': view_sql,
+                    'source_schema_nameiew_sql,
                     'source_database': self.config_parser.get_source_db_name(),
                     'source_schema': self.config_parser.get_source_schema(),
-                    'target_schema': self.config_parser.get_target_schema(),
+                    'target_schema_name': self.config_parser.get_target_schema(),
                     'target_db_type': self.config_parser.get_target_db_type(),
                     'target_view_name': view_info['view_name'], # Pass name
                     'view_type': view_info.get('view_type', 'VIEW'), # Pass type
@@ -816,17 +816,17 @@ class Planner:
                     for row in rows:
                         self.config_parser.print_log_message( 'DEBUG', f"Views - remote objects substituting {row[0]} with {row[1]}")
                         converted_view_sql = re.sub(re.escape(row[0]), row[1], converted_view_sql, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
-
+source_schema_name
                 self.config_parser.print_log_message( 'DEBUG', f"Converted view SQL: {converted_view_sql}")
                 self.migrator_tables.insert_view(self.source_schema, view_info['view_name'], view_info['id'], view_sql,
-                                                 self.target_schema, view_info['view_name'], converted_view_sql, view_info['comment'])
+                                                 self.target_schema_name, view_info['view_name'], converted_view_sql, view_info['comment'])
                 self.config_parser.print_log_message( 'INFO', f"View {view_info['view_name']} processed successfully.")
             self.config_parser.print_log_message( 'INFO', "Views processed successfully.")
         else:
             self.config_parser.print_log_message( 'INFO', "Skipping views migration.")
         self.config_parser.print_log_message( 'INFO', "Planner - Views processed successfully.")
 
-    def run_prepare_user_defined_types(self):
+    def run_prepare_user_defined_types(self):source_schema_name
         self.config_parser.print_log_message('INFO', "Planner - Preparing user defined types...")
         user_defined_types = self.source_connection.fetch_user_defined_types(self.source_schema)
 
@@ -864,24 +864,24 @@ class Planner:
                     elif base_lower in ('numeric', 'decimal'):
                          definition += f"({prec},{scale})"
 
-                # Construct DDL: CREATE DOMAIN "target_schema"."type_name" AS definition;
+                # Construct DDL: CREATE DOMAIN "target_schema_name"."type_name" AS definition;
                 # Note: IF NOT EXISTS is not standard for CREATE DOMAIN in all versions, but we can try exception handling or standard CREATE
                 # Using simple CREATE DOMAIN as insert_user_defined_type expects SQL to execute.
                 # However, planner usually prepares 'target_type_sql' which is then executed.
 
                 # Using 'AS' syntax for domains
                 if definition:
-                    target_type_sql = f'CREATE DOMAIN "{self.target_schema}"."{type_name}" AS {definition};'
+                    target_type_sql = f'CREATE DOMAIN "{self.target_schema_name}"."{type_name}" AS {definsource_schema_name
                 else:
-                    target_type_sql = source_type_sql.replace(f'"{type_info.get("schema_name", self.source_schema)}".', f'"{self.target_schema}".') if source_type_sql else ''
+                    target_type_sql = source_type_sql.replace(f'"{type_info.get("schema_name", self.source_schema)}".', f'"{self.target_schema_name}".') if source_type_sql else ''
 
                 self.config_parser.print_log_message('DEBUG', f"Converted type SQL: {target_type_sql}")
-
+source_schema_name
                 self.migrator_tables.insert_user_defined_type({
                     'source_schema_name': self.source_schema,
                     'source_type_name': type_name,
                     'source_type_sql': source_type_sql,
-                    'target_schema_name': self.target_schema,
+                    'target_schema_name': self.target_schema_name,
                     'target_type_name': type_name,
                     'target_type_sql': target_type_sql,
                     'target_basic_type': target_base_type,
@@ -895,25 +895,25 @@ class Planner:
     def run_prepare_domains(self):
         self.config_parser.print_log_message('INFO', "Planner - Preparing domains...")
         migrated_as = 'CHECK CONSTRAINT'
-        if self.config_parser.get_target_db_type() == 'postgresql':
+        if self.config_parser.get_target_db_type() == 'postgsource_schema_name
             migrated_as = 'DOMAIN'
         domains = self.source_connection.fetch_domains(self.source_schema)
         self.config_parser.print_log_message( 'DEBUG', f"Domains found in source database: {domains}")
         if domains:
             for order_num, domain_info in domains.items():
                 self.config_parser.print_log_message( 'DEBUG', f"Processing domain: {domain_info}")
-                domain_info['target_schema'] = self.target_schema
+                domain_info['target_schema_name'] = self.target_schema_name
                 domain_info['migrated_as'] = migrated_as
                 converted_domain_sql = self.target_connection.get_create_domain_sql(domain_info)
                 self.config_parser.print_log_message( 'DEBUG', f"Converted domain SQL: {converted_domain_sql}")
 
-                # If the source domain SQL contains 'CREATE RULE', set 'migrated_as' accordingly
+                # If the source domain SQL contains 'CREATE RULE', set 'migrated_as' accordinglysource_schema_name
                 self.migrator_tables.insert_domain({
                     'source_schema_name': domain_info['domain_schema'] if 'domain_schema' in domain_info and domain_info['domain_schema'] is not None else self.source_schema,
                     'source_domain_name': domain_info['domain_name'],
                     'source_domain_sql': domain_info['source_domain_sql'],
                     'source_domain_check_sql': domain_info['source_domain_check_sql'] if 'source_domain_check_sql' in domain_info and domain_info['source_domain_check_sql'] is not None else '',
-                    'target_schema_name': self.target_schema,
+                    'target_schema_name': self.target_schema_name,
                     'target_domain_name': domain_info['domain_name'],
                     'target_domain_sql': converted_domain_sql,
                     'migrated_as': migrated_as,
@@ -924,7 +924,7 @@ class Planner:
         else:
             self.config_parser.print_log_message('INFO', "No domains found.")
 
-    def run_prepare_defaults(self):
+    def run_prepare_defaults(self):source_schema_namesource_schema_name
         self.config_parser.print_log_message('INFO', "Planner - Preparing defaults...")
         defaults = self.source_connection.fetch_default_values({ 'source_schema': self.source_schema})
         if defaults:
@@ -1010,26 +1010,26 @@ class Planner:
             self.config_parser.print_log_message('DEBUG', f"Fetched all tables - found: {len(tables)}")
             for table in tables:
                 table_info = self.migrator_tables.decode_table_row(table)
-                part_name = 'fetch data migrations for table ' + table_info['source_table']
-                self.config_parser.print_log_message('DEBUG', f"Checking migration status for table {table_info['source_table']}...")
-                data_migration_rows = self.migrator_tables.fetch_all_data_migrations(table_info['source_schema'], table_info['source_table'])
-                self.config_parser.print_log_message('DEBUG', f"Data migration rows for table {table_info['source_table']}: {data_migration_rows}")
+                part_name = 'fetch data migrations for table ' + table_info['source_table_name']source_schema_name
+                self.config_parser.print_log_message('DEBUG', f"Checking migration status for table {table_info['source_table_name']}...")
+                data_migration_rows = self.migrator_tables.fetch_all_data_migrations(table_info['source_schema'], table_info['source_table_name'])
+                self.config_parser.print_log_message('DEBUG', f"Data migration rows for table {table_info['source_table_name']}: {data_migration_rows}")
                 for record in data_migration_rows:
                     data_migration_info = self.migrator_tables.decode_data_migration_row(record)
 
-                    part_name = 'check row counts for table ' + data_migration_info['source_table']
+                    part_name = 'check row cosource_schema_namee ' + data_migration_info['source_table_name']
                     source_table_rows = self.source_connection.get_rows_count(
                         data_migration_info['source_schema'],
-                        data_migration_info['source_table']
+                        data_migration_info['source_table_name']
                     )
                     target_table_rows = self.target_connection.get_rows_count(
-                        data_migration_info['target_schema'],
-                        data_migration_info['target_table']
+                        data_migration_info['target_schema_name'],
+                        data_migration_info['target_table_name']
                     )
-                    self.config_parser.print_log_message('DEBUG', f"Row counts for table {data_migration_info['source_table']}: source={source_table_rows}, target={target_table_rows}")
+                    self.config_parser.print_log_message('DEBUG', f"Row counts for table {data_migration_info['source_table_name']}: source={source_table_rows}, target={target_table_rows}")
 
                     if source_table_rows != target_table_rows:
-                        self.config_parser.print_log_message('INFO', f"Row counts do not match for table {data_migration_info['source_table']}: source={source_table_rows}, target={target_table_rows}. Marking as not fully migrated.")
+                        self.config_parser.print_log_message('INFO', f"Row counts do not match for table {data_migration_info['source_table_name']}: source={source_table_rows}, target={target_table_rows}. Marking as not fully migrated.")
                         self.migrator_tables.update_table_status(table_info['id'], False, '')
                         self.migrator_tables.update_data_migration_rows({
                             "row_id": data_migration_info['id'],
@@ -1043,7 +1043,7 @@ class Planner:
                             'target_table_rows': target_table_rows,
                         })
                     else:
-                        self.config_parser.print_log_message('DEBUG', f"Row counts match for table {data_migration_info['source_table']}: source={source_table_rows}, target={target_table_rows}. Marking as fully migrated.")
+                        self.config_parser.print_log_message('DEBUG', f"Row counts match for table {data_migration_info['source_table_name']}: source={source_table_rows}, target={target_table_rows}. Marking as fully migrated.")
                         self.migrator_tables.update_table_status(table_info['id'], True, 'Fully migrated')
                         self.migrator_tables.update_data_migration_rows({
                             "row_id": data_migration_info['id'],
@@ -1083,19 +1083,19 @@ class Planner:
         if database_export['format'] in ('CSV', 'UNL'):
             for table in self.migrator_tables.fetch_all_tables():
                 self.config_parser.print_log_message('DEBUG', f"run_prepare_data_sources: Processing table: {table}")
-                settings_source = 'global'
+                settings_source = 'global'source_schema_name
                 table_info = self.migrator_tables.decode_table_row(table)
-                table_database_export = self.config_parser.get_table_database_export(table_info['source_schema'], table_info['source_table'])
+                table_database_export = self.config_parser.get_table_database_export(table_info['source_schema'], table_info['source_table_name'])
                 if table_database_export:
                     settings_source = 'table_specific'
-                    self.config_parser.print_log_message('DEBUG', f"run_prepare_data_sources: Table {table_info['source_table']} has specific database export settings: {table_database_export}")
+                    self.config_parser.print_log_message('DEBUG', f"run_prepare_data_sources: Table {table_info['source_table_name']} has specific database export settings: {table_database_export}")
 
                 file_name = database_export.get('file', None)
                 if table_database_export and 'file' in table_database_export:
                     file_name = table_database_export['file']
-
+source_schema_namesource_schema_name
                 if file_name:
-                    table_file_name = file_name.replace("{{source_schema}}", table_info['source_schema']).replace("{{source_table}}", table_info['source_table'])
+                    table_file_name = file_name.replace("{{source_schema}}", table_info['source_schema']).replace("{{source_table_name}}", table_info['source_table_name'])
                     if os.path.exists(table_file_name):
                         data_file_found = True
                     else:
@@ -1105,9 +1105,9 @@ class Planner:
                             self.config_parser.print_log_message('ERROR', f"run_prepare_data_sources: Data source file {table_file_name} does not exist or is not accessible. Stopping execution.")
                             exit(1)
 
-                    conversion_path = self.config_parser.get_source_database_export_conversion_path()
+                    conversion_path = self.config_parser.get_source_database_export_conversion_path()source_schema_name
                     if table_database_export and 'conversion_path' in table_database_export:
-                        conversion_path = self.config_parser.get_table_database_export_conversion_path(table_info['source_schema'], table_info['source_table'])
+                        conversion_path = self.config_parser.get_table_database_export_conversion_path(table_info['source_schema'], table_info['source_table_name'])
 
                     converted_file_name = os.path.join(
                         conversion_path,
@@ -1126,16 +1126,16 @@ class Planner:
                     if table_database_export and 'delimiter' in table_database_export:
                         delimiter = table_database_export['delimiter']
 
-                    self.config_parser.print_log_message('DEBUG3', f"run_prepare_data_sources: Table {table_info['source_table']} - file_name: {table_file_name}, converted_file_name: {converted_file_name}, data_file_found: {data_file_found}, format: {format}, delimiter: {delimiter}, header: {header}")
+                    self.source_schema_name.print_log_messsource_schema_name f"run_prepare_data_sources: Table {table_info['source_table_name']} - file_name: {table_file_name}, converted_file_name: {converted_file_name}, data_file_found: {data_file_found}, format: {format}, delimiter: {delimiter}, header: {header}")
                     data_source = {
                         'source_schema': table_info['source_schema'],
-                        'source_table': table_info['source_table'],
+                        'source_table_name': table_info['source_table_name'],
                         'source_table_id': table_info['id'],
                         'file_name': table_file_name,
                         'file_size': os.path.getsize(table_file_name) if data_file_found else -1,
-                        'file_lines': None, ## count of lines was too slow - sum(1 for _ in open(table_file_name, 'r', encoding='utf-8')) if data_file_found else -1,
+                        'file_lines': None, ## count of lines was too slow - sum(1 for _ in source_schema_namele_name, 'r', encoding='utf-8')) if data_file_found else -1,
                         'file_found': data_file_found,
-                        'lob_columns': self.config_parser.get_table_lob_columns(table_info['source_schema'], table_info['source_table'], table_info['source_columns']) if table_info else '',
+                        'lob_columns': self.config_parser.get_table_lob_columns(table_info['source_schema'], table_info['source_table_name'], table_info['source_columns']) if table_info else '',
                         'converted_file_name': converted_file_name,
                         'format_options': {
                             'settings_source': settings_source,
@@ -1145,7 +1145,7 @@ class Planner:
                         }
                     }
                     self.migrator_tables.insert_data_source(data_source)
-                    self.config_parser.print_log_message('DEBUG', f"run_prepare_data_sources: Table {table_info['source_table']} - inserted data source: {data_source}")
+                    self.config_parser.print_log_message('DEBUG', f"run_prepare_data_sources: Table {table_info['source_table_name']} - inserted data source: {data_source}")
 
         elif database_export['format'] == 'SQL':
             if self.config_parser.get_source_db_type() not in ('informix',):
@@ -1197,16 +1197,16 @@ class Planner:
                                 table_id = table_info['id']
                             else:
                                 table_id = None
-
+source_schema_name
                             data_source = {
                                 'source_schema': schema,
-                                'source_table': table,
+                                'source_table_name': table,
                                 'source_table_id': table_id,
                                 'file_name': unl_dump_file,
                                 'file_size': os.path.getsize(unl_dump_file) if data_file_found else -1,
-                                'file_lines': sum(1 for _ in open(unl_dump_file, 'r', encoding='utf-8')) if data_file_found else -1,
+                                'file_lines': sum(1 for _ in open(unl_dump_file, 'r', encoding='utf-source_schema_namefile_found else -1,
                                 'file_found': data_file_found,
-                                'lob_columns': self.config_parser.get_table_lob_columns(table_info['source_schema'], table_info['source_table'], table_info['source_columns']) if table_info else '',
+                                'lob_columns': self.config_parser.get_table_lob_columns(table_info['source_schema'], table_info['source_table_name'], table_info['source_columns']) if table_info else '',
                                 'converted_file_name': converted_file_name,
                                 'format_options': {
                                     'format': 'UNL',

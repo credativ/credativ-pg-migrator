@@ -936,7 +936,14 @@ class Orchestrator:
                             sequence_name = sequence_details['name']
                             column_name = sequence_details['column_name']
                             sequence_sql = sequence_details['set_sequence_sql']
-                            self.migrator_tables.insert_sequence(sequence_id, target_schema_name, target_table_name, column_name, sequence_name, sequence_sql)
+                            self.migrator_tables.insert_sequence({
+                                'sequence_id': sequence_id,
+                                'target_schema_name': target_schema_name,
+                                'target_table_name': target_table_name,
+                                'target_column_name': column_name,
+                                'target_sequence_name': sequence_name,
+                                'target_sequence_sql': sequence_sql
+                            })
                             self.config_parser.print_log_message( 'DEBUG', f"Worker {worker_id}: Setting sequence with SQL: {sequence_sql}")
                             try:
                                 worker_target_connection.execute_query(sequence_sql)
@@ -1372,7 +1379,16 @@ class Orchestrator:
                                 self.config_parser.print_log_message( 'DEBUG', f"Funcs/Procs - remote objects substituting {row[0]} with {row[1]}")
                                 converted_code = re.sub(re.escape(row[0]), row[1], converted_code, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
 
-                        self.migrator_tables.insert_funcprocs(self.source_schema_name, funcproc_data['name'], funcproc_id, funcproc_code_str, self.target_schema_name, funcproc_data['name'], converted_code, funcproc_data['comment'])
+                        self.migrator_tables.insert_funcprocs({
+                            'source_schema_name': self.source_schema_name,
+                            'source_funcproc_name': funcproc_data['name'],
+                            'source_funcproc_id': funcproc_id,
+                            'source_funcproc_sql': funcproc_code_str,
+                            'target_schema_name': self.target_schema_name,
+                            'target_funcproc_name': funcproc_data['name'],
+                            'target_funcproc_sql': converted_code,
+                            'funcproc_comment': funcproc_data['comment']
+                        })
 
                         if converted_code is not None and converted_code.strip():
                             self.config_parser.print_log_message('INFO', f"Creating {funcproc_type} {funcproc_data['name']} in target database.")

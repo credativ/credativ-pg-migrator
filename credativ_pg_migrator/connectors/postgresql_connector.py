@@ -483,7 +483,7 @@ class PostgreSQLConnector(DatabaseConnector):
 
             column_default = ''
             if column_info['column_default_name'] != '' and column_info['column_default_value'] == '' and column_info['replaced_column_default_value'] == '':
-                default_value_info = migrator_tables.get_default_value_details(default_value_name=column_info['column_default_name'])
+                default_value_info = migrator_tables.get_default_value_details({'default_value_name': column_info['column_default_name']})
                 if default_value_info:
                     column_default = default_value_info['extracted_default_value']
 
@@ -523,7 +523,7 @@ class PostgreSQLConnector(DatabaseConnector):
                     create_column_sql += f" DEFAULT {column_default}::{column_data_type}"
 
             if domain_name:
-                domain_details = migrator_tables.get_domain_details(domain_name=domain_name)
+                domain_details = migrator_tables.get_domain_details({'source_domain_name': domain_name})
                 if domain_details:
                     domain_row_id = domain_details['id']
                     domain_name = domain_details['source_domain_name']
@@ -1593,7 +1593,14 @@ class PostgreSQLConnector(DatabaseConnector):
                         # We'll update it later or insert it now with placeholders?
                         # Usually insert happens before work starts to track 'started', but insert_sequence seems to just log existence?
                         # Looking at other methods, insert_* usually logs the item and then update_* sets status.
-                        migrator_tables.insert_sequence(seq_oid, source_schema_name, '', '', seq_name, '')
+                        migrator_tables.insert_sequence({
+                            'sequence_id': seq_oid,
+                            'source_schema_name': source_schema_name,
+                            'source_table_name': '',
+                            'source_column_name': '',
+                            'source_sequence_name': seq_name,
+                            'source_sequence_sql': ''
+                        })
                     except Exception as e:
                         self.config_parser.print_log_message('ERROR', f"Failed to insert sequence {seq_name} into protocol: {e}")
 

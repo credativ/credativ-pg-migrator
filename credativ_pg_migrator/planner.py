@@ -664,21 +664,21 @@ class Planner:
                         self.config_parser.print_log_message( 'DEBUG', f"Source trigger code: {trigger_details['sql']}")
                         self.config_parser.print_log_message( 'DEBUG', f"Converted trigger code: {converted_code}")
 
-                        self.migrator_tables.insert_trigger(
-                            self.source_schema_name,
-                            table_info['table_name'],
-                            table_info['id'],
-                            self.target_schema_name,
-                            table_info['table_name'],
-                            trigger_details['id'],
-                            trigger_details['name'],
-                            trigger_details['event'],
-                            trigger_details['new'],
-                            trigger_details['old'],
-                            trigger_details['sql'],
-                            converted_code,
-                            trigger_details['comment']
-                        )
+                        self.migrator_tables.insert_trigger({
+                            'source_schema_name': self.source_schema_name,
+                            'source_table_name': table_info['table_name'],
+                            'source_table_id': table_info['id'],
+                            'target_schema_name': self.target_schema_name,
+                            'target_table_name': table_info['table_name'],
+                            'trigger_id': trigger_details['id'],
+                            'trigger_name': trigger_details['name'],
+                            'trigger_event': trigger_details['event'],
+                            'trigger_new': trigger_details['new'],
+                            'trigger_old': trigger_details['old'],
+                            'trigger_source_sql': trigger_details['sql'],
+                            'trigger_target_sql': converted_code,
+                            'trigger_comment': trigger_details['comment']
+                        })
                     self.config_parser.print_log_message('INFO', f"Trigger {trigger_details['name']} for table {table_info['table_name']}")
                 else:
                     self.config_parser.print_log_message('INFO', f"No triggers found for table {table_info['table_name']}.")
@@ -818,8 +818,16 @@ class Planner:
                         converted_view_sql = re.sub(re.escape(row[0]), row[1], converted_view_sql, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
 
                 self.config_parser.print_log_message( 'DEBUG', f"Converted view SQL: {converted_view_sql}")
-                self.migrator_tables.insert_view(self.source_schema_name, view_info['view_name'], view_info['id'], view_sql,
-                                                 self.target_schema_name, view_info['view_name'], converted_view_sql, view_info['comment'])
+                self.migrator_tables.insert_view({
+                    'source_schema_name': self.source_schema_name,
+                    'source_view_name': view_info['view_name'],
+                    'source_view_id': view_info['id'],
+                    'source_view_sql': view_sql,
+                    'target_schema_name': self.target_schema_name,
+                    'target_view_name': view_info['view_name'],
+                    'target_view_sql': converted_view_sql,
+                    'view_comment': view_info['comment']
+                })
                 self.config_parser.print_log_message( 'INFO', f"View {view_info['view_name']} processed successfully.")
             self.config_parser.print_log_message( 'INFO', "Views processed successfully.")
         else:

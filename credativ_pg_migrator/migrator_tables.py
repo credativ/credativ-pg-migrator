@@ -708,7 +708,7 @@ class MigratorTables:
     def get_domain_details(self, settings):
         source_schema_name = settings.get('source_schema_name')
         source_domain_name = settings.get('source_domain_name')
-        domain_row = self.fetch_all_domains({'domain_owner': domain_owner, 'domain_name': domain_name})
+        domain_row = self.fetch_all_domains({'domain_owner': source_schema_name, 'domain_name': source_domain_name})
         result = self.decode_domain_row(domain_row[0]) if domain_row else {}
         return result
 
@@ -822,7 +822,8 @@ class MigratorTables:
             'default_value_data_type': row[5],
         }
 
-    def get_default_value_details(self, default_value_name):
+    def get_default_value_details(self, settings):
+        default_value_name = settings.get('default_value_name')
         table_name = self.config_parser.get_protocol_name_default_values()
         query = f"""SELECT * FROM "{self.protocol_schema}"."{table_name}" WHERE default_value_name = '{default_value_name}'"""
         cursor = self.protocol_connection.connection.cursor()
@@ -3268,6 +3269,46 @@ class MigratorTables:
             self.config_parser.print_log_message('ERROR', f"update_aliases_status ({func_run_id}): Error updating status for row {row_id} in {table_name}. Exception: {e}")
             raise
 
+
+    def fetch_all_source_table_partitioning(self, settings):
+        source_schema_name = settings.get('source_schema_name')
+        table_name = self.config_parser.get_protocol_name_source_table_partitioning()
+        query = f"""SELECT * FROM "{self.protocol_schema}"."{table_name}" WHERE source_schema_name = '{source_schema_name}' ORDER BY id"""
+        cursor = self.protocol_connection.connection.cursor()
+        cursor.execute(query)
+        rows = cursor.fetchall()
+        cursor.close()
+        return rows
+
+    def fetch_all_target_table_partitioning(self, settings):
+        target_schema_name = settings.get('target_schema_name')
+        table_name = self.config_parser.get_protocol_name_target_table_partitioning()
+        query = f"""SELECT * FROM "{self.protocol_schema}"."{table_name}" WHERE target_schema_name = '{target_schema_name}' ORDER BY id"""
+        cursor = self.protocol_connection.connection.cursor()
+        cursor.execute(query)
+        rows = cursor.fetchall()
+        cursor.close()
+        return rows
+
+    def fetch_all_columns(self, settings):
+        source_schema_name = settings.get('source_schema_name')
+        table_name = self.config_parser.get_protocol_name_columns()
+        query = f"""SELECT * FROM "{self.protocol_schema}"."{table_name}" WHERE source_schema_name = '{source_schema_name}' ORDER BY id"""
+        cursor = self.protocol_connection.connection.cursor()
+        cursor.execute(query)
+        rows = cursor.fetchall()
+        cursor.close()
+        return rows
+
+    def fetch_all_aliases(self, settings):
+        source_schema_name = settings.get('source_schema_name')
+        table_name = self.config_parser.get_protocol_name_aliases()
+        query = f"""SELECT * FROM "{self.protocol_schema}"."{table_name}" WHERE source_schema_name = '{source_schema_name}' ORDER BY id"""
+        cursor = self.protocol_connection.connection.cursor()
+        cursor.execute(query)
+        rows = cursor.fetchall()
+        cursor.close()
+        return rows
 
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

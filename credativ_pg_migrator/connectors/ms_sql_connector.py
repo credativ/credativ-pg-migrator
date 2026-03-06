@@ -794,7 +794,7 @@ class MsSQLConnector(DatabaseConnector):
              implicit_return_schema = []
 
         # target_db_type = settings['target_db_type'] # Unused
-        # source_schema = settings['source_schema'] # Unused
+        # source_schema_name = settings['source_schema_name'] # Unused
         target_schema_name = settings['target_schema_name']
         # table_list = settings['table_list']
         # view_list = settings['view_list']
@@ -1047,7 +1047,7 @@ $$ LANGUAGE plpgsql;
 
     def fetch_view_code(self, settings):
         view_id = settings['view_id']
-        source_schema = settings['source_schema']
+        source_schema_name = settings['source_schema_name']
         source_view_name = settings['source_view_name']
         target_schema_name = settings['target_schema_name']
         target_view_name = settings['target_view_name']
@@ -1064,7 +1064,7 @@ $$ LANGUAGE plpgsql;
             rows = cursor.fetchall()
             for row in rows:
                 view_code = row[0]
-                self.config_parser.print_log_message('DEBUG', f"View code for {source_schema}.{source_view_name}: {view_code}")
+                self.config_parser.print_log_message('DEBUG', f"View code for {source_schema_name}.{source_view_name}: {view_code}")
                 return view_code
             cursor.close()
             self.disconnect()
@@ -1090,7 +1090,7 @@ $$ LANGUAGE plpgsql;
         def replace_schema_names(node):
             if isinstance(node, (sqlglot.exp.Table, sqlglot.exp.Column)):
                 schema = node.args.get("db")
-                if schema and schema.name == settings['source_schema']:
+                if schema and schema.name == settings['source_schema_name']:
                     node.set("db", sqlglot.exp.Identifier(this=settings['target_schema_name'], quoted=False))
             return node
 
@@ -1236,7 +1236,7 @@ $$ LANGUAGE plpgsql;
         order_by_clause = ''
         try:
             worker_id = settings['worker_id']
-            source_schema = settings['source_schema']
+            source_schema_name = settings['source_schema_name']
             source_table_name = settings['source_table_name']
             source_table_id = settings['source_table_id']
             source_columns = settings['source_columns']
@@ -1252,7 +1252,7 @@ $$ LANGUAGE plpgsql;
             resume_after_crash = settings['resume_after_crash']
             drop_unfinished_tables = settings['drop_unfinished_tables']
 
-            source_table_rows = self.get_rows_count(source_schema, source_table_name, migration_limitation)
+            source_table_rows = self.get_rows_count(source_schema_name, source_table_name, migration_limitation)
             target_table_rows = migrate_target_connection.get_rows_count(target_schema_name, target_table_name)
 
             total_chunks = self.config_parser.get_total_chunks(source_table_rows, chunk_size)
@@ -1267,11 +1267,11 @@ $$ LANGUAGE plpgsql;
                 'target_table_rows': target_table_rows,
                 'finished': True if source_table_rows == 0 else False,
             }
-            ## source_schema, source_table, source_table_id, source_table_rows, worker_id, target_schema, target_table, target_table_rows
+            ## source_schema_name, source_table_name, source_table_id, source_table_rows, worker_id, target_schema_name, target_table_name, target_table_rows
             protocol_id = migrator_tables.insert_data_migration({
                 'worker_id': worker_id,
                 'source_table_id': source_table_id,
-                'source_schema': source_schema,
+                'source_schema_name': source_schema_name,
                 'source_table_name': source_table_name,
                 'target_schema_name': target_schema_name,
                 'target_table_name': target_table_name,
@@ -1305,7 +1305,7 @@ $$ LANGUAGE plpgsql;
                     insert_columns_list = []
                     for order_num, col in source_columns.items():
                         self.config_parser.print_log_message('DEBUG2',
-                                                            f"Worker {worker_id}: Table {source_schema}.{source_table_name}: Processing column {col['column_name']} ({order_num}) with data type {col['data_type']}")
+                                                            f"Worker {worker_id}: Table {source_schema_name}.{source_table_name}: Processing column {col['column_name']} ({order_num}) with data type {col['data_type']}")
 
                         target_type_check = migrator_tables.check_data_types_substitution({
                             'table_name': source_table_name,
@@ -1327,7 +1327,7 @@ $$ LANGUAGE plpgsql;
 
                     if resume_after_crash and not drop_unfinished_tables:
                         chunk_number = self.config_parser.get_total_chunks(target_table_rows, chunk_size)
-                        self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Resuming migration for table {source_schema}.{source_table_name} from chunk {chunk_number} with data chunk size {chunk_size}.")
+                        self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Resuming migration for table {source_schema_name}.{source_table_name} from chunk {chunk_number} with data chunk size {chunk_size}.")
                         chunk_offset = target_table_rows
                     else:
                         chunk_offset = (chunk_number - 1) * chunk_size
@@ -1335,21 +1335,21 @@ $$ LANGUAGE plpgsql;
                     chunk_start_row_number = chunk_offset + 1
                     chunk_end_row_number = chunk_offset + chunk_size
 
-                    self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Migrating table {source_schema}.{source_table_name}: chunk {chunk_number}, data chunk size {chunk_size}, batch size {batch_size}, chunk offset {chunk_offset}, chunk end row number {chunk_end_row_number}, source table rows {source_table_rows}")
+                    self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Migrating table {source_schema_name}.{source_table_name}: chunk {chunk_number}, data chunk size {chunk_size}, batch size {batch_size}, chunk offset {chunk_offset}, chunk end row number {chunk_end_row_number}, source table rows {source_table_rows}")
                     order_by_clause = ''
 
                     # if table is small, skipping ordering does not make sense because it will not speed up the migration
                     # if chunk_size > source_table_rows:
-                    #     query = f'''SELECT {select_columns} FROM "{source_schema}".{source_table_name}'''
+                    #     query = f'''SELECT {select_columns} FROM "{source_schema_name}".{source_table_name}'''
                     #     if migration_limitation:
                     #         query += f" WHERE {migration_limitation}"
                     # else:
 
-                    query = f"SELECT {select_columns} FROM [{source_schema}].[{source_table_name}]"
+                    query = f"SELECT {select_columns} FROM [{source_schema_name}].[{source_table_name}]"
                     if migration_limitation:
                         query += f" WHERE {migration_limitation}"
-                    primary_key_columns = migrator_tables.select_primary_key(source_schema, source_table_name)
-                    self.config_parser.print_log_message('DEBUG2', f"Worker {worker_id}: Primary key columns for {source_schema}.{source_table_name}: {primary_key_columns}")
+                    primary_key_columns = migrator_tables.select_primary_key(source_schema_name, source_table_name)
+                    self.config_parser.print_log_message('DEBUG2', f"Worker {worker_id}: Primary key columns for {source_schema_name}.{source_table_name}: {primary_key_columns}")
                     if primary_key_columns:
                         orderby_columns = primary_key_columns
                     order_by_clause = f""" ORDER BY {orderby_columns}"""
@@ -1421,7 +1421,7 @@ $$ LANGUAGE plpgsql;
                         batch_start_str = batch_start_dt.strftime('%Y-%m-%d %H:%M:%S.%f')
                         batch_end_str = batch_end_dt.strftime('%Y-%m-%d %H:%M:%S.%f')
                         migrator_tables.insert_batches_stats({
-                            'source_schema': source_schema,
+                            'source_schema_name': source_schema_name,
                             'source_table_name': source_table_name,
                             'source_table_id': source_table_id,
                             'chunk_number': chunk_number,
@@ -1491,7 +1491,7 @@ $$ LANGUAGE plpgsql;
                 migrator_tables.insert_data_chunk({
                     'worker_id': worker_id,
                     'source_table_id': source_table_id,
-                    'source_schema': source_schema,
+                    'source_schema_name': source_schema_name,
                     'source_table_name': source_table_name,
                     'target_schema_name': target_schema_name,
                     'target_table_name': target_table_name,
@@ -1586,7 +1586,7 @@ $$ LANGUAGE plpgsql;
     def convert_trigger(self, settings):
         trigger_name = settings['trigger_name']
         trigger_code = settings['trigger_sql']
-        source_schema = settings['source_schema']
+        source_schema_name = settings['source_schema_name']
         target_schema_name = settings['target_schema_name']
         table_list = settings['table_list']
 
@@ -1943,7 +1943,7 @@ EXECUTE FUNCTION "{func_schema}"."{func_name}"();
         top_tables['by_indexes'] = {}
         top_tables['by_constraints'] = {}
 
-        source_schema = settings['source_schema']
+        source_schema_name = settings['source_schema_name']
         try:
             order_num = 1
             top_n = self.config_parser.get_top_n_tables_by_rows()
@@ -1958,13 +1958,13 @@ EXECUTE FUNCTION "{func_schema}"."{func_name}"();
                     JOIN sys.schemas s ON t.schema_id = s.schema_id
                     JOIN sys.partitions p ON t.object_id = p.object_id AND p.index_id IN (0, 1)
                     JOIN sys.allocation_units a ON p.partition_id = a.container_id
-                    WHERE s.name = '{source_schema}'
+                    WHERE s.name = '{source_schema_name}'
                     GROUP BY s.name, t.name
                     ORDER BY total_size DESC
                 """
                 self.connect()
                 cursor = self.connection.cursor()
-                cursor.execute(query.format(source_schema=source_schema))
+                cursor.execute(query.format(source_schema_name=source_schema_name))
                 rows = cursor.fetchall()
                 cursor.close()
                 self.disconnect()

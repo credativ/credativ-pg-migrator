@@ -407,7 +407,7 @@ class DatabaseConnector(ABC):
         settings - dictionary with the following keys:
             - funcproc_code: str - code of the function or procedure in the source database
             - target_db_type: str - target database type
-            - source_schema: str - schema name of the function or procedure in the source database
+            - source_schema_name: str - schema name of the function or procedure in the source database
             - target_schema_name: str - schema name of the function or procedure in the target database
             - table_list: list - list of all tables in the migrated schema
             - view_list: list - list of all views in the migrated schema
@@ -454,7 +454,7 @@ class DatabaseConnector(ABC):
         pass
 
     @abstractmethod
-    def fetch_views_names(self, source_schema: str):
+    def fetch_views_names(self, source_schema_name: str):
         """
         Fetch view names in the specified schema.
         Returns: dict
@@ -473,7 +473,7 @@ class DatabaseConnector(ABC):
         """
         settings - dictionary with the following keys
             - view_id: id of the view in the source database (does not exist in MySQL)
-            - source_schema: schema name of the view in the source database
+            - source_schema_name: schema name of the view in the source database
             - source_view_name: view name in the source database
             - target_schema_name: target schema name
             - target_view_name: target view name
@@ -616,7 +616,7 @@ class DatabaseConnector(ABC):
     def get_top_n_tables(self, settings):
         """
         Settings - dictionary with the following keys
-            - source_schema: str - schema name of the tables to be checked
+            - source_schema_name: str - schema name of the tables to be checked
         Returns a dictionary with the top N tables in the specified schema.
         The dictionary contains the following keys:
             - 'by_rows': dict - top tables by number of rows
@@ -642,7 +642,7 @@ class DatabaseConnector(ABC):
         """
         Fetch top foreign key dependencies in the specified schema.
         settings - dictionary with the following keys
-            - source_schema: str - schema name of the tables to be checked
+            - source_schema_name: str - schema name of the tables to be checked
         Returns a dictionary with the top foreign key dependencies.
         Each of these keys contains a dictionary with structure like this:
         { ordinary_number: {

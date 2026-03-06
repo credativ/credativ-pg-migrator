@@ -537,7 +537,7 @@ class PostgreSQLConnector(DatabaseConnector):
                         constraint_name = f"{domain_name}_tab_{target_table_name}"
                         create_constraint_sql = f"""ALTER TABLE "{target_schema_name}"."{target_table_name}" ADD CONSTRAINT "{constraint_name}" CHECK({source_domain_check_sql})"""
                         migrator_tables.insert_constraint({
-                            'source_schema': source_schema,
+                            'source_schema_name': source_schema_name,
                             'source_table_name': source_table_name,
                             'source_table_id': source_table_id,
                             'target_schema_name': target_schema_name,
@@ -621,7 +621,7 @@ class PostgreSQLConnector(DatabaseConnector):
 
     def get_create_index_sql(self, settings):
 
-        # source_schema = settings['source_schema']
+        # source_schema_name = settings['source_schema_name']
         # source_table_name = settings['source_table_name']
         # source_table_id = settings['source_table_id']
         # index_owner = settings['index_owner']
@@ -951,7 +951,7 @@ class PostgreSQLConnector(DatabaseConnector):
         order_by_clause = ''
         try:
             worker_id = settings['worker_id']
-            source_schema = settings['source_schema']
+            source_schema_name = settings['source_schema_name']
             source_table_name = settings['source_table_name']
             source_table_id = settings['source_table_id']
             source_columns = settings['source_columns']
@@ -968,7 +968,7 @@ class PostgreSQLConnector(DatabaseConnector):
             resume_after_crash = settings['resume_after_crash']
             drop_unfinished_tables = settings['drop_unfinished_tables']
 
-            source_table_rows = self.get_rows_count(source_schema, source_table_name, migration_limitation)
+            source_table_rows = self.get_rows_count(source_schema_name, source_table_name, migration_limitation)
             target_table_rows = migrate_target_connection.get_rows_count(target_schema_name, target_table_name)
 
             total_chunks = self.config_parser.get_total_chunks(source_table_rows, chunk_size)
@@ -983,11 +983,11 @@ class PostgreSQLConnector(DatabaseConnector):
                 'target_table_rows': target_table_rows,
                 'finished': True if source_table_rows == 0 else False,
             }
-            ## source_schema, source_table_name, source_table_id, source_table_rows, worker_id, target_schema_name, target_table_name, target_table_rows
+            ## source_schema_name, source_table_name, source_table_id, source_table_rows, worker_id, target_schema_name, target_table_name, target_table_rows
             protocol_id = migrator_tables.insert_data_migration({
                 'worker_id': worker_id,
                 'source_table_id': source_table_id,
-                'source_schema': source_schema,
+                'source_schema_name': source_schema_name,
                 'source_table_name': source_table_name,
                 'target_schema_name': target_schema_name,
                 'target_table_name': target_table_name,
@@ -1022,7 +1022,7 @@ class PostgreSQLConnector(DatabaseConnector):
                     insert_columns_list = []
                     for order_num, col in source_columns.items():
                         self.config_parser.print_log_message('DEBUG2',
-                                                            f"Worker {worker_id}: Table {source_schema}.{source_table_name}: Processing column {col['column_name']} ({order_num}) with data type {col['data_type']}")
+                                                            f"Worker {worker_id}: Table {source_schema_name}.{source_table_name}: Processing column {col['column_name']} ({order_num}) with data type {col['data_type']}")
 
                         if col['data_type'].lower() == 'datetime':
                             select_columns_list.append(f"TO_CHAR({col['column_name']}, '%Y-%m-%d %H:%M:%S') as {col['column_name']}")
@@ -1041,7 +1041,7 @@ class PostgreSQLConnector(DatabaseConnector):
 
                     if resume_after_crash and not drop_unfinished_tables:
                         chunk_number = self.config_parser.get_total_chunks(target_table_rows, chunk_size)
-                        self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Resuming migration for table {source_schema}.{source_table_name} from chunk {chunk_number} with data chunk size {chunk_size}.")
+                        self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Resuming migration for table {source_schema_name}.{source_table_name} from chunk {chunk_number} with data chunk size {chunk_size}.")
                         chunk_offset = target_table_rows
                     else:
                         chunk_offset = (chunk_number - 1) * chunk_size
@@ -1049,14 +1049,14 @@ class PostgreSQLConnector(DatabaseConnector):
                     chunk_start_row_number = chunk_offset + 1
                     chunk_end_row_number = chunk_offset + chunk_size
 
-                    self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Migrating table {source_schema}.{source_table_name}: chunk {chunk_number}, data chunk size {chunk_size}, batch size {batch_size}, chunk offset {chunk_offset}, chunk end row number {chunk_end_row_number}, source table rows {source_table_rows}")
+                    self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Migrating table {source_schema_name}.{source_table_name}: chunk {chunk_number}, data chunk size {chunk_size}, batch size {batch_size}, chunk offset {chunk_offset}, chunk end row number {chunk_end_row_number}, source table rows {source_table_rows}")
                     order_by_clause = ''
 
-                    query = f'''SELECT {select_columns} FROM "{source_schema}"."{source_table_name}" '''
+                    query = f'''SELECT {select_columns} FROM "{source_schema_name}"."{source_table_name}" '''
                     if migration_limitation:
                         query += f" WHERE {migration_limitation}"
-                    primary_key_columns = migrator_tables.select_primary_key(source_schema, source_table_name)
-                    self.config_parser.print_log_message('DEBUG2', f"Worker {worker_id}: Primary key columns for {source_schema}.{source_table_name}: {primary_key_columns}")
+                    primary_key_columns = migrator_tables.select_primary_key(source_schema_name, source_table_name)
+                    self.config_parser.print_log_message('DEBUG2', f"Worker {worker_id}: Primary key columns for {source_schema_name}.{source_table_name}: {primary_key_columns}")
                     if primary_key_columns:
                         orderby_columns = primary_key_columns
                     order_by_clause = f""" ORDER BY {orderby_columns}"""
@@ -1126,7 +1126,7 @@ class PostgreSQLConnector(DatabaseConnector):
                         batch_start_str = batch_start_dt.strftime('%Y-%m-%d %H:%M:%S.%f')
                         batch_end_str = batch_end_dt.strftime('%Y-%m-%d %H:%M:%S.%f')
                         migrator_tables.insert_batches_stats({
-                            'source_schema': source_schema,
+                            'source_schema_name': source_schema_name,
                             'source_table_name': source_table_name,
                             'source_table_id': source_table_id,
                             'chunk_number': chunk_number,
@@ -1196,7 +1196,7 @@ class PostgreSQLConnector(DatabaseConnector):
                 migrator_tables.insert_data_chunk({
                     'worker_id': worker_id,
                     'source_table_id': source_table_id,
-                    'source_schema': source_schema,
+                    'source_schema_name': source_schema_name,
                     'source_table_name': source_table_name,
                     'target_schema_name': target_schema_name,
                     'target_table_name': target_table_name,
@@ -1353,19 +1353,19 @@ class PostgreSQLConnector(DatabaseConnector):
     def convert_funcproc_code(self, settings):
         funcproc_code = settings['funcproc_code']
         # target_db_type = settings['target_db_type']
-        source_schema = settings['source_schema']
+        source_schema_name = settings['source_schema_name']
         target_schema_name = settings['target_schema_name']
 
         # Simple schema replacement if they differ
         converted_code = funcproc_code
-        if source_schema != target_schema_name:
+        if source_schema_name != target_schema_name:
             # Replace schema references
-            # Use loose matching or generic replace for source_schema
+            # Use loose matching or generic replace for source_schema_name
             # This is risky if schema name is common word, but standard practice in this simple migration
-            # Better: Replace "source_schema". with "target_schema_name".
-            converted_code = converted_code.replace(f'"{source_schema}".', f'"{target_schema_name}".')
+            # Better: Replace "source_schema_name". with "target_schema_name".
+            converted_code = converted_code.replace(f'"{source_schema_name}".', f'"{target_schema_name}".')
             # Also without quotes?
-            converted_code = converted_code.replace(f'{source_schema}.', f'{target_schema_name}.')
+            converted_code = converted_code.replace(f'{source_schema_name}.', f'{target_schema_name}.')
 
         return converted_code
 
@@ -1507,18 +1507,18 @@ class PostgreSQLConnector(DatabaseConnector):
 
     def convert_trigger(self, settings: dict):
         trigger_sql = settings['trigger_sql']
-        source_schema = settings['source_schema']
-        target_schema = settings['target_schema']
+        source_schema_name = settings['source_schema_name']
+        target_schema_name = settings['target_schema_name']
 
         # Simple schema replacement
         converted_code = trigger_sql
-        if source_schema != target_schema_name:
-             converted_code = converted_code.replace(f'"{source_schema}".', f'"{target_schema_name}".')
-             converted_code = converted_code.replace(f'{source_schema}.', f'{target_schema_name}.')
+        if source_schema_name != target_schema_name:
+             converted_code = converted_code.replace(f'"{source_schema_name}".', f'"{target_schema_name}".')
+             converted_code = converted_code.replace(f'{source_schema_name}.', f'{target_schema_name}.')
 
         return converted_code
 
-    def fetch_views_names(self, source_schema: str):
+    def fetch_views_names(self, source_schema_name: str):
         views = {}
         order_num = 1
         query = f"""
@@ -1529,7 +1529,7 @@ class PostgreSQLConnector(DatabaseConnector):
                 relkind
             FROM pg_class
             WHERE relkind IN ('v', 'm')
-            AND relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = '{source_schema}')
+            AND relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = '{source_schema_name}')
             AND relname NOT LIKE 'pg_%'
             ORDER BY viewname
         """
@@ -1541,7 +1541,7 @@ class PostgreSQLConnector(DatabaseConnector):
                 view_type = 'MATERIALIZED VIEW' if row[3] == 'm' else 'VIEW'
                 views[order_num] = {
                     'id': row[0],
-                    'schema_name': source_schema,
+                    'schema_name': source_schema_name,
                     'view_name': row[1],
                     'comment': row[2],
                     'view_type': view_type
@@ -1556,17 +1556,17 @@ class PostgreSQLConnector(DatabaseConnector):
             raise
 
     def migrate_sequences(self, target_connector, settings):
-        source_schema = settings['source_schema']
+        source_schema_name = settings['source_schema_name']
         target_schema_name = settings['target_schema_name']
         migrator_tables = settings.get('migrator_tables')
 
-        self.config_parser.print_log_message('INFO', f"Migrating sequences from {source_schema} to {target_schema_name}...")
+        self.config_parser.print_log_message('INFO', f"Migrating sequences from {source_schema_name} to {target_schema_name}...")
 
         query = f"""
             SELECT c.relname, c.oid
             FROM pg_class c
             JOIN pg_namespace n ON c.relnamespace = n.oid
-            WHERE n.nspname = '{source_schema}'
+            WHERE n.nspname = '{source_schema_name}'
               AND c.relkind = 'S'
         """
 
@@ -1593,16 +1593,16 @@ class PostgreSQLConnector(DatabaseConnector):
                         # We'll update it later or insert it now with placeholders?
                         # Usually insert happens before work starts to track 'started', but insert_sequence seems to just log existence?
                         # Looking at other methods, insert_* usually logs the item and then update_* sets status.
-                        migrator_tables.insert_sequence(seq_oid, source_schema, '', '', seq_name, '')
+                        migrator_tables.insert_sequence(seq_oid, source_schema_name, '', '', seq_name, '')
                     except Exception as e:
                         self.config_parser.print_log_message('ERROR', f"Failed to insert sequence {seq_name} into protocol: {e}")
 
-                details = self.get_sequence_details(source_schema, seq_name)
+                details = self.get_sequence_details(source_schema_name, seq_name)
 
                 # Fetch current value separately as it's not in pg_sequence catalog
                 # Re-connect because get_sequence_details closes the connection
                 self.connect()
-                curr_val_query = f"SELECT last_value, is_called FROM {source_schema}.{seq_name}"
+                curr_val_query = f"SELECT last_value, is_called FROM {source_schema_name}.{seq_name}"
                 cursor = self.connection.cursor()
                 cursor.execute(curr_val_query)
                 curr_val_row = cursor.fetchone()
@@ -1968,7 +1968,7 @@ class PostgreSQLConnector(DatabaseConnector):
         top_tables['by_constraints'] = {}
         # return top_tables
 
-        source_schema = settings.get('source_schema', 'public')
+        source_schema_name = settings.get('source_schema_name', 'public')
         try:
             order_num = 1
             top_n = self.config_parser.get_top_n_tables_by_rows()
@@ -1984,7 +1984,7 @@ class PostgreSQLConnector(DatabaseConnector):
                     JOIN
                     pg_namespace n ON n.oid = c.relnamespace
                     WHERE
-                    c.relkind = 'r' AND n.nspname = '{source_schema}'
+                    c.relkind = 'r' AND n.nspname = '{source_schema_name}'
                     ORDER BY
                     c.reltuples DESC
                     LIMIT {top_n};

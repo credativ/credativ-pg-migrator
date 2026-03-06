@@ -854,7 +854,7 @@ class ConfigParser:
 
     ### Other utility methods
 
-    def get_table_lob_columns(self, source_schema, source_table_name, source_columns):
+    def get_table_lob_columns(self, source_schema_name, source_table_name, source_columns):
         lob_columns_list = []
         for _, column_info in source_columns.items():
             if column_info.get('data_type', '').upper() in ['BLOB', 'CLOB', 'NCLOB']:

@@ -534,13 +534,13 @@ class Orchestrator:
                 worker_source_connection = self.load_connector('source')
                 worker_source_connection.connect()
 
-                data_source = self.migrator_tables.fetch_data_source(table_data['source_schema'], table_data['source_table_name'])
-                self.config_parser.print_log_message('DEBUG3', f"Worker {worker_id}: Checking data source for table {table_data['source_schema']}.{table_data['source_table_name']}: {data_source}")
+                data_source = self.migrator_tables.fetch_data_source(table_data['source_schema_name'], table_data['source_table_name'])
+                self.config_parser.print_log_message('DEBUG3', f"Worker {worker_id}: Checking data source for table {table_data['source_schema_name']}.{table_data['source_table_name']}: {data_source}")
 
                 use_source_table = False
 
                 if data_source is not None:
-                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data source for table {table_data['source_schema']}.{table_data['source_table_name']} is {data_source}.")
+                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Data source for table {table_data['source_schema_name']}.{table_data['source_table_name']} is {data_source}.")
                     clean_objects = self.config_parser.get_source_database_export_clean()
 
                     if data_source['file_found'] and data_source['file_name'] is not None:
@@ -560,7 +560,7 @@ class Orchestrator:
                             protocol_id = migrator_tables.insert_data_migration({
                                 'worker_id': worker_id,
                                 'source_table_id': table_data['source_table_id'],
-                                'source_schema': table_data['source_schema'],
+                                'source_schema_name': table_data['source_schema_name'],
                                 'source_table_name': table_data['source_table_name'],
                                 'target_schema_name': table_data['target_schema_name'],
                                 'target_table_name': table_data['target_table_name'],
@@ -648,7 +648,7 @@ class Orchestrator:
                                             if lob_columns_count > 1:
                                                 self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {target_table_name} has multiple LOB columns defined ({data_source_settings['lob_columns']}) - adding primary key for LOB migration.")
                                                 part_name = 'migrate LOBs - add primary key'
-                                                primary_key_data = migrator_tables.select_primary_key_all_columns(table_data['source_schema'], table_data['source_table_name'])
+                                                primary_key_data = migrator_tables.select_primary_key_all_columns(table_data['source_schema_name'], table_data['source_table_name'])
                                                 if primary_key_data is None:
                                                     self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Table {target_table_name} has LOB columns defined ({data_source_settings['lob_columns']}), but no primary key could be determined.")
                                                 else:
@@ -746,7 +746,7 @@ class Orchestrator:
                                                                 settings = {
                                                                     'target_schema_name': target_schema_name,
                                                                     'target_table_name': target_table_name,
-                                                                    'primary_key_columns': migrator_tables.select_primary_key(table_data['source_schema'], table_data['source_table_name']),
+                                                                    'primary_key_columns': migrator_tables.select_primary_key(table_data['source_schema_name'], table_data['source_table_name']),
                                                                     'unl_import_table': table_name_for_lob_import,
                                                                     'lob_column': lob_col_name,
                                                                     'lob_col_index': lob_col_index,
@@ -873,7 +873,7 @@ class Orchestrator:
 
                     table_settings = {
                         'worker_id': worker_id,
-                        'source_schema': table_data['source_schema'],
+                        'source_schema_name': table_data['source_schema_name'],
                         'source_table_name': table_data['source_table_name'],
                         'source_table_id': table_data['source_table_id'],
                         'source_columns': table_data['source_columns'],
@@ -899,7 +899,7 @@ class Orchestrator:
                         self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Found data migration limitations matching table {target_table_name}: {rows_migration_limitations}")
                         for limitation in rows_migration_limitations:
                             where_clause = limitation[0]
-                            where_clause = where_clause.replace('{source_schema}', table_data['source_schema']).replace('{source_table_name}', table_data['source_table_name'])
+                            where_clause = where_clause.replace('{source_schema_name}', table_data['source_schema_name']).replace('{source_table_name}', table_data['source_table_name'])
                             use_when_column_name = limitation[1]
                             for col_order_num, column_info in table_data['source_columns'].items():
                                 column_name = column_info['column_name']
@@ -1358,7 +1358,7 @@ class Orchestrator:
                             'funcproc_code': funcproc_code,
                             'funcproc_name': funcproc_data['name'],
                             'target_db_type': self.config_parser.get_target_db_type(),
-                            'source_schema': self.config_parser.get_source_schema(),
+                            'source_schema_name': self.config_parser.get_source_schema(),
                             'target_schema_name': self.config_parser.get_target_schema(),
                             'table_list': table_names,
                             'view_list': view_names,
@@ -1372,7 +1372,7 @@ class Orchestrator:
                                 self.config_parser.print_log_message( 'DEBUG', f"Funcs/Procs - remote objects substituting {row[0]} with {row[1]}")
                                 converted_code = re.sub(re.escape(row[0]), row[1], converted_code, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
 
-                        self.migrator_tables.insert_funcprocs(self.source_schema, funcproc_data['name'], funcproc_id, funcproc_code_str, self.target_schema_name, funcproc_data['name'], converted_code, funcproc_data['comment'])
+                        self.migrator_tables.insert_funcprocs(self.source_schema_name, funcproc_data['name'], funcproc_id, funcproc_code_str, self.target_schema_name, funcproc_data['name'], converted_code, funcproc_data['comment'])
 
                         if converted_code is not None and converted_code.strip():
                             self.config_parser.print_log_message('INFO', f"Creating {funcproc_type} {funcproc_data['name']} in target database.")
@@ -1421,7 +1421,7 @@ class Orchestrator:
                     for one_trigger in all_triggers:
                         trigger_detail = self.migrator_tables.decode_trigger_row(one_trigger)
 
-                        if self.config_parser.should_migrate_triggers(trigger_detail['source_table']):
+                        if self.config_parser.should_migrate_triggers(trigger_detail['source_table_name']):
                             self.config_parser.print_log_message('INFO', f"Processing trigger {trigger_detail['trigger_name']}")
                             self.config_parser.print_log_message( 'DEBUG', f"Trigger details: {trigger_detail}")
 
@@ -1637,7 +1637,7 @@ class Orchestrator:
         self.migrator_tables.insert_main('Orchestrator', 'sequences migration')
 
         settings = {
-            'source_schema': self.config_parser.get_source_schema(),
+            'source_schema_name': self.config_parser.get_source_schema(),
             'target_schema_name': self.config_parser.get_target_schema(),
             'migrator_tables': self.migrator_tables,
         }

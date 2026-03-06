@@ -17,6 +17,7 @@
 import json
 import uuid
 import psycopg2
+import traceback
 from credativ_pg_migrator.constants import MigratorConstants
 
 class ProtocolPostgresConnection:
@@ -41,9 +42,13 @@ class ProtocolPostgresConnection:
         )
 
     def execute_query(self, query, params=None):
-        with self.connection.cursor() as cur:
-            cur.execute(query, params) if params else cur.execute(query)
+        try:
+            with self.connection.cursor() as cur:
+                cur.execute(query, params) if params else cur.execute(query)
             self.connection.commit()
+        except Exception as e:
+            self.connection.rollback()
+            raise e
 
 class MigratorTables:
     def __init__(self, logger, config_parser):
@@ -3312,10 +3317,11 @@ class MigratorTables:
         return rows
 
     def create_ddl_tables(self):
+        self.config_parser.print_log_message('DEBUG3', f"MigratorTables: create_ddl_tables: starting")
         self.protocol_connection.execute_query("DROP TABLE IF EXISTS ddl_tables, ddl_columns, ddl_indexes, ddl_foreign_keys, ddl_sequences, ddl_views, ddl_aliases, ddl_triggers CASCADE")
 
-        self.protocol_connection.execute_query("""
-            CREATE TABLE IF NOT EXISTS ddl_tables (
+        self.protocol_connection.execute_query(f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}".ddl_tables (
                 id SERIAL PRIMARY KEY,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 source_schema_name VARCHAR,
@@ -3325,8 +3331,8 @@ class MigratorTables:
             )
         """)
 
-        self.protocol_connection.execute_query("""
-            CREATE TABLE IF NOT EXISTS ddl_columns (
+        self.protocol_connection.execute_query(f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}".ddl_columns (
                 id SERIAL PRIMARY KEY,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 source_schema_name VARCHAR,
@@ -3339,8 +3345,8 @@ class MigratorTables:
             )
         """)
 
-        self.protocol_connection.execute_query("""
-            CREATE TABLE IF NOT EXISTS ddl_indexes (
+        self.protocol_connection.execute_query(f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}".ddl_indexes (
                 id SERIAL PRIMARY KEY,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 source_schema_name VARCHAR,
@@ -3351,8 +3357,8 @@ class MigratorTables:
             )
         """)
 
-        self.protocol_connection.execute_query("""
-            CREATE TABLE IF NOT EXISTS ddl_foreign_keys (
+        self.protocol_connection.execute_query(f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}".ddl_foreign_keys (
                 id SERIAL PRIMARY KEY,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 source_schema_name VARCHAR,
@@ -3365,8 +3371,8 @@ class MigratorTables:
             )
         """)
 
-        self.protocol_connection.execute_query("""
-            CREATE TABLE IF NOT EXISTS ddl_sequences (
+        self.protocol_connection.execute_query(f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}".ddl_sequences (
                 id SERIAL PRIMARY KEY,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 source_schema_name VARCHAR,
@@ -3375,8 +3381,8 @@ class MigratorTables:
             )
         """)
 
-        self.protocol_connection.execute_query("""
-            CREATE TABLE IF NOT EXISTS ddl_views (
+        self.protocol_connection.execute_query(f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}".ddl_views (
                 id SERIAL PRIMARY KEY,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 source_schema_name VARCHAR,
@@ -3385,8 +3391,8 @@ class MigratorTables:
             )
         """)
 
-        self.protocol_connection.execute_query("""
-            CREATE TABLE IF NOT EXISTS ddl_aliases (
+        self.protocol_connection.execute_query(f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}".ddl_aliases (
                 id SERIAL PRIMARY KEY,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 source_schema_name VARCHAR,
@@ -3396,8 +3402,8 @@ class MigratorTables:
             )
         """)
 
-        self.protocol_connection.execute_query("""
-            CREATE TABLE IF NOT EXISTS ddl_triggers (
+        self.protocol_connection.execute_query(f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}".ddl_triggers (
                 id SERIAL PRIMARY KEY,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 source_schema_name VARCHAR,
@@ -3418,6 +3424,7 @@ class MigratorTables:
             RETURNING id
         """
         params = (settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_partition_columns'), settings.get('source_partition_ranges'))
+        self.config_parser.print_log_message('DEBUG3', f"insert_ddl_tables ({func_run_id}): inserting: {params}")
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -3437,6 +3444,7 @@ class MigratorTables:
             RETURNING id
         """
         params = (settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_column_name'), settings.get('source_data_type'), settings.get('source_is_nullable'), settings.get('source_default_value'), settings.get('source_pk_indicator'))
+        self.config_parser.print_log_message('DEBUG3', f"insert_ddl_columns: inserting: {params}")
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -3456,6 +3464,7 @@ class MigratorTables:
             RETURNING id
         """
         params = (settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_index_name'), settings.get('source_is_unique'), settings.get('source_columns_list'))
+        self.config_parser.print_log_message('DEBUG3', f"insert_ddl_indexes: inserting: {params}")
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -3475,6 +3484,7 @@ class MigratorTables:
             RETURNING id
         """
         params = (settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_fk_name'), settings.get('source_columns_list'), settings.get('source_ref_schema_name'), settings.get('source_ref_table_name'), settings.get('source_ref_columns_list'))
+        self.config_parser.print_log_message('DEBUG3', f"insert_ddl_foreign_keys: inserting: {params}")
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -3494,6 +3504,7 @@ class MigratorTables:
             RETURNING id
         """
         params = (settings.get('source_schema_name'), settings.get('source_seq_name'), settings.get('source_ddl_text'))
+        self.config_parser.print_log_message('DEBUG3', f"insert_ddl_sequences: inserting: {params}")
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -3513,14 +3524,19 @@ class MigratorTables:
             RETURNING id
         """
         params = (settings.get('source_schema_name'), settings.get('source_view_name'), settings.get('source_ddl_text'))
+        self.config_parser.print_log_message('DEBUG3', f"insert_ddl_views ({func_run_id}): inserting: {params}")
         try:
+            self.config_parser.print_log_message('DEBUG3', f"insert_ddl_views ({func_run_id}): open cursor")
             cursor = self.protocol_connection.connection.cursor()
+            self.config_parser.print_log_message('DEBUG3', f"insert_ddl_views ({func_run_id}): execute query")
             cursor.execute(query, params)
+            self.config_parser.print_log_message('DEBUG3', f"insert_ddl_views ({func_run_id}): fetchone")
             row_id = cursor.fetchone()[0]
+            self.config_parser.print_log_message('DEBUG3', f"insert_ddl_views ({func_run_id}): close cursor")
             cursor.close()
             return row_id
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"insert_ddl_views ({func_run_id}): Exception: {e}")
+            self.config_parser.print_log_message('ERROR', f"insert_ddl_views ({func_run_id}): Exception: {e}\n{traceback.format_exc()}")
             raise
 
     def insert_ddl_aliases(self, settings):
@@ -3532,6 +3548,7 @@ class MigratorTables:
             RETURNING id
         """
         params = (settings.get('source_schema_name'), settings.get('source_alias_name'), settings.get('source_target_schema'), settings.get('source_target_name'))
+        self.config_parser.print_log_message('DEBUG3', f"insert_ddl_aliases: inserting: {params}")
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -3551,6 +3568,7 @@ class MigratorTables:
             RETURNING id
         """
         params = (settings.get('source_schema_name'), settings.get('source_trigger_name'), settings.get('source_ddl_text'))
+        self.config_parser.print_log_message('DEBUG3', f"insert_ddl_triggers: inserting: {params}")
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)

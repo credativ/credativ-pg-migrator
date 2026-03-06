@@ -27,11 +27,11 @@ import json
 class Planner:
     def __init__(self, config_parser):
         self.config_parser = config_parser
+        self.source_db_config = self.config_parser.get_source_config()
         self.logger = MigratorLogger(self.config_parser.get_log_file()).logger
-        self.config_parser.print_log_message('DEBUG3', f"Planner: Loading connectors...")
+        # self.config_parser.print_log_message('DEBUG3', f"Planner: Loading connectors...")
         self.source_connection = self.load_connector('source')
         self.target_connection = self.load_connector('target')
-        self.config_parser.print_log_message('DEBUG3', f"Planner: Connectors loaded")
         self.migrator_tables = MigratorTables(self.logger, self.config_parser)
         self.on_error_action = self.config_parser.get_on_error_action()
         self.source_schema_name = self.config_parser.get_source_schema()
@@ -65,6 +65,10 @@ class Planner:
                 self.run_premigration_analysis()
 
                 self.check_pausing_resuming()
+
+                if self.source_db_config['connectivity'] == 'ddl':
+                    self.config_parser.print_log_message('DEBUG3', f"Planner: starting ddl connectivity")
+                    self.source_connection.parse_ddl_files({ 'migrator_tables': self.migrator_tables})
 
                 self.run_prepare_user_defined_types()
                 self.run_prepare_domains()
@@ -178,6 +182,9 @@ class Planner:
 
     def run_premigration_analysis(self):
         self.config_parser.print_log_message('INFO', "Running pre-migration analysis...")
+        if self.source_db_config.get('connectivity') == 'ddl':
+            self.config_parser.print_log_message('DEBUG', "Planner - skipping source db pre-migration analysis due to DDL connectivity")
+            return
         try:
             self.source_connection.connect()
             self.target_connection.connect()
@@ -344,6 +351,9 @@ class Planner:
 
     def run_prepare_tables(self):
         self.config_parser.print_log_message('INFO', "Planner - Preparing tables...")
+        if self.source_db_config.get('connectivity') == 'ddl':
+            self.config_parser.print_log_message('DEBUG', "Planner - skipping source db fetch for tables due to DDL connectivity")
+            return
         source_tables = self.source_connection.fetch_table_names(self.source_schema_name)
         include_tables = self.config_parser.get_include_tables()
         exclude_tables = self.config_parser.get_exclude_tables() or []
@@ -773,6 +783,9 @@ class Planner:
 
     def run_prepare_views(self):
         self.config_parser.print_log_message('INFO', "Planner - Preparing views...")
+        if self.source_db_config.get('connectivity') == 'ddl':
+            self.config_parser.print_log_message('DEBUG', "Planner - skipping source db fetch for views due to DDL connectivity")
+            return
         if self.config_parser.should_migrate_views():
             self.config_parser.print_log_message('INFO', "Processing views...")
             views = self.source_connection.fetch_views_names(self.source_schema_name)
@@ -839,6 +852,9 @@ class Planner:
 
     def run_prepare_user_defined_types(self):
         self.config_parser.print_log_message('INFO', "Planner - Preparing user defined types...")
+        if self.source_db_config.get('connectivity') == 'ddl':
+            self.config_parser.print_log_message('DEBUG', "Planner - skipping source db fetch for user defined types due to DDL connectivity")
+            return
         user_defined_types = self.source_connection.fetch_user_defined_types(self.source_schema_name)
 
         # Get types mapping for type conversion
@@ -905,6 +921,9 @@ class Planner:
 
     def run_prepare_domains(self):
         self.config_parser.print_log_message('INFO', "Planner - Preparing domains...")
+        if self.source_db_config.get('connectivity') == 'ddl':
+            self.config_parser.print_log_message('DEBUG', "Planner - skipping source db fetch for domains due to DDL connectivity")
+            return
         migrated_as = 'CHECK CONSTRAINT'
         if self.config_parser.get_target_db_type() == 'postgresql':
             migrated_as = 'DOMAIN'
@@ -937,6 +956,9 @@ class Planner:
 
     def run_prepare_defaults(self):
         self.config_parser.print_log_message('INFO', "Planner - Preparing defaults...")
+        if self.source_db_config.get('connectivity') == 'ddl':
+            self.config_parser.print_log_message('DEBUG', "Planner - skipping source db fetch for defaults due to DDL connectivity")
+            return
         defaults = self.source_connection.fetch_default_values({ 'source_schema_name': self.source_schema_name})
         if defaults:
             self.config_parser.print_log_message( 'DEBUG', f"Defaults found in source database: {defaults}")
@@ -981,6 +1003,10 @@ class Planner:
         self.config_parser.print_log_message('INFO', f"Script {script_path} is accessible.")
 
     def check_database_connection(self, connector, db_name):
+        if db_name == "Source Database" and self.source_db_config.get('connectivity') == 'ddl':
+            self.config_parser.print_log_message('DEBUG', f"Skipping connection check for {db_name} due to DDL connectivity.")
+            return
+
         try:
             connector.connect()
             cursor = connector.connection.cursor()

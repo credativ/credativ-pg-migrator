@@ -60,12 +60,10 @@ class IbmDb2ZosConnector(DatabaseConnector):
                     for ext, count in extension_counts.items():
                         self.config_parser.print_log_message('INFO', f"Found {count} files with extension '{ext}'")
 
-                    self.config_parser.print_log_message('INFO', f"DDL directory found: {ddl_directory}")
+                    self.config_parser.print_log_message('INFO', f"DDL directory found: {self.ddl_directory}")
         else:
             raise ValueError(f"Unsupported IBM DB2 z/OS connectivity: {self.connectivity}")
 
-        self.config_parser.print_log_message('DEBUG3', f"IbmDb2ZosConnector: Starting DDL parser")
-        parse_ddl_files()
         self.config_parser.print_log_message('DEBUG3', f"IbmDb2ZosConnector: INIT done")
 
     def connect(self):
@@ -104,7 +102,8 @@ class IbmDb2ZosConnector(DatabaseConnector):
 
 
     def parse_ddl_files(self, settings):
-        migrator_tables = settings.get('migrator_tables')
+        self.config_parser.print_log_message('DEBUG3', f"IbmDb2ZosConnector: Starting DDL parser")
+        migrator_tables = settings['migrator_tables']
         if not migrator_tables:
             self.config_parser.print_log_message('ERROR', "parse_ddl_files: migrator_tables not found in settings.")
             return

@@ -67,37 +67,134 @@ class IbmDb2ZosConnector(DatabaseConnector):
         self.config_parser.print_log_message('DEBUG3', f"IbmDb2ZosConnector: INIT done")
 
     def connect(self):
-        self.config_parser.print_log_message('DEBUG', "IbmDb2ZosConnector: connect() called (dummy implementation).")
-        pass
+        self.config_parser.print_log_message('DEBUG', "IbmDb2ZosConnector: connect() called.")
+        from credativ_pg_migrator.migrator_tables import MigratorTables
+        self.migrator_tables = MigratorTables(self.logger, self.config_parser)
+        self.protocol_schema = self.migrator_tables.protocol_schema
 
     def disconnect(self):
-        self.config_parser.print_log_message('DEBUG', "IbmDb2ZosConnector: disconnect() called (dummy implementation).")
-        pass
+        self.config_parser.print_log_message('DEBUG', "IbmDb2ZosConnector: disconnect() called.")
+        if hasattr(self, 'migrator_tables') and self.migrator_tables and self.migrator_tables.protocol_connection:
+            self.migrator_tables.protocol_connection.connection.close()
 
     def fetch_all_tables(self, schema_name: str) -> dict:
+        tables = {}
+        self.config_parser.print_log_message('DEBUG3', f"fetch_all_tables ({schema_name}): starting - self.connectivity: {self.connectivity}")
         if self.connectivity == self.config_parser.const_connectivity_ddl():
-            tables = {}
-            order_num = 1
-            for filename in os.listdir(self.ddl_directory):
-                if os.path.isfile(os.path.join(self.ddl_directory, filename)):
-                    ext = os.path.splitext(filename)[1]
-                    if ext == '.sql':
-                        with open(os.path.join(self.ddl_directory, filename), 'r') as f:
-                            tables[order_num] = {
-                                'id': order_num,
-                                'schema_name': schema_name,
-                                'table_name': filename,
-                                'comment': f.read()
-                            }
-                        order_num += 1
-            return tables
-        return {}
+            query = f"""SELECT source_schema_name, source_table_name, source_partition_columns, source_partition_ranges
+                        FROM "{self.protocol_schema}"."ddl_tables"
+                        WHERE source_schema_name = %s ORDER BY id"""
+            cursor = self.migrator_tables.protocol_connection.connection.cursor()
+            cursor.execute(query, (schema_name,))
+            rows = cursor.fetchall()
+            self.config_parser.print_log_message('DEBUG3', f"fetch_all_tables ({schema_name}): {rows}")
+            for i, row in enumerate(rows, 1):
+                tables[i] = {
+                    'id': i,
+                    'schema_name': row[0],
+                    'table_name': row[1],
+                    'comment': f"Partition: {row[2]}, Ranges: {row[3]}" if row[2] else None
+                }
+            cursor.close()
+        return tables
 
     def fetch_table_columns(self, settings) -> dict:
         self.config_parser.print_log_message('DEBUG', "IbmDb2ZosConnector: fetch_table_columns() called.")
-        return {}
+        table_schema = settings.get('table_schema')
+        table_name = settings.get('table_name')
+        columns = {}
+        if self.connectivity == self.config_parser.const_connectivity_ddl():
+            query = f"""SELECT source_column_name, source_data_type, source_is_nullable, source_default_value, source_pk_indicator
+                        FROM "{self.protocol_schema}"."ddl_columns"
+                        WHERE source_schema_name = %s AND source_table_name = %s ORDER BY id"""
+            cursor = self.migrator_tables.protocol_connection.connection.cursor()
+            cursor.execute(query, (table_schema, table_name))
+            rows = cursor.fetchall()
+            self.config_parser.print_log_message('DEBUG3', f"fetch_table_columns ({table_schema}.{table_name}): {rows}")
+            for i, row in enumerate(rows, 1):
+                col_name = row[0]
+                col_type = row[1]
+                is_nullable = 'YES' if row[2] else 'NO'
+                default_val = row[3]
+                is_pk = row[4]
+
+                base_type = col_type.split('(')[0].strip().upper()
+                char_length = None
+                numeric_prec = None
+                numeric_scale = None
+
+                if '(' in col_type:
+                    params_str = col_type[col_type.find('(')+1:col_type.find(')')]
+                    params = [p.strip() for p in params_str.split(',')]
+                    if base_type in ['CHAR', 'VARCHAR', 'CLOB', 'GRAPHIC', 'VARGRAPHIC', 'DBCLOB', 'BINARY', 'VARBINARY', 'BLOB']:
+                        char_length = params[0]
+                    elif base_type in ['DECIMAL', 'NUMERIC']:
+                        numeric_prec = params[0]
+                        if len(params) > 1:
+                            numeric_scale = params[1]
+
+                columns[i] = {
+                    'column_name': col_name,
+                    'is_nullable': is_nullable,
+                    'column_default_name': None,
+                    'column_default_value': default_val,
+                    'replaced_column_default_value': None,
+                    'data_type': base_type,
+                    'column_type': col_type,
+                    'column_type_substitution': None,
+                    'character_maximum_length': char_length,
+                    'numeric_precision': numeric_prec,
+                    'numeric_scale': numeric_scale,
+                    'basic_data_type': None,
+                    'basic_character_maximum_length': None,
+                    'basic_numeric_precision': None,
+                    'basic_numeric_scale': None,
+                    'basic_column_type': None,
+                    'is_identity': 'NO',
+                    'column_comment': 'Primary Key' if is_pk else None,
+                    'is_generated_virtual': 'NO',
+                    'is_generated_stored': 'NO',
+                    'generation_expression': None,
+                    'stripped_generation_expression': None,
+                    'udt_schema': None,
+                    'udt_name': None,
+                    'domain_schema': None,
+                    'domain_name': None,
+                    'is_hidden_column': 'NO'
+                }
+            cursor.close()
+        return columns
 
     def get_types_mapping(self, settings):
+        if not hasattr(self, 'types_mapping'):
+            self.types_mapping = {
+                'postgresql': {
+                    'SMALLINT': 'SMALLINT',
+                    'INTEGER': 'INTEGER',
+                    'INT': 'INTEGER',
+                    'BIGINT': 'BIGINT',
+                    'DECIMAL': 'DECIMAL',
+                    'NUMERIC': 'NUMERIC',
+                    'REAL': 'REAL',
+                    'DOUBLE': 'DOUBLE PRECISION',
+                    'FLOAT': 'DOUBLE PRECISION',
+                    'DECFLOAT': 'NUMERIC',
+                    'CHAR': 'CHAR',
+                    'VARCHAR': 'VARCHAR',
+                    'CLOB': 'TEXT',
+                    'GRAPHIC': 'CHAR',
+                    'VARGRAPHIC': 'VARCHAR',
+                    'DBCLOB': 'TEXT',
+                    'BINARY': 'BYTEA',
+                    'VARBINARY': 'BYTEA',
+                    'BLOB': 'BYTEA',
+                    'DATE': 'DATE',
+                    'TIME': 'TIME',
+                    'TIMESTAMP': 'TIMESTAMP',
+                    'XML': 'XML',
+                    'ROWID': 'BYTEA'
+                }
+            }
         return self.types_mapping
 
 
@@ -388,19 +485,95 @@ class IbmDb2ZosConnector(DatabaseConnector):
         return {'finished': True, 'rows_migrated': 0, 'source_table_rows': 0, 'target_table_rows': 0, 'chunk_number': 1, 'total_chunks': 1}
 
     def fetch_indexes(self, settings):
-        return {}
+        table_schema = settings.get('source_table_schema')
+        table_name = settings.get('source_table_name')
+        indexes = {}
+        if self.connectivity == self.config_parser.const_connectivity_ddl():
+            query = f"""SELECT source_index_name, source_is_unique, source_columns_list
+                        FROM "{self.protocol_schema}"."ddl_indexes"
+                        WHERE source_schema_name = %s AND source_table_name = %s ORDER BY id"""
+            cursor = self.migrator_tables.protocol_connection.connection.cursor()
+            cursor.execute(query, (table_schema, table_name))
+            rows = cursor.fetchall()
+            self.config_parser.print_log_message('DEBUG3', f"fetch_indexes ({table_schema}.{table_name}): {rows}")
+            for i, row in enumerate(rows, 1):
+                idx_name = row[0]
+                is_unique = row[1]
+                cols = row[2]
+                indexes[i] = {
+                    'index_name': idx_name,
+                    'index_type': 'UNIQUE' if is_unique else 'INDEX',
+                    'index_owner': table_schema,
+                    'index_columns': cols,
+                    'index_comment': None,
+                    'index_sql': None,
+                    'is_function_based': 'NO'
+                }
+            cursor.close()
+        return indexes
 
     def get_create_index_sql(self, settings):
         pass
 
     def fetch_constraints(self, settings):
-        return {}
+        table_schema = settings.get('source_table_schema')
+        table_name = settings.get('source_table_name')
+        constraints = {}
+        if self.connectivity == self.config_parser.const_connectivity_ddl():
+            query = f"""SELECT source_fk_name, source_columns_list, source_ref_schema_name, source_ref_table_name, source_ref_columns_list
+                        FROM "{self.protocol_schema}"."ddl_foreign_keys"
+                        WHERE source_schema_name = %s AND source_table_name = %s ORDER BY id"""
+            cursor = self.migrator_tables.protocol_connection.connection.cursor()
+            cursor.execute(query, (table_schema, table_name))
+            rows = cursor.fetchall()
+            self.config_parser.print_log_message('DEBUG3', f"fetch_constraints ({table_schema}.{table_name}): {rows}")
+            for i, row in enumerate(rows, 1):
+                constraints[i] = {
+                    'constraint_name': row[0],
+                    'constraint_type': 'FOREIGN KEY',
+                    'constraint_owner': table_schema,
+                    'constraint_columns': row[1],
+                    'referenced_table_schema': row[2],
+                    'referenced_table_name': row[3],
+                    'referenced_columns': row[4],
+                    'constraint_sql': None,
+                    'delete_rule': 'NO ACTION',
+                    'update_rule': 'NO ACTION',
+                    'constraint_comment': None,
+                    'constraint_status': 'ENABLED'
+                }
+            cursor.close()
+        return constraints
 
     def get_create_constraint_sql(self, settings):
         pass
 
     def fetch_triggers(self, table_id: int, table_schema: str, table_name: str):
-        return {}
+        triggers = {}
+        if self.connectivity == self.config_parser.const_connectivity_ddl():
+            query = f"""SELECT id, source_trigger_name, source_ddl_text
+                        FROM "{self.protocol_schema}"."ddl_triggers"
+                        WHERE source_schema_name = %s ORDER BY id"""
+            cursor = self.migrator_tables.protocol_connection.connection.cursor()
+            cursor.execute(query, (table_schema,))
+            rows = cursor.fetchall()
+            self.config_parser.print_log_message('DEBUG3', f"fetch_triggers ({table_schema}): {rows}")
+            order_num = 1
+            for row in rows:
+                if table_name and table_name.upper() not in row[2].upper():
+                    continue
+                triggers[order_num] = {
+                    'id': row[0],
+                    'name': row[1],
+                    'event': 'UNKNOWN',
+                    'new': None,
+                    'old': None,
+                    'sql': row[2],
+                    'comment': None
+                }
+                order_num += 1
+            cursor.close()
+        return triggers
 
     def convert_trigger(self, trig: str, settings: dict):
         pass
@@ -415,15 +588,62 @@ class IbmDb2ZosConnector(DatabaseConnector):
         pass
 
     def fetch_sequences(self, table_schema: str, table_name: str):
-        return {}
+        seqs = {}
+        if self.connectivity == self.config_parser.const_connectivity_ddl():
+            query = f"""SELECT id, source_seq_name, source_ddl_text
+                        FROM "{self.protocol_schema}"."ddl_sequences"
+                        WHERE source_schema_name = %s ORDER BY id"""
+            cursor = self.migrator_tables.protocol_connection.connection.cursor()
+            cursor.execute(query, (table_schema,))
+            rows = cursor.fetchall()
+            self.config_parser.print_log_message('DEBUG3', f"fetch_sequences ({table_schema}): {rows}")
+            for i, row in enumerate(rows, 1):
+                seqs[i] = {
+                    'id': row[0],
+                    'name': row[1],
+                    'column_name': None,
+                    'set_sequence_sql': row[2]
+                }
+            cursor.close()
+        return seqs
 
     def get_sequence_details(self, sequence_owner, sequence_name):
         return {}
 
     def fetch_views_names(self, source_schema_name: str):
-        return {}
+        views = {}
+        if self.connectivity == self.config_parser.const_connectivity_ddl():
+            query = f"""SELECT id, source_schema_name, source_view_name
+                        FROM "{self.protocol_schema}"."ddl_views"
+                        WHERE source_schema_name = %s ORDER BY id"""
+            cursor = self.migrator_tables.protocol_connection.connection.cursor()
+            cursor.execute(query, (source_schema_name,))
+            rows = cursor.fetchall()
+            self.config_parser.print_log_message('DEBUG3', f"fetch_views_names ({source_schema_name}): {rows}")
+            for i, row in enumerate(rows, 1):
+                views[i] = {
+                    'id': row[0],
+                    'schema_name': row[1],
+                    'view_name': row[2],
+                    'comment': None
+                }
+            cursor.close()
+        return views
 
     def fetch_view_code(self, settings):
+        source_schema_name = settings.get('source_schema_name')
+        source_view_name = settings.get('source_view_name')
+        if self.connectivity == self.config_parser.const_connectivity_ddl():
+            query = f"""SELECT source_ddl_text
+                        FROM "{self.protocol_schema}"."ddl_views"
+                        WHERE source_schema_name = %s AND source_view_name = %s"""
+            cursor = self.migrator_tables.protocol_connection.connection.cursor()
+            cursor.execute(query, (source_schema_name, source_view_name))
+            row = cursor.fetchone()
+            self.config_parser.print_log_message('DEBUG3', f"fetch_view_code ({source_schema_name}.{source_view_name}): {row}")
+            cursor.close()
+            if row:
+                return row[0]
         return ""
 
     def convert_view_code(self, view_code: str, settings: dict):

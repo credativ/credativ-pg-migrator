@@ -3409,5 +3409,157 @@ class MigratorTables:
         self.config_parser.print_log_message('DEBUG3', f"create_ddl_tables: Tables created in schema {self.protocol_schema}")
 
 
+    def insert_ddl_tables(self, settings):
+        func_run_id = uuid.uuid4()
+        query = f"""
+            INSERT INTO "{self.protocol_schema}"."ddl_tables"
+            (source_schema_name, source_table_name, source_partition_columns, source_partition_ranges)
+            VALUES (%s, %s, %s, %s)
+            RETURNING id
+        """
+        params = (settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_partition_columns'), settings.get('source_partition_ranges'))
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row_id = cursor.fetchone()[0]
+            cursor.close()
+            return row_id
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"insert_ddl_tables ({func_run_id}): Exception: {e}")
+            raise
+
+    def insert_ddl_columns(self, settings):
+        func_run_id = uuid.uuid4()
+        query = f"""
+            INSERT INTO "{self.protocol_schema}"."ddl_columns"
+            (source_schema_name, source_table_name, source_column_name, source_data_type, source_is_nullable, source_default_value, source_pk_indicator)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
+        """
+        params = (settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_column_name'), settings.get('source_data_type'), settings.get('source_is_nullable'), settings.get('source_default_value'), settings.get('source_pk_indicator'))
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row_id = cursor.fetchone()[0]
+            cursor.close()
+            return row_id
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"insert_ddl_columns ({func_run_id}): Exception: {e}")
+            raise
+
+    def insert_ddl_indexes(self, settings):
+        func_run_id = uuid.uuid4()
+        query = f"""
+            INSERT INTO "{self.protocol_schema}"."ddl_indexes"
+            (source_schema_name, source_table_name, source_index_name, source_is_unique, source_columns_list)
+            VALUES (%s, %s, %s, %s, %s)
+            RETURNING id
+        """
+        params = (settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_index_name'), settings.get('source_is_unique'), settings.get('source_columns_list'))
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row_id = cursor.fetchone()[0]
+            cursor.close()
+            return row_id
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"insert_ddl_indexes ({func_run_id}): Exception: {e}")
+            raise
+
+    def insert_ddl_foreign_keys(self, settings):
+        func_run_id = uuid.uuid4()
+        query = f"""
+            INSERT INTO "{self.protocol_schema}"."ddl_foreign_keys"
+            (source_schema_name, source_table_name, source_fk_name, source_columns_list, source_ref_schema_name, source_ref_table_name, source_ref_columns_list)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
+        """
+        params = (settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_fk_name'), settings.get('source_columns_list'), settings.get('source_ref_schema_name'), settings.get('source_ref_table_name'), settings.get('source_ref_columns_list'))
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row_id = cursor.fetchone()[0]
+            cursor.close()
+            return row_id
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"insert_ddl_foreign_keys ({func_run_id}): Exception: {e}")
+            raise
+
+    def insert_ddl_sequences(self, settings):
+        func_run_id = uuid.uuid4()
+        query = f"""
+            INSERT INTO "{self.protocol_schema}"."ddl_sequences"
+            (source_schema_name, source_seq_name, source_ddl_text)
+            VALUES (%s, %s, %s)
+            RETURNING id
+        """
+        params = (settings.get('source_schema_name'), settings.get('source_seq_name'), settings.get('source_ddl_text'))
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row_id = cursor.fetchone()[0]
+            cursor.close()
+            return row_id
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"insert_ddl_sequences ({func_run_id}): Exception: {e}")
+            raise
+
+    def insert_ddl_views(self, settings):
+        func_run_id = uuid.uuid4()
+        query = f"""
+            INSERT INTO "{self.protocol_schema}"."ddl_views"
+            (source_schema_name, source_view_name, source_ddl_text)
+            VALUES (%s, %s, %s)
+            RETURNING id
+        """
+        params = (settings.get('source_schema_name'), settings.get('source_view_name'), settings.get('source_ddl_text'))
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row_id = cursor.fetchone()[0]
+            cursor.close()
+            return row_id
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"insert_ddl_views ({func_run_id}): Exception: {e}")
+            raise
+
+    def insert_ddl_aliases(self, settings):
+        func_run_id = uuid.uuid4()
+        query = f"""
+            INSERT INTO "{self.protocol_schema}"."ddl_aliases"
+            (source_schema_name, source_alias_name, source_target_schema, source_target_name)
+            VALUES (%s, %s, %s, %s)
+            RETURNING id
+        """
+        params = (settings.get('source_schema_name'), settings.get('source_alias_name'), settings.get('source_target_schema'), settings.get('source_target_name'))
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row_id = cursor.fetchone()[0]
+            cursor.close()
+            return row_id
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"insert_ddl_aliases ({func_run_id}): Exception: {e}")
+            raise
+
+    def insert_ddl_triggers(self, settings):
+        func_run_id = uuid.uuid4()
+        query = f"""
+            INSERT INTO "{self.protocol_schema}"."ddl_triggers"
+            (source_schema_name, source_trigger_name, source_ddl_text)
+            VALUES (%s, %s, %s)
+            RETURNING id
+        """
+        params = (settings.get('source_schema_name'), settings.get('source_trigger_name'), settings.get('source_ddl_text'))
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row_id = cursor.fetchone()[0]
+            cursor.close()
+            return row_id
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"insert_ddl_triggers ({func_run_id}): Exception: {e}")
+            raise
+
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

@@ -45,8 +45,9 @@ source:
   database: "source_database"
   # schema or owner (these are synonyms depending on the source database - but only one can be used, not both)
   schema: "dbo"
-  # connectivity type - "jdbc", "odbc", "native"
+  # connectivity type - "jdbc", "odbc", "native", "ddl"
   # "native" does not have any additional section
+  # "ddl" - objects are read from DDL file(s), not from the source database
   connectivity: "odbc"
   # connection_string_options currently used only for MS SQL Server - JDBC connectivity
   # will be appended to the connection string
@@ -60,9 +61,11 @@ source:
   odbc:
     driver: 'FreeTDS'
     libraries: "/usr/lib/x86_64-linux-gnu/odbc/libtdsodbc.so"
+  ddl:
+    directory: "/path/to/ddl/directory"
   # system catalog is used only for some database
   # ibm_db2_luw - SYSCAT or SYSIBM - sysibm simulates the information_schema
-  # ibm_db2_zos
+  # ibm_db2_zos - currently implements only DDL connectivity
   # mssql - SYS or INFORMATION_SCHEMA
   system_catalog: "SYSIBM"
 

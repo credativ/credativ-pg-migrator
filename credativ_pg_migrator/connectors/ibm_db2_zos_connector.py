@@ -25,15 +25,39 @@ class IbmDb2ZosConnector(DatabaseConnector):
             raise ValueError("IBM DB2 z/OS is only supported as a source database")
 
         self.connection = None
+        self.connectivity = self.config_parser.get_connectivity(self.source_or_target)
         self.config_parser = config_parser
-        self.config_parser.print_log_message('DEBUG', "IbmDb2ZosConnector initialized.")
-        self.types_mapping = {
-            # Dummy mapping to be implemented
-        }
+        self.source_or_target = source_or_target
+        self.on_error_action = self.config_parser.get_on_error_action()
+        self.logger = MigratorLogger(self.config_parser.get_log_file()).logger
+        self.source_db_config = self.config_parser.get_source_config()
 
     def connect(self):
-        self.config_parser.print_log_message('DEBUG', "IbmDb2ZosConnector: connect() called (dummy implementation).")
-        pass
+        if self.connectivity == self.config_parser.const_connectivity_ddl():
+            ddl_directory = self.source_db_config['ddl']['directory']
+            if not os.path.exists(ddl_directory):
+                raise ValueError(f"DDL directory not found: {ddl_directory}")
+            else:
+                if not os.listdir(ddl_directory):
+                    raise ValueError(f"DDL directory is empty: {ddl_directory}")
+                else:
+                    self.config_parser.print_log_message('INFO', f"DDL directory found: {ddl_directory}")
+
+                if not os.listdir(ddl_directory):
+                    raise ValueError(f"DDL directory is empty: {ddl_directory}")
+                else:
+
+                    extension_counts = {}
+                    for filename in os.listdir(ddl_directory):
+                        if os.path.isfile(os.path.join(ddl_directory, filename)):
+                            ext = os.path.splitext(filename)[1]
+                            extension_counts[ext] = extension_counts.get(ext, 0) + 1
+                    for ext, count in extension_counts.items():
+                        self.config_parser.print_log_message('INFO', f"Found {count} files with extension '{ext}'")
+
+                    self.config_parser.print_log_message('INFO', f"DDL directory found: {ddl_directory}")
+        else:
+            raise ValueError(f"Unsupported connectivity: {self.connectivity}")
 
     def disconnect(self):
         self.config_parser.print_log_message('DEBUG', "IbmDb2ZosConnector: disconnect() called (dummy implementation).")

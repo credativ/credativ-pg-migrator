@@ -27,6 +27,7 @@ class IbmDb2LuwConnector(DatabaseConnector):
             raise ValueError("IBM DB2 is only supported as a source database")
 
         self.connection = None
+        self.connectivity = self.config_parser.get_connectivity(self.source_or_target)
         self.config_parser = config_parser
         self.source_or_target = source_or_target
         self.on_error_action = self.config_parser.get_on_error_action()
@@ -39,7 +40,7 @@ class IbmDb2LuwConnector(DatabaseConnector):
             if not self.connection:
                 raise Exception("Failed to connect to the database")
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Unexpected error while conneting into the database: {e}")
+            self.config_parser.print_log_message('ERROR', f"Unexpected error while connecting into the database: {e}")
             raise
 
     def disconnect(self):

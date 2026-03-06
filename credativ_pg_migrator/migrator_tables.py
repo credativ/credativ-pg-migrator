@@ -1824,16 +1824,14 @@ class MigratorTables:
             'source_columns': json.loads(row[4]),
             'source_table_rows': row[5],
             'source_table_description': row[6],
-            'target_schema_name': row[7],
-            'target_table_name': row[8],
-            'target_columns': json.loads(row[9]),
-            'target_table_rows': row[10],
-            'target_table_sql': row[11],
-            'table_comment': row[12],
-            'partitioned': row[13],
-            'partitioned_by': row[14],
-            'partitioning_columns': row[15],
-            'create_partitions_sql': row[16],
+            'source_table_sql': row[7],
+            'target_schema_name': row[8],
+            'target_table_name': row[9],
+            'target_columns': json.loads(row[10]),
+            'target_table_rows': row[11],
+            'target_table_sql': row[12],
+            'table_comment': row[13],
+            'create_partitions_sql': row[14],
         }
 
     def decode_index_row(self, row):
@@ -1869,11 +1867,18 @@ class MigratorTables:
     def decode_sequence_row(self, row):
         return {
             'sequence_id': row[0],
-            'schema_name': row[1],
-            'table_name': row[2],
-            'column_name': row[3],
-            'sequence_name': row[4],
-            'set_sequence_sql': row[5]
+            'source_schema_name': row[1],
+            'source_table_name': row[2],
+            'source_column_name': row[3],
+            'source_sequence_name': row[4],
+            'source_sequence_sql': row[5],
+            'source_sequence_comment': row[6],
+            'target_schema_name': row[7],
+            'target_table_name': row[8],
+            'target_column_name': row[9],
+            'target_sequence_name': row[10],
+            'target_sequence_sql': row[11],
+            'target_sequence_comment': row[12]
         }
 
     def decode_trigger_row(self, row):
@@ -1952,15 +1957,13 @@ class MigratorTables:
         source_columns = settings['source_columns']
         source_table_rows = settings['source_table_rows']
         source_table_description = settings['source_table_description']
+        source_table_sql = settings['source_table_sql']
         target_schema_name = settings['target_schema_name']
         target_table_name = settings['target_table_name']
         target_columns = settings['target_columns']
         target_table_rows = settings['target_table_rows']
         target_table_sql = settings['target_table_sql']
         table_comment = settings['table_comment']
-        partitioned = settings['partitioned']
-        partitioned_by = settings['partitioned_by']
-        partitioning_columns = settings['partitioning_columns']
         create_partitions_sql = settings['create_partitions_sql']
 
         table_name = self.config_parser.get_protocol_name_tables()
@@ -1968,15 +1971,15 @@ class MigratorTables:
         target_columns_str = json.dumps(target_columns)
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
-            (source_schema_name, source_table_name, source_table_id, source_columns, source_table_rows, source_table_description,
+            (source_schema_name, source_table_name, source_table_id, source_columns, source_table_rows, source_table_description, source_table_sql,
             target_schema_name, target_table_name, target_columns, target_table_rows, target_table_sql, table_comment,
-            partitioned, partitioned_by, partitioning_columns, create_partitions_sql)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            create_partitions_sql)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (source_schema_name, source_table_name, source_table_id, source_columns_str, source_table_rows, source_table_description,
+        params = (source_schema_name, source_table_name, source_table_id, source_columns_str, source_table_rows, source_table_description, source_table_sql,
                   target_schema_name, target_table_name, target_columns_str, target_table_rows, target_table_sql, table_comment,
-                  partitioned, partitioned_by, partitioning_columns, create_partitions_sql)
+                  create_partitions_sql)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -2300,16 +2303,16 @@ class MigratorTables:
             self.config_parser.print_log_message('ERROR', f"update_funcproc_status ({func_run_id}): Exception: {e}")
             raise
 
-    def insert_sequence(self, sequence_id, schema_name, table_name, column_name, sequence_name, set_sequence_sql):
+    def insert_sequence(self, sequence_id, source_schema_name, source_table_name, source_column_name, source_sequence_name, source_sequence_sql, source_sequence_comment, target_schema_name, target_table_name, target_column_name, target_sequence_name, target_sequence_sql, target_sequence_comment):
         func_run_id = uuid.uuid4()
         protocol_table_name = self.config_parser.get_protocol_name_sequences()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{protocol_table_name}"
-            (sequence_id, schema_name, table_name, column_name, sequence_name, set_sequence_sql)
-            VALUES (%s, %s, %s, %s, %s, %s)
+            (sequence_id, source_schema_name, source_table_name, source_column_name, source_sequence_name, source_sequence_sql, source_sequence_comment, target_schema_name, target_table_name, target_column_name, target_sequence_name, target_sequence_sql, target_sequence_comment)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (sequence_id, schema_name, table_name, column_name, sequence_name, set_sequence_sql)
+        params = (sequence_id, source_schema_name, source_table_name, source_column_name, source_sequence_name, source_sequence_sql, source_sequence_comment, target_schema_name, target_table_name, target_column_name, target_sequence_name, target_sequence_sql, target_sequence_comment)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -2768,6 +2771,9 @@ class MigratorTables:
             self.config_parser.print_log_message('INFO', "! Dry run mode enabled. No migration performed !")
         self.print_summary('User Defined Types', self.config_parser.get_protocol_name_user_defined_types())
         self.print_summary('Tables', self.config_parser.get_protocol_name_tables())
+        self.print_summary('Source Table Partitioning', self.config_parser.get_protocol_name_source_table_partitioning())
+        self.print_summary('Target Table Partitioning', self.config_parser.get_protocol_name_target_table_partitioning())
+        self.print_summary('Columns', self.config_parser.get_protocol_name_columns())
         self.print_data_migration_summary()
         self.print_summary('Altered columns', self.config_parser.get_protocol_name_target_columns_alterations(), 'reason')
         self.print_summary('Sequences', self.config_parser.get_protocol_name_sequences())
@@ -2777,6 +2783,7 @@ class MigratorTables:
         self.print_summary('Functions / procedures', self.config_parser.get_protocol_name_funcprocs())
         self.print_summary('Triggers', self.config_parser.get_protocol_name_triggers())
         self.print_summary('Views', self.config_parser.get_protocol_name_views())
+        self.print_summary('Aliases', self.config_parser.get_protocol_name_aliases())
         if self.config_parser.is_dry_run():
             self.config_parser.print_log_message('INFO', "! Dry run mode enabled. No migration performed !")
 
@@ -2871,6 +2878,309 @@ class MigratorTables:
         cursor.execute(query)
         constraints = cursor.fetchall()
         return constraints
+
+
+    def decode_source_table_partitioning_row(self, row):
+        return {
+            'id': row[0],
+            'source_schema_name': row[1],
+            'source_table_name': row[2],
+            'source_table_id': row[3],
+            'source_table_partitioning_level': row[4],
+            'source_partition_columns': row[5],
+            'source_partition_ranges': row[6],
+            'task_created': row[7],
+            'task_started': row[8],
+            'task_completed': row[9],
+            'success': row[10],
+            'message': row[11]
+        }
+
+    def insert_source_table_partitioning(self, settings):
+        func_run_id = uuid.uuid4()
+        table_name = self.config_parser.get_protocol_name_source_table_partitioning()
+        query = f"""
+            INSERT INTO "{self.protocol_schema}"."{table_name}"
+            (source_schema_name, source_table_name, source_table_id, source_table_partitioning_level, source_partition_columns, source_partition_ranges)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            RETURNING *
+        """
+        params = (settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_table_id'), settings.get('source_table_partitioning_level'), settings.get('source_partition_columns'), settings.get('source_partition_ranges'))
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+            partitioning_row = self.decode_source_table_partitioning_row(row)
+            self.config_parser.print_log_message('DEBUG3', f"insert_source_table_partitioning ({func_run_id}): Returned row: {partitioning_row}")
+            self.insert_protocol('source_table_partitioning', settings.get('source_table_name'), 'create', None, None, None, None, 'info', None, partitioning_row['id'])
+            return partitioning_row['id']
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"insert_source_table_partitioning ({func_run_id}): Error inserting info for {settings.get('source_table_name')} into {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"insert_source_table_partitioning ({func_run_id}): Exception: {e}")
+            raise
+
+    def update_source_table_partitioning_status(self, row_id, success, message):
+        func_run_id = uuid.uuid4()
+        table_name = self.config_parser.get_protocol_name_source_table_partitioning()
+        query = f"""
+            UPDATE "{self.protocol_schema}"."{table_name}"
+            SET task_completed = clock_timestamp(),
+            success = %s,
+            message = %s
+            WHERE id = %s
+            RETURNING *
+        """
+        params = ('TRUE' if success else 'FALSE', message, row_id)
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+            if row:
+                partitioning_row = self.decode_source_table_partitioning_row(row)
+                self.config_parser.print_log_message('DEBUG3', f"update_source_table_partitioning_status ({func_run_id}): Returned row: {partitioning_row}")
+                self.update_protocol('source_table_partitioning', partitioning_row['id'], success, message, None)
+            else:
+                self.config_parser.print_log_message('ERROR', f"update_source_table_partitioning_status ({func_run_id}): Error updating status for row {row_id} in {table_name}. No protocol row returned.")
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"update_source_table_partitioning_status ({func_run_id}): Error updating status for row {row_id} in {table_name}. Exception: {e}")
+            raise
+
+    def decode_target_table_partitioning_row(self, row):
+        return {
+            'id': row[0],
+            'target_schema_name': row[1],
+            'target_table_name': row[2],
+            'target_table_id': row[3],
+            'target_table_partitioning_level': row[4],
+            'target_partition_columns': row[5],
+            'target_partition_ranges': row[6],
+            'task_created': row[7],
+            'task_started': row[8],
+            'task_completed': row[9],
+            'success': row[10],
+            'message': row[11]
+        }
+
+    def insert_target_table_partitioning(self, settings):
+        func_run_id = uuid.uuid4()
+        table_name = self.config_parser.get_protocol_name_target_table_partitioning()
+        query = f"""
+            INSERT INTO "{self.protocol_schema}"."{table_name}"
+            (target_schema_name, target_table_name, target_table_id, target_table_partitioning_level, target_partition_columns, target_partition_ranges)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            RETURNING *
+        """
+        params = (settings.get('target_schema_name'), settings.get('target_table_name'), settings.get('target_table_id'), settings.get('target_table_partitioning_level'), settings.get('target_partition_columns'), settings.get('target_partition_ranges'))
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+            partitioning_row = self.decode_target_table_partitioning_row(row)
+            self.config_parser.print_log_message('DEBUG3', f"insert_target_table_partitioning ({func_run_id}): Returned row: {partitioning_row}")
+            self.insert_protocol('target_table_partitioning', settings.get('target_table_name'), 'create', None, None, None, None, 'info', None, partitioning_row['id'])
+            return partitioning_row['id']
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"insert_target_table_partitioning ({func_run_id}): Error inserting info for {settings.get('target_table_name')} into {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"insert_target_table_partitioning ({func_run_id}): Exception: {e}")
+            raise
+
+    def update_target_table_partitioning_status(self, row_id, success, message):
+        func_run_id = uuid.uuid4()
+        table_name = self.config_parser.get_protocol_name_target_table_partitioning()
+        query = f"""
+            UPDATE "{self.protocol_schema}"."{table_name}"
+            SET task_completed = clock_timestamp(),
+            success = %s,
+            message = %s
+            WHERE id = %s
+            RETURNING *
+        """
+        params = ('TRUE' if success else 'FALSE', message, row_id)
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+            if row:
+                partitioning_row = self.decode_target_table_partitioning_row(row)
+                self.config_parser.print_log_message('DEBUG3', f"update_target_table_partitioning_status ({func_run_id}): Returned row: {partitioning_row}")
+                self.update_protocol('target_table_partitioning', partitioning_row['id'], success, message, None)
+            else:
+                self.config_parser.print_log_message('ERROR', f"update_target_table_partitioning_status ({func_run_id}): Error updating status for row {row_id} in {table_name}. No protocol row returned.")
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"update_target_table_partitioning_status ({func_run_id}): Error updating status for row {row_id} in {table_name}. Exception: {e}")
+            raise
+
+    def decode_columns_row(self, row):
+        return {
+            'id': row[0],
+            'source_schema_name': row[1],
+            'source_table_name': row[2],
+            'source_table_id': row[3],
+            'source_column_name': row[4],
+            'source_column_id': row[5],
+            'source_column_data_type': row[6],
+            'source_column_is_nullable': row[7],
+            'source_column_is_primary_key': row[8],
+            'source_column_is_identity': row[9],
+            'source_column_default_name': row[10],
+            'source_column_default_value': row[11],
+            'source_column_replaced_default_value': row[12],
+            'source_column_character_maximum_length': row[13],
+            'source_column_numeric_precision': row[14],
+            'source_column_numeric_scale': row[15],
+            'source_column_basic_data_type': row[16],
+            'source_column_basic_character_maximum_length': row[17],
+            'source_column_basic_numeric_precision': row[18],
+            'source_column_basic_numeric_scale': row[19],
+            'source_column_basic_column_type': row[20],
+            'source_column_is_generated_virtual': row[21],
+            'source_column_is_generated_stored': row[22],
+            'source_column_generation_expression': row[23],
+            'source_column_stripped_generation_expression': row[24],
+            'source_column_udt_schema': row[25],
+            'source_column_udt_name': row[26],
+            'source_column_domain_schema': row[27],
+            'source_column_domain_name': row[28],
+            'source_column_description': row[29],
+            'source_column_sql': row[30],
+            'target_schema_name': row[31],
+            'target_table_name': row[32],
+            'target_table_id': row[33],
+            'target_column_name': row[34],
+            'target_column_id': row[35],
+            'target_column_data_type': row[36],
+            'target_column_description': row[37],
+            'target_column_sql': row[38],
+            'task_created': row[39],
+            'task_started': row[40],
+            'task_completed': row[41],
+            'success': row[42],
+            'message': row[43]
+        }
+
+    def insert_columns(self, settings):
+        func_run_id = uuid.uuid4()
+        table_name = self.config_parser.get_protocol_name_columns()
+        query = f"""
+            INSERT INTO "{self.protocol_schema}"."{table_name}"
+            (source_schema_name, source_table_name, source_table_id, source_column_name, source_column_id, source_column_data_type, source_column_is_nullable, source_column_is_primary_key, source_column_is_identity, source_column_default_name, source_column_default_value, source_column_replaced_default_value, source_column_character_maximum_length, source_column_numeric_precision, source_column_numeric_scale, source_column_basic_data_type, source_column_basic_character_maximum_length, source_column_basic_numeric_precision, source_column_basic_numeric_scale, source_column_basic_column_type, source_column_is_generated_virtual, source_column_is_generated_stored, source_column_generation_expression, source_column_stripped_generation_expression, source_column_udt_schema, source_column_udt_name, source_column_domain_schema, source_column_domain_name, source_column_description, source_column_sql, target_schema_name, target_table_name, target_table_id, target_column_name, target_column_id, target_column_data_type, target_column_description, target_column_sql)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING *
+        """
+        params = (settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_table_id'), settings.get('source_column_name'), settings.get('source_column_id'), settings.get('source_column_data_type'), settings.get('source_column_is_nullable'), settings.get('source_column_is_primary_key'), settings.get('source_column_is_identity'), settings.get('source_column_default_name'), settings.get('source_column_default_value'), settings.get('source_column_replaced_default_value'), settings.get('source_column_character_maximum_length'), settings.get('source_column_numeric_precision'), settings.get('source_column_numeric_scale'), settings.get('source_column_basic_data_type'), settings.get('source_column_basic_character_maximum_length'), settings.get('source_column_basic_numeric_precision'), settings.get('source_column_basic_numeric_scale'), settings.get('source_column_basic_column_type'), settings.get('source_column_is_generated_virtual'), settings.get('source_column_is_generated_stored'), settings.get('source_column_generation_expression'), settings.get('source_column_stripped_generation_expression'), settings.get('source_column_udt_schema'), settings.get('source_column_udt_name'), settings.get('source_column_domain_schema'), settings.get('source_column_domain_name'), settings.get('source_column_description'), settings.get('source_column_sql'), settings.get('target_schema_name'), settings.get('target_table_name'), settings.get('target_table_id'), settings.get('target_column_name'), settings.get('target_column_id'), settings.get('target_column_data_type'), settings.get('target_column_description'), settings.get('target_column_sql'))
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+            columns_row = self.decode_columns_row(row)
+            self.config_parser.print_log_message('DEBUG3', f"insert_columns ({func_run_id}): Returned row: {columns_row}")
+            self.insert_protocol('column', settings.get('source_column_name'), 'create', None, None, None, None, 'info', None, columns_row['id'])
+            return columns_row['id']
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"insert_columns ({func_run_id}): Error inserting info for {settings.get('source_column_name')} into {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"insert_columns ({func_run_id}): Exception: {e}")
+            raise
+
+    def update_columns_status(self, row_id, success, message):
+        func_run_id = uuid.uuid4()
+        table_name = self.config_parser.get_protocol_name_columns()
+        query = f"""
+            UPDATE "{self.protocol_schema}"."{table_name}"
+            SET task_completed = clock_timestamp(),
+            success = %s,
+            message = %s
+            WHERE id = %s
+            RETURNING *
+        """
+        params = ('TRUE' if success else 'FALSE', message, row_id)
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+            if row:
+                columns_row = self.decode_columns_row(row)
+                self.config_parser.print_log_message('DEBUG3', f"update_columns_status ({func_run_id}): Returned row: {columns_row}")
+                self.update_protocol('column', columns_row['id'], success, message, None)
+            else:
+                self.config_parser.print_log_message('ERROR', f"update_columns_status ({func_run_id}): Error updating status for row {row_id} in {table_name}. No protocol row returned.")
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"update_columns_status ({func_run_id}): Error updating status for row {row_id} in {table_name}. Exception: {e}")
+            raise
+
+    def decode_aliases_row(self, row):
+        return {
+            'id': row[0],
+            'source_schema_name': row[1],
+            'source_alias_name': row[2],
+            'source_alias_id': row[3],
+            'source_alias_sql': row[4],
+            'source_referenced_schema_name': row[5],
+            'source_referenced_table_name': row[6],
+            'source_referenced_column_name': row[7],
+            'source_alias_comment': row[8],
+            'task_created': row[9],
+            'task_started': row[10],
+            'task_completed': row[11],
+            'success': row[12],
+            'message': row[13]
+        }
+
+    def insert_aliases(self, settings):
+        func_run_id = uuid.uuid4()
+        table_name = self.config_parser.get_protocol_name_aliases()
+        query = f"""
+            INSERT INTO "{self.protocol_schema}"."{table_name}"
+            (source_schema_name, source_alias_name, source_alias_id, source_alias_sql, source_referenced_schema_name, source_referenced_table_name, source_referenced_column_name, source_alias_comment)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING *
+        """
+        params = (settings.get('source_schema_name'), settings.get('source_alias_name'), settings.get('source_alias_id'), settings.get('source_alias_sql'), settings.get('source_referenced_schema_name'), settings.get('source_referenced_table_name'), settings.get('source_referenced_column_name'), settings.get('source_alias_comment'))
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+            aliases_row = self.decode_aliases_row(row)
+            self.config_parser.print_log_message('DEBUG3', f"insert_aliases ({func_run_id}): Returned row: {aliases_row}")
+            self.insert_protocol('alias', settings.get('source_alias_name'), 'create', None, None, None, None, 'info', None, aliases_row['id'])
+            return aliases_row['id']
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"insert_aliases ({func_run_id}): Error inserting info for {settings.get('source_alias_name')} into {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"insert_aliases ({func_run_id}): Exception: {e}")
+            raise
+
+    def update_aliases_status(self, row_id, success, message):
+        func_run_id = uuid.uuid4()
+        table_name = self.config_parser.get_protocol_name_aliases()
+        query = f"""
+            UPDATE "{self.protocol_schema}"."{table_name}"
+            SET task_completed = clock_timestamp(),
+            success = %s,
+            message = %s
+            WHERE id = %s
+            RETURNING *
+        """
+        params = ('TRUE' if success else 'FALSE', message, row_id)
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+            if row:
+                aliases_row = self.decode_aliases_row(row)
+                self.config_parser.print_log_message('DEBUG3', f"update_aliases_status ({func_run_id}): Returned row: {aliases_row}")
+                self.update_protocol('alias', aliases_row['id'], success, message, None)
+            else:
+                self.config_parser.print_log_message('ERROR', f"update_aliases_status ({func_run_id}): Error updating status for row {row_id} in {table_name}. No protocol row returned.")
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"update_aliases_status ({func_run_id}): Error updating status for row {row_id} in {table_name}. Exception: {e}")
+            raise
 
 
 if __name__ == "__main__":

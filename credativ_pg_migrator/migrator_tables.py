@@ -1403,15 +1403,13 @@ class MigratorTables:
             source_columns TEXT,
             source_table_rows BIGINT,
             source_table_description TEXT,
+            source_table_sql TEXT,
             target_schema_name TEXT,
             target_table_name TEXT,
             target_columns TEXT,
             target_table_rows BIGINT,
             target_table_sql TEXT,
             table_comment TEXT,
-            partitioned BOOLEAN,
-            partitioned_by TEXT,
-            partitioning_columns TEXT,
             create_partitions_sql TEXT,
             task_created TIMESTAMP DEFAULT clock_timestamp(),
             task_started TIMESTAMP,
@@ -1421,6 +1419,102 @@ class MigratorTables:
             )
         """)
         self.config_parser.print_log_message('DEBUG', f"Created protocol table {table_name} for tables.")
+
+    def create_table_for_source_table_partitioning(self):
+        table_name = self.config_parser.get_protocol_name_source_table_partitioning()
+        self.protocol_connection.execute_query(self.drop_table_sql.format(protocol_schema=self.protocol_schema, table_name=table_name))
+        self.protocol_connection.execute_query(f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."{table_name}"
+            (id SERIAL PRIMARY KEY,
+            source_schema_name TEXT,
+            source_table_name TEXT,
+            source_table_id INTEGER,
+            source_table_partitioning_level INTEGER,
+            source_partition_columns TEXT,
+            source_partition_ranges TEXT,
+            task_created TIMESTAMP DEFAULT clock_timestamp(),
+            task_started TIMESTAMP,
+            task_completed TIMESTAMP,
+            success BOOLEAN,
+            message TEXT
+            )
+        """)
+        self.config_parser.print_log_message('DEBUG', f"Created protocol table {table_name} for source table partitioning.")
+
+    def create_table_for_target_table_partitioning(self):
+        table_name = self.config_parser.get_protocol_name_target_table_partitioning()
+        self.protocol_connection.execute_query(self.drop_table_sql.format(protocol_schema=self.protocol_schema, table_name=table_name))
+        self.protocol_connection.execute_query(f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."{table_name}"
+            (id SERIAL PRIMARY KEY,
+            target_schema_name TEXT,
+            target_table_name TEXT,
+            target_table_id INTEGER,
+            target_table_partitioning_level INTEGER,
+            target_partition_columns TEXT,
+            target_partition_ranges TEXT,
+            task_created TIMESTAMP DEFAULT clock_timestamp(),
+            task_started TIMESTAMP,
+            task_completed TIMESTAMP,
+            success BOOLEAN,
+            message TEXT
+            )
+        """)
+        self.config_parser.print_log_message('DEBUG', f"Created protocol table {table_name} for target table partitioning.")
+
+    def create_table_for_columns(self):
+        table_name = self.config_parser.get_protocol_name_columns()
+        self.protocol_connection.execute_query(self.drop_table_sql.format(protocol_schema=self.protocol_schema, table_name=table_name))
+        self.protocol_connection.execute_query(f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."{table_name}"
+            (id SERIAL PRIMARY KEY,
+            source_schema_name TEXT,
+            source_table_name TEXT,
+            source_table_id INTEGER,
+            source_column_name TEXT,
+            source_column_id INTEGER,
+            source_column_data_type TEXT,
+            source_column_is_nullable TEXT,
+            source_column_is_primary_key TEXT,
+            source_column_is_identity TEXT,
+            source_column_default_name TEXT,
+            source_column_default_value TEXT,
+            source_column_replaced_default_value TEXT,
+            source_column_character_maximum_length TEXT,
+            source_column_numeric_precision TEXT,
+            source_column_numeric_scale TEXT,
+            source_column_basic_data_type TEXT,
+            source_column_basic_character_maximum_length TEXT,
+            source_column_basic_numeric_precision TEXT,
+            source_column_basic_numeric_scale TEXT,
+            source_column_basic_column_type TEXT,
+            source_column_is_generated_virtual TEXT,
+            source_column_is_generated_stored TEXT,
+            source_column_generation_expression TEXT,
+            source_column_stripped_generation_expression TEXT,
+            source_column_udt_schema TEXT,
+            source_column_udt_name TEXT,
+            source_column_domain_schema TEXT,
+            source_column_domain_name TEXT,
+            source_column_description TEXT,
+            source_column_sql TEXT,
+            target_schema_name TEXT,
+            target_table_name TEXT,
+            target_table_id INTEGER,
+            target_column_name TEXT,
+            target_column_id INTEGER,
+            target_column_data_type TEXT,
+            target_column_description TEXT,
+            target_column_sql TEXT,
+            task_created TIMESTAMP DEFAULT clock_timestamp(),
+            task_started TIMESTAMP,
+            task_completed TIMESTAMP,
+            success BOOLEAN,
+            message TEXT
+            )
+        """)
+        self.config_parser.print_log_message('DEBUG', f"Created protocol table {table_name} for columns.")
+
 
     def create_table_for_data_sources(self):
         table_name = self.config_parser.get_protocol_name_data_sources()
@@ -1610,11 +1704,18 @@ class MigratorTables:
         self.protocol_connection.execute_query(f"""
             CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."{table_name}"
             (sequence_id INTEGER,
-            schema_name TEXT,
-            table_name TEXT,
-            column_name TEXT,
-            sequence_name TEXT,
-            set_sequence_sql TEXT,
+            source_schema_name TEXT,
+            source_table_name TEXT,
+            source_column_name TEXT,
+            source_sequence_name TEXT,
+            source_sequence_sql TEXT,
+            source_sequence_comment TEXT,
+            target_schema_name TEXT,
+            target_table_name TEXT,
+            target_column_name TEXT,
+            target_sequence_name TEXT,
+            target_sequence_sql TEXT,
+            target_sequence_comment TEXT,
             task_created TIMESTAMP DEFAULT clock_timestamp(),
             task_started TIMESTAMP,
             task_completed TIMESTAMP,
@@ -1623,6 +1724,29 @@ class MigratorTables:
             )
         """)
         self.config_parser.print_log_message('DEBUG', f"Created protocol table {table_name} for sequences.")
+
+    def create_table_for_aliases(self):
+        table_name = self.config_parser.get_protocol_name_aliases()
+        self.protocol_connection.execute_query(self.drop_table_sql.format(protocol_schema=self.protocol_schema, table_name=table_name))
+        self.protocol_connection.execute_query(f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."{table_name}"
+            (id SERIAL PRIMARY KEY,
+            source_schema_name TEXT,
+            source_alias_name TEXT,
+            source_alias_id INTEGER,
+            source_alias_sql TEXT,
+            source_referenced_schema_name TEXT,
+            source_referenced_table_name TEXT,
+            source_referenced_column_name TEXT,
+            source_alias_comment TEXT,
+            task_created TIMESTAMP DEFAULT clock_timestamp(),
+            task_started TIMESTAMP,
+            task_completed TIMESTAMP,
+            success BOOLEAN,
+            message TEXT
+            )
+        """)
+        self.config_parser.print_log_message('DEBUG', f"Created protocol table {table_name} for aliases.")
 
     def create_table_for_triggers(self):
         table_name = self.config_parser.get_protocol_name_triggers()

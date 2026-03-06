@@ -267,6 +267,15 @@ class ConfigParser:
     def get_protocol_name_tables(self):
         return f"{self.get_protocol_name()}_tables"
 
+    def get_protocol_name_source_table_partitioning(self):
+        return f"{self.get_protocol_name()}_source_table_partitioning"
+
+    def get_protocol_name_target_table_partitioning(self):
+        return f"{self.get_protocol_name()}_target_table_partitioning"
+
+    def get_protocol_name_columns(self):
+        return f"{self.get_protocol_name()}_columns"
+
     def get_protocol_name_data_sources(self):
         return f"{self.get_protocol_name()}_data_sources"
 
@@ -299,6 +308,9 @@ class ConfigParser:
 
     def get_protocol_name_views(self):
         return f"{self.get_protocol_name()}_views"
+
+    def get_protocol_name_aliases(self):
+        return f"{self.get_protocol_name()}_aliases"
 
     def get_data_types_substitution(self):
         return self.config.get('data_types_substitution', {})
@@ -835,7 +847,7 @@ class ConfigParser:
         resume_file = os.path.join(config_dir, "resume_migration")
         self.print_log_message('INFO', f"Migration paused. Waiting for '{resume_file}' to exist to resume...")
         while not os.path.exists(resume_file):
-            time.sleep(5)source_schema_name
+            time.sleep(5)
         self.print_log_message('INFO', f"Resuming migration as '{resume_file}' was found.")
         os.remove(resume_file)
 

@@ -78,6 +78,7 @@ class MigratorTables:
         self.create_table_for_sequences()
         self.create_table_for_triggers()
         self.create_table_for_views()
+        self.create_ddl_tables()
 
     def prepare_data_types_substitution(self):
         # Drop table if exists
@@ -3309,6 +3310,104 @@ class MigratorTables:
         rows = cursor.fetchall()
         cursor.close()
         return rows
+
+    def create_ddl_tables(self):
+        self.protocol_connection.execute_query("DROP TABLE IF EXISTS ddl_tables, ddl_columns, ddl_indexes, ddl_foreign_keys, ddl_sequences, ddl_views, ddl_aliases, ddl_triggers CASCADE")
+
+        self.protocol_connection.execute_query("""
+            CREATE TABLE IF NOT EXISTS ddl_tables (
+                id SERIAL PRIMARY KEY,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                source_schema_name VARCHAR,
+                source_table_name VARCHAR,
+                source_partition_columns VARCHAR,
+                source_partition_ranges VARCHAR
+            )
+        """)
+
+        self.protocol_connection.execute_query("""
+            CREATE TABLE IF NOT EXISTS ddl_columns (
+                id SERIAL PRIMARY KEY,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                source_schema_name VARCHAR,
+                source_table_name VARCHAR,
+                source_column_name VARCHAR,
+                source_data_type VARCHAR,
+                source_is_nullable BOOLEAN,
+                source_default_value VARCHAR,
+                source_pk_indicator BOOLEAN
+            )
+        """)
+
+        self.protocol_connection.execute_query("""
+            CREATE TABLE IF NOT EXISTS ddl_indexes (
+                id SERIAL PRIMARY KEY,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                source_schema_name VARCHAR,
+                source_table_name VARCHAR,
+                source_index_name VARCHAR,
+                source_is_unique BOOLEAN,
+                source_columns_list VARCHAR
+            )
+        """)
+
+        self.protocol_connection.execute_query("""
+            CREATE TABLE IF NOT EXISTS ddl_foreign_keys (
+                id SERIAL PRIMARY KEY,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                source_schema_name VARCHAR,
+                source_table_name VARCHAR,
+                source_fk_name VARCHAR,
+                source_columns_list VARCHAR,
+                source_ref_schema_name VARCHAR,
+                source_ref_table_name VARCHAR,
+                source_ref_columns_list VARCHAR
+            )
+        """)
+
+        self.protocol_connection.execute_query("""
+            CREATE TABLE IF NOT EXISTS ddl_sequences (
+                id SERIAL PRIMARY KEY,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                source_schema_name VARCHAR,
+                source_seq_name VARCHAR,
+                source_ddl_text VARCHAR
+            )
+        """)
+
+        self.protocol_connection.execute_query("""
+            CREATE TABLE IF NOT EXISTS ddl_views (
+                id SERIAL PRIMARY KEY,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                source_schema_name VARCHAR,
+                source_view_name VARCHAR,
+                source_ddl_text VARCHAR
+            )
+        """)
+
+        self.protocol_connection.execute_query("""
+            CREATE TABLE IF NOT EXISTS ddl_aliases (
+                id SERIAL PRIMARY KEY,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                source_schema_name VARCHAR,
+                source_alias_name VARCHAR,
+                source_target_schema VARCHAR,
+                source_target_name VARCHAR
+            )
+        """)
+
+        self.protocol_connection.execute_query("""
+            CREATE TABLE IF NOT EXISTS ddl_triggers (
+                id SERIAL PRIMARY KEY,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                source_schema_name VARCHAR,
+                source_trigger_name VARCHAR,
+                source_ddl_text VARCHAR
+            )
+        """)
+
+        self.config_parser.print_log_message('DEBUG3', f"create_ddl_tables: Tables created in schema {self.protocol_schema}")
+
 
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

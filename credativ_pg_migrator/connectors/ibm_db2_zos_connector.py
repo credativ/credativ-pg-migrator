@@ -92,5 +92,247 @@ class IbmDb2ZosConnector(DatabaseConnector):
     def get_types_mapping(self, settings):
         return self.types_mapping
 
+
+def parse_ddl_files(self, settings):
+
+    for filepath in glob.glob(os.path.join(self.ddl_directory, '*.*')):
+        with open(filepath, 'r', encoding='utf-8') as f:
+            content = f.read()
+
+        # Extract triggers first to avoid splitting by semicolons inside their bodies
+        trigger_pattern = re.compile(r"(CREATE\s+TRIGGER\s+\"?([A-Za-z0-9_]+)\"?\.\"?([A-Za-z0-9_]+)\"?[\s\S]*?(?=(?:CREATE\s+(?:TABLE|VIEW|INDEX|UNIQUE\s+INDEX|ALIAS|SEQUENCE|TRIGGER))|(?:ALTER\s+TABLE)|(?:SET\s+CURRENT\s+SCHEMA)|$))", re.IGNORECASE)
+        for match in trigger_pattern.finditer(content):
+            schema_name = match.group(2).upper()
+            trigger_name = match.group(3).upper()
+            ddl_text = match.group(1).strip()
+            cursor.execute("""
+                INSERT INTO protocol_triggers (source_schema_name, source_trigger_name, source_ddl_text)
+                VALUES (%s, %s, %s)
+            """, (schema_name, trigger_name, ddl_text))
+
+        # Remove the extracted triggers from content so they aren't parsed again
+        content = trigger_pattern.sub("", content)
+
+        statements = content.split(';')
+        for stmt in statements:
+            stmt = stmt.strip()
+            if not stmt:
+                continue
+
+            # Parse Indexes
+            match_index = re.search(r"^CREATE\s+(UNIQUE\s+)?INDEX\s+([A-Za-z0-9_]+)\.([A-Za-z0-9_]+)\s+ON\s+([A-Za-z0-9_]+)\.([A-Za-z0-9_]+)", stmt, re.IGNORECASE)
+            if match_index:
+                is_unique = bool(match_index.group(1))
+                idx_schema = match_index.group(2).upper()
+                idx_name = match_index.group(3).upper()
+                tbl_schema = match_index.group(4).upper()
+                tbl_name = match_index.group(5).upper()
+
+                # Fetch columns list in parenthesis
+                start_idx = stmt.find('(', match_index.end())
+                if start_idx != -1:
+                    depth = 0
+                    end_idx = -1
+                    for i in range(start_idx, len(stmt)):
+                        if stmt[i] == '(':
+                            depth += 1
+                        elif stmt[i] == ')':
+                            depth -= 1
+                            if depth == 0:
+                                end_idx = i
+                                break
+
+                    if end_idx != -1:
+                        cols_str = stmt[start_idx+1:end_idx]
+                        cols_list = []
+                        for c in cols_str.split(','):
+                            col_stmt = c.strip().split()
+                            if col_stmt:
+                                cols_list.append(col_stmt[0].upper())
+
+                        cursor.execute("""
+                            INSERT INTO protocol_indexes
+                            (source_schema_name, source_table_name, source_index_name, source_is_unique, source_columns_list)
+                            VALUES (%s, %s, %s, %s, %s)
+                        """, (tbl_schema, tbl_name, idx_name, is_unique, ', '.join(cols_list)))
+                continue
+
+            # Parse Sequences
+            match_seq = re.search(r"^CREATE\s+SEQUENCE\s+\"?([A-Za-z0-9_]+)\"?\.\"?([A-Za-z0-9_]+)\"?", stmt, re.IGNORECASE)
+            if match_seq:
+                schema_name = match_seq.group(1).upper()
+                seq_name = match_seq.group(2).upper()
+                cursor.execute("""
+                    INSERT INTO protocol_sequences (source_schema_name, source_seq_name, source_ddl_text)
+                    VALUES (%s, %s, %s)
+                """, (schema_name, seq_name, stmt))
+                continue
+
+            # Parse Views
+            match_view = re.search(r"^CREATE\s+VIEW\s+\"?([A-Za-z0-9_]+)\"?\.\"?([A-Za-z0-9_]+)\"?", stmt, re.IGNORECASE)
+            if match_view:
+                schema_name = match_view.group(1).upper()
+                view_name = match_view.group(2).upper()
+                cursor.execute("""
+                    INSERT INTO protocol_views (source_schema_name, source_view_name, source_ddl_text)
+                    VALUES (%s, %s, %s)
+                """, (schema_name, view_name, stmt))
+                continue
+
+            # Parse Aliases
+            match_alias = re.search(r"^CREATE\s+ALIAS\s+\"?([A-Za-z0-9_]+)\"?\.\"?([A-Za-z0-9_]+)\"?\s+FOR\s+\"?([A-Za-z0-9_]+)\"?\.\"?([A-Za-z0-9_]+)\"?", stmt, re.IGNORECASE)
+            if match_alias:
+                schema_name = match_alias.group(1).upper()
+                alias_name = match_alias.group(2).upper()
+                target_schema = match_alias.group(3).upper()
+                target_name = match_alias.group(4).upper()
+                cursor.execute("""
+                    INSERT INTO protocol_aliases (source_schema_name, source_alias_name, source_target_schema, source_target_name)
+                    VALUES (%s, %s, %s, %s)
+                """, (schema_name, alias_name, target_schema, target_name))
+                continue
+
+            # Parse Foreign Keys
+            match_fk = re.search(r"^ALTER\s+TABLE\s+([A-Za-z0-9_]+)\.([A-Za-z0-9_]+)\s+ADD\s+CONSTRAINT\s+([A-Za-z0-9_]+)\s+FOREIGN\s+KEY\s*\(([^)]+)\)\s*REFERENCES\s+([A-Za-z0-9_]+)\.([A-Za-z0-9_]+)\s*\(([^)]+)\)", stmt, re.IGNORECASE)
+            if match_fk:
+                tbl_schema = match_fk.group(1).upper()
+                tbl_name = match_fk.group(2).upper()
+                fk_name = match_fk.group(3).upper()
+                cols_str = match_fk.group(4)
+                ref_schema = match_fk.group(5).upper()
+                ref_name = match_fk.group(6).upper()
+                ref_cols_str = match_fk.group(7)
+
+                cols_list = [c.strip().upper() for c in cols_str.split(',')]
+                ref_cols_list = [c.strip().upper() for c in ref_cols_str.split(',')]
+
+                cursor.execute("""
+                    INSERT INTO protocol_foreign_keys
+                    (source_schema_name, source_table_name, source_fk_name, source_columns_list, source_ref_schema_name, source_ref_table_name, source_ref_columns_list)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """, (tbl_schema, tbl_name, fk_name, ', '.join(cols_list), ref_schema, ref_name, ', '.join(ref_cols_list)))
+                continue
+
+            # Find CREATE TABLE
+            match_table = re.search(r"^CREATE\s+TABLE\s+([A-Za-z0-9_]+)\.([A-Za-z0-9_]+)", stmt, re.IGNORECASE)
+            if not match_table:
+                continue
+
+            schema_name = match_table.group(1).upper()
+            table_name = match_table.group(2).upper()
+
+            # Extract block inside parenthesis
+            start_idx = stmt.find('(', match_table.end())
+            if start_idx == -1:
+                continue
+
+            depth = 0
+            end_idx = -1
+            for i in range(start_idx, len(stmt)):
+                if stmt[i] == '(':
+                    depth += 1
+                elif stmt[i] == ')':
+                    depth -= 1
+                    if depth == 0:
+                        end_idx = i
+                        break
+
+            if end_idx == -1:
+                continue
+
+            columns_str = stmt[start_idx+1:end_idx]
+
+            # Split columns correctly ignoring commas inside parenthesis
+            cols = []
+            current = []
+            depth = 0
+            for char in columns_str:
+                if char == '(':
+                    depth += 1
+                    current.append(char)
+                elif char == ')':
+                    depth -= 1
+                    current.append(char)
+                elif char == ',' and depth == 0:
+                    cols.append("".join(current).strip())
+                    current = []
+                else:
+                    current.append(char)
+            if current:
+                cols.append("".join(current).strip())
+
+            col_defs = [c for c in cols if c]
+
+            pk_columns = set()
+            # First pass for Primary Key constraints within the table block
+            for col_def in col_defs:
+                if col_def.upper().startswith("PRIMARY KEY"):
+                    match_pk = re.search(r"\((.*)\)", col_def)
+                    if match_pk:
+                        pks = [p.strip().upper() for p in match_pk.group(1).split(',')]
+                        pk_columns.update(pks)
+
+            # Extract Partitioning parameters from the trailing text
+            trailing_str = stmt[end_idx+1:]
+            partition_col = None
+            partition_ranges = None
+
+            match_part = re.search(r"PARTITION\s+BY\s*\(\s*([^)]+)\s*\)\s*\(([\s\S]*?)\)\s*(?:IN|;|$)", trailing_str, re.IGNORECASE)
+            if match_part:
+                partition_col = match_part.group(1).replace(" ASC", "").replace(" DESC", "").strip()
+                partition_ranges = match_part.group(2).strip()
+
+            # Register Table
+            cursor.execute("""
+                INSERT INTO protocol_tables (source_schema_name, source_table_name, source_partition_col, source_partition_ranges)
+                VALUES (%s, %s, %s, %s)
+            """, (schema_name, table_name, partition_col, partition_ranges))
+
+            # Second pass for extracting column metrics
+            for col_def in col_defs:
+                col_def_u = col_def.upper()
+                if col_def_u.startswith("PRIMARY KEY") or col_def_u.startswith("CONSTRAINT") or col_def_u.startswith("FOREIGN KEY") or col_def_u.startswith("UNIQUE"):
+                    continue
+
+                parts = col_def.split(maxsplit=1)
+                col_name = parts[0].upper()
+                rest = parts[1] if len(parts) > 1 else ""
+
+                # Exclude any other definition that is not a column
+                if len(parts) < 2:
+                    continue
+
+                type_match = re.match(r"([A-Za-z0-9_]+(?:\s*\([^)]+\))?)", rest, re.IGNORECASE)
+                if not type_match:
+                    print(f"Failed to parse type for column {col_name} on {table_name}: {rest}")
+                    continue
+
+                data_type = type_match.group(1).upper()
+                after_type = rest[len(data_type):].strip()
+
+                is_nullable = True
+                if "NOT NULL" in after_type.upper():
+                    is_nullable = False
+
+                default_value = None
+                default_match = re.search(r"WITH\s+DEFAULT\s+('[^']*'|[0-9\.]+|[A-Za-z0-9_]+)?", after_type, re.IGNORECASE)
+                if default_match:
+                    if default_match.group(1):
+                        default_value = default_match.group(1)
+                    else:
+                        default_value = "SYSTEM DEFAULT"
+
+                is_pk = col_name in pk_columns
+
+                cursor.execute("""
+                    INSERT INTO protocol_columns
+                    (source_schema_name, source_table_name, source_column_name, source_data_type, source_is_nullable, source_default_value, source_pk_indicator)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """, (schema_name, table_name, col_name, data_type, is_nullable, default_value, is_pk))
+
+    conn.close()
+    print("DDL parsing completed and unified protocol tables populated with DB2 source metadata.")
+
+
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

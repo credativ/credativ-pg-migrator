@@ -327,7 +327,7 @@ class SQLAnywhereConnector(DatabaseConnector):
                     query = f"SELECT TOP {chunk_size} START AT {chunk_start_row_number} {select_columns} FROM {source_schema_name}.{source_table_name}"
                     if migration_limitation:
                         query += f" WHERE {migration_limitation}"
-                    primary_key_columns = migrator_tables.select_primary_key(source_schema_name, source_table_name)
+                    primary_key_columns = migrator_tables.select_primary_key({'source_schema_name': source_schema_name, 'source_table_name': source_table_name})
                     self.config_parser.print_log_message('DEBUG2', f"Worker {worker_id}: Primary key columns for {source_schema_name}.{source_table_name}: {primary_key_columns}")
                     if primary_key_columns:
                         orderby_columns = primary_key_columns

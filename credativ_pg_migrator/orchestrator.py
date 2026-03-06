@@ -38,7 +38,7 @@ class Orchestrator:
         self.source_schema_name = self.config_parser.get_source_schema()
         self.target_schema_name = self.config_parser.get_target_schema()
         if self.config_parser.is_resume_after_crash():
-            self.migrator_tables.insert_main('Orchestrator', 'Resume after crash')
+            self.migrator_tables.insert_main({'task_name': 'Orchestrator', 'subtask_name': 'Resume after crash'})
             self.config_parser.print_log_message('INFO', "#############################################################################")
             self.config_parser.print_log_message('INFO', "Orchestration: Resuming migration after crash - stats from crashed migration:")
             self.config_parser.print_log_message('INFO', f"Orchestration: drop_unfinished-tables set to: {self.config_parser.should_drop_unfinished_tables()}")
@@ -46,7 +46,7 @@ class Orchestrator:
             self.config_parser.print_log_message('INFO', "#############################################################################")
             self.config_parser.print_log_message('INFO', "Orchestration: Continuing migration...")
         else:
-            self.migrator_tables.insert_main('Orchestrator', '')
+            self.migrator_tables.insert_main({'task_name': 'Orchestrator', 'subtask_name': ''})
 
     def run(self):
         try:
@@ -97,7 +97,7 @@ class Orchestrator:
                 self.config_parser.print_log_message('INFO', "Dry run mode enabled. No data migration performed.")
 
             self.config_parser.print_log_message('INFO', "Orchestration complete.")
-            self.migrator_tables.update_main_status('Orchestrator', '', True, 'finished OK')
+            self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': '', 'success': True, 'message': 'finished OK'})
 
             self.migrator_tables.print_migration_summary()
 
@@ -111,7 +111,7 @@ class Orchestrator:
                 pass
 
         except Exception as e:
-            self.migrator_tables.update_main_status('Orchestrator', '', False, f'ERROR: {e}')
+            self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': '', 'success': False, 'message': f'ERROR: {e}'})
             self.handle_error(e, 'orchestration')
 
     def load_connector(self, source_or_target):
@@ -147,7 +147,7 @@ class Orchestrator:
                 self.handle_error(e, 'post-migration script')
 
     def run_migrate_tables(self):
-        self.migrator_tables.insert_main('Orchestrator', 'tables migration')
+        self.migrator_tables.insert_main({'task_name': 'Orchestrator', 'subtask_name': 'tables migration'})
         workers_requested = self.config_parser.get_parallel_workers_count()
         settings = {
             'source_db_type': self.config_parser.get_source_db_type(),
@@ -187,7 +187,7 @@ class Orchestrator:
                                     self.config_parser.print_log_message('ERROR', "Stopping execution due to error.")
                                     exit(1)
                             else:
-                                self.migrator_tables.update_table_status(table_done['id'], True, 'migrated OK')
+                                self.migrator_tables.update_table_status({'row_id': table_done['id'], 'success': True, 'message': 'migrated OK'})
 
                     # Submit the next task
                     future = executor.submit(self.table_worker, table_data, settings)
@@ -202,16 +202,16 @@ class Orchestrator:
                             self.config_parser.print_log_message('ERROR', "Stopping execution due to error.")
                             exit(1)
                     else:
-                        self.migrator_tables.update_table_status(table_done['id'], True, 'migrated OK')
+                        self.migrator_tables.update_table_status({'row_id': table_done['id'], 'success': True, 'message': 'migrated OK'})
 
             self.config_parser.print_log_message('INFO', "Tables processed successfully.")
         else:
             self.config_parser.print_log_message('INFO', "No tables to create.")
 
-        self.migrator_tables.update_main_status('Orchestrator', 'tables migration', True, 'finished OK')
+        self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': 'tables migration', 'success': True, 'message': 'finished OK'})
 
     def run_create_user_defined_types(self):
-        self.migrator_tables.insert_main('Orchestrator', 'user defined types migration')
+        self.migrator_tables.insert_main({'task_name': 'Orchestrator', 'subtask_name': 'user defined types migration'})
         self.config_parser.print_log_message('INFO', "Migrating user defined types.")
         user_defined_types = self.migrator_tables.fetch_all_user_defined_types()
         if len(user_defined_types) > 0:
@@ -240,24 +240,24 @@ class Orchestrator:
                         if target_basic_type and norm_existing == norm_target:
                             msg = f"Domain {type_data['target_type_name']} with underlying type {target_basic_type} already exists (normalized match: {norm_existing}). Skipping."
                             self.config_parser.print_log_message('INFO', msg)
-                            self.migrator_tables.update_user_defined_type_status(type_data['id'], True, 'skipped (exists)')
+                            self.migrator_tables.update_user_defined_type_status({'row_id': type_data['id'], 'success': True, 'message': 'skipped (exists)'})
                         else:
                             msg = f"Domain {type_data['target_type_name']} already exists but with different underlying type: {existing_type} (expected: {target_basic_type}). Normalized: {norm_existing} vs {norm_target}. Skipping creation."
                             self.config_parser.print_log_message('ERROR', msg)
-                            self.migrator_tables.update_user_defined_type_status(type_data['id'], False, f"ERROR: {msg}")
+                            self.migrator_tables.update_user_defined_type_status({'row_id': type_data['id'], 'success': False, 'message': f'ERROR: {msg}'})
                     else:
                         self.target_connection.execute_query(type_data['target_type_sql'])
-                        self.migrator_tables.update_user_defined_type_status(type_data['id'], True, 'migrated OK')
+                        self.migrator_tables.update_user_defined_type_status({'row_id': type_data['id'], 'success': True, 'message': 'migrated OK'})
                         self.config_parser.print_log_message('INFO', f"User defined type {type_data['target_type_name']} created successfully.")
 
                     self.target_connection.disconnect()
                 except Exception as e:
-                    self.migrator_tables.update_user_defined_type_status(type_data['id'], False, f'ERROR: {e}')
+                    self.migrator_tables.update_user_defined_type_status({'row_id': type_data['id'], 'success': False, 'message': f'ERROR: {e}'})
                     self.handle_error(e, f"create_user_defined_type {type_data['target_type_name']}")
             self.config_parser.print_log_message('INFO', "User defined types migrated successfully.")
         else:
             self.config_parser.print_log_message('INFO', "No user defined types found to migrate.")
-        self.migrator_tables.update_main_status('Orchestrator', 'user defined types migration', True, 'finished OK')
+        self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': 'user defined types migration', 'success': True, 'message': 'finished OK'})
 
     def _normalize_data_type(self, data_type):
         """Normalize PostgreSQL data type names for comparison."""
@@ -287,9 +287,9 @@ class Orchestrator:
         return mapping.get(dt, dt)
 
     def run_create_domains(self):
-        self.migrator_tables.insert_main('Orchestrator', 'domains migration')
+        self.migrator_tables.insert_main({'task_name': 'Orchestrator', 'subtask_name': 'domains migration'})
         self.config_parser.print_log_message('INFO', "Migrating domains.")
-        domains = self.migrator_tables.fetch_all_domains()
+        domains = self.migrator_tables.fetch_all_domains({})
         if len(domains) > 0:
             for domain_row in domains:
                 domain_data = self.migrator_tables.decode_domain_row(domain_row)
@@ -297,19 +297,19 @@ class Orchestrator:
                 try:
                     self.target_connection.connect()
                     self.target_connection.execute_query(domain_data['target_domain_sql'])
-                    self.migrator_tables.update_domain_status(domain_data['id'], True, 'migrated OK')
+                    self.migrator_tables.update_domain_status({'row_id': domain_data['id'], 'success': True, 'message': 'migrated OK'})
                     self.config_parser.print_log_message('INFO', f"Domain {domain_data['target_domain_name']} created successfully.")
                     self.target_connection.disconnect()
                 except Exception as e:
-                    self.migrator_tables.update_domain_status(domain_data['id'], False, f'ERROR: {e}')
+                    self.migrator_tables.update_domain_status({'row_id': domain_data['id'], 'success': False, 'message': f'ERROR: {e}'})
                     self.handle_error(e, f"create_domain {domain_data['target_domain_name']}")
             self.config_parser.print_log_message('INFO', "Domains migrated successfully.")
         else:
             self.config_parser.print_log_message('INFO', "No domains found to migrate.")
-        self.migrator_tables.update_main_status('Orchestrator', 'domains migration', True, 'finished OK')
+        self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': 'domains migration', 'success': True, 'message': 'finished OK'})
 
     def run_migrate_indexes(self, run_mode='standard'):
-        self.migrator_tables.insert_main('Orchestrator', 'indexes migration')
+        self.migrator_tables.insert_main({'task_name': 'Orchestrator', 'subtask_name': 'indexes migration'})
         workers_requested = self.config_parser.get_parallel_workers_count()
         target_db_type = self.config_parser.get_target_db_type()
 
@@ -341,7 +341,7 @@ class Orchestrator:
                                     self.config_parser.print_log_message('ERROR', "Stopping execution due to error.")
                                     exit(1)
                             else:
-                                self.migrator_tables.update_index_status(index_done['id'], True, 'migrated OK')
+                                self.migrator_tables.update_index_status({'row_id': index_done['id'], 'success': True, 'message': 'migrated OK'})
 
                     # Submit the next task
                     future = executor.submit(self.index_worker, index_data, target_db_type)
@@ -355,16 +355,16 @@ class Orchestrator:
                             self.config_parser.print_log_message('ERROR', "Stopping execution due to error.")
                             exit(1)
                     else:
-                        self.migrator_tables.update_index_status(index_done['id'], True, 'migrated OK')
+                        self.migrator_tables.update_index_status({'row_id': index_done['id'], 'success': True, 'message': 'migrated OK'})
 
             self.config_parser.print_log_message('INFO', "Indexes processed successfully.")
         else:
             self.config_parser.print_log_message('INFO', "No indexes to create.")
 
-        self.migrator_tables.update_main_status('Orchestrator', 'indexes migration', True, 'finished OK')
+        self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': 'indexes migration', 'success': True, 'message': 'finished OK'})
 
     def run_migrate_constraints(self):
-        self.migrator_tables.insert_main('Orchestrator', 'constraints migration')
+        self.migrator_tables.insert_main({'task_name': 'Orchestrator', 'subtask_name': 'constraints migration'})
         workers_requested = self.config_parser.get_parallel_workers_count()
         target_db_type = self.config_parser.get_target_db_type()
 
@@ -390,7 +390,7 @@ class Orchestrator:
                                     self.config_parser.print_log_message('ERROR', "Stopping execution due to error.")
                                     exit(1)
                             else:
-                                self.migrator_tables.update_constraint_status(constraint_done['id'], True, 'migrated OK')
+                                self.migrator_tables.update_constraint_status({'row_id': constraint_done['id'], 'success': True, 'message': 'migrated OK'})
                     # Submit the next task
                     future = executor.submit(self.constraint_worker, constraint_data, target_db_type)
                     futures[future] = constraint_data
@@ -403,13 +403,13 @@ class Orchestrator:
                             self.config_parser.print_log_message('ERROR', "Stopping execution due to error.")
                             exit(1)
                     else:
-                        self.migrator_tables.update_constraint_status(constraint_done['id'], True, 'migrated OK')
+                        self.migrator_tables.update_constraint_status({'row_id': constraint_done['id'], 'success': True, 'message': 'migrated OK'})
 
             self.config_parser.print_log_message('INFO', "Constraints processed successfully.")
         else:
             self.config_parser.print_log_message('INFO', "No constraints to create.")
 
-        self.migrator_tables.update_main_status('Orchestrator', 'constraints migration', True, 'finished OK')
+        self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': 'constraints migration', 'success': True, 'message': 'finished OK'})
 
     def table_worker(self, table_data, settings):
         worker_id = uuid.uuid4()
@@ -463,7 +463,7 @@ class Orchestrator:
                     except Exception as e:
                         if repeat_count > 5:
                             self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Error dropping table {target_table_name}: {e}")
-                            self.migrator_tables.update_table_status(table_data['id'], False, f'ERROR: {e}')
+                            self.migrator_tables.update_table_status({'row_id': table_data['id'], 'success': False, 'message': f'ERROR: {e}'})
                             return False
                         else:
                             repeat_count += 1
@@ -517,7 +517,7 @@ class Orchestrator:
                     except Exception as e:
                         if repeat_count > 5:
                             self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Error truncating table {target_table_name}: {e}")
-                            self.migrator_tables.update_table_status(table_data['id'], False, f'ERROR: {e}')
+                            self.migrator_tables.update_table_status({'row_id': table_data['id'], 'success': False, 'message': f'ERROR: {e}'})
                             return False
                         else:
                             repeat_count += 1
@@ -534,7 +534,7 @@ class Orchestrator:
                 worker_source_connection = self.load_connector('source')
                 worker_source_connection.connect()
 
-                data_source = self.migrator_tables.fetch_data_source(table_data['source_schema_name'], table_data['source_table_name'])
+                data_source = self.migrator_tables.fetch_data_source({'source_schema_name': table_data['source_schema_name'], 'source_table_name': table_data['source_table_name']})
                 self.config_parser.print_log_message('DEBUG3', f"Worker {worker_id}: Checking data source for table {table_data['source_schema_name']}.{table_data['source_table_name']}: {data_source}")
 
                 use_source_table = False
@@ -648,7 +648,7 @@ class Orchestrator:
                                             if lob_columns_count > 1:
                                                 self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {target_table_name} has multiple LOB columns defined ({data_source_settings['lob_columns']}) - adding primary key for LOB migration.")
                                                 part_name = 'migrate LOBs - add primary key'
-                                                primary_key_data = migrator_tables.select_primary_key_all_columns(table_data['source_schema_name'], table_data['source_table_name'])
+                                                primary_key_data = migrator_tables.select_primary_key_all_columns({'source_schema_name': table_data['source_schema_name'], 'source_table_name': table_data['source_table_name']})
                                                 if primary_key_data is None:
                                                     self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Table {target_table_name} has LOB columns defined ({data_source_settings['lob_columns']}), but no primary key could be determined.")
                                                 else:
@@ -746,7 +746,7 @@ class Orchestrator:
                                                                 settings = {
                                                                     'target_schema_name': target_schema_name,
                                                                     'target_table_name': target_table_name,
-                                                                    'primary_key_columns': migrator_tables.select_primary_key(table_data['source_schema_name'], table_data['source_table_name']),
+                                                                    'primary_key_columns': migrator_tables.select_primary_key({'source_schema_name': table_data['source_schema_name'], 'source_table_name': table_data['source_table_name']}),
                                                                     'unl_import_table': table_name_for_lob_import,
                                                                     'lob_column': lob_col_name,
                                                                     'lob_col_index': lob_col_index,
@@ -848,7 +848,7 @@ class Orchestrator:
                                                 self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Failed to delete temporary CSV file {csv_file_name}: {cleanup_exc}")
 
                                     except Exception as e:
-                                        self.migrator_tables.update_table_status(table_data['id'], False, f'ERROR: {e}')
+                                        self.migrator_tables.update_table_status({'row_id': table_data['id'], 'success': False, 'message': f'ERROR: {e}'})
                                         self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: ({part_name}) Error copying data from CSV file {csv_file_name} to table {target_table_name}: {e}")
                                         return False
                     else:
@@ -943,10 +943,10 @@ class Orchestrator:
                                 self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Sequence ({order_num}) {sequence_name} set successfully for table {target_table_name}.")
                                 seq_curr_val = worker_target_connection.get_sequence_current_value(sequence_id)
                                 self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Current value of sequence {sequence_name} is {seq_curr_val}.")
-                                self.migrator_tables.update_sequence_status(sequence_id, True, 'migrated OK')
+                                self.migrator_tables.update_sequence_status({'sequence_id': sequence_id, 'success': True, 'message': 'migrated OK'})
                             except Exception as e:
-                                self.migrator_tables.update_sequence_status(sequence_id, False, f'ERROR: {e}')
-                                self.migrator_tables.update_table_status(table_data['id'], False, f'ERROR: {e}')
+                                self.migrator_tables.update_sequence_status({'sequence_id': sequence_id, 'success': False, 'message': f'ERROR: {e}'})
+                                self.migrator_tables.update_table_status({'row_id': table_data['id'], 'success': False, 'message': f'ERROR: {e}'})
                                 self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Error setting sequence {sequence_name} for table {target_table_name}: {e}")
                     else:
                         self.config_parser.print_log_message('INFO', f"Worker {worker_id}: No sequences found for table {target_table_name}.")
@@ -972,7 +972,7 @@ class Orchestrator:
                 worker_target_connection.disconnect()
             except Exception as e:
                 pass
-            self.migrator_tables.update_table_status(table_data['id'], False, f'ERROR: {e_main}')
+            self.migrator_tables.update_table_status({'row_id': table_data['id'], 'success': False, 'message': f'ERROR: {e_main}'})
             self.handle_error(e_main, f"table_worker {worker_id} ({part_name}) {target_table_name}")
             return False
 
@@ -1217,7 +1217,7 @@ class Orchestrator:
             worker_target_connection.disconnect()
             return True
         except Exception as e:
-            self.migrator_tables.update_index_status(index_data['id'], False, f'ERROR: {e}')
+            self.migrator_tables.update_index_status({'row_id': index_data['id'], 'success': False, 'message': f'ERROR: {e}'})
             self.handle_error(e, f"index_worker {worker_id} {index_name}")
             return False
 
@@ -1242,18 +1242,18 @@ class Orchestrator:
 
                 if not worker_target_connection.target_table_exists(target_schema_name, target_table_name):
                     self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Target table {target_schema_name}.{target_table_name} for constraint {constraint_name} does not exist - skipping constraint creation.")
-                    self.migrator_tables.update_constraint_status(constraint_data['id'], False, f'ERROR: target table {target_schema_name}.{target_table_name} does not exist')
+                    self.migrator_tables.update_constraint_status({'row_id': constraint_data['id'], 'success': False, 'message': f'ERROR: target table {target_schema_name}.{target_table_name} does not exist'})
                     return False
 
-                referenced_target_table = self.migrator_tables.select_table_by_source(referenced_table_schema, referenced_table_name)
+                referenced_target_table = self.migrator_tables.select_table_by_source({'source_schema_name': referenced_table_schema, 'source_table_name': referenced_table_name})
                 if referenced_target_table is None:
                     self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Referenced table {referenced_table_schema}.{referenced_table_name} for constraint {constraint_name} not found - skipping constraint creation.")
-                    self.migrator_tables.update_constraint_status(constraint_data['id'], False, f'''ERROR: referenced table {referenced_table_schema}.{referenced_table_name} not found''')
+                    self.migrator_tables.update_constraint_status({'row_id': constraint_data['id'], 'success': False, 'message': f'ERROR: referenced table {referenced_table_schema}.{referenced_table_name} not found'})
                     worker_target_connection.disconnect()
                     return False
                 if not worker_target_connection.target_table_exists(referenced_target_table['target_schema_name'], referenced_target_table['target_table_name']):
                     self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Referenced table {referenced_target_table['target_schema_name']}.{referenced_target_table['target_table_name']} for constraint {constraint_name} does not exist - skipping constraint creation.")
-                    self.migrator_tables.update_constraint_status(constraint_data['id'], False, f'''ERROR: referenced table {referenced_target_table['target_schema_name']}.{referenced_target_table['target_table_name']} does not exist''')
+                    self.migrator_tables.update_constraint_status({'row_id': constraint_data['id'], 'success': False, 'message': f"ERROR: referenced table {referenced_target_table['target_schema_name']}.{referenced_target_table['target_table_name']} does not exist"})
                     return False
 
                 self.config_parser.print_log_message( 'DEBUG', f"Worker {worker_id}: Creating constraint with SQL: {create_constraint_sql}")
@@ -1281,13 +1281,13 @@ class Orchestrator:
                             "violates check constraint",
                         ]
                         if any(txt in str(e).lower() for txt in error_texts):
-                            self.migrator_tables.update_constraint_status(constraint_data['id'], False, f'ERROR: {e}')
+                            self.migrator_tables.update_constraint_status({'row_id': constraint_data['id'], 'success': False, 'message': f'ERROR: {e}'})
                             worker_target_connection.disconnect()
                             return False
                         self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Retrying ({creation_try}) to create constraint {constraint_name}...")
                         if creation_try > 5:
                             self.handle_error(e, f"constraint_worker {worker_id}: Failed to create {constraint_name} after {creation_try} attempts.")
-                            self.migrator_tables.update_constraint_status(constraint_data['id'], False, f'ERROR: {e}')
+                            self.migrator_tables.update_constraint_status({'row_id': constraint_data['id'], 'success': False, 'message': f'ERROR: {e}'})
                             worker_target_connection.disconnect()
                             return False
                         creation_try += 1
@@ -1308,7 +1308,7 @@ class Orchestrator:
             return False
 
     def run_migrate_funcprocs(self):
-        self.migrator_tables.insert_main('Orchestrator', 'functions/procedures migration')
+        self.migrator_tables.insert_main({'task_name': 'Orchestrator', 'subtask_name': 'functions/procedures migration'})
         include_funcprocs = self.config_parser.get_include_funcprocs()
         exclude_funcprocs = self.config_parser.get_exclude_funcprocs() or []
 
@@ -1385,16 +1385,16 @@ class Orchestrator:
                             self.target_connection.execute_query(converted_code)
                             self.config_parser.print_log_message( 'DEBUG', f"[OK] Source code for {funcproc_data['name']}: {funcproc_code_str}")
                             self.config_parser.print_log_message( 'DEBUG', f"[OK] Converted code for {funcproc_data['name']}: {converted_code}")
-                            self.migrator_tables.update_funcproc_status(funcproc_id, True, 'migrated OK')
+                            self.migrator_tables.update_funcproc_status({'source_funcproc_id': funcproc_id, 'success': True, 'message': 'migrated OK'})
                         else:
                             self.config_parser.print_log_message('INFO', f"Skipping {funcproc_type} {funcproc_data['name']} - no conversion done")
-                            self.migrator_tables.update_funcproc_status(funcproc_id, False, 'no conversion')
+                            self.migrator_tables.update_funcproc_status({'source_funcproc_id': funcproc_id, 'success': False, 'message': 'no conversion'})
                         self.target_connection.disconnect()
                     except Exception as e:
                         self.config_parser.print_log_message( 'DEBUG', f"[ERROR] Source code for {funcproc_data['name']}: {funcproc_code}")
                         self.config_parser.print_log_message( 'DEBUG', f"[ERROR] Converted code for {funcproc_data['name']}: {converted_code}")
                         self.config_parser.print_log_message( 'DEBUG', f"[ERROR] Migrating {funcproc_type} {funcproc_data['name']}.")
-                        self.migrator_tables.update_funcproc_status(funcproc_id, False, f'ERROR: {e}')
+                        self.migrator_tables.update_funcproc_status({'source_funcproc_id': funcproc_id, 'success': False, 'message': f'ERROR: {e}'})
                         self.config_parser.print_log_message('ERROR', f"Error migrating {funcproc_type} {funcproc_data['name']}: {e}")
                         self.config_parser.print_log_message('ERROR', traceback.format_exc())
                         try:
@@ -1408,10 +1408,10 @@ class Orchestrator:
         else:
             self.config_parser.print_log_message('INFO', "Skipping function and procedure migration as requested.")
 
-        self.migrator_tables.update_main_status('Orchestrator', 'functions/procedures migration', True, 'finished OK')
+        self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': 'functions/procedures migration', 'success': True, 'message': 'finished OK'})
 
     def run_migrate_triggers(self):
-        self.migrator_tables.insert_main('Orchestrator', 'triggers migration')
+        self.migrator_tables.insert_main({'task_name': 'Orchestrator', 'subtask_name': 'triggers migration'})
         try:
             if self.config_parser.should_migrate_triggers():
                 self.config_parser.print_log_message('INFO', "Migrating triggers.")
@@ -1441,17 +1441,17 @@ class Orchestrator:
                                     self.target_connection.execute_query(converted_code)
                                     self.config_parser.print_log_message( 'DEBUG', f"[OK] Source code for {trigger_detail['trigger_name']}: {trigger_detail['trigger_source_sql']}")
                                     self.config_parser.print_log_message( 'DEBUG', f"[OK] Converted code for {trigger_detail['trigger_name']}: {converted_code}")
-                                    self.migrator_tables.update_trigger_status(trigger_detail['id'], True, 'migrated OK')
+                                    self.migrator_tables.update_trigger_status({'row_id': trigger_detail['id'], 'success': True, 'message': 'migrated OK'})
                                 else:
                                     self.config_parser.print_log_message('INFO', f"Skipping trigger {trigger_detail['trigger_name']} - no conversion.")
-                                    self.migrator_tables.update_trigger_status(trigger_detail['id'], False, 'no conversion')
+                                    self.migrator_tables.update_trigger_status({'row_id': trigger_detail['id'], 'success': False, 'message': 'no conversion'})
                                 self.target_connection.disconnect()
                             except Exception as e:
                                 self.config_parser.print_log_message( 'DEBUG', f"[ERROR] Migrating trigger {trigger_detail['trigger_name']}.")
                                 self.config_parser.print_log_message( 'DEBUG', f"[ERROR] Source code for {trigger_detail['trigger_name']}: {trigger_detail['trigger_source_sql']}")
                                 self.config_parser.print_log_message( 'DEBUG', f"[ERROR] Converted code for {trigger_detail['trigger_name']}: {converted_code}")
                                 # self.migrator_tables.update_trigger_status(trigger_detail['id'], False, f'ERROR: {e}')
-                                self.migrator_tables.update_trigger_status(trigger_detail['id'], False, f'ERROR: {e}')
+                                self.migrator_tables.update_trigger_status({'row_id': trigger_detail['id'], 'success': False, 'message': f'ERROR: {e}'})
                                 # self.handle_error(e, f"migrate_trigger {trigger_detail['trigger_name']}")
                                 # We do not want to stop the whole migration if one trigger fails
                                 self.config_parser.print_log_message('ERROR', f"Error migrating trigger {trigger_detail['trigger_name']}: {e}")
@@ -1465,13 +1465,13 @@ class Orchestrator:
             else:
                 self.config_parser.print_log_message('INFO', "Skipping trigger migration as requested.")
 
-            self.migrator_tables.update_main_status('Orchestrator', 'triggers migration', True, 'finished OK')
+            self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': 'triggers migration', 'success': True, 'message': 'finished OK'})
 
         except Exception as e:
             self.handle_error(e, 'migrate_triggers')
 
     def run_migrate_views(self):
-        self.migrator_tables.insert_main('Orchestrator', 'views migration')
+        self.migrator_tables.insert_main({'task_name': 'Orchestrator', 'subtask_name': 'views migration'})
 
         if self.config_parser.should_migrate_views():
             self.config_parser.print_log_message('INFO', "Migrating views.")
@@ -1494,23 +1494,23 @@ class Orchestrator:
                         self.target_connection.execute_query(query)
 
                         self.target_connection.execute_query(view_detail['target_view_sql'])
-                        self.migrator_tables.update_view_status(view_detail['id'], True, 'migrated OK')
+                        self.migrator_tables.update_view_status({'row_id': view_detail['id'], 'success': True, 'message': 'migrated OK'})
                         self.config_parser.print_log_message('INFO', f"View {view_detail['source_view_name']} migrated successfully.")
 
                         query = f'''RESET search_path;'''
                         self.target_connection.execute_query(query)
                         self.target_connection.disconnect()
                     except Exception as e:
-                        self.migrator_tables.update_view_status(view_detail['id'], False, f'ERROR: {e}')
+                        self.migrator_tables.update_view_status({'row_id': view_detail['id'], 'success': False, 'message': f'ERROR: {e}'})
                         self.handle_error(e, f"migrate_view {view_detail['source_view_name']}")
             else:
                 self.config_parser.print_log_message('INFO', "No views found to migrate.")
         else:
             self.config_parser.print_log_message('INFO', "Skipping view migration as requested.")
-        self.migrator_tables.update_main_status('Orchestrator', 'views migration', True, 'finished OK')
+        self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': 'views migration', 'success': True, 'message': 'finished OK'})
 
     def run_migrate_comments(self):
-        self.migrator_tables.insert_main('Orchestrator', 'comments migration')
+        self.migrator_tables.insert_main({'task_name': 'Orchestrator', 'subtask_name': 'comments migration'})
         self.config_parser.print_log_message('INFO', "Migrating comments.")
         all_tables = self.migrator_tables.fetch_all_tables()
         self.target_connection.connect()
@@ -1608,10 +1608,10 @@ class Orchestrator:
                     self.target_connection.execute_query(query)
 
             self.target_connection.disconnect()
-            self.migrator_tables.update_main_status('Orchestrator', 'comments migration', True, 'finished OK')
+            self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': 'comments migration', 'success': True, 'message': 'finished OK'})
             self.config_parser.print_log_message('INFO', "Comments migrated successfully.")
         except Exception as e:
-            self.migrator_tables.update_main_status('Orchestrator', 'comments migration', False, f'ERROR: {e}')
+            self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': 'comments migration', 'success': False, 'message': f'ERROR: {e}'})
             self.handle_error(e, 'migrate_comments')
             self.target_connection.disconnect()
             return False
@@ -1634,7 +1634,7 @@ class Orchestrator:
         Migrate sequences from source to target database.
         """
         self.config_parser.print_log_message('INFO', "Starting sequence migration...")
-        self.migrator_tables.insert_main('Orchestrator', 'sequences migration')
+        self.migrator_tables.insert_main({'task_name': 'Orchestrator', 'subtask_name': 'sequences migration'})
 
         settings = {
             'source_schema_name': self.config_parser.get_source_schema(),
@@ -1644,7 +1644,7 @@ class Orchestrator:
 
         try:
             self.source_connection.migrate_sequences(self.target_connection, settings)
-            self.migrator_tables.update_main_status('Orchestrator', 'sequences migration', True, 'finished OK')
+            self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': 'sequences migration', 'success': True, 'message': 'finished OK'})
         except Exception as e:
             self.handle_error(e, 'Sequence Migration')
 

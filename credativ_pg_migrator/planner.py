@@ -43,7 +43,7 @@ class Planner:
 
     def create_plan(self):
         if self.config_parser.is_resume_after_crash():
-            self.migrator_tables.insert_main('Planner', 'Resume after crash')
+            self.migrator_tables.insert_main({'task_name': 'Planner', 'subtask_name': 'Resume after crash'})
             self.config_parser.print_log_message('INFO', "Planner: Resuming migration after crash...")
             self.config_parser.print_log_message('INFO', "Planner: In current version of crash recovery, we skip planner phase, assuming all protocol tables already exist.")
 
@@ -53,7 +53,7 @@ class Planner:
 
             self.run_check_tables_migration_status()
 
-            self.migrator_tables.update_main_status('Planner', 'Resume after crash', True, 'finished OK')
+            self.migrator_tables.update_main_status({'task_name': 'Planner', 'subtask_name': 'Resume after crash', 'success': True, 'message': 'finished OK'})
         else:
             try:
                 self.pre_planning()
@@ -79,7 +79,7 @@ class Planner:
 
                 self.check_pausing_resuming()
 
-                self.migrator_tables.update_main_status('Planner', '', True, 'finished OK')
+                self.migrator_tables.update_main_status({'task_name': 'Planner', 'subtask_name': '', 'success': True, 'message': 'finished OK'})
 
                 try:
                     self.source_connection.disconnect()
@@ -92,7 +92,7 @@ class Planner:
 
                 self.config_parser.print_log_message('INFO', "Planner phase done successfully.")
             except Exception as e:
-                self.migrator_tables.update_main_status('Planner', '', False, f'ERROR: {e}')
+                self.migrator_tables.update_main_status({'task_name': 'Planner', 'subtask_name': '', 'success': False, 'message': f'ERROR: {e}'})
                 self.handle_error(e, "Planner")
 
     def load_connector(self, source_or_target):
@@ -151,7 +151,7 @@ class Planner:
 
             self.config_parser.print_log_message('INFO', "Creating migration plan...")
             self.migrator_tables.create_all()
-            self.migrator_tables.insert_main('Planner', '')
+            self.migrator_tables.insert_main({'task_name': 'Planner', 'subtask_name': ''})
             self.migrator_tables.prepare_data_types_substitution()
             self.migrator_tables.prepare_default_values_substitution()
 
@@ -1012,7 +1012,7 @@ class Planner:
                 table_info = self.migrator_tables.decode_table_row(table)
                 part_name = 'fetch data migrations for table ' + table_info['source_table_name']
                 self.config_parser.print_log_message('DEBUG', f"Checking migration status for table {table_info['source_table_name']}...")
-                data_migration_rows = self.migrator_tables.fetch_all_data_migrations(table_info['source_schema_name'], table_info['source_table_name'])
+                data_migration_rows = self.migrator_tables.fetch_all_data_migrations({'source_schema_name': table_info['source_schema_name'], 'source_table_name': table_info['source_table_name']})
                 self.config_parser.print_log_message('DEBUG', f"Data migration rows for table {table_info['source_table_name']}: {data_migration_rows}")
                 for record in data_migration_rows:
                     data_migration_info = self.migrator_tables.decode_data_migration_row(record)
@@ -1030,7 +1030,7 @@ class Planner:
 
                     if source_table_rows != target_table_rows:
                         self.config_parser.print_log_message('INFO', f"Row counts do not match for table {data_migration_info['source_table_name']}: source={source_table_rows}, target={target_table_rows}. Marking as not fully migrated.")
-                        self.migrator_tables.update_table_status(table_info['id'], False, '')
+                        self.migrator_tables.update_table_status({'row_id': table_info['id'], 'success': False, 'message': ''})
                         self.migrator_tables.update_data_migration_rows({
                             "row_id": data_migration_info['id'],
                             "source_table_rows": source_table_rows,
@@ -1044,7 +1044,7 @@ class Planner:
                         })
                     else:
                         self.config_parser.print_log_message('DEBUG', f"Row counts match for table {data_migration_info['source_table_name']}: source={source_table_rows}, target={target_table_rows}. Marking as fully migrated.")
-                        self.migrator_tables.update_table_status(table_info['id'], True, 'Fully migrated')
+                        self.migrator_tables.update_table_status({'row_id': table_info['id'], 'success': True, 'message': 'Fully migrated'})
                         self.migrator_tables.update_data_migration_rows({
                             "row_id": data_migration_info['id'],
                             "source_table_rows": source_table_rows,
@@ -1190,7 +1190,7 @@ class Planner:
                                 file_name + ".csv"
                             )
 
-                            table_info = self.migrator_tables.fetch_table(schema, table)
+                            table_info = self.migrator_tables.fetch_table({'source_schema_name': schema, 'source_table_name': table})
                             # dump might contain tables that are not in protocol
                             # But we still want to insert data source for them for debugging purposes
                             if table_info:

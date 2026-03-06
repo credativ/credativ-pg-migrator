@@ -1055,7 +1055,7 @@ class PostgreSQLConnector(DatabaseConnector):
                     query = f'''SELECT {select_columns} FROM "{source_schema_name}"."{source_table_name}" '''
                     if migration_limitation:
                         query += f" WHERE {migration_limitation}"
-                    primary_key_columns = migrator_tables.select_primary_key(source_schema_name, source_table_name)
+                    primary_key_columns = migrator_tables.select_primary_key({'source_schema_name': source_schema_name, 'source_table_name': source_table_name})
                     self.config_parser.print_log_message('DEBUG2', f"Worker {worker_id}: Primary key columns for {source_schema_name}.{source_table_name}: {primary_key_columns}")
                     if primary_key_columns:
                         orderby_columns = primary_key_columns
@@ -1653,12 +1653,12 @@ class PostgreSQLConnector(DatabaseConnector):
                         # No, I generate it later.
                         # I'll just leave SQL empty or put "See logs" if I can't update it.
                         # Or I accept that the protocol table won't show the SQL.
-                        migrator_tables.update_sequence_status(seq_oid, True, 'migrated OK')
+                        migrator_tables.update_sequence_status({'sequence_id': seq_oid, 'success': True, 'message': 'migrated OK'})
 
                 except Exception as ex:
                     self.config_parser.print_log_message('ERROR', f"Failed to migrate sequence {seq_name}: {ex}")
                     if migrator_tables:
-                        migrator_tables.update_sequence_status(seq_oid, False, str(ex))
+                        migrator_tables.update_sequence_status({'sequence_id': seq_oid, 'success': False, 'message': str(ex)})
 
             self.disconnect()
             target_connector.disconnect()

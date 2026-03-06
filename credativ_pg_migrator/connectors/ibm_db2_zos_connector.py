@@ -85,7 +85,8 @@ class IbmDb2ZosConnector(DatabaseConnector):
         if self.connectivity == self.config_parser.const_connectivity_ddl():
             query = f"""SELECT source_schema_name, source_table_name, source_partition_columns, source_partition_ranges
                         FROM "{self.protocol_schema}"."ddl_tables"
-                        WHERE source_schema_name = %s ORDER BY id"""
+                        WHERE source_schema_name = %s
+                        ORDER BY id"""
             cursor = self.migrator_tables.protocol_connection.connection.cursor()
             cursor.execute(query, (schema_name,))
             rows = cursor.fetchall()
@@ -458,6 +459,13 @@ class IbmDb2ZosConnector(DatabaseConnector):
                         'source_default_value': default_value,
                         'source_pk_indicator': is_pk
                     })
+
+        ddl_tables_data = migrator_tables.get_ddl_tables()
+        if ddl_tables_data:
+            schemas = [t.get('source_schema_name') for t in ddl_tables_data if t.get('source_schema_name')]
+            if schemas:
+                most_frequent_schema = max(set(schemas), key=schemas.count)
+                self.config_parser.set_source_schema(most_frequent_schema)
 
         self.config_parser.print_log_message('INFO', "DDL parsing completed and unified protocol tables populated with DB2 source metadata.")
 

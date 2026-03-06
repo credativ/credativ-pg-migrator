@@ -98,6 +98,10 @@ class ConfigParser:
     def get_source_owner(self):
         return self.get_source_schema()
 
+    def set_source_schema(self, schema):
+        """ Set the schema for the source database. For special cases, like IBM DB2 z/OS with DDL connectivity. """
+        self.config['source']['schema'] = schema
+
     def get_source_db_type(self):
         return self.config['source']['type']
 

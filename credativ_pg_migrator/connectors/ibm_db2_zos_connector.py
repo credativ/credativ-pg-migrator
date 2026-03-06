@@ -32,24 +32,23 @@ class IbmDb2ZosConnector(DatabaseConnector):
         self.logger = MigratorLogger(self.config_parser.get_log_file()).logger
         self.source_db_config = self.config_parser.get_source_config()
 
-    def connect(self):
         if self.connectivity == self.config_parser.const_connectivity_ddl():
-            ddl_directory = self.source_db_config['ddl']['directory']
-            if not os.path.exists(ddl_directory):
-                raise ValueError(f"DDL directory not found: {ddl_directory}")
+            self.ddl_directory = self.source_db_config['ddl']['directory']
+            if not os.path.exists(self.ddl_directory):
+                raise ValueError(f"DDL directory not found: {self.ddl_directory}")
             else:
-                if not os.listdir(ddl_directory):
-                    raise ValueError(f"DDL directory is empty: {ddl_directory}")
+                if not os.listdir(self.ddl_directory):
+                    raise ValueError(f"DDL directory is empty: {self.ddl_directory}")
                 else:
-                    self.config_parser.print_log_message('INFO', f"DDL directory found: {ddl_directory}")
+                    self.config_parser.print_log_message('INFO', f"DDL directory found: {self.ddl_directory}")
 
-                if not os.listdir(ddl_directory):
-                    raise ValueError(f"DDL directory is empty: {ddl_directory}")
+                if not os.listdir(self.ddl_directory):
+                    raise ValueError(f"DDL directory is empty: {self.ddl_directory}")
                 else:
 
                     extension_counts = {}
-                    for filename in os.listdir(ddl_directory):
-                        if os.path.isfile(os.path.join(ddl_directory, filename)):
+                    for filename in os.listdir(self.ddl_directory):
+                        if os.path.isfile(os.path.join(self.ddl_directory, filename)):
                             ext = os.path.splitext(filename)[1]
                             extension_counts[ext] = extension_counts.get(ext, 0) + 1
                     for ext, count in extension_counts.items():
@@ -57,14 +56,33 @@ class IbmDb2ZosConnector(DatabaseConnector):
 
                     self.config_parser.print_log_message('INFO', f"DDL directory found: {ddl_directory}")
         else:
-            raise ValueError(f"Unsupported connectivity: {self.connectivity}")
+            raise ValueError(f"Unsupported IBM DB2 z/OS connectivity: {self.connectivity}")
+
+    def connect(self):
+        self.config_parser.print_log_message('DEBUG', "IbmDb2ZosConnector: connect() called (dummy implementation).")
+        pass
 
     def disconnect(self):
         self.config_parser.print_log_message('DEBUG', "IbmDb2ZosConnector: disconnect() called (dummy implementation).")
         pass
 
     def fetch_all_tables(self, schema_name: str) -> dict:
-        self.config_parser.print_log_message('DEBUG', f"IbmDb2ZosConnector: fetch_all_tables() called for schema {schema_name}.")
+        if self.connectivity == self.config_parser.const_connectivity_ddl():
+            tables = {}
+            order_num = 1
+            for filename in os.listdir(self.ddl_directory):
+                if os.path.isfile(os.path.join(self.ddl_directory, filename)):
+                    ext = os.path.splitext(filename)[1]
+                    if ext == '.sql':
+                        with open(os.path.join(self.ddl_directory, filename), 'r') as f:
+                            tables[order_num] = {
+                                'id': order_num,
+                                'schema_name': schema_name,
+                                'table_name': filename,
+                                'comment': f.read()
+                            }
+                        order_num += 1
+            return tables
         return {}
 
     def fetch_table_columns(self, settings) -> dict:

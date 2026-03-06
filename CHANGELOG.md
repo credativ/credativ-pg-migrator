@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.12.0 - 2026.03.06
+
+- 2026.03.06
+
+  - Implemented `ddl` connectivity type - allows reading database objects directly from DDL file(s) rather than connecting to the source database, configured via the `ddl.directory` option.
+  - Renamed IBM DB2 connector to `ibm_db2_luw` to explicitly denote Linux/Unix/Windows variants.
+  - Added initial support for IBM DB2 z/OS via the new `ibm_db2_zos` connector (currently focusing on DDL connectivity).
+  - Extensive internal refactoring - migrator protocol table functions (`insert_`, `update_`, `fetch_`) now accept a single `settings` dictionary instead of multiple positional arguments, improving code maintainability.
+  - Added new protocol tables and corresponding fetch/insert functions for handling partitioning, columns, and aliases.
+  - Replaced hardcoded connectivity string mappings with unified constants (`ddl`, `odbc`, `jdbc`, `native`) in `constants.py`.
+  - Preparations for PoC (Proof of Concept) implementation.
+
 ## 0.11.2 - 2026.03.02
 
 - 2026.03.02

@@ -69,6 +69,7 @@ class Planner:
                 if self.source_db_config['connectivity'] == 'ddl':
                     self.config_parser.print_log_message('DEBUG3', f"Planner: starting ddl connectivity")
                     self.source_connection.parse_ddl_files({ 'migrator_tables': self.migrator_tables})
+                    self.source_schema_name = self.config_parser.get_source_schema()
 
                 self.run_prepare_user_defined_types()
                 self.run_prepare_domains()

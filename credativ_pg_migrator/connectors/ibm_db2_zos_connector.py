@@ -81,11 +81,11 @@ class IbmDb2ZosConnector(DatabaseConnector):
 
     def fetch_all_tables(self, schema_name: str) -> dict:
         tables = {}
-        self.config_parser.print_log_message('DEBUG3', f"fetch_all_tables ({schema_name}): starting - self.connectivity: {self.connectivity}")
+        self.config_parser.print_log_message('DEBUG3', f"fetch_all_tables ({schema_name}): starting: schema_name: {schema_name} - self.connectivity: {self.connectivity}")
         if self.connectivity == self.config_parser.const_connectivity_ddl():
             query = f"""SELECT source_schema_name, source_table_name, source_partition_columns, source_partition_ranges
                         FROM "{self.protocol_schema}"."ddl_tables"
-                        WHERE source_schema_name = %s
+                        WHERE trim(source_schema_name) = trim(%s)
                         ORDER BY id"""
             cursor = self.migrator_tables.protocol_connection.connection.cursor()
             cursor.execute(query, (schema_name,))
@@ -109,7 +109,7 @@ class IbmDb2ZosConnector(DatabaseConnector):
         if self.connectivity == self.config_parser.const_connectivity_ddl():
             query = f"""SELECT source_column_name, source_data_type, source_is_nullable, source_default_value, source_pk_indicator
                         FROM "{self.protocol_schema}"."ddl_columns"
-                        WHERE source_schema_name = %s AND source_table_name = %s ORDER BY id"""
+                        WHERE trim(source_schema_name) = trim(%s) AND trim(source_table_name) = trim(%s) ORDER BY id"""
             cursor = self.migrator_tables.protocol_connection.connection.cursor()
             cursor.execute(query, (table_schema, table_name))
             rows = cursor.fetchall()
@@ -460,12 +460,16 @@ class IbmDb2ZosConnector(DatabaseConnector):
                         'source_pk_indicator': is_pk
                     })
 
-        ddl_tables_data = migrator_tables.get_ddl_tables()
-        if ddl_tables_data:
-            schemas = [t.get('source_schema_name') for t in ddl_tables_data if t.get('source_schema_name')]
-            if schemas:
-                most_frequent_schema = max(set(schemas), key=schemas.count)
-                self.config_parser.set_source_schema(most_frequent_schema)
+        cursor = migrator_tables.protocol_connection.connection.cursor()
+        cursor.execute(f'SELECT source_schema_name FROM "{migrator_tables.protocol_schema}"."ddl_tables" WHERE source_schema_name IS NOT NULL')
+        schemas = [row[0] for row in cursor.fetchall()]
+        cursor.close()
+        self.config_parser.print_log_message('DEBUG3', f'parse_ddl_files: found schemas: {schemas}')
+
+        if schemas:
+            most_frequent_schema = max(set(schemas), key=schemas.count)
+            self.config_parser.print_log_message('DEBUG3', f'parse_ddl_files: setting schema: {most_frequent_schema}')
+            self.config_parser.set_source_schema(most_frequent_schema)
 
         self.config_parser.print_log_message('INFO', "DDL parsing completed and unified protocol tables populated with DB2 source metadata.")
 

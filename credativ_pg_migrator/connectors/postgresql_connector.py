@@ -527,7 +527,7 @@ class PostgreSQLConnector(DatabaseConnector):
                 if domain_details:
                     domain_row_id = domain_details['id']
                     domain_name = domain_details['source_domain_name']
-                    migrated_source_schema_nameetasource_schema_name_as']
+                    migrated_as = domain_details['migrated_as']
                     source_domain_check_sql = domain_details['source_domain_check_sql']
                     if source_domain_check_sql:
                         # Replace exact word VALUE with the column name, case-sensitive, word boundary
@@ -611,7 +611,7 @@ class PostgreSQLConnector(DatabaseConnector):
                     'index_comment': row[3]
                 }
                 order_num += 1
-          source_schema_namee()source_schema_name
+            cursor.close()
             self.disconnect()
             return table_indexes
         except Exception as e:
@@ -941,7 +941,7 @@ class PostgreSQLConnector(DatabaseConnector):
         target_table_rows = 0
         total_inserted_rows = 0
         migration_stats = {}
-        batcsource_schema_namesource_schema_name
+        batch_number = 0
         shortest_batch_seconds = 0
         longest_batch_seconds = 0
         average_batch_seconds = 0
@@ -958,7 +958,7 @@ class PostgreSQLConnector(DatabaseConnector):
             # target_schema_name = self.config_parser.convert_names_case(settings['target_schema_name'])
             target_schema_name = settings['target_schema_name'] ## target schema is used as it is defined in config, not converted to upper/lower case
             target_table_name = self.config_parser.convert_names_case(settings['target_table_name'])
-            target_columns = settings['target_columnsource_schema_name
+            target_columns = settings['target_columns']
             # primary_key_columns = settings['primary_key_columns']
             batch_size = settings['batch_size']
             migrator_tables = settings['migrator_tables']
@@ -973,11 +973,11 @@ class PostgreSQLConnector(DatabaseConnector):
 
             total_chunks = self.config_parser.get_total_chunks(source_table_rows, chunk_size)
             if chunk_size == -1:
-               source_schema_name source_table_rows + 1
+                chunk_size = source_table_rows + 1
 
             migration_stats = {
                 'rows_migrated': target_table_rows,
-                'source_schema_name: csource_schema_name
+                'chunk_number': chunk_number,
                 'total_chunks': total_chunks,
                 'source_table_rows': source_table_rows,
                 'target_table_rows': target_table_rows,
@@ -1012,7 +1012,7 @@ class PostgreSQLConnector(DatabaseConnector):
 
             else:
 
-                if source_table_rows > target_table_rows:source_schema_name
+                if source_table_rows > target_table_rows:
 
                     part_name = 'migrate_table in batches using cursor'
                     self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Source table {source_table_name}: {source_table_rows} rows / Target table {target_table_name}: {target_table_rows} rows - starting data migration.")
@@ -1031,7 +1031,7 @@ class PostgreSQLConnector(DatabaseConnector):
                         #     select_columns_list.append(f"cast(`{col['column_name']}` as char(4000)) as `{col['column_name']}`")
                         else:
                             select_columns_list.append(f'''"{col['column_name']}"''')
-source_schema_name
+
                         insert_columns_list.append(f'''"{self.config_parser.convert_names_case(col['column_name'])}"''')
                         orderby_columns_list.append(f'''"{col['column_name']}"''')
 
@@ -1039,14 +1039,14 @@ source_schema_name
                     orderby_columns = ', '.join(orderby_columns_list)
                     insert_columns = ', '.join(insert_columns_list)
 
-                    if resume_after_crash and not drop_unfinished_tables:source_schema_name
+                    if resume_after_crash and not drop_unfinished_tables:
                         chunk_number = self.config_parser.get_total_chunks(target_table_rows, chunk_size)
                         self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Resuming migration for table {source_schema}.{source_table_name} from chunk {chunk_number} with data chunk size {chunk_size}.")
-                        chunk_offset = target_table_rowssource_schema_name
+                        chunk_offset = target_table_rows
                     else:
                         chunk_offset = (chunk_number - 1) * chunk_size
-source_schema_name
-                    chunk_start_row_number = chunk_offset + 1source_schema_name
+
+                    chunk_start_row_number = chunk_offset + 1
                     chunk_end_row_number = chunk_offset + chunk_size
 
                     self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Migrating table {source_schema}.{source_table_name}: chunk {chunk_number}, data chunk size {chunk_size}, batch size {batch_size}, chunk offset {chunk_offset}, chunk end row number {chunk_end_row_number}, source table rows {source_table_rows}")
@@ -1116,7 +1116,7 @@ source_schema_name
                         inserting_end_time = time.time()
                         inserting_duration = inserting_end_time - inserting_start_time
 
-                        batchsource_schema_nameimesource_schema_name
+                        batch_end_time = time.time()
                         batch_duration = batch_end_time - batch_start_time
                         batch_durations.append(batch_duration)
                         percent_done = round(total_inserted_rows / source_table_rows * 100, 2)
@@ -1186,7 +1186,7 @@ source_schema_name
                         'row_id': protocol_id,
                         'success': True,
                         'message': 'OK',
-                     source_schema_nameblesource_schema_namet_table_rows,
+                        'target_table_rows': target_table_rows,
                         'batch_count': batch_number,
                         'shortest_batch_seconds': shortest_batch_seconds,
                         'longest_batch_seconds': longest_batch_seconds,
@@ -1343,19 +1343,19 @@ source_schema_name
             cursor.execute(query)
             code = cursor.fetchone()[0]
             cursor.close()
-        source_schema_nameonnect()source_schema_name
+            self.disconnect()
             return code
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
             self.config_parser.print_log_message('ERROR', e)
-           source_schema_name
+            raise
 
-    def convert_funcproc_code(self, settings):source_schema_name
+    def convert_funcproc_code(self, settings):
         funcproc_code = settings['funcproc_code']
-        # target_db_type = settsource_schema_namedb_type']
-        source_schema = settings['source_schema']source_schema_name
+        # target_db_type = settings['target_db_type']
+        source_schema = settings['source_schema']
         target_schema_name = settings['target_schema_name']
-source_schema_name
+
         # Simple schema replacement if they differ
         converted_code = funcproc_code
         if source_schema != target_schema_name:
@@ -1497,18 +1497,18 @@ source_schema_name
         cursor.close()
         return count
 
-    def source_schema_namee(self, tablesource_schema_name table_name: str):
+    def get_table_size(self, table_schema: str, table_name: str):
         query = f"""SELECT pg_total_relation_size('{table_schema}.{table_name}')"""
         cursor = self.connection.cursor()
         cursor.execute(query)
         size = cursor.fetchone()[0]
-        cursource_schema_name
-        return sizesource_schema_name
-source_schema_name
+        cursor.close()
+        return size
+
     def convert_trigger(self, settings: dict):
         trigger_sql = settings['trigger_sql']
         source_schema = settings['source_schema']
-        target_schema_name = settingssource_schema_namema']
+        target_schema = settings['target_schema']
 
         # Simple schema replacement
         converted_code = trigger_sql
@@ -1519,7 +1519,7 @@ source_schema_name
         return converted_code
 
     def fetch_views_names(self, source_schema: str):
-        views = {}source_schema_name
+        views = {}
         order_num = 1
         query = f"""
             SELECT
@@ -1531,7 +1531,7 @@ source_schema_name
             WHERE relkind IN ('v', 'm')
             AND relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = '{source_schema}')
             AND relname NOT LIKE 'pg_%'
-            ORDER BY viewnamesource_schema_name
+            ORDER BY viewname
         """
         try:
             self.connect()
@@ -1546,17 +1546,17 @@ source_schema_name
                     'comment': row[2],
                     'view_type': view_type
                 }
-        source_schema_name_num += 1source_schema_name
+                order_num += 1
             cursor.close()
             self.disconnect()
             return views
-        except Exception as e:source_schema_name
+        except Exception as e:
             self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
             self.config_parser.print_log_message('ERROR', e)
             raise
 
     def migrate_sequences(self, target_connector, settings):
-        source_schema = settingssource_schema_namema']
+        source_schema = settings['source_schema']
         target_schema_name = settings['target_schema_name']
         migrator_tables = settings.get('migrator_tables')
 
@@ -1583,16 +1583,16 @@ source_schema_name
                 seq_oid = seq_row[1]
 
                 self.config_parser.print_log_message('DEBUG', f"Processing sequence: {seq_name}")
-source_schema_name
+
                 # Insert into protocol table if migrator_tables is available
                 # We don't have table/column info here as we are migrating all sequences in schema
                 if migrator_tables:
-                    try:source_schema_name
+                    try:
                         # set_sequence_sql will be populated later, but we need to insert first to get ID/track start?
                         # insert_sequence(self, sequence_id, schema_name, table_name, column_name, sequence_name, set_sequence_sql)
                         # We'll update it later or insert it now with placeholders?
                         # Usually insert happens before work starts to track 'started', but insert_sequence seems to just log existence?
-                        # Looking at other methods, insert_* usually lsource_schema_nameand then update_* sets status.
+                        # Looking at other methods, insert_* usually logs the item and then update_* sets status.
                         migrator_tables.insert_sequence(seq_oid, source_schema, '', '', seq_name, '')
                     except Exception as e:
                         self.config_parser.print_log_message('ERROR', f"Failed to insert sequence {seq_name} into protocol: {e}")
@@ -1960,7 +1960,7 @@ source_schema_name
         return size
 
     def get_top_n_tables(self, settings):
-        source_schema_name{}source_schema_name
+        top_tables = {}
         top_tables['by_rows'] = {}
         top_tables['by_size'] = {}
         top_tables['by_columns'] = {}
@@ -1976,7 +1976,7 @@ source_schema_name
                 query = f"""
                     SELECT
                     n.nspname AS owner,
-                    c.relname AS table_name,source_schema_name
+                    c.relname AS table_name,
                     c.reltuples::bigint AS row_count,
                     pg_total_relation_size(c.oid) AS row_size
                     FROM

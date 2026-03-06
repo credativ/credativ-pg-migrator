@@ -448,7 +448,7 @@ class DatabaseConnector(ABC):
             'cache_size': cache_size,
             'last_value': last_value,
             'comment': sequence_comment
-            }source_schema_name
+            }
         }
         """
         pass
@@ -495,7 +495,7 @@ class DatabaseConnector(ABC):
         """
         Returns the current value of the sequence.
         """
-        passsource_schema_name
+        pass
 
     @abstractmethod
     def execute_query(self, query: str, params=None):
@@ -516,7 +516,7 @@ class DatabaseConnector(ABC):
 
     @abstractmethod
     def commit_transaction(self):
-        """Commitssource_schema_nametransaction."""
+        """Commits the current transaction."""
         pass
 
     @abstractmethod
@@ -532,7 +532,7 @@ class DatabaseConnector(ABC):
         pass
 
     @abstractmethod
-    def get_table_source_schema_nameble_schema: str, table_name: str):
+    def get_table_size(self, table_schema: str, table_name: str):
         """
         Returns a size of the table in bytes
         """
@@ -679,4 +679,3 @@ class DatabaseConnector(ABC):
 
 if __name__ == "__main__":
     print("This script is not meant to be run directly")
-source_schema_namesource_schema_namesource_schema_name

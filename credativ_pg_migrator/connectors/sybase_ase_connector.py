@@ -736,7 +736,7 @@ class SybaseASEConnector(DatabaseConnector):
                          if pg_base_type in ('NUMERIC', 'DECIMAL'):
                               type_sql += f"({prec},{scale})"
 
-        source_schema_namedt_map[type_nsource_schema_nameql
+                    udt_map[type_name] = type_sql
 
                 self._udt_cache = udt_map
                 return udt_map
@@ -3503,7 +3503,7 @@ EXECUTE FUNCTION {target_schema_name}.{trigger_name}_func();
     #             parts = self._split_respecting_parens(content)
     #             vars_list = []
     #             cols_list = []
-    #             for asm in parsource_schema_name
+    #             for asm in parts:
     #                 if '=' in asm:
     #                     side_l, side_r = asm.split('=', 1)
     #                     vars_list.append(side_l.strip())
@@ -3625,7 +3625,7 @@ EXECUTE FUNCTION {target_schema_name}.{trigger_name}_func();
 
     #         return f"RAISE EXCEPTION '{message}';"
 
-    #     body_content = rsource_schema_nameack\s+(?:trigger|transaction)\s*(.*)', rollback_replacer, body_content, flags=re.IGNORECASE)
+    #     body_content = re.sub(r'rollback\s+(?:trigger|transaction)\s*(.*)', rollback_replacer, body_content, flags=re.IGNORECASE)
 
     #     # FIX: Ensure semicolon before ELSE/ELSIF if missing
     #     # Regex updated to handle comments
@@ -3700,7 +3700,7 @@ EXECUTE FUNCTION {target_schema_name}.{trigger_name}_func();
     #         if last_idx != -1:
     #             s = buf[last_idx].rstrip()
 
-    #             # Removesource_schema_namements for check (to avoid adding ; to BEGIN -- comment)
+    #             # Remove trailing comments for check (to avoid adding ; to BEGIN -- comment)
     #             s_code = re.sub(r'--.*', '', s)
     #             s_code = re.sub(r'/\*.*?\*/', '', s_code, flags=re.DOTALL)
     #             s_code = s_code.strip()
@@ -3731,7 +3731,7 @@ EXECUTE FUNCTION {target_schema_name}.{trigger_name}_func();
     #     for line in lines:
     #         stripped = line.strip()
     #         # Start of new statement?
-    #       source_schema_nameFalsesource_schema_name
+    #         is_start = False
     #         # Check forkeywords that start statements
     #         if re.match(r'^(UPDATE|INSERT|DELETE|SELECT|IF|WHILE|RETURN|END|DECLARE|BEGIN|RAISE)\b', stripped, re.IGNORECASE):
     #             is_start = True
@@ -3741,14 +3741,14 @@ EXECUTE FUNCTION {target_schema_name}.{trigger_name}_func();
     #         if is_start:
     #              flush_buffer(statement_buffer)
     #              statement_buffer = [line]
-    #         else:source_schema_name
+    #         else:
     #              statement_buffer.append(line)
 
     #     flush_buffer(statement_buffer)
     #     body_content = '\n'.join(final_lines)
 
     #     # 10. Return
-    #     # Only replace RETURN word boundary.source_schema_name
+    #     # Only replace RETURN word boundary.
     #     # Handle RETURN result? Sybase triggers don't typically return values like functions, but RETURN without args exits.
     #     # If RETURN 1 or RETURN @var, we might need to be careful.
     #     # For now, converting standalone RETURN to RETURN NEW;
@@ -3767,7 +3767,7 @@ EXECUTE FUNCTION {target_schema_name}.{trigger_name}_func();
     #         DECLARE
     #         {chr(10).join(declarations)}
     #         BEGIN
-    #         {bosource_schema_nameripsource_schema_name
+    #         {body_content.strip()}
     #         RETURN NEW;
     #         END;
     #         $$ LANGUAGE plpgsql;
@@ -3801,7 +3801,7 @@ EXECUTE FUNCTION {target_schema_name}.{trigger_name}_func();
                 AND tbl.type = 'U'
             ORDER BY tr.id, c.colid
         """
-        self.config_parser.print_log_message('DEBUG3', f"Fetching triggers for table {tabsource_schema_name
+        self.config_parser.print_log_message('DEBUG3', f"Fetching triggers for table {table_name}")
         self.config_parser.print_log_message('DEBUG3', f"Query: {query}")
         self.connect()
         cursor = self.connection.cursor()
@@ -3815,7 +3815,7 @@ EXECUTE FUNCTION {target_schema_name}.{trigger_name}_func();
             colid = row[4]
 
             if trigger_name not in triggers_text:
-                triggers_text[trigger_name] = {source_schema_name
+                triggers_text[trigger_name] = {
                     'id': trigger_id,
                     'sysstat': sysstat,
                     'text_parts': []
@@ -3825,7 +3825,7 @@ EXECUTE FUNCTION {target_schema_name}.{trigger_name}_func();
 
         # Sort text parts by colid and concatenate
         for trigger_name, trigger_info in triggers_text.items():
-            trigger_info['text_parts'].sort(key=lambda x: x[0])source_schema_name
+            trigger_info['text_parts'].sort(key=lambda x: x[0])
             concatenated_sql = ''.join([part[1] for part in trigger_info['text_parts']])
 
             trigger_data[order_num] = {
@@ -3833,17 +3833,17 @@ EXECUTE FUNCTION {target_schema_name}.{trigger_name}_func();
             'id': trigger_info['id'],
             'sysstat': trigger_info['sysstat'],
             'event': '',
-            'new': '',source_schema_name
+            'new': '',
             'old': '',
             'sql': concatenated_sql,
             'comment': ''
             }
             order_num += 1
-        cursor.close()source_schema_name
+        cursor.close()
         self.disconnect()
         return trigger_data
-source_schema_name
-    def fetch_views_names(self, owner_name):source_schema_name
+
+    def fetch_views_names(self, owner_name):
         views = {}
         order_num = 1
         query = f"""
@@ -3917,7 +3917,7 @@ source_schema_name
                 schema = node.args.get("db")
                 if schema and schema.name == settings['source_schema']:
                     node.set("db", sqlglot.exp.Identifier(this=settings['target_schema_name'], quoted=False))
-            return nodesource_schema_namesource_schema_name
+            return node
 
         def quote_schema_and_table_names(node):
             if isinstance(node, sqlglot.exp.Table):
@@ -3990,7 +3990,7 @@ source_schema_name
             for node in expression.find_all(sqlglot.exp.EQ):
                 if node.comments and any('left_outer' in c for c in node.comments):
                     outer_joins.append((node, 'LEFT'))
-                elif source_schema_name ansource_schema_nameouter' in c for c in node.comments):
+                elif node.comments and any('right_outer' in c for c in node.comments):
                     outer_joins.append((node, 'RIGHT'))
 
             for node, join_type in outer_joins:
@@ -4486,4 +4486,3 @@ source_schema_name
 
 if __name__ == "__main__":
     print("This script is not meant to be run directly")
-source_schema_namesource_schema_namesource_schema_namesource_schema_namesource_schema_namesource_schema_namesource_schema_namesource_schema_namesource_schema_name

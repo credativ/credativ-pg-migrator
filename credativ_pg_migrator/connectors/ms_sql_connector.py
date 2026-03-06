@@ -790,7 +790,7 @@ class MsSQLConnector(DatabaseConnector):
              funcproc_code = funcproc_code_input.get('definition', '')
              implicit_return_schema = funcproc_code_input.get('return_schema', [])
         else:
-          source_schema_nameode = str(funsource_schema_nameput)
+             funcproc_code = str(funcproc_code_input)
              implicit_return_schema = []
 
         # target_db_type = settings['target_db_type'] # Unused
@@ -1043,7 +1043,7 @@ $$ LANGUAGE plpgsql;
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
             self.config_parser.print_log_message('ERROR', e)
-        source_schema_namesource_schema_name
+            raise
 
     def fetch_view_code(self, settings):
         view_id = settings['view_id']
@@ -1060,7 +1060,7 @@ $$ LANGUAGE plpgsql;
         try:
             self.connect()
             cursor = self.connection.cursor()
-            cursor.execute(query)source_schema_name
+            cursor.execute(query)
             rows = cursor.fetchall()
             for row in rows:
                 view_code = row[0]
@@ -1086,7 +1086,7 @@ $$ LANGUAGE plpgsql;
                 if not alias.args.get("quoted"):
                     alias.set("quoted", True)
             return node
-source_schema_name
+
         def replace_schema_names(node):
             if isinstance(node, (sqlglot.exp.Table, sqlglot.exp.Column)):
                 schema = node.args.get("db")
@@ -1232,7 +1232,7 @@ source_schema_name
         average_batch_seconds = 0
         chunk_start_row_number = 0
         chunk_end_row_number = 0
-        procsource_schema_nametime = time.tsource_schema_name
+        processing_start_time = time.time()
         order_by_clause = ''
         try:
             worker_id = settings['worker_id']
@@ -1248,7 +1248,7 @@ source_schema_name
             migrator_tables = settings['migrator_tables']
             migration_limitation = settings['migration_limitation']
             chunk_size = settings['chunk_size']
-            chunk_number = settings['chunk_number']source_schema_name
+            chunk_number = settings['chunk_number']
             resume_after_crash = settings['resume_after_crash']
             drop_unfinished_tables = settings['drop_unfinished_tables']
 
@@ -1263,11 +1263,11 @@ source_schema_name
                 'rows_migrated': target_table_rows,
                 'chunk_number': chunk_number,
                 'total_chunks': total_chunks,
-               source_schema_namee_rows': source_table_rows,
+                'source_table_rows': source_table_rows,
                 'target_table_rows': target_table_rows,
                 'finished': True if source_table_rows == 0 else False,
             }
-            ## sosource_schema_namesousource_schema_nameurce_table_id, source_table_rows, worker_id, target_schema_name, target_table_name, target_table_rows
+            ## source_schema, source_table, source_table_id, source_table_rows, worker_id, target_schema, target_table, target_table_rows
             protocol_id = migrator_tables.insert_data_migration({
                 'worker_id': worker_id,
                 'source_table_id': source_table_id,
@@ -1301,7 +1301,7 @@ source_schema_name
                     self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Source table {source_table_name}: {source_table_rows} rows / Target table {target_table_name}: {target_table_rows} rows - starting data migration.")
 
                     select_columns_list = []
-                    orderby_columns_list = []source_schema_name
+                    orderby_columns_list = []
                     insert_columns_list = []
                     for order_num, col in source_columns.items():
                         self.config_parser.print_log_message('DEBUG2',
@@ -1320,7 +1320,7 @@ source_schema_name
 
                         insert_columns_list.append(f'''"{self.config_parser.convert_names_case(col['column_name'])}"''')
                         orderby_columns_list.append(f'''[{col['column_name']}]''')
-source_schema_name
+
                     select_columns = ', '.join(select_columns_list)
                     insert_columns = ', '.join(insert_columns_list)
                     orderby_columns = ', '.join(orderby_columns_list)
@@ -1328,21 +1328,21 @@ source_schema_name
                     if resume_after_crash and not drop_unfinished_tables:
                         chunk_number = self.config_parser.get_total_chunks(target_table_rows, chunk_size)
                         self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Resuming migration for table {source_schema}.{source_table_name} from chunk {chunk_number} with data chunk size {chunk_size}.")
-                        chunk_offset = target_table_rowssource_schema_name
+                        chunk_offset = target_table_rows
                     else:
                         chunk_offset = (chunk_number - 1) * chunk_size
 
                     chunk_start_row_number = chunk_offset + 1
-                    chunk_end_row_number = chunk_offset + chunk_sizesource_schema_name
+                    chunk_end_row_number = chunk_offset + chunk_size
 
                     self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Migrating table {source_schema}.{source_table_name}: chunk {chunk_number}, data chunk size {chunk_size}, batch size {batch_size}, chunk offset {chunk_offset}, chunk end row number {chunk_end_row_number}, source table rows {source_table_rows}")
                     order_by_clause = ''
 
-                    # if table is small, skipping ordering dosource_schema_nameense because it will not speed up the migration
+                    # if table is small, skipping ordering does not make sense because it will not speed up the migration
                     # if chunk_size > source_table_rows:
                     #     query = f'''SELECT {select_columns} FROM "{source_schema}".{source_table_name}'''
-                    #     if migration_limitation:source_schema_name
-                    #         query += f" WHERE {migration_limitation}"source_schema_name
+                    #     if migration_limitation:
+                    #         query += f" WHERE {migration_limitation}"
                     # else:
 
                     query = f"SELECT {select_columns} FROM [{source_schema}].[{source_table_name}]"
@@ -1414,7 +1414,7 @@ source_schema_name
                         batch_end_time = time.time()
                         batch_duration = batch_end_time - batch_start_time
                         batch_durations.append(batch_duration)
-                        percesource_schema_namend(source_schema_named_rows / source_table_rows * 100, 2)
+                        percent_done = round(total_inserted_rows / source_table_rows * 100, 2)
 
                         batch_start_dt = datetime.datetime.fromtimestamp(batch_start_time)
                         batch_end_dt = datetime.datetime.fromtimestamp(batch_end_time)
@@ -1484,7 +1484,7 @@ source_schema_name
                         'target_table_rows': target_table_rows,
                         'batch_count': batch_number,
                         'shortest_batch_seconds': shortest_batch_seconds,
-                     source_schema_nameatcsource_schema_nameongest_batch_seconds,
+                        'longest_batch_seconds': longest_batch_seconds,
                         'average_batch_seconds': average_batch_seconds,
                     })
 
@@ -1579,7 +1579,7 @@ source_schema_name
             cursor.close()
             self.disconnect()
             return triggers
-        source_schema_nameion as e:source_schema_name
+        except Exception as e:
             self.config_parser.print_log_message('ERROR', f"Error fetching triggers: {e}")
             return {}
 
@@ -1936,7 +1936,7 @@ EXECUTE FUNCTION "{func_schema}"."{func_name}"();
         return size
 
     def get_top_n_tables(self, settings):
-        source_schema_name{}source_schema_name
+        top_tables = {}
         top_tables['by_rows'] = {}
         top_tables['by_size'] = {}
         top_tables['by_columns'] = {}
@@ -1951,13 +1951,13 @@ EXECUTE FUNCTION "{func_schema}"."{func_name}"();
                 query = f"""
                     SELECT TOP {top_n}
                     s.name AS schema_name,
-                    t.name AS table_nsource_schema_name
+                    t.name AS table_name,
                     SUM(p.rows) AS row_count,
                     SUM(a.total_pages) * 8 * 1024 AS total_size
                     FROM sys.tables t
                     JOIN sys.schemas s ON t.schema_id = s.schema_id
                     JOIN sys.partitions p ON t.object_id = p.object_id AND p.index_id IN (0, 1)
-                    JOIN sys.allocation_unitsource_schema_nameisource_schema_nameontainer_id
+                    JOIN sys.allocation_units a ON p.partition_id = a.container_id
                     WHERE s.name = '{source_schema}'
                     GROUP BY s.name, t.name
                     ORDER BY total_size DESC

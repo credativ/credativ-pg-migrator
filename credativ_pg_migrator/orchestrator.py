@@ -577,13 +577,13 @@ class Orchestrator:
                                     'success': True,
                                     'message': 'OK',
                                     'target_table_rows': target_table_rows,
-                                    'batch_count': 0,source_schema_name
-                                    'shortest_batch_seconds': 0,source_schema_name
+                                    'batch_count': 0,
+                                    'shortest_batch_seconds': 0,
                                     'longest_batch_seconds': 0,
                                     'average_batch_seconds': 0,
                                 })
                             else:
-source_schema_name
+
                                 data_import_start_time = time.time()
                                 source_files_to_process = []
                                 converted_files_to_process = []
@@ -603,7 +603,7 @@ source_schema_name
                                         split_threshold_bytes_str = f"{split_threshold_bytes} B ({split_threshold_bytes / (1024 ** 3):.2f} GB)"
 
                                     self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Table: {target_table_name}: Data source file size: {data_source_file_size_str}, split threshold: {split_threshold_bytes_str}, big files split enabled: {big_files_split_enabled}")
-source_schema_namesource_schema_name
+
                                     if big_files_split_enabled and data_source_file_size > split_threshold_bytes:
                                         # Big files split enabled and file size exceeds threshold
                                         self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {target_table_name}: Data source for table {target_table_name} is a big file ({data_source_file_size} bytes). Splitting into smaller files.")
@@ -691,7 +691,7 @@ source_schema_namesource_schema_name
                                                 NULL '\\N',
                                                 DELIMITER '{data_source_settings['format_options']['delimiter']}')"""
                                             part_name = 'import to intermediate table'
-                                            worker_target_connection.copy_from_file(imp_table_copy_command, csv_file_name)source_schema_name
+                                            worker_target_connection.copy_from_file(imp_table_copy_command, csv_file_name)
 
                                             lob_col_name = None
                                             lob_col_index = None
@@ -789,7 +789,7 @@ source_schema_namesource_schema_name
                                                                     self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {target_table_name}: parallel LOB processing [{lob_col_name}]: {datafile_done} LOBs migrated OK")
 
                                                         self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {target_table_name}: parallel LOB processing [{lob_col_name}]: All datafiles processed successfully.")
-                                                    else:source_schema_name
+                                                    else:
                                                         self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {target_table_name}: parallel LOB processing [{lob_col_name}]: No datafiles to process.")
 
 
@@ -916,7 +916,7 @@ source_schema_namesource_schema_name
                             self.config_parser.wait_for_resume()
                             self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Resuming migration for table {target_table_name}.")
                         # proper pausing / stopping of the migration requires to connect and disconnect for each chunk
-                        msource_schema_names = worker_soursource_schema_name.migrate_table(worker_target_connection, table_settings)
+                        migration_stats = worker_source_connection.migrate_table(worker_target_connection, table_settings)
 
                         rows_migrated += migration_stats['rows_migrated']
                         if migration_stats['finished']:
@@ -942,7 +942,7 @@ source_schema_namesource_schema_name
                                 worker_target_connection.execute_query(sequence_sql)
                                 self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Sequence ({order_num}) {sequence_name} set successfully for table {target_table_name}.")
                                 seq_curr_val = worker_target_connection.get_sequence_current_value(sequence_id)
-                                self.config_parser.print_log_messasource_schema_nameWorker {worker_isource_schema_namealue of sequence {sequence_name} is {seq_curr_val}.")
+                                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Current value of sequence {sequence_name} is {seq_curr_val}.")
                                 self.migrator_tables.update_sequence_status(sequence_id, True, 'migrated OK')
                             except Exception as e:
                                 self.migrator_tables.update_sequence_status(sequence_id, False, f'ERROR: {e}')
@@ -1333,7 +1333,7 @@ source_schema_namesource_schema_name
                     self.config_parser.print_log_message('INFO', f"Migrating {funcproc_type} {funcproc_data['name']}.")
                     try:
                         funcproc_code = self.source_connection.fetch_funcproc_code(funcproc_id)
-                        
+
                         # Handle dict return (with implicit schema) for logging/DB
                         funcproc_code_str = funcproc_code
                         if isinstance(funcproc_code, dict):
@@ -1373,15 +1373,15 @@ source_schema_namesource_schema_name
                                 converted_code = re.sub(re.escape(row[0]), row[1], converted_code, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
 
                         self.migrator_tables.insert_funcprocs(self.source_schema, funcproc_data['name'], funcproc_id, funcproc_code_str, self.target_schema_name, funcproc_data['name'], converted_code, funcproc_data['comment'])
-                        
+
                         if converted_code is not None and converted_code.strip():
                             self.config_parser.print_log_message('INFO', f"Creating {funcproc_type} {funcproc_data['name']} in target database.")
                             self.target_connection.connect()
-                            
+
                             if self.target_connection.session_settings:
                                 self.config_parser.print_log_message( 'DEBUG', f"Executing session settings: {self.target_connection.session_settings}")
                                 self.target_connection.execute_query(self.target_connection.session_settings)
-                            
+
                             self.target_connection.execute_query(converted_code)
                             self.config_parser.print_log_message( 'DEBUG', f"[OK] Source code for {funcproc_data['name']}: {funcproc_code_str}")
                             self.config_parser.print_log_message( 'DEBUG', f"[OK] Converted code for {funcproc_data['name']}: {converted_code}")
@@ -1407,7 +1407,7 @@ source_schema_namesource_schema_name
                 self.config_parser.print_log_message('INFO', "No functions or procedures found to migrate.")
         else:
             self.config_parser.print_log_message('INFO', "Skipping function and procedure migration as requested.")
-source_schema_name
+
         self.migrator_tables.update_main_status('Orchestrator', 'functions/procedures migration', True, 'finished OK')
 
     def run_migrate_triggers(self):
@@ -1421,12 +1421,12 @@ source_schema_name
                     for one_trigger in all_triggers:
                         trigger_detail = self.migrator_tables.decode_trigger_row(one_trigger)
 
-                        if self.config_parser.should_migrate_triggesource_schema_nametail['source_table_name']):
+                        if self.config_parser.should_migrate_triggers(trigger_detail['source_table']):
                             self.config_parser.print_log_message('INFO', f"Processing trigger {trigger_detail['trigger_name']}")
                             self.config_parser.print_log_message( 'DEBUG', f"Trigger details: {trigger_detail}")
 
                             converted_code = trigger_detail['trigger_target_sql']
-source_schema_namesource_schema_namesource_schema_name
+
                             self.config_parser.print_log_message( 'DEBUG', "Checking for remote objects substitution in triggers...")
                             rows = self.migrator_tables.get_records_remote_objects_substitution()
                             if rows:
@@ -1650,4 +1650,3 @@ source_schema_namesource_schema_namesource_schema_name
 
 if __name__ == "__main__":
     print("This script is not meant to be run directly")
-source_schema_name

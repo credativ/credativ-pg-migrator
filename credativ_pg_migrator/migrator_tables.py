@@ -1324,7 +1324,7 @@ class MigratorTables:
         """)
         self.config_parser.print_log_message('DEBUG', f"Created table {table_name} for PK ranges.")
 
-    def insert_pk_ranges(self, values):
+    def insert_pk_ranges(self, settings):
         func_run_id = uuid.uuid4()
         table_name = self.config_parser.get_protocol_name_pk_ranges()
         query = f"""
@@ -1333,9 +1333,9 @@ class MigratorTables:
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (values['source_schema_name'], values['source_table_name'], values['source_table_id'],
-                  str(values['worker_id']), values['pk_columns'],
-                  values['batch_start'], values['batch_end'], values['row_count'])
+        params = (settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_table_id'),
+                  str(settings.get('worker_id')), settings.get('pk_columns'),
+                  settings.get('batch_start'), settings.get('batch_end'), settings.get('row_count'))
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -1344,11 +1344,11 @@ class MigratorTables:
 
             data_migration_row = self.decode_pk_ranges_row(row)
             self.config_parser.print_log_message('DEBUG3', f"insert_pk_ranges ({func_run_id}): Returned row: {data_migration_row}")
-            self.insert_protocol('data_migration', values['source_table_name'], 'pk_range',
-                                 f'''PK range: {values['batch_start']} - {values['batch_end']} / {values['row_count']}''',
+            self.insert_protocol('data_migration', settings.get('source_table_name'), 'pk_range',
+                                 f'''PK range: {settings.get('batch_start')} - {settings.get('batch_end')} / {settings.get('row_count')}''',
                                  None, True, None, 'info', None, data_migration_row['id'])
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"insert_pk_ranges ({func_run_id}): Error inserting PK ranges {values['source_table_name']} into {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"insert_pk_ranges ({func_run_id}): Error inserting PK ranges {settings.get('source_table_name')} into {table_name}.")
             self.config_parser.print_log_message('ERROR', f"insert_pk_ranges ({func_run_id}): Exception: {e}")
             raise
 
@@ -2051,7 +2051,7 @@ class MigratorTables:
             self.config_parser.print_log_message('ERROR', f"select_table_by_source ({func_run_id}): Exception: {e}")
             raise
 
-    def insert_indexes(self, values):
+    def insert_indexes(self, settings):
         func_run_id = uuid.uuid4()
         table_name = self.config_parser.get_protocol_name_indexes()
         query = f"""
@@ -2061,10 +2061,10 @@ class MigratorTables:
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (values['source_schema_name'], values['source_table_name'], values['source_table_id'], values['index_owner'],
-                  values['index_name'], values['index_type'], values['target_schema_name'],
-                  values['target_table_name'], values['index_sql'], values['index_columns'],
-                  values['index_comment'], True if values['is_function_based'] == 'YES' else False)
+        params = (settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_table_id'), settings.get('index_owner'),
+                  settings.get('index_name'), settings.get('index_type'), settings.get('target_schema_name'),
+                  settings.get('target_table_name'), settings.get('index_sql'), settings.get('index_columns'),
+                  settings.get('index_comment'), True if settings.get('is_function_based') == 'YES' else False)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -2073,9 +2073,9 @@ class MigratorTables:
 
             index_row = self.decode_index_row(row)
             self.config_parser.print_log_message('DEBUG3', f"insert_indexes ({func_run_id}): Returned row: {index_row}")
-            self.insert_protocol('index', values['index_name'], 'create', values['index_sql'], None, None, None, 'info', None, index_row['id'])
+            self.insert_protocol('index', settings.get('index_name'), 'create', settings.get('index_sql'), None, None, None, 'info', None, index_row['id'])
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"insert_indexes ({func_run_id}): Error inserting index info {values['index_name']} into {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"insert_indexes ({func_run_id}): Error inserting index info {settings.get('index_name')} into {table_name}.")
             self.config_parser.print_log_message('ERROR', f"insert_indexes ({func_run_id}): Exception: {e}")
             raise
 
@@ -2247,7 +2247,7 @@ class MigratorTables:
             self.config_parser.print_log_message('ERROR', f"update_constraint_status ({func_run_id}): Exception: {e}")
             raise
 
-    def insert_funcprocs(self, source_schema_name, source_funcproc_name, source_funcproc_id, source_funcproc_sql, target_schema_name, target_funcproc_name, target_funcproc_sql, funcproc_comment):
+    def insert_funcprocs(self, settings):
         func_run_id = uuid.uuid4()
         table_name = self.config_parser.get_protocol_name_funcprocs()
         query = f"""
@@ -2256,7 +2256,7 @@ class MigratorTables:
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (source_schema_name, source_funcproc_name, source_funcproc_id, source_funcproc_sql, target_schema_name, target_funcproc_name, target_funcproc_sql, funcproc_comment)
+        params = (settings.get('source_schema_name'), settings.get('source_funcproc_name'), settings.get('source_funcproc_id'), settings.get('source_funcproc_sql'), settings.get('target_schema_name'), settings.get('target_funcproc_name'), settings.get('target_funcproc_sql'), settings.get('funcproc_comment'))
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -2265,10 +2265,10 @@ class MigratorTables:
 
             funcproc_row = self.decode_funcproc_row(row)
             self.config_parser.print_log_message('DEBUG3', f"insert_funcprocs ({func_run_id}): Returned row: {funcproc_row}")
-            self.insert_protocol('funcproc', source_funcproc_name, 'create', target_funcproc_sql, None, None, None, 'info', None, funcproc_row['id'])
+            self.insert_protocol('funcproc', settings.get('source_funcproc_name'), 'create', settings.get('target_funcproc_sql'), None, None, None, 'info', None, funcproc_row['id'])
             return funcproc_row['id']
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"insert_funcprocs ({func_run_id}): Error inserting funcproc info {source_funcproc_name} into {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"insert_funcprocs ({func_run_id}): Error inserting funcproc info {settings.get('source_funcproc_name')} into {table_name}.")
             self.config_parser.print_log_message('ERROR', f"insert_funcprocs ({func_run_id}): Exception: {e}")
             raise
 
@@ -2303,7 +2303,7 @@ class MigratorTables:
             self.config_parser.print_log_message('ERROR', f"update_funcproc_status ({func_run_id}): Exception: {e}")
             raise
 
-    def insert_sequence(self, sequence_id, source_schema_name, source_table_name, source_column_name, source_sequence_name, source_sequence_sql, source_sequence_comment, target_schema_name, target_table_name, target_column_name, target_sequence_name, target_sequence_sql, target_sequence_comment):
+    def insert_sequence(self, settings):
         func_run_id = uuid.uuid4()
         protocol_table_name = self.config_parser.get_protocol_name_sequences()
         query = f"""
@@ -2312,7 +2312,7 @@ class MigratorTables:
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (sequence_id, source_schema_name, source_table_name, source_column_name, source_sequence_name, source_sequence_sql, source_sequence_comment, target_schema_name, target_table_name, target_column_name, target_sequence_name, target_sequence_sql, target_sequence_comment)
+        params = (settings.get('sequence_id'), settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_column_name'), settings.get('source_sequence_name'), settings.get('source_sequence_sql'), settings.get('source_sequence_comment'), settings.get('target_schema_name'), settings.get('target_table_name'), settings.get('target_column_name'), settings.get('target_sequence_name'), settings.get('target_sequence_sql'), settings.get('target_sequence_comment'))
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -2321,10 +2321,10 @@ class MigratorTables:
 
             sequence_row = self.decode_sequence_row(row)
             self.config_parser.print_log_message('DEBUG3', f"insert_sequence ({func_run_id}): Returned row: {sequence_row}")
-            self.insert_protocol('sequence', sequence_name, 'create', set_sequence_sql, None, None, None, 'info', None, sequence_row['sequence_id'])
+            self.insert_protocol('sequence', settings.get('source_sequence_name'), 'create', settings.get('source_sequence_sql'), None, None, None, 'info', None, sequence_row['sequence_id'])
             return sequence_row['sequence_id']
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"insert_sequence ({func_run_id}): Error inserting sequence info {sequence_name} into {protocol_table_name}.")
+            self.config_parser.print_log_message('ERROR', f"insert_sequence ({func_run_id}): Error inserting sequence info {settings.get('source_sequence_name')} into {protocol_table_name}.")
             self.config_parser.print_log_message('ERROR', f"insert_sequence ({func_run_id}): Exception: {e}")
             raise
 
@@ -2359,7 +2359,7 @@ class MigratorTables:
             self.config_parser.print_log_message('ERROR', f"update_sequence_status ({func_run_id}): Exception: {e}")
             raise
 
-    def insert_trigger(self, source_schema_name, source_table_name, source_table_id, target_schema_name, target_table_name, trigger_id, trigger_name, trigger_event, trigger_new, trigger_old, trigger_source_sql, trigger_target_sql, trigger_comment):
+    def insert_trigger(self, settings):
         func_run_id = uuid.uuid4()
         table_name = self.config_parser.get_protocol_name_triggers()
         query = f"""
@@ -2368,7 +2368,7 @@ class MigratorTables:
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (source_schema_name, source_table_name, source_table_id, target_schema_name, target_table_name, trigger_id, trigger_name, trigger_event, trigger_new, trigger_old, trigger_source_sql, trigger_target_sql, trigger_comment)
+        params = (settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_table_id'), settings.get('target_schema_name'), settings.get('target_table_name'), settings.get('trigger_id'), settings.get('trigger_name'), settings.get('trigger_event'), settings.get('trigger_new'), settings.get('trigger_old'), settings.get('trigger_source_sql'), settings.get('trigger_target_sql'), settings.get('trigger_comment'))
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -2377,10 +2377,10 @@ class MigratorTables:
 
             trigger_row = self.decode_trigger_row(row)
             self.config_parser.print_log_message('DEBUG3', f"insert_trigger ({func_run_id}): Returned row: {trigger_row}")
-            self.insert_protocol('trigger', trigger_name, 'create', trigger_target_sql, None, None, None, 'info', None, trigger_row['id'])
+            self.insert_protocol('trigger', settings.get('trigger_name'), 'create', settings.get('trigger_target_sql'), None, None, None, 'info', None, trigger_row['id'])
             return trigger_row['id']
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"insert_trigger ({func_run_id}): Error inserting trigger info {trigger_name} into {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"insert_trigger ({func_run_id}): Error inserting trigger info {settings.get('trigger_name')} into {table_name}.")
             self.config_parser.print_log_message('ERROR', f"insert_trigger ({func_run_id}): Exception: {e}")
             raise
 
@@ -2431,7 +2431,7 @@ class MigratorTables:
             self.config_parser.print_log_message('ERROR', e)
             return None
 
-    def insert_view(self, source_schema_name, source_view_name, source_view_id, source_view_sql, target_schema_name, target_view_name, target_view_sql, view_comment):
+    def insert_view(self, settings):
         func_run_id = uuid.uuid4()
         table_name = self.config_parser.get_protocol_name_views()
         query = f"""
@@ -2440,7 +2440,7 @@ class MigratorTables:
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (source_schema_name, source_view_name, source_view_id, source_view_sql, target_schema_name, target_view_name, target_view_sql, view_comment)
+        params = (settings.get('source_schema_name'), settings.get('source_view_name'), settings.get('source_view_id'), settings.get('source_view_sql'), settings.get('target_schema_name'), settings.get('target_view_name'), settings.get('target_view_sql'), settings.get('view_comment'))
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -2449,10 +2449,10 @@ class MigratorTables:
 
             view_row = self.decode_view_row(row)
             self.config_parser.print_log_message('DEBUG3', f"insert_view ({func_run_id}): Returned row: {view_row}")
-            self.insert_protocol('view', source_view_name, 'create', target_view_sql, None, None, None, 'info', None, view_row['id'])
+            self.insert_protocol('view', settings.get('source_view_name'), 'create', settings.get('target_view_sql'), None, None, None, 'info', None, view_row['id'])
             return view_row['id']
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"insert_view ({func_run_id}): Error inserting view info {source_view_name} into {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"insert_view ({func_run_id}): Error inserting view info {settings.get('source_view_name')} into {table_name}.")
             self.config_parser.print_log_message('ERROR', f"insert_view ({func_run_id}): Exception: {e}")
             raise
 

@@ -16,6 +16,7 @@
 
 from credativ_pg_migrator.database_connector import DatabaseConnector
 from credativ_pg_migrator.migrator_logging import MigratorLogger
+from credativ_pg_migrator.migrator_tables import MigratorTables
 import psycopg2
 import time
 import datetime
@@ -64,13 +65,14 @@ class IbmDb2ZosConnector(DatabaseConnector):
         else:
             raise ValueError(f"Unsupported IBM DB2 z/OS connectivity: {self.connectivity}")
 
+        self.migrator_tables = MigratorTables(self.logger, self.config_parser)
+        self.protocol_schema = self.migrator_tables.protocol_schema
+
         self.config_parser.print_log_message('DEBUG3', f"IbmDb2ZosConnector: INIT done")
 
     def connect(self):
         self.config_parser.print_log_message('DEBUG', "IbmDb2ZosConnector: connect() called.")
-        from credativ_pg_migrator.migrator_tables import MigratorTables
-        self.migrator_tables = MigratorTables(self.logger, self.config_parser)
-        self.protocol_schema = self.migrator_tables.protocol_schema
+        pass
 
     def disconnect(self):
         self.config_parser.print_log_message('DEBUG', "IbmDb2ZosConnector: disconnect() called.")

@@ -35,7 +35,7 @@ migrator:
   schema: "migration"
 
 # source database connection
-# type: "informix", "sybase_ase", "mssql", "ibm_db2", "mysql", "sql_anywhere", "postgresql", "oracle"
+# type: "informix", "sybase_ase", "mssql", "ibm_db2_luw", "ibm_db2_zos", "mysql", "sql_anywhere", "postgresql", "oracle"
 source:
   type: "sybase_ase"
   host: "localhost"
@@ -61,7 +61,8 @@ source:
     driver: 'FreeTDS'
     libraries: "/usr/lib/x86_64-linux-gnu/odbc/libtdsodbc.so"
   # system catalog is used only for some database
-  # ibm_db2 - SYSCAT or SYSIBM - sysibm simulates the information_schema
+  # ibm_db2_luw - SYSCAT or SYSIBM - sysibm simulates the information_schema
+  # ibm_db2_zos
   # mssql - SYS or INFORMATION_SCHEMA
   system_catalog: "SYSIBM"
 

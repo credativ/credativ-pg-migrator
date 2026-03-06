@@ -21,7 +21,7 @@ import traceback
 import time
 import datetime
 
-class IBMDB2Connector(DatabaseConnector):
+class IbmDb2LuwConnector(DatabaseConnector):
     def __init__(self, config_parser, source_or_target):
         if source_or_target != 'source':
             raise ValueError("IBM DB2 is only supported as a source database")

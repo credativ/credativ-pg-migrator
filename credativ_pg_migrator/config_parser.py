@@ -189,7 +189,7 @@ class ConfigParser:
                 return f"mysql://{db_config['username']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
             else:
                 raise ValueError(f"Unsupported MySQL connectivity: {connectivity}")
-        elif db_config['type'] == 'ibm_db2':
+        elif db_config['type'] == 'ibm_db2_luw':
             if connectivity == 'native':
                 return f"DATABASE={db_config['database']};HOSTNAME={db_config['host']};PORT={db_config['port']};PROTOCOL=TCPIP;UID={db_config['username']};PWD={db_config['password']}"
             else:

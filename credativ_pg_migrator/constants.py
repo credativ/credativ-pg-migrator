@@ -61,7 +61,8 @@ class MigratorConstants:
     def get_modules():
         return {
             'postgresql': 'credativ_pg_migrator.connectors.postgresql_connector:PostgreSQLConnector',
-            'ibm_db2': 'credativ_pg_migrator.connectors.ibm_db2_connector:IBMDB2Connector',
+            'ibm_db2_luw': 'credativ_pg_migrator.connectors.ibm_db2_luw_connector:IbmDb2LuwConnector',
+            'ibm_db2_zos': 'credativ_pg_migrator.connectors.ibm_db2_zos_connector:IbmDb2ZosConnector',
             'informix': 'credativ_pg_migrator.connectors.informix_connector:InformixConnector',
             'mssql': 'credativ_pg_migrator.connectors.ms_sql_connector:MsSQLConnector',
             'mysql': 'credativ_pg_migrator.connectors.mysql_connector:MySQLConnector',

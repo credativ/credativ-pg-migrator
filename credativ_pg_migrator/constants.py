@@ -58,22 +58,6 @@ class MigratorConstants:
         }
 
     @staticmethod
-    def const_connectivity_ddl():
-        return 'ddl'
-
-    @staticmethod
-    def const_connectivity_odbc():
-        return 'odbc'
-
-    @staticmethod
-    def const_connectivity_jdbc():
-        return 'jdbc'
-
-    @staticmethod
-    def const_connectivity_native():
-        return 'native'
-
-    @staticmethod
     def get_modules():
         return {
             'postgresql': 'credativ_pg_migrator.connectors.postgresql_connector:PostgreSQLConnector',

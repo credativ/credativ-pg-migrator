@@ -27,9 +27,9 @@ class IbmDb2LuwConnector(DatabaseConnector):
             raise ValueError("IBM DB2 is only supported as a source database")
 
         self.connection = None
-        self.connectivity = self.config_parser.get_connectivity(self.source_or_target)
         self.config_parser = config_parser
         self.source_or_target = source_or_target
+        self.connectivity = self.config_parser.get_connectivity(self.source_or_target)
         self.on_error_action = self.config_parser.get_on_error_action()
         self.logger = MigratorLogger(self.config_parser.get_log_file()).logger
 

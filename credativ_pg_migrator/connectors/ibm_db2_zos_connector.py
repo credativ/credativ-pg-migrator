@@ -24,30 +24,32 @@ import glob
 import re
 
 class IbmDb2ZosConnector(DatabaseConnector):
-    def __init__(self, config_parser, is_target=False):
-        if is_target:
+    def __init__(self, config_parser, source_or_target):
+        if source_or_target != 'source':
             raise ValueError("IBM DB2 z/OS is only supported as a source database")
 
         self.connection = None
-        self.connectivity = self.config_parser.get_connectivity(self.source_or_target)
         self.config_parser = config_parser
         self.source_or_target = source_or_target
+        self.config_parser.print_log_message('DEBUG3', f"IbmDb2ZosConnector: Starting INIT")
+        self.connectivity = self.config_parser.get_connectivity(self.source_or_target)
         self.on_error_action = self.config_parser.get_on_error_action()
         self.logger = MigratorLogger(self.config_parser.get_log_file()).logger
         self.source_db_config = self.config_parser.get_source_config()
 
         if self.connectivity == self.config_parser.const_connectivity_ddl():
             self.ddl_directory = self.source_db_config['ddl']['directory']
+            self.config_parser.print_log_message('DEBUG3', f"Source_db_config: {self.source_db_config} - ddl_directory: {self.ddl_directory}")
             if not os.path.exists(self.ddl_directory):
-                raise ValueError(f"DDL directory not found: {self.ddl_directory}")
+                raise ValueError(f"DDL directory not found: '{self.ddl_directory}'")
             else:
                 if not os.listdir(self.ddl_directory):
-                    raise ValueError(f"DDL directory is empty: {self.ddl_directory}")
+                    raise ValueError(f"DDL directory is empty: '{self.ddl_directory}'")
                 else:
-                    self.config_parser.print_log_message('INFO', f"DDL directory found: {self.ddl_directory}")
+                    self.config_parser.print_log_message('INFO', f"DDL directory found: '{self.ddl_directory}'")
 
                 if not os.listdir(self.ddl_directory):
-                    raise ValueError(f"DDL directory is empty: {self.ddl_directory}")
+                    raise ValueError(f"DDL directory is empty: '{self.ddl_directory}'")
                 else:
 
                     extension_counts = {}
@@ -62,7 +64,9 @@ class IbmDb2ZosConnector(DatabaseConnector):
         else:
             raise ValueError(f"Unsupported IBM DB2 z/OS connectivity: {self.connectivity}")
 
+        self.config_parser.print_log_message('DEBUG3', f"IbmDb2ZosConnector: Starting DDL parser")
         parse_ddl_files()
+        self.config_parser.print_log_message('DEBUG3', f"IbmDb2ZosConnector: INIT done")
 
     def connect(self):
         self.config_parser.print_log_message('DEBUG', "IbmDb2ZosConnector: connect() called (dummy implementation).")
@@ -359,6 +363,126 @@ class IbmDb2ZosConnector(DatabaseConnector):
 
         self.config_parser.print_log_message('INFO', "DDL parsing completed and unified protocol tables populated with DB2 source metadata.")
 
+
+    def get_sql_functions_mapping(self, settings):
+        return {}
+
+    def fetch_table_names(self, table_schema: str):
+        return self.fetch_all_tables(table_schema)
+
+    def get_table_description(self, settings) -> dict:
+        return {}
+
+    def fetch_default_values(self, settings) -> dict:
+        return {}
+
+    def is_string_type(self, column_type: str) -> bool:
+        return False
+
+    def is_numeric_type(self, column_type: str) -> bool:
+        return False
+
+    def get_create_table_sql(self, settings):
+        pass
+
+    def migrate_table(self, migrate_target_connection, settings):
+        return {'finished': True, 'rows_migrated': 0, 'source_table_rows': 0, 'target_table_rows': 0, 'chunk_number': 1, 'total_chunks': 1}
+
+    def fetch_indexes(self, settings):
+        return {}
+
+    def get_create_index_sql(self, settings):
+        pass
+
+    def fetch_constraints(self, settings):
+        return {}
+
+    def get_create_constraint_sql(self, settings):
+        pass
+
+    def fetch_triggers(self, table_id: int, table_schema: str, table_name: str):
+        return {}
+
+    def convert_trigger(self, trig: str, settings: dict):
+        pass
+
+    def fetch_funcproc_names(self, schema: str):
+        return {}
+
+    def fetch_funcproc_code(self, funcproc_id: int):
+        return ""
+
+    def convert_funcproc_code(self, settings):
+        pass
+
+    def fetch_sequences(self, table_schema: str, table_name: str):
+        return {}
+
+    def get_sequence_details(self, sequence_owner, sequence_name):
+        return {}
+
+    def fetch_views_names(self, source_schema_name: str):
+        return {}
+
+    def fetch_view_code(self, settings):
+        return ""
+
+    def convert_view_code(self, view_code: str, settings: dict):
+        pass
+
+    def get_sequence_current_value(self, sequence_id: int):
+        return 0
+
+    def execute_query(self, query: str, params=None):
+        pass
+
+    def execute_sql_script(self, script_path: str):
+        pass
+
+    def begin_transaction(self):
+        pass
+
+    def commit_transaction(self):
+        pass
+
+    def rollback_transaction(self):
+        pass
+
+    def get_rows_count(self, table_schema: str, table_name: str):
+        return 0
+
+    def get_table_size(self, table_schema: str, table_name: str):
+        return 0
+
+    def fetch_user_defined_types(self, schema: str):
+        return {}
+
+    def fetch_domains(self, schema: str):
+        return {}
+
+    def get_create_domain_sql(self, settings):
+        pass
+
+    def testing_select(self):
+        pass
+
+    def get_database_version(self):
+        return "Dummy zOS"
+
+    def get_database_size(self):
+        return 0
+
+    def get_top_n_tables(self, settings):
+        return {}
+
+    def get_top_fk_dependencies(self, settings):
+        return {}
+
+    def target_table_exists(self, target_schema_name, target_table_name):
+        return False
+
+    def fetch_all_rows(self, query):
+        return []
 
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

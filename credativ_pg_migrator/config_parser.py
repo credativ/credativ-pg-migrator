@@ -1185,6 +1185,22 @@ class ConfigParser:
 
         return source_file_parts, converted_file_parts
 
+    @staticmethod
+    def const_connectivity_ddl():
+        return 'ddl'
+
+    @staticmethod
+    def const_connectivity_odbc():
+        return 'odbc'
+
+    @staticmethod
+    def const_connectivity_jdbc():
+        return 'jdbc'
+
+    @staticmethod
+    def const_connectivity_native():
+        return 'native'
+
 ### Main entry point
 
 if __name__ == "__main__":

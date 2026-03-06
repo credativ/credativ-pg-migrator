@@ -28,8 +28,10 @@ class Planner:
     def __init__(self, config_parser):
         self.config_parser = config_parser
         self.logger = MigratorLogger(self.config_parser.get_log_file()).logger
+        self.config_parser.print_log_message('DEBUG3', f"Planner: Loading connectors...")
         self.source_connection = self.load_connector('source')
         self.target_connection = self.load_connector('target')
+        self.config_parser.print_log_message('DEBUG3', f"Planner: Connectors loaded")
         self.migrator_tables = MigratorTables(self.logger, self.config_parser)
         self.on_error_action = self.config_parser.get_on_error_action()
         self.source_schema_name = self.config_parser.get_source_schema()
@@ -108,7 +110,7 @@ class Planner:
             raise ValueError(f"Unsupported database type: {database_type}")
         # Import the module and get the class
         module_name, class_name = database_module.split(':')
-        self.config_parser.print_log_message( 'DEBUG3', f"Will load modules {module_name} - {class_name}")
+        self.config_parser.print_log_message( 'DEBUG3', f"Will load modules {module_name} - {class_name} for {source_or_target} database")
         if not module_name or not class_name:
             raise ValueError(f"Invalid module format: {database_module}")
         # Import the module and get the class

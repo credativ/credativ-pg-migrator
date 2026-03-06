@@ -14,7 +14,8 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-from .database_connector import DatabaseConnector
+from credativ_pg_migrator.database_connector import DatabaseConnector
+from credativ_pg_migrator.migrator_logging import MigratorLogger
 import psycopg2
 import time
 import datetime
@@ -60,6 +61,8 @@ class IbmDb2ZosConnector(DatabaseConnector):
                     self.config_parser.print_log_message('INFO', f"DDL directory found: {ddl_directory}")
         else:
             raise ValueError(f"Unsupported IBM DB2 z/OS connectivity: {self.connectivity}")
+
+        parse_ddl_files()
 
     def connect(self):
         self.config_parser.print_log_message('DEBUG', "IbmDb2ZosConnector: connect() called (dummy implementation).")

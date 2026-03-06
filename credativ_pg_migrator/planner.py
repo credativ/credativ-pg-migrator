@@ -108,6 +108,7 @@ class Planner:
             raise ValueError(f"Unsupported database type: {database_type}")
         # Import the module and get the class
         module_name, class_name = database_module.split(':')
+        self.config_parser.print_log_message( 'DEBUG3', f"Will load modules {module_name} - {class_name}")
         if not module_name or not class_name:
             raise ValueError(f"Invalid module format: {database_module}")
         # Import the module and get the class

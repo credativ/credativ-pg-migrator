@@ -440,6 +440,7 @@ class Planner:
                             column_info['replaced_column_default_value'] = substitution
                             self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_tables: Substituted default value: {column_info['column_default_value']} -> {substitution}")
 
+                self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_tables: Source columns: {source_columns}")
                 settings = {
                     'source_db_type': self.config_parser.get_source_db_type(),
                     'source_schema_name': self.source_schema_name,
@@ -451,10 +452,11 @@ class Planner:
                     'source_columns': source_columns,
                     'migrator_tables': self.migrator_tables,
                 }
+                self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_tables: convert_table_columns - settings: {settings}")
                 target_columns = self.convert_table_columns(settings)
                 settings['target_columns'] = target_columns
+                self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_tables: convert_table_columns - target_columns: {target_columns}")
                 target_table_sql = self.target_connection.get_create_table_sql(settings)
-                self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_tables: Target columns: {target_columns}")
                 self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_tables: Target table SQL: {target_table_sql}")
 
                 target_partitioning = self.config_parser.get_target_partitioning()
@@ -533,6 +535,7 @@ class Planner:
                     'source_columns': source_columns,
                     'source_table_rows': source_table_rows,
                     'source_table_description': table_description,
+                    'source_table_sql': table_info.get('source_table_sql', ''),
                     'target_schema_name': self.target_schema_name,
                     'target_table_name': table_info['table_name'],
                     'target_columns': target_columns,
@@ -553,6 +556,7 @@ class Planner:
                     'source_columns': source_columns,
                     'source_table_rows': source_table_rows,
                     'source_table_description': table_description,
+                    'source_table_sql': table_info.get('source_table_sql', ''),
                     'target_schema_name': self.target_schema_name,
                     'target_table_name': table_info['table_name'],
                     'target_columns': target_columns,
@@ -713,7 +717,7 @@ class Planner:
                 types_mapping = self.source_connection.get_types_mapping(settings)
 
             for order_num, column_info in source_columns.items():
-                if 'column_type_substitution' in column_info and column_info['column_type_substitution'] != '':
+                if column_info.get('column_type_substitution'):
                     coltype = column_info['column_type_substitution'].upper()
                     character_maximum_length = 0
                     ## we presume substitution contains also length/ precision, scale

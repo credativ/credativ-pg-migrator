@@ -823,7 +823,7 @@ class ConfigParser:
                     self.logger.error(f"pause_migration_fired: Invalid datetime format in scheduled action: {action_datetime_str}. Expected format is YYYY.MM.DD HH:MM.")
                     continue  # skip invalid datetime format
                 if now >= action_datetime and not action.get('fired', False):
-                    self.print_log_message('INFO', f"config_parser: pause_migration_fired: ""**** Pausing migration with scheduled action "{action.get('name')}" as current datetime {now} is past scheduled action datetime {action_datetime}. ****""")
+                    self.print_log_message('INFO', f"config_parser: pause_migration_fired: **** Pausing migration with scheduled action '{action.get('name')}' as current datetime {now} is past scheduled action datetime {action_datetime}. ****")
                     self.print_log_message('INFO', f"config_parser: pause_migration_fired: **** To resume migration, create a file '{resume_file}' in the working directory. ****")
                     action['fired'] = True
                     return True

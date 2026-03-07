@@ -470,7 +470,7 @@ class Orchestrator:
                             self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Retrying to drop table {target_table_name} ({repeat_count})...")
                             part_name = f'retry drop table ({repeat_count})'
                             time.sleep(10)
-                self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: ""Worker {worker_id}: Table "{target_table_name}" dropped successfully.""")
+                self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Table '{target_table_name}' dropped successfully.")
 
             if ((settings['create_tables'] and not settings['resume_after_crash'])
                 or (settings['resume_after_crash'] and settings['drop_unfinished_tables'])
@@ -478,7 +478,7 @@ class Orchestrator:
                 self.config_parser.print_log_message( 'DEBUG', f"orchestrator: table_worker: Worker {worker_id}: Creating table with SQL: {create_table_sql}")
                 part_name = 'create table'
                 worker_target_connection.execute_query(create_table_sql)
-                self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: ""Worker {worker_id}: Table "{target_table_name}" created successfully.""")
+                self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Table '{target_table_name}' created successfully.")
 
                 if table_data['partitioned']:
                     part_name = 'create partitions'
@@ -488,7 +488,7 @@ class Orchestrator:
                     for partition_sql in table_create_partitions_sql:
                         self.config_parser.print_log_message( 'DEBUG', f"orchestrator: table_worker: Worker {worker_id}: Creating partition for table {target_table_name}: {partition_sql}")
                         worker_target_connection.execute_query(partition_sql)
-                        self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: ""Worker {worker_id}: Partition of "{target_table_name}" created successfully [{partition_sql}].""")
+                        self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Partition of '{target_table_name}' created successfully [{partition_sql}].")
 
                 ## now check alterations of columns due to FK IDENTITY dependency
                 for result in migrator_tables.fk_find_dependent_columns_to_alter({
@@ -502,7 +502,7 @@ class Orchestrator:
                         TYPE {result['altered_data_type']}"""
                     self.config_parser.print_log_message( 'DEBUG', f"orchestrator: table_worker: Worker {worker_id}: Altering column with SQL: {alter_column_sql}")
                     worker_target_connection.execute_query(alter_column_sql)
-                    self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: ""Worker {worker_id}: Column "{result['target_column']}" altered successfully.""")
+                    self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Column '{result['target_column']}' altered successfully.")
 
             if ((settings['truncate_tables'] and not settings['resume_after_crash'])
                 or (settings['resume_after_crash'] and settings['drop_unfinished_tables']) ):
@@ -525,7 +525,7 @@ class Orchestrator:
                             self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Retrying to truncate table {target_table_name} ({repeat_count})...")
                             part_name = f'retry truncate table ({repeat_count})'
                             time.sleep(10)
-                self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: ""Worker {worker_id}: Table "{target_table_name}" truncated successfully.""")
+                self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Table '{target_table_name}' truncated successfully.")
 
             if self.config_parser.should_migrate_data(table_data['source_table_name']):
                 # data migration
@@ -1219,7 +1219,7 @@ class Orchestrator:
                 worker_target_connection.execute_query(worker_target_connection.session_settings)
 
             worker_target_connection.execute_query(create_index_sql)
-            self.config_parser.print_log_message('INFO', f"orchestrator: index_worker: ""Worker {worker_id}: Index "{index_name}" created successfully.""")
+            self.config_parser.print_log_message('INFO', f"orchestrator: index_worker: Worker {worker_id}: Index '{index_name}' created successfully.")
 
             worker_target_connection.disconnect()
             return True
@@ -1302,7 +1302,7 @@ class Orchestrator:
 
                 query = 'RESET search_path;'
                 worker_target_connection.execute_query(query)
-                self.config_parser.print_log_message('INFO', f"orchestrator: constraint_worker: ""Worker {worker_id}: Constraint "{constraint_name}" created successfully.""")
+                self.config_parser.print_log_message('INFO', f"orchestrator: constraint_worker: Worker {worker_id}: Constraint '{constraint_name}' created successfully.")
                 worker_target_connection.disconnect()
                 return True
             else:

@@ -81,24 +81,34 @@ class IbmDb2ZosConnector(DatabaseConnector):
 
     def fetch_all_tables(self, schema_name: str) -> dict:
         tables = {}
-        self.config_parser.print_log_message('DEBUG3', f"fetch_all_tables ({schema_name}): starting: schema_name: {schema_name} - self.connectivity: {self.connectivity}")
         if self.connectivity == self.config_parser.const_connectivity_ddl():
             query = f"""SELECT source_schema_name, source_table_name, source_partition_columns, source_partition_ranges
                         FROM "{self.protocol_schema}"."ddl_tables"
-                        WHERE trim(source_schema_name) = trim(%s)
+                        WHERE upper(trim(source_schema_name)) = upper(trim('{schema_name}'))
                         ORDER BY id"""
-            cursor = self.migrator_tables.protocol_connection.connection.cursor()
-            cursor.execute(query, (schema_name,))
-            rows = cursor.fetchall()
-            self.config_parser.print_log_message('DEBUG3', f"fetch_all_tables ({schema_name}): {rows}")
-            for i, row in enumerate(rows, 1):
-                tables[i] = {
-                    'id': i,
-                    'schema_name': row[0],
-                    'table_name': row[1],
-                    'comment': f"Partition: {row[2]}, Ranges: {row[3]}" if row[2] else None
-                }
-            cursor.close()
+            self.config_parser.print_log_message('DEBUG3', f"fetch_all_tables ({schema_name}): starting: schema_name: {schema_name} - self.connectivity: {self.connectivity} - query: {query}")
+            try:
+                cursor = self.migrator_tables.protocol_connection.connection.cursor()
+                cursor.execute(f"""select count(*) from "{self.protocol_schema}"."ddl_tables" """)
+                count = cursor.fetchone()[0]
+                if count == 0:
+                    self.config_parser.print_log_message('INFO', f"fetch_all_tables ({schema_name}): No tables found")
+                else:
+                    self.config_parser.print_log_message('INFO', f"fetch_all_tables ({schema_name}): Found {count} tables")
+                cursor.execute(query)
+                rows = cursor.fetchall()
+                self.config_parser.print_log_message('DEBUG3', f"fetch_all_tables ({schema_name}): {rows}")
+                for i, row in enumerate(rows, 1):
+                    tables[i] = {
+                        'id': i,
+                        'schema_name': row[0],
+                        'table_name': row[1],
+                        'comment': f"Partition: {row[2]}, Ranges: {row[3]}" if row[2] else None
+                    }
+                cursor.close()
+            except Exception as e:
+                self.config_parser.print_log_message('ERROR', f"fetch_all_tables ({schema_name}): {e}")
+                raise
         return tables
 
     def fetch_table_columns(self, settings) -> dict:
@@ -221,7 +231,9 @@ class IbmDb2ZosConnector(DatabaseConnector):
                 migrator_tables.insert_ddl_triggers({
                     'source_schema_name': schema_name,
                     'source_trigger_name': trigger_name,
-                    'source_ddl_text': ddl_text
+                    'source_ddl_text': ddl_text,
+                    'source_trigger_sql': ddl_text,
+                    'source_trigger_comment': None
                 })
 
             # Remove the extracted triggers from content so they aren't parsed again
@@ -233,8 +245,42 @@ class IbmDb2ZosConnector(DatabaseConnector):
                 if not stmt:
                     continue
 
+                # Extract inline comments and clean statement for regex matching
+                comment_lines = []
+                clean_stmt_lines = []
+                for line in stmt.split('\n'):
+                    stripped_line = line.strip()
+                    if stripped_line.startswith('--'):
+                        comment_lines.append(stripped_line[2:].strip())
+                    else:
+                        clean_stmt_lines.append(line)
+
+                clean_stmt = '\n'.join(clean_stmt_lines).strip()
+                comment_text = '\n'.join(comment_lines).strip() if comment_lines else None
+
+                if not clean_stmt:
+                    continue
+
+                # Parse Comments (COMMENT ON statements)
+                match_comment = re.search(r"^COMMENT\s+ON\s+(TABLE|COLUMN|INDEX|VIEW|ALIAS|TRIGGER|SEQUENCE)\s+\"?([A-Za-z0-9_]+)\"?\.\"?([A-Za-z0-9_]+)\"?(?:\.\"?([A-Za-z0-9_]+)\"?)?\s+IS\s+'(.*)'", clean_stmt, re.IGNORECASE | re.DOTALL)
+                if match_comment:
+                    obj_type = match_comment.group(1).upper()
+                    schema_name = match_comment.group(2).upper()
+                    obj_name = match_comment.group(3).upper()
+                    col_name = match_comment.group(4).upper() if match_comment.group(4) else None
+                    comment_val = match_comment.group(5)
+
+                    migrator_tables.update_ddl_comment({
+                        'object_type': obj_type,
+                        'source_schema_name': schema_name,
+                        'source_name': obj_name,
+                        'source_column_name': col_name,
+                        'comment': comment_val
+                    })
+                    continue
+
                 # Parse Indexes
-                match_index = re.search(r"^CREATE\s+(UNIQUE\s+)?INDEX\s+([A-Za-z0-9_]+)\.([A-Za-z0-9_]+)\s+ON\s+([A-Za-z0-9_]+)\.([A-Za-z0-9_]+)", stmt, re.IGNORECASE)
+                match_index = re.search(r"^CREATE\s+(UNIQUE\s+)?INDEX\s+([A-Za-z0-9_]+)\.([A-Za-z0-9_]+)\s+ON\s+([A-Za-z0-9_]+)\.([A-Za-z0-9_]+)", clean_stmt, re.IGNORECASE)
                 if match_index:
                     is_unique = bool(match_index.group(1))
                     idx_schema = match_index.group(2).upper()
@@ -269,36 +315,40 @@ class IbmDb2ZosConnector(DatabaseConnector):
                                 'source_table_name': tbl_name,
                                 'source_index_name': idx_name,
                                 'source_is_unique': is_unique,
-                                'source_columns_list': ', '.join(cols_list)
+                                'source_columns_list': ', '.join(cols_list),
+                                'source_index_sql': stmt,
+                                'source_index_comment': comment_text
                             })
                     continue
 
                 # Parse Sequences
-                match_seq = re.search(r"^CREATE\s+SEQUENCE\s+\"?([A-Za-z0-9_]+)\"?\.\"?([A-Za-z0-9_]+)\"?", stmt, re.IGNORECASE)
+                match_seq = re.search(r"^CREATE\s+SEQUENCE\s+\"?([A-Za-z0-9_]+)\"?\.\"?([A-Za-z0-9_]+)\"?", clean_stmt, re.IGNORECASE)
                 if match_seq:
                     schema_name = match_seq.group(1).upper()
                     seq_name = match_seq.group(2).upper()
                     migrator_tables.insert_ddl_sequences({
                         'source_schema_name': schema_name,
                         'source_seq_name': seq_name,
-                        'source_ddl_text': stmt
+                        'source_ddl_text': stmt,
+                        'source_seq_comment': comment_text
                     })
                     continue
 
                 # Parse Views
-                match_view = re.search(r"^CREATE\s+VIEW\s+\"?([A-Za-z0-9_]+)\"?\.\"?([A-Za-z0-9_]+)\"?", stmt, re.IGNORECASE)
+                match_view = re.search(r"^CREATE\s+VIEW\s+\"?([A-Za-z0-9_]+)\"?\.\"?([A-Za-z0-9_]+)\"?", clean_stmt, re.IGNORECASE)
                 if match_view:
                     schema_name = match_view.group(1).upper()
                     view_name = match_view.group(2).upper()
                     migrator_tables.insert_ddl_views({
                         'source_schema_name': schema_name,
                         'source_view_name': view_name,
-                        'source_ddl_text': stmt
+                        'source_view_sql': stmt,
+                        'source_view_comment': comment_text
                     })
                     continue
 
                 # Parse Aliases
-                match_alias = re.search(r"^CREATE\s+ALIAS\s+\"?([A-Za-z0-9_]+)\"?\.\"?([A-Za-z0-9_]+)\"?\s+FOR\s+\"?([A-Za-z0-9_]+)\"?\.\"?([A-Za-z0-9_]+)\"?", stmt, re.IGNORECASE)
+                match_alias = re.search(r"^CREATE\s+ALIAS\s+\"?([A-Za-z0-9_]+)\"?\.\"?([A-Za-z0-9_]+)\"?\s+FOR\s+\"?([A-Za-z0-9_]+)\"?\.\"?([A-Za-z0-9_]+)\"?", clean_stmt, re.IGNORECASE)
                 if match_alias:
                     schema_name = match_alias.group(1).upper()
                     alias_name = match_alias.group(2).upper()
@@ -308,12 +358,14 @@ class IbmDb2ZosConnector(DatabaseConnector):
                         'source_schema_name': schema_name,
                         'source_alias_name': alias_name,
                         'source_target_schema': target_schema,
-                        'source_target_name': target_name
+                        'source_target_name': target_name,
+                        'source_alias_sql': stmt,
+                        'source_alias_comment': comment_text
                     })
                     continue
 
                 # Parse Foreign Keys
-                match_fk = re.search(r"^ALTER\s+TABLE\s+([A-Za-z0-9_]+)\.([A-Za-z0-9_]+)\s+ADD\s+CONSTRAINT\s+([A-Za-z0-9_]+)\s+FOREIGN\s+KEY\s*\(([^)]+)\)\s*REFERENCES\s+([A-Za-z0-9_]+)\.([A-Za-z0-9_]+)\s*\(([^)]+)\)", stmt, re.IGNORECASE)
+                match_fk = re.search(r"^ALTER\s+TABLE\s+([A-Za-z0-9_]+)\.([A-Za-z0-9_]+)\s+ADD\s+CONSTRAINT\s+([A-Za-z0-9_]+)\s+FOREIGN\s+KEY\s*\(([^)]+)\)\s*REFERENCES\s+([A-Za-z0-9_]+)\.([A-Za-z0-9_]+)\s*\(([^)]+)\)", clean_stmt, re.IGNORECASE)
                 if match_fk:
                     tbl_schema = match_fk.group(1).upper()
                     tbl_name = match_fk.group(2).upper()
@@ -333,12 +385,14 @@ class IbmDb2ZosConnector(DatabaseConnector):
                         'source_columns_list': ', '.join(cols_list),
                         'source_ref_schema_name': ref_schema,
                         'source_ref_table_name': ref_name,
-                        'source_ref_columns_list': ', '.join(ref_cols_list)
+                        'source_ref_columns_list': ', '.join(ref_cols_list),
+                        'source_fk_sql': stmt,
+                        'source_fk_comment': comment_text
                     })
                     continue
 
                 # Find CREATE TABLE
-                match_table = re.search(r"^CREATE\s+TABLE\s+([A-Za-z0-9_]+)\.([A-Za-z0-9_]+)", stmt, re.IGNORECASE)
+                match_table = re.search(r"^CREATE\s+TABLE\s+([A-Za-z0-9_]+)\.([A-Za-z0-9_]+)", clean_stmt, re.IGNORECASE)
                 if not match_table:
                     continue
 
@@ -346,16 +400,16 @@ class IbmDb2ZosConnector(DatabaseConnector):
                 table_name = match_table.group(2).upper()
 
                 # Extract block inside parenthesis
-                start_idx = stmt.find('(', match_table.end())
+                start_idx = clean_stmt.find('(', match_table.end())
                 if start_idx == -1:
                     continue
 
                 depth = 0
                 end_idx = -1
-                for i in range(start_idx, len(stmt)):
-                    if stmt[i] == '(':
+                for i in range(start_idx, len(clean_stmt)):
+                    if clean_stmt[i] == '(':
                         depth += 1
-                    elif stmt[i] == ')':
+                    elif clean_stmt[i] == ')':
                         depth -= 1
                         if depth == 0:
                             end_idx = i
@@ -364,7 +418,7 @@ class IbmDb2ZosConnector(DatabaseConnector):
                 if end_idx == -1:
                     continue
 
-                columns_str = stmt[start_idx+1:end_idx]
+                columns_str = clean_stmt[start_idx+1:end_idx]
 
                 # Split columns correctly ignoring commas inside parenthesis
                 cols = []
@@ -397,7 +451,7 @@ class IbmDb2ZosConnector(DatabaseConnector):
                             pk_columns.update(pks)
 
                 # Extract Partitioning parameters from the trailing text
-                trailing_str = stmt[end_idx+1:]
+                trailing_str = clean_stmt[end_idx+1:]
                 partition_col = None
                 partition_ranges = None
 
@@ -411,7 +465,9 @@ class IbmDb2ZosConnector(DatabaseConnector):
                     'source_schema_name': schema_name,
                     'source_table_name': table_name,
                     'source_partition_columns': partition_col,
-                    'source_partition_ranges': partition_ranges
+                    'source_partition_ranges': partition_ranges,
+                    'source_table_sql': stmt,
+                    'source_table_comment': comment_text
                 })
 
                 # Second pass for extracting column metrics
@@ -450,6 +506,7 @@ class IbmDb2ZosConnector(DatabaseConnector):
 
                     is_pk = col_name in pk_columns
 
+                    # Column sql is the column definition
                     migrator_tables.insert_ddl_columns({
                         'source_schema_name': schema_name,
                         'source_table_name': table_name,
@@ -457,7 +514,9 @@ class IbmDb2ZosConnector(DatabaseConnector):
                         'source_data_type': data_type,
                         'source_is_nullable': is_nullable,
                         'source_default_value': default_value,
-                        'source_pk_indicator': is_pk
+                        'source_pk_indicator': is_pk,
+                        'source_column_sql': col_def,
+                        'source_column_comment': None
                     })
 
         cursor = migrator_tables.protocol_connection.connection.cursor()

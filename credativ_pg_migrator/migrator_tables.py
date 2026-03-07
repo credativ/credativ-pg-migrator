@@ -2631,7 +2631,12 @@ class MigratorTables:
             self.config_parser.print_log_message('INFO', f"migrator_tables: print_summary: {objects} summary:")
             query = f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{migrator_table_name}" """
             cursor = self.protocol_connection.connection.cursor()
-            cursor.execute(query)
+            try:
+                cursor.execute(query)
+            except psycopg2.errors.UndefinedTable:
+                self.protocol_connection.connection.rollback()
+                self.config_parser.print_log_message('INFO', f"migrator_tables: print_summary: Table {migrator_table_name} does not exist, skipping.")
+                return
             summary = cursor.fetchone()[0]
             if objects.lower() not in ['sequences']:
                 self.config_parser.print_log_message('INFO', f"migrator_tables: print_summary: Found in source: {summary}")

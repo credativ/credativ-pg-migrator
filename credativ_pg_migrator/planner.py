@@ -516,7 +516,6 @@ class Planner:
 
                                             create_partitions_sql = json.dumps([row[0] for row in create_partitions_sql])
                                             cursor.close()
-                                            self.target_connection.disconnect()
                                             self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_tables: Create partitions SQL: {create_partitions_sql}")
 
                 self.config_parser.print_log_message( 'INFO', f"planner: run_prepare_tables: Counting rows in source table {table_info['table_name']}...")

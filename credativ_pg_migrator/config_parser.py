@@ -89,7 +89,11 @@ class ConfigParser:
         return self.config['source']
 
     def get_source_db_name(self):
-        return self.get_source_config()['database']
+        source_config = self.get_source_config()
+        if source_config.get('connectivity') == 'ddl':
+            ddl_dir = source_config.get('ddl', {}).get('directory', 'unknown')
+            return f"DDL Files ({ddl_dir})"
+        return source_config.get('database', 'unknown')
 
     def get_source_schema(self):
         source_config = self.get_source_config()

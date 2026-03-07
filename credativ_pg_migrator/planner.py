@@ -768,7 +768,7 @@ class Planner:
                     'basic_character_maximum_length': column_info['basic_character_maximum_length'] if 'basic_character_maximum_length' in column_info else '',
                     'basic_numeric_precision': column_info['basic_numeric_precision'] if 'basic_numeric_precision' in column_info else '',
                     'basic_numeric_scale': column_info['basic_numeric_scale'] if 'basic_numeric_scale' in column_info else '',
-                    'basic_column_type': column_info['basic_column_type'].strip() if 'basic_column_type' in column_info else '',
+                    'basic_column_type': column_info['basic_column_type'].strip() if column_info.get('basic_column_type') else '',
                     'is_identity': column_info['is_identity'],
                     'column_comment': column_info['column_comment'] if 'column_comment' in column_info else '',
                     'is_generated_virtual': column_info['is_generated_virtual'] if 'is_generated_virtual' in column_info else '',

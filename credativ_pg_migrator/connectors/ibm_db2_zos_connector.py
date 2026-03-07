@@ -76,8 +76,7 @@ class IbmDb2ZosConnector(DatabaseConnector):
 
     def disconnect(self):
         self.config_parser.print_log_message('DEBUG', "ibm_db2_zos_connector: disconnect: disconnect() called.")
-        if hasattr(self, 'migrator_tables') and self.migrator_tables and self.migrator_tables.protocol_connection:
-            self.migrator_tables.protocol_connection.connection.close()
+        pass
 
     def fetch_all_tables(self, schema_name: str) -> dict:
         tables = {}

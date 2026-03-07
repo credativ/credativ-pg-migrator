@@ -28,13 +28,13 @@ class ConfigParser:
         self.args = args
         self.logger = logger
         self.config = self.load_config(args.config)
-        self.print_log_message('DEBUG3', f"Configuration loaded: {self.config}")
+        self.print_log_message('DEBUG3', f"config_parser: __init__: Configuration loaded: {self.config}")
         self.validate_config()
 
     def load_config(self, config_file):
         """Load the configuration file."""
-        self.print_log_message('INFO', f"Working directory: {os.path.dirname(os.path.abspath(self.args.config))}")
-        self.print_log_message('INFO', f"Loading configuration from {config_file}")
+        self.print_log_message('INFO', f"config_parser: load_config: Working directory: {os.path.dirname(os.path.abspath(self.args.config))}")
+        self.print_log_message('INFO', f"config_parser: load_config: Loading configuration from {config_file}")
         with open(config_file, 'r') as file:
             return yaml.safe_load(file)
 
@@ -71,7 +71,7 @@ class ConfigParser:
         if self.get_source_db_type() == 'sybase_ase':
             # Sybase ASE does not support LIMIT with OFFSET in older versions, so we cannot resume after crash
             # and must drop unfinished tables
-            self.print_log_message('INFO', "##### Sybase ASE does not support LIMIT with OFFSET in older versions, dropping unfinished tables. #####")
+            self.print_log_message('INFO', "config_parser: should_drop_unfinished_tables: ##### Sybase ASE does not support LIMIT with OFFSET in older versions, dropping unfinished tables. #####")
             return True
         return bool(self.args.drop_unfinished_tables)
 
@@ -322,7 +322,7 @@ class ConfigParser:
     def get_default_values_substitution(self):
         implicit_substitutions = []
         from_config_file = self.config.get('default_values_substitution', {})
-        self.print_log_message('DEBUG3', f"get_default_values_substitution: from_config_file: {from_config_file}")
+        self.print_log_message('DEBUG3', f"config_parser: get_default_values_substitution: from_config_file: {from_config_file}")
         if self.get_source_db_type() == 'sybase_ase':
             implicit_substitutions = [
                 # Use regex patterns for matching default values
@@ -369,11 +369,11 @@ class ConfigParser:
             if isinstance(table_settings, list):
                 for entry in table_settings:
                     pattern = entry.get('table_name')
-                    # self.print_log_message('DEBUG3', f"should_migrate_data: checking table {table_name} with pattern {pattern}, setting is {entry.get('migrate_data', False)}")
+                    # self.print_log_message('DEBUG3', f"config_parser: should_migrate_data: checking table {table_name} with pattern {pattern}, setting is {entry.get('migrate_data', False)}")
                     if pattern and re.fullmatch(pattern, table_name, re.IGNORECASE):
-                        # self.print_log_message('DEBUG3', f"should_migrate_data: table {table_name} matched pattern {pattern}, setting is {entry.get('migrate_data', False)}")
+                        # self.print_log_message('DEBUG3', f"config_parser: should_migrate_data: table {table_name} matched pattern {pattern}, setting is {entry.get('migrate_data', False)}")
                         return entry.get('migrate_data', False)
-        # self.print_log_message('DEBUG3', f"should_migrate_data: table {table_name} returned default setting {self.config.get('migration', {}).get('migrate_data', False)}")
+        # self.print_log_message('DEBUG3', f"config_parser: should_migrate_data: table {table_name} returned default setting {self.config.get('migration', {}).get('migrate_data', False)}")
         return self.config.get('migration', {}).get('migrate_data', False)
 
     def should_migrate_indexes(self, table_name=None):
@@ -423,10 +423,10 @@ class ConfigParser:
     def get_chunk_size(self):
         chunk_size = self.config.get('migration', {}).get('chunk_size', -1)
         if chunk_size == -1:
-            self.print_log_message('DEBUG', "Chunk size is set to -1, which means no chunking will be done.")
+            self.print_log_message('DEBUG', "config_parser: get_chunk_size: Chunk size is set to -1, which means no chunking will be done.")
             return -1
         if chunk_size < self.get_batch_size():
-            self.print_log_message('WARNING', f"Chunk size {chunk_size} is smaller than batch size {self.get_batch_size()}. Disabling chunking.")
+            self.print_log_message('WARNING', f"config_parser: get_chunk_size: Chunk size {chunk_size} is smaller than batch size {self.get_batch_size()}. Disabling chunking.")
             return -1 ##self.get_batch_size() * 10
         return int(chunk_size)
 
@@ -711,9 +711,9 @@ class ConfigParser:
                     if pattern and re.fullmatch(pattern, table_name, re.IGNORECASE):
                         chunk_size = entry.get('chunk_size', self.get_chunk_size())
                         if chunk_size == -1:
-                            self.print_log_message('DEBUG', f"Chunk size for table {table_name} is set to -1, which means no chunking will be done.")
+                            self.print_log_message('DEBUG', f"config_parser: get_table_chunk_size: Chunk size for table {table_name} is set to -1, which means no chunking will be done.")
                         if chunk_size < self.get_table_batch_size(table_name):
-                            self.print_log_message('WARNING', f"Chunk size {chunk_size} for table {table_name} is smaller than batch size {self.get_table_batch_size(table_name)}. Disabling chunking.")
+                            self.print_log_message('WARNING', f"config_parser: get_table_chunk_size: Chunk size {chunk_size} for table {table_name} is smaller than batch size {self.get_table_batch_size(table_name)}. Disabling chunking.")
                             chunk_size = -1
         return chunk_size
 
@@ -807,41 +807,41 @@ class ConfigParser:
         config_dir = os.path.dirname(os.path.abspath(self.args.config))
 
         scheduled_actions = self.config.get('migration', {}).get('scheduled_actions', [])
-        self.print_log_message('DEBUG3', f"pause_migration_fired: Checking for scheduled actions: {scheduled_actions}")
+        self.print_log_message('DEBUG3', f"config_parser: pause_migration_fired: Checking for scheduled actions: {scheduled_actions}")
         resume_file = os.path.join(config_dir, "resume_migration")
 
         now = datetime.now()
         for action in scheduled_actions:
-            self.print_log_message('DEBUG3', f"pause_migration_fired: Checking action: {action}")
+            self.print_log_message('DEBUG3', f"config_parser: pause_migration_fired: Checking action: {action}")
             if action.get('action') == 'pause' and 'datetime' in action:
                 action_datetime_str = action['datetime']
                 try:
                     # Expected format: "YYYY.MM.DD HH:MM"
                     action_datetime = datetime.strptime(action_datetime_str, "%Y.%m.%d %H:%M")
-                    self.print_log_message('DEBUG3', f"pause_migration_fired: Parsed action datetime: {action_datetime}, current datetime: {now}")
+                    self.print_log_message('DEBUG3', f"config_parser: pause_migration_fired: Parsed action datetime: {action_datetime}, current datetime: {now}")
                 except ValueError:
                     self.logger.error(f"pause_migration_fired: Invalid datetime format in scheduled action: {action_datetime_str}. Expected format is YYYY.MM.DD HH:MM.")
                     continue  # skip invalid datetime format
                 if now >= action_datetime and not action.get('fired', False):
-                    self.print_log_message('INFO', f"""**** Pausing migration with scheduled action "{action.get('name')}" as current datetime {now} is past scheduled action datetime {action_datetime}. ****""")
-                    self.print_log_message('INFO', f"**** To resume migration, create a file '{resume_file}' in the working directory. ****")
+                    self.print_log_message('INFO', f"config_parser: pause_migration_fired: ""**** Pausing migration with scheduled action "{action.get('name')}" as current datetime {now} is past scheduled action datetime {action_datetime}. ****""")
+                    self.print_log_message('INFO', f"config_parser: pause_migration_fired: **** To resume migration, create a file '{resume_file}' in the working directory. ****")
                     action['fired'] = True
                     return True
 
         pause_file = os.path.join(config_dir, "pause_migration")
-        self.print_log_message('DEBUG', f"Checking for pause file '{pause_file}' to pause migration...")
+        self.print_log_message('DEBUG', f"config_parser: pause_migration_fired: Checking for pause file '{pause_file}' to pause migration...")
         if os.path.exists(pause_file):
             os.remove(pause_file)
-            self.print_log_message('INFO', f"**** Pause file '{pause_file}' found. Pausing migration. ****")
-            self.print_log_message('INFO', f"**** To resume migration, create a file '{resume_file}' in the working directory. ****")
+            self.print_log_message('INFO', f"config_parser: pause_migration_fired: **** Pause file '{pause_file}' found. Pausing migration. ****")
+            self.print_log_message('INFO', f"config_parser: pause_migration_fired: **** To resume migration, create a file '{resume_file}' in the working directory. ****")
             return True
 
         cancel_file = os.path.join(config_dir, "cancel_migration")
-        self.print_log_message('DEBUG', f"Checking for cancel file '{cancel_file}' to cancel migration...")
+        self.print_log_message('DEBUG', f"config_parser: pause_migration_fired: Checking for cancel file '{cancel_file}' to cancel migration...")
         if os.path.exists(cancel_file):
-            self.print_log_message('INFO', f"Cancel file '{cancel_file}' found. Exiting migration.")
+            self.print_log_message('INFO', f"config_parser: pause_migration_fired: Cancel file '{cancel_file}' found. Exiting migration.")
             os.remove(cancel_file)
-            self.print_log_message('INFO', "**** Migration canceled on user request ****")
+            self.print_log_message('INFO', "config_parser: pause_migration_fired: **** Migration canceled on user request ****")
             exit(1)
 
         return False
@@ -849,10 +849,10 @@ class ConfigParser:
     def wait_for_resume(self):
         config_dir = os.path.dirname(os.path.abspath(self.args.config))
         resume_file = os.path.join(config_dir, "resume_migration")
-        self.print_log_message('INFO', f"Migration paused. Waiting for '{resume_file}' to exist to resume...")
+        self.print_log_message('INFO', f"config_parser: wait_for_resume: Migration paused. Waiting for '{resume_file}' to exist to resume...")
         while not os.path.exists(resume_file):
             time.sleep(5)
-        self.print_log_message('INFO', f"Resuming migration as '{resume_file}' was found.")
+        self.print_log_message('INFO', f"config_parser: wait_for_resume: Resuming migration as '{resume_file}' was found.")
         os.remove(resume_file)
 
 
@@ -863,7 +863,7 @@ class ConfigParser:
         for _, column_info in source_columns.items():
             if column_info.get('data_type', '').upper() in ['BLOB', 'CLOB', 'NCLOB']:
                 lob_columns_list.append(column_info['column_name'])
-                self.print_log_message('DEBUG3', f"get_table_lob_columns: Column {column_info['column_name']} in table {source_table_name} is of LOB type {column_info.get('data_type', '').upper()}. Added to LOB columns list.")
+                self.print_log_message('DEBUG3', f"config_parser: get_table_lob_columns: Column {column_info['column_name']} in table {source_table_name} is of LOB type {column_info.get('data_type', '').upper()}. Added to LOB columns list.")
             else:
                 # Check if this column is configured as a LOB column in the export settings
                 lob_columns_config = self.get_source_database_export_lob_columns()
@@ -873,7 +873,7 @@ class ConfigParser:
                         config_column_name = lob_config[1]
                         if (not config_table_name or config_table_name == source_table_name) and config_column_name == column_info['column_name']:
                             lob_columns_list.append(column_info['column_name'])
-                            self.print_log_message('DEBUG3', f"get_table_lob_columns: Column {column_info['column_name']} in table {source_table_name} is configured as LOB column. Added to LOB columns list.")
+                            self.print_log_message('DEBUG3', f"config_parser: get_table_lob_columns: Column {column_info['column_name']} in table {source_table_name} is configured as LOB column. Added to LOB columns list.")
                             break
         return ','.join(lob_columns_list)
 
@@ -903,10 +903,10 @@ class ConfigParser:
                 expected_types.append(column_info['data_type'].upper())
 
             if not input_unl_data_file or not output_csv_data_file:
-                self.print_log_message('ERROR', "convert_unl_to_csv: Both 'unl_data_file' and 'csv_data_file' must be specified in the settings.")
+                self.print_log_message('ERROR', "config_parser: convert_unl_to_csv: Both 'unl_data_file' and 'csv_data_file' must be specified in the settings.")
                 raise ValueError("Both 'unl_data_file' and 'csv_data_file' must be specified in the settings.")
             if not os.path.exists(input_unl_data_file):
-                self.print_log_message('ERROR', f"convert_unl_to_csv: Input UNL data file '{input_unl_data_file}' does not exist.")
+                self.print_log_message('ERROR', f"config_parser: convert_unl_to_csv: Input UNL data file '{input_unl_data_file}' does not exist.")
                 raise FileNotFoundError(f"Input UNL data file '{input_unl_data_file}' does not exist.")
             try:
 
@@ -984,7 +984,7 @@ class ConfigParser:
                     with open(input_unl_data_file, 'r', encoding='utf-8', newline='\n') as infile:
                         buffer = ""
                         for _, line in zip(range(sample_size), infile):
-                            # self.print_log_message('DEBUG3', f"convert_unl_to_csv - determine_expected_delimiters: Reading line for sample: {line}")
+                            # self.print_log_message('DEBUG3', f"config_parser: determine_expected_delimiters: convert_unl_to_csv - determine_expected_delimiters: Reading line for sample: {line}")
                             if '\r' in line:
                                 line = line.replace('\r', '')
                             line = line.rstrip('\n')
@@ -1008,28 +1008,28 @@ class ConfigParser:
 
                             # Now simply count the occurrences of the unl delimiter
                             delimiter_count = record_processed.count(unl_delimiter)
-                            # self.print_log_message('DEBUG3', f"convert_unl_to_csv - determine_expected_delimiters: Processed record: {record_processed}, Delimiter count: {delimiter_count}")
+                            # self.print_log_message('DEBUG3', f"config_parser: determine_expected_delimiters: convert_unl_to_csv - determine_expected_delimiters: Processed record: {record_processed}, Delimiter count: {delimiter_count}")
 
                             # Only count records with at least one delimiter
                             if delimiter_count > 0:
                                 delimiter_counts.append(delimiter_count)
                             buffer = ""
-                    # self.print_log_message('DEBUG3', f"convert_unl_to_csv - determine_expected_delimiters: Sampled delimiter counts: {delimiter_counts}")
+                    # self.print_log_message('DEBUG3', f"config_parser: determine_expected_delimiters: convert_unl_to_csv - determine_expected_delimiters: Sampled delimiter counts: {delimiter_counts}")
                     if not delimiter_counts:
                         return None
                     count_freq = Counter(delimiter_counts)
                     max_occurrence = max(count_freq.values())
-                    self.print_log_message('DEBUG3', f"convert_unl_to_csv - determine_expected_delimiters: Delimiter counts frequency: {count_freq}, Max occurrence: {max_occurrence}")
+                    self.print_log_message('DEBUG3', f"config_parser: determine_expected_delimiters: convert_unl_to_csv - determine_expected_delimiters: Delimiter counts frequency: {count_freq}, Max occurrence: {max_occurrence}")
                     # Find all delimiter counts with the highest occurrence
                     candidates = [count for count, freq in count_freq.items() if freq == max_occurrence]
                     # Return the largest delimiter count among the candidates
                     return max(candidates)
 
-                self.print_log_message('DEBUG', f"convert_unl_to_csv: ({part_name}): Converting UNL file '{input_unl_data_file}' to CSV file '{output_csv_data_file}' with delimiter '{unl_delimiter}' - source file size: {source_file_size}")
+                self.print_log_message('DEBUG', f"config_parser: determine_expected_delimiters: convert_unl_to_csv: ({part_name}): Converting UNL file '{input_unl_data_file}' to CSV file '{output_csv_data_file}' with delimiter '{unl_delimiter}' - source file size: {source_file_size}")
                 # First analyze the input file to determine the expected number of delimiters per line
                 part_name = "determine_expected_delimiters"
                 expected_delimiters = determine_expected_delimiters()
-                self.print_log_message('DEBUG', f"convert_unl_to_csv: ({part_name}): UNL file '{input_unl_data_file}' - found delimiters count: {expected_delimiters} - source file size: {source_file_size}")
+                self.print_log_message('DEBUG', f"config_parser: determine_expected_delimiters: convert_unl_to_csv: ({part_name}): UNL file '{input_unl_data_file}' - found delimiters count: {expected_delimiters} - source file size: {source_file_size}")
 
                 with open(input_unl_data_file, 'r', encoding='utf-8', newline='\n') as infile, \
                     open(output_csv_data_file, 'w', newline='\n', encoding='utf-8') as outfile:
@@ -1058,8 +1058,8 @@ class ConfigParser:
                         line = line.rstrip()
                         counter += 1
 
-                        # self.print_log_message('DEBUG3', f"convert_unl_to_csv: ({part_name}): line: {line}")
-                        # self.print_log_message('DEBUG3', f"convert_unl_to_csv: ({part_name}): buffer: {buffer}")
+                        # self.print_log_message('DEBUG3', f"config_parser: determine_expected_delimiters: convert_unl_to_csv: ({part_name}): line: {line}")
+                        # self.print_log_message('DEBUG3', f"config_parser: determine_expected_delimiters: convert_unl_to_csv: ({part_name}): buffer: {buffer}")
 
                         # If line ends with a backslash, it means the line continues
                         # We append it to the buffer without the backslash at the end and continue to the next line
@@ -1074,7 +1074,7 @@ class ConfigParser:
                         if delimiter_count < expected_delimiters:
                             continue
 
-                        # self.print_log_message('DEBUG3', f"convert_unl_to_csv: ({part_name}): AFTER buffer: {buffer}")
+                        # self.print_log_message('DEBUG3', f"config_parser: determine_expected_delimiters: convert_unl_to_csv: ({part_name}): AFTER buffer: {buffer}")
 
                         # Remove only the last trailing unl_delimiter
                         # only at the end of the last line in the buffer
@@ -1107,21 +1107,21 @@ class ConfigParser:
 
                         if counter == 1:
                             types_str = ','.join([type(field).__name__ for field in processed_fields])
-                            self.print_log_message('DEBUG3', f"convert_unl_to_csv: Table {source_table_name}: Field types: {types_str}")
-                            self.print_log_message('DEBUG3', f"convert_unl_to_csv: Table {source_table_name}: Expected types: {expected_types}")
-                            self.print_log_message('DEBUG3', f"convert_unl_to_csv: Table {source_table_name}: row: {counter}: Processed fields: {processed_fields}")
+                            self.print_log_message('DEBUG3', f"config_parser: determine_expected_delimiters: convert_unl_to_csv: Table {source_table_name}: Field types: {types_str}")
+                            self.print_log_message('DEBUG3', f"config_parser: determine_expected_delimiters: convert_unl_to_csv: Table {source_table_name}: Expected types: {expected_types}")
+                            self.print_log_message('DEBUG3', f"config_parser: determine_expected_delimiters: convert_unl_to_csv: Table {source_table_name}: row: {counter}: Processed fields: {processed_fields}")
 
                         part_name = f"writerow {counter}"
                         csv_writer.writerow(processed_fields)
                         buffer = ""
 
-                self.print_log_message('INFO', f"convert_unl_to_csv: Processed {counter} lines from {input_unl_data_file} and wrote to {output_csv_data_file} - source file size: {source_file_size} - processing time: {datetime.now() - processing_start_time}")
+                self.print_log_message('INFO', f"config_parser: determine_expected_delimiters: convert_unl_to_csv: Processed {counter} lines from {input_unl_data_file} and wrote to {output_csv_data_file} - source file size: {source_file_size} - processing time: {datetime.now() - processing_start_time}")
 
             except Exception as e:
-                self.print_log_message('ERROR', f"convert_unl_to_csv: ({part_name}) Error converting UNL to CSV: {e}")
+                self.print_log_message('ERROR', f"config_parser: determine_expected_delimiters: convert_unl_to_csv: ({part_name}) Error converting UNL to CSV: {e}")
                 raise e
         except Exception as e:
-            self.print_log_message('ERROR', f"convert_unl_to_csv: ({part_name}): {e}")
+            self.print_log_message('ERROR', f"config_parser: determine_expected_delimiters: convert_unl_to_csv: ({part_name}): {e}")
             raise e
 
     def split_big_unl_file(self, data_source_settings):
@@ -1157,7 +1157,7 @@ class ConfigParser:
                     if buffer.rstrip(b'\n').endswith(delimiter):
                         row_bytes = len(buffer)
                         if part_bytes + row_bytes > part_size_bytes and line_count > 0:
-                            self.print_log_message('INFO', f"split_big_unl_file: Writing part {part_num} to {out_name} - logical rows: {line_count}, bytes: {part_bytes}")
+                            self.print_log_message('INFO', f"config_parser: split_big_unl_file: Writing part {part_num} to {out_name} - logical rows: {line_count}, bytes: {part_bytes}")
                             outfile.close()
                             part_num += 1
                             out_name = os.path.join(converted_file_path, f"{source_file_basename}.{str(part_num).zfill(4)}")
@@ -1165,7 +1165,7 @@ class ConfigParser:
                             converted_file_part = f"{converted_file_name}.{str(part_num).zfill(4)}"
                             converted_file_parts.append(converted_file_part)
 
-                            self.print_log_message('DEBUG', f"split_big_unl_file: Creating new output file {out_name} for part {part_num} - size: {part_size_bytes} bytes")
+                            self.print_log_message('DEBUG', f"config_parser: split_big_unl_file: Creating new output file {out_name} for part {part_num} - size: {part_size_bytes} bytes")
                             outfile = open(out_name, 'wb')
                             part_bytes = 0
                             line_count = 0
@@ -1178,12 +1178,12 @@ class ConfigParser:
                     else:
                         continue
                 if buffer:
-                    self.print_log_message('INFO', f"split_big_unl_file: Writing remaining part {part_num} to {out_name} - logical rows: {line_count + 1}, bytes: {part_bytes + len(buffer)}")
+                    self.print_log_message('INFO', f"config_parser: split_big_unl_file: Writing remaining part {part_num} to {out_name} - logical rows: {line_count + 1}, bytes: {part_bytes + len(buffer)}")
                     outfile.write(buffer)
                 outfile.close()
 
         else:
-            self.print_log_message('DEBUG', f"split_big_unl_file: Source file {source_file_name} is smaller than split threshold {split_threshold_bytes} bytes. No splitting needed.")
+            self.print_log_message('DEBUG', f"config_parser: split_big_unl_file: Source file {source_file_name} is smaller than split threshold {split_threshold_bytes} bytes. No splitting needed.")
             source_file_parts.append(source_file_name)
             converted_file_parts.append(converted_file_name)
 

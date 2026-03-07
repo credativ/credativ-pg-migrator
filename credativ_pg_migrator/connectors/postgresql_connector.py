@@ -50,7 +50,7 @@ class PostgreSQLConnector(DatabaseConnector):
         if target_db_type == 'postgresql':
             return {}
         else:
-            self.config_parser.print_log_message('ERROR', f"Unsupported target database type: {target_db_type}")
+            self.config_parser.print_log_message('ERROR', f"postgresql_connector: get_sql_functions_mapping: Unsupported target database type: {target_db_type}")
 
     def fetch_table_names(self, schema: str = 'public'):
         query = f"""
@@ -69,8 +69,8 @@ class PostgreSQLConnector(DatabaseConnector):
             AND c.relkind in ('r', 'p')
             ORDER BY c.relname
         """
-        self.config_parser.print_log_message('DEBUG3', f"Reading table names for {schema}")
-        self.config_parser.print_log_message('DEBUG3', f"Query: {query}")
+        self.config_parser.print_log_message('DEBUG3', f"postgresql_connector: fetch_table_names: Reading table names for {schema}")
+        self.config_parser.print_log_message('DEBUG3', f"postgresql_connector: fetch_table_names: Query: {query}")
         try:
             tables = {}
             order_num = 1
@@ -94,7 +94,7 @@ class PostgreSQLConnector(DatabaseConnector):
             self.disconnect()
             return tables
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', f"postgresql_connector: fetch_table_names: Error executing query: {query}")
             self.config_parser.print_log_message('ERROR', e)
             raise
 
@@ -103,7 +103,7 @@ class PostgreSQLConnector(DatabaseConnector):
         table_name = settings['table_name']
         output = []
         output.append(f'Table "{table_schema}"."{table_name}"')
-        self.config_parser.print_log_message('DEBUG3', f"PostgreSQL connector: Getting table description for {table_schema}.{table_name}")
+        self.config_parser.print_log_message('DEBUG3', f"postgresql_connector: get_table_description: PostgreSQL connector: Getting table description for {table_schema}.{table_name}")
 
         try:
             self.connect()
@@ -214,10 +214,10 @@ class PostgreSQLConnector(DatabaseConnector):
             self.disconnect()
 
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error getting table description for {table_schema}.{table_name}: {e}")
+            self.config_parser.print_log_message('ERROR', f"postgresql_connector: get_table_description: Error getting table description for {table_schema}.{table_name}: {e}")
             return {'table_description': f"Error: {str(e)}"}
 
-        self.config_parser.print_log_message('DEBUG3', f"Table description for {table_schema}.{table_name}: {output}")
+        self.config_parser.print_log_message('DEBUG3', f"postgresql_connector: get_table_description: Table description for {table_schema}.{table_name}: {output}")
         return {'table_description': "\\n".join(output)}
 
     def fetch_table_columns(self, settings) -> dict:
@@ -249,7 +249,7 @@ class PostgreSQLConnector(DatabaseConnector):
                 """
             self.connect()
             cursor = self.connection.cursor()
-            self.config_parser.print_log_message('DEBUG2', f"PostgreSQL: Reading columns for {table_schema}.{table_name}")
+            self.config_parser.print_log_message('DEBUG2', f"postgresql_connector: fetch_table_columns: PostgreSQL: Reading columns for {table_schema}.{table_name}")
             cursor.execute(query)
             for row in cursor.fetchall():
                 ordinal_position = row[0]
@@ -295,7 +295,7 @@ class PostgreSQLConnector(DatabaseConnector):
             return result
 
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', f"postgresql_connector: fetch_table_columns: Error executing query: {query}")
             self.config_parser.print_log_message('ERROR', e)
             raise
 
@@ -337,16 +337,16 @@ class PostgreSQLConnector(DatabaseConnector):
                    create_table_sql = f"""CREATE TABLE "{target_schema_name}"."{target_table_name}" PARTITION OF "{target_schema_name}"."{parent_table}" {partition_bound}"""
                    return create_table_sql
 
-        self.config_parser.print_log_message('DEBUG', f"Creating DDL for table {target_schema_name}.{target_table_name}, case handling: {self.config_parser.get_names_case_handling()}")
+        self.config_parser.print_log_message('DEBUG', f"postgresql_connector: get_create_table_sql: Creating DDL for table {target_schema_name}.{target_table_name}, case handling: {self.config_parser.get_names_case_handling()}")
 
         for _, column_info in converted.items():
 
             column_name = self.config_parser.convert_names_case(column_info['column_name'])
 
-            self.config_parser.print_log_message('DEBUG3', f"Creating DDL for table {target_schema_name}.{target_table_name}, column_info: {column_info}")
+            self.config_parser.print_log_message('DEBUG3', f"postgresql_connector: get_create_table_sql: Creating DDL for table {target_schema_name}.{target_table_name}, column_info: {column_info}")
 
             if column_info['is_hidden_column'] == 'YES':
-                self.config_parser.print_log_message('DEBUG', f"Skipping hidden column {column_name}: {column_info}")
+                self.config_parser.print_log_message('DEBUG', f"postgresql_connector: get_create_table_sql: Skipping hidden column {column_name}: {column_info}")
                 continue
 
             create_column_sql = ""
@@ -389,7 +389,7 @@ class PostgreSQLConnector(DatabaseConnector):
                     'altered_data_type': altered_data_type,
                 })
                 create_column_sql = f""""{column_name}" {altered_data_type}"""
-                self.config_parser.print_log_message('DEBUG', f"Column {column_name} is identity, altered data type to {altered_data_type}")
+                self.config_parser.print_log_message('DEBUG', f"postgresql_connector: get_create_table_sql: Column {column_name} is identity, altered data type to {altered_data_type}")
             elif column_data_type in ('NUMBER', 'NUMERIC') and (numeric_precision is None or numeric_precision == 10) and numeric_scale == 0:
                 altered_data_type = 'INTEGER'
                 migrator_tables.insert_target_column_alteration({
@@ -401,7 +401,7 @@ class PostgreSQLConnector(DatabaseConnector):
                     'altered_data_type': altered_data_type,
                 })
                 create_column_sql = f""""{column_name}" {altered_data_type}"""
-                self.config_parser.print_log_message('DEBUG', f"Column {column_name} is NUMBER without precision, scale {numeric_scale}, altered data type to {altered_data_type}")
+                self.config_parser.print_log_message('DEBUG', f"postgresql_connector: get_create_table_sql: Column {column_name} is NUMBER without precision, scale {numeric_scale}, altered data type to {altered_data_type}")
             elif column_data_type in ('NUMBER', 'NUMERIC') and numeric_precision is None and numeric_scale == 10:
                 altered_data_type = 'DOUBLE PRECISION'
                 migrator_tables.insert_target_column_alteration({
@@ -413,7 +413,7 @@ class PostgreSQLConnector(DatabaseConnector):
                     'altered_data_type': altered_data_type,
                 })
                 create_column_sql = f""""{column_name}" {altered_data_type}"""
-                self.config_parser.print_log_message('DEBUG', f"Column {column_name} is NUMBER without precision, scale {numeric_scale}, altered data type to {altered_data_type}")
+                self.config_parser.print_log_message('DEBUG', f"postgresql_connector: get_create_table_sql: Column {column_name} is NUMBER without precision, scale {numeric_scale}, altered data type to {altered_data_type}")
             elif column_data_type in ('NUMBER', 'NUMERIC') and numeric_precision == 1 and numeric_scale == 0:
                 altered_data_type = 'BOOLEAN'
                 migrator_tables.insert_target_column_alteration({
@@ -425,7 +425,7 @@ class PostgreSQLConnector(DatabaseConnector):
                     'altered_data_type': altered_data_type,
                 })
                 create_column_sql = f""""{column_name}" {altered_data_type}"""
-                self.config_parser.print_log_message('DEBUG', f"Column {column_name} is NUMBER with precision 1, scale 0, altered data type to {altered_data_type}")
+                self.config_parser.print_log_message('DEBUG', f"postgresql_connector: get_create_table_sql: Column {column_name} is NUMBER with precision 1, scale 0, altered data type to {altered_data_type}")
             elif column_data_type in ('NUMBER', 'NUMERIC') and numeric_precision == 19 and numeric_scale == 0:
                 altered_data_type = 'BIGINT'
                 migrator_tables.insert_target_column_alteration({
@@ -437,7 +437,7 @@ class PostgreSQLConnector(DatabaseConnector):
                     'altered_data_type': altered_data_type,
                 })
                 create_column_sql = f""""{column_name}" {altered_data_type}"""
-                self.config_parser.print_log_message('DEBUG', f"Column {column_name} is NUMBER with precision 19, scale 0, altered data type to {altered_data_type}")
+                self.config_parser.print_log_message('DEBUG', f"postgresql_connector: get_create_table_sql: Column {column_name} is NUMBER with precision 19, scale 0, altered data type to {altered_data_type}")
             else:
                 if (character_maximum_length != '' and 'CHAR' in column_data_type):
                     create_column_sql = f""""{column_name}" {column_data_type}({character_maximum_length})"""
@@ -548,7 +548,7 @@ class PostgreSQLConnector(DatabaseConnector):
                             'constraint_comment': ('added from domains ' + column_comment).strip(),
                         })
 
-            self.config_parser.print_log_message('DEBUG3', f"Creating DDL for table {target_schema_name}.{target_table_name}, create_column_sql: {create_column_sql}")
+            self.config_parser.print_log_message('DEBUG3', f"postgresql_connector: get_create_table_sql: Creating DDL for table {target_schema_name}.{target_table_name}, create_column_sql: {create_column_sql}")
             create_table_sql_parts.append(create_column_sql)
 
         create_table_sql = ", ".join(create_table_sql_parts)
@@ -615,7 +615,7 @@ class PostgreSQLConnector(DatabaseConnector):
             self.disconnect()
             return table_indexes
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', f"postgresql_connector: fetch_indexes: Error executing query: {query}")
             self.config_parser.print_log_message('ERROR', e)
             raise
 
@@ -664,7 +664,7 @@ class PostgreSQLConnector(DatabaseConnector):
         #         if column_name == column_info['column_name']:
         #             index_columns_count += 1
         #             column_data_type = column_info['data_type']
-        #             self.config_parser.print_log_message('DEBUG', f"Table: {target_schema_name}.{target_table_name}, index: {index_name}, column: {column_name} has data type {column_data_type}")
+        #             self.config_parser.print_log_message('DEBUG', f"postgresql_connector: get_create_index_sql: Table: {target_schema_name}.{target_table_name}, index: {index_name}, column: {column_name} has data type {column_data_type}")
         #             index_columns_data_types.append(column_data_type)
         #             index_columns_data_types_str = ', '.join(index_columns_data_types)
 
@@ -755,7 +755,7 @@ class PostgreSQLConnector(DatabaseConnector):
             self.disconnect()
             return constraints
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', f"postgresql_connector: fetch_constraints: Error executing query: {query}")
             self.config_parser.print_log_message('ERROR', e)
             raise
 
@@ -888,7 +888,7 @@ class PostgreSQLConnector(DatabaseConnector):
             self.disconnect()
             return triggers
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', f"postgresql_connector: fetch_triggers: Error executing query: {query}")
             self.config_parser.print_log_message('ERROR', e)
             raise
 
@@ -907,7 +907,7 @@ class PostgreSQLConnector(DatabaseConnector):
                 except Exception as e:
                     for notice in cursor.connection.notices:
                         self.config_parser.print_log_message('INFO', notice)
-                    self.config_parser.print_log_message('ERROR', f"Error executing copy_expert: {e}")
+                    self.config_parser.print_log_message('ERROR', f"postgresql_connector: copy_from_file: Error executing copy_expert: {e}")
                     raise
 
     def execute_sql_script(self, script_path: str):
@@ -922,7 +922,7 @@ class PostgreSQLConnector(DatabaseConnector):
             except Exception as e:
                 for notice in cursor.connection.notices:
                     self.config_parser.print_log_message('INFO', notice)
-                self.config_parser.print_log_message('ERROR', f"Error executing script: {e}")
+                self.config_parser.print_log_message('ERROR', f"postgresql_connector: execute_sql_script: Error executing script: {e}")
                 raise
 
     def begin_transaction(self):
@@ -996,7 +996,7 @@ class PostgreSQLConnector(DatabaseConnector):
             })
 
             if source_table_rows == 0:
-                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {source_table_name} is empty - skipping data migration.")
+                self.config_parser.print_log_message('INFO', f"postgresql_connector: migrate_table: Worker {worker_id}: Table {source_table_name} is empty - skipping data migration.")
                 migrator_tables.update_data_migration_status({
                         'row_id': protocol_id,
                         'success': True,
@@ -1015,7 +1015,7 @@ class PostgreSQLConnector(DatabaseConnector):
                 if source_table_rows > target_table_rows:
 
                     part_name = 'migrate_table in batches using cursor'
-                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Source table {source_table_name}: {source_table_rows} rows / Target table {target_table_name}: {target_table_rows} rows - starting data migration.")
+                    self.config_parser.print_log_message('INFO', f"postgresql_connector: migrate_table: Worker {worker_id}: Source table {source_table_name}: {source_table_rows} rows / Target table {target_table_name}: {target_table_rows} rows - starting data migration.")
 
                     select_columns_list = []
                     orderby_columns_list = []
@@ -1041,7 +1041,7 @@ class PostgreSQLConnector(DatabaseConnector):
 
                     if resume_after_crash and not drop_unfinished_tables:
                         chunk_number = self.config_parser.get_total_chunks(target_table_rows, chunk_size)
-                        self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Resuming migration for table {source_schema_name}.{source_table_name} from chunk {chunk_number} with data chunk size {chunk_size}.")
+                        self.config_parser.print_log_message('DEBUG', f"postgresql_connector: migrate_table: Worker {worker_id}: Resuming migration for table {source_schema_name}.{source_table_name} from chunk {chunk_number} with data chunk size {chunk_size}.")
                         chunk_offset = target_table_rows
                     else:
                         chunk_offset = (chunk_number - 1) * chunk_size
@@ -1049,20 +1049,20 @@ class PostgreSQLConnector(DatabaseConnector):
                     chunk_start_row_number = chunk_offset + 1
                     chunk_end_row_number = chunk_offset + chunk_size
 
-                    self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Migrating table {source_schema_name}.{source_table_name}: chunk {chunk_number}, data chunk size {chunk_size}, batch size {batch_size}, chunk offset {chunk_offset}, chunk end row number {chunk_end_row_number}, source table rows {source_table_rows}")
+                    self.config_parser.print_log_message('DEBUG', f"postgresql_connector: migrate_table: Worker {worker_id}: Migrating table {source_schema_name}.{source_table_name}: chunk {chunk_number}, data chunk size {chunk_size}, batch size {batch_size}, chunk offset {chunk_offset}, chunk end row number {chunk_end_row_number}, source table rows {source_table_rows}")
                     order_by_clause = ''
 
                     query = f'''SELECT {select_columns} FROM "{source_schema_name}"."{source_table_name}" '''
                     if migration_limitation:
                         query += f" WHERE {migration_limitation}"
                     primary_key_columns = migrator_tables.select_primary_key({'source_schema_name': source_schema_name, 'source_table_name': source_table_name})
-                    self.config_parser.print_log_message('DEBUG2', f"Worker {worker_id}: Primary key columns for {source_schema_name}.{source_table_name}: {primary_key_columns}")
+                    self.config_parser.print_log_message('DEBUG2', f"postgresql_connector: migrate_table: Worker {worker_id}: Primary key columns for {source_schema_name}.{source_table_name}: {primary_key_columns}")
                     if primary_key_columns:
                         orderby_columns = primary_key_columns
                     order_by_clause = f""" ORDER BY {orderby_columns}"""
                     query += order_by_clause + f" LIMIT {chunk_size} OFFSET {chunk_offset}"
 
-                    self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Fetching data with cursor using query: {query}")
+                    self.config_parser.print_log_message('DEBUG', f"postgresql_connector: migrate_table: Worker {worker_id}: Fetching data with cursor using query: {query}")
 
                     part_name = 'execute query'
                     cursor = self.connection.cursor()
@@ -1084,7 +1084,7 @@ class PostgreSQLConnector(DatabaseConnector):
                         batch_number += 1
                         reading_end_time = time.time()
                         reading_duration = reading_end_time - reading_start_time
-                        self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Fetched {len(records)} rows (batch {batch_number}) from source table {source_table_name}.")
+                        self.config_parser.print_log_message('DEBUG', f"postgresql_connector: migrate_table: Worker {worker_id}: Fetched {len(records)} rows (batch {batch_number}) from source table {source_table_name}.")
 
                         transforming_start_time = time.time()
                         records = [
@@ -1099,7 +1099,7 @@ class PostgreSQLConnector(DatabaseConnector):
                                     record[column_name] = record[column_name].tobytes()
 
                         # Insert batch into target table
-                        self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Starting insert of {len(records)} rows from source table {source_table_name}")
+                        self.config_parser.print_log_message('DEBUG', f"postgresql_connector: migrate_table: Worker {worker_id}: Starting insert of {len(records)} rows from source table {source_table_name}")
                         transforming_end_time = time.time()
                         transforming_duration = transforming_end_time - transforming_start_time
                         inserting_start_time = time.time()
@@ -1154,12 +1154,12 @@ class PostgreSQLConnector(DatabaseConnector):
                         reading_start_time = batch_start_time
 
                     target_table_rows = migrate_target_connection.get_rows_count(target_schema_name, target_table_name)
-                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Target table {target_schema_name}.{target_table_name} has {target_table_rows} rows")
+                    self.config_parser.print_log_message('INFO', f"postgresql_connector: migrate_table: Worker {worker_id}: Target table {target_schema_name}.{target_table_name} has {target_table_rows} rows")
 
                     shortest_batch_seconds = min(batch_durations) if batch_durations else 0
                     longest_batch_seconds = max(batch_durations) if batch_durations else 0
                     average_batch_seconds = sum(batch_durations) / len(batch_durations) if batch_durations else 0
-                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Migrated {total_inserted_rows} rows from {source_table_name} to {target_schema_name}.{target_table_name} in {batch_number} batches: "
+                    self.config_parser.print_log_message('INFO', f"postgresql_connector: migrate_table: Worker {worker_id}: Migrated {total_inserted_rows} rows from {source_table_name} to {target_schema_name}.{target_table_name} in {batch_number} batches: "
                                                             f"Shortest batch: {shortest_batch_seconds:.2f} seconds, "
                                                             f"Longest batch: {longest_batch_seconds:.2f} seconds, "
                                                             f"Average batch: {average_batch_seconds:.2f} seconds")
@@ -1167,7 +1167,7 @@ class PostgreSQLConnector(DatabaseConnector):
                     cursor.close()
 
                 elif source_table_rows <= target_table_rows:
-                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Source table {source_table_name} has {source_table_rows} rows, which is less than or equal to target table {target_table_name} with {target_table_rows} rows. No data migration needed.")
+                    self.config_parser.print_log_message('INFO', f"postgresql_connector: migrate_table: Worker {worker_id}: Source table {source_table_name} has {source_table_rows} rows, which is less than or equal to target table {target_table_name} with {target_table_rows} rows. No data migration needed.")
 
                 migration_stats = {
                     'rows_migrated': total_inserted_rows,
@@ -1178,9 +1178,9 @@ class PostgreSQLConnector(DatabaseConnector):
                     'finished': False,
                 }
 
-                self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Migration stats: {migration_stats}")
+                self.config_parser.print_log_message('DEBUG', f"postgresql_connector: migrate_table: Worker {worker_id}: Migration stats: {migration_stats}")
                 if source_table_rows <= target_table_rows or chunk_number >= total_chunks:
-                    self.config_parser.print_log_message('DEBUG3', f"Worker {worker_id}: Setting migration status to finished for table {source_table_name} (chunk {chunk_number}/{total_chunks})")
+                    self.config_parser.print_log_message('DEBUG3', f"postgresql_connector: migrate_table: Worker {worker_id}: Setting migration status to finished for table {source_table_name} (chunk {chunk_number}/{total_chunks})")
                     migration_stats['finished'] = True
                     migrator_tables.update_data_migration_status({
                         'row_id': protocol_id,
@@ -1218,8 +1218,8 @@ class PostgreSQLConnector(DatabaseConnector):
                 return migration_stats
 
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Error during {part_name} -> {e}")
-            self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Full stack trace: {traceback.format_exc()}")
+            self.config_parser.print_log_message('ERROR', f"postgresql_connector: migrate_table: Worker {worker_id}: Error during {part_name} -> {e}")
+            self.config_parser.print_log_message('ERROR', f"postgresql_connector: migrate_table: Worker {worker_id}: Full stack trace: {traceback.format_exc()}")
             raise e
 
     def insert_batch(self, settings):
@@ -1237,10 +1237,10 @@ class PostgreSQLConnector(DatabaseConnector):
             insert_columns = ', '.join(insert_columns)
 
         inserted_rows = 0
-        self.config_parser.print_log_message('DEBUG2', f"Worker {worker_id}: insert_batch into {target_schema_name}.{target_table_name} with {len(data)} rows, columns: {insert_columns}, data type: {type(data)}")
+        self.config_parser.print_log_message('DEBUG2', f"postgresql_connector: insert_batch: Worker {worker_id}: insert_batch into {target_schema_name}.{target_table_name} with {len(data)} rows, columns: {insert_columns}, data type: {type(data)}")
         try:
             # Ensure data is a list of tuples
-            self.config_parser.print_log_message('DEBUG2', f"Worker {worker_id}: Started insert batch into {target_schema_name}.{target_table_name} with {len(data)} rows")
+            self.config_parser.print_log_message('DEBUG2', f"postgresql_connector: insert_batch: Worker {worker_id}: Started insert batch into {target_schema_name}.{target_table_name} with {len(data)} rows")
             if isinstance(data, list) and all(isinstance(item, dict) for item in data):
                 formatted_data = []
                 for item in data:
@@ -1258,26 +1258,26 @@ class PostgreSQLConnector(DatabaseConnector):
                     formatted_data.append(tuple(row))
                 data = formatted_data
             else:
-                self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Data for insert_batch must be a list of dictionaries, got {type(data)}")
+                self.config_parser.print_log_message('ERROR', f"postgresql_connector: insert_batch: Worker {worker_id}: Data for insert_batch must be a list of dictionaries, got {type(data)}")
                 return 0
 
-            self.config_parser.print_log_message('DEBUG2', f"Worker {worker_id}: insert_batch [2] into {target_schema_name}.{target_table_name} with {len(data)} rows, columns: |{insert_columns}| data type: {type(data)}")
+            self.config_parser.print_log_message('DEBUG2', f"postgresql_connector: insert_batch: Worker {worker_id}: insert_batch [2] into {target_schema_name}.{target_table_name} with {len(data)} rows, columns: |{insert_columns}| data type: {type(data)}")
 
             with self.connection.cursor() as cursor:
                 insert_query = sql.SQL(f"""INSERT INTO "{target_schema_name}"."{target_table_name}" ({insert_columns}) VALUES ({', '.join(['%s' for _ in columns.keys()])})""")
-                self.config_parser.print_log_message('DEBUG3', f"Worker {worker_id}: Insert query: {insert_query}")
+                self.config_parser.print_log_message('DEBUG3', f"postgresql_connector: insert_batch: Worker {worker_id}: Insert query: {insert_query}")
                 self.connection.autocommit = False
                 try:
                     if self.session_settings:
                         cursor.execute(self.session_settings)
-                    self.config_parser.print_log_message('DEBUG3', f"Worker {worker_id}: Starting psycopg2.extras.execute_batch into {target_table_name} with {len(data)} rows")
+                    self.config_parser.print_log_message('DEBUG3', f"postgresql_connector: insert_batch: Worker {worker_id}: Starting psycopg2.extras.execute_batch into {target_table_name} with {len(data)} rows")
 
                     psycopg2.extras.execute_batch(cursor, insert_query, data)
                     inserted_rows = len(data)
                     self.connection.commit()
                 except Exception as e:
-                    self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Error inserting batch data into {target_table_name}: {e}")
-                    self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Trying to insert row by row.")
+                    self.config_parser.print_log_message('ERROR', f"postgresql_connector: insert_batch: Worker {worker_id}: Error inserting batch data into {target_table_name}: {e}")
+                    self.config_parser.print_log_message('ERROR', f"postgresql_connector: insert_batch: Worker {worker_id}: Trying to insert row by row.")
                     self.connection.rollback()
                     for row in data:
                         try:
@@ -1286,13 +1286,13 @@ class PostgreSQLConnector(DatabaseConnector):
                             self.connection.commit()
                         except Exception as e:
                             self.connection.rollback()
-                            self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Error inserting row into {target_table_name}: {row}")
+                            self.config_parser.print_log_message('ERROR', f"postgresql_connector: insert_batch: Worker {worker_id}: Error inserting row into {target_table_name}: {row}")
                             self.config_parser.print_log_message('ERROR', e)
 
                 self.connection.autocommit = True
 
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Error before inserting batch data: {e}")
+            self.config_parser.print_log_message('ERROR', f"postgresql_connector: insert_batch: Worker {worker_id}: Error before inserting batch data: {e}")
             raise
 
         return inserted_rows
@@ -1331,7 +1331,7 @@ class PostgreSQLConnector(DatabaseConnector):
             self.disconnect()
             return funcprocs
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', f"postgresql_connector: fetch_funcproc_names: Error executing query: {query}")
             self.config_parser.print_log_message('ERROR', e)
             raise
 
@@ -1346,7 +1346,7 @@ class PostgreSQLConnector(DatabaseConnector):
             self.disconnect()
             return code
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', f"postgresql_connector: fetch_funcproc_code: Error executing query: {query}")
             self.config_parser.print_log_message('ERROR', e)
             raise
 
@@ -1370,10 +1370,10 @@ class PostgreSQLConnector(DatabaseConnector):
         return converted_code
 
     def handle_error(self, e, description=None):
-        self.config_parser.print_log_message('ERROR', f"An error in {self.__class__.__name__} ({description}): {e}")
+        self.config_parser.print_log_message('ERROR', f"postgresql_connector: handle_error: An error in {self.__class__.__name__} ({description}): {e}")
         self.config_parser.print_log_message('ERROR', traceback.format_exc())
         if self.on_error_action == 'stop':
-            self.config_parser.print_log_message('ERROR', "Stopping due to error.")
+            self.config_parser.print_log_message('ERROR', "postgresql_connector: handle_error: Stopping due to error.")
             exit(1)
 
     def fetch_sequences(self, table_schema: str, table_name: str):
@@ -1419,7 +1419,7 @@ class PostgreSQLConnector(DatabaseConnector):
             # self.disconnect()
             return sequence_data
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error executing sequence query: {query}")
+            self.config_parser.print_log_message('ERROR', f"postgresql_connector: fetch_sequences: Error executing sequence query: {query}")
             self.config_parser.print_log_message('ERROR', e)
 
     def get_sequence_details(self, sequence_owner, sequence_name):
@@ -1461,7 +1461,7 @@ class PostgreSQLConnector(DatabaseConnector):
                 return None
 
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error executing sequence query: {query}")
+            self.config_parser.print_log_message('ERROR', f"postgresql_connector: get_sequence_details: Error executing sequence query: {query}")
             self.config_parser.print_log_message('ERROR', e)
             raise
 
@@ -1482,7 +1482,7 @@ class PostgreSQLConnector(DatabaseConnector):
             self.disconnect()
             return cur_value
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', f"postgresql_connector: get_sequence_current_value: Error executing query: {query}")
             self.config_parser.print_log_message('ERROR', e)
             raise
 
@@ -1490,7 +1490,7 @@ class PostgreSQLConnector(DatabaseConnector):
         query = f"""SELECT count(*) FROM "{table_schema}"."{table_name}" """
         if migration_limitation:
             query += f" WHERE {migration_limitation}"
-        self.config_parser.print_log_message('DEBUG3', f"postgresql: get_rows_count query: {query}")
+        self.config_parser.print_log_message('DEBUG3', f"postgresql_connector: get_rows_count: postgresql: get_rows_count query: {query}")
         cursor = self.connection.cursor()
         cursor.execute(query)
         count = cursor.fetchone()[0]
@@ -1551,7 +1551,7 @@ class PostgreSQLConnector(DatabaseConnector):
             self.disconnect()
             return views
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', f"postgresql_connector: fetch_views_names: Error executing query: {query}")
             self.config_parser.print_log_message('ERROR', e)
             raise
 
@@ -1560,7 +1560,7 @@ class PostgreSQLConnector(DatabaseConnector):
         target_schema_name = settings['target_schema_name']
         migrator_tables = settings.get('migrator_tables')
 
-        self.config_parser.print_log_message('INFO', f"Migrating sequences from {source_schema_name} to {target_schema_name}...")
+        self.config_parser.print_log_message('INFO', f"postgresql_connector: migrate_sequences: Migrating sequences from {source_schema_name} to {target_schema_name}...")
 
         query = f"""
             SELECT c.relname, c.oid
@@ -1582,7 +1582,7 @@ class PostgreSQLConnector(DatabaseConnector):
                 seq_name = seq_row[0]
                 seq_oid = seq_row[1]
 
-                self.config_parser.print_log_message('DEBUG', f"Processing sequence: {seq_name}")
+                self.config_parser.print_log_message('DEBUG', f"postgresql_connector: migrate_sequences: Processing sequence: {seq_name}")
 
                 # Insert into protocol table if migrator_tables is available
                 # We don't have table/column info here as we are migrating all sequences in schema
@@ -1602,7 +1602,7 @@ class PostgreSQLConnector(DatabaseConnector):
                             'source_sequence_sql': ''
                         })
                     except Exception as e:
-                        self.config_parser.print_log_message('ERROR', f"Failed to insert sequence {seq_name} into protocol: {e}")
+                        self.config_parser.print_log_message('ERROR', f"postgresql_connector: migrate_sequences: Failed to insert sequence {seq_name} into protocol: {e}")
 
                 details = self.get_sequence_details(source_schema_name, seq_name)
 
@@ -1640,8 +1640,8 @@ class PostgreSQLConnector(DatabaseConnector):
 
                 setval_sql = f"SELECT setval('\"{target_schema_name}\".\"{seq_name}\"', {last_value}, {'true' if is_called else 'false'});"
 
-                self.config_parser.print_log_message('DEBUG', f"Sequence {seq_name} SQL: {create_sql}")
-                self.config_parser.print_log_message('DEBUG', f"Sequence {seq_name} SETVAL: {setval_sql}")
+                self.config_parser.print_log_message('DEBUG', f"postgresql_connector: migrate_sequences: Sequence {seq_name} SQL: {create_sql}")
+                self.config_parser.print_log_message('DEBUG', f"postgresql_connector: migrate_sequences: Sequence {seq_name} SETVAL: {setval_sql}")
 
                 try:
                     target_connector.execute_query(create_sql)
@@ -1663,7 +1663,7 @@ class PostgreSQLConnector(DatabaseConnector):
                         migrator_tables.update_sequence_status({'sequence_id': seq_oid, 'success': True, 'message': 'migrated OK'})
 
                 except Exception as ex:
-                    self.config_parser.print_log_message('ERROR', f"Failed to migrate sequence {seq_name}: {ex}")
+                    self.config_parser.print_log_message('ERROR', f"postgresql_connector: migrate_sequences: Failed to migrate sequence {seq_name}: {ex}")
                     if migrator_tables:
                         migrator_tables.update_sequence_status({'sequence_id': seq_oid, 'success': False, 'message': str(ex)})
 
@@ -1671,7 +1671,7 @@ class PostgreSQLConnector(DatabaseConnector):
             target_connector.disconnect()
             return True
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error migrating sequences: {e}")
+            self.config_parser.print_log_message('ERROR', f"postgresql_connector: migrate_sequences: Error migrating sequences: {e}")
             self.disconnect()
             # Try to disconnect target if possible, though it might be closed/failed
             try:
@@ -1692,7 +1692,7 @@ class PostgreSQLConnector(DatabaseConnector):
             self.disconnect()
             return view_code
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', f"postgresql_connector: fetch_view_code: Error executing query: {query}")
             self.config_parser.print_log_message('ERROR', e)
             raise
 
@@ -1821,7 +1821,7 @@ class PostgreSQLConnector(DatabaseConnector):
             self.disconnect()
             return user_defined_types
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error fetching UDTs: {e}")
+            self.config_parser.print_log_message('ERROR', f"postgresql_connector: fetch_user_defined_types: Error fetching UDTs: {e}")
             raise
 
     def prepare_session_settings(self):
@@ -1832,9 +1832,9 @@ class PostgreSQLConnector(DatabaseConnector):
         try:
             settings = self.config_parser.get_target_db_session_settings()
             if not settings:
-                self.config_parser.print_log_message('INFO', "No session settings found in config file.")
+                self.config_parser.print_log_message('INFO', "postgresql_connector: prepare_session_settings: No session settings found in config file.")
                 return filtered_settings
-            # self.config_parser.print_log_message('INFO', f"Preparing session settings: {settings} / {settings.keys()} / {tuple(settings.keys())}")
+            # self.config_parser.print_log_message('INFO', f"postgresql_connector: prepare_session_settings: Preparing session settings: {settings} / {settings.keys()} / {tuple(settings.keys())}")
             self.connect()
             cursor = self.connection.cursor()
             lower_keys = tuple(k.lower() for k in settings.keys())
@@ -1843,7 +1843,7 @@ class PostgreSQLConnector(DatabaseConnector):
             cursor.close()
             self.disconnect()
             if not matching_settings:
-                self.config_parser.print_log_message('INFO', "No settings found to prepare.")
+                self.config_parser.print_log_message('INFO', "postgresql_connector: prepare_session_settings: No settings found to prepare.")
                 return filtered_settings
 
             for setting in matching_settings:
@@ -1852,10 +1852,10 @@ class PostgreSQLConnector(DatabaseConnector):
                     filtered_settings += f"SET {setting_name} = {settings[setting_name]};"
                 else:
                     filtered_settings += f"SET {setting_name} = '{settings[setting_name]}';"
-            self.config_parser.print_log_message('INFO', f"Session settings: {filtered_settings}")
+            self.config_parser.print_log_message('INFO', f"postgresql_connector: prepare_session_settings: Session settings: {filtered_settings}")
             return filtered_settings
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error preparing session settings: {e}")
+            self.config_parser.print_log_message('ERROR', f"postgresql_connector: prepare_session_settings: Error preparing session settings: {e}")
             raise
 
     def fetch_domains(self, schema: str):
@@ -1898,7 +1898,7 @@ class PostgreSQLConnector(DatabaseConnector):
             self.disconnect()
             return domains
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', f"postgresql_connector: fetch_domains: Error executing query: {query}")
             self.config_parser.print_log_message('ERROR', e)
             raise
 
@@ -2013,12 +2013,12 @@ class PostgreSQLConnector(DatabaseConnector):
                     }
                     order_num += 1
 
-                self.config_parser.print_log_message('DEBUG2', f"Top {top_n} tables by rows: {top_tables['by_rows']}")
+                self.config_parser.print_log_message('DEBUG2', f"postgresql_connector: get_top_n_tables: Top {top_n} tables by rows: {top_tables['by_rows']}")
             else:
-                self.config_parser.print_log_message('DEBUG', "Top N tables by rows is not configured or set to 0, skipping this part.")
+                self.config_parser.print_log_message('DEBUG', "postgresql_connector: get_top_n_tables: Top N tables by rows is not configured or set to 0, skipping this part.")
 
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error fetching top tables by rows: {e}")
+            self.config_parser.print_log_message('ERROR', f"postgresql_connector: get_top_n_tables: Error fetching top tables by rows: {e}")
 
         return top_tables
 

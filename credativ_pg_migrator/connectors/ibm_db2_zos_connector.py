@@ -32,7 +32,7 @@ class IbmDb2ZosConnector(DatabaseConnector):
         self.connection = None
         self.config_parser = config_parser
         self.source_or_target = source_or_target
-        self.config_parser.print_log_message('DEBUG3', f"IbmDb2ZosConnector: Starting INIT")
+        self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: __init__: Starting INIT")
         self.connectivity = self.config_parser.get_connectivity(self.source_or_target)
         self.on_error_action = self.config_parser.get_on_error_action()
         self.logger = MigratorLogger(self.config_parser.get_log_file()).logger
@@ -40,14 +40,14 @@ class IbmDb2ZosConnector(DatabaseConnector):
 
         if self.connectivity == self.config_parser.const_connectivity_ddl():
             self.ddl_directory = self.source_db_config['ddl']['directory']
-            self.config_parser.print_log_message('DEBUG3', f"Source_db_config: {self.source_db_config} - ddl_directory: {self.ddl_directory}")
+            self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: __init__: Source_db_config: {self.source_db_config} - ddl_directory: {self.ddl_directory}")
             if not os.path.exists(self.ddl_directory):
                 raise ValueError(f"DDL directory not found: '{self.ddl_directory}'")
             else:
                 if not os.listdir(self.ddl_directory):
                     raise ValueError(f"DDL directory is empty: '{self.ddl_directory}'")
                 else:
-                    self.config_parser.print_log_message('INFO', f"DDL directory found: '{self.ddl_directory}'")
+                    self.config_parser.print_log_message('INFO', f"ibm_db2_zos_connector: __init__: DDL directory found: '{self.ddl_directory}'")
 
                 if not os.listdir(self.ddl_directory):
                     raise ValueError(f"DDL directory is empty: '{self.ddl_directory}'")
@@ -59,23 +59,23 @@ class IbmDb2ZosConnector(DatabaseConnector):
                             ext = os.path.splitext(filename)[1]
                             extension_counts[ext] = extension_counts.get(ext, 0) + 1
                     for ext, count in extension_counts.items():
-                        self.config_parser.print_log_message('INFO', f"Found {count} files with extension '{ext}'")
+                        self.config_parser.print_log_message('INFO', f"ibm_db2_zos_connector: __init__: Found {count} files with extension '{ext}'")
 
-                    self.config_parser.print_log_message('INFO', f"DDL directory found: {self.ddl_directory}")
+                    self.config_parser.print_log_message('INFO', f"ibm_db2_zos_connector: __init__: DDL directory found: {self.ddl_directory}")
         else:
             raise ValueError(f"Unsupported IBM DB2 z/OS connectivity: {self.connectivity}")
 
         self.migrator_tables = MigratorTables(self.logger, self.config_parser)
         self.protocol_schema = self.migrator_tables.protocol_schema
 
-        self.config_parser.print_log_message('DEBUG3', f"IbmDb2ZosConnector: INIT done")
+        self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: __init__: INIT done")
 
     def connect(self):
-        self.config_parser.print_log_message('DEBUG', "IbmDb2ZosConnector: connect() called.")
+        self.config_parser.print_log_message('DEBUG', "ibm_db2_zos_connector: connect: connect() called.")
         pass
 
     def disconnect(self):
-        self.config_parser.print_log_message('DEBUG', "IbmDb2ZosConnector: disconnect() called.")
+        self.config_parser.print_log_message('DEBUG', "ibm_db2_zos_connector: disconnect: disconnect() called.")
         if hasattr(self, 'migrator_tables') and self.migrator_tables and self.migrator_tables.protocol_connection:
             self.migrator_tables.protocol_connection.connection.close()
 
@@ -86,12 +86,12 @@ class IbmDb2ZosConnector(DatabaseConnector):
                         FROM "{self.protocol_schema}"."ddl_tables"
                         WHERE upper(trim(source_schema_name)) = upper(trim('{schema_name}'))
                         ORDER BY id"""
-            self.config_parser.print_log_message('DEBUG3', f"fetch_all_tables ({schema_name}): starting: schema_name: {schema_name} - self.connectivity: {self.connectivity} - query: {query}")
+            self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: fetch_all_tables: ({schema_name}): starting: schema_name: {schema_name} - self.connectivity: {self.connectivity} - query: {query}")
             try:
                 cursor = self.migrator_tables.protocol_connection.connection.cursor()
                 cursor.execute(query)
                 rows = cursor.fetchall()
-                self.config_parser.print_log_message('DEBUG3', f"fetch_all_tables ({schema_name}): {rows}")
+                self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: fetch_all_tables: ({schema_name}): {rows}")
                 for i, row in enumerate(rows, 1):
                     tables[i] = {
                         'id': i,
@@ -101,12 +101,12 @@ class IbmDb2ZosConnector(DatabaseConnector):
                     }
                 cursor.close()
             except Exception as e:
-                self.config_parser.print_log_message('ERROR', f"fetch_all_tables ({schema_name}): {e}")
+                self.config_parser.print_log_message('ERROR', f"ibm_db2_zos_connector: fetch_all_tables: ({schema_name}): {e}")
                 raise
         return tables
 
     def fetch_table_columns(self, settings) -> dict:
-        self.config_parser.print_log_message('DEBUG', "IbmDb2ZosConnector: fetch_table_columns() called.")
+        self.config_parser.print_log_message('DEBUG', "ibm_db2_zos_connector: fetch_table_columns: fetch_table_columns() called.")
         table_schema = settings.get('table_schema')
         table_name = settings.get('table_name')
         columns = {}
@@ -117,7 +117,7 @@ class IbmDb2ZosConnector(DatabaseConnector):
             cursor = self.migrator_tables.protocol_connection.connection.cursor()
             cursor.execute(query, (table_schema, table_name))
             rows = cursor.fetchall()
-            self.config_parser.print_log_message('DEBUG3', f"fetch_table_columns ({table_schema}.{table_name}): {rows}")
+            self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: fetch_table_columns: ({table_schema}.{table_name}): {rows}")
             for i, row in enumerate(rows, 1):
                 col_name = row[0]
                 col_type = row[1]
@@ -206,10 +206,10 @@ class IbmDb2ZosConnector(DatabaseConnector):
 
 
     def parse_ddl_files(self, settings):
-        self.config_parser.print_log_message('DEBUG3', f"IbmDb2ZosConnector: Starting DDL parser")
+        self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: parse_ddl_files: Starting DDL parser")
         migrator_tables = settings['migrator_tables']
         if not migrator_tables:
-            self.config_parser.print_log_message('ERROR', "parse_ddl_files: migrator_tables not found in settings.")
+            self.config_parser.print_log_message('ERROR', "ibm_db2_zos_connector: parse_ddl_files: migrator_tables not found in settings.")
             return
 
         for filepath in glob.glob(os.path.join(self.ddl_directory, '*.*')):
@@ -517,14 +517,14 @@ class IbmDb2ZosConnector(DatabaseConnector):
         cursor.execute(f'SELECT source_schema_name FROM "{migrator_tables.protocol_schema}"."ddl_tables" WHERE source_schema_name IS NOT NULL')
         schemas = [row[0] for row in cursor.fetchall()]
         cursor.close()
-        self.config_parser.print_log_message('DEBUG3', f'parse_ddl_files: found schemas: {schemas}')
+        self.config_parser.print_log_message('DEBUG3', f'ibm_db2_zos_connector: parse_ddl_files: found schemas: {schemas}')
 
         if schemas:
             most_frequent_schema = max(set(schemas), key=schemas.count)
-            self.config_parser.print_log_message('DEBUG3', f'parse_ddl_files: setting schema: {most_frequent_schema}')
+            self.config_parser.print_log_message('DEBUG3', f'ibm_db2_zos_connector: parse_ddl_files: setting schema: {most_frequent_schema}')
             self.config_parser.set_source_schema(most_frequent_schema)
 
-        self.config_parser.print_log_message('INFO', "DDL parsing completed and unified protocol tables populated with DB2 source metadata.")
+        self.config_parser.print_log_message('INFO', "ibm_db2_zos_connector: parse_ddl_files: DDL parsing completed and unified protocol tables populated with DB2 source metadata.")
 
 
     def get_sql_functions_mapping(self, settings):
@@ -562,7 +562,7 @@ class IbmDb2ZosConnector(DatabaseConnector):
             cursor = self.migrator_tables.protocol_connection.connection.cursor()
             cursor.execute(query, (table_schema, table_name))
             rows = cursor.fetchall()
-            self.config_parser.print_log_message('DEBUG3', f"fetch_indexes ({table_schema}.{table_name}): {rows}")
+            self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: fetch_indexes: ({table_schema}.{table_name}): {rows}")
             for i, row in enumerate(rows, 1):
                 idx_name = row[0]
                 is_unique = row[1]
@@ -593,7 +593,7 @@ class IbmDb2ZosConnector(DatabaseConnector):
             cursor = self.migrator_tables.protocol_connection.connection.cursor()
             cursor.execute(query, (table_schema, table_name))
             rows = cursor.fetchall()
-            self.config_parser.print_log_message('DEBUG3', f"fetch_constraints ({table_schema}.{table_name}): {rows}")
+            self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: fetch_constraints: ({table_schema}.{table_name}): {rows}")
             for i, row in enumerate(rows, 1):
                 constraints[i] = {
                     'constraint_name': row[0],
@@ -624,7 +624,7 @@ class IbmDb2ZosConnector(DatabaseConnector):
             cursor = self.migrator_tables.protocol_connection.connection.cursor()
             cursor.execute(query, (table_schema,))
             rows = cursor.fetchall()
-            self.config_parser.print_log_message('DEBUG3', f"fetch_triggers ({table_schema}): {rows}")
+            self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: fetch_triggers: ({table_schema}): {rows}")
             order_num = 1
             for row in rows:
                 if table_name and table_name.upper() not in row[2].upper():
@@ -663,7 +663,7 @@ class IbmDb2ZosConnector(DatabaseConnector):
             cursor = self.migrator_tables.protocol_connection.connection.cursor()
             cursor.execute(query, (table_schema,))
             rows = cursor.fetchall()
-            self.config_parser.print_log_message('DEBUG3', f"fetch_sequences ({table_schema}): {rows}")
+            self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: fetch_sequences: ({table_schema}): {rows}")
             for i, row in enumerate(rows, 1):
                 seqs[i] = {
                     'id': row[0],
@@ -686,7 +686,7 @@ class IbmDb2ZosConnector(DatabaseConnector):
             cursor = self.migrator_tables.protocol_connection.connection.cursor()
             cursor.execute(query, (source_schema_name,))
             rows = cursor.fetchall()
-            self.config_parser.print_log_message('DEBUG3', f"fetch_views_names ({source_schema_name}): {rows}")
+            self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: fetch_views_names: ({source_schema_name}): {rows}")
             for i, row in enumerate(rows, 1):
                 views[i] = {
                     'id': row[0],
@@ -707,7 +707,7 @@ class IbmDb2ZosConnector(DatabaseConnector):
             cursor = self.migrator_tables.protocol_connection.connection.cursor()
             cursor.execute(query, (source_schema_name, source_view_name))
             row = cursor.fetchone()
-            self.config_parser.print_log_message('DEBUG3', f"fetch_view_code ({source_schema_name}.{source_view_name}): {row}")
+            self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: fetch_view_code: ({source_schema_name}.{source_view_name}): {row}")
             cursor.close()
             if row:
                 return row[0]

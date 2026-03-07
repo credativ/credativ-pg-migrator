@@ -40,7 +40,7 @@ class IbmDb2LuwConnector(DatabaseConnector):
             if not self.connection:
                 raise Exception("Failed to connect to the database")
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Unexpected error while connecting into the database: {e}")
+            self.config_parser.print_log_message('ERROR', f"ibm_db2_luw_connector: connect: Unexpected error while connecting into the database: {e}")
             raise
 
     def disconnect(self):
@@ -56,7 +56,7 @@ class IbmDb2LuwConnector(DatabaseConnector):
         if target_db_type == 'postgresql':
             return {}
         else:
-            self.config_parser.print_log_message('ERROR', f"Unsupported target database type: {target_db_type}")
+            self.config_parser.print_log_message('ERROR', f"ibm_db2_luw_connector: get_sql_functions_mapping: Unsupported target database type: {target_db_type}")
 
     def migrate_sequences(self, target_connector, settings):
         return True
@@ -88,7 +88,7 @@ class IbmDb2LuwConnector(DatabaseConnector):
             self.disconnect()
             return tables
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', f"ibm_db2_luw_connector: fetch_table_names: Error executing query: {query}")
             self.config_parser.print_log_message('ERROR', e)
             raise
 
@@ -168,7 +168,7 @@ class IbmDb2LuwConnector(DatabaseConnector):
             self.disconnect()
             return result
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', f"ibm_db2_luw_connector: fetch_table_columns: Error executing query: {query}")
             self.config_parser.print_log_message('ERROR', e)
             raise
 
@@ -303,7 +303,7 @@ class IbmDb2LuwConnector(DatabaseConnector):
             })
 
             if source_table_rows == 0:
-                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {source_table_name} is empty - skipping data migration.")
+                self.config_parser.print_log_message('INFO', f"ibm_db2_luw_connector: migrate_table: Worker {worker_id}: Table {source_table_name} is empty - skipping data migration.")
                 migrator_tables.update_data_migration_status({
                         'row_id': protocol_id,
                         'success': True,
@@ -319,12 +319,12 @@ class IbmDb2LuwConnector(DatabaseConnector):
 
             else:
                 part_name = 'migrate_table in batches using cursor'
-                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {source_table_name} has {source_table_rows} rows - starting data migration.")
+                self.config_parser.print_log_message('INFO', f"ibm_db2_luw_connector: migrate_table: Worker {worker_id}: Table {source_table_name} has {source_table_rows} rows - starting data migration.")
 
                 if source_table_rows > target_table_rows:
 
                     part_name = 'migrate_table in batches using cursor'
-                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Source table {source_table_name}: {source_table_rows} rows / Target table {target_table_name}: {target_table_rows} rows - starting data migration.")
+                    self.config_parser.print_log_message('INFO', f"ibm_db2_luw_connector: migrate_table: Worker {worker_id}: Source table {source_table_name}: {source_table_rows} rows / Target table {target_table_name}: {target_table_rows} rows - starting data migration.")
 
                     select_columns_list = []
                     orderby_columns_list = []
@@ -350,7 +350,7 @@ class IbmDb2LuwConnector(DatabaseConnector):
 
                     if resume_after_crash and not drop_unfinished_tables:
                         chunk_number = self.config_parser.get_total_chunks(target_table_rows, chunk_size)
-                        self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Resuming migration for table {source_schema_name}.{source_table_name} from chunk {chunk_number} with data chunk size {chunk_size}.")
+                        self.config_parser.print_log_message('DEBUG', f"ibm_db2_luw_connector: migrate_table: Worker {worker_id}: Resuming migration for table {source_schema_name}.{source_table_name} from chunk {chunk_number} with data chunk size {chunk_size}.")
                         chunk_offset = target_table_rows
                     else:
                         chunk_offset = (chunk_number - 1) * chunk_size
@@ -358,7 +358,7 @@ class IbmDb2LuwConnector(DatabaseConnector):
                     chunk_start_row_number = chunk_offset + 1
                     chunk_end_row_number = chunk_offset + chunk_size
 
-                    self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Migrating table {source_schema_name}.{source_table_name}: chunk {chunk_number}, data chunk size {chunk_size}, batch size {batch_size}, chunk offset {chunk_offset}, chunk end row number {chunk_end_row_number}, source table rows {source_table_rows}")
+                    self.config_parser.print_log_message('DEBUG', f"ibm_db2_luw_connector: migrate_table: Worker {worker_id}: Migrating table {source_schema_name}.{source_table_name}: chunk {chunk_number}, data chunk size {chunk_size}, batch size {batch_size}, chunk offset {chunk_offset}, chunk end row number {chunk_end_row_number}, source table rows {source_table_rows}")
                     order_by_clause = ''
 
                     # if table is small, skipping ordering does not make sense because it will not speed up the migration
@@ -367,13 +367,13 @@ class IbmDb2LuwConnector(DatabaseConnector):
                     if migration_limitation:
                         query += f" WHERE {migration_limitation}"
                     primary_key_columns = migrator_tables.select_primary_key({'source_schema_name': source_schema_name, 'source_table_name': source_table_name})
-                    self.config_parser.print_log_message('DEBUG2', f"Worker {worker_id}: Primary key columns for {source_schema_name}.{source_table_name}: {primary_key_columns}")
+                    self.config_parser.print_log_message('DEBUG2', f"ibm_db2_luw_connector: migrate_table: Worker {worker_id}: Primary key columns for {source_schema_name}.{source_table_name}: {primary_key_columns}")
                     if primary_key_columns:
                         orderby_columns = primary_key_columns
                     order_by_clause = f""" ORDER BY {orderby_columns}"""
                     query += order_by_clause + f" LIMIT {chunk_size} OFFSET {chunk_offset}"
 
-                    self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Fetching data with cursor using query: {query}")
+                    self.config_parser.print_log_message('DEBUG', f"ibm_db2_luw_connector: migrate_table: Worker {worker_id}: Fetching data with cursor using query: {query}")
 
                     part_name = 'execute query'
                     cursor = self.connection.cursor()
@@ -394,7 +394,7 @@ class IbmDb2LuwConnector(DatabaseConnector):
                         batch_number += 1
                         reading_end_time = time.time()
                         reading_duration = reading_end_time - reading_start_time
-                        self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Fetched {len(records)} rows (batch {batch_number}) from source table {source_table_name}.")
+                        self.config_parser.print_log_message('DEBUG', f"ibm_db2_luw_connector: migrate_table: Worker {worker_id}: Fetched {len(records)} rows (batch {batch_number}) from source table {source_table_name}.")
 
                         transforming_start_time = time.time()
                         records = [
@@ -411,7 +411,7 @@ class IbmDb2LuwConnector(DatabaseConnector):
                                     record[column_name] = str(record[column_name]) if record[column_name] is not None else None
 
                         # Insert batch into target table
-                        self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Starting insert of {len(records)} rows from source table {source_table_name}")
+                        self.config_parser.print_log_message('DEBUG', f"ibm_db2_luw_connector: migrate_table: Worker {worker_id}: Starting insert of {len(records)} rows from source table {source_table_name}")
                         transforming_end_time = time.time()
                         transforming_duration = transforming_end_time - transforming_start_time
                         inserting_start_time = time.time()
@@ -466,19 +466,19 @@ class IbmDb2LuwConnector(DatabaseConnector):
                         reading_start_time = batch_start_time
 
                     target_table_rows = migrate_target_connection.get_rows_count(target_schema_name, target_table_name)
-                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Target table {target_schema_name}.{target_table_name} has {target_table_rows} rows")
+                    self.config_parser.print_log_message('INFO', f"ibm_db2_luw_connector: migrate_table: Worker {worker_id}: Target table {target_schema_name}.{target_table_name} has {target_table_rows} rows")
 
                     shortest_batch_seconds = min(batch_durations) if batch_durations else 0
                     longest_batch_seconds = max(batch_durations) if batch_durations else 0
                     average_batch_seconds = sum(batch_durations) / len(batch_durations) if batch_durations else 0
-                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Migrated {total_inserted_rows} rows from {source_table_name} to {target_schema_name}.{target_table_name} in {batch_number} batches: "
+                    self.config_parser.print_log_message('INFO', f"ibm_db2_luw_connector: migrate_table: Worker {worker_id}: Migrated {total_inserted_rows} rows from {source_table_name} to {target_schema_name}.{target_table_name} in {batch_number} batches: "
                                                             f"Shortest batch: {shortest_batch_seconds:.2f} seconds, "
                                                             f"Longest batch: {longest_batch_seconds:.2f} seconds, "
                                                             f"Average batch: {average_batch_seconds:.2f} seconds")
                     cursor.close()
 
                 elif source_table_rows <= target_table_rows:
-                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Source table {source_table_name} has {source_table_rows} rows, which is less than or equal to target table {target_table_name} with {target_table_rows} rows. No data migration needed.")
+                    self.config_parser.print_log_message('INFO', f"ibm_db2_luw_connector: migrate_table: Worker {worker_id}: Source table {source_table_name} has {source_table_rows} rows, which is less than or equal to target table {target_table_name} with {target_table_rows} rows. No data migration needed.")
 
                 migration_stats = {
                     'rows_migrated': total_inserted_rows,
@@ -489,9 +489,9 @@ class IbmDb2LuwConnector(DatabaseConnector):
                     'finished': False,
                 }
 
-                self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Migration stats: {migration_stats}")
+                self.config_parser.print_log_message('DEBUG', f"ibm_db2_luw_connector: migrate_table: Worker {worker_id}: Migration stats: {migration_stats}")
                 if source_table_rows == target_table_rows or chunk_number >= total_chunks:
-                    self.config_parser.print_log_message('DEBUG3', f"Worker {worker_id}: Setting migration status to finished for table {source_table_name} (chunk {chunk_number}/{total_chunks})")
+                    self.config_parser.print_log_message('DEBUG3', f"ibm_db2_luw_connector: migrate_table: Worker {worker_id}: Setting migration status to finished for table {source_table_name} (chunk {chunk_number}/{total_chunks})")
                     migration_stats['finished'] = True
                     migrator_tables.update_data_migration_status({
                         'row_id': protocol_id,
@@ -527,8 +527,8 @@ class IbmDb2LuwConnector(DatabaseConnector):
                 })
                 return migration_stats
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Error during {part_name} -> {e}")
-            self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Full stack trace: {traceback.format_exc()}")
+            self.config_parser.print_log_message('ERROR', f"ibm_db2_luw_connector: migrate_table: Worker {worker_id}: Error during {part_name} -> {e}")
+            self.config_parser.print_log_message('ERROR', f"ibm_db2_luw_connector: migrate_table: Worker {worker_id}: Full stack trace: {traceback.format_exc()}")
             raise e
 
     def fetch_indexes(self, settings):
@@ -572,10 +572,10 @@ class IbmDb2LuwConnector(DatabaseConnector):
 
             cursor.close()
             self.disconnect()
-            self.config_parser.print_log_message( 'DEBUG2', f"Indexes for table {source_table_name} ({source_table_schema}): {index_columns}")
+            self.config_parser.print_log_message( 'DEBUG2', f"ibm_db2_luw_connector: fetch_indexes: Indexes for table {source_table_name} ({source_table_schema}): {index_columns}")
             return table_indexes
         except Exception as e:
-            self.config_parser.print_log_message( 'ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message( 'ERROR', f"ibm_db2_luw_connector: fetch_indexes: Error executing query: {query}")
             self.config_parser.print_log_message( 'ERROR', str(e))
             raise
 
@@ -645,7 +645,7 @@ class IbmDb2LuwConnector(DatabaseConnector):
             self.disconnect()
             return table_constraints
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', f"ibm_db2_luw_connector: fetch_constraints: Error executing query: {query}")
             self.config_parser.print_log_message('ERROR', e)
             raise
 
@@ -718,7 +718,7 @@ class IbmDb2LuwConnector(DatabaseConnector):
                 cursor.execute(query)
             cursor.close()
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', f"ibm_db2_luw_connector: execute_query: Error executing query: {query}")
             self.config_parser.print_log_message('ERROR', e)
             raise
 
@@ -730,7 +730,7 @@ class IbmDb2LuwConnector(DatabaseConnector):
             cursor.execute(script)
             cursor.close()
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error executing script: {script_path}")
+            self.config_parser.print_log_message('ERROR', f"ibm_db2_luw_connector: execute_sql_script: Error executing script: {script_path}")
             self.config_parser.print_log_message('ERROR', e)
             raise
 
@@ -755,7 +755,7 @@ class IbmDb2LuwConnector(DatabaseConnector):
             cursor.close()
             return count
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', f"ibm_db2_luw_connector: get_rows_count: Error executing query: {query}")
             self.config_parser.print_log_message('ERROR', e)
             raise
 
@@ -781,7 +781,7 @@ class IbmDb2LuwConnector(DatabaseConnector):
 
     def get_table_description(self, settings) -> dict:
         # Placeholder for fetching table description
-        self.config_parser.print_log_message('DEBUG3', f"IBM DB2 connector: Getting table description for {settings['table_schema']}.{settings['table_name']}")
+        self.config_parser.print_log_message('DEBUG3', f"ibm_db2_luw_connector: get_table_description: IBM DB2 connector: Getting table description for {settings['table_schema']}.{settings['table_name']}")
         return { 'table_description': '' }
 
     def testing_select(self):
@@ -796,7 +796,7 @@ class IbmDb2LuwConnector(DatabaseConnector):
             cursor.close()
             return version
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error fetching database version: {e}")
+            self.config_parser.print_log_message('ERROR', f"ibm_db2_luw_connector: get_database_version: Error fetching database version: {e}")
             raise
 
     def get_database_size(self):
@@ -808,7 +808,7 @@ class IbmDb2LuwConnector(DatabaseConnector):
             cursor.close()
             return size
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error fetching database size: {e}")
+            self.config_parser.print_log_message('ERROR', f"ibm_db2_luw_connector: get_database_size: Error fetching database size: {e}")
             raise
 
     def get_top_n_tables(self, settings):
@@ -836,7 +836,7 @@ class IbmDb2LuwConnector(DatabaseConnector):
                     ORDER BY STATS_ROWS_MODIFIED DESC
                     FETCH FIRST {top_n} ROWS ONLY
                 """
-                self.config_parser.print_log_message('DEBUG', f"Fetching top {top_n} tables by row count for schema {source_schema_name} with query: {query}")
+                self.config_parser.print_log_message('DEBUG', f"ibm_db2_luw_connector: get_top_n_tables: Fetching top {top_n} tables by row count for schema {source_schema_name} with query: {query}")
                 cursor = self.connection.cursor()
                 cursor.execute(query)
                 tables = cursor.fetchall()
@@ -851,11 +851,11 @@ class IbmDb2LuwConnector(DatabaseConnector):
                         'table_size': row[3],
                     }
                     order_num += 1
-                self.config_parser.print_log_message('DEBUG2', f"Top {top_n} tables BY ROWS: {top_tables}")
+                self.config_parser.print_log_message('DEBUG2', f"ibm_db2_luw_connector: get_top_n_tables: Top {top_n} tables BY ROWS: {top_tables}")
             else:
-                self.config_parser.print_log_message('DEBUG', f"Top N tables by rows is set to 0, skipping fetching top tables by row count.")
+                self.config_parser.print_log_message('DEBUG', f"ibm_db2_luw_connector: get_top_n_tables: Top N tables by rows is set to 0, skipping fetching top tables by row count.")
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error fetching top {top_n} tables by row count: {e}")
+            self.config_parser.print_log_message('ERROR', f"ibm_db2_luw_connector: get_top_n_tables: Error fetching top {top_n} tables by row count: {e}")
 
         return top_tables
 
@@ -875,7 +875,7 @@ class IbmDb2LuwConnector(DatabaseConnector):
             self.disconnect()
             return exists
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error checking if target table exists: {query}")
+            self.config_parser.print_log_message('ERROR', f"ibm_db2_luw_connector: target_table_exists: Error checking if target table exists: {query}")
             self.config_parser.print_log_message('ERROR', e)
             raise
 

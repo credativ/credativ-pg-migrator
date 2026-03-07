@@ -50,11 +50,11 @@ class OracleConnector(DatabaseConnector):
                                                     encoding="UTF-8")
 
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', "cx_Oracle module is not installed.")
+            self.config_parser.print_log_message('ERROR', "oracle_connector: connect: cx_Oracle module is not installed.")
             raise e
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error connecting to Oracle database: {e}")
-            self.config_parser.print_log_message('ERROR', "Full stack trace:")
+            self.config_parser.print_log_message('ERROR', f"oracle_connector: connect: Error connecting to Oracle database: {e}")
+            self.config_parser.print_log_message('ERROR', "oracle_connector: connect: Full stack trace:")
             self.config_parser.print_log_message('ERROR', traceback.format_exc())
             raise e
 
@@ -71,7 +71,7 @@ class OracleConnector(DatabaseConnector):
         if target_db_type == 'postgresql':
             return {}
         else:
-            self.config_parser.print_log_message('ERROR', f"Unsupported target database type: {target_db_type}")
+            self.config_parser.print_log_message('ERROR', f"oracle_connector: get_sql_functions_mapping: Unsupported target database type: {target_db_type}")
 
     def migrate_sequences(self, target_connector, settings):
         return True
@@ -101,7 +101,7 @@ class OracleConnector(DatabaseConnector):
             self.disconnect()
             return tables
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', f"oracle_connector: fetch_table_names: Error executing query: {query}")
             self.config_parser.print_log_message('ERROR', e)
             raise
 
@@ -158,7 +158,7 @@ class OracleConnector(DatabaseConnector):
                     'comment': '',
                 }
 
-                self.config_parser.print_log_message('DEBUG', f"Checking if default value is a sequence for column {column_name} ({column_default})...")
+                self.config_parser.print_log_message('DEBUG', f"oracle_connector: fetch_table_columns: Checking if default value is a sequence for column {column_name} ({column_default})...")
                 if (isinstance(column_default, str)
                     and 'nextval' in column_default.lower()):
                     parts = column_default.replace('"', '').split(".")
@@ -166,7 +166,7 @@ class OracleConnector(DatabaseConnector):
                         owner, seq_name, _ = parts
                         sequence_details = self.get_sequence_details(owner, seq_name)
                         if sequence_details:
-                            self.config_parser.print_log_message('DEBUG', f"Found sequence {sequence_details['name']} for column {column_name}.")
+                            self.config_parser.print_log_message('DEBUG', f"oracle_connector: fetch_table_columns: Found sequence {sequence_details['name']} for column {column_name}.")
                             result[column_id]['column_default_value'] = ""
                             result[column_id]['is_identity'] = 'YES'
                             # if data_type in ('NUMBER'):
@@ -179,7 +179,7 @@ class OracleConnector(DatabaseConnector):
 
             return result
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', f"oracle_connector: fetch_table_columns: Error executing query: {query}")
             self.config_parser.print_log_message('ERROR', e)
             raise
 
@@ -277,7 +277,7 @@ class OracleConnector(DatabaseConnector):
             else:
                 return None
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', f"oracle_connector: get_sequence_details: Error executing query: {query}")
             self.config_parser.print_log_message('ERROR', e)
             raise
 
@@ -342,7 +342,7 @@ class OracleConnector(DatabaseConnector):
             })
 
             if source_table_rows == 0:
-                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {source_table_name} is empty - skipping data migration.")
+                self.config_parser.print_log_message('INFO', f"oracle_connector: migrate_table: Worker {worker_id}: Table {source_table_name} is empty - skipping data migration.")
                 migrator_tables.update_data_migration_status({
                         'row_id': protocol_id,
                         'success': True,
@@ -360,7 +360,7 @@ class OracleConnector(DatabaseConnector):
 
                 if source_table_rows > target_table_rows:
 
-                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Source table {source_table_name}: {source_table_rows} rows / Target table {target_table_name}: {target_table_rows} rows - starting data migration.")
+                    self.config_parser.print_log_message('INFO', f"oracle_connector: migrate_table: Worker {worker_id}: Source table {source_table_name}: {source_table_rows} rows / Target table {target_table_name}: {target_table_rows} rows - starting data migration.")
 
                     select_columns_list = []
                     orderby_columns_list = []
@@ -386,7 +386,7 @@ class OracleConnector(DatabaseConnector):
 
                     if resume_after_crash and not drop_unfinished_tables:
                         chunk_number = self.config_parser.get_total_chunks(target_table_rows, chunk_size)
-                        self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Resuming migration for table {source_schema_name}.{source_table_name} from chunk {chunk_number} with data chunk size {chunk_size}.")
+                        self.config_parser.print_log_message('DEBUG', f"oracle_connector: migrate_table: Worker {worker_id}: Resuming migration for table {source_schema_name}.{source_table_name} from chunk {chunk_number} with data chunk size {chunk_size}.")
                         chunk_offset = target_table_rows
                     else:
                         chunk_offset = (chunk_number - 1) * chunk_size
@@ -394,20 +394,20 @@ class OracleConnector(DatabaseConnector):
                     chunk_start_row_number = chunk_offset + 1
                     chunk_end_row_number = chunk_offset + chunk_size
 
-                    self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Migrating table {source_schema_name}.{source_table_name}: chunk {chunk_number}, data chunk size {chunk_size}, batch size {batch_size}, chunk offset {chunk_offset}, chunk end row number {chunk_end_row_number}, source table rows {source_table_rows}")
+                    self.config_parser.print_log_message('DEBUG', f"oracle_connector: migrate_table: Worker {worker_id}: Migrating table {source_schema_name}.{source_table_name}: chunk {chunk_number}, data chunk size {chunk_size}, batch size {batch_size}, chunk offset {chunk_offset}, chunk end row number {chunk_end_row_number}, source table rows {source_table_rows}")
                     order_by_clause = ''
 
                     query = f'''SELECT {select_columns} FROM "{source_schema_name}"."{source_table_name}"'''
                     if migration_limitation:
                         query += f" WHERE {migration_limitation}"
                     primary_key_columns = migrator_tables.select_primary_key({'source_schema_name': source_schema_name, 'source_table_name': source_table_name})
-                    self.config_parser.print_log_message('DEBUG2', f"Worker {worker_id}: Primary key columns for {source_schema_name}.{source_table_name}: {primary_key_columns}")
+                    self.config_parser.print_log_message('DEBUG2', f"oracle_connector: migrate_table: Worker {worker_id}: Primary key columns for {source_schema_name}.{source_table_name}: {primary_key_columns}")
                     if primary_key_columns:
                         orderby_columns = primary_key_columns
                     order_by_clause = f""" ORDER BY {orderby_columns}"""
                     query += order_by_clause + f" OFFSET {chunk_offset} ROWS FETCH NEXT {chunk_size} ROWS ONLY"
 
-                    self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Fetching data with cursor using query: {query}")
+                    self.config_parser.print_log_message('DEBUG', f"oracle_connector: migrate_table: Worker {worker_id}: Fetching data with cursor using query: {query}")
 
                     part_name = 'execute query'
                     cursor = self.connection.cursor()
@@ -432,7 +432,7 @@ class OracleConnector(DatabaseConnector):
                         batch_number += 1
                         reading_end_time = time.time()
                         reading_duration = reading_end_time - reading_start_time
-                        self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Fetched {len(records)} rows (batch {batch_number}) from source table '{source_table_name}' using cursor")
+                        self.config_parser.print_log_message('DEBUG', f"oracle_connector: migrate_table: Worker {worker_id}: Fetched {len(records)} rows (batch {batch_number}) from source table '{source_table_name}' using cursor")
 
                         transforming_start_time = time.time()
                         records = [
@@ -443,13 +443,13 @@ class OracleConnector(DatabaseConnector):
                             for order_num, column in source_columns.items():
                                 column_name = column['column_name']
                                 column_type = column['data_type']
-                                # self.config_parser.print_log_message('DEBUG3', f"Worker {worker_id}: Processing column {column_name} with data type {column_type} in record {record}")
+                                # self.config_parser.print_log_message('DEBUG3', f"oracle_connector: migrate_table: Worker {worker_id}: Processing column {column_name} with data type {column_type} in record {record}")
                                 if column_type.lower() in ['blob', 'clob']:
                                     if record[column_name] is not None:
                                         record[column_name] = record[column_name].read()
 
                         # Insert batch into target table
-                        self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Starting insert of {len(records)} rows from source table {source_table_name}")
+                        self.config_parser.print_log_message('DEBUG', f"oracle_connector: migrate_table: Worker {worker_id}: Starting insert of {len(records)} rows from source table {source_table_name}")
                         transforming_end_time = time.time()
                         transforming_duration = transforming_end_time - transforming_start_time
                         inserting_start_time = time.time()
@@ -504,12 +504,12 @@ class OracleConnector(DatabaseConnector):
                         reading_start_time = batch_start_time
 
                     target_table_rows = migrate_target_connection.get_rows_count(target_schema_name, target_table_name)
-                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Target table {target_schema_name}.{target_table_name} has {target_table_rows} rows")
+                    self.config_parser.print_log_message('INFO', f"oracle_connector: migrate_table: Worker {worker_id}: Target table {target_schema_name}.{target_table_name} has {target_table_rows} rows")
 
                     shortest_batch_seconds = min(batch_durations) if batch_durations else 0
                     longest_batch_seconds = max(batch_durations) if batch_durations else 0
                     average_batch_seconds = sum(batch_durations) / len(batch_durations) if batch_durations else 0
-                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Migrated {total_inserted_rows} rows from {source_table_name} to {target_schema_name}.{target_table_name} in {batch_number} batches: "
+                    self.config_parser.print_log_message('INFO', f"oracle_connector: migrate_table: Worker {worker_id}: Migrated {total_inserted_rows} rows from {source_table_name} to {target_schema_name}.{target_table_name} in {batch_number} batches: "
                                                             f"Shortest batch: {shortest_batch_seconds:.2f} seconds, "
                                                             f"Longest batch: {longest_batch_seconds:.2f} seconds, "
                                                             f"Average batch: {average_batch_seconds:.2f} seconds")
@@ -517,7 +517,7 @@ class OracleConnector(DatabaseConnector):
                     cursor.close()
 
                 elif source_table_rows <= target_table_rows:
-                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Source table {source_table_name} has {source_table_rows} rows, which is less than or equal to target table {target_table_name} with {target_table_rows} rows. No data migration needed.")
+                    self.config_parser.print_log_message('INFO', f"oracle_connector: migrate_table: Worker {worker_id}: Source table {source_table_name} has {source_table_rows} rows, which is less than or equal to target table {target_table_name} with {target_table_rows} rows. No data migration needed.")
 
                 migration_stats = {
                     'rows_migrated': total_inserted_rows,
@@ -528,9 +528,9 @@ class OracleConnector(DatabaseConnector):
                     'finished': False,
                 }
 
-                self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Migration stats: {migration_stats}")
+                self.config_parser.print_log_message('DEBUG', f"oracle_connector: migrate_table: Worker {worker_id}: Migration stats: {migration_stats}")
                 if source_table_rows <= target_table_rows or chunk_number >= total_chunks:
-                    self.config_parser.print_log_message('DEBUG3', f"Worker {worker_id}: Setting migration status to finished for table {source_table_name} (chunk {chunk_number}/{total_chunks})")
+                    self.config_parser.print_log_message('DEBUG3', f"oracle_connector: migrate_table: Worker {worker_id}: Setting migration status to finished for table {source_table_name} (chunk {chunk_number}/{total_chunks})")
                     migration_stats['finished'] = True
                     migrator_tables.update_data_migration_status({
                         'row_id': protocol_id,
@@ -568,8 +568,8 @@ class OracleConnector(DatabaseConnector):
                 return migration_stats
 
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Error during {part_name} -> {e}")
-            self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Full stack trace: {traceback.format_exc()}")
+            self.config_parser.print_log_message('ERROR', f"oracle_connector: migrate_table: Worker {worker_id}: Error during {part_name} -> {e}")
+            self.config_parser.print_log_message('ERROR', f"oracle_connector: migrate_table: Worker {worker_id}: Full stack trace: {traceback.format_exc()}")
             raise e
 
     def fetch_indexes(self, settings):
@@ -655,13 +655,13 @@ class OracleConnector(DatabaseConnector):
                     if ddl:
                         ddl = ddl.decode('utf-8') if isinstance(ddl, bytes) else ddl
                         table_indexes[order_num]['index_sql'] = f"{ddl}"
-                        self.config_parser.print_log_message('DEBUG', f"Fetched DDL for index {index_info['index_name']}: {ddl}")
+                        self.config_parser.print_log_message('DEBUG', f"oracle_connector: fetch_indexes: Fetched DDL for index {index_info['index_name']}: {ddl}")
                 except Exception as e:
-                    self.config_parser.print_log_message('ERROR', f"Error fetching DDL for index {index_info['index_name']}: {e}")
+                    self.config_parser.print_log_message('ERROR', f"oracle_connector: fetch_indexes: Error fetching DDL for index {index_info['index_name']}: {e}")
                     table_indexes[order_num]['index_sql'] = f"Error fetching DDL: {e}"
 
             if hidden_columns_count > 0:
-                self.config_parser.print_log_message('INFO', f"Table {source_table_schema}.{source_table_name} has {hidden_columns_count} hidden columns in indexes.")
+                self.config_parser.print_log_message('INFO', f"oracle_connector: fetch_indexes: Table {source_table_schema}.{source_table_name} has {hidden_columns_count} hidden columns in indexes.")
                 try:
                     query = f"""SELECT COLUMN_NAME, DATA_DEFAULT FROM all_tab_cols WHERE owner = '{source_table_schema.upper()}' AND table_name = '{source_table_name.upper()}' AND hidden_column = 'YES'"""
                     cursor.execute(query)
@@ -669,22 +669,22 @@ class OracleConnector(DatabaseConnector):
                     for col in hidden_columns:
                         col_name = col[0]
                         col_default = col[1] if col[1] else 'NULL'
-                        self.config_parser.print_log_message('DEBUG', f"Hidden column: {col_name}, Default value: {col_default}")
+                        self.config_parser.print_log_message('DEBUG', f"oracle_connector: fetch_indexes: Hidden column: {col_name}, Default value: {col_default}")
 
                         for order_num, index_info in table_indexes.items():
                             if index_info['index_hidden_columns_count'] > 0:
                                 if col_name in index_info['index_columns']:
                                     index_info['index_columns'] = index_info['index_columns'].replace(col_name, f"{col_default}")
-                                    self.config_parser.print_log_message('DEBUG', f"Updated index {index_info['index_name']} with hidden column {col_name} and default value {col_default}")
+                                    self.config_parser.print_log_message('DEBUG', f"oracle_connector: fetch_indexes: Updated index {index_info['index_name']} with hidden column {col_name} and default value {col_default}")
                 except Exception as e:
-                    self.config_parser.print_log_message('ERROR', f"Error fetching hidden columns for table {source_table_schema}.{source_table_name}: {e}")
+                    self.config_parser.print_log_message('ERROR', f"oracle_connector: fetch_indexes: Error fetching hidden columns for table {source_table_schema}.{source_table_name}: {e}")
 
             cursor.close()
             self.disconnect()
             return table_indexes
 
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error executing query: {index_query}")
+            self.config_parser.print_log_message('ERROR', f"oracle_connector: fetch_indexes: Error executing query: {index_query}")
             self.config_parser.print_log_message('ERROR', e)
             raise
 
@@ -772,7 +772,7 @@ class OracleConnector(DatabaseConnector):
             self.disconnect()
             return table_constraints
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error executing query: {constraints_query}")
+            self.config_parser.print_log_message('ERROR', f"oracle_connector: fetch_constraints: Error executing query: {constraints_query}")
             self.config_parser.print_log_message('ERROR', e)
             raise
 
@@ -824,7 +824,7 @@ class OracleConnector(DatabaseConnector):
             self.disconnect()
             return triggers
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', f"oracle_connector: fetch_triggers: Error executing query: {query}")
             self.config_parser.print_log_message('ERROR', e)
             raise
 
@@ -880,7 +880,7 @@ class OracleConnector(DatabaseConnector):
             self.disconnect()
             return views
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', f"oracle_connector: fetch_views_names: Error executing query: {query}")
             self.config_parser.print_log_message('ERROR', e)
             raise
 
@@ -905,7 +905,7 @@ class OracleConnector(DatabaseConnector):
             self.disconnect()
             return view_code
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', f"oracle_connector: fetch_view_code: Error executing query: {query}")
             self.config_parser.print_log_message('ERROR', e)
             raise
 
@@ -928,7 +928,7 @@ class OracleConnector(DatabaseConnector):
                 cursor.execute(query)
             cursor.close()
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', f"oracle_connector: execute_query: Error executing query: {query}")
             self.config_parser.print_log_message('ERROR', e)
             raise
 
@@ -940,7 +940,7 @@ class OracleConnector(DatabaseConnector):
             cursor.execute(script)
             cursor.close()
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error executing SQL script: {script_path}")
+            self.config_parser.print_log_message('ERROR', f"oracle_connector: execute_sql_script: Error executing SQL script: {script_path}")
             self.config_parser.print_log_message('ERROR', e)
             raise
 
@@ -964,7 +964,7 @@ class OracleConnector(DatabaseConnector):
             cursor.close()
             return count
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', f"oracle_connector: get_rows_count: Error executing query: {query}")
             self.config_parser.print_log_message('ERROR', e)
             raise
 
@@ -989,7 +989,7 @@ class OracleConnector(DatabaseConnector):
         return {}
 
     def get_table_description(self, settings) -> dict:
-        self.config_parser.print_log_message('DEBUG3', f"Oracle connector: Getting table description for {settings['table_schema']}.{settings['table_name']}")
+        self.config_parser.print_log_message('DEBUG3', f"oracle_connector: get_table_description: Oracle connector: Getting table description for {settings['table_schema']}.{settings['table_name']}")
         table_schema = settings['table_schema']
         table_name = settings['table_name']
         output = ""
@@ -1011,7 +1011,7 @@ class OracleConnector(DatabaseConnector):
             cursor.close()
             self.disconnect()
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error fetching table description for {table_schema}.{table_name}: {e}")
+            self.config_parser.print_log_message('ERROR', f"oracle_connector: get_table_description: Error fetching table description for {table_schema}.{table_name}: {e}")
             raise
 
         return { 'table_description': output.strip() }
@@ -1031,7 +1031,7 @@ class OracleConnector(DatabaseConnector):
             self.disconnect()
             return version_info
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', f"oracle_connector: get_database_version: Error executing query: {query}")
             self.config_parser.print_log_message('ERROR', e)
             raise
 
@@ -1050,7 +1050,7 @@ class OracleConnector(DatabaseConnector):
             self.disconnect()
             return size_mb
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', f"oracle_connector: get_database_size: Error executing query: {query}")
             self.config_parser.print_log_message('ERROR', e)
             raise
 
@@ -1094,12 +1094,12 @@ class OracleConnector(DatabaseConnector):
                         'row_count': row[2],
                         'row_size': row[3],
                     }
-                self.config_parser.print_log_message('DEBUG2', f"Top {top_n} tables by rows: {top_tables['by_rows']}")
+                self.config_parser.print_log_message('DEBUG2', f"oracle_connector: get_top_n_tables: Top {top_n} tables by rows: {top_tables['by_rows']}")
             else:
-                self.config_parser.print_log_message('DEBUG', "Top N tables by rows is not configured or set to 0, skipping this part.")
+                self.config_parser.print_log_message('DEBUG', "oracle_connector: get_top_n_tables: Top N tables by rows is not configured or set to 0, skipping this part.")
 
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', f"oracle_connector: get_top_n_tables: Error executing query: {query}")
 
         return top_tables
 
@@ -1123,7 +1123,7 @@ class OracleConnector(DatabaseConnector):
             self.disconnect()
             return exists
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', f"oracle_connector: target_table_exists: Error executing query: {query}")
             self.config_parser.print_log_message('ERROR', e)
             raise
 
@@ -1135,7 +1135,7 @@ class OracleConnector(DatabaseConnector):
             cursor.close()
             return rows
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', f"oracle_connector: fetch_all_rows: Error executing query: {query}")
             self.config_parser.print_log_message('ERROR', e)
             raise
 

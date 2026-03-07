@@ -74,7 +74,7 @@ class InformixConnector(DatabaseConnector):
                 'day(': 'extract(day from ',
             }
         else:
-            self.config_parser.print_log_message('ERROR', f"Unsupported target database type: {target_db_type}")
+            self.config_parser.print_log_message('ERROR', f"informix_connector: get_sql_functions_mapping: Unsupported target database type: {target_db_type}")
 
     def migrate_sequences(self, target_connector, settings):
         return True
@@ -104,7 +104,7 @@ class InformixConnector(DatabaseConnector):
             self.disconnect()
             return tables
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', f"informix_connector: fetch_table_names: Error executing query: {query}")
             self.config_parser.print_log_message('ERROR', e)
             raise
 
@@ -176,7 +176,7 @@ class InformixConnector(DatabaseConnector):
         try:
             self.connect()
             cursor = self.connection.cursor()
-            self.config_parser.print_log_message('DEBUG', f"Informix: Reading columns for {table_schema}.{table_name}")
+            self.config_parser.print_log_message('DEBUG', f"informix_connector: fetch_table_columns: Informix: Reading columns for {table_schema}.{table_name}")
             cursor.execute(query)
             for row in cursor.fetchall():
                 column_number = row[0]
@@ -210,7 +210,7 @@ class InformixConnector(DatabaseConnector):
             self.disconnect()
             return result
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', f"informix_connector: fetch_table_columns: Error executing query: {query}")
             self.config_parser.print_log_message('ERROR', e)
             raise
 
@@ -240,7 +240,7 @@ class InformixConnector(DatabaseConnector):
             self.disconnect()
             return views
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', f"informix_connector: fetch_views_names: Error executing query: {query}")
             self.config_parser.print_log_message('ERROR', e)
             raise
 
@@ -350,7 +350,7 @@ class InformixConnector(DatabaseConnector):
             indexes = cursor.fetchall()
 
             for index in indexes:
-                self.config_parser.print_log_message('DEBUG', f"Processing index: {index}")
+                self.config_parser.print_log_message('DEBUG', f"informix_connector: fetch_indexes: Processing index: {index}")
                 procedure_id = 0
                 procedure_colnos = []
                 procedure_owner = ''
@@ -369,12 +369,12 @@ class InformixConnector(DatabaseConnector):
                 if match:
                     procedure_id = int(match.group(1))
                     procedure_colnos = [int(x) for x in match.group(2).split(',')]
-                    self.config_parser.print_log_message('DEBUG', f"Index {index_name}: index_keys: procedure_id={procedure_id}, procedure_colnos={procedure_colnos}")
+                    self.config_parser.print_log_message('DEBUG', f"informix_connector: fetch_indexes: Index {index_name}: index_keys: procedure_id={procedure_id}, procedure_colnos={procedure_colnos}")
                 # Get column names for each colno
 
                 columns = []
                 if colnos:
-                    self.config_parser.print_log_message('DEBUG3', f"Index {index_name}: Extracted colnos: {colnos}")
+                    self.config_parser.print_log_message('DEBUG3', f"informix_connector: fetch_indexes: Index {index_name}: Extracted colnos: {colnos}")
                     for colno in colnos:
                         cursor.execute(f"SELECT colname FROM syscolumns WHERE colno = {colno} AND tabid = {source_table_id}")
                         colname = cursor.fetchone()[0]
@@ -390,7 +390,7 @@ class InformixConnector(DatabaseConnector):
                     if procedure_info:
                         procedure_owner = procedure_info[0].strip()
                         procedure_name = procedure_info[1].strip()
-                        self.config_parser.print_log_message('DEBUG', f"Index {index_name}: Function-based index found: {index_name} on procedure {procedure_name}")
+                        self.config_parser.print_log_message('DEBUG', f"informix_connector: fetch_indexes: Index {index_name}: Function-based index found: {index_name} on procedure {procedure_name}")
                         function_based_index = True
 
                 if procedure_colnos:
@@ -401,10 +401,10 @@ class InformixConnector(DatabaseConnector):
                         colname = cursor.fetchone()[0]
                         proc_columns.append(colname)
                     procedure_columns = ', '.join(proc_columns)
-                    self.config_parser.print_log_message('DEBUG', f"Index {index_name}: Function-based index columns: {procedure_columns}")
+                    self.config_parser.print_log_message('DEBUG', f"informix_connector: fetch_indexes: Index {index_name}: Function-based index columns: {procedure_columns}")
 
                 index_columns = ', '.join([f'"{col}"' for col in columns])
-                self.config_parser.print_log_message('DEBUG', f"Index {index_name}: Columns list: {index_columns}, index type: {index_type}, clustered: {index[2]}")
+                self.config_parser.print_log_message('DEBUG', f"informix_connector: fetch_indexes: Index {index_name}: Columns list: {index_columns}, index type: {index_type}, clustered: {index[2]}")
 
                 table_indexes[order_num] = {
                     'index_name': index_name,
@@ -422,7 +422,7 @@ class InformixConnector(DatabaseConnector):
             return table_indexes
 
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', f"informix_connector: fetch_indexes: Error executing query: {query}")
             self.config_parser.print_log_message('ERROR', e)
             raise
 
@@ -445,7 +445,7 @@ class InformixConnector(DatabaseConnector):
         self.connect()
         cursor = self.connection.cursor()
 
-        # self.config_parser.print_log_message('DEBUG', f"Reading constraints for {target_table_name}")
+        # self.config_parser.print_log_message('DEBUG', f"informix_connector: fetch_constraints: Reading constraints for {target_table_name}")
         # cursor.execute(index_query)
         # indexes = cursor.fetchall()
 
@@ -478,7 +478,7 @@ class InformixConnector(DatabaseConnector):
                 index_name = constraint[2]
 
                 if constraint_type == 'R':
-                    self.config_parser.print_log_message('DEBUG', f"Processing table: {source_table_name} ({source_table_id}) - foreign key: {constraint_name}")
+                    self.config_parser.print_log_message('DEBUG', f"informix_connector: fetch_constraints: Processing table: {source_table_name} ({source_table_id}) - foreign key: {constraint_name}")
 
                     # Get foreign key details
                     find_fk_query = f"""
@@ -511,7 +511,7 @@ class InformixConnector(DatabaseConnector):
                         raise ValueError(f"ERROR: Multiple foreign key details found for table {source_table_name} and index {index_name}/{constraint_name}")
 
                     fk_details = cursor.fetchone()
-                    self.config_parser.print_log_message('DEBUG', f"Source table {source_table_name}: FOREIGN KEY details: {fk_details}")
+                    self.config_parser.print_log_message('DEBUG', f"informix_connector: fetch_constraints: Source table {source_table_name}: FOREIGN KEY details: {fk_details}")
 
                     # main_schema = fk_details[0]
                     # main_table_name = fk_details[1]
@@ -534,7 +534,7 @@ class InformixConnector(DatabaseConnector):
                     """
                     cursor.execute(find_ck_query)
                     ck_details = cursor.fetchone()
-                    self.config_parser.print_log_message('DEBUG', f"Source table {source_table_name}: CHECK constraint details: {ck_details}")
+                    self.config_parser.print_log_message('DEBUG', f"informix_connector: fetch_constraints: Source table {source_table_name}: CHECK constraint details: {ck_details}")
 
                     create_constraint_query = ''.join([f"{ck[0].strip()}" for ck in ck_details])
 
@@ -570,8 +570,8 @@ class InformixConnector(DatabaseConnector):
             WHERE owner = '{schema}'
             ORDER BY procname
         """
-        self.config_parser.print_log_message('DEBUG3', f"Fetching function/procedure names for schema {schema}")
-        self.config_parser.print_log_message('DEBUG3', f"Query: {query}")
+        self.config_parser.print_log_message('DEBUG3', f"informix_connector: fetch_funcproc_names: Fetching function/procedure names for schema {schema}")
+        self.config_parser.print_log_message('DEBUG3', f"informix_connector: fetch_funcproc_names: Query: {query}")
         self.connect()
         cursor = self.connection.cursor()
         cursor.execute(query)
@@ -622,7 +622,7 @@ class InformixConnector(DatabaseConnector):
             commands = [command.strip() for command in postgresql_code.split('\n') if command.strip()]
             postgresql_code = ''
             line_number = 0
-            # self.config_parser.print_log_message('DEBUG', 'Processing step 1: Splitting code into commands and replacing keywords')
+            # self.config_parser.print_log_message('DEBUG', 'informix_connector: convert_funcproc_code: Processing step 1: Splitting code into commands and replacing keywords')
 
             for command in commands:
                 if command.startswith('--'):
@@ -667,7 +667,7 @@ class InformixConnector(DatabaseConnector):
                 line_number += 1
 
             # Split the code based on ";"
-            # self.config_parser.print_log_message('DEBUG', 'Processing step 2: Splitting code into commands based on ";", reformating code and removing unnecessary spaces')
+            # self.config_parser.print_log_message('DEBUG', 'informix_connector: convert_funcproc_code: Processing step 2: Splitting code into commands based on ";", reformating code and removing unnecessary spaces')
 
             commands = postgresql_code.split(';')
             postgresql_code = ''
@@ -687,7 +687,7 @@ class InformixConnector(DatabaseConnector):
             postgresql_code = re.sub(r'\n\*/;', ' */', postgresql_code, flags=re.IGNORECASE)
             postgresql_code = re.sub(r'(FOREACH\s+\w+\s+FOR);', r'\1', postgresql_code, flags=re.MULTILINE | re.IGNORECASE)
 
-            self.config_parser.print_log_message('DEBUG3', f'[1] postgresql_code: {postgresql_code}')
+            self.config_parser.print_log_message('DEBUG3', f'informix_connector: convert_funcproc_code: [1] postgresql_code: {postgresql_code}')
 
             # Replace CREATE PROCEDURE ... RETURNS TRIGGER AS with CREATE FUNCTION
             # postgresql_code = re.sub(
@@ -766,9 +766,9 @@ class InformixConnector(DatabaseConnector):
             # Remove WITH HOLD if there is no COMMIT or ROLLBACK
             if re.search(r'\bWITH HOLD\b', postgresql_code, re.IGNORECASE) and not re.search(r'\b(COMMIT|ROLLBACK)\b', postgresql_code, re.IGNORECASE):
                 postgresql_code = re.sub(r'\bWITH HOLD\b', '', postgresql_code, flags=re.IGNORECASE)
-                self.config_parser.print_log_message('DEBUG', f'code contains WITH HOLD but no COMMIT or ROLLBACK')
+                self.config_parser.print_log_message('DEBUG', f'informix_connector: convert_funcproc_code: code contains WITH HOLD but no COMMIT or ROLLBACK')
 
-            self.config_parser.print_log_message('DEBUG3', f'Processing step 4: Converting FOREACH cursor FOR loop to FOR loop')
+            self.config_parser.print_log_message('DEBUG3', f'informix_connector: convert_funcproc_code: Processing step 4: Converting FOREACH cursor FOR loop to FOR loop')
             # convert FOREACH cursor FOR loop to FOR loop
             foreach_cursor_matches = re.finditer(
                 # r'FOREACH\s+\w+\s+FOR\s+SELECT\s+(.*?)\s+INTO\s+(.*?)\s+FROM\s+(.*?)\s+WHERE\s+(.*?)(?=;\s*FOREACH|;\s*END|;\s*IF|;\s*UPDATE|;\s*LET|;\s*SELECT|;|$)',
@@ -791,7 +791,7 @@ class InformixConnector(DatabaseConnector):
                 for_sql = f'FOR {match.group(2).strip()} IN (SELECT {match.group(1).strip()} FROM {match.group(3).strip()} \n)\nLOOP'
                 postgresql_code = postgresql_code.replace(foreach_cursor_sql, for_sql)
 
-            self.config_parser.print_log_message('DEBUG3', f'Processing step 5: Header for Procedures, Adding AS $$ and BEGIN to the code')
+            self.config_parser.print_log_message('DEBUG3', f'informix_connector: convert_funcproc_code: Processing step 5: Header for Procedures, Adding AS $$ and BEGIN to the code')
             # header for procedures
             header_match = re.search(r'CREATE PROCEDURE.*?\);', postgresql_code, flags=re.DOTALL | re.IGNORECASE)
             if header_match:
@@ -863,10 +863,10 @@ class InformixConnector(DatabaseConnector):
             postgresql_code = re.sub(r';;', ';', postgresql_code, flags=re.IGNORECASE )
             postgresql_code = re.sub(r'\*/;', '*/', postgresql_code, flags=re.IGNORECASE)
 
-            self.config_parser.print_log_message('DEBUG3', f'Processing step 7: Replacing source schema and table names with target schema and table names ({len(table_list)} tables)')
+            self.config_parser.print_log_message('DEBUG3', f'informix_connector: convert_funcproc_code: Processing step 7: Replacing source schema and table names with target schema and table names ({len(table_list)} tables)')
 
             for table in table_list:
-                # self.config_parser.print_log_message('DEBUG3', f'Replacing table {table} from schema {source_schema_name} to {target_schema_name}')
+                # self.config_parser.print_log_message('DEBUG3', f'informix_connector: convert_funcproc_code: Replacing table {table} from schema {source_schema_name} to {target_schema_name}')
 
                 source_table_pattern = re.compile(rf'("{source_schema_name}"\.)?"{table}"')
                 target_table_name = f'"{target_schema_name}"."{table}"'
@@ -876,7 +876,7 @@ class InformixConnector(DatabaseConnector):
                 postgresql_code = source_table_pattern.sub(target_table_name, postgresql_code)
 
             for view in view_list:
-                # self.config_parser.print_log_message('DEBUG3', f'Replacing view {view} from schema {source_schema_name} to {target_schema_name}')
+                # self.config_parser.print_log_message('DEBUG3', f'informix_connector: convert_funcproc_code: Replacing view {view} from schema {source_schema_name} to {target_schema_name}')
 
                 source_view_pattern = re.compile(rf'("{source_schema_name}"\.)?"{view}"')
                 target_view = f'"{target_schema_name}"."{view}"'
@@ -908,7 +908,7 @@ class InformixConnector(DatabaseConnector):
                 return_type = match.group(2)
                 postgresql_code = postgresql_code.replace(match.group(0), f'{header_part} RETURNS {return_type} AS $$\n')
 
-            self.config_parser.print_log_message('DEBUG3', 'Processing step 8: Handling ON EXCEPTION blocks')
+            self.config_parser.print_log_message('DEBUG3', 'informix_connector: convert_funcproc_code: Processing step 8: Handling ON EXCEPTION blocks')
             # some procs /funcs have ON EXCEPTION block, some of them several times
             if "ON EXCEPTION" in postgresql_code:
                 exception_lines = [line for line in postgresql_code.split('\n') if 'ON EXCEPTION' in line]
@@ -919,7 +919,7 @@ class InformixConnector(DatabaseConnector):
                         commentedout_exception_occurences += 1
 
                 live_exception_occurences = len(exception_lines) - commentedout_exception_occurences
-                self.config_parser.print_log_message('DEBUG3', f'Found {len(exception_lines)} ON EXCEPTION occurences, {commentedout_exception_occurences} commented out, {live_exception_occurences} live')
+                self.config_parser.print_log_message('DEBUG3', f'informix_connector: convert_funcproc_code: Found {len(exception_lines)} ON EXCEPTION occurences, {commentedout_exception_occurences} commented out, {live_exception_occurences} live')
                 if live_exception_occurences > 0:
 
                     for i in range(live_exception_occurences):
@@ -929,7 +929,7 @@ class InformixConnector(DatabaseConnector):
 
                         # Find the first occurrence of BEGIN
                         begin_index = next((i for i, line in enumerate(lines) if 'BEGIN' in line), None)
-                        self.config_parser.print_log_message('DEBUG3', f'ON EXCEPTION - begin_index: {begin_index}')
+                        self.config_parser.print_log_message('DEBUG3', f'informix_connector: convert_funcproc_code: ON EXCEPTION - begin_index: {begin_index}')
 
                         if begin_index is not None:
                             # Find the ON EXCEPTION - END EXCEPTION block that follows the first BEGIN
@@ -938,13 +938,13 @@ class InformixConnector(DatabaseConnector):
 
                             # Ensure that exception_start_index is immediately after begin_index
                             if exception_start_index is not None and exception_start_index != begin_index + 1:
-                                self.config_parser.print_log_message('DEBUG3', 'ON EXCEPTION does not immediately follow BEGIN, trying LOOP occurence')
+                                self.config_parser.print_log_message('DEBUG3', 'informix_connector: convert_funcproc_code: ON EXCEPTION does not immediately follow BEGIN, trying LOOP occurence')
 
                                 ## try LOOP - END LOOP occurence
                                 # loop_begin_index = next((i for i, line in enumerate(lines) if 'LOOP' in line), None)
                                 loop_begin_index = next((i for i, line in enumerate(lines) if 'LOOP' in line and i + 1 < len(lines) and 'ON EXCEPTION' in lines[i + 1]), None)
 
-                                self.config_parser.print_log_message('DEBUG3', f'loop_begin_index: {loop_begin_index}')
+                                self.config_parser.print_log_message('DEBUG3', f'informix_connector: convert_funcproc_code: loop_begin_index: {loop_begin_index}')
 
                                 if loop_begin_index is not None:
                                     # Find the ON EXCEPTION - END EXCEPTION block that follows the first BEGIN
@@ -953,7 +953,7 @@ class InformixConnector(DatabaseConnector):
 
                                     # Ensure that exception_start_index is immediately after loop_begin_index
                                     if exception_start_index is not None and exception_start_index != loop_begin_index + 1:
-                                        self.config_parser.print_log_message('DEBUG3', 'ON EXCEPTION does not immediately follow LOOP command')
+                                        self.config_parser.print_log_message('DEBUG3', 'informix_connector: convert_funcproc_code: ON EXCEPTION does not immediately follow LOOP command')
 
                                     if exception_start_index is not None and exception_end_index is not None:
                                         # Extract the exception block
@@ -1134,7 +1134,7 @@ class InformixConnector(DatabaseConnector):
             })
 
             if source_table_rows == 0:
-                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {source_table_name} is empty - skipping data migration.")
+                self.config_parser.print_log_message('INFO', f"informix_connector: migrate_table: Worker {worker_id}: Table {source_table_name} is empty - skipping data migration.")
                 migrator_tables.update_data_migration_status({
                         'row_id': protocol_id,
                         'success': True,
@@ -1152,7 +1152,7 @@ class InformixConnector(DatabaseConnector):
 
                 if source_table_rows > target_table_rows:
 
-                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Source table {source_table_name}: {source_table_rows} rows / Target table {target_table_name}: {target_table_rows} rows - starting data migration.")
+                    self.config_parser.print_log_message('INFO', f"informix_connector: migrate_table: Worker {worker_id}: Source table {source_table_name}: {source_table_rows} rows / Target table {target_table_name}: {target_table_rows} rows - starting data migration.")
 
                     select_columns_list = []
                     orderby_columns_list = []
@@ -1183,7 +1183,7 @@ class InformixConnector(DatabaseConnector):
 
                     if resume_after_crash and not drop_unfinished_tables:
                         chunk_number = self.config_parser.get_total_chunks(target_table_rows, chunk_size)
-                        self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Resuming migration for table {source_schema_name}.{source_table_name} from chunk {chunk_number} with data chunk size {chunk_size}.")
+                        self.config_parser.print_log_message('DEBUG', f"informix_connector: migrate_table: Worker {worker_id}: Resuming migration for table {source_schema_name}.{source_table_name} from chunk {chunk_number} with data chunk size {chunk_size}.")
                         chunk_offset = target_table_rows
                     else:
                         chunk_offset = (chunk_number - 1) * chunk_size
@@ -1191,20 +1191,20 @@ class InformixConnector(DatabaseConnector):
                     chunk_start_row_number = chunk_offset + 1
                     chunk_end_row_number = chunk_offset + chunk_size
 
-                    self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Migrating table {source_schema_name}.{source_table_name}: chunk {chunk_number}, data chunk size {chunk_size}, batch size {batch_size}, chunk offset {chunk_offset}, chunk end row number {chunk_end_row_number}, source table rows {source_table_rows}")
+                    self.config_parser.print_log_message('DEBUG', f"informix_connector: migrate_table: Worker {worker_id}: Migrating table {source_schema_name}.{source_table_name}: chunk {chunk_number}, data chunk size {chunk_size}, batch size {batch_size}, chunk offset {chunk_offset}, chunk end row number {chunk_end_row_number}, source table rows {source_table_rows}")
                     order_by_clause = ''
 
                     query = f'''SELECT SKIP {chunk_offset} {select_columns} FROM "{source_schema_name}".{source_table_name}'''
                     if migration_limitation:
                         query += f" WHERE {migration_limitation}"
                     primary_key_columns = migrator_tables.select_primary_key({'source_schema_name': source_schema_name, 'source_table_name': source_table_name})
-                    self.config_parser.print_log_message('DEBUG2', f"Worker {worker_id}: Primary key columns for {source_schema_name}.{source_table_name}: {primary_key_columns}")
+                    self.config_parser.print_log_message('DEBUG2', f"informix_connector: migrate_table: Worker {worker_id}: Primary key columns for {source_schema_name}.{source_table_name}: {primary_key_columns}")
                     if primary_key_columns:
                         orderby_columns = primary_key_columns
                     order_by_clause = f""" ORDER BY {orderby_columns}"""
                     query += order_by_clause + f" LIMIT {chunk_size}"
 
-                    self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Fetching data with cursor using query: {query}")
+                    self.config_parser.print_log_message('DEBUG', f"informix_connector: migrate_table: Worker {worker_id}: Fetching data with cursor using query: {query}")
 
                     part_name = 'execute query'
                     cursor = self.connection.cursor()
@@ -1226,7 +1226,7 @@ class InformixConnector(DatabaseConnector):
                         batch_number += 1
                         reading_end_time = time.time()
                         reading_duration = reading_end_time - reading_start_time
-                        self.config_parser.print_log_message('DEBUG',f"Worker {worker_id}: Fetched {len(records)} rows (batch {batch_number}) from source table {source_table_name}.")
+                        self.config_parser.print_log_message('DEBUG',f"informix_connector: migrate_table: Worker {worker_id}: Fetched {len(records)} rows (batch {batch_number}) from source table {source_table_name}.")
 
                         transforming_start_time = time.time()
                         records = [
@@ -1251,7 +1251,7 @@ class InformixConnector(DatabaseConnector):
                                     record[column_name] = bool(record[column_name])
 
                         # Insert batch into target table
-                        self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Starting insert of {len(records)} rows from source table {source_table_name}")
+                        self.config_parser.print_log_message('DEBUG', f"informix_connector: migrate_table: Worker {worker_id}: Starting insert of {len(records)} rows from source table {source_table_name}")
                         transforming_end_time = time.time()
                         transforming_duration = transforming_end_time - transforming_start_time
                         inserting_start_time = time.time()
@@ -1306,12 +1306,12 @@ class InformixConnector(DatabaseConnector):
                         reading_start_time = batch_start_time
 
                     target_table_rows = migrate_target_connection.get_rows_count(target_schema_name, target_table_name)
-                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Target table {target_schema_name}.{target_table_name} has {target_table_rows} rows")
+                    self.config_parser.print_log_message('INFO', f"informix_connector: migrate_table: Worker {worker_id}: Target table {target_schema_name}.{target_table_name} has {target_table_rows} rows")
 
                     shortest_batch_seconds = min(batch_durations) if batch_durations else 0
                     longest_batch_seconds = max(batch_durations) if batch_durations else 0
                     average_batch_seconds = sum(batch_durations) / len(batch_durations) if batch_durations else 0
-                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Migrated {total_inserted_rows} rows from {source_table_name} to {target_schema_name}.{target_table_name} in {batch_number} batches: "
+                    self.config_parser.print_log_message('INFO', f"informix_connector: migrate_table: Worker {worker_id}: Migrated {total_inserted_rows} rows from {source_table_name} to {target_schema_name}.{target_table_name} in {batch_number} batches: "
                                                             f"Shortest batch: {shortest_batch_seconds:.2f} seconds, "
                                                             f"Longest batch: {longest_batch_seconds:.2f} seconds, "
                                                             f"Average batch: {average_batch_seconds:.2f} seconds")
@@ -1319,7 +1319,7 @@ class InformixConnector(DatabaseConnector):
                     cursor.close()
 
                 elif source_table_rows <= target_table_rows:
-                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Source table {source_table_name} has {source_table_rows} rows, which is less than or equal to target table {target_table_name} with {target_table_rows} rows. No data migration needed.")
+                    self.config_parser.print_log_message('INFO', f"informix_connector: migrate_table: Worker {worker_id}: Source table {source_table_name} has {source_table_rows} rows, which is less than or equal to target table {target_table_name} with {target_table_rows} rows. No data migration needed.")
 
                 migration_stats = {
                     'rows_migrated': total_inserted_rows,
@@ -1330,9 +1330,9 @@ class InformixConnector(DatabaseConnector):
                     'finished': False,
                 }
 
-                self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Migration stats: {migration_stats}")
+                self.config_parser.print_log_message('DEBUG', f"informix_connector: migrate_table: Worker {worker_id}: Migration stats: {migration_stats}")
                 if source_table_rows <= target_table_rows or chunk_number >= total_chunks:
-                    self.config_parser.print_log_message('DEBUG3', f"Worker {worker_id}: Setting migration status to finished for table {source_table_name} (chunk {chunk_number}/{total_chunks})")
+                    self.config_parser.print_log_message('DEBUG3', f"informix_connector: migrate_table: Worker {worker_id}: Setting migration status to finished for table {source_table_name} (chunk {chunk_number}/{total_chunks})")
                     migration_stats['finished'] = True
                     migrator_tables.update_data_migration_status({
                         'row_id': protocol_id,
@@ -1370,8 +1370,8 @@ class InformixConnector(DatabaseConnector):
                 return migration_stats
 
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Error during {part_name} -> {e}")
-            self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Full stack trace: {traceback.format_exc()}")
+            self.config_parser.print_log_message('ERROR', f"informix_connector: migrate_table: Worker {worker_id}: Error during {part_name} -> {e}")
+            self.config_parser.print_log_message('ERROR', f"informix_connector: migrate_table: Worker {worker_id}: Full stack trace: {traceback.format_exc()}")
             raise e
 
 
@@ -1397,7 +1397,7 @@ class InformixConnector(DatabaseConnector):
             triggers = {}
             order_num = 1
             for row in cursor.fetchall():
-                self.config_parser.print_log_message('DEBUG', f"fetch_triggers row: {row}")
+                self.config_parser.print_log_message('DEBUG', f"informix_connector: fetch_triggers: row: {row}")
                 triggers[order_num] = {
                     'id': row[0],
                     'name': row[1].strip(),
@@ -1429,7 +1429,7 @@ class InformixConnector(DatabaseConnector):
 
                 trigger_code_str = '\n'.join(trigger_code_lines)
 
-                self.config_parser.print_log_message('DEBUG', f"trigger SQL: {trigger_code_str}")
+                self.config_parser.print_log_message('DEBUG', f"informix_connector: fetch_triggers: trigger SQL: {trigger_code_str}")
 
                 triggers[order_num]['sql'] = trigger_code_str
                 triggers[order_num]['row_statement'] = 'FOR EACH ROW' if 'FOR EACH ROW' in trigger_code_str.upper() else ''
@@ -1438,7 +1438,7 @@ class InformixConnector(DatabaseConnector):
             self.disconnect()
             return triggers
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error when fetching triggers for the table {table_name}/{table_id}: {e}")
+            self.config_parser.print_log_message('ERROR', f"informix_connector: fetch_triggers: Error when fetching triggers for the table {table_name}/{table_id}: {e}")
             raise
 
 
@@ -1462,7 +1462,7 @@ class InformixConnector(DatabaseConnector):
                 trig_lines = [line for line in trig_lines if line != '--']
                 trig_lines = [f"/* {line.strip()} */" if line.startswith('--') else line for line in trig_lines]
                 trig = '\n'.join(trig_lines)
-                self.config_parser.print_log_message('DEBUG', f"Trigger code: {trig}")
+                self.config_parser.print_log_message('DEBUG', f"informix_connector: convert_trigger: Trigger code: {trig}")
 
                 # Replace groups of multiple spaces with just one space
                 trig = re.sub(r'\s+', ' ', trig)
@@ -1477,7 +1477,7 @@ class InformixConnector(DatabaseConnector):
                     new_ref = ref_match.group(2) if ref_match.group(2) else ""
                     old_ref = ref_match.group(4) if ref_match.group(4) else ""
 
-                self.config_parser.print_log_message('DEBUG', f"new_ref: {new_ref}, old_ref: {old_ref}")
+                self.config_parser.print_log_message('DEBUG', f"informix_connector: convert_trigger: new_ref: {new_ref}, old_ref: {old_ref}")
 
                 # Extract schema, trigger name, and operation (insert/update)
                 header_match = re.match(r'"([^"]+)"\.(\S+)\s+(insert|update|delete)', trig, re.IGNORECASE)
@@ -1487,7 +1487,7 @@ class InformixConnector(DatabaseConnector):
                 trigger_name = header_match.group(2)
                 operation = header_match.group(3).lower()
 
-                self.config_parser.print_log_message('DEBUG', f"Trigger name: {trigger_name}, Operation: {operation}")
+                self.config_parser.print_log_message('DEBUG', f"informix_connector: convert_trigger: Trigger name: {trigger_name}, Operation: {operation}")
 
                 # Extract the table name (assumes: on "schemaname".table)
                 table_match = re.search(r'\s+on\s+"([^"]+)"\.(\S+)', trig, re.IGNORECASE)
@@ -1498,7 +1498,7 @@ class InformixConnector(DatabaseConnector):
                     table_schema = schema
                     table_name = "unknown_table"
 
-                self.config_parser.print_log_message('DEBUG', f"Table name: {table_name}, Schema: {table_schema}")
+                self.config_parser.print_log_message('DEBUG', f"informix_connector: convert_trigger: Table name: {table_name}, Schema: {table_schema}")
 
                 func_body_lines = []
 
@@ -1515,7 +1515,7 @@ class InformixConnector(DatabaseConnector):
                 when_matches = re.findall(r'when\s*\((.*?)\)\s*\((.*?\)\s*\))', trig, re.IGNORECASE | re.DOTALL | re.MULTILINE)
                 # when_matches = re.findall(r'when\s*\((.*?)\)\s*\((.*?\n*?)\)', trig, re.IGNORECASE | re.DOTALL | re.MULTILINE)
 
-                self.config_parser.print_log_message('DEBUG', f"when_matches: {when_matches}")
+                self.config_parser.print_log_message('DEBUG', f"informix_connector: convert_trigger: when_matches: {when_matches}")
 
                 for match in when_matches:
                     when_condition = match[0]
@@ -1524,8 +1524,8 @@ class InformixConnector(DatabaseConnector):
                     when_conditions[order_num] = when_condition
                     proc_calls[order_num] = proc_call
                     order_num += 1
-                    self.config_parser.print_log_message('DEBUG', f"when_condition: {when_condition}")
-                    self.config_parser.print_log_message('DEBUG', f"proc_call: {proc_call}")
+                    self.config_parser.print_log_message('DEBUG', f"informix_connector: convert_trigger: when_condition: {when_condition}")
+                    self.config_parser.print_log_message('DEBUG', f"informix_connector: convert_trigger: proc_call: {proc_call}")
 
                 after_pattern = re.compile(r'after\s*\((.*)\)', re.DOTALL | re.IGNORECASE | re.MULTILINE)
                 # Extract AFTER clause
@@ -1562,7 +1562,7 @@ class InformixConnector(DatabaseConnector):
                             if after_all_commands:
                                 after_all_commands[-1] += ',' + ''.join(after_current_command).strip()
 
-                    self.config_parser.print_log_message('DEBUG', f"AFTER part after_all_commands: {after_all_commands}")
+                    self.config_parser.print_log_message('DEBUG', f"informix_connector: convert_trigger: AFTER part after_all_commands: {after_all_commands}")
 
                 if not when_conditions and not proc_calls:
                     action_all_commands = []
@@ -1598,11 +1598,11 @@ class InformixConnector(DatabaseConnector):
                                 if action_all_commands:
                                     action_all_commands[-1] += ',' + ''.join(action_current_command).strip()
 
-                        self.config_parser.print_log_message('DEBUG', f"ACTION part action_all_commands: {action_all_commands}")
+                        self.config_parser.print_log_message('DEBUG', f"informix_connector: convert_trigger: ACTION part action_all_commands: {action_all_commands}")
 
                         actions = actions_match.group(1).split(',')
                         for action in actions:
-                            self.config_parser.print_log_message('INFO', f"action: {action.strip()}")
+                            self.config_parser.print_log_message('INFO', f"informix_connector: convert_trigger: action: {action.strip()}")
                             if "execute procedure" in action:
                                 # action = re.sub("execute procedure", "", action, flags=re.IGNORECASE) ## keep it for further processing
                                 action = re.sub("with trigger references", "", action, flags=re.IGNORECASE)
@@ -1610,8 +1610,8 @@ class InformixConnector(DatabaseConnector):
                             proc_calls[order_num] = action.strip()
                             order_num += 1
 
-                self.config_parser.print_log_message('DEBUG', f"when_conditions: {when_conditions}")
-                self.config_parser.print_log_message('DEBUG', f"proc_calls: {proc_calls}")
+                self.config_parser.print_log_message('DEBUG', f"informix_connector: convert_trigger: when_conditions: {when_conditions}")
+                self.config_parser.print_log_message('DEBUG', f"informix_connector: convert_trigger: proc_calls: {proc_calls}")
 
                 function_name = trigger_name + "_trigfunc"
                 counter = 0
@@ -1633,13 +1633,13 @@ class InformixConnector(DatabaseConnector):
 
                     if ((not re.search(r'for each row', trig, re.IGNORECASE) or re.search(r'before', trig, re.IGNORECASE))
                         and after_all_commands):
-                        self.config_parser.print_log_message('ERROR', f"Trigger {trigger_name} has AFTER clause but is not FOR EACH ROW. This is not supported!!!")
+                        self.config_parser.print_log_message('ERROR', f"informix_connector: convert_trigger: Trigger {trigger_name} has AFTER clause but is not FOR EACH ROW. This is not supported!!!")
                         func_body_lines.append("/* AFTER clause not migrated */")
                         for after_command in after_all_commands:
                             if after_command:
                                 func_body_lines.append(f"/*    {after_command.replace(settings['source_schema_name'], settings['target_schema_name'])}; */")
 
-                    self.config_parser.print_log_message('DEBUG3', f"func_body_lines: {func_body_lines}")
+                    self.config_parser.print_log_message('DEBUG3', f"informix_connector: convert_trigger: func_body_lines: {func_body_lines}")
 
                     func_code = f"""CREATE OR REPLACE FUNCTION "{settings['target_schema_name']}"."{function_name + str(counter)}"()
                         RETURNS trigger AS $$
@@ -1672,7 +1672,7 @@ class InformixConnector(DatabaseConnector):
                         trigger_code = ''
                         func_code = ''
                         proc_call = proc_calls[i]
-                        self.config_parser.print_log_message('DEBUG3', f"proc_call: {proc_call}")
+                        self.config_parser.print_log_message('DEBUG3', f"informix_connector: convert_trigger: proc_call: {proc_call}")
 
                         trigger_code = f"""CREATE TRIGGER "{trigger_name + str(counter)}" """
 
@@ -1705,7 +1705,7 @@ class InformixConnector(DatabaseConnector):
 
             pgsql_trigger_code = "\n\n".join(pgsql_triggers)
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error converting trigger {trigger_name}: {e}")
+            self.config_parser.print_log_message('ERROR', f"informix_connector: convert_trigger: Error converting trigger {trigger_name}: {e}")
             self.config_parser.print_log_message('ERROR', traceback.format_exc())
 
         return pgsql_trigger_code
@@ -1746,10 +1746,10 @@ class InformixConnector(DatabaseConnector):
         return maxval
 
     def handle_error(self, e, description=None):
-        self.config_parser.print_log_message('ERROR', f"An error in {self.__class__.__name__} ({description}): {e}")
+        self.config_parser.print_log_message('ERROR', f"informix_connector: handle_error: An error in {self.__class__.__name__} ({description}): {e}")
         self.config_parser.print_log_message('ERROR', traceback.format_exc())
         if self.on_error_action == 'stop':
-            self.config_parser.print_log_message('ERROR', "Stopping due to error.")
+            self.config_parser.print_log_message('ERROR', "informix_connector: handle_error: Stopping due to error.")
             exit(1)
         else:
             pass
@@ -1758,7 +1758,7 @@ class InformixConnector(DatabaseConnector):
         query = f"""SELECT COUNT(*) FROM "{table_schema}".{table_name} """
         if migration_limitation:
             query += f" WHERE {migration_limitation}"
-        self.config_parser.print_log_message('DEBUG3', f"informix: get_rows_count query: {query}")
+        self.config_parser.print_log_message('DEBUG3', f"informix_connector: get_rows_count: informix: get_rows_count query: {query}")
         cursor = self.connection.cursor()
         cursor.execute(query)
         count = cursor.fetchone()[0]
@@ -1791,7 +1791,7 @@ class InformixConnector(DatabaseConnector):
 
     def get_table_description(self, settings) -> dict:
         # Placeholder for fetching table description
-        self.config_parser.print_log_message('DEBUG3', f"Informix connector: Getting table description for {settings['table_schema']}.{settings['table_name']}")
+        self.config_parser.print_log_message('DEBUG3', f"informix_connector: get_table_description: Informix connector: Getting table description for {settings['table_schema']}.{settings['table_name']}")
         return { 'table_description': '' }
 
     def testing_select(self):
@@ -1842,7 +1842,7 @@ class InformixConnector(DatabaseConnector):
             )
             ORDER BY c.colno
             """
-        self.config_parser.print_log_message('DEBUG3', f"Fetching date/time columns for table {table_name.strip()} with query: {query}")
+        self.config_parser.print_log_message('DEBUG3', f"informix_connector: get_date_time_columns: Fetching date/time columns for table {table_name.strip()} with query: {query}")
         cursor.execute(query)
         date_time_columns = cursor.fetchall()
         return ', '.join([f"{col[1]} ({col[2]})" for col in date_time_columns]) if date_time_columns else None
@@ -1865,7 +1865,7 @@ class InformixConnector(DatabaseConnector):
                 WHERE tabname = '{table_name.strip()}'
                 AND owner = '{table_schema.strip()}')
         """
-        self.config_parser.print_log_message('DEBUG3', f"Fetching PK columns for table {table_name.strip()} with query: {query}")
+        self.config_parser.print_log_message('DEBUG3', f"informix_connector: get_pk_columns: Fetching PK columns for table {table_name.strip()} with query: {query}")
         cursor.execute(query)
         pk_columns = cursor.fetchall()
         pk_column_names = []
@@ -1911,7 +1911,7 @@ class InformixConnector(DatabaseConnector):
                     from systables t where owner = '{settings['source_schema_name']}' {exclude_clause}
                     order by nrows desc limit {top_n}
                 """
-                self.config_parser.print_log_message('DEBUG2', f"Fetching top {top_n} tables BY ROWS for schema {settings['source_schema_name']} with query: {query}")
+                self.config_parser.print_log_message('DEBUG2', f"informix_connector: get_top_n_tables: Fetching top {top_n} tables BY ROWS for schema {settings['source_schema_name']} with query: {query}")
                 self.connect()
                 cursor = self.connection.cursor()
                 cursor.execute(query)
@@ -1934,11 +1934,11 @@ class InformixConnector(DatabaseConnector):
 
                 cursor.close()
                 self.disconnect()
-                self.config_parser.print_log_message('DEBUG2', f"Top {top_n} tables BY ROWS: {top_tables}")
+                self.config_parser.print_log_message('DEBUG2', f"informix_connector: get_top_n_tables: Top {top_n} tables BY ROWS: {top_tables}")
             else:
-                self.config_parser.print_log_message('INFO', "Skipping fetching top tables by rows as the setting is not defined or set to 0")
+                self.config_parser.print_log_message('INFO', "informix_connector: get_top_n_tables: Skipping fetching top tables by rows as the setting is not defined or set to 0")
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error fetching top tables by rows: {e}")
+            self.config_parser.print_log_message('ERROR', f"informix_connector: get_top_n_tables: Error fetching top tables by rows: {e}")
 
         try:
             order_num = 1
@@ -1954,7 +1954,7 @@ class InformixConnector(DatabaseConnector):
                     from systables t where owner = '{settings['source_schema_name']}' {exclude_clause}
                     order by size desc limit {top_n}
                 """
-                self.config_parser.print_log_message('DEBUG2', f"Fetching top {top_n} tables BY SIZE for schema {settings['source_schema_name']} with query: {query}")
+                self.config_parser.print_log_message('DEBUG2', f"informix_connector: get_top_n_tables: Fetching top {top_n} tables BY SIZE for schema {settings['source_schema_name']} with query: {query}")
                 self.connect()
                 cursor = self.connection.cursor()
                 cursor.execute(query)
@@ -1975,11 +1975,11 @@ class InformixConnector(DatabaseConnector):
                     order_num += 1
                 cursor.close()
                 self.disconnect()
-                self.config_parser.print_log_message('DEBUG2', f"Top {top_n} tables BY SIZE: {top_tables}")
+                self.config_parser.print_log_message('DEBUG2', f"informix_connector: get_top_n_tables: Top {top_n} tables BY SIZE: {top_tables}")
             else:
-                self.config_parser.print_log_message('INFO', "Skipping fetching top tables by size as the setting is not defined or set to 0")
+                self.config_parser.print_log_message('INFO', "informix_connector: get_top_n_tables: Skipping fetching top tables by size as the setting is not defined or set to 0")
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error fetching top tables by size: {e}")
+            self.config_parser.print_log_message('ERROR', f"informix_connector: get_top_n_tables: Error fetching top tables by size: {e}")
 
         try:
             order_num = 1
@@ -1999,7 +1999,7 @@ class InformixConnector(DatabaseConnector):
                     group by t.owner, tabname, rowsize, nrows, size, fk_count, has_rowid
                     order by column_count desc limit {top_n}
                 """
-                self.config_parser.print_log_message('DEBUG2', f"Fetching top {top_n} tables BY COLUMNS for schema {settings['source_schema_name']} with query: {query}")
+                self.config_parser.print_log_message('DEBUG2', f"informix_connector: get_top_n_tables: Fetching top {top_n} tables BY COLUMNS for schema {settings['source_schema_name']} with query: {query}")
                 self.connect()
                 cursor = self.connection.cursor()
                 cursor.execute(query)
@@ -2021,11 +2021,11 @@ class InformixConnector(DatabaseConnector):
                     order_num += 1
                 cursor.close()
                 self.disconnect()
-                self.config_parser.print_log_message('DEBUG2', f"Top {top_n} tables BY COLUMNS: {top_tables}")
+                self.config_parser.print_log_message('DEBUG2', f"informix_connector: get_top_n_tables: Top {top_n} tables BY COLUMNS: {top_tables}")
             else:
-                self.config_parser.print_log_message('INFO', "Skipping fetching top tables by columns as the setting is not defined or set to 0")
+                self.config_parser.print_log_message('INFO', "informix_connector: get_top_n_tables: Skipping fetching top tables by columns as the setting is not defined or set to 0")
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error fetching top tables by columns: {e}")
+            self.config_parser.print_log_message('ERROR', f"informix_connector: get_top_n_tables: Error fetching top tables by columns: {e}")
 
         try:
             order_num = 1
@@ -2044,7 +2044,7 @@ class InformixConnector(DatabaseConnector):
                     group by t.owner, tabname, rowsize, nrows, size, fk_count, has_rowid
                     order by index_count desc limit {top_n}
                 """
-                self.config_parser.print_log_message('DEBUG2', f"Fetching top {top_n} tables BY INDEXES for schema {settings['source_schema_name']} with query: {query}")
+                self.config_parser.print_log_message('DEBUG2', f"informix_connector: get_top_n_tables: Fetching top {top_n} tables BY INDEXES for schema {settings['source_schema_name']} with query: {query}")
                 self.connect()
                 cursor = self.connection.cursor()
                 cursor.execute(query)
@@ -2066,11 +2066,11 @@ class InformixConnector(DatabaseConnector):
                     order_num += 1
                 cursor.close()
                 self.disconnect()
-                self.config_parser.print_log_message('DEBUG2', f"Top {top_n} tables BY INDEXES: {top_tables}")
+                self.config_parser.print_log_message('DEBUG2', f"informix_connector: get_top_n_tables: Top {top_n} tables BY INDEXES: {top_tables}")
             else:
-                self.config_parser.print_log_message('INFO', "Skipping fetching top tables by indexes as the setting is not defined or set to 0")
+                self.config_parser.print_log_message('INFO', "informix_connector: get_top_n_tables: Skipping fetching top tables by indexes as the setting is not defined or set to 0")
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error fetching top tables by indexes: {e}")
+            self.config_parser.print_log_message('ERROR', f"informix_connector: get_top_n_tables: Error fetching top tables by indexes: {e}")
 
         try:
             order_num = 1
@@ -2089,7 +2089,7 @@ class InformixConnector(DatabaseConnector):
                     group by t.owner, tabname, rowsize, nrows, size, constrtype, has_rowid
                     order by constraint_count desc limit {top_n}
                 """
-                self.config_parser.print_log_message('DEBUG2', f"Fetching top {top_n} tables BY CONSTRAINTS for schema {settings['source_schema_name']} with query: {query}")
+                self.config_parser.print_log_message('DEBUG2', f"informix_connector: get_top_n_tables: Fetching top {top_n} tables BY CONSTRAINTS for schema {settings['source_schema_name']} with query: {query}")
                 self.connect()
                 cursor = self.connection.cursor()
                 cursor.execute(query)
@@ -2111,11 +2111,11 @@ class InformixConnector(DatabaseConnector):
                     order_num += 1
                 cursor.close()
                 self.disconnect()
-                self.config_parser.print_log_message('DEBUG2', f"Top {top_n} tables BY CONSTRAINTS: {top_tables}")
+                self.config_parser.print_log_message('DEBUG2', f"informix_connector: get_top_n_tables: Top {top_n} tables BY CONSTRAINTS: {top_tables}")
             else:
-                self.config_parser.print_log_message('INFO', "Skipping fetching top tables by constraints as the setting is not defined or set to 0")
+                self.config_parser.print_log_message('INFO', "informix_connector: get_top_n_tables: Skipping fetching top tables by constraints as the setting is not defined or set to 0")
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error fetching top tables by constraints: {e}")
+            self.config_parser.print_log_message('ERROR', f"informix_connector: get_top_n_tables: Error fetching top tables by constraints: {e}")
 
         return top_tables
 
@@ -2151,7 +2151,7 @@ class InformixConnector(DatabaseConnector):
                     GROUP BY t.owner, t.tabname
                     ORDER BY fk_count DESC LIMIT {top_n}
                 """
-                self.config_parser.print_log_message('DEBUG2', f"Fetching top {top_n} foreign key dependencies BY TABLES for schema {settings['source_schema_name']} with query: {query}")
+                self.config_parser.print_log_message('DEBUG2', f"informix_connector: get_top_fk_dependencies: Fetching top {top_n} foreign key dependencies BY TABLES for schema {settings['source_schema_name']} with query: {query}")
                 self.connect()
                 cursor = self.connection.cursor()
                 cursor.execute(query)
@@ -2186,11 +2186,11 @@ class InformixConnector(DatabaseConnector):
 
                 cursor.close()
                 self.disconnect()
-                self.config_parser.print_log_message('DEBUG2', f"Top {top_n} foreign key dependencies BY TABLES: {top_fk_dependencies}")
+                self.config_parser.print_log_message('DEBUG2', f"informix_connector: get_top_fk_dependencies: Top {top_n} foreign key dependencies BY TABLES: {top_fk_dependencies}")
             else:
-                self.config_parser.print_log_message('INFO', "Skipping fetching top foreign key dependencies by tables as the setting is not defined or set to 0")
+                self.config_parser.print_log_message('INFO', "informix_connector: get_top_fk_dependencies: Skipping fetching top foreign key dependencies by tables as the setting is not defined or set to 0")
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error fetching top foreign key dependencies by tables: {e}")
+            self.config_parser.print_log_message('ERROR', f"informix_connector: get_top_fk_dependencies: Error fetching top foreign key dependencies by tables: {e}")
 
         return top_fk_dependencies
 
@@ -2201,26 +2201,26 @@ class InformixConnector(DatabaseConnector):
                 FROM systables
                 WHERE owner = '{target_schema_name}' AND tabname = '{target_table_name}' AND tabtype = 'T'
             """
-            self.config_parser.print_log_message('DEBUG3', f"Checking if target table exists with query: {query}")
+            self.config_parser.print_log_message('DEBUG3', f"informix_connector: target_table_exists: Checking if target table exists with query: {query}")
             cursor = self.connection.cursor()
             cursor.execute(query)
             exists = cursor.fetchone()[0]
             cursor.close()
             return exists
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error checking if target table exists: {e}")
+            self.config_parser.print_log_message('ERROR', f"informix_connector: target_table_exists: Error checking if target table exists: {e}")
             return False
 
     def fetch_all_rows(self, query):
         try:
-            self.config_parser.print_log_message('DEBUG3', f"Executing query to fetch all rows: {query}")
+            self.config_parser.print_log_message('DEBUG3', f"informix_connector: fetch_all_rows: Executing query to fetch all rows: {query}")
             cursor = self.connection.cursor()
             cursor.execute(query)
             rows = cursor.fetchall()
             cursor.close()
             return rows
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error fetching all rows: {e}")
+            self.config_parser.print_log_message('ERROR', f"informix_connector: fetch_all_rows: Error fetching all rows: {e}")
             return []
 
 if __name__ == "__main__":

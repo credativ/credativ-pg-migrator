@@ -257,7 +257,7 @@ class SybaseASEConnector(DatabaseConnector):
                 'datediff(': "age(",  # requires more logic
             }
         else:
-            self.config_parser.print_log_message('ERROR', f"Unsupported target database type: {target_db_type}")
+            self.config_parser.print_log_message('ERROR', f"sybase_ase_connector: get_sql_functions_mapping: Unsupported target database type: {target_db_type}")
             return {}
 
     def _split_respecting_parens(self, text):
@@ -325,7 +325,7 @@ class SybaseASEConnector(DatabaseConnector):
             self.disconnect()
             return tables
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', f"sybase_ase_connector: fetch_table_names: Error executing query: {query}")
             self.config_parser.print_log_message('ERROR', e)
             raise
 
@@ -336,10 +336,10 @@ class SybaseASEConnector(DatabaseConnector):
         try:
             self.connect()
             cursor = self.connection.cursor()
-            self.config_parser.print_log_message('DEBUG', f"Sybase ASE: Reading columns for {table_schema}.{table_name}")
+            self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: fetch_table_columns: Sybase ASE: Reading columns for {table_schema}.{table_name}")
             cursor.execute("SELECT @@unicharsize, @@ncharsize")
             unichar_size, nchar_size = cursor.fetchone()
-            self.config_parser.print_log_message('DEBUG', f"Sybase ASE: unichar size: {unichar_size}, nchar size: {nchar_size}")
+            self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: fetch_table_columns: Sybase ASE: unichar size: {unichar_size}, nchar size: {nchar_size}")
             query = f"""
                 SELECT
                     c.colid as ordinal_position,
@@ -380,7 +380,7 @@ class SybaseASEConnector(DatabaseConnector):
             """
             cursor.execute(query)
             for row in cursor.fetchall():
-                self.config_parser.print_log_message('DEBUG', f"Processing column: {row}")
+                self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: fetch_table_columns: Processing column: {row}")
                 ordinal_position = row[0]
                 column_name = row[1].strip()
                 data_type = row[2].strip()
@@ -550,7 +550,7 @@ class SybaseASEConnector(DatabaseConnector):
             self.disconnect()
             return result
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', f"sybase_ase_connector: fetch_table_columns: Error executing query: {query}")
             self.config_parser.print_log_message('ERROR', e)
             raise
 
@@ -742,7 +742,7 @@ class SybaseASEConnector(DatabaseConnector):
                 return udt_map
 
             except Exception as e:
-                self.config_parser.print_log_message('WARNING', f"Failed to fetch UDTs from protocol table: {e}. Fallback to live query.")
+                self.config_parser.print_log_message('WARNING', f"sybase_ase_connector: _get_udt_codes_mapping: Failed to fetch UDTs from protocol table: {e}. Fallback to live query.")
 
 
         query = """
@@ -805,7 +805,7 @@ class SybaseASEConnector(DatabaseConnector):
                 self.disconnect()
 
         except Exception as e:
-            self.config_parser.print_log_message('WARNING', f"Failed to fetch UDTs for substitution: {e}")
+            self.config_parser.print_log_message('WARNING', f"sybase_ase_connector: _get_udt_codes_mapping: Failed to fetch UDTs for substitution: {e}")
             # If we fail, we just return empty map to not break flow
 
         self._udt_cache = udt_map
@@ -835,7 +835,7 @@ class SybaseASEConnector(DatabaseConnector):
         types_mapping = self.get_types_mapping({'target_db_type': settings.get('target_db_type', 'postgresql')})
 
         # Optimize: Pre-calculate all final definitions and use single regex pass
-        self.config_parser.print_log_message('DEBUG', "Optimizing UDT substitution: preparing map...")
+        self.config_parser.print_log_message('DEBUG', "sybase_ase_connector: _apply_udt_to_base_type_substitutions: Optimizing UDT substitution: preparing map...")
         udt_lookup = {}
         keys_to_match = []
 
@@ -853,10 +853,10 @@ class SybaseASEConnector(DatabaseConnector):
             keys_to_match.append(udt_name)
 
         if not keys_to_match:
-            self.config_parser.print_log_message('DEBUG', "No UDTs to substitute.")
+            self.config_parser.print_log_message('DEBUG', "sybase_ase_connector: _apply_udt_to_base_type_substitutions: No UDTs to substitute.")
             return text
 
-        self.config_parser.print_log_message('DEBUG', f"Compiling regex for {len(keys_to_match)} UDTs...")
+        self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: _apply_udt_to_base_type_substitutions: Compiling regex for {len(keys_to_match)} UDTs...")
         # Sort by length desc to handle prefixes/overlaps
         keys_to_match.sort(key=len, reverse=True)
 
@@ -868,7 +868,7 @@ class SybaseASEConnector(DatabaseConnector):
         try:
              regex = re.compile(pattern_str, flags=re.IGNORECASE)
         except re.error as e:
-             self.config_parser.print_log_message('WARNING', f"Failed to compile optimized UDT regex: {e}. Fallback to slow loop.")
+             self.config_parser.print_log_message('WARNING', f"sybase_ase_connector: _apply_udt_to_base_type_substitutions: Failed to compile optimized UDT regex: {e}. Fallback to slow loop.")
              # Fallback logic could be here, but simpler to just return or raise.
              return text
 
@@ -879,9 +879,9 @@ class SybaseASEConnector(DatabaseConnector):
                  return udt_lookup.get(core_name.upper(), match.group(0))
              return match.group(0)
 
-        self.config_parser.print_log_message('DEBUG', "Executing UDT substitution...")
+        self.config_parser.print_log_message('DEBUG', "sybase_ase_connector: replacer: Executing UDT substitution...")
         text = regex.sub(replacer, text)
-        self.config_parser.print_log_message('DEBUG', "UDT substitution complete.")
+        self.config_parser.print_log_message('DEBUG', "sybase_ase_connector: replacer: UDT substitution complete.")
 
         return text
 
@@ -924,7 +924,7 @@ class SybaseASEConnector(DatabaseConnector):
                     pattern = re.compile(rf'\b{source_type}\b', flags=re.IGNORECASE)
                     text = pattern.sub(target_type, text)
                 except re.error:
-                    self.config_parser.print_log_message('WARNING', f"Invalid regex in data_types_substitution: {source_type}")
+                    self.config_parser.print_log_message('WARNING', f"sybase_ase_connector: _apply_data_type_substitutions: Invalid regex in data_types_substitution: {source_type}")
 
         return text
 
@@ -979,7 +979,7 @@ class SybaseASEConnector(DatabaseConnector):
             indexes = cursor.fetchall()
 
             for index in indexes:
-                self.config_parser.print_log_message('DEBUG', f"Processing index: {index}")
+                self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: fetch_indexes: Processing index: {index}")
                 index_name = index[0].strip()
                 index_unique = index[1]  ## integer 0 or 1
                 index_columns = index[2].strip()
@@ -1000,7 +1000,7 @@ class SybaseASEConnector(DatabaseConnector):
             return table_indexes
 
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', f"sybase_ase_connector: fetch_indexes: Error executing query: {query}")
             self.config_parser.print_log_message('ERROR', e)
             raise
 
@@ -1043,7 +1043,7 @@ class SybaseASEConnector(DatabaseConnector):
         ## status & 64 = 64 - foreign key constraint (0x0040)
         self.connect()
         cursor = self.connection.cursor()
-        self.config_parser.print_log_message('DEBUG', f"Reading constraints for {source_table_name}")
+        self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: fetch_constraints: Reading constraints for {source_table_name}")
         cursor.execute(index_query)
         constraints = cursor.fetchall()
 
@@ -1124,8 +1124,8 @@ class SybaseASEConnector(DatabaseConnector):
                 AND (o.sysstat & 4 = 4 or o.sysstat & 10 = 10 or o.sysstat & 12 = 12)
             ORDER BY o.name
         """
-        self.config_parser.print_log_message('DEBUG3', f"Fetching function/procedure names for schema {schema}")
-        self.config_parser.print_log_message('DEBUG3', f"Query: {query}")
+        self.config_parser.print_log_message('DEBUG3', f"sybase_ase_connector: fetch_funcproc_names: Fetching function/procedure names for schema {schema}")
+        self.config_parser.print_log_message('DEBUG3', f"sybase_ase_connector: fetch_funcproc_names: Query: {query}")
         self.connect()
         cursor = self.connection.cursor()
         cursor.execute(query)
@@ -1219,7 +1219,7 @@ class SybaseASEConnector(DatabaseConnector):
 
     def convert_funcproc_code_v2(self, settings):
 
-        self.config_parser.print_log_message('DEBUG', f"Entered convert_funcproc_code_v2 for {settings.get('funcproc_name')}")
+        self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: convert_funcproc_code_v2: Entered convert_funcproc_code_v2 for {settings.get('funcproc_name')}")
         """
         Parser-based conversion using sqlglot.
         Breaks code into logical statements (expressions) and transpiles to Postgres.
@@ -1228,8 +1228,8 @@ class SybaseASEConnector(DatabaseConnector):
         funcproc_code = settings['funcproc_code']
         if not funcproc_code:
              return "-- [WARNING] Empty input code provided"
-        # self.config_parser.print_log_message('DEBUG', f"V2 Input Code FULL:\n{repr(funcproc_code)}")
-        # self.config_parser.print_log_message('DEBUG', f"Input Len: {len(funcproc_code)}")
+        # self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: convert_funcproc_code_v2: V2 Input Code FULL:\n{repr(funcproc_code)}")
+        # self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: convert_funcproc_code_v2: Input Len: {len(funcproc_code)}")
 
         # --- Pre-processing (Ported from V1 & Enhancements) ---
 
@@ -1331,7 +1331,7 @@ class SybaseASEConnector(DatabaseConnector):
                 clean_params = clean_params[1:-1].strip()
                 clean_params = re.sub(r'/\*.*?\*/', '', clean_params, flags=re.DOTALL).strip()
 
-            self.config_parser.print_log_message('DEBUG', f"DEBUG_PARA: '{proc_name}' ORG='{params_str}' CLEAN='{clean_params}'")
+            self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: tran_replacer: DEBUG_PARA: '{proc_name}' ORG='{params_str}' CLEAN='{clean_params}'")
 
             clean_params = clean_params.replace('@', '')
 
@@ -1399,7 +1399,7 @@ class SybaseASEConnector(DatabaseConnector):
         body_content = re.sub(r'\bOPEN\s+([a-zA-Z0-9_]+)', mask_open, body_content, flags=re.IGNORECASE)
         body_content = re.sub(r'\bCLOSE\s+([a-zA-Z0-9_]+)', mask_close, body_content, flags=re.IGNORECASE)
         body_content = re.sub(r'\bDEALLOCATE\s+(?:CURSOR\s+)?([a-zA-Z0-9_]+)', mask_deallocate, body_content, flags=re.IGNORECASE)
-        # self.config_parser.print_log_message('DEBUG', f"Body after masking:\n{body_content[:1000]}")
+        # self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: mask_deallocate: Body after masking:\n{body_content[:1000]}")
 
         # --- Pre-process Declarations (Variables) ---
         types_mapping = self.get_types_mapping({'target_db_type': 'postgresql'})
@@ -1600,7 +1600,7 @@ class SybaseASEConnector(DatabaseConnector):
              parsed = sqlglot.parse(processed_body.strip(), read=CustomTSQL)
         except Exception as e:
              traceback.print_exc()
-             self.config_parser.print_log_message('ERROR', f"Global parsing failed for code: {body_content[:100]}... Error: {e}")
+             self.config_parser.print_log_message('ERROR', f"sybase_ase_connector: _convert_stmts: Global parsing failed for code: {body_content[:100]}... Error: {e}")
              return [f"/* PARSING FAILED: {e} */\n" + body_content]
 
         converted_statements = []
@@ -1725,8 +1725,8 @@ class SybaseASEConnector(DatabaseConnector):
                   return case_sql
 
              # Catch-all debug for confusing failures
-             self.config_parser.print_log_message('DEBUG', f"FALLTHROUGH GENERIC! Type: {type(expression).__name__}, Key: {expression.key if hasattr(expression, 'key') else 'None'}")
-             # self.config_parser.print_log_message('DEBUG', f"DUMP: {expression}") # Can be verbose
+             self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: process_node: FALLTHROUGH GENERIC! Type: {type(expression).__name__}, Key: {expression.key if hasattr(expression, 'key') else 'None'}")
+             # self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: process_node: DUMP: {expression}") # Can be verbose
 
              pg_sql = expression.sql(dialect='postgres')
 
@@ -1939,11 +1939,11 @@ class SybaseASEConnector(DatabaseConnector):
                       return v2_result
 
             # Fallback to V1
-            self.config_parser.print_log_message('WARNING', "V2 Conversion failed or incomplete, falling back to V1.")
+            self.config_parser.print_log_message('WARNING', "sybase_ase_connector: convert_funcproc_code: V2 Conversion failed or incomplete, falling back to V1.")
             return self.convert_funcproc_code_v1(settings)
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"V2 Conversion Critical Failure: {e}. Falling back to V1.")
-            self.config_parser.print_log_message('ERROR', f"Traceback: {traceback.format_exc()}")
+            self.config_parser.print_log_message('ERROR', f"sybase_ase_connector: convert_funcproc_code: V2 Conversion Critical Failure: {e}. Falling back to V1.")
+            self.config_parser.print_log_message('ERROR', f"sybase_ase_connector: convert_funcproc_code: Traceback: {traceback.format_exc()}")
             try:
                 return self.convert_funcproc_code_v1(settings)
             except Exception as v1_e:
@@ -2045,7 +2045,7 @@ class SybaseASEConnector(DatabaseConnector):
         body_start_idx = 0
 
         if header_match:
-            self.config_parser.print_log_message('DEBUG', f"DEBUG_MATCH: SUCCESS params='{header_match.group(2)}'")
+            self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: exec_assignment_transformer: DEBUG_MATCH: SUCCESS params='{header_match.group(2)}'")
             full_name = header_match.group(1)
             params_str = header_match.group(2).strip()
             # body technically starts after AS.
@@ -2062,7 +2062,7 @@ class SybaseASEConnector(DatabaseConnector):
                 func_schema = settings.get('target_schema_name', 'public')
         else:
             # Fallback if regex fails - return original or minor mod
-            self.config_parser.print_log_message('DEBUG', f"DEBUG_FAIL: Header regex failed. Code start: {converted_code[:100]}")
+            self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: exec_assignment_transformer: DEBUG_FAIL: Header regex failed. Code start: {converted_code[:100]}")
             return converted_code
 
 
@@ -2083,7 +2083,7 @@ class SybaseASEConnector(DatabaseConnector):
                 # Re-clean comments in case parens wrapped comments? Unlikely but safe.
                 clean_params = re.sub(r'/\*.*?\*/', '', clean_params, flags=re.DOTALL).strip()
 
-            self.config_parser.print_log_message('DEBUG', f"DEBUG_PARA: '{func_name}' ORG='{params_str}' CLEAN='{clean_params}'")
+            self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: exec_assignment_transformer: DEBUG_PARA: '{func_name}' ORG='{params_str}' CLEAN='{clean_params}'")
 
             clean_params = clean_params.replace('@', '')
 
@@ -2119,7 +2119,7 @@ class SybaseASEConnector(DatabaseConnector):
 
             pg_params_str = ", ".join(processed_params)
         else:
-            self.config_parser.print_log_message('DEBUG', f"DEBUG_PARA_EMPTY: '{func_name}'")
+            self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: exec_assignment_transformer: DEBUG_PARA_EMPTY: '{func_name}'")
             pg_params_str = ""
 
         # 4. Process Body
@@ -2695,10 +2695,10 @@ class SybaseASEConnector(DatabaseConnector):
         self.connection.rollback()
 
     def handle_error(self, e, description=None):
-        self.config_parser.print_log_message('ERROR', f"An error in {self.__class__.__name__} ({description}): {e}")
+        self.config_parser.print_log_message('ERROR', f"sybase_ase_connector: handle_error: An error in {self.__class__.__name__} ({description}): {e}")
         self.config_parser.print_log_message('ERROR', traceback.format_exc())
         if self.on_error_action == 'stop':
-            self.config_parser.print_log_message('ERROR', "Stopping due to error.")
+            self.config_parser.print_log_message('ERROR', "sybase_ase_connector: handle_error: Stopping due to error.")
             exit(1)
         else:
             pass
@@ -2707,7 +2707,7 @@ class SybaseASEConnector(DatabaseConnector):
         query = f"""SELECT COUNT(*) FROM {table_schema}.{table_name} """
         if migration_limitation:
             query += f" WHERE {migration_limitation} "
-        self.config_parser.print_log_message('DEBUG3',f"get_rows_count query: {query}")
+        self.config_parser.print_log_message('DEBUG3',f"sybase_ase_connector: get_rows_count: query: {query}")
         cursor = self.connection.cursor()
         cursor.execute(query)
         count = cursor.fetchone()[0]
@@ -2730,7 +2730,7 @@ class SybaseASEConnector(DatabaseConnector):
 
     #     if primary_key_columns_count == 1 and primary_key_columns_types in ('BIGINT', 'INTEGER', 'NUMERIC', 'REAL', 'FLOAT', 'DOUBLE PRECISION', 'DECIMAL', 'SMALLINT', 'TINYINT'):
     #         # primary key is one column of numeric type - analysis with min/max values is much quicker
-    #         self.config_parser.print_log_message('DEBUG', f"Worker: {worker_id}: PK analysis: {primary_key_columns} ({primary_key_columns_types}): min/max analysis")
+    #         self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: get_rows_count: Worker: {worker_id}: PK analysis: {primary_key_columns} ({primary_key_columns_types}): min/max analysis")
 
     #         current_batch_percent = 20
 
@@ -2746,7 +2746,7 @@ class SybaseASEConnector(DatabaseConnector):
     #         sybase_cursor.execute(f"SELECT MAX({primary_key_columns}) FROM {schema_name}.{table_name}")
     #         max_id = sybase_cursor.fetchone()[0]
 
-    #         self.config_parser.print_log_message('DEBUG', f"Worker: {worker_id}: PK analysis: {primary_key_columns}: min_id: {min_id}, max_id: {max_id}")
+    #         self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: get_rows_count: Worker: {worker_id}: PK analysis: {primary_key_columns}: min_id: {min_id}, max_id: {max_id}")
 
     #         total_range = int(max_id) - int(min_id)
     #         current_start = min_id
@@ -2760,11 +2760,11 @@ class SybaseASEConnector(DatabaseConnector):
     #             if current_batch_size < analyze_batch_size:
     #                 current_batch_size = analyze_batch_size
     #                 current_decrease_ratio = 2
-    #                 self.config_parser.print_log_message('DEBUG', f"Worker: {worker_id}: PK analysis: {loop_counter}: resetting current_decrease_ratio to {current_decrease_ratio}")
+    #                 self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: get_rows_count: Worker: {worker_id}: PK analysis: {loop_counter}: resetting current_decrease_ratio to {current_decrease_ratio}")
 
     #             current_end = current_start + current_batch_size
 
-    #             self.config_parser.print_log_message('DEBUG', f"Worker: {worker_id}: PK analysis: {loop_counter}: Loop counter: {loop_counter}, current_batch_percent: {round(current_batch_percent, 8)}, current_batch_size: {current_batch_size}, current_start: {current_start} (min: {min_id}), current_end: {current_end} (max: {max_id}), perc: {round(current_start / max_id * 100, 4)}")
+    #             self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: get_rows_count: Worker: {worker_id}: PK analysis: {loop_counter}: Loop counter: {loop_counter}, current_batch_percent: {round(current_batch_percent, 8)}, current_batch_size: {current_batch_size}, current_start: {current_start} (min: {min_id}), current_end: {current_end} (max: {max_id}), perc: {round(current_start / max_id * 100, 4)}")
 
     #             if current_end > max_id:
     #                 current_end = max_id
@@ -2773,13 +2773,13 @@ class SybaseASEConnector(DatabaseConnector):
     #             sybase_cursor.execute(f"""SELECT COUNT(*) FROM {schema_name}.{table_name} WHERE {primary_key_columns} BETWEEN %s AND %s""", (current_start, current_end))
     #             testing_row_count = sybase_cursor.fetchone()[0]
 
-    #             self.config_parser.print_log_message('DEBUG', f"Worker: {worker_id}: PK analysis: {loop_counter}: Testing row count: {testing_row_count}")
+    #             self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: get_rows_count: Worker: {worker_id}: PK analysis: {loop_counter}: Testing row count: {testing_row_count}")
 
     #             if testing_row_count == previous_row_count:
     #                 same_previous_row_count += 1
     #                 if same_previous_row_count >= 2:
     #                     current_decrease_ratio *= 2
-    #                     self.config_parser.print_log_message('DEBUG', f"Worker: {worker_id}: PK analysis: {loop_counter}: changing current_decrease_ratio to {current_decrease_ratio}")
+    #                     self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: get_rows_count: Worker: {worker_id}: PK analysis: {loop_counter}: changing current_decrease_ratio to {current_decrease_ratio}")
     #                     same_previous_row_count = 0
     #             else:
     #                 same_previous_row_count = 0
@@ -2788,12 +2788,12 @@ class SybaseASEConnector(DatabaseConnector):
 
     #             if testing_row_count > analyze_batch_size:
     #                 current_batch_percent /= current_decrease_ratio
-    #                 self.config_parser.print_log_message('DEBUG', f"Worker: {worker_id}: PK analysis: {loop_counter}: Decreasing analyze_batch_percent to {round(current_batch_percent, 8)}")
+    #                 self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: get_rows_count: Worker: {worker_id}: PK analysis: {loop_counter}: Decreasing analyze_batch_percent to {round(current_batch_percent, 8)}")
     #                 continue
 
     #             if testing_row_count == 0:
     #                 current_batch_percent *= 1.5
-    #                 self.config_parser.print_log_message('DEBUG', f"Worker: {worker_id}: PK analysis: {loop_counter}: Increasing analyze_batch_percent to {round(current_batch_percent, 8)} without restarting loop")
+    #                 self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: get_rows_count: Worker: {worker_id}: PK analysis: {loop_counter}: Increasing analyze_batch_percent to {round(current_batch_percent, 8)} without restarting loop")
 
     #             sybase_cursor.execute(f"""SELECT
     #                         %s::bigint AS batch_start,
@@ -2808,13 +2808,13 @@ class SybaseASEConnector(DatabaseConnector):
     #                 insert_batch_start = result[0]
     #                 insert_batch_end = result[1]
     #                 insert_row_count = result[2]
-    #                 self.config_parser.print_log_message('DEBUG', f"Worker: {worker_id}: PK analysis: {loop_counter}: Insert batch into temp table: start: {insert_batch_start}, end: {insert_batch_end}, row count: {insert_row_count}")
+    #                 self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: get_rows_count: Worker: {worker_id}: PK analysis: {loop_counter}: Insert batch into temp table: start: {insert_batch_start}, end: {insert_batch_end}, row count: {insert_row_count}")
     #                 migrator_tables.protocol_connection.execute_query(f"""INSERT INTO "{temp_table}" (batch_start, batch_end, row_count) VALUES (%s, %s, %s)""", (insert_batch_start, insert_batch_end, insert_row_count))
 
     #             current_start = current_end + 1
-    #             self.config_parser.print_log_message('DEBUG', f"Worker: {worker_id}: PK analysis: {loop_counter}: loop end - new current_start: {current_start}")
+    #             self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: get_rows_count: Worker: {worker_id}: PK analysis: {loop_counter}: loop end - new current_start: {current_start}")
 
-    #         self.config_parser.print_log_message('DEBUG', f"Worker: {worker_id}: PK analysis: {loop_counter}: second loop")
+    #         self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: get_rows_count: Worker: {worker_id}: PK analysis: {loop_counter}: second loop")
 
     #         current_start = min_id
     #         while current_start <= max_id:
@@ -2855,7 +2855,7 @@ class SybaseASEConnector(DatabaseConnector):
 
     #         migrator_tables.protocol_connection.execute_query(f"""DROP TABLE IF EXISTS "{temp_table}" """)
     #         self.connection.commit()
-    #         self.config_parser.print_log_message('INFO', f"Worker: {worker_id}: PK analysis: {loop_counter}: Finished analyzing PK distribution for table {table_name}.")
+    #         self.config_parser.print_log_message('INFO', f"sybase_ase_connector: get_rows_count: Worker: {worker_id}: PK analysis: {loop_counter}: Finished analyzing PK distribution for table {table_name}.")
     #         ## end of function
 
 
@@ -2866,12 +2866,12 @@ class SybaseASEConnector(DatabaseConnector):
 
             # # we need to do slower analysis with selecting all values of primary key
             # # necessary for composite keys or non-numeric keys
-            # self.config_parser.print_log_message('DEBUG', f"Worker: {worker_id}: PK analysis: {primary_key_columns} ({primary_key_columns_types}): analyzing all PK values")
+            # self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: get_rows_count: Worker: {worker_id}: PK analysis: {primary_key_columns} ({primary_key_columns_types}): analyzing all PK values")
 
             # primary_key_columns_list = primary_key_columns.split(',')
             # primary_key_columns_types_list = primary_key_columns_types.split(',')
             # temp_table_structure = ', '.join([f"{column.strip()} {column_type.strip()}" for column, column_type in zip(primary_key_columns_list, primary_key_columns_types_list)])
-            # self.config_parser.print_log_message('DEBUG', f"Worker: {worker_id}: PK analysis: {primary_key_columns}: temp table structure: {temp_table_structure}")
+            # self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: get_rows_count: Worker: {worker_id}: PK analysis: {primary_key_columns}: temp table structure: {temp_table_structure}")
 
             # # step 1: create temp table with all PK values
             # sybase_cursor = self.connection.cursor()
@@ -2884,10 +2884,10 @@ class SybaseASEConnector(DatabaseConnector):
             # rows = sybase_cursor.fetchall()
             # pk_temp_table_row_count = len(rows)
             # for row in rows:
-            #     # self.config_parser.print_log_message('DEBUG', f"Worker: {worker_id}: PK analysis: {primary_key_columns}: row: {row}")
+            #     # self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: get_rows_count: Worker: {worker_id}: PK analysis: {primary_key_columns}: row: {row}")
             #     insert_values = ', '.join([f"'{value}'" if isinstance(value, str) else str(value) for value in row])
             #     migrator_tables.protocol_connection.execute_query(f"""INSERT INTO "{temp_table}" ({primary_key_columns}) VALUES ({insert_values})""")
-            # self.config_parser.print_log_message('DEBUG', f"Worker: {worker_id}: PK analysis: {primary_key_columns}: Inserted {pk_temp_table_row_count} rows into temp table {temp_table}")
+            # self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: get_rows_count: Worker: {worker_id}: PK analysis: {primary_key_columns}: Inserted {pk_temp_table_row_count} rows into temp table {temp_table}")
 
             # # step 2: analyze distribution of PK values
             # pk_temp_table_offset = 0
@@ -2914,7 +2914,7 @@ class SybaseASEConnector(DatabaseConnector):
             #     if not rec_max_values:
             #         break
 
-            #     self.config_parser.print_log_message('DEBUG', f"Worker: {worker_id}: PK analysis: {batch_loop}: Loop counter: {batch_loop}, PK values: {rec_min_values} / {rec_max_values}")
+            #     self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: get_rows_count: Worker: {worker_id}: PK analysis: {batch_loop}: Loop counter: {batch_loop}, PK values: {rec_min_values} / {rec_max_values}")
 
             #     values = {}
             #     values['source_schema_name'] = schema_name
@@ -2993,7 +2993,7 @@ class SybaseASEConnector(DatabaseConnector):
             })
 
             if source_table_rows == 0:
-                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {source_table_name} is empty - skipping data migration.")
+                self.config_parser.print_log_message('INFO', f"sybase_ase_connector: migrate_table: Worker {worker_id}: Table {source_table_name} is empty - skipping data migration.")
                 migrator_tables.update_data_migration_status({
                         'row_id': protocol_id,
                         'success': True,
@@ -3011,7 +3011,7 @@ class SybaseASEConnector(DatabaseConnector):
 
                 if source_table_rows > target_table_rows:
 
-                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Source table {source_table_name}: {source_table_rows} rows / Target table {target_table_name}: {target_table_rows} rows - starting data migration.")
+                    self.config_parser.print_log_message('INFO', f"sybase_ase_connector: migrate_table: Worker {worker_id}: Source table {source_table_name}: {source_table_rows} rows / Target table {target_table_name}: {target_table_rows} rows - starting data migration.")
 
                     select_columns_list = []
                     orderby_columns_list = []
@@ -3032,7 +3032,7 @@ class SybaseASEConnector(DatabaseConnector):
 
                         # fixing error - [42000] [FreeTDS][SQL Server]The TEXT, IMAGE and UNITEXT datatypes cannot be used in an ORDER BY clause or in the select list of a query in a UNION statement.\n (420) (SQLExecDirectW)
                         if col['data_type'].lower() in ['text', 'image', 'unitext']:
-                            self.config_parser.print_log_message('DEBUG2', f"Worker {worker_id}: Table {source_schema_name}.{source_table_name}: Column {col['column_name']} ({order_num}) with data type {col['data_type']} cannot be used in ORDER BY clause or in the select list of a query in a UNION statement.")
+                            self.config_parser.print_log_message('DEBUG2', f"sybase_ase_connector: migrate_table: Worker {worker_id}: Table {source_schema_name}.{source_table_name}: Column {col['column_name']} ({order_num}) with data type {col['data_type']} cannot be used in ORDER BY clause or in the select list of a query in a UNION statement.")
                             continue
                         orderby_columns_list.append(f'''{col['column_name']}''')
 
@@ -3042,7 +3042,7 @@ class SybaseASEConnector(DatabaseConnector):
 
                     if resume_after_crash and not drop_unfinished_tables:
                         chunk_number = self.config_parser.get_total_chunks(target_table_rows, chunk_size)
-                        self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Resuming migration for table {source_schema_name}.{source_table_name} from chunk {chunk_number} with data chunk size {chunk_size}.")
+                        self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: migrate_table: Worker {worker_id}: Resuming migration for table {source_schema_name}.{source_table_name} from chunk {chunk_number} with data chunk size {chunk_size}.")
                         chunk_offset = target_table_rows
                     else:
                         chunk_offset = (chunk_number - 1) * chunk_size
@@ -3050,7 +3050,7 @@ class SybaseASEConnector(DatabaseConnector):
                     chunk_start_row_number = chunk_offset + 1
                     chunk_end_row_number = chunk_offset + chunk_size
 
-                    self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Migrating table {source_schema_name}.{source_table_name}: chunk {chunk_number}, data chunk size {chunk_size}, batch size {batch_size}, chunk offset {chunk_offset}, chunk end row number {chunk_end_row_number}, source table rows {source_table_rows}")
+                    self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: migrate_table: Worker {worker_id}: Migrating table {source_schema_name}.{source_table_name}: chunk {chunk_number}, data chunk size {chunk_size}, batch size {batch_size}, chunk offset {chunk_offset}, chunk end row number {chunk_end_row_number}, source table rows {source_table_rows}")
                     order_by_clause = ''
 
                     ## Sybase ASE does not support LIMIT with OFFSET, in older versions,
@@ -3060,14 +3060,14 @@ class SybaseASEConnector(DatabaseConnector):
                     if migration_limitation:
                         query += f" WHERE {migration_limitation}"
                     primary_key_columns = migrator_tables.select_primary_key({'source_schema_name': source_schema_name, 'source_table_name': source_table_name})
-                    self.config_parser.print_log_message('DEBUG2', f"Worker {worker_id}: Primary key columns for {source_schema_name}.{source_table_name}: {primary_key_columns}")
+                    self.config_parser.print_log_message('DEBUG2', f"sybase_ase_connector: migrate_table: Worker {worker_id}: Primary key columns for {source_schema_name}.{source_table_name}: {primary_key_columns}")
                     if primary_key_columns:
                         orderby_columns = primary_key_columns
                     order_by_clause = f""" ORDER BY {orderby_columns}"""
                     query += order_by_clause
                     # query += order_by_clause + f" LIMIT {chunk_size}"
 
-                    self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Fetching data with cursor using query: {query}")
+                    self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: migrate_table: Worker {worker_id}: Fetching data with cursor using query: {query}")
 
                     part_name = 'execute query'
                     cursor = self.connection.cursor()
@@ -3089,7 +3089,7 @@ class SybaseASEConnector(DatabaseConnector):
                         batch_number += 1
                         reading_end_time = time.time()
                         reading_duration = reading_end_time - reading_start_time
-                        self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Fetched {len(records)} rows (batch {batch_number}) from source table '{source_table_name}' using cursor")
+                        self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: migrate_table: Worker {worker_id}: Fetched {len(records)} rows (batch {batch_number}) from source table '{source_table_name}' using cursor")
 
                         # Convert records to a list of dictionaries
                         transforming_start_time = time.time()
@@ -3107,7 +3107,7 @@ class SybaseASEConnector(DatabaseConnector):
                                     record[column_name] = str(record[column_name]) if record[column_name] is not None else None
 
                         # Insert batch into target table
-                        self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Starting insert of {len(records)} rows from source table {source_table_name}")
+                        self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: migrate_table: Worker {worker_id}: Starting insert of {len(records)} rows from source table {source_table_name}")
                         transforming_end_time = time.time()
                         transforming_duration = transforming_end_time - transforming_start_time
                         inserting_start_time = time.time()
@@ -3162,12 +3162,12 @@ class SybaseASEConnector(DatabaseConnector):
                         reading_start_time = batch_start_time
 
                     target_table_rows = migrate_target_connection.get_rows_count(target_schema_name, target_table_name)
-                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Target table {target_schema_name}.{target_table_name} has {target_table_rows} rows")
+                    self.config_parser.print_log_message('INFO', f"sybase_ase_connector: migrate_table: Worker {worker_id}: Target table {target_schema_name}.{target_table_name} has {target_table_rows} rows")
 
                     shortest_batch_seconds = min(batch_durations) if batch_durations else 0
                     longest_batch_seconds = max(batch_durations) if batch_durations else 0
                     average_batch_seconds = sum(batch_durations) / len(batch_durations) if batch_durations else 0
-                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Migrated {total_inserted_rows} rows from {source_table_name} to {target_schema_name}.{target_table_name} in {batch_number} batches: "
+                    self.config_parser.print_log_message('INFO', f"sybase_ase_connector: migrate_table: Worker {worker_id}: Migrated {total_inserted_rows} rows from {source_table_name} to {target_schema_name}.{target_table_name} in {batch_number} batches: "
                                                             f"Shortest batch: {shortest_batch_seconds:.2f} seconds, "
                                                             f"Longest batch: {longest_batch_seconds:.2f} seconds, "
                                                             f"Average batch: {average_batch_seconds:.2f} seconds")
@@ -3176,7 +3176,7 @@ class SybaseASEConnector(DatabaseConnector):
                     cursor.close()
 
                 elif source_table_rows <= target_table_rows:
-                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Source table {source_table_name} has {source_table_rows} rows, which is less than or equal to target table {target_table_name} with {target_table_rows} rows. No data migration needed.")
+                    self.config_parser.print_log_message('INFO', f"sybase_ase_connector: migrate_table: Worker {worker_id}: Source table {source_table_name} has {source_table_rows} rows, which is less than or equal to target table {target_table_name} with {target_table_rows} rows. No data migration needed.")
 
                 migration_stats = {
                     'rows_migrated': total_inserted_rows,
@@ -3187,11 +3187,11 @@ class SybaseASEConnector(DatabaseConnector):
                     'finished': False,
                 }
 
-                self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Migration stats: {migration_stats}")
+                self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: migrate_table: Worker {worker_id}: Migration stats: {migration_stats}")
                 # we currently do not implement chunking for Sybase ASE
                 # if source_table_rows <= target_table_rows or chunk_number >= total_chunks:
                 if source_table_rows <= target_table_rows:
-                    self.config_parser.print_log_message('DEBUG3', f"Worker {worker_id}: Setting migration status to finished for table {source_table_name} (chunk {chunk_number}/{total_chunks})")
+                    self.config_parser.print_log_message('DEBUG3', f"sybase_ase_connector: migrate_table: Worker {worker_id}: Setting migration status to finished for table {source_table_name} (chunk {chunk_number}/{total_chunks})")
                     migration_stats['finished'] = True
                     migrator_tables.update_data_migration_status({
                         'row_id': protocol_id,
@@ -3229,8 +3229,8 @@ class SybaseASEConnector(DatabaseConnector):
                 return migration_stats
 
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Error during {part_name} -> {e}")
-            self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Full stack trace: {traceback.format_exc()}")
+            self.config_parser.print_log_message('ERROR', f"sybase_ase_connector: migrate_table: Worker {worker_id}: Error during {part_name} -> {e}")
+            self.config_parser.print_log_message('ERROR', f"sybase_ase_connector: migrate_table: Worker {worker_id}: Full stack trace: {traceback.format_exc()}")
             raise e
 
     def convert_trigger(self, settings):
@@ -3413,9 +3413,9 @@ EXECUTE FUNCTION {target_schema_name}.{trigger_name}_func();
 
     #         return '' # Remove from body
 
-    #     self.config_parser.print_log_message('DEBUG', "Starting variable declaration extraction...")
+    #     self.config_parser.print_log_message('DEBUG', "sybase_ase_connector: update_func_replacer: Starting variable declaration extraction...")
     #     body_content = re.sub(r'DECLARE\s+@.*?(?=\bBEGIN\b|\bIF\b|\bWHILE\b|\bSELECT\b|\bINSERT\b|\bUPDATE\b|\bDELETE\b|\bRETURN\b|\bSET\b|\bFETCH\b|\bOPEN\b|\bCLOSE\b|\bDEALLOCATE\b|\bDECLARE\b|$)', declaration_replacer, body_content, flags=re.IGNORECASE | re.DOTALL)
-    #     self.config_parser.print_log_message('DEBUG', "Variable declaration extraction complete.")
+    #     self.config_parser.print_log_message('DEBUG', "sybase_ase_connector: update_func_replacer: Variable declaration extraction complete.")
 
     #     # 4. Global Replacements
     #     # Functions
@@ -3425,7 +3425,7 @@ EXECUTE FUNCTION {target_schema_name}.{trigger_name}_func();
     #         body_content = re.sub(escaped_src_func, pg_equiv, body_content, flags=re.IGNORECASE)
 
     #     # Type substitutions in body
-    #     self.config_parser.print_log_message('DEBUG', "Starting global type substitutions...")
+    #     self.config_parser.print_log_message('DEBUG', "sybase_ase_connector: update_func_replacer: Starting global type substitutions...")
     #     body_content = self._apply_data_type_substitutions(body_content)
     #     body_content = self._apply_udt_to_base_type_substitutions(body_content, settings)
     #     for sybase_type, pg_type in types_mapping.items():
@@ -3801,8 +3801,8 @@ EXECUTE FUNCTION {target_schema_name}.{trigger_name}_func();
                 AND tbl.type = 'U'
             ORDER BY tr.id, c.colid
         """
-        self.config_parser.print_log_message('DEBUG3', f"Fetching triggers for table {table_name}")
-        self.config_parser.print_log_message('DEBUG3', f"Query: {query}")
+        self.config_parser.print_log_message('DEBUG3', f"sybase_ase_connector: fetch_triggers: Fetching triggers for table {table_name}")
+        self.config_parser.print_log_message('DEBUG3', f"sybase_ase_connector: fetch_triggers: Query: {query}")
         self.connect()
         cursor = self.connection.cursor()
         cursor.execute(query)
@@ -3872,7 +3872,7 @@ EXECUTE FUNCTION {target_schema_name}.{trigger_name}_func();
             self.disconnect()
             return views
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', f"sybase_ase_connector: fetch_views_names: Error executing query: {query}")
             self.config_parser.print_log_message('ERROR', e)
             raise
 
@@ -4073,7 +4073,7 @@ EXECUTE FUNCTION {target_schema_name}.{trigger_name}_func();
                     return sqlglot.exp.DPipe(this=new_left, expression=new_right)
             return node
 
-        self.config_parser.print_log_message('DEBUG3', f"settings in convert_view_code: {settings}")
+        self.config_parser.print_log_message('DEBUG3', f"sybase_ase_connector: convert_string_concatenation: settings in convert_view_code: {settings}")
         converted_code = settings['view_code']
 
         # Apply remote_objects_substitution
@@ -4084,7 +4084,7 @@ EXECUTE FUNCTION {target_schema_name}.{trigger_name}_func();
                 if source_obj and target_obj:
                     # Case-insensitive replacement
                     converted_code = re.sub(re.escape(source_obj), target_obj, converted_code, flags=re.IGNORECASE)
-                    self.config_parser.print_log_message('DEBUG', f"Applied remote object substitution: {source_obj} -> {target_obj}")
+                    self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: convert_string_concatenation: Applied remote object substitution: {source_obj} -> {target_obj}")
 
         # Pre-process Sybase specific join syntax
         # *= -> = /* left_outer */
@@ -4105,7 +4105,7 @@ EXECUTE FUNCTION {target_schema_name}.{trigger_name}_func();
             try:
                 parsed_code = sqlglot.parse_one(converted_code)
             except Exception as e:
-                self.config_parser.print_log_message('ERROR', f"Error parsing View code: {e}")
+                self.config_parser.print_log_message('ERROR', f"sybase_ase_connector: convert_string_concatenation: Error parsing View code: {e}")
                 return ''
 
             # double quote column names
@@ -4117,19 +4117,19 @@ EXECUTE FUNCTION {target_schema_name}.{trigger_name}_func();
             # Convert string concatenation + to ||
             parsed_code = parsed_code.transform(convert_string_concatenation)
 
-            self.config_parser.print_log_message('DEBUG3', f"Double quoted columns: {parsed_code.sql()}")
+            self.config_parser.print_log_message('DEBUG3', f"sybase_ase_connector: convert_string_concatenation: Double quoted columns: {parsed_code.sql()}")
 
             # replace source schema with target schema
             parsed_code = parsed_code.transform(replace_schema_names)
-            self.config_parser.print_log_message('DEBUG3', f"Replaced schema names: {parsed_code.sql()}")
+            self.config_parser.print_log_message('DEBUG3', f"sybase_ase_connector: convert_string_concatenation: Replaced schema names: {parsed_code.sql()}")
 
             # double quote schema and table names
             parsed_code = parsed_code.transform(quote_schema_and_table_names)
-            self.config_parser.print_log_message('DEBUG3', f"Double quoted schema and table names: {parsed_code.sql()}")
+            self.config_parser.print_log_message('DEBUG3', f"sybase_ase_connector: convert_string_concatenation: Double quoted schema and table names: {parsed_code.sql()}")
 
             # replace functions
             parsed_code = parsed_code.transform(replace_functions)
-            self.config_parser.print_log_message('DEBUG3', f"Replaced functions: {parsed_code.sql()}")
+            self.config_parser.print_log_message('DEBUG3', f"sybase_ase_connector: convert_string_concatenation: Replaced functions: {parsed_code.sql()}")
 
             converted_code = parsed_code.sql()
             converted_code = converted_code.replace("()()", "()")
@@ -4140,14 +4140,14 @@ EXECUTE FUNCTION {target_schema_name}.{trigger_name}_func();
                 for src_func, tgt_func in sql_functions_mapping.items():
                     escaped_src_func = re.escape(src_func)
                     converted_code = re.sub(rf"(?i){escaped_src_func}", tgt_func, converted_code, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
-                    self.config_parser.print_log_message('DEBUG', f"Checking convertion of function {src_func} to {tgt_func} in view code")
+                    self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: convert_string_concatenation: Checking convertion of function {src_func} to {tgt_func} in view code")
 
             # converted_code = converted_code.replace(f"{settings['source_database']}..", f"{settings['target_schema_name']}.")
             # converted_code = converted_code.replace(f"{settings['source_database']}.{settings['source_schema_name']}.", f"{settings['target_schema_name']}.")
             # converted_code = converted_code.replace(f"{settings['source_schema_name']}.", f"{settings['target_schema_name']}.")
-            self.config_parser.print_log_message('DEBUG', f"Converted view: {converted_code}")
+            self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: convert_string_concatenation: Converted view: {converted_code}")
         else:
-            self.config_parser.print_log_message('ERROR', f"Unsupported target database type: {settings['target_db_type']}")
+            self.config_parser.print_log_message('ERROR', f"sybase_ase_connector: convert_string_concatenation: Unsupported target database type: {settings['target_db_type']}")
         return converted_code
 
     def get_sequence_current_value(self, sequence_name):
@@ -4179,7 +4179,7 @@ EXECUTE FUNCTION {target_schema_name}.{trigger_name}_func();
 
         self.connect()
         cursor = self.connection.cursor()
-        self.config_parser.print_log_message('DEBUG', "Fetching user defined types")
+        self.config_parser.print_log_message('DEBUG', "sybase_ase_connector: fetch_user_defined_types: Fetching user defined types")
         cursor.execute(query)
         rows = cursor.fetchall()
 
@@ -4317,7 +4317,7 @@ EXECUTE FUNCTION {target_schema_name}.{trigger_name}_func();
 
         cursor.close()
         self.disconnect()
-        self.config_parser.print_log_message('DEBUG', f"Found domains: {domains}")
+        self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: fetch_domains: Found domains: {domains}")
         return domains
 
     def get_create_domain_sql(self, settings):
@@ -4325,7 +4325,7 @@ EXECUTE FUNCTION {target_schema_name}.{trigger_name}_func();
         return ""
 
     def get_table_description(self, settings) -> dict:
-        self.config_parser.print_log_message('DEBUG3', f"Sybase ASE connector: Getting table description for {settings['table_schema']}.{settings['table_name']}")
+        self.config_parser.print_log_message('DEBUG3', f"sybase_ase_connector: get_table_description: Sybase ASE connector: Getting table description for {settings['table_schema']}.{settings['table_name']}")
         table_schema = settings['table_schema']
         table_name = settings['table_name']
         output = ""
@@ -4350,7 +4350,7 @@ EXECUTE FUNCTION {target_schema_name}.{trigger_name}_func();
             cursor.close()
             self.disconnect()
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error fetching table description for {table_schema}.{table_name}: {e}")
+            self.config_parser.print_log_message('ERROR', f"sybase_ase_connector: get_table_description: Error fetching table description for {table_schema}.{table_name}: {e}")
             raise
 
         return { 'table_description': output.strip() }
@@ -4430,7 +4430,7 @@ EXECUTE FUNCTION {target_schema_name}.{trigger_name}_func();
                 WHERE type='U'
                 ORDER BY row_count DESC
                 """
-                self.config_parser.print_log_message('DEBUG', f"Executing query to get top {top_n} tables by rows: {query}")
+                self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: get_top_n_tables: Executing query to get top {top_n} tables by rows: {query}")
                 cursor.execute(query)
                 order_num = 1
                 rows = cursor.fetchall()
@@ -4444,12 +4444,12 @@ EXECUTE FUNCTION {target_schema_name}.{trigger_name}_func();
                         'row_size': row[3],
                     }
                     order_num += 1
-                self.config_parser.print_log_message('DEBUG', f"Top tables by rows: {top_tables['by_rows']}")
+                self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: get_top_n_tables: Top tables by rows: {top_tables['by_rows']}")
             else:
-                self.config_parser.print_log_message('DEBUG', f"Skipping top tables by rows check, top_n is set to 0")
+                self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: get_top_n_tables: Skipping top tables by rows check, top_n is set to 0")
 
         except Exception as error:
-            self.config_parser.print_log_message('ERROR', f"Warning: cannot check top tables by rows - error: {error}")
+            self.config_parser.print_log_message('ERROR', f"sybase_ase_connector: get_top_n_tables: Warning: cannot check top tables by rows - error: {error}")
 
         return top_tables
 

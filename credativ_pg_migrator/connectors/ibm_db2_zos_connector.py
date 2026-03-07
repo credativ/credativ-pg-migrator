@@ -89,12 +89,6 @@ class IbmDb2ZosConnector(DatabaseConnector):
             self.config_parser.print_log_message('DEBUG3', f"fetch_all_tables ({schema_name}): starting: schema_name: {schema_name} - self.connectivity: {self.connectivity} - query: {query}")
             try:
                 cursor = self.migrator_tables.protocol_connection.connection.cursor()
-                cursor.execute(f"""select count(*) from "{self.protocol_schema}"."ddl_tables" """)
-                count = cursor.fetchone()[0]
-                if count == 0:
-                    self.config_parser.print_log_message('INFO', f"fetch_all_tables ({schema_name}): No tables found")
-                else:
-                    self.config_parser.print_log_message('INFO', f"fetch_all_tables ({schema_name}): Found {count} tables")
                 cursor.execute(query)
                 rows = cursor.fetchall()
                 self.config_parser.print_log_message('DEBUG3', f"fetch_all_tables ({schema_name}): {rows}")

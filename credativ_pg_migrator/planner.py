@@ -724,7 +724,10 @@ class Planner:
                     self.config_parser.print_log_message( 'DEBUG', f"planner: convert_table_columns: Column {column_info['column_name']} - using substitution: {coltype}")
                 else:
                     coltype = column_info['data_type'].upper()
-                    character_maximum_length = column_info['character_maximum_length'] if column_info['character_maximum_length'] is not None else 0
+                    try:
+                        character_maximum_length = int(column_info['character_maximum_length']) if column_info['character_maximum_length'] is not None else 0
+                    except (ValueError, TypeError):
+                        character_maximum_length = 0
                     if source_db_type != 'postgresql':
                         if types_mapping.get(coltype, 'UNKNOWN').startswith('UNKNOWN'):
                             self.config_parser.print_log_message('INFO', f"planner: convert_table_columns: Column {column_info['column_name']} - unknown data type: {column_info['data_type']} - checking column_type...")

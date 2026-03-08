@@ -172,36 +172,39 @@ class IbmDb2ZosConnector(DatabaseConnector):
         return columns
 
     def get_types_mapping(self, settings):
-        if not hasattr(self, 'types_mapping'):
-            self.types_mapping = {
-                'postgresql': {
-                    'SMALLINT': 'SMALLINT',
-                    'INTEGER': 'INTEGER',
-                    'INT': 'INTEGER',
-                    'BIGINT': 'BIGINT',
-                    'DECIMAL': 'DECIMAL',
-                    'NUMERIC': 'NUMERIC',
-                    'REAL': 'REAL',
-                    'DOUBLE': 'DOUBLE PRECISION',
-                    'FLOAT': 'DOUBLE PRECISION',
-                    'DECFLOAT': 'NUMERIC',
-                    'CHAR': 'CHAR',
-                    'VARCHAR': 'VARCHAR',
-                    'CLOB': 'TEXT',
-                    'GRAPHIC': 'CHAR',
-                    'VARGRAPHIC': 'VARCHAR',
-                    'DBCLOB': 'TEXT',
-                    'BINARY': 'BYTEA',
-                    'VARBINARY': 'BYTEA',
-                    'BLOB': 'BYTEA',
-                    'DATE': 'DATE',
-                    'TIME': 'TIME',
-                    'TIMESTAMP': 'TIMESTAMP',
-                    'XML': 'XML',
-                    'ROWID': 'BYTEA'
-                }
+        target_db_type = settings['target_db_type']
+        types_mapping = {}
+        if target_db_type == 'postgresql':
+            types_mapping = {
+                'SMALLINT': 'SMALLINT',
+                'INTEGER': 'INTEGER',
+                'INT': 'INTEGER',
+                'BIGINT': 'BIGINT',
+                'DECIMAL': 'DECIMAL',
+                'NUMERIC': 'NUMERIC',
+                'REAL': 'REAL',
+                'DOUBLE': 'DOUBLE PRECISION',
+                'FLOAT': 'DOUBLE PRECISION',
+                'DECFLOAT': 'NUMERIC',
+                'CHAR': 'CHAR',
+                'VARCHAR': 'VARCHAR',
+                'CLOB': 'TEXT',
+                'GRAPHIC': 'CHAR',
+                'VARGRAPHIC': 'VARCHAR',
+                'DBCLOB': 'TEXT',
+                'BINARY': 'BYTEA',
+                'VARBINARY': 'BYTEA',
+                'BLOB': 'BYTEA',
+                'DATE': 'DATE',
+                'TIME': 'TIME',
+                'TIMESTAMP': 'TIMESTAMP',
+                'XML': 'XML',
+                'ROWID': 'BYTEA'
             }
-        return self.types_mapping
+        else:
+            raise ValueError(f"Unsupported target database type: {target_db_type}")
+
+        return types_mapping
 
 
     def parse_ddl_files(self, settings):
@@ -539,10 +542,12 @@ class IbmDb2ZosConnector(DatabaseConnector):
         return {}
 
     def is_string_type(self, column_type: str) -> bool:
-        return False
+        string_types = ['CHAR', 'VARCHAR', 'NCHAR', 'NVARCHAR', 'TEXT', 'LONG VARCHAR', 'LONG NVARCHAR', 'UNICHAR', 'UNIVARCHAR']
+        return column_type.upper() in string_types
 
     def is_numeric_type(self, column_type: str) -> bool:
-        return False
+        numeric_types = ['BIGINT', 'INTEGER', 'INT', 'TINYINT', 'SMALLINT', 'FLOAT', 'DOUBLE PRECISION', 'DECIMAL', 'NUMERIC']
+        return column_type.upper() in numeric_types
 
     def get_create_table_sql(self, settings):
         pass

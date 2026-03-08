@@ -360,9 +360,9 @@ class PostgreSQLConnector(DatabaseConnector):
             #     column_data_type = column_info['basic_data_type'].upper()
 
             character_maximum_length = ''
-            if 'character_maximum_length' in column_info and column_info['character_maximum_length'] != '':
+            if 'character_maximum_length' in column_info and column_info['character_maximum_length'] not in ('', None):
                 character_maximum_length = column_info['character_maximum_length']
-            if column_info['basic_character_maximum_length'] != '':
+            if column_info['basic_character_maximum_length'] not in ('', None):
                 character_maximum_length = column_info['basic_character_maximum_length']
 
             domain_name = column_info['domain_name']

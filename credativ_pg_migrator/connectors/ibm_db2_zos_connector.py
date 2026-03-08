@@ -705,7 +705,7 @@ class IbmDb2ZosConnector(DatabaseConnector):
         source_schema_name = settings.get('source_schema_name')
         source_view_name = settings.get('source_view_name')
         if self.connectivity == self.config_parser.const_connectivity_ddl():
-            query = f"""SELECT source_ddl_text
+            query = f"""SELECT source_view_sql
                         FROM "{self.protocol_schema}"."ddl_views"
                         WHERE source_schema_name = %s AND source_view_name = %s"""
             cursor = self.migrator_tables.protocol_connection.connection.cursor()

@@ -480,7 +480,7 @@ class Orchestrator:
                 worker_target_connection.execute_query(create_table_sql)
                 self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Table '{target_table_name}' created successfully.")
 
-                if table_data['partitioned']:
+                if table_data.get('create_partitions_sql'):
                     part_name = 'create partitions'
                     self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Creating partitions for table {target_table_name} in target database.")
 

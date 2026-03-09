@@ -1230,7 +1230,11 @@ class Planner:
                     if table_database_export and 'delimiter' in table_database_export:
                         delimiter = table_database_export['delimiter']
 
-                    self.config_parser.print_log_message('DEBUG3',f"planner: run_prepare_data_sources: Table {table_info['source_table_name']} - file_name: {table_file_name}, converted_file_name: {converted_file_name}, data_file_found: {data_file_found}, format: {format}, delimiter: {delimiter}, header: {header}")
+                    character_set = database_export.get('character_set', 'UTF-8')
+                    if table_database_export and 'character_set' in table_database_export:
+                        character_set = table_database_export['character_set']
+
+                    self.config_parser.print_log_message('DEBUG3',f"planner: run_prepare_data_sources: Table {table_info['source_table_name']} - file_name: {table_file_name}, converted_file_name: {converted_file_name}, data_file_found: {data_file_found}, format: {format}, delimiter: {delimiter}, header: {header}, character_set: {character_set}")
                     data_source = {
                         'source_schema_name': table_info['source_schema_name'],
                         'source_table_name': table_info['source_table_name'],
@@ -1246,6 +1250,7 @@ class Planner:
                             'format': format,
                             'delimiter': delimiter,
                             'header': header,
+                            'character_set': character_set,
                         }
                     }
                     self.migrator_tables.insert_data_source(data_source)

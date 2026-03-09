@@ -493,12 +493,13 @@ class IbmDb2ZosConnector(DatabaseConnector):
                         is_nullable = False
 
                     default_value = None
-                    default_match = re.search(r"WITH\s+DEFAULT\s+('[^']*'|[0-9\.]+|[A-Za-z0-9_]+)?", after_type, re.IGNORECASE)
+                    default_match = re.search(r"WITH\s+DEFAULT(?:\s+('[^']*'|[0-9\.]+|[A-Za-z0-9_]+(?:\s+[A-Za-z0-9_]+)?))?", after_type, re.IGNORECASE)
                     if default_match:
-                        if default_match.group(1):
-                            default_value = default_match.group(1)
-                        else:
+                        val = default_match.group(1)
+                        if val is None or val.upper() in ('NOT NULL', 'GENERATED', 'CONSTRAINT'):
                             default_value = "SYSTEM DEFAULT"
+                        else:
+                            default_value = val
 
                     is_pk = col_name in pk_columns
 

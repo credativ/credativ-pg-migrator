@@ -361,6 +361,28 @@ class DatabaseConnector(ABC):
         pass
 
     @abstractmethod
+    def get_aliases(self, settings):
+        """
+        Fetch all aliases from source database. PostgreSQL does not have direct equivalent for aliases.
+        But we need to know them for consistency.
+        settings:
+            - source_schema_name
+        Returns a dictionary:
+            { ordinary_number: {
+                'id': alias_id,
+                'alias_schema_name': schema_name,
+                'alias_name': alias_name,
+                'aliased_schema_name': aliased_schema_name,
+                'aliased_table_name': aliased_table_name,
+                'alias_owner': alias_owner,
+                'alias_sql': alias_sql,
+                'alias_comment': alias_comment
+                }
+            }
+        """
+        pass
+
+    @abstractmethod
     def get_create_constraint_sql(self, settings):
         """
         This function is currently relevant only for target database

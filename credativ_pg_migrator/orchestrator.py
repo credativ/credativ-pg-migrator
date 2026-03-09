@@ -633,6 +633,7 @@ class Orchestrator:
                                         part_name = 'convert UNL to CSV'
                                         csv_file_name = data_source_settings['converted_file_name']
                                         self.config_parser.convert_unl_to_csv(data_source_settings, table_data['source_columns'], table_data['target_columns'])
+                                        csv_file_name = data_source_settings['converted_file_name']
 
                                     elif data_source_settings['format_options']['format'].upper() == 'CSV':
                                         self.config_parser.print_log_message('DEBUG3', f"orchestrator: table_worker: Worker {worker_id}: Table {target_table_name}: Data source for table {target_table_name} is CSV format. Char set: {data_source_settings['format_options']['character_set']}")
@@ -823,7 +824,7 @@ class Orchestrator:
                                             # No LOB columns - standard CSV import
                                             # CSV data source - directly import into target database
                                             part_name = 'copy data from CSV'
-                                            self.config_parser.print_log_message('DEBUG', f"orchestrator: table_worker: Worker {worker_id}: Executing COPY command: {copy_command}")
+                                            self.config_parser.print_log_message('DEBUG', f"orchestrator: table_worker: Worker {worker_id}: Executing COPY command: {copy_command}, csv_file_name: {csv_file_name}")
                                             worker_target_connection.copy_from_file(copy_command, csv_file_name)
 
                                             self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Data copied successfully from CSV file {csv_file_name} to table {target_table_name}.")

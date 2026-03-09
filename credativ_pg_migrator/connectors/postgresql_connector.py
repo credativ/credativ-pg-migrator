@@ -900,6 +900,7 @@ class PostgreSQLConnector(DatabaseConnector):
             cursor.execute(query, params)
 
     def copy_from_file(self, sql: str, file_path: str):
+        self.config_parser.print_log_message('DEBUG3', f"postgresql_connector: copy_from_file: sql: {sql}, file_path: {file_path}")
         with open(file_path, 'r') as file:
             with self.connection.cursor() as cursor:
                 try:
@@ -910,7 +911,7 @@ class PostgreSQLConnector(DatabaseConnector):
                 except Exception as e:
                     for notice in cursor.connection.notices:
                         self.config_parser.print_log_message('INFO', notice)
-                    self.config_parser.print_log_message('ERROR', f"postgresql_connector: copy_from_file: Error executing copy_expert: {e}")
+                    self.config_parser.print_log_message('ERROR', f"postgresql_connector: copy_from_file: file_path: {file_path}: Error executing copy_expert: {e}")
                     raise
 
     def execute_sql_script(self, script_path: str):

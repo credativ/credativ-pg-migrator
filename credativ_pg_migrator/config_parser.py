@@ -883,7 +883,7 @@ class ConfigParser:
 
     def convert_csv_to_utf8(self, data_source_settings):
         part_name = 'convert_csv_to_utf8 start'
-        self.config_parser.print_log_message('DEBUG3', f"config_parser: convert_csv_to_utf8: ({part_name}): Starting conversion of CSV file '{data_source_settings['file_name']}' to UTF-8.")
+        self.print_log_message('DEBUG3', f"config_parser: convert_csv_to_utf8: ({part_name}): Starting conversion of CSV file '{data_source_settings['file_name']}' to UTF-8.")
         try:
             input_csv_data_file = data_source_settings['file_name']
             output_csv_data_file = data_source_settings['converted_file_name'] + '_utf8'

@@ -663,11 +663,21 @@ class IbmDb2ZosConnector(DatabaseConnector):
                 else:
                     referenced_columns = raw_ref_cols
 
+                raw_constraint_cols = row[1]
+                if raw_constraint_cols:
+                    constraint_cols_list = [c.strip() for c in raw_constraint_cols.split(',')]
+                    # Deduplicate preserving order
+                    seen = set()
+                    deduped_constraint_cols = [x for x in constraint_cols_list if not (x in seen or seen.add(x))]
+                    constraint_columns = ', '.join(deduped_constraint_cols)
+                else:
+                    constraint_columns = raw_constraint_cols
+
                 constraints[i] = {
                     'constraint_name': row[0],
                     'constraint_type': 'FOREIGN KEY',
                     'constraint_owner': table_schema,
-                    'constraint_columns': row[1],
+                    'constraint_columns': constraint_columns,
                     'referenced_table_schema': row[2],
                     'referenced_table_name': row[3],
                     'referenced_columns': referenced_columns,

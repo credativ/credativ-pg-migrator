@@ -552,11 +552,13 @@ class Orchestrator:
                             NULL '\\N',
                             DELIMITER '{data_source['format_options']['delimiter']}')"""
                             ## , QUOTE '{data_source['format_options']['quote']}'
+                        self.config_parser.print_log_message('DEBUG3', f"orchestrator: table_worker: Worker {worker_id}: Copy command: {copy_command}")
 
                         ## for other formats relevant to other databases we simply add new data types
                         ## CSV format is common for all databases, but might be necessary to convert it to PostgreSQL CSV conventions
                         if data_source['format_options']['format'].upper() in ('CSV', 'UNL'):
 
+                            self.config_parser.print_log_message('DEBUG3', f"orchestrator: table_worker: Worker {worker_id}: Data source format is CSV or UNL - proceeding with data migration.")
                             protocol_id = migrator_tables.insert_data_migration({
                                 'worker_id': worker_id,
                                 'source_table_id': table_data['source_table_id'],
@@ -583,7 +585,7 @@ class Orchestrator:
                                     'average_batch_seconds': 0,
                                 })
                             else:
-
+                                self.config_parser.print_log_message('DEBUG3', f"orchestrator: table_worker: Worker {worker_id}: Data source format is {data_source['format_options']['format'].upper()} - size: {data_source['file_size']} - proceeding with data migration.")
                                 data_import_start_time = time.time()
                                 source_files_to_process = []
                                 converted_files_to_process = []
@@ -610,13 +612,15 @@ class Orchestrator:
                                         source_files_to_process, converted_files_to_process = self.config_parser.split_big_unl_file(data_source)
                                         self.config_parser.print_log_message('DEBUG', f"orchestrator: table_worker: Worker {worker_id}: Table {target_table_name}: Split source files: {source_files_to_process}, converted target file names: {converted_files_to_process}")
 
-                                    else:
-                                        # Single file processing
-                                        source_files_to_process.append(data_source['file_name'])
-                                        converted_files_to_process.append(data_source['converted_file_name'])
+                                else:
+                                    # Single file processing
+                                    source_files_to_process.append(data_source['file_name'])
+                                    converted_files_to_process.append(data_source['converted_file_name'])
 
                                 data_source_settings = data_source.copy()
                                 csv_file_name = None
+
+                                self.config_parser.print_log_message('DEBUG3', f"orchestrator: table_worker: Worker {worker_id}: Table {target_table_name}: Processing {len(source_files_to_process)} source files.")
 
                                 for source_file_index, source_file_name in enumerate(source_files_to_process):
                                     data_source_settings['file_name'] = source_file_name

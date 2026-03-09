@@ -483,8 +483,13 @@ class DatabaseConnector(ABC):
         pass
 
     @abstractmethod
-    def convert_view_code(self, view_code: str, settings: dict):
+    def convert_view_code(self, settings: dict):
         """
+        settings - dictionary with the following keys
+            - view_code: id of the view in the source database (does not exist in MySQL)
+            - view_name: view name
+            - schema_name: schema name
+            - view_type: type of the view
         Convert view to the target database type.
         table_list - contains the list of all tables in the target schema - used for adding target_schema_name prefix to table names in the view code.
         """

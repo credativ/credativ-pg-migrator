@@ -71,7 +71,7 @@ source:
 
   # database locale - used for date and time formatting
   # currently working only for Informix
-  db_locale: "en_US.utf8"source_schema_name
+  db_locale: "en_US.utf8"
 
   # Global settings for using database export files as source of data for the migration, otherwise source table in the source database is used
   # This option is currently supported only for Informix
@@ -97,13 +97,13 @@ source:
     # action to take if data file is not found
     #   error - raise an error and stop the migration
     #   skip - skip the table and continue with the migration
-    #   source_table_name - use sourcesource_schema_namehe source database instead of the data file
+    #   source_table_name - use source table name from source database instead of the data file
     # default is "source_table_name"
     on_missing_data_file: skip
 
     # CSV example - separate CSV files for some or all table are expected in the specified directory
     format: "CSV"
-    file: "/path/to/data/files/{{source_schema_name}}.{{source_table_name}}.csv"source_schema_name
+    file: "/path/to/data/files/{{source_schema_name}}.{{source_table_name}}.csv"
     delimiter: ","
     header: true  # if CSV files contain header line with column names, default is false
 
@@ -201,7 +201,7 @@ migration:
   migrate_lob_values: false
 
   ## this is just a preparation for the future, not implemented yet
-  # target_lob_source_schema_namesource database contains CLOB or BLOB columns, this setting defines how to storsource_schema_name target database
+  # target_lob_storage - if source database contains CLOB or BLOB columns, this setting defines how to store them in the target database
   # this is global setting for the whole migration process - if missing, default is to store LOB values in the target database in bytea or text columns
   # "path" and "name" are used only if storage is set to "file"
   # target_lob_storage:
@@ -267,7 +267,7 @@ table_settings:
       #   chunk_size: '2GB'
       #   workers: 4  # number of workers to use for parallel processing of the chunks, default is 4
 
-    ## currently source_schema_nameed, just a preparation for the futuresource_schema_name
+    ## currently not implemented, just a preparation for the future
     # individual target LOB storage settings for the table
     # for example global settings can be set to database, but for this table we want to store LOB values in files
     # target_lob_storage:
@@ -325,7 +325,7 @@ default_values_substitution:
   - ["", "", "%getdate()%", "statement_timestamp()"]   ## condition with % to catch also "create default job_lastchange as getdate()", "(getdate())" and similar options
   - ["", "", "db_name()", "current_database()"]
   - ["", "", "current_timestamp()", "current_timestamp"]
-  - ["", "bitsource_schema_namealse"]
+  - ["", "bit", "b'0'", "false"]
   - ["", "bit", "b'1'", "true"]
 
 # Substitutions for objects from other databases
@@ -339,7 +339,7 @@ remote_objects_substitution:
 # "Table name (or pattern)", "condition for limiting data (without WHERE)", "column name (or pattern) - use condition when column is present in the table", "row limit"
 #   - condition can contain placeholders {source_schema} and {source_table_name} to reference schema and table name for which condition will be applied
 #   - placeholders will be replaced with proper values during migration
-# row limit is optional, if specified, lsource_schema_namel be applied only to tables with more than this number of rows
+# row limit is optional, if specified, limitation will be applied only to tables with more than this number of rows
 #   - if row limit is not specified, limitation will be applied to all tables matching the pattern and having the specified column
 data_migration_limitation:
   - [".*", "date >= '2000-01-01'", "date", 1000000]

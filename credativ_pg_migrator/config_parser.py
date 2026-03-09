@@ -881,6 +881,51 @@ class ConfigParser:
                             break
         return ','.join(lob_columns_list)
 
+    def convert_csv_to_utf8(self, data_source_settings):
+        part_name = 'convert_csv_to_utf8 start'
+        self.config_parser.print_log_message('DEBUG3', f"config_parser: convert_csv_to_utf8: ({part_name}): Starting conversion of CSV file '{data_source_settings['file_name']}' to UTF-8.")
+        try:
+            input_csv_data_file = data_source_settings['file_name']
+            output_csv_data_file = data_source_settings['converted_file_name'] + '_utf8'
+            source_table_name = data_source_settings['source_table_name']
+            file_size_bytes = data_source_settings.get('file_size', None)
+            if file_size_bytes is not None:
+                try:
+                    file_size_bytes = int(file_size_bytes)
+                    file_size_gb = file_size_bytes / (1024 ** 3)
+                    source_file_size = f"{file_size_bytes} B / {file_size_gb:.2f} GB"
+                except Exception:
+                    source_file_size = str(file_size_bytes)
+            else:
+                source_file_size = "Unknown"
+
+            character_set = data_source_settings.get('format_options', {}).get('character_set', 'UTF-8')
+            processing_start_time = datetime.now()
+
+            if not input_csv_data_file or not output_csv_data_file:
+                self.print_log_message('ERROR', "config_parser: convert_csv_to_utf8: Both 'file_name' and 'converted_file_name' must be specified in the settings.")
+                raise ValueError("Both 'file_name' and 'converted_file_name' must be specified in the settings.")
+            if not os.path.exists(input_csv_data_file):
+                self.print_log_message('ERROR', f"config_parser: convert_csv_to_utf8: Input CSV data file '{input_csv_data_file}' does not exist.")
+                raise FileNotFoundError(f"Input CSV data file '{input_csv_data_file}' does not exist.")
+
+            self.print_log_message('DEBUG', f"config_parser: convert_csv_to_utf8: ({part_name}): Converting CSV file '{input_csv_data_file}' (charset: {character_set}) to UTF-8 file '{output_csv_data_file}' - source file size: {source_file_size}")
+
+            counter = 0
+            with open(input_csv_data_file, 'r', encoding=character_set, errors='replace') as infile, \
+                 open(output_csv_data_file, 'w', encoding='utf-8') as outfile:
+                for line in infile:
+                    outfile.write(line)
+                    counter += 1
+
+            self.print_log_message('INFO', f"config_parser: convert_csv_to_utf8: Processed {counter} lines from {input_csv_data_file} and wrote to {output_csv_data_file} - source file size: {source_file_size} - processing time: {datetime.now() - processing_start_time}")
+
+            data_source_settings['converted_file_name'] = output_csv_data_file
+
+        except Exception as e:
+            self.print_log_message('ERROR', f"config_parser: convert_csv_to_utf8: ({part_name}): {e}")
+            raise e
+
     def convert_unl_to_csv(self, data_source_settings, source_columns, target_columns):
         part_name = 'convert_unl_to_csv start'
         try:

@@ -635,6 +635,10 @@ class Orchestrator:
                                         self.config_parser.convert_unl_to_csv(data_source_settings, table_data['source_columns'], table_data['target_columns'])
 
                                     elif data_source_settings['format_options']['format'].upper() == 'CSV':
+                                        self.config_parser.print_log_message('DEBUG3', f"orchestrator: table_worker: Worker {worker_id}: Table {target_table_name}: Data source for table {target_table_name} is CSV format. Char set: {data_source_settings['format_options']['character_set']}")
+                                        if data_source_settings['format_options']['character_set'].upper() != 'UTF-8':
+                                            self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Table {target_table_name}: Data source for table {target_table_name} is CSV format with character set {data_source_settings['format_options']['character_set']}. Converting to UTF-8.")
+                                            self.config_parser.convert_csv_to_utf8(data_source_settings)
                                         # CSV data source - use the file directly
                                         part_name = 'use CSV'
                                         csv_file_name = data_source_settings['file_name']

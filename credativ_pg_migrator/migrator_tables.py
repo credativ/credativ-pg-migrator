@@ -3320,9 +3320,11 @@ class MigratorTables:
         source_schema_name = settings.get('source_schema_name')
         table_name = self.config_parser.get_protocol_name_aliases()
         query = f"""SELECT * FROM "{self.protocol_schema}"."{table_name}" WHERE source_schema_name = '{source_schema_name}' ORDER BY id"""
+        # self.config_parser.print_log_message('DEBUG3', f"migrator_tables: fetch_all_aliases: ({source_schema_name}): {query}")
         cursor = self.protocol_connection.connection.cursor()
         cursor.execute(query)
         rows = cursor.fetchall()
+        # self.config_parser.print_log_message('DEBUG3', f"migrator_tables: fetch_all_aliases: ({source_schema_name}): {rows}")
         cursor.close()
         return rows
 

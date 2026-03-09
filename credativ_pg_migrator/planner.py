@@ -77,16 +77,13 @@ class Planner:
 
                 self.check_pausing_resuming()
 
+                self.run_prepare_aliases()
                 self.run_prepare_tables()
                 self.run_prepare_data_sources()
 
                 self.check_pausing_resuming()
 
                 self.run_prepare_views()
-
-                self.check_pausing_resuming()
-
-                self.run_prepare_aliases()
 
                 self.check_pausing_resuming()
 
@@ -864,7 +861,7 @@ class Planner:
     def run_prepare_aliases(self):
         self.config_parser.print_log_message('INFO', "planner: run_prepare_aliases: Preparing aliases...")
         self.config_parser.print_log_message('INFO', "planner: run_prepare_aliases: Processing aliases...")
-        
+
         try:
             aliases = self.source_connection.get_aliases({'source_schema_name': self.source_schema_name})
         except Exception as e:
@@ -875,7 +872,7 @@ class Planner:
             self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_aliases: Source aliases count: {len(aliases)}")
             for order_num, alias_info in aliases.items():
                 self.config_parser.print_log_message('INFO', f"planner: run_prepare_aliases: Processing alias ({order_num}): {alias_info.get('alias_name')}")
-                
+
                 self.migrator_tables.insert_aliases({
                     'source_schema_name': self.source_schema_name,
                     'source_alias_name': alias_info.get('alias_name', ''),
@@ -889,7 +886,7 @@ class Planner:
                 self.config_parser.print_log_message( 'INFO', f"planner: run_prepare_aliases: Alias {alias_info.get('alias_name')} processed successfully.")
         else:
             self.config_parser.print_log_message( 'INFO', "planner: run_prepare_aliases: No aliases found.")
-            
+
         self.config_parser.print_log_message( 'INFO', "planner: run_prepare_aliases: Aliases processing completed.")
 
     def run_prepare_user_defined_types(self):
@@ -1174,7 +1171,33 @@ class Planner:
                     file_name = table_database_export['file']
 
                 if file_name:
-                    table_file_name = file_name.replace("{{source_schema_name}}", table_info['source_schema_name']).replace("{{source_table_name}}", table_info['source_table_name'])
+                    def replace_placeholder(text, placeholder, value):
+                        def replacer(match):
+                            return value.upper() if match.group(0).isupper() else value.lower()
+                        return re.sub(re.escape(placeholder), replacer, text, flags=re.IGNORECASE)
+
+                    table_file_name = file_name
+                    table_file_name = replace_placeholder(table_file_name, '{{source_schema_name}}', table_info['source_schema_name'])
+                    table_file_name = replace_placeholder(table_file_name, '{{source_table_name}}', table_info['source_table_name'])
+
+                    if re.search(re.escape('{{source_alias_name}}'), table_file_name, flags=re.IGNORECASE):
+                        valid_alias_name = table_info['source_table_name']
+                        aliases = self.migrator_tables.fetch_all_aliases({'source_schema_name': table_info['source_schema_name']})
+                        self.config_parser.print_log_message('DEBUG3', f"planner: run_prepare_data_sources: Aliases found: {aliases}")
+                        for row in aliases:
+                            alias_info = self.migrator_tables.decode_aliases_row(row)
+                            self.config_parser.print_log_message('DEBUG3', f"planner: run_prepare_data_sources: Processing alias: {alias_info}")
+                            ref_schema = alias_info.get('source_referenced_schema_name') or ''
+                            ref_table = alias_info.get('source_referenced_table_name') or ''
+                            if ref_schema and ref_table:
+                                if ((ref_table == table_info['source_table_name'].lower() or ref_table == table_info['source_table_name'].upper()) and
+                                    (ref_schema == table_info['source_schema_name'].lower() or ref_schema == table_info['source_schema_name'].upper())):
+                                    valid_alias_name = alias_info['source_alias_name']
+                                    break
+
+                        table_file_name = replace_placeholder(table_file_name, '{{source_alias_name}}', valid_alias_name)
+
+
                     if os.path.exists(table_file_name):
                         data_file_found = True
                     else:
@@ -1190,7 +1213,7 @@ class Planner:
 
                     converted_file_name = os.path.join(
                         conversion_path,
-                        os.path.basename(table_file_name) + ".csv"
+                        re.sub(r'(?i)(\.csv)+$', '.csv', os.path.basename(table_file_name) + ".csv")
                     )
 
                     header = database_export.get('header', False)

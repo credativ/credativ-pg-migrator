@@ -2407,6 +2407,9 @@ EXECUTE FUNCTION "{func_schema}"."{func_name}"();
              text = re.sub(rf'\b{re.escape(udt)}\b', info['base_type'], text, flags=re.IGNORECASE)
         return text
 
+    def convert_default_value(self, settings) -> dict:
+        extracted_default_value = settings['extracted_default_value']
+        return extracted_default_value
 
 
 if __name__ == "__main__":

@@ -176,6 +176,20 @@ class DatabaseConnector(ABC):
         pass
 
     @abstractmethod
+    def convert_default_value(self, settings) -> dict:
+        """
+        settings - dictionary with the following keys
+            - default_value_schema: str,
+            - default_value_name: str,
+            - default_value_sql: str,
+            - extracted_default_value: str,
+            - default_value_data_type: str,
+            - default_value_comment: str,
+        Returns converted default value
+        """
+        pass
+
+    @abstractmethod
     def is_string_type(self, column_type: str) -> bool:
         """
         Check if the column type is a string type.

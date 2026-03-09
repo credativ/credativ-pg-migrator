@@ -2223,5 +2223,9 @@ class InformixConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', f"informix_connector: fetch_all_rows: Error fetching all rows: {e}")
             return []
 
+    def convert_default_value(self, settings) -> dict:
+        extracted_default_value = settings['extracted_default_value']
+        return extracted_default_value
+
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

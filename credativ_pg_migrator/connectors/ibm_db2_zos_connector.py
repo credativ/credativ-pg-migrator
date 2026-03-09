@@ -530,7 +530,61 @@ class IbmDb2ZosConnector(DatabaseConnector):
 
 
     def get_sql_functions_mapping(self, settings):
-        return {}
+        target_db_type = settings['target_db_type']
+        if target_db_type == 'postgresql':
+            return {
+                # --- Special Registers (Session Variables) ---
+                "CURRENT SQLID": "CURRENT_USER",
+                "CURRENT USER": "CURRENT_USER",
+                "USER": "SESSION_USER",          # SESSION_USER tracks the original login role
+                "CURRENT DATE": "CURRENT_DATE",
+                "CURRENT TIME": "CURRENT_TIME",
+                "CURRENT TIMESTAMP": "CURRENT_TIMESTAMP",
+                "CURRENT SCHEMA": "CURRENT_SCHEMA",
+                "CURRENT SERVER": "current_database()",
+
+                # --- Null Handling & Control Flow ---
+                "VALUE(": "COALESCE(",
+                "IFNULL(": "COALESCE(",
+                "NVL(": "COALESCE(",
+                ## "DECODE(expr, search, result, default)": "CASE expr WHEN search THEN result ELSE default END",
+
+                # --- String Functions ---
+                "SUBSTR(": "SUBSTRING(",
+                "POSSTR(": "STRPOS(",       # DB2's POSSTR takes (source, search)
+                "LOCATE(": "POSITION(", # DB2's LOCATE takes (search, source)
+                "UCASE(": "UPPER(",
+                "LCASE(": "LOWER(",
+                "STRIP(": "TRIM(",
+                "LENGTH(": "LENGTH(",
+                "CONCAT(": "CONCAT(",                 # Or simply use the str1 || str2 operator
+
+                # --- Date and Time Functions ---
+                "YEAR(": "EXTRACT(YEAR FROM ",
+                "MONTH(": "EXTRACT(MONTH FROM ",
+                "DAY(": "EXTRACT(DAY FROM ",
+                "HOUR(": "EXTRACT(HOUR FROM ",
+                "MINUTE(": "EXTRACT(MINUTE FROM ",
+                "SECOND(": "EXTRACT(SECOND FROM ",
+
+                # Db2 DAYS() returns the integer number of days since Jan 1, 0001.
+                # To replicate this exact integer in Postgres, you subtract that date from your column.
+                ## "DAYS(date_col)": "(date_col::DATE - '0001-01-01'::DATE)",
+
+                # "DATE(expr)": "expr::DATE",                                 # Or CAST(expr AS DATE)
+                # "TIMESTAMP(expr)": "expr::TIMESTAMP",                       # Or CAST(expr AS TIMESTAMP)
+                # "ADD_DAYS(date_col, n)": "date_col + (n || ' days')::INTERVAL",
+                # "ADD_MONTHS(date_col, n)": "date_col + (n || ' months')::INTERVAL",
+
+                # --- Math & Numeric Functions ---
+                "CEILING(": "CEIL(",
+                "TRUNCATE(": "TRUNC(",
+                "RAND()": "RANDOM()",
+                "DECFLOAT(": "num::NUMERIC",                            # PostgreSQL uses NUMERIC for arbitrary precision
+            }
+        else:
+            self.config_parser.print_log_message('ERROR', f"ibm_db2_zos_connector: get_sql_functions_mapping: Unsupported target database type: {target_db_type}")
+            return {}
 
     def fetch_table_names(self, table_schema: str):
         return self.fetch_all_tables(table_schema)
@@ -599,6 +653,16 @@ class IbmDb2ZosConnector(DatabaseConnector):
             rows = cursor.fetchall()
             self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: fetch_constraints: ({table_schema}.{table_name}): {rows}")
             for i, row in enumerate(rows, 1):
+                raw_ref_cols = row[4]
+                if raw_ref_cols:
+                    ref_cols_list = [c.strip() for c in raw_ref_cols.split(',')]
+                    # Deduplicate preserving order
+                    seen = set()
+                    deduped_ref_cols = [x for x in ref_cols_list if not (x in seen or seen.add(x))]
+                    referenced_columns = ', '.join(deduped_ref_cols)
+                else:
+                    referenced_columns = raw_ref_cols
+
                 constraints[i] = {
                     'constraint_name': row[0],
                     'constraint_type': 'FOREIGN KEY',
@@ -606,7 +670,7 @@ class IbmDb2ZosConnector(DatabaseConnector):
                     'constraint_columns': row[1],
                     'referenced_table_schema': row[2],
                     'referenced_table_name': row[3],
-                    'referenced_columns': row[4],
+                    'referenced_columns': referenced_columns,
                     'constraint_sql': None,
                     'delete_rule': 'NO ACTION',
                     'update_rule': 'NO ACTION',
@@ -717,9 +781,25 @@ class IbmDb2ZosConnector(DatabaseConnector):
                 return row[0]
         return ""
 
+    def convert_default_value(self, settings) -> dict:
+        extracted_default_value = settings['extracted_default_value']
+        if extracted_default_value != None and extracted_default_value.upper() == 'SYSTEM DEFAULT':
+            return 'NULL'
+        return extracted_default_value
+
     def convert_view_code(self, settings: dict):
         view_code = settings['view_code']
-        # Placeholder for view conversion
+
+        converted_code = view_code
+
+        sql_functions_mapping = self.get_sql_functions_mapping({ 'target_db_type': settings['target_db_type'] })
+
+        if sql_functions_mapping:
+            for src_func, tgt_func in sql_functions_mapping.items():
+                escaped_src_func = re.escape(src_func)
+                converted_code = re.sub(rf"(?i){escaped_src_func}", tgt_func, converted_code, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
+                self.config_parser.print_log_message('DEBUG', f"ibm_db2_zos_connector: convert_view_code: Checking conversion of function {src_func} to {tgt_func} in view code")
+
         return view_code
 
     def get_sequence_current_value(self, sequence_id: int):

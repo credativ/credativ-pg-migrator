@@ -2048,5 +2048,9 @@ class PostgreSQLConnector(DatabaseConnector):
         cursor.close()
         return rows
 
+    def convert_default_value(self, settings) -> dict:
+        extracted_default_value = settings['extracted_default_value']
+        return extracted_default_value
+
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

@@ -157,6 +157,10 @@ target:
 
 # recipe for the migration process
 migration:
+  # migration workflow - type of migration
+  # standard (default) = read source objects from source DB or DDL files, convert them to target objects, create target objects, copy data
+  # objects_mapping = map existing objects in target db to existing objects in source database, copy data
+  workflow: "standard" # "mapping"
   # drop schema if exists - uses DROP CASCADE if true
   drop_schema: true
   drop_tables: true

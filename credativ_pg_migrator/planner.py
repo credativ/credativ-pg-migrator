@@ -757,9 +757,9 @@ class Planner:
                 converted[order_num] = {
                     'column_name': column_info['column_name'],
                     'is_nullable': column_info['is_nullable'],
-                    'column_default_name': column_info['column_default_name'] if 'column_default_name' in column_info else '',
+                    'column_default_name': self.source_connection.convert_default_value({'extracted_default_value': column_info['column_default_name']}) if 'column_default_name' in column_info else '',
                     'column_default_value': column_info['column_default_value'],
-                    'replaced_column_default_value': column_info['replaced_column_default_value'] if 'replaced_column_default_value' in column_info else '',
+                    'replaced_column_default_value': self.source_connection.convert_default_value({'extracted_default_value': column_info['replaced_column_default_value']}) if 'replaced_column_default_value' in column_info else '',
                     'data_type': coltype,
                     'column_type': column_info['column_type'] if 'column_type' in column_info else '',
                     'column_type_substitution': column_info['column_type_substitution'] if 'column_type_substitution' in column_info else '',

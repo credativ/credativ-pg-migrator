@@ -687,6 +687,67 @@ class IbmDb2LuwConnector(DatabaseConnector):
         # Placeholder for fetching sequence details
         return {}
 
+    def get_aliases(self, settings):
+        source_schema_name = settings.get('source_schema_name')
+        aliases = {}
+        order_num = 1
+        query = ""
+        try:
+            if self.config_parser.get_system_catalog() in ('SYSCAT', 'NONE'):
+                query = f"""
+                    SELECT
+                        TABNAME,
+                        BASE_TABSCHEMA,
+                        BASE_TABNAME,
+                        TABSCHEMA,
+                        REMARKS
+                    FROM SYSCAT.TABLES
+                    WHERE TYPE = 'A' AND TABSCHEMA = upper('{source_schema_name}')
+                    ORDER BY TABNAME
+                """
+            elif self.config_parser.get_system_catalog() == 'SYSIBM':
+                query = f"""
+                    SELECT
+                        NAME,
+                        CREATOR,
+                        TBNAME,
+                        CREATOR,
+                        REMARKS
+                    FROM SYSIBM.SYSTABLES
+                    WHERE TYPE = 'A' AND CREATOR = upper('{source_schema_name}')
+                    ORDER BY NAME
+                """
+            else:
+                raise ValueError(f"Unsupported system catalog: {self.config_parser.get_system_catalog()}")
+
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            for row in cursor.fetchall():
+                alias_name = row[0]
+                aliased_schema_name = row[1] if row[1] else ''
+                aliased_table_name = row[2] if row[2] else ''
+                alias_owner = row[3] if row[3] else source_schema_name
+                alias_comment = row[4]
+                aliases[order_num] = {
+                    'id': order_num,
+                    'alias_schema_name': source_schema_name,
+                    'alias_name': alias_name,
+                    'aliased_schema_name': aliased_schema_name,
+                    'aliased_table_name': aliased_table_name,
+                    'alias_owner': alias_owner,
+                    'alias_sql': f"CREATE ALIAS {source_schema_name}.{alias_name} FOR {aliased_schema_name}.{aliased_table_name}",
+                    'alias_comment': alias_comment
+                }
+                order_num += 1
+            cursor.close()
+            self.disconnect()
+            return aliases
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"ibm_db2_luw_connector: get_aliases: Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
+            raise
+
     def fetch_views_names(self, source_schema_name: str):
         # Placeholder for fetching view names
         return {}

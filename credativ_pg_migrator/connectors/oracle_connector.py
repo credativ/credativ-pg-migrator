@@ -779,6 +779,49 @@ class OracleConnector(DatabaseConnector):
     def get_create_constraint_sql(self, settings):
         return ""
 
+    def get_aliases(self, settings):
+        source_schema_name = settings.get('source_schema_name')
+        aliases = {}
+        order_num = 1
+        query = f"""
+            SELECT
+                synonym_name AS alias_name,
+                table_owner AS aliased_schema_name,
+                table_name AS aliased_table_name,
+                owner AS alias_owner
+            FROM all_synonyms
+            WHERE owner = '{source_schema_name}'
+            ORDER BY synonym_name
+        """
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            for row in cursor.fetchall():
+                alias_name = row[0].strip() if row[0] else ''
+                aliased_schema_name = row[1].strip() if row[1] else ''
+                aliased_table_name = row[2].strip() if row[2] else ''
+                alias_owner = row[3].strip() if row[3] else source_schema_name
+                alias_sql = f"CREATE SYNONYM {alias_owner}.{alias_name} FOR {aliased_schema_name}.{aliased_table_name}"
+                
+                aliases[order_num] = {
+                    'id': order_num,
+                    'alias_schema_name': source_schema_name,
+                    'alias_name': alias_name,
+                    'aliased_schema_name': aliased_schema_name,
+                    'aliased_table_name': aliased_table_name,
+                    'alias_owner': alias_owner,
+                    'alias_sql': alias_sql,
+                    'alias_comment': ''
+                }
+                order_num += 1
+            self.disconnect()
+            return aliases
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"oracle_connector: get_aliases: Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
+            raise
+
     def fetch_triggers(self, table_id: int, table_schema: str, table_name: str):
         try:
             triggers = {}

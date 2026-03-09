@@ -1103,6 +1103,9 @@ class SybaseASEConnector(DatabaseConnector):
     def get_create_constraint_sql(self, settings):
         return ""
 
+    def get_aliases(self, settings):
+        return {}
+
     def fetch_funcproc_names(self, schema: str):
         funcproc_data = {}
         order_num = 1

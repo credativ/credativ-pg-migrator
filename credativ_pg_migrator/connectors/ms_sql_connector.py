@@ -679,6 +679,51 @@ class MsSQLConnector(DatabaseConnector):
     def get_create_constraint_sql(self, settings):
         return ""
 
+    def get_aliases(self, settings):
+        source_schema_name = settings.get('source_schema_name')
+        aliases = {}
+        order_num = 1
+        query = f"""
+            SELECT
+                s.name AS alias_name,
+                PARSENAME(s.base_object_name, 2) AS aliased_schema_name,
+                PARSENAME(s.base_object_name, 1) AS aliased_table_name,
+                SCHEMA_NAME(s.schema_id) AS alias_owner,
+                s.base_object_name
+            FROM sys.synonyms s
+            WHERE SCHEMA_NAME(s.schema_id) = '{source_schema_name}'
+            ORDER BY s.name
+        """
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            for row in cursor.fetchall():
+                alias_name = row[0].strip() if row[0] else ''
+                aliased_schema_name = row[1].strip() if row[1] else ''
+                aliased_table_name = row[2].strip() if row[2] else ''
+                alias_owner = row[3].strip() if row[3] else source_schema_name
+                alias_sql = f"CREATE SYNONYM [{alias_owner}].[{alias_name}] FOR [{aliased_schema_name}].[{aliased_table_name}]"
+                
+                aliases[order_num] = {
+                    'id': order_num,
+                    'alias_schema_name': source_schema_name,
+                    'alias_name': alias_name,
+                    'aliased_schema_name': aliased_schema_name,
+                    'aliased_table_name': aliased_table_name,
+                    'alias_owner': alias_owner,
+                    'alias_sql': alias_sql,
+                    'alias_comment': ''
+                }
+                order_num += 1
+            cursor.close()
+            self.disconnect()
+            return aliases
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"ms_sql_connector: get_aliases: Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
+            raise
+
     def fetch_funcproc_names(self, schema: str):
         query = f"""
             SELECT

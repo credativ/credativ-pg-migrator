@@ -776,6 +776,31 @@ class IbmDb2ZosConnector(DatabaseConnector):
             cursor.close()
         return views
 
+    def get_aliases(self, settings):
+        source_schema_name = settings.get('source_schema_name')
+        aliases = {}
+        if self.connectivity == self.config_parser.const_connectivity_ddl():
+            query = f"""SELECT id, source_schema_name, source_alias_name, source_target_schema, source_target_name, source_alias_sql, source_alias_comment
+                        FROM "{self.protocol_schema}"."ddl_aliases"
+                        WHERE source_schema_name = %s ORDER BY id"""
+            cursor = self.migrator_tables.protocol_connection.connection.cursor()
+            cursor.execute(query, (source_schema_name,))
+            rows = cursor.fetchall()
+            self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: get_aliases: ({source_schema_name}): {rows}")
+            for i, row in enumerate(rows, 1):
+                aliases[i] = {
+                    'id': row[0],
+                    'alias_schema_name': row[1],
+                    'alias_name': row[2],
+                    'aliased_schema_name': row[3],
+                    'aliased_table_name': row[4],
+                    'alias_owner': row[1],
+                    'alias_sql': row[5],
+                    'alias_comment': row[6]
+                }
+            cursor.close()
+        return aliases
+
     def fetch_view_code(self, settings):
         source_schema_name = settings.get('source_schema_name')
         source_view_name = settings.get('source_view_name')

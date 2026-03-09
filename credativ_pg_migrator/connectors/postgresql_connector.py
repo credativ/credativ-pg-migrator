@@ -835,6 +835,9 @@ class PostgreSQLConnector(DatabaseConnector):
             create_constraint_query = f"""ALTER TABLE "{target_schema_name}"."{target_table_name}" ADD CONSTRAINT "{constraint_name}" {constraint_sql}"""
         return create_constraint_query
 
+    def get_aliases(self, settings):
+        return {}
+
     def fetch_triggers(self, table_id: int, table_schema: str, table_name: str):
         triggers = {}
         order_num = 1

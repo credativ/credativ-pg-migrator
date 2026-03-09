@@ -707,6 +707,9 @@ class MySQLConnector(DatabaseConnector):
     def get_create_constraint_sql(self, settings):
         return ""
 
+    def get_aliases(self, settings):
+        return {}
+
     def fetch_triggers(self, table_id: int, table_schema: str, table_name: str):
         # Implement trigger fetching logic
         pass

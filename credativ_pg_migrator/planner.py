@@ -86,6 +86,10 @@ class Planner:
 
                 self.check_pausing_resuming()
 
+                self.run_prepare_aliases()
+
+                self.check_pausing_resuming()
+
                 self.migrator_tables.update_main_status({'task_name': 'Planner', 'subtask_name': '', 'success': True, 'message': 'finished OK'})
 
                 try:
@@ -856,6 +860,37 @@ class Planner:
         else:
             self.config_parser.print_log_message( 'INFO', "planner: run_prepare_views: Skipping views migration.")
         self.config_parser.print_log_message( 'INFO', "planner: run_prepare_views: Views processed successfully.")
+
+    def run_prepare_aliases(self):
+        self.config_parser.print_log_message('INFO', "planner: run_prepare_aliases: Preparing aliases...")
+        self.config_parser.print_log_message('INFO', "planner: run_prepare_aliases: Processing aliases...")
+        
+        try:
+            aliases = self.source_connection.get_aliases({'source_schema_name': self.source_schema_name})
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"planner: run_prepare_aliases: Cannot fetch aliases: {e}")
+            aliases = {}
+
+        if aliases:
+            self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_aliases: Source aliases count: {len(aliases)}")
+            for order_num, alias_info in aliases.items():
+                self.config_parser.print_log_message('INFO', f"planner: run_prepare_aliases: Processing alias ({order_num}): {alias_info.get('alias_name')}")
+                
+                self.migrator_tables.insert_aliases({
+                    'source_schema_name': self.source_schema_name,
+                    'source_alias_name': alias_info.get('alias_name', ''),
+                    'source_alias_id': alias_info.get('id', 0),
+                    'source_alias_sql': alias_info.get('alias_sql', ''),
+                    'source_referenced_schema_name': alias_info.get('aliased_schema_name', ''),
+                    'source_referenced_table_name': alias_info.get('aliased_table_name', ''),
+                    'source_referenced_column_name': alias_info.get('aliased_column_name', ''),
+                    'source_alias_comment': alias_info.get('alias_comment', '')
+                })
+                self.config_parser.print_log_message( 'INFO', f"planner: run_prepare_aliases: Alias {alias_info.get('alias_name')} processed successfully.")
+        else:
+            self.config_parser.print_log_message( 'INFO', "planner: run_prepare_aliases: No aliases found.")
+            
+        self.config_parser.print_log_message( 'INFO', "planner: run_prepare_aliases: Aliases processing completed.")
 
     def run_prepare_user_defined_types(self):
         self.config_parser.print_log_message('INFO', "planner: run_prepare_user_defined_types: Preparing user defined types...")

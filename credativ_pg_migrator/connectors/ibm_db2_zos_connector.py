@@ -819,7 +819,13 @@ class IbmDb2ZosConnector(DatabaseConnector):
 
     def convert_default_value(self, settings) -> dict:
         extracted_default_value = settings['extracted_default_value']
+        self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: convert_default_value: ({extracted_default_value})")
         if extracted_default_value != None and extracted_default_value.upper() == 'SYSTEM DEFAULT':
+            column_type = settings['column_type']
+            if self.is_string_type(column_type):
+                return "''"
+            elif self.is_numeric_type(column_type):
+                return '0'
             return 'NULL'
         return extracted_default_value
 

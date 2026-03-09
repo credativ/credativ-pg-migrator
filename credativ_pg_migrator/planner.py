@@ -758,9 +758,9 @@ class Planner:
                 converted[order_num] = {
                     'column_name': column_info['column_name'],
                     'is_nullable': column_info['is_nullable'],
-                    'column_default_name': self.source_connection.convert_default_value({'extracted_default_value': column_info['column_default_name']}) if 'column_default_name' in column_info else '',
-                    'column_default_value': column_info['column_default_value'],
-                    'replaced_column_default_value': self.source_connection.convert_default_value({'extracted_default_value': column_info['replaced_column_default_value']}) if 'replaced_column_default_value' in column_info else '',
+                    'column_default_name': column_info['column_default_name'] if 'column_default_name' in column_info else '',
+                    'column_default_value': self.source_connection.convert_default_value({'extracted_default_value': column_info['column_default_value'], 'column_type': coltype}) if 'column_default_value' in column_info else '',
+                    'replaced_column_default_value': self.source_connection.convert_default_value({'extracted_default_value': column_info['replaced_column_default_value'], 'column_type': coltype}) if 'replaced_column_default_value' in column_info else '',
                     'data_type': coltype,
                     'column_type': column_info['column_type'] if 'column_type' in column_info else '',
                     'column_type_substitution': column_info['column_type_substitution'] if 'column_type_substitution' in column_info else '',
@@ -1180,23 +1180,25 @@ class Planner:
                     table_file_name = replace_placeholder(table_file_name, '{{source_schema_name}}', table_info['source_schema_name'])
                     table_file_name = replace_placeholder(table_file_name, '{{source_table_name}}', table_info['source_table_name'])
 
-                    if re.search(re.escape('{{source_alias_name}}'), table_file_name, flags=re.IGNORECASE):
-                        valid_alias_name = table_info['source_table_name']
-                        aliases = self.migrator_tables.fetch_all_aliases({'source_schema_name': table_info['source_schema_name']})
-                        self.config_parser.print_log_message('DEBUG3', f"planner: run_prepare_data_sources: Aliases found: {aliases}")
-                        for row in aliases:
-                            alias_info = self.migrator_tables.decode_aliases_row(row)
-                            self.config_parser.print_log_message('DEBUG3', f"planner: run_prepare_data_sources: Processing alias: {alias_info}")
-                            ref_schema = alias_info.get('source_referenced_schema_name') or ''
-                            ref_table = alias_info.get('source_referenced_table_name') or ''
-                            if ref_schema and ref_table:
-                                if ((ref_table == table_info['source_table_name'].lower() or ref_table == table_info['source_table_name'].upper()) and
-                                    (ref_schema == table_info['source_schema_name'].lower() or ref_schema == table_info['source_schema_name'].upper())):
-                                    valid_alias_name = alias_info['source_alias_name']
-                                    break
-
-                        table_file_name = replace_placeholder(table_file_name, '{{source_alias_name}}', valid_alias_name)
-
+                    if os.path.exists(table_file_name):
+                        data_file_found = True
+                    else:
+                        if re.search(re.escape('{{source_alias_name}}'), table_file_name, flags=re.IGNORECASE):
+                            valid_alias_name = table_info['source_table_name']
+                            aliases = self.migrator_tables.fetch_all_aliases({'source_schema_name': table_info['source_schema_name']})
+                            # self.config_parser.print_log_message('DEBUG3', f"planner: run_prepare_data_sources: Aliases found: {aliases}")
+                            for row in aliases:
+                                alias_info = self.migrator_tables.decode_aliases_row(row)
+                                # self.config_parser.print_log_message('DEBUG3', f"planner: run_prepare_data_sources: Processing alias: {alias_info}")
+                                ref_schema = alias_info.get('source_referenced_schema_name') or ''
+                                ref_table = alias_info.get('source_referenced_table_name') or ''
+                                if ref_schema and ref_table:
+                                    if ((ref_table == table_info['source_table_name'].lower() or ref_table == table_info['source_table_name'].upper()) and
+                                        (ref_schema == table_info['source_schema_name'].lower() or ref_schema == table_info['source_schema_name'].upper())):
+                                        valid_alias_name = alias_info['source_alias_name']
+                                        table_file_name = replace_placeholder(table_file_name, '{{source_alias_name}}', valid_alias_name)
+                                        if os.path.exists(table_file_name):
+                                            break
 
                     if os.path.exists(table_file_name):
                         data_file_found = True

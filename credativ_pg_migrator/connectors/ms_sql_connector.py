@@ -174,7 +174,7 @@ class CustomTSQL(TSQL):
                       # Detect orphaned ELSE -> Incorrectly parsed block boundary or lost ELSE IF
                       if self._curr.token_type == TokenType.ELSE:
                            if self.config_parser:
-                                self.config_parser.print_log_message('DEBUG', "Encountered ELSE in Block. Treating as implicit block end.")
+                                self.config_parser.print_log_message('DEBUG', "ms_sql_connector: _parse_block: Encountered ELSE in Block. Treating as implicit block end.")
                            break
 
                       msg = f"DEBUG: Processed token {self._curr} but did not advance. Force advance."
@@ -311,7 +311,7 @@ class MsSQLConnector(DatabaseConnector):
                 # 'datediff(': "requires age() logic",
             }
         else:
-            self.config_parser.print_log_message('ERROR', f"Unsupported target database type: {target_db_type}")
+            self.config_parser.print_log_message('ERROR', f"ms_sql_connector: get_sql_functions_mapping: Unsupported target database type: {target_db_type}")
             return {}
 
     def migrate_sequences(self, target_connector, settings):
@@ -346,7 +346,7 @@ class MsSQLConnector(DatabaseConnector):
             self.disconnect()
             return tables
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', f"ms_sql_connector: fetch_table_names: Error executing query: {query}")
             self.config_parser.print_log_message('ERROR', e)
             raise
 
@@ -399,7 +399,7 @@ class MsSQLConnector(DatabaseConnector):
         try:
             self.connect()
             cursor = self.connection.cursor()
-            self.config_parser.print_log_message('DEBUG2', f"MSSQL: Reading columns for {table_schema}.{table_name}")
+            self.config_parser.print_log_message('DEBUG2', f"ms_sql_connector: fetch_table_columns: MSSQL: Reading columns for {table_schema}.{table_name}")
             cursor.execute(query)
             for row in cursor.fetchall():
                 ordinal_position = row[0]
@@ -420,6 +420,14 @@ class MsSQLConnector(DatabaseConnector):
                 elif self.is_numeric_type(column_type) and numeric_precision is not None:
                     column_type += f"({numeric_precision})"
 
+                if self.config_parser.get_source_db_type() == 'sybase_ase':
+                    is_identity_bool = bool(is_identity is not None and (int(is_identity) & 128) == 128)
+                else:
+                    if str(is_identity).strip().upper() in ('YES', 'TRUE', '1'):
+                        is_identity_bool = True
+                    else:
+                        is_identity_bool = False
+
                 result[ordinal_position] = {
                     'column_name': column_name,
                     'data_type': data_type,
@@ -428,8 +436,8 @@ class MsSQLConnector(DatabaseConnector):
                     'numeric_precision': numeric_precision,
                     'numeric_scale': numeric_scale,
                     'is_nullable': 'YES' if is_nullable else 'NO',
-                    'is_identity': 'YES' if is_identity else 'NO',
-                    'column_default_value': column_default,
+                    'is_identity': 'YES' if is_identity_bool else 'NO',
+                    'column_default_value': column_default if not is_identity_bool else None,
                     'comment': ''
                 }
 
@@ -437,7 +445,7 @@ class MsSQLConnector(DatabaseConnector):
             self.disconnect()
             return result
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', f"ms_sql_connector: fetch_table_columns: Error executing query: {query}")
             self.config_parser.print_log_message('ERROR', e)
             raise
 
@@ -558,7 +566,7 @@ class MsSQLConnector(DatabaseConnector):
             indexes = cursor.fetchall()
 
             for index in indexes:
-                self.config_parser.print_log_message('DEBUG', f"Processing index: {index}")
+                self.config_parser.print_log_message('DEBUG', f"ms_sql_connector: fetch_indexes: Processing index: {index}")
                 if index[0] is None:
                     continue
                 index_name = index[0].strip()
@@ -581,7 +589,7 @@ class MsSQLConnector(DatabaseConnector):
             return table_indexes
 
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', f"ms_sql_connector: fetch_indexes: Error executing query: {query}")
             self.config_parser.print_log_message('ERROR', e)
             raise
 
@@ -646,7 +654,7 @@ class MsSQLConnector(DatabaseConnector):
             constraints = cursor.fetchall()
 
             for constraint in constraints:
-                self.config_parser.print_log_message('DEBUG', f"Processing constraint: {constraint}")
+                self.config_parser.print_log_message('DEBUG', f"ms_sql_connector: fetch_constraints: Processing constraint: {constraint}")
                 constraint_name = constraint[0].strip()
                 constraint_type = constraint[1].strip()
                 constraint_columns = constraint[2].strip()
@@ -672,12 +680,57 @@ class MsSQLConnector(DatabaseConnector):
             self.disconnect()
             return table_constraints
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', f"ms_sql_connector: fetch_constraints: Error executing query: {query}")
             self.config_parser.print_log_message('ERROR', e)
             raise
 
     def get_create_constraint_sql(self, settings):
         return ""
+
+    def get_aliases(self, settings):
+        source_schema_name = settings.get('source_schema_name')
+        aliases = {}
+        order_num = 1
+        query = f"""
+            SELECT
+                s.name AS alias_name,
+                PARSENAME(s.base_object_name, 2) AS aliased_schema_name,
+                PARSENAME(s.base_object_name, 1) AS aliased_table_name,
+                SCHEMA_NAME(s.schema_id) AS alias_owner,
+                s.base_object_name
+            FROM sys.synonyms s
+            WHERE SCHEMA_NAME(s.schema_id) = '{source_schema_name}'
+            ORDER BY s.name
+        """
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            for row in cursor.fetchall():
+                alias_name = row[0].strip() if row[0] else ''
+                aliased_schema_name = row[1].strip() if row[1] else ''
+                aliased_table_name = row[2].strip() if row[2] else ''
+                alias_owner = row[3].strip() if row[3] else source_schema_name
+                alias_sql = f"CREATE SYNONYM [{alias_owner}].[{alias_name}] FOR [{aliased_schema_name}].[{aliased_table_name}]"
+                
+                aliases[order_num] = {
+                    'id': order_num,
+                    'alias_schema_name': source_schema_name,
+                    'alias_name': alias_name,
+                    'aliased_schema_name': aliased_schema_name,
+                    'aliased_table_name': aliased_table_name,
+                    'alias_owner': alias_owner,
+                    'alias_sql': alias_sql,
+                    'alias_comment': ''
+                }
+                order_num += 1
+            cursor.close()
+            self.disconnect()
+            return aliases
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"ms_sql_connector: get_aliases: Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
+            raise
 
     def fetch_funcproc_names(self, schema: str):
         query = f"""
@@ -696,7 +749,7 @@ class MsSQLConnector(DatabaseConnector):
               AND p.is_ms_shipped = 0
             ORDER BY p.name
         """
-        self.config_parser.print_log_message('DEBUG3', f"fetch_funcproc_names: query: {query}")
+        self.config_parser.print_log_message('DEBUG3', f"ms_sql_connector: fetch_funcproc_names: query: {query}")
         try:
             self.connect()
             cursor = self.connection.cursor()
@@ -717,7 +770,7 @@ class MsSQLConnector(DatabaseConnector):
             self.disconnect()
             return funcprocs
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error fetching function/procedure names: {e}")
+            self.config_parser.print_log_message('ERROR', f"ms_sql_connector: fetch_funcproc_names: Error fetching function/procedure names: {e}")
             return []
 
     def fetch_funcproc_code(self, funcproc_id: int):
@@ -768,7 +821,7 @@ class MsSQLConnector(DatabaseConnector):
                         })
                 except Exception as ex_schema:
                     # DMV might not exist or parsing error
-                    self.config_parser.print_log_message('DEBUG', f"Schema discovery failed (ignoring): {ex_schema}")
+                    self.config_parser.print_log_message('DEBUG', f"ms_sql_connector: fetch_funcproc_code: Schema discovery failed (ignoring): {ex_schema}")
 
             cursor.close()
             self.disconnect()
@@ -780,7 +833,7 @@ class MsSQLConnector(DatabaseConnector):
                 }
             return None
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error fetching function/procedure code for id {funcproc_id}: {e}")
+            self.config_parser.print_log_message('ERROR', f"ms_sql_connector: fetch_funcproc_code: Error fetching function/procedure code for id {funcproc_id}: {e}")
             return None
 
     def convert_funcproc_code(self, settings):
@@ -794,8 +847,8 @@ class MsSQLConnector(DatabaseConnector):
              implicit_return_schema = []
 
         # target_db_type = settings['target_db_type'] # Unused
-        # source_schema = settings['source_schema'] # Unused
-        target_schema = settings['target_schema']
+        # source_schema_name = settings['source_schema_name'] # Unused
+        target_schema_name = settings['target_schema_name']
         # table_list = settings['table_list']
         # view_list = settings['view_list']
 
@@ -814,7 +867,7 @@ class MsSQLConnector(DatabaseConnector):
              return f"/* FAILED TO PARSE DEFINITION */\n{funcproc_code}"
 
         obj_type_raw = type_match.group(1).upper()
-        # schema_name = type_match.group(2) # Ignore source schema, use target_schema
+        # schema_name = type_match.group(2) # Ignore source schema, use target_schema_name
         obj_name = type_match.group(3).strip('[]"')
 
         is_proc = 'PROC' in obj_type_raw
@@ -825,7 +878,7 @@ class MsSQLConnector(DatabaseConnector):
              pg_type = 'FUNCTION'
              is_implicit_return = True
 
-        self.config_parser.print_log_message('DEBUG', f"DEBUG Parsing: obj_type_raw={obj_type_raw}, is_proc={is_proc}, pg_type={pg_type}, implicit_return={is_implicit_return}")
+        self.config_parser.print_log_message('DEBUG', f"ms_sql_connector: convert_funcproc_code: DEBUG Parsing: obj_type_raw={obj_type_raw}, is_proc={is_proc}, pg_type={pg_type}, implicit_return={is_implicit_return}")
 
 
 
@@ -1000,7 +1053,7 @@ class MsSQLConnector(DatabaseConnector):
         decl_section = "DECLARE\n" + "\n".join(declarations) if declarations else ""
 
         ddl = f"""
-CREATE OR REPLACE {pg_type} "{target_schema}".{pg_name}({pg_params_str})
+CREATE OR REPLACE {pg_type} "{target_schema_name}".{pg_name}({pg_params_str})
 {returns_clause if pg_type == 'FUNCTION' else ''}
 AS $$
 {decl_section}
@@ -1041,15 +1094,15 @@ $$ LANGUAGE plpgsql;
             self.disconnect()
             return views
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', f"ms_sql_connector: fetch_views_names: Error executing query: {query}")
             self.config_parser.print_log_message('ERROR', e)
             raise
 
     def fetch_view_code(self, settings):
         view_id = settings['view_id']
-        source_schema = settings['source_schema']
+        source_schema_name = settings['source_schema_name']
         source_view_name = settings['source_view_name']
-        target_schema = settings['target_schema']
+        target_schema_name = settings['target_schema_name']
         target_view_name = settings['target_view_name']
         view_code = ''
         query = f"""
@@ -1064,13 +1117,13 @@ $$ LANGUAGE plpgsql;
             rows = cursor.fetchall()
             for row in rows:
                 view_code = row[0]
-                self.config_parser.print_log_message('DEBUG', f"View code for {source_schema}.{source_view_name}: {view_code}")
+                self.config_parser.print_log_message('DEBUG', f"ms_sql_connector: fetch_view_code: View code for {source_schema_name}.{source_view_name}: {view_code}")
                 return view_code
             cursor.close()
             self.disconnect()
             return view_code
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', f"ms_sql_connector: fetch_view_code: Error executing query: {query}")
             self.config_parser.print_log_message('ERROR', e)
             raise
 
@@ -1090,8 +1143,8 @@ $$ LANGUAGE plpgsql;
         def replace_schema_names(node):
             if isinstance(node, (sqlglot.exp.Table, sqlglot.exp.Column)):
                 schema = node.args.get("db")
-                if schema and schema.name == settings['source_schema']:
-                    node.set("db", sqlglot.exp.Identifier(this=settings['target_schema'], quoted=False))
+                if schema and schema.name == settings['source_schema_name']:
+                    node.set("db", sqlglot.exp.Identifier(this=settings['target_schema_name'], quoted=False))
             return node
 
         def quote_schema_and_table_names(node):
@@ -1188,7 +1241,7 @@ $$ LANGUAGE plpgsql;
         try:
             expressions = sqlglot.parse(view_code, read=CustomTSQL)
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Failed to parse view code: {e}")
+            self.config_parser.print_log_message('ERROR', f"ms_sql_connector: transform_sybase_joins: Failed to parse view code: {e}")
             return f"-- ERROR parsing view: {e}\n/*\n{view_code}\n*/"
 
         transformed_sqls = []
@@ -1209,15 +1262,15 @@ $$ LANGUAGE plpgsql;
                 pg_sql = expression.sql(dialect='postgres')
                 transformed_sqls.append(pg_sql)
             except Exception as e:
-                self.config_parser.print_log_message('ERROR', f"Failed to transform expression: {e}")
+                self.config_parser.print_log_message('ERROR', f"ms_sql_connector: transform_sybase_joins: Failed to transform expression: {e}")
                 transformed_sqls.append(f"-- ERROR transforming: {e}")
 
         final_select_sql = "\n".join(transformed_sqls)
 
-        target_schema = settings['target_schema']
+        target_schema_name = settings['target_schema_name']
         target_view_name = settings['target_view_name']
 
-        final_view_sql = f"CREATE OR REPLACE VIEW \"{target_schema}\".\"{target_view_name}\" AS\n{final_select_sql};"
+        final_view_sql = f"CREATE OR REPLACE VIEW \"{target_schema_name}\".\"{target_view_name}\" AS\n{final_select_sql};"
         return final_view_sql
 
     def migrate_table(self, migrate_target_connection, settings):
@@ -1236,13 +1289,13 @@ $$ LANGUAGE plpgsql;
         order_by_clause = ''
         try:
             worker_id = settings['worker_id']
-            source_schema = settings['source_schema']
-            source_table = settings['source_table']
+            source_schema_name = settings['source_schema_name']
+            source_table_name = settings['source_table_name']
             source_table_id = settings['source_table_id']
             source_columns = settings['source_columns']
-            # target_schema = self.config_parser.convert_names_case(settings['target_schema'])
-            target_schema = settings['target_schema'] ## target schema is used as it is defined in config, not converted to upper/lower case
-            target_table = self.config_parser.convert_names_case(settings['target_table'])
+            # target_schema_name = self.config_parser.convert_names_case(settings['target_schema_name'])
+            target_schema_name = settings['target_schema_name'] ## target schema is used as it is defined in config, not converted to upper/lower case
+            target_table_name = self.config_parser.convert_names_case(settings['target_table_name'])
             target_columns = settings['target_columns']
             batch_size = settings['batch_size']
             migrator_tables = settings['migrator_tables']
@@ -1252,8 +1305,8 @@ $$ LANGUAGE plpgsql;
             resume_after_crash = settings['resume_after_crash']
             drop_unfinished_tables = settings['drop_unfinished_tables']
 
-            source_table_rows = self.get_rows_count(source_schema, source_table, migration_limitation)
-            target_table_rows = migrate_target_connection.get_rows_count(target_schema, target_table)
+            source_table_rows = self.get_rows_count(source_schema_name, source_table_name, migration_limitation)
+            target_table_rows = migrate_target_connection.get_rows_count(target_schema_name, target_table_name)
 
             total_chunks = self.config_parser.get_total_chunks(source_table_rows, chunk_size)
             if chunk_size == -1:
@@ -1267,20 +1320,20 @@ $$ LANGUAGE plpgsql;
                 'target_table_rows': target_table_rows,
                 'finished': True if source_table_rows == 0 else False,
             }
-            ## source_schema, source_table, source_table_id, source_table_rows, worker_id, target_schema, target_table, target_table_rows
+            ## source_schema_name, source_table_name, source_table_id, source_table_rows, worker_id, target_schema_name, target_table_name, target_table_rows
             protocol_id = migrator_tables.insert_data_migration({
                 'worker_id': worker_id,
                 'source_table_id': source_table_id,
-                'source_schema': source_schema,
-                'source_table': source_table,
-                'target_schema': target_schema,
-                'target_table': target_table,
+                'source_schema_name': source_schema_name,
+                'source_table_name': source_table_name,
+                'target_schema_name': target_schema_name,
+                'target_table_name': target_table_name,
                 'source_table_rows': source_table_rows,
                 'target_table_rows': target_table_rows,
             })
 
             if source_table_rows == 0:
-                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {source_table} is empty - skipping data migration.")
+                self.config_parser.print_log_message('INFO', f"ms_sql_connector: migrate_table: Worker {worker_id}: Table {source_table_name} is empty - skipping data migration.")
                 migrator_tables.update_data_migration_status({
                         'row_id': protocol_id,
                         'success': True,
@@ -1298,17 +1351,17 @@ $$ LANGUAGE plpgsql;
 
                 if source_table_rows > target_table_rows:
 
-                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Source table {source_table}: {source_table_rows} rows / Target table {target_table}: {target_table_rows} rows - starting data migration.")
+                    self.config_parser.print_log_message('INFO', f"ms_sql_connector: migrate_table: Worker {worker_id}: Source table {source_table_name}: {source_table_rows} rows / Target table {target_table_name}: {target_table_rows} rows - starting data migration.")
 
                     select_columns_list = []
                     orderby_columns_list = []
                     insert_columns_list = []
                     for order_num, col in source_columns.items():
                         self.config_parser.print_log_message('DEBUG2',
-                                                            f"Worker {worker_id}: Table {source_schema}.{source_table}: Processing column {col['column_name']} ({order_num}) with data type {col['data_type']}")
+                                                            f"Worker {worker_id}: Table {source_schema_name}.{source_table_name}: Processing column {col['column_name']} ({order_num}) with data type {col['data_type']}")
 
                         target_type_check = migrator_tables.check_data_types_substitution({
-                            'table_name': source_table,
+                            'table_name': source_table_name,
                             'column_name': col['column_name'],
                             'check_type': col['data_type']
                         })
@@ -1327,7 +1380,7 @@ $$ LANGUAGE plpgsql;
 
                     if resume_after_crash and not drop_unfinished_tables:
                         chunk_number = self.config_parser.get_total_chunks(target_table_rows, chunk_size)
-                        self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Resuming migration for table {source_schema}.{source_table} from chunk {chunk_number} with data chunk size {chunk_size}.")
+                        self.config_parser.print_log_message('DEBUG', f"ms_sql_connector: migrate_table: Worker {worker_id}: Resuming migration for table {source_schema_name}.{source_table_name} from chunk {chunk_number} with data chunk size {chunk_size}.")
                         chunk_offset = target_table_rows
                     else:
                         chunk_offset = (chunk_number - 1) * chunk_size
@@ -1335,27 +1388,27 @@ $$ LANGUAGE plpgsql;
                     chunk_start_row_number = chunk_offset + 1
                     chunk_end_row_number = chunk_offset + chunk_size
 
-                    self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Migrating table {source_schema}.{source_table}: chunk {chunk_number}, data chunk size {chunk_size}, batch size {batch_size}, chunk offset {chunk_offset}, chunk end row number {chunk_end_row_number}, source table rows {source_table_rows}")
+                    self.config_parser.print_log_message('DEBUG', f"ms_sql_connector: migrate_table: Worker {worker_id}: Migrating table {source_schema_name}.{source_table_name}: chunk {chunk_number}, data chunk size {chunk_size}, batch size {batch_size}, chunk offset {chunk_offset}, chunk end row number {chunk_end_row_number}, source table rows {source_table_rows}")
                     order_by_clause = ''
 
                     # if table is small, skipping ordering does not make sense because it will not speed up the migration
                     # if chunk_size > source_table_rows:
-                    #     query = f'''SELECT {select_columns} FROM "{source_schema}".{source_table}'''
+                    #     query = f'''SELECT {select_columns} FROM "{source_schema_name}".{source_table_name}'''
                     #     if migration_limitation:
                     #         query += f" WHERE {migration_limitation}"
                     # else:
 
-                    query = f"SELECT {select_columns} FROM [{source_schema}].[{source_table}]"
+                    query = f"SELECT {select_columns} FROM [{source_schema_name}].[{source_table_name}]"
                     if migration_limitation:
                         query += f" WHERE {migration_limitation}"
-                    primary_key_columns = migrator_tables.select_primary_key(source_schema, source_table)
-                    self.config_parser.print_log_message('DEBUG2', f"Worker {worker_id}: Primary key columns for {source_schema}.{source_table}: {primary_key_columns}")
+                    primary_key_columns = migrator_tables.select_primary_key({'source_schema_name': source_schema_name, 'source_table_name': source_table_name})
+                    self.config_parser.print_log_message('DEBUG2', f"ms_sql_connector: migrate_table: Worker {worker_id}: Primary key columns for {source_schema_name}.{source_table_name}: {primary_key_columns}")
                     if primary_key_columns:
                         orderby_columns = primary_key_columns
                     order_by_clause = f""" ORDER BY {orderby_columns}"""
                     query += order_by_clause + f" OFFSET {chunk_offset} ROWS FETCH NEXT {chunk_size} ROWS ONLY;"
 
-                    self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Fetching data with cursor using query: {query}")
+                    self.config_parser.print_log_message('DEBUG', f"ms_sql_connector: migrate_table: Worker {worker_id}: Fetching data with cursor using query: {query}")
 
                     part_name = 'execute query'
                     cursor = self.connection.cursor()
@@ -1377,7 +1430,7 @@ $$ LANGUAGE plpgsql;
                         batch_number += 1
                         reading_end_time = time.time()
                         reading_duration = reading_end_time - reading_start_time
-                        self.config_parser.print_log_message('DEBUG',f"Worker {worker_id}: Fetched {len(records)} rows (batch {batch_number}) from source table {source_table}.")
+                        self.config_parser.print_log_message('DEBUG',f"ms_sql_connector: migrate_table: Worker {worker_id}: Fetched {len(records)} rows (batch {batch_number}) from source table {source_table_name}.")
 
                         transforming_start_time = time.time()
                         records = [
@@ -1394,13 +1447,13 @@ $$ LANGUAGE plpgsql;
                                     record[column_name] = str(record[column_name]) if record[column_name] is not None else None
 
                         # Insert batch into target table
-                        self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Starting insert of {len(records)} rows from source table {source_table}")
+                        self.config_parser.print_log_message('DEBUG', f"ms_sql_connector: migrate_table: Worker {worker_id}: Starting insert of {len(records)} rows from source table {source_table_name}")
                         transforming_end_time = time.time()
                         transforming_duration = transforming_end_time - transforming_start_time
                         inserting_start_time = time.time()
                         inserted_rows = migrate_target_connection.insert_batch({
-                            'target_schema': target_schema,
-                            'target_table': target_table,
+                            'target_schema_name': target_schema_name,
+                            'target_table_name': target_table_name,
                             'target_columns': target_columns,
                             'data': records,
                             'worker_id': worker_id,
@@ -1421,8 +1474,8 @@ $$ LANGUAGE plpgsql;
                         batch_start_str = batch_start_dt.strftime('%Y-%m-%d %H:%M:%S.%f')
                         batch_end_str = batch_end_dt.strftime('%Y-%m-%d %H:%M:%S.%f')
                         migrator_tables.insert_batches_stats({
-                            'source_schema': source_schema,
-                            'source_table': source_table,
+                            'source_schema_name': source_schema_name,
+                            'source_table_name': source_table_name,
                             'source_table_id': source_table_id,
                             'chunk_number': chunk_number,
                             'batch_number': batch_number,
@@ -1439,7 +1492,7 @@ $$ LANGUAGE plpgsql;
                         msg = (
                             f"Worker {worker_id}: Inserted {inserted_rows} "
                             f"(total: {total_inserted_rows} from: {source_table_rows} "
-                            f"({percent_done}%)) rows into target table '{target_table}': "
+                            f"({percent_done}%)) rows into target table '{target_table_name}': "
                             f"Batch {batch_number} duration: {batch_duration:.2f} seconds "
                             f"(r: {reading_duration:.2f}, t: {transforming_duration:.2f}, w: {inserting_duration:.2f})"
                         )
@@ -1448,13 +1501,13 @@ $$ LANGUAGE plpgsql;
                         batch_start_time = time.time()
                         reading_start_time = batch_start_time
 
-                    target_table_rows = migrate_target_connection.get_rows_count(target_schema, target_table)
-                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Target table {target_schema}.{target_table} has {target_table_rows} rows")
+                    target_table_rows = migrate_target_connection.get_rows_count(target_schema_name, target_table_name)
+                    self.config_parser.print_log_message('INFO', f"ms_sql_connector: migrate_table: Worker {worker_id}: Target table {target_schema_name}.{target_table_name} has {target_table_rows} rows")
 
                     shortest_batch_seconds = min(batch_durations) if batch_durations else 0
                     longest_batch_seconds = max(batch_durations) if batch_durations else 0
                     average_batch_seconds = sum(batch_durations) / len(batch_durations) if batch_durations else 0
-                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Migrated {total_inserted_rows} rows from {source_table} to {target_schema}.{target_table} in {batch_number} batches: "
+                    self.config_parser.print_log_message('INFO', f"ms_sql_connector: migrate_table: Worker {worker_id}: Migrated {total_inserted_rows} rows from {source_table_name} to {target_schema_name}.{target_table_name} in {batch_number} batches: "
                                                             f"Shortest batch: {shortest_batch_seconds:.2f} seconds, "
                                                             f"Longest batch: {longest_batch_seconds:.2f} seconds, "
                                                             f"Average batch: {average_batch_seconds:.2f} seconds")
@@ -1462,7 +1515,7 @@ $$ LANGUAGE plpgsql;
                     cursor.close()
 
                 elif source_table_rows <= target_table_rows:
-                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Source table {source_table} has {source_table_rows} rows, which is less than or equal to target table {target_table} with {target_table_rows} rows. No data migration needed.")
+                    self.config_parser.print_log_message('INFO', f"ms_sql_connector: migrate_table: Worker {worker_id}: Source table {source_table_name} has {source_table_rows} rows, which is less than or equal to target table {target_table_name} with {target_table_rows} rows. No data migration needed.")
 
                 migration_stats = {
                     'rows_migrated': total_inserted_rows,
@@ -1473,9 +1526,9 @@ $$ LANGUAGE plpgsql;
                     'finished': False,
                 }
 
-                self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Migration stats: {migration_stats}")
+                self.config_parser.print_log_message('DEBUG', f"ms_sql_connector: migrate_table: Worker {worker_id}: Migration stats: {migration_stats}")
                 if source_table_rows <= target_table_rows or chunk_number >= total_chunks:
-                    self.config_parser.print_log_message('DEBUG3', f"Worker {worker_id}: Setting migration status to finished for table {source_table} (chunk {chunk_number}/{total_chunks})")
+                    self.config_parser.print_log_message('DEBUG3', f"ms_sql_connector: migrate_table: Worker {worker_id}: Setting migration status to finished for table {source_table_name} (chunk {chunk_number}/{total_chunks})")
                     migration_stats['finished'] = True
                     migrator_tables.update_data_migration_status({
                         'row_id': protocol_id,
@@ -1491,10 +1544,10 @@ $$ LANGUAGE plpgsql;
                 migrator_tables.insert_data_chunk({
                     'worker_id': worker_id,
                     'source_table_id': source_table_id,
-                    'source_schema': source_schema,
-                    'source_table': source_table,
-                    'target_schema': target_schema,
-                    'target_table': target_table,
+                    'source_schema_name': source_schema_name,
+                    'source_table_name': source_table_name,
+                    'target_schema_name': target_schema_name,
+                    'target_table_name': target_table_name,
                     'source_table_rows': source_table_rows,
                     'target_table_rows': target_table_rows,
                     'chunk_number': chunk_number,
@@ -1511,8 +1564,8 @@ $$ LANGUAGE plpgsql;
                 })
                 return migration_stats
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Error during {part_name} -> {e}")
-            self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Full stack trace: {traceback.format_exc()}")
+            self.config_parser.print_log_message('ERROR', f"ms_sql_connector: migrate_table: Worker {worker_id}: Error during {part_name} -> {e}")
+            self.config_parser.print_log_message('ERROR', f"ms_sql_connector: migrate_table: Worker {worker_id}: Full stack trace: {traceback.format_exc()}")
             raise e
 
     def fetch_triggers(self, table_id, schema_name, table_name):
@@ -1580,14 +1633,14 @@ $$ LANGUAGE plpgsql;
             self.disconnect()
             return triggers
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error fetching triggers: {e}")
+            self.config_parser.print_log_message('ERROR', f"ms_sql_connector: fetch_triggers: Error fetching triggers: {e}")
             return {}
 
     def convert_trigger(self, settings):
         trigger_name = settings['trigger_name']
         trigger_code = settings['trigger_sql']
-        source_schema = settings['source_schema']
-        target_schema = settings['target_schema']
+        source_schema_name = settings['source_schema_name']
+        target_schema_name = settings['target_schema_name']
         table_list = settings['table_list']
 
         # Clean up code
@@ -1642,7 +1695,7 @@ $$ LANGUAGE plpgsql;
 
         # Construct Function
         func_name = f"tf_{trigger_name}"
-        func_schema = target_schema
+        func_schema = target_schema_name
 
         decl_section = "DECLARE\n" + "\n".join(declarations) if declarations else ""
 
@@ -1670,7 +1723,7 @@ $$ LANGUAGE plpgsql;
 
         trigger_ddl = f"""
 CREATE TRIGGER "{trigger_name}"
-{timing} {events_str} ON "{target_schema}"."{table_name}"
+{timing} {events_str} ON "{target_schema_name}"."{table_name}"
 FOR EACH ROW
 EXECUTE FUNCTION "{func_schema}"."{func_name}"();
 """
@@ -1795,7 +1848,7 @@ EXECUTE FUNCTION "{func_schema}"."{func_name}"();
         query = f"""SELECT COUNT(*) FROM [{table_schema}].[{table_name}]"""
         if migration_limitation:
             query += f" WHERE {migration_limitation}"
-        self.config_parser.print_log_message('DEBUG', f"get_rows_count query: {query}")
+        self.config_parser.print_log_message('DEBUG', f"ms_sql_connector: get_rows_count: query: {query}")
         cursor = self.connection.cursor()
         cursor.execute(query)
         count = cursor.fetchone()[0]
@@ -1881,7 +1934,7 @@ EXECUTE FUNCTION "{func_schema}"."{func_name}"();
             self.disconnect()
             return udts
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error fetching UDTs: {e}")
+            self.config_parser.print_log_message('ERROR', f"ms_sql_connector: fetch_user_defined_types: Error fetching UDTs: {e}")
             return {}
 
     def _get_udt_map(self):
@@ -1909,7 +1962,7 @@ EXECUTE FUNCTION "{func_schema}"."{func_name}"();
 
     def get_table_description(self, settings) -> dict:
         # Placeholder for fetching table description
-        self.config_parser.print_log_message('DEBUG3', f"MS SQL connector: Getting table description for {settings['table_schema']}.{settings['table_name']}")
+        self.config_parser.print_log_message('DEBUG3', f"ms_sql_connector: get_table_description: MS SQL connector: Getting table description for {settings['table_schema']}.{settings['table_name']}")
         return { 'table_description': '' }
 
     def testing_select(self):
@@ -1943,7 +1996,7 @@ EXECUTE FUNCTION "{func_schema}"."{func_name}"();
         top_tables['by_indexes'] = {}
         top_tables['by_constraints'] = {}
 
-        source_schema = settings['source_schema']
+        source_schema_name = settings['source_schema_name']
         try:
             order_num = 1
             top_n = self.config_parser.get_top_n_tables_by_rows()
@@ -1958,13 +2011,13 @@ EXECUTE FUNCTION "{func_schema}"."{func_name}"();
                     JOIN sys.schemas s ON t.schema_id = s.schema_id
                     JOIN sys.partitions p ON t.object_id = p.object_id AND p.index_id IN (0, 1)
                     JOIN sys.allocation_units a ON p.partition_id = a.container_id
-                    WHERE s.name = '{source_schema}'
+                    WHERE s.name = '{source_schema_name}'
                     GROUP BY s.name, t.name
                     ORDER BY total_size DESC
                 """
                 self.connect()
                 cursor = self.connection.cursor()
-                cursor.execute(query.format(source_schema=source_schema))
+                cursor.execute(query.format(source_schema_name=source_schema_name))
                 rows = cursor.fetchall()
                 cursor.close()
                 self.disconnect()
@@ -1977,11 +2030,11 @@ EXECUTE FUNCTION "{func_schema}"."{func_name}"();
                         'table_size': row[3],
                     }
                     order_num += 1
-                self.config_parser.print_log_message('DEBUG', f"Top {top_n} tables by rows: {top_tables['by_rows']}")
+                self.config_parser.print_log_message('DEBUG', f"ms_sql_connector: get_top_n_tables: Top {top_n} tables by rows: {top_tables['by_rows']}")
             else:
-                self.config_parser.print_log_message('DEBUG', "Top N tables by rows is not configured or set to 0, skipping this part.")
+                self.config_parser.print_log_message('DEBUG', "ms_sql_connector: get_top_n_tables: Top N tables by rows is not configured or set to 0, skipping this part.")
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error fetching top tables by rows: {e}")
+            self.config_parser.print_log_message('ERROR', f"ms_sql_connector: get_top_n_tables: Error fetching top tables by rows: {e}")
 
         return top_tables
 
@@ -1989,12 +2042,12 @@ EXECUTE FUNCTION "{func_schema}"."{func_name}"();
         top_fk_dependencies = {}
         return top_fk_dependencies
 
-    def target_table_exists(self, target_schema, target_table):
+    def target_table_exists(self, target_schema_name, target_table_name):
         query = f"""
             SELECT COUNT(*)
             FROM sys.tables t
             JOIN sys.schemas s ON t.schema_id = s.schema_id
-            WHERE s.name = '{target_schema}' AND t.name = '{target_table}'
+            WHERE s.name = '{target_schema_name}' AND t.name = '{target_table_name}'
         """
         self.connect()
         cursor = self.connection.cursor()
@@ -2038,7 +2091,7 @@ EXECUTE FUNCTION "{func_schema}"."{func_name}"();
         try:
              parsed = sqlglot.parse(processed_body.strip(), read=CustomTSQL)
         except Exception as e:
-             self.config_parser.print_log_message('ERROR', f"Global parsing failed: {e}")
+             self.config_parser.print_log_message('ERROR', f"ms_sql_connector: _convert_stmts: Global parsing failed: {e}")
              return [f"/* PARSING FAILED: {e} */\n" + body_content]
 
         converted_statements = []
@@ -2397,7 +2450,7 @@ EXECUTE FUNCTION "{func_schema}"."{func_name}"();
                     pattern = re.compile(rf'\b{source_type}\b', flags=re.IGNORECASE)
                     text = pattern.sub(target_type, text)
                 except re.error:
-                    self.config_parser.print_log_message('WARNING', f"Invalid regex in data_types_substitution: {source_type}")
+                    self.config_parser.print_log_message('WARNING', f"ms_sql_connector: _apply_data_type_substitutions: Invalid regex in data_types_substitution: {source_type}")
 
         return text
 
@@ -2407,6 +2460,9 @@ EXECUTE FUNCTION "{func_schema}"."{func_name}"();
              text = re.sub(rf'\b{re.escape(udt)}\b', info['base_type'], text, flags=re.IGNORECASE)
         return text
 
+    def convert_default_value(self, settings) -> dict:
+        extracted_default_value = settings['extracted_default_value']
+        return extracted_default_value
 
 
 if __name__ == "__main__":

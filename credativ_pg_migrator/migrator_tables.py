@@ -17,6 +17,7 @@
 import json
 import uuid
 import psycopg2
+import traceback
 from credativ_pg_migrator.constants import MigratorConstants
 
 class ProtocolPostgresConnection:
@@ -39,11 +40,16 @@ class ProtocolPostgresConnection:
             host=cfg.get('host', 'localhost'),
             port=cfg.get('port', 5432)
         )
+        self.connection.autocommit = True
 
     def execute_query(self, query, params=None):
-        with self.connection.cursor() as cur:
-            cur.execute(query, params) if params else cur.execute(query)
+        try:
+            with self.connection.cursor() as cur:
+                cur.execute(query, params) if params else cur.execute(query)
             self.connection.commit()
+        except Exception as e:
+            self.connection.rollback()
+            raise e
 
 class MigratorTables:
     def __init__(self, logger, config_parser):
@@ -66,6 +72,9 @@ class MigratorTables:
         self.create_table_for_domains()
         self.create_table_for_new_objects()
         self.create_table_for_tables()
+        self.create_table_for_source_table_partitioning()
+        self.create_table_for_target_table_partitioning()
+        self.create_table_for_columns()
         self.create_table_for_data_sources()
         self.create_table_for_target_columns_alterations()
         self.create_table_for_data_migration()
@@ -76,8 +85,10 @@ class MigratorTables:
         self.create_table_for_constraints()
         self.create_table_for_funcprocs()
         self.create_table_for_sequences()
+        self.create_table_for_aliases()
         self.create_table_for_triggers()
         self.create_table_for_views()
+        self.create_ddl_tables()
 
     def prepare_data_types_substitution(self):
         # Drop table if exists
@@ -95,7 +106,7 @@ class MigratorTables:
             inserted TIMESTAMP DEFAULT clock_timestamp()
         )
         """)
-        self.config_parser.print_log_message('DEBUG3', f"Table data_types_substitution created in schema {self.protocol_schema}")
+        self.config_parser.print_log_message('DEBUG3', f"migrator_tables: prepare_data_types_substitution: Table data_types_substitution created in schema {self.protocol_schema}")
 
         # Insert data into the table
         for table_name, column_name, source_type, target_type, comment in self.config_parser.get_data_types_substitution():
@@ -104,7 +115,7 @@ class MigratorTables:
             (table_name, column_name, source_type, target_type, comment)
             VALUES (%s, %s, %s, %s, %s)
             """, (table_name, column_name, source_type, target_type, comment))
-        self.config_parser.print_log_message('DEBUG3', f"Data inserted into table data_types_substitution in schema {self.protocol_schema}")
+        self.config_parser.print_log_message('DEBUG3', f"migrator_tables: prepare_data_types_substitution: Data inserted into table data_types_substitution in schema {self.protocol_schema}")
 
     def check_data_types_substitution(self, settings):
         """
@@ -156,12 +167,12 @@ class MigratorTables:
         WHERE {where_sql}
         LIMIT 1
         """
-        self.config_parser.print_log_message('DEBUG2', f"check_data_types_substitution query: {query} - params: {params}")
+        self.config_parser.print_log_message('DEBUG2', f"migrator_tables: check_data_types_substitution: query: {query} - params: {params}")
         cursor = self.protocol_connection.connection.cursor()
         cursor.execute(query, params)
         result = cursor.fetchone()
         cursor.close()
-        self.config_parser.print_log_message('DEBUG2', f"check_data_types_substitution result: {result}")
+        self.config_parser.print_log_message('DEBUG2', f"migrator_tables: check_data_types_substitution: result: {result}")
         return result[0] if result else None
 
     def prepare_data_migration_limitation(self):
@@ -178,7 +189,7 @@ class MigratorTables:
         inserted TIMESTAMP DEFAULT clock_timestamp()
         )
         """)
-        self.config_parser.print_log_message('DEBUG3', f"Table data_migration_limitation created in schema {self.protocol_schema}")
+        self.config_parser.print_log_message('DEBUG3', f"migrator_tables: prepare_data_migration_limitation: Table data_migration_limitation created in schema {self.protocol_schema}")
 
         # Insert data into the table
         for source_table_name, where_limitation, use_when_column_present in self.config_parser.get_data_migration_limitation():
@@ -187,7 +198,7 @@ class MigratorTables:
             (source_table_name, where_limitation, use_when_column_present)
             VALUES (%s, %s, %s)
             """, (source_table_name, where_limitation, use_when_column_present))
-        self.config_parser.print_log_message('DEBUG3', f"Data inserted into table data_migration_limitation in schema {self.protocol_schema}")
+        self.config_parser.print_log_message('DEBUG3', f"migrator_tables: prepare_data_migration_limitation: Data inserted into table data_migration_limitation in schema {self.protocol_schema}")
 
     def get_records_data_migration_limitation(self, source_table_name):
         query = f"""
@@ -196,7 +207,7 @@ class MigratorTables:
         WHERE trim('{source_table_name}') = trim(source_table_name)
         OR trim('{source_table_name}') ~ trim(source_table_name)
         """
-        self.config_parser.print_log_message( 'DEBUG3', f"get_records_data_migration_limitation query: {query}")
+        self.config_parser.print_log_message( 'DEBUG3', f"migrator_tables: get_records_data_migration_limitation: query: {query}")
         cursor = self.protocol_connection.connection.cursor()
         cursor.execute(query)
         result = cursor.fetchall()
@@ -219,7 +230,7 @@ class MigratorTables:
         inserted TIMESTAMP DEFAULT clock_timestamp()
         )
         """)
-        self.config_parser.print_log_message('DEBUG3', f"Table remote_objects_substitution created in schema {self.protocol_schema}")
+        self.config_parser.print_log_message('DEBUG3', f"migrator_tables: prepare_remote_objects_substitution: Table remote_objects_substitution created in schema {self.protocol_schema}")
 
         # Insert data into the table
         for source_object_name, target_object_name in self.config_parser.get_remote_objects_substitution():
@@ -228,7 +239,7 @@ class MigratorTables:
             (source_object_name, target_object_name)
             VALUES (%s, %s)
             """, (source_object_name, target_object_name))
-        self.config_parser.print_log_message('DEBUG3', f"Data inserted into table remote_objects_substitution in schema {self.protocol_schema}")
+        self.config_parser.print_log_message('DEBUG3', f"migrator_tables: prepare_remote_objects_substitution: Data inserted into table remote_objects_substitution in schema {self.protocol_schema}")
 
     def get_records_remote_objects_substitution(self):
         query = f"""
@@ -256,7 +267,7 @@ class MigratorTables:
         inserted TIMESTAMP DEFAULT clock_timestamp()
         )
         """)
-        self.config_parser.print_log_message('DEBUG3', f"Table default_values_substitution created in schema {self.protocol_schema}")
+        self.config_parser.print_log_message('DEBUG3', f"migrator_tables: prepare_default_values_substitution: Table default_values_substitution created in schema {self.protocol_schema}")
 
         # Insert data into the table
         for column_name, source_column_data_type, default_value_value, target_default_value in self.config_parser.get_default_values_substitution():
@@ -266,7 +277,7 @@ class MigratorTables:
                 'default_value_value': default_value_value,
                 'target_default_value': target_default_value
             })
-        self.config_parser.print_log_message('DEBUG3', f"Data inserted into table default_values_substitution in schema {self.protocol_schema}")
+        self.config_parser.print_log_message('DEBUG3', f"migrator_tables: prepare_default_values_substitution: Data inserted into table default_values_substitution in schema {self.protocol_schema}")
 
     def insert_default_values_substitution(self, settings):
         self.protocol_connection.execute_query(f"""
@@ -295,11 +306,11 @@ class MigratorTables:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, (check_column_name, check_column_name, check_column_data_type, check_column_data_type,  check_default_value, check_default_value))
             result = cursor.fetchone()
-            self.config_parser.print_log_message( 'DEBUG3', f"0 check_default_values_substitution {check_column_name}, {check_column_data_type}, {check_default_value} query: {query} - {result}")
+            self.config_parser.print_log_message( 'DEBUG3', f"migrator_tables: check_default_values_substitution: 0 check_default_values_substitution {check_column_name}, {check_column_data_type}, {check_default_value} query: {query} - {result}")
 
             if result is not None:
                 target_default_value = result[0]
-                self.config_parser.print_log_message( 'DEBUG3', f"0 check_default_values_substitution found direct match: {target_default_value}")
+                self.config_parser.print_log_message( 'DEBUG3', f"migrator_tables: check_default_values_substitution: 0 check_default_values_substitution found direct match: {target_default_value}")
             else:
                 query = f"""
                     SELECT target_default_value
@@ -311,11 +322,11 @@ class MigratorTables:
                 cursor = self.protocol_connection.connection.cursor()
                 cursor.execute(query, (check_column_name, check_column_data_type, check_default_value))
                 result = cursor.fetchone()
-                self.config_parser.print_log_message( 'DEBUG3', f"1 check_default_values_substitution {check_column_name}, {check_column_data_type}, {check_default_value} query: {query} - {result}")
+                self.config_parser.print_log_message( 'DEBUG3', f"migrator_tables: check_default_values_substitution: 1 check_default_values_substitution {check_column_name}, {check_column_data_type}, {check_default_value} query: {query} - {result}")
 
                 if result is not None:
                     target_default_value = result[0]
-                    self.config_parser.print_log_message( 'DEBUG3', f"1 check_default_values_substitution found ILIKE match: {target_default_value}")
+                    self.config_parser.print_log_message( 'DEBUG3', f"migrator_tables: check_default_values_substitution: 1 check_default_values_substitution found ILIKE match: {target_default_value}")
                 else:
                     query = f"""
                         SELECT target_default_value
@@ -326,11 +337,11 @@ class MigratorTables:
                     """
                     cursor.execute(query, (check_column_data_type, check_default_value))
                     result = cursor.fetchone()
-                    self.config_parser.print_log_message( 'DEBUG3', f"2 check_default_values_substitution {check_column_name}, {check_column_data_type}, {check_default_value} query: {query} - {result}")
+                    self.config_parser.print_log_message( 'DEBUG3', f"migrator_tables: check_default_values_substitution: 2 check_default_values_substitution {check_column_name}, {check_column_data_type}, {check_default_value} query: {query} - {result}")
 
                     if result is not None:
                         target_default_value = result[0]
-                        self.config_parser.print_log_message( 'DEBUG3', f"2 check_default_values_substitution found data type match: {target_default_value}")
+                        self.config_parser.print_log_message( 'DEBUG3', f"migrator_tables: check_default_values_substitution: 2 check_default_values_substitution found data type match: {target_default_value}")
                     else:
                         query = f"""
                             SELECT target_default_value
@@ -341,15 +352,15 @@ class MigratorTables:
                         """
                         cursor.execute(query, (check_default_value,))
                         result = cursor.fetchone()
-                        self.config_parser.print_log_message( 'DEBUG3', f"3 check_default_values_substitution {check_column_name}, {check_column_data_type}, {check_default_value} query: {query} - {result}")
+                        self.config_parser.print_log_message( 'DEBUG3', f"migrator_tables: check_default_values_substitution: 3 check_default_values_substitution {check_column_name}, {check_column_data_type}, {check_default_value} query: {query} - {result}")
 
                         if result is not None:
                             target_default_value = result[0]
-                            self.config_parser.print_log_message( 'DEBUG3', f"3 check_default_values_substitution found default value match: {target_default_value}")
+                            self.config_parser.print_log_message( 'DEBUG3', f"migrator_tables: check_default_values_substitution: 3 check_default_values_substitution found default value match: {target_default_value}")
             cursor.close()
 
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error checking default values substitution for {check_column_name}, {check_column_data_type}, {check_default_value}.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: check_default_values_substitution: Error checking default values substitution for {check_column_name}, {check_column_data_type}, {check_default_value}.")
             self.config_parser.print_log_message('ERROR', e)
 
         return target_default_value
@@ -380,7 +391,7 @@ class MigratorTables:
         );
         """
         self.protocol_connection.execute_query(query)
-        self.config_parser.print_log_message('DEBUG3', f"Table {table_name} created in schema {self.protocol_schema}")
+        self.config_parser.print_log_message('DEBUG3', f"migrator_tables: create_protocol: Table {table_name} created in schema {self.protocol_schema}")
 
     def create_table_for_main(self):
         table_name = self.config_parser.get_protocol_name_main()
@@ -396,9 +407,11 @@ class MigratorTables:
             message TEXT
             )
         """)
-        self.config_parser.print_log_message('DEBUG3', f"Table {table_name} created in schema {self.protocol_schema}")
+        self.config_parser.print_log_message('DEBUG3', f"migrator_tables: create_table_for_main: Table {table_name} created in schema {self.protocol_schema}")
 
-    def insert_main(self, task_name, subtask_name):
+    def insert_main(self, settings):
+        task_name = settings.get('task_name')
+        subtask_name = settings.get('subtask_name')
         func_run_id = uuid.uuid4()
         table_name = self.config_parser.get_protocol_name_main()
         query = f"""
@@ -411,15 +424,19 @@ class MigratorTables:
             cursor.execute(query)
             row = cursor.fetchone()
             cursor.close()
-            self.config_parser.print_log_message( 'DEBUG3', f"insert_main ({func_run_id}): returned row: {row}")
+            self.config_parser.print_log_message( 'DEBUG3', f"migrator_tables: insert_main: ({func_run_id}): returned row: {row}")
             main_row = self.decode_main_row(row)
-            self.insert_protocol('main', task_name + ': ' + subtask_name, 'start', None, None, None, None, 'info', None, main_row['id'])
+            self.insert_protocol({'object_type': 'main', 'object_name': task_name + ': ' + subtask_name, 'object_action': 'start', 'object_ddl': None, 'execution_timestamp': None, 'execution_success': None, 'execution_error_message': None, 'row_type': 'info', 'execution_results': None, 'object_protocol_id': main_row['id']})
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"insert_main ({func_run_id}): Error inserting task {task_name} into {table_name}.")
-            self.config_parser.print_log_message('ERROR', f"insert_main ({func_run_id}): Error: {e}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_main: ({func_run_id}): Error inserting task {task_name} into {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_main: ({func_run_id}): Error: {e}")
             raise
 
-    def update_main_status(self, task_name, subtask_name, success, message):
+    def update_main_status(self, settings):
+        task_name = settings.get('task_name')
+        subtask_name = settings.get('subtask_name')
+        success = settings.get('success')
+        message = settings.get('message')
         func_run_id = uuid.uuid4()
         table_name = self.config_parser.get_protocol_name_main()
         query = f"""
@@ -432,23 +449,23 @@ class MigratorTables:
             RETURNING *
         """
         params = ('TRUE' if str(success).upper() == 'TRUE' else 'FALSE', message, task_name, subtask_name)
-        self.config_parser.print_log_message( 'DEBUG3', f"update_main_status ({func_run_id}): params: {params}")
+        self.config_parser.print_log_message( 'DEBUG3', f"migrator_tables: update_main_status: ({func_run_id}): params: {params}")
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
             row = cursor.fetchone()
             cursor.close()
-            self.config_parser.print_log_message( 'DEBUG3', f"update_main_status ({func_run_id}): returned row: {row}")
+            self.config_parser.print_log_message( 'DEBUG3', f"migrator_tables: update_main_status: ({func_run_id}): returned row: {row}")
             if row:
                 main_row = self.decode_main_row(row)
-                self.update_protocol('main', main_row['id'], success, message, None)
+                self.update_protocol({'object_type': 'main', 'object_protocol_id': main_row['id'], 'execution_success': success, 'execution_error_message': message, 'execution_results': None})
             else:
-                self.config_parser.print_log_message('ERROR', f"update_main_status ({func_run_id}): Error updating status for task {task_name} in {table_name}.")
-                self.config_parser.print_log_message('ERROR', f"update_main_status ({func_run_id}): Error: No protocol row returned.")
+                self.config_parser.print_log_message('ERROR', f"migrator_tables: update_main_status: ({func_run_id}): Error updating status for task {task_name} in {table_name}.")
+                self.config_parser.print_log_message('ERROR', f"migrator_tables: update_main_status: ({func_run_id}): Error: No protocol row returned.")
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"update_main_status ({func_run_id}): Error updating status for task {task_name} in {table_name}.")
-            self.config_parser.print_log_message('ERROR', f"update_main_status ({func_run_id}): Query: {query}")
-            self.config_parser.print_log_message('ERROR', f"update_main_status ({func_run_id}): Error: {e}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_main_status: ({func_run_id}): Error updating status for task {task_name} in {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_main_status: ({func_run_id}): Query: {query}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_main_status: ({func_run_id}): Error: {e}")
             raise
 
     def decode_main_row(self, row):
@@ -483,7 +500,7 @@ class MigratorTables:
             message TEXT
             )
         """)
-        self.config_parser.print_log_message('DEBUG3', f"Table {table_name} created in schema {self.protocol_schema}")
+        self.config_parser.print_log_message('DEBUG3', f"migrator_tables: create_table_for_user_defined_types: Table {table_name} created in schema {self.protocol_schema}")
 
     def insert_user_defined_type(self, settings):
         func_run_id = uuid.uuid4()
@@ -511,16 +528,19 @@ class MigratorTables:
             row = cursor.fetchone()
             cursor.close()
 
-            self.config_parser.print_log_message( 'DEBUG3', f"insert_user_defined_type ({func_run_id}): returned row: {row}")
+            self.config_parser.print_log_message( 'DEBUG3', f"migrator_tables: insert_user_defined_type: ({func_run_id}): returned row: {row}")
             user_defined_type_row = self.decode_user_defined_type_row(row)
-            self.insert_protocol('user_defined_type', target_type_name, 'create', target_type_sql, None, None, None, 'info', None, user_defined_type_row['id'])
+            self.insert_protocol({'object_type': 'user_defined_type', 'object_name': target_type_name, 'object_action': 'create', 'object_ddl': target_type_sql, 'execution_timestamp': None, 'execution_success': None, 'execution_error_message': None, 'row_type': 'info', 'execution_results': None, 'object_protocol_id': user_defined_type_row['id']})
             return user_defined_type_row['id']
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"insert_user_defined_type ({func_run_id}): Error inserting user defined type {target_type_name} into {table_name}.")
-            self.config_parser.print_log_message('ERROR', f"insert_user_defined_type ({func_run_id}): Error: {e}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_user_defined_type: ({func_run_id}): Error inserting user defined type {target_type_name} into {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_user_defined_type: ({func_run_id}): Error: {e}")
             raise
 
-    def update_user_defined_type_status(self, row_id, success, message):
+    def update_user_defined_type_status(self, settings):
+        row_id = settings.get('row_id')
+        success = settings.get('success')
+        message = settings.get('message')
         func_run_id = uuid.uuid4()
         table_name = self.config_parser.get_protocol_name_user_defined_types()
         query = f"""
@@ -532,7 +552,7 @@ class MigratorTables:
             RETURNING *
         """
         params = ('TRUE' if str(success).upper() == 'TRUE' else 'FALSE', message.replace('"', ''), row_id)
-        self.config_parser.print_log_message( 'DEBUG3', f"update_user_defined_type_status ({func_run_id}): query: {query}, params: {params}")
+        self.config_parser.print_log_message( 'DEBUG3', f"migrator_tables: update_user_defined_type_status: ({func_run_id}): query: {query}, params: {params}")
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -541,15 +561,15 @@ class MigratorTables:
 
             if row:
                 user_defined_type_row = self.decode_user_defined_type_row(row)
-                self.config_parser.print_log_message( 'DEBUG3', f"update_user_defined_type_status ({func_run_id}): returned row: {user_defined_type_row}")
-                self.update_protocol('user_defined_type', user_defined_type_row['id'], success, message, None)
+                self.config_parser.print_log_message( 'DEBUG3', f"migrator_tables: update_user_defined_type_status: ({func_run_id}): returned row: {user_defined_type_row}")
+                self.update_protocol({'object_type': 'user_defined_type', 'object_protocol_id': user_defined_type_row['id'], 'execution_success': success, 'execution_error_message': message, 'execution_results': None})
             else:
-                self.config_parser.print_log_message('ERROR', f"update_user_defined_type_status ({func_run_id}): Error updating status for user defined type {row_id} in {table_name}.")
-                self.config_parser.print_log_message('ERROR', f"update_user_defined_type_status ({func_run_id}): Error: No protocol row returned.")
+                self.config_parser.print_log_message('ERROR', f"migrator_tables: update_user_defined_type_status: ({func_run_id}): Error updating status for user defined type {row_id} in {table_name}.")
+                self.config_parser.print_log_message('ERROR', f"migrator_tables: update_user_defined_type_status: ({func_run_id}): Error: No protocol row returned.")
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"update_user_defined_type_status ({func_run_id}): Error updating status for user defined type {row_id} in {table_name}.")
-            self.config_parser.print_log_message('ERROR', f"update_user_defined_type_status ({func_run_id}): Query: {query}")
-            self.config_parser.print_log_message('ERROR', f"update_user_defined_type_status ({func_run_id}): Error: {e}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_user_defined_type_status: ({func_run_id}): Error updating status for user defined type {row_id} in {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_user_defined_type_status: ({func_run_id}): Query: {query}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_user_defined_type_status: ({func_run_id}): Error: {e}")
             raise
 
     def fetch_all_user_defined_types(self):
@@ -559,7 +579,7 @@ class MigratorTables:
         cursor.execute(query)
         rows = cursor.fetchall()
         cursor.close()
-        self.config_parser.print_log_message('DEBUG3', f"fetch_all_user_defined_types: returned rows: {len(rows)}")
+        self.config_parser.print_log_message('DEBUG3', f"migrator_tables: fetch_all_user_defined_types: returned rows: {len(rows)}")
         return rows
 
     def decode_user_defined_type_row(self, row):
@@ -602,7 +622,7 @@ class MigratorTables:
             message TEXT
             )
         """)
-        self.config_parser.print_log_message('DEBUG3', f"create_table_for_domains: Table {table_name} created in schema {self.protocol_schema}")
+        self.config_parser.print_log_message('DEBUG3', f"migrator_tables: create_table_for_domains: Table {table_name} created in schema {self.protocol_schema}")
 
     def insert_domain(self, settings):
         func_run_id = uuid.uuid4()
@@ -634,14 +654,17 @@ class MigratorTables:
             cursor.close()
 
             domain_row = self.decode_user_defined_type_row(row)
-            self.config_parser.print_log_message( 'DEBUG3', f"insert_domain ({func_run_id}): returned row: {domain_row}")
-            self.insert_protocol('domain', target_domain_name, 'create', target_domain_sql, None, None, None, 'info', None, domain_row['id'])
+            self.config_parser.print_log_message( 'DEBUG3', f"migrator_tables: insert_domain: ({func_run_id}): returned row: {domain_row}")
+            self.insert_protocol({'object_type': 'domain', 'object_name': target_domain_name, 'object_action': 'create', 'object_ddl': target_domain_sql, 'execution_timestamp': None, 'execution_success': None, 'execution_error_message': None, 'row_type': 'info', 'execution_results': None, 'object_protocol_id': domain_row['id']})
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"insert_domain ({func_run_id}): Error inserting domain {target_domain_name} into {table_name}.")
-            self.config_parser.print_log_message('ERROR', f"insert_domain ({func_run_id}): Error: {e}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_domain: ({func_run_id}): Error inserting domain {target_domain_name} into {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_domain: ({func_run_id}): Error: {e}")
             raise
 
-    def update_domain_status(self, row_id, success, message):
+    def update_domain_status(self, settings):
+        row_id = settings.get('row_id')
+        success = settings.get('success')
+        message = settings.get('message')
         func_run_id = uuid.uuid4()
         table_name = self.config_parser.get_protocol_name_domains()
         query = f"""
@@ -652,7 +675,7 @@ class MigratorTables:
             WHERE id = %s
             RETURNING *
         """
-        self.config_parser.print_log_message( 'DEBUG3', f"update_domain_status ({func_run_id}): Query: {query}")
+        self.config_parser.print_log_message( 'DEBUG3', f"migrator_tables: update_domain_status: ({func_run_id}): Query: {query}")
         params = ('TRUE' if success else 'FALSE', message, row_id)
         try:
             cursor = self.protocol_connection.connection.cursor()
@@ -662,18 +685,21 @@ class MigratorTables:
 
             if row:
                 domain_row = self.decode_domain_row(row)
-                self.config_parser.print_log_message( 'DEBUG3', f"update_domain_status ({func_run_id}): returned row: {domain_row}")
-                self.update_protocol('domain', domain_row['id'], success, message, None)
+                self.config_parser.print_log_message( 'DEBUG3', f"migrator_tables: update_domain_status: ({func_run_id}): returned row: {domain_row}")
+                self.update_protocol({'object_type': 'domain', 'object_protocol_id': domain_row['id'], 'execution_success': success, 'execution_error_message': message, 'execution_results': None})
             else:
-                self.config_parser.print_log_message('ERROR', f"update_domain_status ({func_run_id}): Error updating status for domain {row_id} in {table_name}.")
-                self.config_parser.print_log_message('ERROR', f"update_domain_status ({func_run_id}): Error: No protocol row returned.")
+                self.config_parser.print_log_message('ERROR', f"migrator_tables: update_domain_status: ({func_run_id}): Error updating status for domain {row_id} in {table_name}.")
+                self.config_parser.print_log_message('ERROR', f"migrator_tables: update_domain_status: ({func_run_id}): Error: No protocol row returned.")
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"update_domain_status ({func_run_id}): Error updating status for domain {row_id} in {table_name}.")
-            self.config_parser.print_log_message('ERROR', f"update_domain_status ({func_run_id}): Query: {query}")
-            self.config_parser.print_log_message('ERROR', f"update_domain_status ({func_run_id}): Error: {e}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_domain_status: ({func_run_id}): Error updating status for domain {row_id} in {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_domain_status: ({func_run_id}): Query: {query}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_domain_status: ({func_run_id}): Error: {e}")
             raise
 
-    def fetch_all_domains(self, domain_owner=None, domain_name=None):
+    def fetch_all_domains(self, settings=None):
+        if settings is None: settings = {}
+        domain_owner = settings.get('domain_owner')
+        domain_name = settings.get('domain_name')
         table_name = self.config_parser.get_protocol_name_domains()
         where_clause = ""
         if domain_owner:
@@ -690,8 +716,10 @@ class MigratorTables:
         cursor.close()
         return rows
 
-    def get_domain_details(self, domain_owner=None, domain_name=None):
-        domain_row = self.fetch_all_domains(domain_owner, domain_name)
+    def get_domain_details(self, settings):
+        source_schema_name = settings.get('source_schema_name')
+        source_domain_name = settings.get('source_domain_name')
+        domain_row = self.fetch_all_domains({'domain_owner': source_schema_name, 'domain_name': source_domain_name})
         result = self.decode_domain_row(domain_row[0]) if domain_row else {}
         return result
 
@@ -727,7 +755,7 @@ class MigratorTables:
             message TEXT
             )
         """)
-        self.config_parser.print_log_message('DEBUG3', f"create_table_for_default_values: Table {table_name} created in schema {self.protocol_schema}")
+        self.config_parser.print_log_message('DEBUG3', f"migrator_tables: create_table_for_default_values: Table {table_name} created in schema {self.protocol_schema}")
 
     def insert_default_value(self, settings):
         func_run_id = uuid.uuid4()
@@ -754,14 +782,17 @@ class MigratorTables:
             cursor.close()
 
             default_value_row = self.decode_default_value_row(row)
-            self.config_parser.print_log_message( 'DEBUG3', f"insert_default_value ({func_run_id}): returned row: {default_value_row}")
-            self.insert_protocol('default_value', default_value_name, 'create', None, None, None, None, 'info', None, default_value_row['id'])
+            self.config_parser.print_log_message( 'DEBUG3', f"migrator_tables: insert_default_value: ({func_run_id}): returned row: {default_value_row}")
+            self.insert_protocol({'object_type': 'default_value', 'object_name': default_value_name, 'object_action': 'create', 'object_ddl': None, 'execution_timestamp': None, 'execution_success': None, 'execution_error_message': None, 'row_type': 'info', 'execution_results': None, 'object_protocol_id': default_value_row['id']})
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"insert_default_value ({func_run_id}): Error inserting default value {default_value_name} into {table_name}.")
-            self.config_parser.print_log_message('ERROR', f"insert_default_value ({func_run_id}): Error: {e}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_default_value: ({func_run_id}): Error inserting default value {default_value_name} into {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_default_value: ({func_run_id}): Error: {e}")
             raise
 
-    def update_default_value_status(self, row_id, success, message):
+    def update_default_value_status(self, settings):
+        row_id = settings.get('row_id')
+        success = settings.get('success')
+        message = settings.get('message')
         func_run_id = uuid.uuid4()
         table_name = self.config_parser.get_protocol_name_default_values()
         query = f"""
@@ -781,15 +812,15 @@ class MigratorTables:
 
             if row:
                 default_value_row = self.decode_default_value_row(row)
-                self.config_parser.print_log_message('DEBUG3', f"update_default_value_status ({func_run_id}): returned row: {default_value_row}")
-                self.update_protocol('default_value', default_value_row['id'], success, message, None)
+                self.config_parser.print_log_message('DEBUG3', f"migrator_tables: update_default_value_status: ({func_run_id}): returned row: {default_value_row}")
+                self.update_protocol({'object_type': 'default_value', 'object_protocol_id': default_value_row['id'], 'execution_success': success, 'execution_error_message': message, 'execution_results': None})
             else:
-                self.config_parser.print_log_message('ERROR', f"update_default_value_status ({func_run_id}): Error updating status for default value {row_id} in {table_name}.")
-                self.config_parser.print_log_message('ERROR', f"update_default_value_status ({func_run_id}): Error: No protocol row returned.")
+                self.config_parser.print_log_message('ERROR', f"migrator_tables: update_default_value_status: ({func_run_id}): Error updating status for default value {row_id} in {table_name}.")
+                self.config_parser.print_log_message('ERROR', f"migrator_tables: update_default_value_status: ({func_run_id}): Error: No protocol row returned.")
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"update_default_value_status ({func_run_id}): Error updating status for default value {row_id} in {table_name}.")
-            self.config_parser.print_log_message('ERROR', f"update_default_value_status ({func_run_id}): Query: {query}")
-            self.config_parser.print_log_message('ERROR', f"update_default_value_status ({func_run_id}): Exception: {e}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_default_value_status: ({func_run_id}): Error updating status for default value {row_id} in {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_default_value_status: ({func_run_id}): Query: {query}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_default_value_status: ({func_run_id}): Exception: {e}")
             raise
 
     def decode_default_value_row(self, row):
@@ -802,7 +833,8 @@ class MigratorTables:
             'default_value_data_type': row[5],
         }
 
-    def get_default_value_details(self, default_value_name):
+    def get_default_value_details(self, settings):
+        default_value_name = settings.get('default_value_name')
         table_name = self.config_parser.get_protocol_name_default_values()
         query = f"""SELECT * FROM "{self.protocol_schema}"."{table_name}" WHERE default_value_name = '{default_value_name}'"""
         cursor = self.protocol_connection.connection.cursor()
@@ -817,8 +849,8 @@ class MigratorTables:
         self.protocol_connection.execute_query(f"""
             CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."{table_name}"
             (id SERIAL PRIMARY KEY,
-            target_schema TEXT,
-            target_table TEXT,
+            target_schema_name TEXT,
+            target_table_name TEXT,
             target_column TEXT,
             reason TEXT,
             original_data_type TEXT,
@@ -829,13 +861,13 @@ class MigratorTables:
             message TEXT
             )
         """)
-        self.config_parser.print_log_message('DEBUG3', f"create_table_for_target_columns_alterations: Table {table_name} created in schema {self.protocol_schema}")
+        self.config_parser.print_log_message('DEBUG3', f"migrator_tables: create_table_for_target_columns_alterations: Table {table_name} created in schema {self.protocol_schema}")
 
     def insert_target_column_alteration(self, settings):
         func_run_id = uuid.uuid4()
-        ## target_schema, target_table, target_column, original_data_type, altered_data_type
-        target_schema = settings['target_schema']
-        target_table = settings['target_table']
+        ## target_schema_name, target_table_name, target_column, original_data_type, altered_data_type
+        target_schema_name = settings['target_schema_name']
+        target_table_name = settings['target_table_name']
         target_column = settings['target_column']
         reason = settings['reason'] if 'reason' in settings else ''
         original_data_type = settings['original_data_type']
@@ -844,11 +876,11 @@ class MigratorTables:
         table_name = self.config_parser.get_protocol_name_target_columns_alterations()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
-            (target_schema, target_table, target_column, reason, original_data_type, altered_data_type)
+            (target_schema_name, target_table_name, target_column, reason, original_data_type, altered_data_type)
             VALUES (%s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (target_schema, target_table, target_column, reason, original_data_type, altered_data_type)
+        params = (target_schema_name, target_table_name, target_column, reason, original_data_type, altered_data_type)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -856,19 +888,19 @@ class MigratorTables:
             cursor.close()
 
             target_column_alteration_row = self.decode_target_column_alteration_row(row)
-            self.config_parser.print_log_message( 'DEBUG3', f"insert_target_column_alteration ({func_run_id}): returned row: {target_column_alteration_row}")
-            self.insert_protocol('target_column_alteration', target_table + '.' + target_column, 'alter', None, None, None, None, 'info', None, target_column_alteration_row['id'])
+            self.config_parser.print_log_message( 'DEBUG3', f"migrator_tables: insert_target_column_alteration: ({func_run_id}): returned row: {target_column_alteration_row}")
+            self.insert_protocol({'object_type': 'target_column_alteration', 'object_name': target_table_name + '.' + target_column, 'object_action': 'alter', 'object_ddl': None, 'execution_timestamp': None, 'execution_success': None, 'execution_error_message': None, 'row_type': 'info', 'execution_results': None, 'object_protocol_id': target_column_alteration_row['id']})
             return target_column_alteration_row['id']
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"insert_target_column_alteration ({func_run_id}): Error inserting target column alteration {target_table}.{target_column} into {table_name}.")
-            self.config_parser.print_log_message('ERROR', f"insert_target_column_alteration ({func_run_id}): Exception: {e}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_target_column_alteration: ({func_run_id}): Error inserting target column alteration {target_table_name}.{target_column} into {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_target_column_alteration: ({func_run_id}): Exception: {e}")
             raise
 
     def decode_target_column_alteration_row(self, row):
         return {
             'id': row[0],
-            'target_schema': row[1],
-            'target_table': row[2],
+            'target_schema_name': row[1],
+            'target_table_name': row[2],
             'target_column': row[3],
             'original_data_type': row[4],
             'altered_data_type': row[5]
@@ -888,11 +920,11 @@ class MigratorTables:
                         a.altered_data_type
                     FROM "{self.protocol_schema}".{table_name_constraints} c
                     JOIN "{self.protocol_schema}".{table_name_target_columns_alterations} a
-                    ON c.referenced_table_name = a.target_table
+                    ON c.referenced_table_name = a.target_table_name
                     AND replace(c.referenced_columns,'"','') = a.target_column
                     WHERE c.constraint_type = 'FOREIGN KEY'
-                    AND c.target_schema = '{settings['target_schema']}'
-                    AND c.target_table = '{settings['target_table']}'
+                    AND c.target_schema_name = '{settings['target_schema_name']}'
+                    AND c.target_table_name = '{settings['target_table_name']}'
                 """
         cursor = self.protocol_connection.connection.cursor()
         cursor.execute(query)
@@ -911,13 +943,13 @@ class MigratorTables:
         self.protocol_connection.execute_query(f"""
             CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."{table_name}"
             (id SERIAL PRIMARY KEY,
-            source_schema TEXT,
-            source_table TEXT,
+            source_schema_name TEXT,
+            source_table_name TEXT,
             source_table_id INTEGER,
             source_table_rows INTEGER,
             worker_id TEXT,
-            target_schema TEXT,
-            target_table TEXT,
+            target_schema_name TEXT,
+            target_table_name TEXT,
             target_table_rows INTEGER,
             task_created TIMESTAMP DEFAULT clock_timestamp(),
             task_started TIMESTAMP DEFAULT clock_timestamp(),
@@ -930,13 +962,13 @@ class MigratorTables:
             average_batch_seconds FLOAT DEFAULT 0
             )
         """)
-        self.config_parser.print_log_message('DEBUG3', f"create_table_for_data_migration: Table {table_name} created in schema {self.protocol_schema}")
+        self.config_parser.print_log_message('DEBUG3', f"migrator_tables: create_table_for_data_migration: Table {table_name} created in schema {self.protocol_schema}")
         self.protocol_connection.execute_query(f"""
             CREATE UNIQUE INDEX IF NOT EXISTS idx_data_migration_unique1
             ON "{self.protocol_schema}"."{self.config_parser.get_protocol_name_data_migration()}"
-            (source_schema, source_table, target_schema, target_table)
+            (source_schema_name, source_table_name, target_schema_name, target_table_name)
         """)
-        self.config_parser.print_log_message('DEBUG3', f"create_table_for_data_migration: Unique index created for table {table_name}.")
+        self.config_parser.print_log_message('DEBUG3', f"migrator_tables: create_table_for_data_migration: Unique index created for table {table_name}.")
 
     def create_table_for_batches_stats(self):
         table_name = self.config_parser.get_protocol_name_batches_stats()
@@ -944,8 +976,8 @@ class MigratorTables:
         self.protocol_connection.execute_query(f"""
             CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."{table_name}"
             (id SERIAL PRIMARY KEY,
-            source_schema TEXT,
-            source_table TEXT,
+            source_schema_name TEXT,
+            source_table_name TEXT,
             source_table_id INTEGER,
             chunk_number INTEGER,
             batch_number INTEGER,
@@ -960,7 +992,7 @@ class MigratorTables:
             worker_id TEXT
             )
         """)
-        self.config_parser.print_log_message('DEBUG3', f"create_table_for_batches_stats: Table {table_name} created in schema {self.protocol_schema}.")
+        self.config_parser.print_log_message('DEBUG3', f"migrator_tables: create_table_for_batches_stats: Table {table_name} created in schema {self.protocol_schema}.")
 
     def create_table_for_data_chunks(self):
         try:
@@ -972,10 +1004,10 @@ class MigratorTables:
                     id SERIAL PRIMARY KEY,
                     worker_id TEXT,
                     source_table_id INTEGER,
-                    source_schema TEXT,
-                    source_table TEXT,
-                    target_schema TEXT,
-                    target_table TEXT,
+                    source_schema_name TEXT,
+                    source_table_name TEXT,
+                    target_schema_name TEXT,
+                    target_table_name TEXT,
                     source_table_rows BIGINT,
                     target_table_rows BIGINT,
                     chunk_number INTEGER,
@@ -991,22 +1023,22 @@ class MigratorTables:
                     task_completed TIMESTAMP
                 )
             """)
-            self.config_parser.print_log_message('DEBUG3', f"create_table_for_data_chunks: Table {table_name} created successfully.")
+            self.config_parser.print_log_message('DEBUG3', f"migrator_tables: create_table_for_data_chunks: Table {table_name} created successfully.")
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"create_table_for_data_chunks: Error creating table {table_name}.")
-            self.config_parser.print_log_message('ERROR', f"create_table_for_data_chunks: Exception: {e}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: create_table_for_data_chunks: Error creating table {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: create_table_for_data_chunks: Exception: {e}")
             raise
 
     def insert_data_chunk(self, settings):
-        ## worker_id, source_table_id, source_schema, source_table, target_schema, target_table,
+        ## worker_id, source_table_id, source_schema_name, source_table_name, target_schema_name, target_table_name,
         ## source_table_rows, target_table_rows, chunk_number, chunk_size, migration_limitation,
         ## chunk_start, chunk_end, inserted_rows, batch_size, total_batches
         worker_id = settings['worker_id']
         source_table_id = settings['source_table_id']
-        source_schema = settings['source_schema']
-        source_table = settings['source_table']
-        target_schema = settings['target_schema']
-        target_table = settings['target_table']
+        source_schema_name = settings['source_schema_name']
+        source_table_name = settings['source_table_name']
+        target_schema_name = settings['target_schema_name']
+        target_table_name = settings['target_table_name']
         source_table_rows = settings['source_table_rows']
         target_table_rows = settings['target_table_rows']
         chunk_number = settings['chunk_number']
@@ -1024,8 +1056,8 @@ class MigratorTables:
         table_name = self.config_parser.get_protocol_name_data_chunks()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
-            (worker_id, source_table_id, source_schema, source_table,
-            target_schema, target_table, source_table_rows, target_table_rows,
+            (worker_id, source_table_id, source_schema_name, source_table_name,
+            target_schema_name, target_table_name, source_table_rows, target_table_rows,
             chunk_number, chunk_size, migration_limitation,
             chunk_start, chunk_end, order_by_clause, inserted_rows, batch_size, total_batches,
             task_started, task_completed)
@@ -1034,9 +1066,9 @@ class MigratorTables:
                     %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (str(worker_id), source_table_id, source_schema,
-                  source_table, target_schema,
-                  target_table,
+        params = (str(worker_id), source_table_id, source_schema_name,
+                  source_table_name, target_schema_name,
+                  target_table_name,
                   source_table_rows,
                   target_table_rows,
                   chunk_number,
@@ -1057,12 +1089,12 @@ class MigratorTables:
             cursor.close()
 
             data_chunk_row = self.decode_data_chunk_row(row)
-            self.config_parser.print_log_message('DEBUG3', f"insert_data_chunk: Returned row: {data_chunk_row}")
-            self.insert_protocol('data_chunk', f"{target_table}.{chunk_number}", 'create', None, None, None, None, 'info', None, data_chunk_row['id'])
+            self.config_parser.print_log_message('DEBUG3', f"migrator_tables: insert_data_chunk: Returned row: {data_chunk_row}")
+            self.insert_protocol({'object_type': 'data_chunk', 'object_name': f'{target_table_name}.{chunk_number}', 'object_action': 'create', 'object_ddl': None, 'execution_timestamp': None, 'execution_success': None, 'execution_error_message': None, 'row_type': 'info', 'execution_results': None, 'object_protocol_id': data_chunk_row['id']})
             return data_chunk_row['id']
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"insert_data_chunk: Error inserting data chunk for {target_table} into {table_name}.")
-            self.config_parser.print_log_message('ERROR', f"insert_data_chunk: Exception: {e}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_data_chunk: Error inserting data chunk for {target_table_name} into {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_data_chunk: Exception: {e}")
             raise
 
     def decode_data_chunk_row(self, row):
@@ -1070,10 +1102,10 @@ class MigratorTables:
             'id': row[0],
             'worker_id': row[1],
             'source_table_id': row[2],
-            'source_schema': row[3],
-            'source_table': row[4],
-            'target_schema': row[5],
-            'target_table': row[6],
+            'source_schema_name': row[3],
+            'source_table_name': row[4],
+            'target_schema_name': row[5],
+            'target_table_name': row[6],
             'source_table_rows': row[7],
             'target_table_rows': row[8],
             'chunk_number': row[9],
@@ -1090,9 +1122,9 @@ class MigratorTables:
         }
 
     def insert_batches_stats(self, settings):
-        ## source_schema, source_table, source_table_id, batch_number, batch_start, batch_end, batch_rows, batch_seconds
-        source_schema = settings['source_schema']
-        source_table = settings['source_table']
+        ## source_schema_name, source_table_name, source_table_id, batch_number, batch_start, batch_end, batch_rows, batch_seconds
+        source_schema_name = settings['source_schema_name']
+        source_table_name = settings['source_table_name']
         source_table_id = settings['source_table_id']
         chunk_number = settings['chunk_number']
         batch_number = settings['batch_number']
@@ -1108,13 +1140,13 @@ class MigratorTables:
         table_name = self.config_parser.get_protocol_name_batches_stats()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
-            (source_schema, source_table, source_table_id, chunk_number, batch_number,
+            (source_schema_name, source_table_name, source_table_id, chunk_number, batch_number,
             batch_start, batch_end, batch_rows, batch_seconds, worker_id,
             reading_seconds, transforming_seconds, writing_seconds)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (source_schema, source_table, source_table_id, chunk_number, batch_number,
+        params = (source_schema_name, source_table_name, source_table_id, chunk_number, batch_number,
                   batch_start, batch_end, batch_rows, batch_seconds, str(worker_id),
                   reading_seconds, transforming_seconds, writing_seconds)
         try:
@@ -1124,31 +1156,31 @@ class MigratorTables:
             self.protocol_connection.connection.commit()  # Commit the transaction
             cursor.close()
 
-            self.config_parser.print_log_message( 'DEBUG3', f"insert_batches_stats: Returned row: {row}")
+            self.config_parser.print_log_message( 'DEBUG3', f"migrator_tables: insert_batches_stats: Returned row: {row}")
             return row[0]  # Return the ID of the inserted row
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"insert_batches_stats: Error inserting batches stats for {source_table} into {table_name}.")
-            self.config_parser.print_log_message('ERROR', f"insert_batches_stats: Exception: {e}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_batches_stats: Error inserting batches stats for {source_table_name} into {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_batches_stats: Exception: {e}")
             raise
 
     def insert_data_migration(self, settings):
         func_run_id = uuid.uuid4()
-        ## source_schema, source_table, source_table_id, source_table_rows, worker_id, target_schema, target_table, target_table_rows
-        source_schema = settings['source_schema']
-        source_table = settings['source_table']
+        ## source_schema_name, source_table_name, source_table_id, source_table_rows, worker_id, target_schema_name, target_table_name, target_table_rows
+        source_schema_name = settings['source_schema_name']
+        source_table_name = settings['source_table_name']
         source_table_id = settings['source_table_id']
         source_table_rows = settings['source_table_rows']
         worker_id = settings['worker_id']
-        target_schema = settings['target_schema']
-        target_table = settings['target_table']
+        target_schema_name = settings['target_schema_name']
+        target_table_name = settings['target_table_name']
         target_table_rows = settings['target_table_rows']
 
         table_name = self.config_parser.get_protocol_name_data_migration()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
-            (source_schema, source_table, source_table_id, source_table_rows, worker_id, target_schema, target_table, target_table_rows)
+            (source_schema_name, source_table_name, source_table_id, source_table_rows, worker_id, target_schema_name, target_table_name, target_table_rows)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (source_schema, source_table, target_schema, target_table)
+            ON CONFLICT (source_schema_name, source_table_name, target_schema_name, target_table_name)
             DO UPDATE SET source_table_rows = EXCLUDED.source_table_rows,
             target_table_rows = EXCLUDED.target_table_rows,
             task_created = clock_timestamp(),
@@ -1157,8 +1189,8 @@ class MigratorTables:
             message = NULL
             RETURNING *
         """
-        params = (source_schema, source_table, source_table_id, source_table_rows, str(worker_id), target_schema, target_table, target_table_rows)
-        self.config_parser.print_log_message('DEBUG3', f"insert_data_migration ({func_run_id}): Inserting data migration record for table {target_table} with params: {params}")
+        params = (source_schema_name, source_table_name, source_table_id, source_table_rows, str(worker_id), target_schema_name, target_table_name, target_table_rows)
+        self.config_parser.print_log_message('DEBUG3', f"migrator_tables: insert_data_migration: ({func_run_id}): Inserting data migration record for table {target_table_name} with params: {params}")
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -1166,12 +1198,12 @@ class MigratorTables:
             cursor.close()
 
             data_migration_row = self.decode_data_migration_row(row)
-            self.config_parser.print_log_message('DEBUG3', f"insert_data_migration ({func_run_id}): Returned row: {data_migration_row}")
-            self.insert_protocol('data_migration', target_table, 'create', None, None, None, None, 'info', None, data_migration_row['id'])
+            self.config_parser.print_log_message('DEBUG3', f"migrator_tables: insert_data_migration: ({func_run_id}): Returned row: {data_migration_row}")
+            self.insert_protocol({'object_type': 'data_migration', 'object_name': target_table_name, 'object_action': 'create', 'object_ddl': None, 'execution_timestamp': None, 'execution_success': None, 'execution_error_message': None, 'row_type': 'info', 'execution_results': None, 'object_protocol_id': data_migration_row['id']})
             return data_migration_row['id']
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"insert_data_migration ({func_run_id}): Error inserting data migration {target_table} into {table_name}.")
-            self.config_parser.print_log_message('ERROR', f"insert_data_migration ({func_run_id}): Exception: {e}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_data_migration: ({func_run_id}): Error inserting data migration {target_table_name} into {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_data_migration: ({func_run_id}): Exception: {e}")
             raise
 
     def update_data_migration_started(self, row_id):
@@ -1190,17 +1222,17 @@ class MigratorTables:
             row = cursor.fetchone()
             cursor.close()
 
-            self.config_parser.print_log_message('DEBUG3', f"update_data_migration_started ({func_run_id}): Returned row: {row}")
+            self.config_parser.print_log_message('DEBUG3', f"migrator_tables: update_data_migration_started: ({func_run_id}): Returned row: {row}")
             # if row:
             #     data_migration_row = self.decode_data_migration_row(row)
             #     self.update_protocol('data_migration', data_migration_row['id'], None, None, None)
             # else:
-            #     self.config_parser.print_log_message('ERROR', f"Error updating started status for data migration {row_id} in {table_name}.")
-            #     self.config_parser.print_log_message('ERROR', f"Error: No protocol row returned.")
+            #     self.config_parser.print_log_message('ERROR', f"migrator_tables: update_data_migration_started: Error updating started status for data migration {row_id} in {table_name}.")
+            #     self.config_parser.print_log_message('ERROR', f"migrator_tables: update_data_migration_started: Error: No protocol row returned.")
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"update_data_migration_started ({func_run_id}): Error updating started status for data migration {row_id} in {table_name}.")
-            self.config_parser.print_log_message('ERROR', f"update_data_migration_started ({func_run_id}): Query: {query}")
-            self.config_parser.print_log_message('ERROR', f"update_data_migration_started ({func_run_id}): Exception: {e}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_data_migration_started: ({func_run_id}): Error updating started status for data migration {row_id} in {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_data_migration_started: ({func_run_id}): Query: {query}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_data_migration_started: ({func_run_id}): Exception: {e}")
             raise
 
     def update_data_migration_status(self, settings):
@@ -1240,15 +1272,15 @@ class MigratorTables:
 
             if row:
                 data_migration_row = self.decode_data_migration_row(row)
-                self.config_parser.print_log_message('DEBUG3', f"update_data_migration_status ({func_run_id}): Returned row: {data_migration_row}")
-                self.update_protocol('data_migration', data_migration_row['id'], success, message, 'source rows: ' + str(data_migration_row['source_table_rows']) + ', target rows: ' + str(target_table_rows))
+                self.config_parser.print_log_message('DEBUG3', f"migrator_tables: update_data_migration_status: ({func_run_id}): Returned row: {data_migration_row}")
+                self.update_protocol({'object_type': 'data_migration', 'object_protocol_id': data_migration_row['id'], 'execution_success': success, 'execution_error_message': message, 'execution_results': 'source rows: ' + str(data_migration_row['source_table_rows']) + ', target rows: ' + str(target_table_rows)})
             else:
-                self.config_parser.print_log_message('ERROR', f"update_data_migration_status ({func_run_id}): Error updating status for data migration {row_id} in {table_name}.")
-                self.config_parser.print_log_message('ERROR', f"update_data_migration_status ({func_run_id}): Error: No protocol row returned.")
+                self.config_parser.print_log_message('ERROR', f"migrator_tables: update_data_migration_status: ({func_run_id}): Error updating status for data migration {row_id} in {table_name}.")
+                self.config_parser.print_log_message('ERROR', f"migrator_tables: update_data_migration_status: ({func_run_id}): Error: No protocol row returned.")
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"update_data_migration_status ({func_run_id}): Error updating status for data migration {row_id} in {table_name}.")
-            self.config_parser.print_log_message('ERROR', f"update_data_migration_status ({func_run_id}): Query: {query}")
-            self.config_parser.print_log_message('ERROR', f"update_data_migration_status ({func_run_id}): Exception: {e}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_data_migration_status: ({func_run_id}): Error updating status for data migration {row_id} in {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_data_migration_status: ({func_run_id}): Query: {query}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_data_migration_status: ({func_run_id}): Exception: {e}")
             raise
 
     def update_data_migration_rows(self, settings):
@@ -1273,27 +1305,27 @@ class MigratorTables:
 
             if row:
                 data_migration_row = self.decode_data_migration_row(row)
-                self.config_parser.print_log_message('DEBUG3', f"update_data_migration_rows ({func_run_id}): Returned row: {data_migration_row}")
-                self.update_protocol('data_migration', data_migration_row['id'], None, None, None)
+                self.config_parser.print_log_message('DEBUG3', f"migrator_tables: update_data_migration_rows: ({func_run_id}): Returned row: {data_migration_row}")
+                self.update_protocol({'object_type': 'data_migration', 'object_protocol_id': data_migration_row['id'], 'execution_success': None, 'execution_error_message': None, 'execution_results': None})
             else:
-                self.config_parser.print_log_message('ERROR', f"update_data_migration_rows ({func_run_id}): Error updating rows for data migration {row_id} in {table_name}.")
-                self.config_parser.print_log_message('ERROR', f"update_data_migration_rows ({func_run_id}): Error: No protocol row returned.")
+                self.config_parser.print_log_message('ERROR', f"migrator_tables: update_data_migration_rows: ({func_run_id}): Error updating rows for data migration {row_id} in {table_name}.")
+                self.config_parser.print_log_message('ERROR', f"migrator_tables: update_data_migration_rows: ({func_run_id}): Error: No protocol row returned.")
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"update_data_migration_rows ({func_run_id}): Error updating rows for data migration {row_id} in {table_name}.")
-            self.config_parser.print_log_message('ERROR', f"update_data_migration_rows ({func_run_id}): Query: {query}")
-            self.config_parser.print_log_message('ERROR', f"update_data_migration_rows ({func_run_id}): Exception: {e}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_data_migration_rows: ({func_run_id}): Error updating rows for data migration {row_id} in {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_data_migration_rows: ({func_run_id}): Query: {query}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_data_migration_rows: ({func_run_id}): Exception: {e}")
             raise
 
     def decode_data_migration_row(self, row):
         return {
             'id': row[0],
-            'source_schema': row[1],
-            'source_table': row[2],
+            'source_schema_name': row[1],
+            'source_table_name': row[2],
             'source_table_id': row[3],
             'source_table_rows': row[4],
             'worker_id': row[5],
-            'target_schema': row[6],
-            'target_table': row[7],
+            'target_schema_name': row[6],
+            'target_table_name': row[7],
             'target_table_rows': row[8],
             'task_created': row[9],
             'task_started': row[10],
@@ -1312,8 +1344,8 @@ class MigratorTables:
         self.protocol_connection.execute_query(f"""
             CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."{table_name}"
             (id SERIAL PRIMARY KEY,
-            source_schema TEXT,
-            source_table TEXT,
+            source_schema_name TEXT,
+            source_table_name TEXT,
             source_table_id INTEGER,
             worker_id TEXT,
             pk_columns TEXT,
@@ -1322,20 +1354,20 @@ class MigratorTables:
             row_count BIGINT
             )
         """)
-        self.config_parser.print_log_message('DEBUG', f"Created table {table_name} for PK ranges.")
+        self.config_parser.print_log_message('DEBUG', f"migrator_tables: create_table_for_pk_ranges: Created table {table_name} for PK ranges.")
 
-    def insert_pk_ranges(self, values):
+    def insert_pk_ranges(self, settings):
         func_run_id = uuid.uuid4()
         table_name = self.config_parser.get_protocol_name_pk_ranges()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
-            (source_schema, source_table, source_table_id, worker_id, pk_columns, batch_start, batch_end, row_count)
+            (source_schema_name, source_table_name, source_table_id, worker_id, pk_columns, batch_start, batch_end, row_count)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (values['source_schema'], values['source_table'], values['source_table_id'],
-                  str(values['worker_id']), values['pk_columns'],
-                  values['batch_start'], values['batch_end'], values['row_count'])
+        params = (settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_table_id'),
+                  str(settings.get('worker_id')), settings.get('pk_columns'),
+                  settings.get('batch_start'), settings.get('batch_end'), settings.get('row_count'))
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -1343,13 +1375,11 @@ class MigratorTables:
             cursor.close()
 
             data_migration_row = self.decode_pk_ranges_row(row)
-            self.config_parser.print_log_message('DEBUG3', f"insert_pk_ranges ({func_run_id}): Returned row: {data_migration_row}")
-            self.insert_protocol('data_migration', values['source_table'], 'pk_range',
-                                 f'''PK range: {values['batch_start']} - {values['batch_end']} / {values['row_count']}''',
-                                 None, True, None, 'info', None, data_migration_row['id'])
+            self.config_parser.print_log_message('DEBUG3', f"migrator_tables: insert_pk_ranges: ({func_run_id}): Returned row: {data_migration_row}")
+            self.insert_protocol({'object_type': 'data_migration', 'object_name': settings.get('source_table_name'), 'object_action': 'pk_range', 'object_ddl': f"PK range: {settings.get('batch_start')} - {settings.get('batch_end')} / {settings.get('row_count')}", 'execution_timestamp': None, 'execution_success': True, 'execution_error_message': None, 'row_type': 'info', 'execution_results': None, 'object_protocol_id': data_migration_row['id']})
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"insert_pk_ranges ({func_run_id}): Error inserting PK ranges {values['source_table']} into {table_name}.")
-            self.config_parser.print_log_message('ERROR', f"insert_pk_ranges ({func_run_id}): Exception: {e}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_pk_ranges: ({func_run_id}): Error inserting PK ranges {settings.get('source_table_name')} into {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_pk_ranges: ({func_run_id}): Exception: {e}")
             raise
 
     def fetch_all_pk_ranges(self, worker_id):
@@ -1364,8 +1394,8 @@ class MigratorTables:
     def decode_pk_ranges_row(self, row):
         return {
             'id': row[0],
-            'source_schema': row[1],
-            'source_table': row[2],
+            'source_schema_name': row[1],
+            'source_table_name': row[2],
             'source_table_id': row[3],
             'worker_id': row[4],
             'batch_start': row[5],
@@ -1389,7 +1419,7 @@ class MigratorTables:
             message TEXT
             )
         """)
-        self.config_parser.print_log_message('DEBUG', f"Created protocol table {table_name} for new objects.")
+        self.config_parser.print_log_message('DEBUG', f"migrator_tables: create_table_for_new_objects: Created protocol table {table_name} for new objects.")
 
     def create_table_for_tables(self):
         table_name = self.config_parser.get_protocol_name_tables()
@@ -1397,21 +1427,19 @@ class MigratorTables:
         self.protocol_connection.execute_query(f"""
             CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."{table_name}"
             (id SERIAL PRIMARY KEY,
-            source_schema TEXT,
-            source_table TEXT,
+            source_schema_name TEXT,
+            source_table_name TEXT,
             source_table_id INTEGER,
             source_columns TEXT,
             source_table_rows BIGINT,
             source_table_description TEXT,
-            target_schema TEXT,
-            target_table TEXT,
+            source_table_sql TEXT,
+            target_schema_name TEXT,
+            target_table_name TEXT,
             target_columns TEXT,
             target_table_rows BIGINT,
             target_table_sql TEXT,
             table_comment TEXT,
-            partitioned BOOLEAN,
-            partitioned_by TEXT,
-            partitioning_columns TEXT,
             create_partitions_sql TEXT,
             task_created TIMESTAMP DEFAULT clock_timestamp(),
             task_started TIMESTAMP,
@@ -1420,7 +1448,103 @@ class MigratorTables:
             message TEXT
             )
         """)
-        self.config_parser.print_log_message('DEBUG', f"Created protocol table {table_name} for tables.")
+        self.config_parser.print_log_message('DEBUG', f"migrator_tables: create_table_for_tables: Created protocol table {table_name} for tables.")
+
+    def create_table_for_source_table_partitioning(self):
+        table_name = self.config_parser.get_protocol_name_source_table_partitioning()
+        self.protocol_connection.execute_query(self.drop_table_sql.format(protocol_schema=self.protocol_schema, table_name=table_name))
+        self.protocol_connection.execute_query(f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."{table_name}"
+            (id SERIAL PRIMARY KEY,
+            source_schema_name TEXT,
+            source_table_name TEXT,
+            source_table_id INTEGER,
+            source_table_partitioning_level INTEGER,
+            source_partition_columns TEXT,
+            source_partition_ranges TEXT,
+            task_created TIMESTAMP DEFAULT clock_timestamp(),
+            task_started TIMESTAMP,
+            task_completed TIMESTAMP,
+            success BOOLEAN,
+            message TEXT
+            )
+        """)
+        self.config_parser.print_log_message('DEBUG', f"migrator_tables: create_table_for_source_table_partitioning: Created protocol table {table_name} for source table partitioning.")
+
+    def create_table_for_target_table_partitioning(self):
+        table_name = self.config_parser.get_protocol_name_target_table_partitioning()
+        self.protocol_connection.execute_query(self.drop_table_sql.format(protocol_schema=self.protocol_schema, table_name=table_name))
+        self.protocol_connection.execute_query(f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."{table_name}"
+            (id SERIAL PRIMARY KEY,
+            target_schema_name TEXT,
+            target_table_name TEXT,
+            target_table_id INTEGER,
+            target_table_partitioning_level INTEGER,
+            target_partition_columns TEXT,
+            target_partition_ranges TEXT,
+            task_created TIMESTAMP DEFAULT clock_timestamp(),
+            task_started TIMESTAMP,
+            task_completed TIMESTAMP,
+            success BOOLEAN,
+            message TEXT
+            )
+        """)
+        self.config_parser.print_log_message('DEBUG', f"migrator_tables: create_table_for_target_table_partitioning: Created protocol table {table_name} for target table partitioning.")
+
+    def create_table_for_columns(self):
+        table_name = self.config_parser.get_protocol_name_columns()
+        self.protocol_connection.execute_query(self.drop_table_sql.format(protocol_schema=self.protocol_schema, table_name=table_name))
+        self.protocol_connection.execute_query(f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."{table_name}"
+            (id SERIAL PRIMARY KEY,
+            source_schema_name TEXT,
+            source_table_name TEXT,
+            source_table_id INTEGER,
+            source_column_name TEXT,
+            source_column_id INTEGER,
+            source_column_data_type TEXT,
+            source_column_is_nullable TEXT,
+            source_column_is_primary_key TEXT,
+            source_column_is_identity TEXT,
+            source_column_default_name TEXT,
+            source_column_default_value TEXT,
+            source_column_replaced_default_value TEXT,
+            source_column_character_maximum_length TEXT,
+            source_column_numeric_precision TEXT,
+            source_column_numeric_scale TEXT,
+            source_column_basic_data_type TEXT,
+            source_column_basic_character_maximum_length TEXT,
+            source_column_basic_numeric_precision TEXT,
+            source_column_basic_numeric_scale TEXT,
+            source_column_basic_column_type TEXT,
+            source_column_is_generated_virtual TEXT,
+            source_column_is_generated_stored TEXT,
+            source_column_generation_expression TEXT,
+            source_column_stripped_generation_expression TEXT,
+            source_column_udt_schema TEXT,
+            source_column_udt_name TEXT,
+            source_column_domain_schema TEXT,
+            source_column_domain_name TEXT,
+            source_column_description TEXT,
+            source_column_sql TEXT,
+            target_schema_name TEXT,
+            target_table_name TEXT,
+            target_table_id INTEGER,
+            target_column_name TEXT,
+            target_column_id INTEGER,
+            target_column_data_type TEXT,
+            target_column_description TEXT,
+            target_column_sql TEXT,
+            task_created TIMESTAMP DEFAULT clock_timestamp(),
+            task_started TIMESTAMP,
+            task_completed TIMESTAMP,
+            success BOOLEAN,
+            message TEXT
+            )
+        """)
+        self.config_parser.print_log_message('DEBUG', f"migrator_tables: create_table_for_columns: Created protocol table {table_name} for columns.")
+
 
     def create_table_for_data_sources(self):
         table_name = self.config_parser.get_protocol_name_data_sources()
@@ -1428,8 +1552,8 @@ class MigratorTables:
         self.protocol_connection.execute_query(f"""
             CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."{table_name}"
             (id SERIAL PRIMARY KEY,
-            source_schema TEXT,
-            source_table TEXT,
+            source_schema_name TEXT,
+            source_table_name TEXT,
             source_table_id INTEGER,
             lob_columns TEXT,
             file_name TEXT,
@@ -1445,13 +1569,13 @@ class MigratorTables:
             message TEXT
             )
         """)
-        self.config_parser.print_log_message('DEBUG', f"Created protocol table {table_name} for data sources.")
+        self.config_parser.print_log_message('DEBUG', f"migrator_tables: create_table_for_data_sources: Created protocol table {table_name} for data sources.")
 
     def insert_data_source(self, settings):
         func_run_id = uuid.uuid4()
-        ## source_schema, source_table, source_table_id, clob_columns, blob_columns, file_name, format_options
-        source_schema = settings['source_schema']
-        source_table = settings['source_table']
+        ## source_schema_name, source_table_name, source_table_id, clob_columns, blob_columns, file_name, format_options
+        source_schema_name = settings['source_schema_name']
+        source_table_name = settings['source_table_name']
         source_table_id = settings['source_table_id']
         lob_columns = settings.get('lob_columns', '')
         file_name = settings.get('file_name', '')
@@ -1464,14 +1588,14 @@ class MigratorTables:
         table_name = self.config_parser.get_protocol_name_data_sources()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
-            (source_schema, source_table, source_table_id, lob_columns,
+            (source_schema_name, source_table_name, source_table_id, lob_columns,
             file_name, file_size, file_lines, file_found, converted_file_name, format_options)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (source_schema, source_table, source_table_id,
+        params = (source_schema_name, source_table_name, source_table_id,
                   lob_columns, file_name, file_size, file_lines, file_found, converted_file_name, format_options)
-        self.config_parser.print_log_message('DEBUG3', f"insert_data_source ({func_run_id}): Query: {query} / Params: {params}")
+        self.config_parser.print_log_message('DEBUG3', f"migrator_tables: insert_data_source: ({func_run_id}): Query: {query} / Params: {params}")
 
         try:
             cursor = self.protocol_connection.connection.cursor()
@@ -1480,21 +1604,23 @@ class MigratorTables:
             cursor.close()
 
             data_source_row = self.decode_data_source_row(row)
-            self.config_parser.print_log_message('DEBUG3', f"insert_data_source ({func_run_id}): Returned row: {data_source_row}")
-            self.insert_protocol('data_source', f"{source_table} ({file_name})", 'create', None, None, None, None, 'info', None, data_source_row['id'])
+            self.config_parser.print_log_message('DEBUG3', f"migrator_tables: insert_data_source: ({func_run_id}): Returned row: {data_source_row}")
+            self.insert_protocol({'object_type': 'data_source', 'object_name': f'{source_table_name} ({file_name})', 'object_action': 'create', 'object_ddl': None, 'execution_timestamp': None, 'execution_success': None, 'execution_error_message': None, 'row_type': 'info', 'execution_results': None, 'object_protocol_id': data_source_row['id']})
             return data_source_row['id']
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"insert_data_source ({func_run_id}): Error inserting data source {source_table} into {table_name}.")
-            self.config_parser.print_log_message('ERROR', f"insert_data_source ({func_run_id}): Exception: {e}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_data_source: ({func_run_id}): Error inserting data source {source_table_name} into {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_data_source: ({func_run_id}): Exception: {e}")
             raise
 
-    def get_data_sources(self, source_schema, source_table):
+    def get_data_sources(self, settings):
+        source_schema_name = settings.get('source_schema_name')
+        source_table_name = settings.get('source_table_name')
         table_name = self.config_parser.get_protocol_name_data_sources()
         query = f"""
             SELECT * FROM "{self.protocol_schema}"."{table_name}"
-            WHERE source_schema = %s AND source_table = %s
+            WHERE source_schema_name = %s AND source_table_name = %s
         """
-        params = (source_schema, source_table)
+        params = (source_schema_name, source_table_name)
         cursor = self.protocol_connection.connection.cursor()
         cursor.execute(query, params)
         row = cursor.fetchone()
@@ -1506,8 +1632,8 @@ class MigratorTables:
     def decode_data_source_row(self, row):
         return {
             'id': row[0],
-            'source_schema': row[1],
-            'source_table': row[2],
+            'source_schema_name': row[1],
+            'source_table_name': row[2],
             'source_table_id': row[3],
             'lob_columns': row[4],
             'file_name': row[5],
@@ -1523,7 +1649,10 @@ class MigratorTables:
             'message': row[15]
         }
 
-    def update_status_data_source(self, row_id, success, message):
+    def update_status_data_source(self, settings):
+        row_id = settings.get('row_id')
+        success = settings.get('success')
+        message = settings.get('message')
         func_run_id = uuid.uuid4()
         table_name = self.config_parser.get_protocol_name_data_sources()
         query = f"""
@@ -1543,15 +1672,15 @@ class MigratorTables:
 
             if row:
                 data_source_row = self.decode_data_source_row(row)
-                self.config_parser.print_log_message('DEBUG3', f"update_status_data_source ({func_run_id}): Returned row: {data_source_row}")
-                self.update_protocol('data_source', data_source_row['id'], success, message, None)
+                self.config_parser.print_log_message('DEBUG3', f"migrator_tables: update_status_data_source: ({func_run_id}): Returned row: {data_source_row}")
+                self.update_protocol({'object_type': 'data_source', 'object_protocol_id': data_source_row['id'], 'execution_success': success, 'execution_error_message': message, 'execution_results': None})
             else:
-                self.config_parser.print_log_message('ERROR', f"update_status_data_source ({func_run_id}): Error updating status for data source {row_id} in {table_name}.")
-                self.config_parser.print_log_message('ERROR', f"update_status_data_source ({func_run_id}): Error: No protocol row returned.")
+                self.config_parser.print_log_message('ERROR', f"migrator_tables: update_status_data_source: ({func_run_id}): Error updating status for data source {row_id} in {table_name}.")
+                self.config_parser.print_log_message('ERROR', f"migrator_tables: update_status_data_source: ({func_run_id}): Error: No protocol row returned.")
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"update_status_data_source ({func_run_id}): Error updating status for data source {row_id} in {table_name}.")
-            self.config_parser.print_log_message('ERROR', f"update_status_data_source ({func_run_id}): Query: {query}")
-            self.config_parser.print_log_message('ERROR', f"update_status_data_source ({func_run_id}): Exception: {e}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_status_data_source: ({func_run_id}): Error updating status for data source {row_id} in {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_status_data_source: ({func_run_id}): Query: {query}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_status_data_source: ({func_run_id}): Exception: {e}")
             raise
 
     def create_table_for_indexes(self):
@@ -1560,14 +1689,14 @@ class MigratorTables:
         self.protocol_connection.execute_query(f"""
             CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."{table_name}"
             (id SERIAL PRIMARY KEY,
-            source_schema TEXT,
-            source_table TEXT,
+            source_schema_name TEXT,
+            source_table_name TEXT,
             source_table_id INTEGER,
             index_owner TEXT,
             index_name TEXT,
             index_type VARCHAR(30),
-            target_schema TEXT,
-            target_table TEXT,
+            target_schema_name TEXT,
+            target_table_name TEXT,
             index_sql TEXT,
             index_columns TEXT,
             index_comment TEXT,
@@ -1579,7 +1708,7 @@ class MigratorTables:
             message TEXT
             )
         """)
-        self.config_parser.print_log_message('DEBUG', f"Created protocol table {table_name} for indexes.")
+        self.config_parser.print_log_message('DEBUG', f"migrator_tables: create_table_for_indexes: Created protocol table {table_name} for indexes.")
 
     def create_table_for_funcprocs(self):
         table_name = self.config_parser.get_protocol_name_funcprocs()
@@ -1587,11 +1716,11 @@ class MigratorTables:
         self.protocol_connection.execute_query(f"""
             CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."{table_name}"
             (id SERIAL PRIMARY KEY,
-            source_schema TEXT,
+            source_schema_name TEXT,
             source_funcproc_name TEXT,
             source_funcproc_id INTEGER,
             source_funcproc_sql TEXT,
-            target_schema TEXT,
+            target_schema_name TEXT,
             target_funcproc_name TEXT,
             target_funcproc_sql TEXT,
             funcproc_comment TEXT,
@@ -1602,7 +1731,7 @@ class MigratorTables:
             message TEXT
             )
         """)
-        self.config_parser.print_log_message('DEBUG', f"Created protocol table {table_name} for functions/procedures.")
+        self.config_parser.print_log_message('DEBUG', f"migrator_tables: create_table_for_funcprocs: Created protocol table {table_name} for functions/procedures.")
 
     def create_table_for_sequences(self):
         table_name = self.config_parser.get_protocol_name_sequences()
@@ -1610,11 +1739,18 @@ class MigratorTables:
         self.protocol_connection.execute_query(f"""
             CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."{table_name}"
             (sequence_id INTEGER,
-            schema_name TEXT,
-            table_name TEXT,
-            column_name TEXT,
-            sequence_name TEXT,
-            set_sequence_sql TEXT,
+            source_schema_name TEXT,
+            source_table_name TEXT,
+            source_column_name TEXT,
+            source_sequence_name TEXT,
+            source_sequence_sql TEXT,
+            source_sequence_comment TEXT,
+            target_schema_name TEXT,
+            target_table_name TEXT,
+            target_column_name TEXT,
+            target_sequence_name TEXT,
+            target_sequence_sql TEXT,
+            target_sequence_comment TEXT,
             task_created TIMESTAMP DEFAULT clock_timestamp(),
             task_started TIMESTAMP,
             task_completed TIMESTAMP,
@@ -1622,7 +1758,30 @@ class MigratorTables:
             message TEXT
             )
         """)
-        self.config_parser.print_log_message('DEBUG', f"Created protocol table {table_name} for sequences.")
+        self.config_parser.print_log_message('DEBUG', f"migrator_tables: create_table_for_sequences: Created protocol table {table_name} for sequences.")
+
+    def create_table_for_aliases(self):
+        table_name = self.config_parser.get_protocol_name_aliases()
+        self.protocol_connection.execute_query(self.drop_table_sql.format(protocol_schema=self.protocol_schema, table_name=table_name))
+        self.protocol_connection.execute_query(f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."{table_name}"
+            (id SERIAL PRIMARY KEY,
+            source_schema_name TEXT,
+            source_alias_name TEXT,
+            source_alias_id INTEGER,
+            source_alias_sql TEXT,
+            source_referenced_schema_name TEXT,
+            source_referenced_table_name TEXT,
+            source_referenced_column_name TEXT,
+            source_alias_comment TEXT,
+            task_created TIMESTAMP DEFAULT clock_timestamp(),
+            task_started TIMESTAMP,
+            task_completed TIMESTAMP,
+            success BOOLEAN,
+            message TEXT
+            )
+        """)
+        self.config_parser.print_log_message('DEBUG', f"migrator_tables: create_table_for_aliases: Created protocol table {table_name} for aliases.")
 
     def create_table_for_triggers(self):
         table_name = self.config_parser.get_protocol_name_triggers()
@@ -1630,11 +1789,11 @@ class MigratorTables:
         self.protocol_connection.execute_query(f"""
             CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."{table_name}"
             (id SERIAL PRIMARY KEY,
-            source_schema TEXT,
-            source_table TEXT,
+            source_schema_name TEXT,
+            source_table_name TEXT,
             source_table_id INTEGER,
-            target_schema TEXT,
-            target_table TEXT,
+            target_schema_name TEXT,
+            target_table_name TEXT,
             trigger_id BIGINT,
             trigger_name TEXT,
             trigger_event TEXT,
@@ -1651,7 +1810,7 @@ class MigratorTables:
             message TEXT
             )
         """)
-        self.config_parser.print_log_message('DEBUG', f"Created protocol table {table_name} for triggers.")
+        self.config_parser.print_log_message('DEBUG', f"migrator_tables: create_table_for_triggers: Created protocol table {table_name} for triggers.")
 
     def create_table_for_views(self):
         table_name = self.config_parser.get_protocol_name_views()
@@ -1659,11 +1818,11 @@ class MigratorTables:
         self.protocol_connection.execute_query(f"""
             CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."{table_name}"
             (id SERIAL PRIMARY KEY,
-            source_schema TEXT,
+            source_schema_name TEXT,
             source_view_name TEXT,
             source_view_id INTEGER,
             source_view_sql TEXT,
-            target_schema TEXT,
+            target_schema_name TEXT,
             target_view_name TEXT,
             target_view_sql TEXT,
             view_comment TEXT,
@@ -1674,7 +1833,7 @@ class MigratorTables:
             message TEXT
             )
         """)
-        self.config_parser.print_log_message('DEBUG', f"Created protocol table {table_name} for views.")
+        self.config_parser.print_log_message('DEBUG', f"migrator_tables: create_table_for_views: Created protocol table {table_name} for views.")
 
     def decode_protocol_row(self, row):
         return {
@@ -1694,35 +1853,33 @@ class MigratorTables:
     def decode_table_row(self, row):
         return {
             'id': row[0],
-            'source_schema': row[1],
-            'source_table': row[2],
+            'source_schema_name': row[1],
+            'source_table_name': row[2],
             'source_table_id': row[3],
             'source_columns': json.loads(row[4]),
             'source_table_rows': row[5],
             'source_table_description': row[6],
-            'target_schema': row[7],
-            'target_table': row[8],
-            'target_columns': json.loads(row[9]),
-            'target_table_rows': row[10],
-            'target_table_sql': row[11],
-            'table_comment': row[12],
-            'partitioned': row[13],
-            'partitioned_by': row[14],
-            'partitioning_columns': row[15],
-            'create_partitions_sql': row[16],
+            'source_table_sql': row[7],
+            'target_schema_name': row[8],
+            'target_table_name': row[9],
+            'target_columns': json.loads(row[10]),
+            'target_table_rows': row[11],
+            'target_table_sql': row[12],
+            'table_comment': row[13],
+            'create_partitions_sql': row[14],
         }
 
     def decode_index_row(self, row):
         return {
             'id': row[0],
-            'source_schema': row[1],
-            'source_table': row[2],
+            'source_schema_name': row[1],
+            'source_table_name': row[2],
             'source_table_id': row[3],
             'index_owner': row[4],
             'index_name': row[5],
             'index_type': row[6],
-            'target_schema': row[7],
-            'target_table': row[8],
+            'target_schema_name': row[7],
+            'target_table_name': row[8],
             'index_sql': row[9],
             'index_columns': row[10],
             'index_comment': row[11],
@@ -1732,11 +1889,11 @@ class MigratorTables:
     def decode_funcproc_row(self, row):
         return {
             'id': row[0],
-            'source_schema': row[1],
+            'source_schema_name': row[1],
             'source_funcproc_name': row[2],
             'source_funcproc_id': row[3],
             'source_funcproc_sql': row[4],
-            'target_schema': row[5],
+            'target_schema_name': row[5],
             'target_funcproc_name': row[6],
             'target_funcproc_sql': row[7],
             'funcproc_comment': row[8]
@@ -1745,21 +1902,28 @@ class MigratorTables:
     def decode_sequence_row(self, row):
         return {
             'sequence_id': row[0],
-            'schema_name': row[1],
-            'table_name': row[2],
-            'column_name': row[3],
-            'sequence_name': row[4],
-            'set_sequence_sql': row[5]
+            'source_schema_name': row[1],
+            'source_table_name': row[2],
+            'source_column_name': row[3],
+            'source_sequence_name': row[4],
+            'source_sequence_sql': row[5],
+            'source_sequence_comment': row[6],
+            'target_schema_name': row[7],
+            'target_table_name': row[8],
+            'target_column_name': row[9],
+            'target_sequence_name': row[10],
+            'target_sequence_sql': row[11],
+            'target_sequence_comment': row[12]
         }
 
     def decode_trigger_row(self, row):
         return {
             'id': row[0],
-            'source_schema': row[1],
-            'source_table': row[2],
+            'source_schema_name': row[1],
+            'source_table_name': row[2],
             'source_table_id': row[3],
-            'target_schema': row[4],
-            'target_table': row[5],
+            'target_schema_name': row[4],
+            'target_table_name': row[5],
             'trigger_id': row[6],
             'trigger_name': row[7],
             'trigger_event': row[8],
@@ -1774,17 +1938,27 @@ class MigratorTables:
     def decode_view_row(self, row):
         return {
             'id': row[0],
-            'source_schema': row[1],
+            'source_schema_name': row[1],
             'source_view_name': row[2],
             'source_view_id': row[3],
             'source_view_sql': row[4],
-            'target_schema': row[5],
+            'target_schema_name': row[5],
             'target_view_name': row[6],
             'target_view_sql': row[7],
             'view_comment': row[8]
         }
 
-    def insert_protocol(self, object_type, object_name, object_action, object_ddl, execution_timestamp, execution_success, execution_error_message, row_type, execution_results, object_protocol_id):
+    def insert_protocol(self, settings):
+        object_type = settings.get('object_type')
+        object_name = settings.get('object_name')
+        object_action = settings.get('object_action')
+        object_ddl = settings.get('object_ddl')
+        execution_timestamp = settings.get('execution_timestamp')
+        execution_success = settings.get('execution_success')
+        execution_error_message = settings.get('execution_error_message')
+        row_type = settings.get('row_type')
+        execution_results = settings.get('execution_results')
+        object_protocol_id = settings.get('object_protocol_id')
         table_name = self.config_parser.get_protocol_name()
         query = f"""
         INSERT INTO "{self.protocol_schema}"."{table_name}"
@@ -1792,15 +1966,20 @@ class MigratorTables:
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
         params = (object_type, object_name, object_action, object_ddl, execution_timestamp, execution_success, execution_error_message, row_type, execution_results, object_protocol_id)
-        self.config_parser.print_log_message('DEBUG', f"insert_protocol: Executing query with params: {params}")
+        self.config_parser.print_log_message('DEBUG', f"migrator_tables: insert_protocol: Executing query with params: {params}")
         try:
             self.protocol_connection.execute_query(query, params)
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"insert_protocol: Error inserting info {object_name} into {table_name}.")
-            self.config_parser.print_log_message('ERROR', f"insert_protocol: Exception: {e}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_protocol: Error inserting info {object_name} into {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_protocol: Exception: {e}")
             raise
 
-    def update_protocol(self, object_type, object_protocol_id, execution_success, execution_error_message, execution_results):
+    def update_protocol(self, settings):
+        object_type = settings.get('object_type')
+        object_protocol_id = settings.get('object_protocol_id')
+        execution_success = settings.get('execution_success')
+        execution_error_message = settings.get('execution_error_message')
+        execution_results = settings.get('execution_results')
         table_name = self.config_parser.get_protocol_name()
         query = f"""
         UPDATE "{self.protocol_schema}"."{table_name}"
@@ -1812,31 +1991,29 @@ class MigratorTables:
         AND object_type = %s
         """
         params = ('TRUE' if str(execution_success).upper() == 'TRUE' else 'FALSE', execution_error_message, execution_results, object_protocol_id, object_type)
-        self.config_parser.print_log_message('DEBUG', f"update_protocol: Executing query with params: {params}")
+        self.config_parser.print_log_message('DEBUG', f"migrator_tables: update_protocol: Executing query with params: {params}")
         try:
             self.protocol_connection.execute_query(query, params)
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"update_protocol: Error updating info {object_protocol_id} in {table_name}.")
-            self.config_parser.print_log_message('ERROR', f"update_protocol: Exception: {e}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_protocol: Error updating info {object_protocol_id} in {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_protocol: Exception: {e}")
             raise
 
     def insert_tables(self, settings):
         func_run_id = uuid.uuid4()
-        source_schema = settings['source_schema']
-        source_table = settings['source_table']
+        source_schema_name = settings['source_schema_name']
+        source_table_name = settings['source_table_name']
         source_table_id = settings['source_table_id']
         source_columns = settings['source_columns']
         source_table_rows = settings['source_table_rows']
         source_table_description = settings['source_table_description']
-        target_schema = settings['target_schema']
-        target_table = settings['target_table']
+        source_table_sql = settings['source_table_sql']
+        target_schema_name = settings['target_schema_name']
+        target_table_name = settings['target_table_name']
         target_columns = settings['target_columns']
         target_table_rows = settings['target_table_rows']
         target_table_sql = settings['target_table_sql']
         table_comment = settings['table_comment']
-        partitioned = settings['partitioned']
-        partitioned_by = settings['partitioned_by']
-        partitioning_columns = settings['partitioning_columns']
         create_partitions_sql = settings['create_partitions_sql']
 
         table_name = self.config_parser.get_protocol_name_tables()
@@ -1844,15 +2021,15 @@ class MigratorTables:
         target_columns_str = json.dumps(target_columns)
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
-            (source_schema, source_table, source_table_id, source_columns, source_table_rows, source_table_description,
-            target_schema, target_table, target_columns, target_table_rows, target_table_sql, table_comment,
-            partitioned, partitioned_by, partitioning_columns, create_partitions_sql)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (source_schema_name, source_table_name, source_table_id, source_columns, source_table_rows, source_table_description, source_table_sql,
+            target_schema_name, target_table_name, target_columns, target_table_rows, target_table_sql, table_comment,
+            create_partitions_sql)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (source_schema, source_table, source_table_id, source_columns_str, source_table_rows, source_table_description,
-                  target_schema, target_table, target_columns_str, target_table_rows, target_table_sql, table_comment,
-                  partitioned, partitioned_by, partitioning_columns, create_partitions_sql)
+        params = (source_schema_name, source_table_name, source_table_id, source_columns_str, source_table_rows, source_table_description, source_table_sql,
+                  target_schema_name, target_table_name, target_columns_str, target_table_rows, target_table_sql, table_comment,
+                  create_partitions_sql)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -1860,15 +2037,18 @@ class MigratorTables:
             cursor.close()
 
             table_row = self.decode_table_row(row)
-            self.config_parser.print_log_message('DEBUG3', f"insert_tables ({func_run_id}): Returned row: {table_row}")
-            self.insert_protocol('table', target_table, 'create', target_table_sql, None, None, None, 'info', None, table_row['id'])
+            self.config_parser.print_log_message('DEBUG3', f"migrator_tables: insert_tables: ({func_run_id}): Returned row: {table_row}")
+            self.insert_protocol({'object_type': 'table', 'object_name': target_table_name, 'object_action': 'create', 'object_ddl': target_table_sql, 'execution_timestamp': None, 'execution_success': None, 'execution_error_message': None, 'row_type': 'info', 'execution_results': None, 'object_protocol_id': table_row['id']})
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"insert_tables ({func_run_id}): Error inserting table info {source_table} into {table_name}.")
-            self.config_parser.print_log_message('ERROR', f"insert_tables ({func_run_id}): Settings: {settings}")
-            self.config_parser.print_log_message('ERROR', f"insert_tables ({func_run_id}): Exception: {e}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_tables: ({func_run_id}): Error inserting table info {source_table_name} into {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_tables: ({func_run_id}): Settings: {settings}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_tables: ({func_run_id}): Exception: {e}")
             raise
 
-    def update_table_status(self, row_id, success, message):
+    def update_table_status(self, settings):
+        row_id = settings.get('row_id')
+        success = settings.get('success')
+        message = settings.get('message')
         func_run_id = uuid.uuid4()
         table_name = self.config_parser.get_protocol_name_tables()
         query = f"""
@@ -1880,7 +2060,7 @@ class MigratorTables:
             RETURNING *
         """
         params = ('TRUE' if success else 'FALSE', message, row_id)
-        self.config_parser.print_log_message('DEBUG3', f"update_table_status ({func_run_id}): Executing query with params: {params}")
+        self.config_parser.print_log_message('DEBUG3', f"migrator_tables: update_table_status: ({func_run_id}): Executing query with params: {params}")
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -1889,26 +2069,28 @@ class MigratorTables:
 
             if row:
                 table_row = self.decode_table_row(row)
-                self.config_parser.print_log_message('DEBUG3', f"update_table_status ({func_run_id}): Returned row: {table_row}")
-                self.update_protocol('table', table_row['id'], success, message, None)
+                self.config_parser.print_log_message('DEBUG3', f"migrator_tables: update_table_status: ({func_run_id}): Returned row: {table_row}")
+                self.update_protocol({'object_type': 'table', 'object_protocol_id': table_row['id'], 'execution_success': success, 'execution_error_message': message, 'execution_results': None})
             else:
-                self.config_parser.print_log_message('ERROR', f"update_table_status ({func_run_id}): Error updating status for table {row_id} in {table_name}.")
-                self.config_parser.print_log_message('ERROR', f"update_table_status ({func_run_id}): Error: No protocol row returned.")
+                self.config_parser.print_log_message('ERROR', f"migrator_tables: update_table_status: ({func_run_id}): Error updating status for table {row_id} in {table_name}.")
+                self.config_parser.print_log_message('ERROR', f"migrator_tables: update_table_status: ({func_run_id}): Error: No protocol row returned.")
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"update_table_status ({func_run_id}): Error updating status for table {row_id} in {table_name}.")
-            self.config_parser.print_log_message('ERROR', f"update_table_status ({func_run_id}): Query: {query}")
-            self.config_parser.print_log_message('ERROR', f"update_table_status ({func_run_id}): Exception: {e}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_table_status: ({func_run_id}): Error updating status for table {row_id} in {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_table_status: ({func_run_id}): Query: {query}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_table_status: ({func_run_id}): Exception: {e}")
             raise
 
-    def select_table_by_source(self, source_schema, source_table):
+    def select_table_by_source(self, settings):
+        source_schema_name = settings.get('source_schema_name')
+        source_table_name = settings.get('source_table_name')
         func_run_id = uuid.uuid4()
         table_name = self.config_parser.get_protocol_name_tables()
-        self.config_parser.print_log_message('DEBUG3', f"select_table_by_source ({func_run_id}): Selecting table for source_schema={source_schema}, source_table={source_table} in {table_name}.")
+        self.config_parser.print_log_message('DEBUG3', f"migrator_tables: select_table_by_source: ({func_run_id}): Selecting table for source_schema_name={source_schema_name}, source_table_name={source_table_name} in {table_name}.")
         query = f"""
             SELECT * FROM "{self.protocol_schema}"."{table_name}"
-            WHERE lower(source_schema) = lower(%s) AND lower(source_table) = lower(%s)
+            WHERE lower(source_schema_name) = lower(%s) AND lower(source_table_name) = lower(%s)
         """
-        params = (source_schema, source_table)
+        params = (source_schema_name, source_table_name)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -1918,26 +2100,26 @@ class MigratorTables:
                 return self.decode_table_row(row)
             return None
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"select_table_by_source ({func_run_id}): Error selecting table for source_schema={source_schema}, source_table={source_table} in {table_name}.")
-            self.config_parser.print_log_message('ERROR', f"select_table_by_source ({func_run_id}): Query: {query}")
-            self.config_parser.print_log_message('ERROR', f"select_table_by_source ({func_run_id}): Params: {params}")
-            self.config_parser.print_log_message('ERROR', f"select_table_by_source ({func_run_id}): Exception: {e}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: select_table_by_source: ({func_run_id}): Error selecting table for source_schema_name={source_schema_name}, source_table_name={source_table_name} in {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: select_table_by_source: ({func_run_id}): Query: {query}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: select_table_by_source: ({func_run_id}): Params: {params}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: select_table_by_source: ({func_run_id}): Exception: {e}")
             raise
 
-    def insert_indexes(self, values):
+    def insert_indexes(self, settings):
         func_run_id = uuid.uuid4()
         table_name = self.config_parser.get_protocol_name_indexes()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
-            (source_schema, source_table, source_table_id, index_owner, index_name, index_type,
-            target_schema, target_table, index_sql, index_columns, index_comment, is_function_based)
+            (source_schema_name, source_table_name, source_table_id, index_owner, index_name, index_type,
+            target_schema_name, target_table_name, index_sql, index_columns, index_comment, is_function_based)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (values['source_schema'], values['source_table'], values['source_table_id'], values['index_owner'],
-                  values['index_name'], values['index_type'], values['target_schema'],
-                  values['target_table'], values['index_sql'], values['index_columns'],
-                  values['index_comment'], True if values['is_function_based'] == 'YES' else False)
+        params = (settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_table_id'), settings.get('index_owner'),
+                  settings.get('index_name'), settings.get('index_type'), settings.get('target_schema_name'),
+                  settings.get('target_table_name'), settings.get('index_sql'), settings.get('index_columns'),
+                  settings.get('index_comment'), True if settings.get('is_function_based') == 'YES' else False)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -1945,14 +2127,17 @@ class MigratorTables:
             cursor.close()
 
             index_row = self.decode_index_row(row)
-            self.config_parser.print_log_message('DEBUG3', f"insert_indexes ({func_run_id}): Returned row: {index_row}")
-            self.insert_protocol('index', values['index_name'], 'create', values['index_sql'], None, None, None, 'info', None, index_row['id'])
+            self.config_parser.print_log_message('DEBUG3', f"migrator_tables: insert_indexes: ({func_run_id}): Returned row: {index_row}")
+            self.insert_protocol({'object_type': 'index', 'object_name': settings.get('index_name'), 'object_action': 'create', 'object_ddl': settings.get('index_sql'), 'execution_timestamp': None, 'execution_success': None, 'execution_error_message': None, 'row_type': 'info', 'execution_results': None, 'object_protocol_id': index_row['id']})
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"insert_indexes ({func_run_id}): Error inserting index info {values['index_name']} into {table_name}.")
-            self.config_parser.print_log_message('ERROR', f"insert_indexes ({func_run_id}): Exception: {e}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_indexes: ({func_run_id}): Error inserting index info {settings.get('index_name')} into {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_indexes: ({func_run_id}): Exception: {e}")
             raise
 
-    def update_index_status(self, row_id, success, message):
+    def update_index_status(self, settings):
+        row_id = settings.get('row_id')
+        success = settings.get('success')
+        message = settings.get('message')
         func_run_id = uuid.uuid4()
         table_name = self.config_parser.get_protocol_name_indexes()
         query = f"""
@@ -1972,15 +2157,15 @@ class MigratorTables:
 
             if row:
                 index_row = self.decode_index_row(row)
-                self.config_parser.print_log_message('DEBUG3', f"update_index_status ({func_run_id}): Returned row: {index_row}")
-                self.update_protocol('index', index_row['id'], success, message, None)
+                self.config_parser.print_log_message('DEBUG3', f"migrator_tables: update_index_status: ({func_run_id}): Returned row: {index_row}")
+                self.update_protocol({'object_type': 'index', 'object_protocol_id': index_row['id'], 'execution_success': success, 'execution_error_message': message, 'execution_results': None})
             else:
-                self.config_parser.print_log_message('ERROR', f"update_index_status ({func_run_id}): Error updating status for index {row_id} in {table_name}.")
-                self.config_parser.print_log_message('ERROR', f"update_index_status ({func_run_id}): Error: No protocol row returned.")
+                self.config_parser.print_log_message('ERROR', f"migrator_tables: update_index_status: ({func_run_id}): Error updating status for index {row_id} in {table_name}.")
+                self.config_parser.print_log_message('ERROR', f"migrator_tables: update_index_status: ({func_run_id}): Error: No protocol row returned.")
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"update_index_status ({func_run_id}): Error updating status for index {row_id} in {table_name}.")
-            self.config_parser.print_log_message('ERROR', f"update_index_status ({func_run_id}): Query: {query}")
-            self.config_parser.print_log_message('ERROR', f"update_index_status ({func_run_id}): Exception: {e}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_index_status: ({func_run_id}): Error updating status for index {row_id} in {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_index_status: ({func_run_id}): Query: {query}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_index_status: ({func_run_id}): Exception: {e}")
             raise
 
     def create_table_for_constraints(self):
@@ -1990,10 +2175,10 @@ class MigratorTables:
             CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."{table_name}"
             (id SERIAL PRIMARY KEY,
             source_table_id INTEGER,
-            source_schema TEXT,
-            source_table TEXT,
-            target_schema TEXT,
-            target_table TEXT,
+            source_schema_name TEXT,
+            source_table_name TEXT,
+            target_schema_name TEXT,
+            target_table_name TEXT,
             constraint_name TEXT,
             constraint_type TEXT,
             constraint_owner TEXT,
@@ -2013,16 +2198,16 @@ class MigratorTables:
             message TEXT
             )
         """)
-        self.config_parser.print_log_message('DEBUG3', f"create_table_for_constraints: Created protocol table {table_name}.")
+        self.config_parser.print_log_message('DEBUG3', f"migrator_tables: create_table_for_constraints: Created protocol table {table_name}.")
 
     def decode_constraint_row(self, row):
         return {
             'id': row[0],
             'source_table_id': row[1],
-            'source_schema': row[2],
-            'source_table': row[3],
-            'target_schema': row[4],
-            'target_table': row[5],
+            'source_schema_name': row[2],
+            'source_table_name': row[3],
+            'target_schema_name': row[4],
+            'target_table_name': row[5],
             'constraint_name': row[6],
             'constraint_type': row[7],
             'constraint_owner': row[8],
@@ -2047,8 +2232,8 @@ class MigratorTables:
         table_name = self.config_parser.get_protocol_name_constraints()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
-            (source_table_id, source_schema, source_table,
-            target_schema, target_table, constraint_name,
+            (source_table_id, source_schema_name, source_table_name,
+            target_schema_name, target_table_name, constraint_name,
             constraint_type,
             constraint_owner, constraint_columns,
             referenced_table_schema, referenced_table_name,
@@ -2058,8 +2243,8 @@ class MigratorTables:
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (settings['source_table_id'], settings['source_schema'], settings['source_table'],
-                    settings['target_schema'], settings['target_table'], settings['constraint_name'],
+        params = (settings['source_table_id'], settings['source_schema_name'], settings['source_table_name'],
+                    settings['target_schema_name'], settings['target_table_name'], settings['constraint_name'],
                     settings['constraint_type'] if 'constraint_type' in settings else '',
                     settings['constraint_owner'] if 'constraint_owner' in settings else '',
                     settings['constraint_columns'] if 'constraint_columns' in settings else '',
@@ -2080,16 +2265,18 @@ class MigratorTables:
             cursor.close()
 
             constraint_row = self.decode_constraint_row(row)
-            self.config_parser.print_log_message('DEBUG3', f"insert_constraint ({func_run_id}): Returned row: {constraint_row}")
-            self.insert_protocol('constraint', settings['constraint_name'], 'create',
-                                 settings['constraint_sql'], None, None, None, 'info', None, constraint_row['id'])
+            self.config_parser.print_log_message('DEBUG3', f"migrator_tables: insert_constraint: ({func_run_id}): Returned row: {constraint_row}")
+            self.insert_protocol({'object_type': 'constraint', 'object_name': settings['constraint_name'], 'object_action': 'create', 'object_ddl': settings['constraint_sql'], 'execution_timestamp': None, 'execution_success': None, 'execution_error_message': None, 'row_type': 'info', 'execution_results': None, 'object_protocol_id': constraint_row['id']})
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"insert_constraint ({func_run_id}): Error inserting constraint info {settings['constraint_name']} into {table_name}.")
-            self.config_parser.print_log_message('ERROR', f"insert_constraint ({func_run_id}): Query: {query}")
-            self.config_parser.print_log_message('ERROR', f"insert_constraint ({func_run_id}): Exception: {e}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_constraint: ({func_run_id}): Error inserting constraint info {settings['constraint_name']} into {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_constraint: ({func_run_id}): Query: {query}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_constraint: ({func_run_id}): Exception: {e}")
             raise
 
-    def update_constraint_status(self, row_id, success, message):
+    def update_constraint_status(self, settings):
+        row_id = settings.get('row_id')
+        success = settings.get('success')
+        message = settings.get('message')
         func_run_id = uuid.uuid4()
         table_name = self.config_parser.get_protocol_name_constraints()
         query = f"""
@@ -2109,27 +2296,27 @@ class MigratorTables:
 
             if row:
                 constraint_row = self.decode_constraint_row(row)
-                self.config_parser.print_log_message('DEBUG3', f"update_constraint_status ({func_run_id}): Returned row: {constraint_row}")
-                self.update_protocol('constraint', constraint_row['id'], success, message, None)
+                self.config_parser.print_log_message('DEBUG3', f"migrator_tables: update_constraint_status: ({func_run_id}): Returned row: {constraint_row}")
+                self.update_protocol({'object_type': 'constraint', 'object_protocol_id': constraint_row['id'], 'execution_success': success, 'execution_error_message': message, 'execution_results': None})
             else:
-                self.config_parser.print_log_message('ERROR', f"update_constraint_status ({func_run_id}): Error updating status for constraint {row_id} in {table_name}.")
-                self.config_parser.print_log_message('ERROR', f"update_constraint_status ({func_run_id}): Error: No protocol row returned.")
+                self.config_parser.print_log_message('ERROR', f"migrator_tables: update_constraint_status: ({func_run_id}): Error updating status for constraint {row_id} in {table_name}.")
+                self.config_parser.print_log_message('ERROR', f"migrator_tables: update_constraint_status: ({func_run_id}): Error: No protocol row returned.")
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"update_constraint_status ({func_run_id}): Error updating status for constraint {row_id} in {table_name}.")
-            self.config_parser.print_log_message('ERROR', f"update_constraint_status ({func_run_id}): Query: {query}")
-            self.config_parser.print_log_message('ERROR', f"update_constraint_status ({func_run_id}): Exception: {e}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_constraint_status: ({func_run_id}): Error updating status for constraint {row_id} in {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_constraint_status: ({func_run_id}): Query: {query}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_constraint_status: ({func_run_id}): Exception: {e}")
             raise
 
-    def insert_funcprocs(self, source_schema, source_funcproc_name, source_funcproc_id, source_funcproc_sql, target_schema, target_funcproc_name, target_funcproc_sql, funcproc_comment):
+    def insert_funcprocs(self, settings):
         func_run_id = uuid.uuid4()
         table_name = self.config_parser.get_protocol_name_funcprocs()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
-            (source_schema, source_funcproc_name, source_funcproc_id, source_funcproc_sql, target_schema, target_funcproc_name, target_funcproc_sql, funcproc_comment)
+            (source_schema_name, source_funcproc_name, source_funcproc_id, source_funcproc_sql, target_schema_name, target_funcproc_name, target_funcproc_sql, funcproc_comment)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (source_schema, source_funcproc_name, source_funcproc_id, source_funcproc_sql, target_schema, target_funcproc_name, target_funcproc_sql, funcproc_comment)
+        params = (settings.get('source_schema_name'), settings.get('source_funcproc_name'), settings.get('source_funcproc_id'), settings.get('source_funcproc_sql'), settings.get('target_schema_name'), settings.get('target_funcproc_name'), settings.get('target_funcproc_sql'), settings.get('funcproc_comment'))
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -2137,15 +2324,18 @@ class MigratorTables:
             cursor.close()
 
             funcproc_row = self.decode_funcproc_row(row)
-            self.config_parser.print_log_message('DEBUG3', f"insert_funcprocs ({func_run_id}): Returned row: {funcproc_row}")
-            self.insert_protocol('funcproc', source_funcproc_name, 'create', target_funcproc_sql, None, None, None, 'info', None, funcproc_row['id'])
+            self.config_parser.print_log_message('DEBUG3', f"migrator_tables: insert_funcprocs: ({func_run_id}): Returned row: {funcproc_row}")
+            self.insert_protocol({'object_type': 'funcproc', 'object_name': settings.get('source_funcproc_name'), 'object_action': 'create', 'object_ddl': settings.get('target_funcproc_sql'), 'execution_timestamp': None, 'execution_success': None, 'execution_error_message': None, 'row_type': 'info', 'execution_results': None, 'object_protocol_id': funcproc_row['id']})
             return funcproc_row['id']
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"insert_funcprocs ({func_run_id}): Error inserting funcproc info {source_funcproc_name} into {table_name}.")
-            self.config_parser.print_log_message('ERROR', f"insert_funcprocs ({func_run_id}): Exception: {e}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_funcprocs: ({func_run_id}): Error inserting funcproc info {settings.get('source_funcproc_name')} into {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_funcprocs: ({func_run_id}): Exception: {e}")
             raise
 
-    def update_funcproc_status(self, source_funcproc_id, success, message):
+    def update_funcproc_status(self, settings):
+        source_funcproc_id = settings.get('source_funcproc_id')
+        success = settings.get('success')
+        message = settings.get('message')
         func_run_id = uuid.uuid4()
         table_name = self.config_parser.get_protocol_name_funcprocs()
         query = f"""
@@ -2165,27 +2355,27 @@ class MigratorTables:
 
             if row:
                 funcproc_row = self.decode_funcproc_row(row)
-                self.config_parser.print_log_message('DEBUG3', f"update_funcproc_status ({func_run_id}): Returned row: {funcproc_row}")
-                self.update_protocol('funcproc', funcproc_row['id'], success, message, None)
+                self.config_parser.print_log_message('DEBUG3', f"migrator_tables: update_funcproc_status: ({func_run_id}): Returned row: {funcproc_row}")
+                self.update_protocol({'object_type': 'funcproc', 'object_protocol_id': funcproc_row['id'], 'execution_success': success, 'execution_error_message': message, 'execution_results': None})
             else:
-                self.config_parser.print_log_message('ERROR', f"update_funcproc_status ({func_run_id}): Error updating status for funcproc {source_funcproc_id} in {table_name}.")
-                self.config_parser.print_log_message('ERROR', f"update_funcproc_status ({func_run_id}): Error: No protocol row returned.")
+                self.config_parser.print_log_message('ERROR', f"migrator_tables: update_funcproc_status: ({func_run_id}): Error updating status for funcproc {source_funcproc_id} in {table_name}.")
+                self.config_parser.print_log_message('ERROR', f"migrator_tables: update_funcproc_status: ({func_run_id}): Error: No protocol row returned.")
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"update_funcproc_status ({func_run_id}): Error updating status for funcproc {source_funcproc_id} in {table_name}.")
-            self.config_parser.print_log_message('ERROR', f"update_funcproc_status ({func_run_id}): Query: {query}")
-            self.config_parser.print_log_message('ERROR', f"update_funcproc_status ({func_run_id}): Exception: {e}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_funcproc_status: ({func_run_id}): Error updating status for funcproc {source_funcproc_id} in {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_funcproc_status: ({func_run_id}): Query: {query}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_funcproc_status: ({func_run_id}): Exception: {e}")
             raise
 
-    def insert_sequence(self, sequence_id, schema_name, table_name, column_name, sequence_name, set_sequence_sql):
+    def insert_sequence(self, settings):
         func_run_id = uuid.uuid4()
         protocol_table_name = self.config_parser.get_protocol_name_sequences()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{protocol_table_name}"
-            (sequence_id, schema_name, table_name, column_name, sequence_name, set_sequence_sql)
-            VALUES (%s, %s, %s, %s, %s, %s)
+            (sequence_id, source_schema_name, source_table_name, source_column_name, source_sequence_name, source_sequence_sql, source_sequence_comment, target_schema_name, target_table_name, target_column_name, target_sequence_name, target_sequence_sql, target_sequence_comment)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (sequence_id, schema_name, table_name, column_name, sequence_name, set_sequence_sql)
+        params = (settings.get('sequence_id'), settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_column_name'), settings.get('source_sequence_name'), settings.get('source_sequence_sql'), settings.get('source_sequence_comment'), settings.get('target_schema_name'), settings.get('target_table_name'), settings.get('target_column_name'), settings.get('target_sequence_name'), settings.get('target_sequence_sql'), settings.get('target_sequence_comment'))
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -2193,15 +2383,18 @@ class MigratorTables:
             cursor.close()
 
             sequence_row = self.decode_sequence_row(row)
-            self.config_parser.print_log_message('DEBUG3', f"insert_sequence ({func_run_id}): Returned row: {sequence_row}")
-            self.insert_protocol('sequence', sequence_name, 'create', set_sequence_sql, None, None, None, 'info', None, sequence_row['sequence_id'])
+            self.config_parser.print_log_message('DEBUG3', f"migrator_tables: insert_sequence: ({func_run_id}): Returned row: {sequence_row}")
+            self.insert_protocol({'object_type': 'sequence', 'object_name': settings.get('source_sequence_name'), 'object_action': 'create', 'object_ddl': settings.get('source_sequence_sql'), 'execution_timestamp': None, 'execution_success': None, 'execution_error_message': None, 'row_type': 'info', 'execution_results': None, 'object_protocol_id': sequence_row['sequence_id']})
             return sequence_row['sequence_id']
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"insert_sequence ({func_run_id}): Error inserting sequence info {sequence_name} into {protocol_table_name}.")
-            self.config_parser.print_log_message('ERROR', f"insert_sequence ({func_run_id}): Exception: {e}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_sequence: ({func_run_id}): Error inserting sequence info {settings.get('source_sequence_name')} into {protocol_table_name}.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_sequence: ({func_run_id}): Exception: {e}")
             raise
 
-    def update_sequence_status(self, sequence_id, success, message):
+    def update_sequence_status(self, settings):
+        sequence_id = settings.get('sequence_id')
+        success = settings.get('success')
+        message = settings.get('message')
         func_run_id = uuid.uuid4()
         table_name = self.config_parser.get_protocol_name_sequences()
         query = f"""
@@ -2221,27 +2414,27 @@ class MigratorTables:
 
             if row:
                 sequence_row = self.decode_sequence_row(row)
-                self.config_parser.print_log_message('DEBUG3', f"update_sequence_status ({func_run_id}): Returned row: {sequence_row}")
-                self.update_protocol('sequence', sequence_row['sequence_id'], success, message, None)
+                self.config_parser.print_log_message('DEBUG3', f"migrator_tables: update_sequence_status: ({func_run_id}): Returned row: {sequence_row}")
+                self.update_protocol({'object_type': 'sequence', 'object_protocol_id': sequence_row['sequence_id'], 'execution_success': success, 'execution_error_message': message, 'execution_results': None})
             else:
-                self.config_parser.print_log_message('ERROR', f"update_sequence_status ({func_run_id}): Error updating status for sequence {sequence_id} in {table_name}.")
-                self.config_parser.print_log_message('ERROR', f"update_sequence_status ({func_run_id}): Error: No protocol row returned.")
+                self.config_parser.print_log_message('ERROR', f"migrator_tables: update_sequence_status: ({func_run_id}): Error updating status for sequence {sequence_id} in {table_name}.")
+                self.config_parser.print_log_message('ERROR', f"migrator_tables: update_sequence_status: ({func_run_id}): Error: No protocol row returned.")
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"update_sequence_status ({func_run_id}): Error updating status for sequence {sequence_id} in {table_name}.")
-            self.config_parser.print_log_message('ERROR', f"update_sequence_status ({func_run_id}): Query: {query}")
-            self.config_parser.print_log_message('ERROR', f"update_sequence_status ({func_run_id}): Exception: {e}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_sequence_status: ({func_run_id}): Error updating status for sequence {sequence_id} in {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_sequence_status: ({func_run_id}): Query: {query}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_sequence_status: ({func_run_id}): Exception: {e}")
             raise
 
-    def insert_trigger(self, source_schema, source_table, source_table_id, target_schema, target_table, trigger_id, trigger_name, trigger_event, trigger_new, trigger_old, trigger_source_sql, trigger_target_sql, trigger_comment):
+    def insert_trigger(self, settings):
         func_run_id = uuid.uuid4()
         table_name = self.config_parser.get_protocol_name_triggers()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
-            (source_schema, source_table, source_table_id, target_schema, target_table, trigger_id, trigger_name, trigger_event, trigger_new, trigger_old, trigger_source_sql, trigger_target_sql, trigger_comment)
+            (source_schema_name, source_table_name, source_table_id, target_schema_name, target_table_name, trigger_id, trigger_name, trigger_event, trigger_new, trigger_old, trigger_source_sql, trigger_target_sql, trigger_comment)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (source_schema, source_table, source_table_id, target_schema, target_table, trigger_id, trigger_name, trigger_event, trigger_new, trigger_old, trigger_source_sql, trigger_target_sql, trigger_comment)
+        params = (settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_table_id'), settings.get('target_schema_name'), settings.get('target_table_name'), settings.get('trigger_id'), settings.get('trigger_name'), settings.get('trigger_event'), settings.get('trigger_new'), settings.get('trigger_old'), settings.get('trigger_source_sql'), settings.get('trigger_target_sql'), settings.get('trigger_comment'))
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -2249,15 +2442,18 @@ class MigratorTables:
             cursor.close()
 
             trigger_row = self.decode_trigger_row(row)
-            self.config_parser.print_log_message('DEBUG3', f"insert_trigger ({func_run_id}): Returned row: {trigger_row}")
-            self.insert_protocol('trigger', trigger_name, 'create', trigger_target_sql, None, None, None, 'info', None, trigger_row['id'])
+            self.config_parser.print_log_message('DEBUG3', f"migrator_tables: insert_trigger: ({func_run_id}): Returned row: {trigger_row}")
+            self.insert_protocol({'object_type': 'trigger', 'object_name': settings.get('trigger_name'), 'object_action': 'create', 'object_ddl': settings.get('trigger_target_sql'), 'execution_timestamp': None, 'execution_success': None, 'execution_error_message': None, 'row_type': 'info', 'execution_results': None, 'object_protocol_id': trigger_row['id']})
             return trigger_row['id']
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"insert_trigger ({func_run_id}): Error inserting trigger info {trigger_name} into {table_name}.")
-            self.config_parser.print_log_message('ERROR', f"insert_trigger ({func_run_id}): Exception: {e}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_trigger: ({func_run_id}): Error inserting trigger info {settings.get('trigger_name')} into {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_trigger: ({func_run_id}): Exception: {e}")
             raise
 
-    def update_trigger_status(self, row_id, success, message):
+    def update_trigger_status(self, settings):
+        row_id = settings.get('row_id')
+        success = settings.get('success')
+        message = settings.get('message')
         func_run_id = uuid.uuid4()
         table_name = self.config_parser.get_protocol_name_triggers()
         query = f"""
@@ -2277,15 +2473,15 @@ class MigratorTables:
 
             if row:
                 trigger_row = self.decode_trigger_row(row)
-                self.config_parser.print_log_message('DEBUG3', f"update_trigger_status ({func_run_id}): Returned row: {trigger_row}")
-                self.update_protocol('trigger', trigger_row['id'], success, message, None)
+                self.config_parser.print_log_message('DEBUG3', f"migrator_tables: update_trigger_status: ({func_run_id}): Returned row: {trigger_row}")
+                self.update_protocol({'object_type': 'trigger', 'object_protocol_id': trigger_row['id'], 'execution_success': success, 'execution_error_message': message, 'execution_results': None})
             else:
-                self.config_parser.print_log_message('ERROR', f"update_trigger_status ({func_run_id}): Error updating status for trigger {row_id} in {table_name}.")
-                self.config_parser.print_log_message('ERROR', f"update_trigger_status ({func_run_id}): Error: No protocol row returned.")
+                self.config_parser.print_log_message('ERROR', f"migrator_tables: update_trigger_status: ({func_run_id}): Error updating status for trigger {row_id} in {table_name}.")
+                self.config_parser.print_log_message('ERROR', f"migrator_tables: update_trigger_status: ({func_run_id}): Error: No protocol row returned.")
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"update_trigger_status ({func_run_id}): Error updating status for trigger {row_id} in {table_name}.")
-            self.config_parser.print_log_message('ERROR', f"update_trigger_status ({func_run_id}): Query: {query}")
-            self.config_parser.print_log_message('ERROR', f"update_trigger_status ({func_run_id}): Exception: {e}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_trigger_status: ({func_run_id}): Error updating status for trigger {row_id} in {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_trigger_status: ({func_run_id}): Query: {query}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_trigger_status: ({func_run_id}): Exception: {e}")
             raise
 
     def fetch_all_triggers(self):
@@ -2300,20 +2496,20 @@ class MigratorTables:
             cursor.close()
             return rows
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error selecting triggers.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: fetch_all_triggers: Error selecting triggers.")
             self.config_parser.print_log_message('ERROR', e)
             return None
 
-    def insert_view(self, source_schema, source_view_name, source_view_id, source_view_sql, target_schema, target_view_name, target_view_sql, view_comment):
+    def insert_view(self, settings):
         func_run_id = uuid.uuid4()
         table_name = self.config_parser.get_protocol_name_views()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
-            (source_schema, source_view_name, source_view_id, source_view_sql, target_schema, target_view_name, target_view_sql, view_comment)
+            (source_schema_name, source_view_name, source_view_id, source_view_sql, target_schema_name, target_view_name, target_view_sql, view_comment)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (source_schema, source_view_name, source_view_id, source_view_sql, target_schema, target_view_name, target_view_sql, view_comment)
+        params = (settings.get('source_schema_name'), settings.get('source_view_name'), settings.get('source_view_id'), settings.get('source_view_sql'), settings.get('target_schema_name'), settings.get('target_view_name'), settings.get('target_view_sql'), settings.get('view_comment'))
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -2321,12 +2517,12 @@ class MigratorTables:
             cursor.close()
 
             view_row = self.decode_view_row(row)
-            self.config_parser.print_log_message('DEBUG3', f"insert_view ({func_run_id}): Returned row: {view_row}")
-            self.insert_protocol('view', source_view_name, 'create', target_view_sql, None, None, None, 'info', None, view_row['id'])
+            self.config_parser.print_log_message('DEBUG3', f"migrator_tables: insert_view: ({func_run_id}): Returned row: {view_row}")
+            self.insert_protocol({'object_type': 'view', 'object_name': settings.get('source_view_name'), 'object_action': 'create', 'object_ddl': settings.get('target_view_sql'), 'execution_timestamp': None, 'execution_success': None, 'execution_error_message': None, 'row_type': 'info', 'execution_results': None, 'object_protocol_id': view_row['id']})
             return view_row['id']
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"insert_view ({func_run_id}): Error inserting view info {source_view_name} into {table_name}.")
-            self.config_parser.print_log_message('ERROR', f"insert_view ({func_run_id}): Exception: {e}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_view: ({func_run_id}): Error inserting view info {settings.get('source_view_name')} into {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_view: ({func_run_id}): Exception: {e}")
             raise
 
     def fetch_all_views(self):
@@ -2339,11 +2535,14 @@ class MigratorTables:
             cursor.close()
             return rows
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"fetch_all_views: Error selecting views.")
-            self.config_parser.print_log_message('ERROR', f"fetch_all_views: Exception: {e}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: fetch_all_views: Error selecting views.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: fetch_all_views: Exception: {e}")
             return None
 
-    def update_view_status(self, row_id, success, message):
+    def update_view_status(self, settings):
+        row_id = settings.get('row_id')
+        success = settings.get('success')
+        message = settings.get('message')
         func_run_id = uuid.uuid4()
         table_name = self.config_parser.get_protocol_name_views()
         query = f"""
@@ -2363,25 +2562,27 @@ class MigratorTables:
 
             if row:
                 view_row = self.decode_view_row(row)
-                self.config_parser.print_log_message('DEBUG3', f"update_view_status ({func_run_id}): Returned row: {view_row}")
-                self.update_protocol('view', view_row['id'], success, message, None)
+                self.config_parser.print_log_message('DEBUG3', f"migrator_tables: update_view_status: ({func_run_id}): Returned row: {view_row}")
+                self.update_protocol({'object_type': 'view', 'object_protocol_id': view_row['id'], 'execution_success': success, 'execution_error_message': message, 'execution_results': None})
 
             else:
-                self.config_parser.print_log_message('ERROR', f"update_view_status ({func_run_id}): Error updating status for view {row_id} in {table_name}.")
-                self.config_parser.print_log_message('ERROR', f"update_view_status ({func_run_id}): Error: No protocol row returned.")
+                self.config_parser.print_log_message('ERROR', f"migrator_tables: update_view_status: ({func_run_id}): Error updating status for view {row_id} in {table_name}.")
+                self.config_parser.print_log_message('ERROR', f"migrator_tables: update_view_status: ({func_run_id}): Error: No protocol row returned.")
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"update_view_status ({func_run_id}): Error updating status for view {row_id} in {table_name}.")
-            self.config_parser.print_log_message('ERROR', f"update_view_status ({func_run_id}): Query: {query}")
-            self.config_parser.print_log_message('ERROR', f"update_view_status ({func_run_id}): Exception: {e}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_view_status: ({func_run_id}): Error updating status for view {row_id} in {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_view_status: ({func_run_id}): Query: {query}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_view_status: ({func_run_id}): Exception: {e}")
             raise
 
-    def select_primary_key(self, source_schema, source_table):
+    def select_primary_key(self, settings):
+        source_schema_name = settings.get('source_schema_name')
+        source_table_name = settings.get('source_table_name')
         query = f"""
             SELECT
                 i.index_columns
             FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_indexes()}" i
-            WHERE i.source_schema = '{source_schema}' AND
-                i.source_table = '{source_table}' AND
+            WHERE i.source_schema_name = '{source_schema_name}' AND
+                i.source_table_name = '{source_table_name}' AND
                 i.index_type in ('PRIMARY KEY', 'UNIQUE')
             ORDER BY CASE WHEN i.index_type = 'PRIMARY KEY' THEN 1 ELSE 2 END
             LIMIT 1
@@ -2396,17 +2597,19 @@ class MigratorTables:
             else:
                 return None
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error selecting primary key for {source_schema}.{source_table}.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: select_primary_key: Error selecting primary key for {source_schema_name}.{source_table_name}.")
             self.config_parser.print_log_message('ERROR', e)
             return None
 
-    def select_primary_key_all_columns(self, source_schema, source_table):
+    def select_primary_key_all_columns(self, settings):
+        source_schema_name = settings.get('source_schema_name')
+        source_table_name = settings.get('source_table_name')
         query = f"""
             SELECT
                 *
             FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_indexes()}" i
-            WHERE i.source_schema = '{source_schema}' AND
-                i.source_table = '{source_table}' AND
+            WHERE i.source_schema_name = '{source_schema_name}' AND
+                i.source_table_name = '{source_table_name}' AND
                 i.index_type = 'PRIMARY KEY'
             LIMIT 1
         """
@@ -2420,21 +2623,29 @@ class MigratorTables:
             else:
                 return None
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error selecting primary key SQL for {source_schema}.{source_table}.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: select_primary_key_all_columns: Error selecting primary key SQL for {source_schema_name}.{source_table_name}.")
             self.config_parser.print_log_message('ERROR', e)
             return None
 
-    def print_summary(self, objects, migrator_table_name, additional_columns=None):
+    def print_summary(self, settings):
+        objects = settings.get('objects')
+        migrator_table_name = settings.get('migrator_table_name')
+        additional_columns = settings.get('additional_columns')
         try:
-            self.config_parser.print_log_message('INFO', f"{objects} summary:")
+            self.config_parser.print_log_message('INFO', f"migrator_tables: print_summary: {objects} summary:")
             query = f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{migrator_table_name}" """
             cursor = self.protocol_connection.connection.cursor()
-            cursor.execute(query)
+            try:
+                cursor.execute(query)
+            except psycopg2.errors.UndefinedTable:
+                self.protocol_connection.connection.rollback()
+                self.config_parser.print_log_message('INFO', f"migrator_tables: print_summary: Table {migrator_table_name} does not exist, skipping.")
+                return
             summary = cursor.fetchone()[0]
             if objects.lower() not in ['sequences']:
-                self.config_parser.print_log_message('INFO', f"    Found in source: {summary}")
+                self.config_parser.print_log_message('INFO', f"migrator_tables: print_summary: Found in source: {summary}")
             else:
-                self.config_parser.print_log_message('INFO', f"    Found: {summary}")
+                self.config_parser.print_log_message('INFO', f"migrator_tables: print_summary: Found: {summary}")
             if additional_columns:
                 columns_count = len(additional_columns.split(','))
                 columns_numbers = ', '.join(str(i + 2) for i in range(columns_count))
@@ -2442,7 +2653,7 @@ class MigratorTables:
                 cursor.execute(query)
                 rows = cursor.fetchall()
                 for row in rows:
-                    self.config_parser.print_log_message('INFO', f"        {row[1:]}: {row[0]}")
+                    self.config_parser.print_log_message('INFO', f"migrator_tables: print_summary: {row[1:]}: {row[0]}")
 
             if not self.config_parser.is_dry_run():
                 query = f"""SELECT success, COUNT(*) FROM "{self.protocol_schema}"."{migrator_table_name}" GROUP BY 1 ORDER BY 1"""
@@ -2455,19 +2666,19 @@ class MigratorTables:
                 for row in rows:
                     status = success_description if row[0] else "error" if row[0] is False else "unknown status"
                     row_success = row[0] if row[0] is not None else 'NULL'
-                    self.config_parser.print_log_message('INFO', f"    {status}: {row[1]}")
+                    self.config_parser.print_log_message('INFO', f"migrator_tables: print_summary: {status}: {row[1]}")
                     if additional_columns:
                         query = f"""SELECT COUNT(*), {additional_columns} FROM "{self.protocol_schema}"."{migrator_table_name}" WHERE success = {row_success} GROUP BY {columns_numbers} ORDER BY {columns_numbers}"""
                         cursor.execute(query)
                         rows = cursor.fetchall()
                         for row in rows:
                             # status = success_description if row[0] else "error" if row[0] is False else "unknown status"
-                            self.config_parser.print_log_message('INFO', f"        {row[1:]}: {row[0]}")
+                            self.config_parser.print_log_message('INFO', f"migrator_tables: print_summary: {row[1:]}: {row[0]}")
 
             cursor.close()
 
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error printing migration summary.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: print_summary: Error printing migration summary.")
             self.config_parser.print_log_message('ERROR', e)
             raise
 
@@ -2491,14 +2702,14 @@ class MigratorTables:
                 completed_str = str(task_data['task_completed'])[:19] if task_data['task_completed'] else ''
                 length_str = str(length)[:19] if length != "none" else ''
                 status = f"{intendation}{(task_data['task_name']+': '+task_data['subtask_name'])[:50]:<50} | {started_str:<19} -> {completed_str:<19} | length: {length_str}"
-                self.config_parser.print_log_message('INFO', f"{status}")
+                self.config_parser.print_log_message('INFO', f"migrator_tables: print_main: {status}")
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error printing migration summary.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: print_main: Error printing migration summary.")
             self.config_parser.print_log_message('ERROR', e)
             raise
 
     def print_data_migration_summary(self):
-        self.config_parser.print_log_message('INFO', "Table rows migration stats:")
+        self.config_parser.print_log_message('INFO', "migrator_tables: print_data_migration_summary: Table rows migration stats:")
         table_name = self.config_parser.get_protocol_name_data_migration()
         data_migration_table_name = self.config_parser.get_protocol_name_data_migration()
         batches_stats_table_name = self.config_parser.get_protocol_name_batches_stats()
@@ -2510,35 +2721,35 @@ class MigratorTables:
             min_time = row[0]
             max_time = row[1]
             length = max_time - min_time
-            self.config_parser.print_log_message('INFO', f"    start: {str(min_time)[:19]} | end: {str(max_time)[:19]} | length: {str(length)[:19]}")
+            self.config_parser.print_log_message('INFO', f"migrator_tables: print_data_migration_summary: start: {str(min_time)[:19]} | end: {str(max_time)[:19]} | length: {str(length)[:19]}")
         else:
-            self.config_parser.print_log_message('INFO', "    No data migration tasks completed.")
+            self.config_parser.print_log_message('INFO', "migrator_tables: print_data_migration_summary: No data migration tasks completed.")
 
         query = f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{table_name}" """
         cursor.execute(query)
         summary = cursor.fetchone()[0]
-        self.config_parser.print_log_message('INFO', f"    Tables in total: {summary}")
+        self.config_parser.print_log_message('INFO', f"migrator_tables: print_data_migration_summary: Tables in total: {summary}")
 
         if not self.config_parser.is_dry_run():
             query = f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{table_name}" WHERE source_table_rows = 0 OR source_table_rows IS NULL"""
             cursor.execute(query)
             summary = cursor.fetchone()[0]
-            self.config_parser.print_log_message('INFO', f"    Empty tables (0 rows): {summary}")
+            self.config_parser.print_log_message('INFO', f"migrator_tables: print_data_migration_summary: Empty tables (0 rows): {summary}")
 
         if not self.config_parser.is_dry_run():
             query = f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{table_name}" WHERE source_table_rows > 0"""
             cursor.execute(query)
             summary = cursor.fetchone()[0]
-            self.config_parser.print_log_message('INFO', f"    Tables with data: {summary}")
+            self.config_parser.print_log_message('INFO', f"migrator_tables: print_data_migration_summary: Tables with data: {summary}")
 
         if not self.config_parser.is_dry_run():
             query = f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{table_name}" WHERE source_table_rows > 0 AND source_table_rows = target_table_rows"""
             cursor.execute(query)
             summary = cursor.fetchone()[0]
-            self.config_parser.print_log_message('INFO', f"    Tables with data - fully migrated: {summary}")
+            self.config_parser.print_log_message('INFO', f"migrator_tables: print_data_migration_summary: Tables with data - fully migrated: {summary}")
 
             try:
-                query = f"""SELECT target_schema, target_table, source_table_rows, target_table_rows, task_completed - task_created as migration_time,
+                query = f"""SELECT target_schema_name, target_table_name, source_table_rows, target_table_rows, task_completed - task_created as migration_time,
                 round(shortest_batch_seconds::numeric, 2) as shortest_batch_seconds,
                 round(longest_batch_seconds::numeric, 2) as longest_batch_seconds,
                 round(average_batch_seconds::numeric, 2) as average_batch_seconds,
@@ -2548,18 +2759,18 @@ class MigratorTables:
                 cursor.execute(query)
                 rows = cursor.fetchall()
                 if rows:
-                    self.config_parser.print_log_message('INFO', "        Tables with data - fully migrated (top 10):")
+                    self.config_parser.print_log_message('INFO', "migrator_tables: print_data_migration_summary: Tables with data - fully migrated (top 10):")
                     max_table_name_length = max(len(row[1]) for row in rows) if rows else 10
                     for row in rows:
-                        target_schema = row[0]
-                        target_table = row[1]
+                        target_schema_name = row[0]
+                        target_table_name = row[1]
                         source_table_rows = row[2]
                         target_table_rows = row[3]
                         migration_time = row[4]
                         formatted_source_rows = f"{source_table_rows:,}".rjust(15)
                         formatted_target_rows = f"{target_table_rows:,}".rjust(15)
 
-                        message = f"        {target_schema}.{target_table[:max_table_name_length].ljust(max_table_name_length)} |"
+                        message = f"        {target_schema_name}.{target_table_name[:max_table_name_length].ljust(max_table_name_length)} |"
                         message += f"{formatted_source_rows} = {formatted_target_rows} | length: {str(migration_time)[:19]:<19}"
                         if row[8] == 1:
                             message += " | 1 batch"
@@ -2567,42 +2778,42 @@ class MigratorTables:
                             message += f" | {row[8]:<6} batches | shortest: {row[5]:<6} | average: {row[7]:<6} | longest: {row[6]:<6}"
                         self.config_parser.print_log_message('INFO', message)
             except Exception as e:
-                self.config_parser.print_log_message('ERROR', f"Error fetching fully migrated tables.")
+                self.config_parser.print_log_message('ERROR', f"migrator_tables: print_data_migration_summary: Error fetching fully migrated tables.")
                 self.config_parser.print_log_message('ERROR', e)
 
         if not self.config_parser.is_dry_run():
             query = f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{table_name}" WHERE source_table_rows > 0 AND source_table_rows <> target_table_rows"""
             cursor.execute(query)
             summary = cursor.fetchone()[0]
-            self.config_parser.print_log_message('INFO', f"    Tables with differences in row counts: {summary}")
+            self.config_parser.print_log_message('INFO', f"migrator_tables: print_data_migration_summary: Tables with differences in row counts: {summary}")
 
             try:
-                query = f"""SELECT target_schema, target_table, source_table_rows, target_table_rows, task_completed - task_created as migration_time
+                query = f"""SELECT target_schema_name, target_table_name, source_table_rows, target_table_rows, task_completed - task_created as migration_time
                 FROM "{self.protocol_schema}"."{data_migration_table_name}" WHERE source_table_rows > 0 AND source_table_rows <> target_table_rows
                 ORDER BY source_table_rows DESC LIMIT 10"""
                 cursor.execute(query)
                 rows = cursor.fetchall()
                 if rows:
-                    self.config_parser.print_log_message('INFO', "        Tables with different row counts (top 10):")
+                    self.config_parser.print_log_message('INFO', "migrator_tables: print_data_migration_summary: Tables with different row counts (top 10):")
                     max_table_name_length = max(len(row[1]) for row in rows) if rows else 0
                     max_table_name_length += 1
                     for row in rows:
-                        target_schema = row[0]
-                        target_table = row[1]
+                        target_schema_name = row[0]
+                        target_table_name = row[1]
                         source_table_rows = row[2]
                         target_table_rows = row[3]
                         migration_time = row[4]
                         formatted_source_rows = f"{source_table_rows:,}".rjust(12)
                         formatted_target_rows = f"{target_table_rows:,}".rjust(12)
-                        self.config_parser.print_log_message('INFO', f"        {target_schema}.{target_table[:max_table_name_length].ljust(max_table_name_length)} | {formatted_source_rows} <> {formatted_target_rows} | length: {str(migration_time)[:19]:<19}")
+                        self.config_parser.print_log_message('INFO', f"migrator_tables: print_data_migration_summary: {target_schema_name}.{target_table_name[:max_table_name_length].ljust(max_table_name_length)} | {formatted_source_rows} <> {formatted_target_rows} | length: {str(migration_time)[:19]:<19}")
             except Exception as e:
-                self.config_parser.print_log_message('ERROR', f"Error fetching migrated tables with different row counts.")
+                self.config_parser.print_log_message('ERROR', f"migrator_tables: print_data_migration_summary: Error fetching migrated tables with different row counts.")
                 self.config_parser.print_log_message('ERROR', e)
 
 
         if not self.config_parser.is_dry_run():
             try:
-                query = f"""SELECT source_schema, source_table, batch_number,
+                query = f"""SELECT source_schema_name, source_table_name, batch_number,
                 round(batch_seconds::numeric, 2) as batch_seconds,
                 round(reading_seconds::numeric, 2) as reading_seconds,
                 round(transforming_seconds::numeric, 2) as transforming_seconds,
@@ -2612,10 +2823,10 @@ class MigratorTables:
                 cursor.execute(query)
                 rows = cursor.fetchall()
                 if rows:
-                    self.config_parser.print_log_message('INFO', "    Longest migration batches (top 10):")
+                    self.config_parser.print_log_message('INFO', "migrator_tables: print_data_migration_summary: Longest migration batches (top 10):")
                     for row in rows:
-                        target_schema = row[0]
-                        target_table = row[1]
+                        target_schema_name = row[0]
+                        target_table_name = row[1]
                         batch_number = row[2]
                         batch_seconds = row[3]
                         reading_seconds = row[4]
@@ -2625,36 +2836,40 @@ class MigratorTables:
                         formatted_reading_seconds = f"{reading_seconds:,}".rjust(15)
                         formatted_transforming_seconds = f"{transforming_seconds:,}".rjust(15)
                         formatted_inserting_seconds = f"{inserting_seconds:,}".rjust(15)
-                        self.config_parser.print_log_message('INFO', f"        {target_schema}.{target_table[:max_table_name_length].ljust(max_table_name_length)} | "
+                        self.config_parser.print_log_message('INFO', f"migrator_tables: print_data_migration_summary: {target_schema_name}.{target_table_name[:max_table_name_length].ljust(max_table_name_length)} | "
                                                             f"batch: {batch_number} | {formatted_batch_seconds} sec | "
                                                             f"r: {formatted_reading_seconds} | t: {formatted_transforming_seconds} | w: {formatted_inserting_seconds}")
             except Exception as e:
-                self.config_parser.print_log_message('ERROR', f"Error fetching longest migration batch.")
+                self.config_parser.print_log_message('ERROR', f"migrator_tables: print_data_migration_summary: Error fetching longest migration batch.")
                 self.config_parser.print_log_message('ERROR', e)
 
         cursor.close()
 
     def print_migration_summary(self):
-        self.config_parser.print_log_message('INFO', "Migration stats:")
-        self.config_parser.print_log_message('INFO', f"    Source database: {self.config_parser.get_source_db_name()}, schema: {self.config_parser.get_source_owner()} ({self.config_parser.get_source_db_type()})")
-        self.config_parser.print_log_message('INFO', f"    Target database: {self.config_parser.get_target_db_name()}, schema: {self.config_parser.get_target_schema()} ({self.config_parser.get_target_db_type()})")
+        self.config_parser.print_log_message('INFO', "migrator_tables: print_migration_summary: Migration stats:")
+        self.config_parser.print_log_message('INFO', f"migrator_tables: print_migration_summary: Source database: {self.config_parser.get_source_db_name()}, schema: {self.config_parser.get_source_owner()} ({self.config_parser.get_source_db_type()})")
+        self.config_parser.print_log_message('INFO', f"migrator_tables: print_migration_summary: Target database: {self.config_parser.get_target_db_name()}, schema: {self.config_parser.get_target_schema()} ({self.config_parser.get_target_db_type()})")
         self.print_main(self.config_parser.get_protocol_name_main())
-        self.config_parser.print_log_message('INFO', "Migration summary:")
+        self.config_parser.print_log_message('INFO', "migrator_tables: print_migration_summary: Migration summary:")
         if self.config_parser.is_dry_run():
-            self.config_parser.print_log_message('INFO', "! Dry run mode enabled. No migration performed !")
-        self.print_summary('User Defined Types', self.config_parser.get_protocol_name_user_defined_types())
-        self.print_summary('Tables', self.config_parser.get_protocol_name_tables())
+            self.config_parser.print_log_message('INFO', "migrator_tables: print_migration_summary: ! Dry run mode enabled. No migration performed !")
+        self.print_summary({'objects': 'User Defined Types', 'migrator_table_name': self.config_parser.get_protocol_name_user_defined_types(), 'additional_columns': None})
+        self.print_summary({'objects': 'Tables', 'migrator_table_name': self.config_parser.get_protocol_name_tables(), 'additional_columns': None})
+        self.print_summary({'objects': 'Source Table Partitioning', 'migrator_table_name': self.config_parser.get_protocol_name_source_table_partitioning(), 'additional_columns': None})
+        self.print_summary({'objects': 'Target Table Partitioning', 'migrator_table_name': self.config_parser.get_protocol_name_target_table_partitioning(), 'additional_columns': None})
+        self.print_summary({'objects': 'Columns', 'migrator_table_name': self.config_parser.get_protocol_name_columns(), 'additional_columns': None})
         self.print_data_migration_summary()
-        self.print_summary('Altered columns', self.config_parser.get_protocol_name_target_columns_alterations(), 'reason')
-        self.print_summary('Sequences', self.config_parser.get_protocol_name_sequences())
-        self.print_summary('Indexes', self.config_parser.get_protocol_name_indexes(), 'index_type, index_owner')
-        self.print_summary('Constraints', self.config_parser.get_protocol_name_constraints(), 'constraint_type')
-        self.print_summary('Domains', self.config_parser.get_protocol_name_domains(), 'migrated_as')
-        self.print_summary('Functions / procedures', self.config_parser.get_protocol_name_funcprocs())
-        self.print_summary('Triggers', self.config_parser.get_protocol_name_triggers())
-        self.print_summary('Views', self.config_parser.get_protocol_name_views())
+        self.print_summary({'objects': 'Altered columns', 'migrator_table_name': self.config_parser.get_protocol_name_target_columns_alterations(), 'additional_columns': 'reason'})
+        self.print_summary({'objects': 'Sequences', 'migrator_table_name': self.config_parser.get_protocol_name_sequences(), 'additional_columns': None})
+        self.print_summary({'objects': 'Indexes', 'migrator_table_name': self.config_parser.get_protocol_name_indexes(), 'additional_columns': 'index_type, index_owner'})
+        self.print_summary({'objects': 'Constraints', 'migrator_table_name': self.config_parser.get_protocol_name_constraints(), 'additional_columns': 'constraint_type'})
+        self.print_summary({'objects': 'Domains', 'migrator_table_name': self.config_parser.get_protocol_name_domains(), 'additional_columns': 'migrated_as'})
+        self.print_summary({'objects': 'Functions / procedures', 'migrator_table_name': self.config_parser.get_protocol_name_funcprocs(), 'additional_columns': None})
+        self.print_summary({'objects': 'Triggers', 'migrator_table_name': self.config_parser.get_protocol_name_triggers(), 'additional_columns': None})
+        self.print_summary({'objects': 'Views', 'migrator_table_name': self.config_parser.get_protocol_name_views(), 'additional_columns': None})
+        self.print_summary({'objects': 'Aliases', 'migrator_table_name': self.config_parser.get_protocol_name_aliases(), 'additional_columns': None})
         if self.config_parser.is_dry_run():
-            self.config_parser.print_log_message('INFO', "! Dry run mode enabled. No migration performed !")
+            self.config_parser.print_log_message('INFO', "migrator_tables: print_migration_summary: ! Dry run mode enabled. No migration performed !")
 
     def fetch_all_tables(self, only_unfinished=False):
         if only_unfinished:
@@ -2667,12 +2882,14 @@ class MigratorTables:
         tables = cursor.fetchall()
         return tables
 
-    def fetch_table(self, source_schema_name, source_table_name):
+    def fetch_table(self, settings):
+        source_schema_name = settings.get('source_schema_name')
+        source_table_name = settings.get('source_table_name')
         query = f"""
                 SELECT *
                 FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_tables()}"
-                WHERE source_schema = '{source_schema_name}'
-                AND source_table = '{source_table_name}'
+                WHERE source_schema_name = '{source_schema_name}'
+                AND source_table_name = '{source_table_name}'
                 """
         # self.protocol_connection.connect()
         cursor = self.protocol_connection.connection.cursor()
@@ -2683,10 +2900,12 @@ class MigratorTables:
             return None
         return self.decode_table_row(table)
 
-    def fetch_data_source(self, source_schema_name, source_table_name):
+    def fetch_data_source(self, settings):
+        source_schema_name = settings.get('source_schema_name')
+        source_table_name = settings.get('source_table_name')
         query = f"""SELECT * FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_data_sources()}"
-            WHERE source_schema = '{source_schema_name}' AND source_table = '{source_table_name}'"""
-        self.config_parser.print_log_message('DEBUG3', f"fetch_data_source: Executing query: {query}")
+            WHERE source_schema_name = '{source_schema_name}' AND source_table_name = '{source_table_name}'"""
+        self.config_parser.print_log_message('DEBUG3', f"migrator_tables: fetch_data_source: Executing query: {query}")
         # self.protocol_connection.connect()
         cursor = self.protocol_connection.connection.cursor()
         cursor.execute(query)
@@ -2700,20 +2919,23 @@ class MigratorTables:
         table_names = []
         for table in tables:
             values = self.decode_table_row(table)
-            table_names.append(values['target_table'])
+            table_names.append(values['target_table_name'])
         return table_names
 
-    def fetch_all_data_migrations(self, source_schema_name=None, source_table_name=None):
+    def fetch_all_data_migrations(self, settings=None):
+        if settings is None: settings = {}
+        source_schema_name = settings.get('source_schema_name')
+        source_table_name = settings.get('source_table_name')
         if source_schema_name and source_table_name:
-            query = f"""SELECT * FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_data_migration()}" WHERE source_schema = '{source_schema_name}' AND source_table = '{source_table_name}' ORDER BY id"""
+            query = f"""SELECT * FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_data_migration()}" WHERE source_schema_name = '{source_schema_name}' AND source_table_name = '{source_table_name}' ORDER BY id"""
         else:
             query = f"""SELECT * FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_data_migration()}" ORDER BY id"""
         # self.protocol_connection.connect()
-        self.config_parser.print_log_message('DEBUG3', f"fetch_all_data_migrations: Executing query: {query}")
+        self.config_parser.print_log_message('DEBUG3', f"migrator_tables: fetch_all_data_migrations: Executing query: {query}")
         cursor = self.protocol_connection.connection.cursor()
         cursor.execute(query)
         data_migrations = cursor.fetchall()
-        self.config_parser.print_log_message('DEBUG3', f"fetch_all_data_migrations: Fetched {len(data_migrations)} rows.")
+        self.config_parser.print_log_message('DEBUG3', f"migrator_tables: fetch_all_data_migrations: Fetched {len(data_migrations)} rows.")
         return data_migrations
 
     def fetch_all_views(self):
@@ -2748,6 +2970,692 @@ class MigratorTables:
         constraints = cursor.fetchall()
         return constraints
 
+
+    def decode_source_table_partitioning_row(self, row):
+        return {
+            'id': row[0],
+            'source_schema_name': row[1],
+            'source_table_name': row[2],
+            'source_table_id': row[3],
+            'source_table_partitioning_level': row[4],
+            'source_partition_columns': row[5],
+            'source_partition_ranges': row[6],
+            'task_created': row[7],
+            'task_started': row[8],
+            'task_completed': row[9],
+            'success': row[10],
+            'message': row[11]
+        }
+
+    def insert_source_table_partitioning(self, settings):
+        func_run_id = uuid.uuid4()
+        table_name = self.config_parser.get_protocol_name_source_table_partitioning()
+        query = f"""
+            INSERT INTO "{self.protocol_schema}"."{table_name}"
+            (source_schema_name, source_table_name, source_table_id, source_table_partitioning_level, source_partition_columns, source_partition_ranges)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            RETURNING *
+        """
+        params = (settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_table_id'), settings.get('source_table_partitioning_level'), settings.get('source_partition_columns'), settings.get('source_partition_ranges'))
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+            partitioning_row = self.decode_source_table_partitioning_row(row)
+            self.config_parser.print_log_message('DEBUG3', f"migrator_tables: insert_source_table_partitioning: ({func_run_id}): Returned row: {partitioning_row}")
+            self.insert_protocol({'object_type': 'source_table_partitioning', 'object_name': settings.get('source_table_name'), 'object_action': 'create', 'object_ddl': None, 'execution_timestamp': None, 'execution_success': None, 'execution_error_message': None, 'row_type': 'info', 'execution_results': None, 'object_protocol_id': partitioning_row['id']})
+            return partitioning_row['id']
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_source_table_partitioning: ({func_run_id}): Error inserting info for {settings.get('source_table_name')} into {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_source_table_partitioning: ({func_run_id}): Exception: {e}")
+            raise
+
+    def update_source_table_partitioning_status(self, settings):
+        row_id = settings.get('row_id')
+        success = settings.get('success')
+        message = settings.get('message')
+        func_run_id = uuid.uuid4()
+        table_name = self.config_parser.get_protocol_name_source_table_partitioning()
+        query = f"""
+            UPDATE "{self.protocol_schema}"."{table_name}"
+            SET task_completed = clock_timestamp(),
+            success = %s,
+            message = %s
+            WHERE id = %s
+            RETURNING *
+        """
+        params = ('TRUE' if success else 'FALSE', message, row_id)
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+            if row:
+                partitioning_row = self.decode_source_table_partitioning_row(row)
+                self.config_parser.print_log_message('DEBUG3', f"migrator_tables: update_source_table_partitioning_status: ({func_run_id}): Returned row: {partitioning_row}")
+                self.update_protocol({'object_type': 'source_table_partitioning', 'object_protocol_id': partitioning_row['id'], 'execution_success': success, 'execution_error_message': message, 'execution_results': None})
+            else:
+                self.config_parser.print_log_message('ERROR', f"migrator_tables: update_source_table_partitioning_status: ({func_run_id}): Error updating status for row {row_id} in {table_name}. No protocol row returned.")
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_source_table_partitioning_status: ({func_run_id}): Error updating status for row {row_id} in {table_name}. Exception: {e}")
+            raise
+
+    def decode_target_table_partitioning_row(self, row):
+        return {
+            'id': row[0],
+            'target_schema_name': row[1],
+            'target_table_name': row[2],
+            'target_table_id': row[3],
+            'target_table_partitioning_level': row[4],
+            'target_partition_columns': row[5],
+            'target_partition_ranges': row[6],
+            'task_created': row[7],
+            'task_started': row[8],
+            'task_completed': row[9],
+            'success': row[10],
+            'message': row[11]
+        }
+
+    def insert_target_table_partitioning(self, settings):
+        func_run_id = uuid.uuid4()
+        table_name = self.config_parser.get_protocol_name_target_table_partitioning()
+        query = f"""
+            INSERT INTO "{self.protocol_schema}"."{table_name}"
+            (target_schema_name, target_table_name, target_table_id, target_table_partitioning_level, target_partition_columns, target_partition_ranges)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            RETURNING *
+        """
+        params = (settings.get('target_schema_name'), settings.get('target_table_name'), settings.get('target_table_id'), settings.get('target_table_partitioning_level'), settings.get('target_partition_columns'), settings.get('target_partition_ranges'))
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+            partitioning_row = self.decode_target_table_partitioning_row(row)
+            self.config_parser.print_log_message('DEBUG3', f"migrator_tables: insert_target_table_partitioning: ({func_run_id}): Returned row: {partitioning_row}")
+            self.insert_protocol({'object_type': 'target_table_partitioning', 'object_name': settings.get('target_table_name'), 'object_action': 'create', 'object_ddl': None, 'execution_timestamp': None, 'execution_success': None, 'execution_error_message': None, 'row_type': 'info', 'execution_results': None, 'object_protocol_id': partitioning_row['id']})
+            return partitioning_row['id']
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_target_table_partitioning: ({func_run_id}): Error inserting info for {settings.get('target_table_name')} into {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_target_table_partitioning: ({func_run_id}): Exception: {e}")
+            raise
+
+    def update_target_table_partitioning_status(self, settings):
+        row_id = settings.get('row_id')
+        success = settings.get('success')
+        message = settings.get('message')
+        func_run_id = uuid.uuid4()
+        table_name = self.config_parser.get_protocol_name_target_table_partitioning()
+        query = f"""
+            UPDATE "{self.protocol_schema}"."{table_name}"
+            SET task_completed = clock_timestamp(),
+            success = %s,
+            message = %s
+            WHERE id = %s
+            RETURNING *
+        """
+        params = ('TRUE' if success else 'FALSE', message, row_id)
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+            if row:
+                partitioning_row = self.decode_target_table_partitioning_row(row)
+                self.config_parser.print_log_message('DEBUG3', f"migrator_tables: update_target_table_partitioning_status: ({func_run_id}): Returned row: {partitioning_row}")
+                self.update_protocol({'object_type': 'target_table_partitioning', 'object_protocol_id': partitioning_row['id'], 'execution_success': success, 'execution_error_message': message, 'execution_results': None})
+            else:
+                self.config_parser.print_log_message('ERROR', f"migrator_tables: update_target_table_partitioning_status: ({func_run_id}): Error updating status for row {row_id} in {table_name}. No protocol row returned.")
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_target_table_partitioning_status: ({func_run_id}): Error updating status for row {row_id} in {table_name}. Exception: {e}")
+            raise
+
+    def decode_columns_row(self, row):
+        return {
+            'id': row[0],
+            'source_schema_name': row[1],
+            'source_table_name': row[2],
+            'source_table_id': row[3],
+            'source_column_name': row[4],
+            'source_column_id': row[5],
+            'source_column_data_type': row[6],
+            'source_column_is_nullable': row[7],
+            'source_column_is_primary_key': row[8],
+            'source_column_is_identity': row[9],
+            'source_column_default_name': row[10],
+            'source_column_default_value': row[11],
+            'source_column_replaced_default_value': row[12],
+            'source_column_character_maximum_length': row[13],
+            'source_column_numeric_precision': row[14],
+            'source_column_numeric_scale': row[15],
+            'source_column_basic_data_type': row[16],
+            'source_column_basic_character_maximum_length': row[17],
+            'source_column_basic_numeric_precision': row[18],
+            'source_column_basic_numeric_scale': row[19],
+            'source_column_basic_column_type': row[20],
+            'source_column_is_generated_virtual': row[21],
+            'source_column_is_generated_stored': row[22],
+            'source_column_generation_expression': row[23],
+            'source_column_stripped_generation_expression': row[24],
+            'source_column_udt_schema': row[25],
+            'source_column_udt_name': row[26],
+            'source_column_domain_schema': row[27],
+            'source_column_domain_name': row[28],
+            'source_column_description': row[29],
+            'source_column_sql': row[30],
+            'target_schema_name': row[31],
+            'target_table_name': row[32],
+            'target_table_id': row[33],
+            'target_column_name': row[34],
+            'target_column_id': row[35],
+            'target_column_data_type': row[36],
+            'target_column_description': row[37],
+            'target_column_sql': row[38],
+            'task_created': row[39],
+            'task_started': row[40],
+            'task_completed': row[41],
+            'success': row[42],
+            'message': row[43]
+        }
+
+    def insert_columns(self, settings):
+        func_run_id = uuid.uuid4()
+        table_name = self.config_parser.get_protocol_name_columns()
+        query = f"""
+            INSERT INTO "{self.protocol_schema}"."{table_name}"
+            (source_schema_name, source_table_name, source_table_id, source_column_name, source_column_id, source_column_data_type, source_column_is_nullable, source_column_is_primary_key, source_column_is_identity, source_column_default_name, source_column_default_value, source_column_replaced_default_value, source_column_character_maximum_length, source_column_numeric_precision, source_column_numeric_scale, source_column_basic_data_type, source_column_basic_character_maximum_length, source_column_basic_numeric_precision, source_column_basic_numeric_scale, source_column_basic_column_type, source_column_is_generated_virtual, source_column_is_generated_stored, source_column_generation_expression, source_column_stripped_generation_expression, source_column_udt_schema, source_column_udt_name, source_column_domain_schema, source_column_domain_name, source_column_description, source_column_sql, target_schema_name, target_table_name, target_table_id, target_column_name, target_column_id, target_column_data_type, target_column_description, target_column_sql)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING *
+        """
+        params = (settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_table_id'), settings.get('source_column_name'), settings.get('source_column_id'), settings.get('source_column_data_type'), settings.get('source_column_is_nullable'), settings.get('source_column_is_primary_key'), settings.get('source_column_is_identity'), settings.get('source_column_default_name'), settings.get('source_column_default_value'), settings.get('source_column_replaced_default_value'), settings.get('source_column_character_maximum_length'), settings.get('source_column_numeric_precision'), settings.get('source_column_numeric_scale'), settings.get('source_column_basic_data_type'), settings.get('source_column_basic_character_maximum_length'), settings.get('source_column_basic_numeric_precision'), settings.get('source_column_basic_numeric_scale'), settings.get('source_column_basic_column_type'), settings.get('source_column_is_generated_virtual'), settings.get('source_column_is_generated_stored'), settings.get('source_column_generation_expression'), settings.get('source_column_stripped_generation_expression'), settings.get('source_column_udt_schema'), settings.get('source_column_udt_name'), settings.get('source_column_domain_schema'), settings.get('source_column_domain_name'), settings.get('source_column_description'), settings.get('source_column_sql'), settings.get('target_schema_name'), settings.get('target_table_name'), settings.get('target_table_id'), settings.get('target_column_name'), settings.get('target_column_id'), settings.get('target_column_data_type'), settings.get('target_column_description'), settings.get('target_column_sql'))
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+            columns_row = self.decode_columns_row(row)
+            self.config_parser.print_log_message('DEBUG3', f"migrator_tables: insert_columns: ({func_run_id}): Returned row: {columns_row}")
+            self.insert_protocol({'object_type': 'column', 'object_name': settings.get('source_column_name'), 'object_action': 'create', 'object_ddl': None, 'execution_timestamp': None, 'execution_success': None, 'execution_error_message': None, 'row_type': 'info', 'execution_results': None, 'object_protocol_id': columns_row['id']})
+            return columns_row['id']
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_columns: ({func_run_id}): Error inserting info for {settings.get('source_column_name')} into {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_columns: ({func_run_id}): Exception: {e}")
+            raise
+
+    def update_columns_status(self, settings):
+        row_id = settings.get('row_id')
+        success = settings.get('success')
+        message = settings.get('message')
+        func_run_id = uuid.uuid4()
+        table_name = self.config_parser.get_protocol_name_columns()
+        query = f"""
+            UPDATE "{self.protocol_schema}"."{table_name}"
+            SET task_completed = clock_timestamp(),
+            success = %s,
+            message = %s
+            WHERE id = %s
+            RETURNING *
+        """
+        params = ('TRUE' if success else 'FALSE', message, row_id)
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+            if row:
+                columns_row = self.decode_columns_row(row)
+                self.config_parser.print_log_message('DEBUG3', f"migrator_tables: update_columns_status: ({func_run_id}): Returned row: {columns_row}")
+                self.update_protocol({'object_type': 'column', 'object_protocol_id': columns_row['id'], 'execution_success': success, 'execution_error_message': message, 'execution_results': None})
+            else:
+                self.config_parser.print_log_message('ERROR', f"migrator_tables: update_columns_status: ({func_run_id}): Error updating status for row {row_id} in {table_name}. No protocol row returned.")
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_columns_status: ({func_run_id}): Error updating status for row {row_id} in {table_name}. Exception: {e}")
+            raise
+
+    def decode_aliases_row(self, row):
+        return {
+            'id': row[0],
+            'source_schema_name': row[1],
+            'source_alias_name': row[2],
+            'source_alias_id': row[3],
+            'source_alias_sql': row[4],
+            'source_referenced_schema_name': row[5],
+            'source_referenced_table_name': row[6],
+            'source_referenced_column_name': row[7],
+            'source_alias_comment': row[8],
+            'task_created': row[9],
+            'task_started': row[10],
+            'task_completed': row[11],
+            'success': row[12],
+            'message': row[13]
+        }
+
+    def insert_aliases(self, settings):
+        func_run_id = uuid.uuid4()
+        table_name = self.config_parser.get_protocol_name_aliases()
+        query = f"""
+            INSERT INTO "{self.protocol_schema}"."{table_name}"
+            (source_schema_name, source_alias_name, source_alias_id, source_alias_sql, source_referenced_schema_name, source_referenced_table_name, source_referenced_column_name, source_alias_comment)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING *
+        """
+        params = (settings.get('source_schema_name'), settings.get('source_alias_name'), settings.get('source_alias_id'), settings.get('source_alias_sql'), settings.get('source_referenced_schema_name'), settings.get('source_referenced_table_name'), settings.get('source_referenced_column_name'), settings.get('source_alias_comment'))
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+            aliases_row = self.decode_aliases_row(row)
+            self.config_parser.print_log_message('DEBUG3', f"migrator_tables: insert_aliases: ({func_run_id}): Returned row: {aliases_row}")
+            self.insert_protocol({'object_type': 'alias', 'object_name': settings.get('source_alias_name'), 'object_action': 'create', 'object_ddl': None, 'execution_timestamp': None, 'execution_success': None, 'execution_error_message': None, 'row_type': 'info', 'execution_results': None, 'object_protocol_id': aliases_row['id']})
+            return aliases_row['id']
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_aliases: ({func_run_id}): Error inserting info for {settings.get('source_alias_name')} into {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_aliases: ({func_run_id}): Exception: {e}")
+            raise
+
+    def update_aliases_status(self, settings):
+        row_id = settings.get('row_id')
+        success = settings.get('success')
+        message = settings.get('message')
+        func_run_id = uuid.uuid4()
+        table_name = self.config_parser.get_protocol_name_aliases()
+        query = f"""
+            UPDATE "{self.protocol_schema}"."{table_name}"
+            SET task_completed = clock_timestamp(),
+            success = %s,
+            message = %s
+            WHERE id = %s
+            RETURNING *
+        """
+        params = ('TRUE' if success else 'FALSE', message, row_id)
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+            if row:
+                aliases_row = self.decode_aliases_row(row)
+                self.config_parser.print_log_message('DEBUG3', f"migrator_tables: update_aliases_status: ({func_run_id}): Returned row: {aliases_row}")
+                self.update_protocol({'object_type': 'alias', 'object_protocol_id': aliases_row['id'], 'execution_success': success, 'execution_error_message': message, 'execution_results': None})
+            else:
+                self.config_parser.print_log_message('ERROR', f"migrator_tables: update_aliases_status: ({func_run_id}): Error updating status for row {row_id} in {table_name}. No protocol row returned.")
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_aliases_status: ({func_run_id}): Error updating status for row {row_id} in {table_name}. Exception: {e}")
+            raise
+
+
+    def fetch_all_source_table_partitioning(self, settings):
+        source_schema_name = settings.get('source_schema_name')
+        table_name = self.config_parser.get_protocol_name_source_table_partitioning()
+        query = f"""SELECT * FROM "{self.protocol_schema}"."{table_name}" WHERE source_schema_name = '{source_schema_name}' ORDER BY id"""
+        cursor = self.protocol_connection.connection.cursor()
+        cursor.execute(query)
+        rows = cursor.fetchall()
+        cursor.close()
+        return rows
+
+    def fetch_all_target_table_partitioning(self, settings):
+        target_schema_name = settings.get('target_schema_name')
+        table_name = self.config_parser.get_protocol_name_target_table_partitioning()
+        query = f"""SELECT * FROM "{self.protocol_schema}"."{table_name}" WHERE target_schema_name = '{target_schema_name}' ORDER BY id"""
+        cursor = self.protocol_connection.connection.cursor()
+        cursor.execute(query)
+        rows = cursor.fetchall()
+        cursor.close()
+        return rows
+
+    def fetch_all_columns(self, settings):
+        source_schema_name = settings.get('source_schema_name')
+        table_name = self.config_parser.get_protocol_name_columns()
+        query = f"""SELECT * FROM "{self.protocol_schema}"."{table_name}" WHERE source_schema_name = '{source_schema_name}' ORDER BY id"""
+        cursor = self.protocol_connection.connection.cursor()
+        cursor.execute(query)
+        rows = cursor.fetchall()
+        cursor.close()
+        return rows
+
+    def fetch_all_aliases(self, settings):
+        source_schema_name = settings.get('source_schema_name')
+        table_name = self.config_parser.get_protocol_name_aliases()
+        query = f"""SELECT * FROM "{self.protocol_schema}"."{table_name}" WHERE source_schema_name = '{source_schema_name}' ORDER BY id"""
+        # self.config_parser.print_log_message('DEBUG3', f"migrator_tables: fetch_all_aliases: ({source_schema_name}): {query}")
+        cursor = self.protocol_connection.connection.cursor()
+        cursor.execute(query)
+        rows = cursor.fetchall()
+        # self.config_parser.print_log_message('DEBUG3', f"migrator_tables: fetch_all_aliases: ({source_schema_name}): {rows}")
+        cursor.close()
+        return rows
+
+    def create_ddl_tables(self):
+        self.config_parser.print_log_message('DEBUG3', f"migrator_tables: create_ddl_tables: starting")
+        self.protocol_connection.execute_query("DROP TABLE IF EXISTS ddl_tables, ddl_columns, ddl_indexes, ddl_foreign_keys, ddl_sequences, ddl_views, ddl_aliases, ddl_triggers CASCADE")
+
+        self.protocol_connection.execute_query(f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}".ddl_tables (
+                id SERIAL PRIMARY KEY,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                source_schema_name VARCHAR,
+                source_table_name VARCHAR,
+                source_partition_columns VARCHAR,
+                source_partition_ranges VARCHAR,
+                source_table_sql TEXT,
+                source_table_comment TEXT
+            )
+        """)
+
+        self.protocol_connection.execute_query(f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}".ddl_columns (
+                id SERIAL PRIMARY KEY,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                source_schema_name VARCHAR,
+                source_table_name VARCHAR,
+                source_column_name VARCHAR,
+                source_data_type VARCHAR,
+                source_is_nullable BOOLEAN,
+                source_default_value VARCHAR,
+                source_pk_indicator BOOLEAN,
+                source_is_identity BOOLEAN,
+                source_column_sql TEXT,
+                source_column_comment TEXT
+            )
+        """)
+
+        self.protocol_connection.execute_query(f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}".ddl_indexes (
+                id SERIAL PRIMARY KEY,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                source_schema_name VARCHAR,
+                source_table_name VARCHAR,
+                source_index_name VARCHAR,
+                source_is_unique BOOLEAN,
+                source_columns_list VARCHAR,
+                source_index_sql TEXT,
+                source_index_comment TEXT
+            )
+        """)
+
+        self.protocol_connection.execute_query(f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}".ddl_foreign_keys (
+                id SERIAL PRIMARY KEY,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                source_schema_name VARCHAR,
+                source_table_name VARCHAR,
+                source_fk_name VARCHAR,
+                source_columns_list VARCHAR,
+                source_ref_schema_name VARCHAR,
+                source_ref_table_name VARCHAR,
+                source_ref_columns_list VARCHAR,
+                source_fk_sql TEXT,
+                source_fk_comment TEXT
+            )
+        """)
+
+        self.protocol_connection.execute_query(f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}".ddl_sequences (
+                id SERIAL PRIMARY KEY,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                source_schema_name VARCHAR,
+                source_seq_name VARCHAR,
+                source_ddl_text VARCHAR,
+                source_seq_comment TEXT
+            )
+        """)
+
+        self.protocol_connection.execute_query(f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}".ddl_views (
+                id SERIAL PRIMARY KEY,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                source_schema_name VARCHAR,
+                source_view_name VARCHAR,
+                source_view_sql TEXT,
+                source_view_comment TEXT
+            )
+        """)
+
+        self.protocol_connection.execute_query(f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}".ddl_aliases (
+                id SERIAL PRIMARY KEY,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                source_schema_name VARCHAR,
+                source_alias_name VARCHAR,
+                source_target_schema VARCHAR,
+                source_target_name VARCHAR,
+                source_alias_sql TEXT,
+                source_alias_comment TEXT
+            )
+        """)
+
+        self.protocol_connection.execute_query(f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}".ddl_triggers (
+                id SERIAL PRIMARY KEY,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                source_schema_name VARCHAR,
+                source_trigger_name VARCHAR,
+                source_ddl_text VARCHAR,
+                source_trigger_sql TEXT,
+                source_trigger_comment TEXT
+            )
+        """)
+
+        self.config_parser.print_log_message('DEBUG3', f"migrator_tables: create_ddl_tables: Tables created in schema {self.protocol_schema}")
+
+
+    def insert_ddl_tables(self, settings):
+        func_run_id = uuid.uuid4()
+        query = f"""
+            INSERT INTO "{self.protocol_schema}"."ddl_tables"
+            (source_schema_name, source_table_name, source_partition_columns, source_partition_ranges, source_table_sql, source_table_comment)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            RETURNING id
+        """
+        params = (settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_partition_columns'), settings.get('source_partition_ranges'), settings.get('source_table_sql'), settings.get('source_table_comment'))
+        self.config_parser.print_log_message('DEBUG3', f"migrator_tables: insert_ddl_tables: ({func_run_id}): inserting: {params}")
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row_id = cursor.fetchone()[0]
+            cursor.close()
+            return row_id
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_ddl_tables: ({func_run_id}): Exception: {e}")
+            raise
+
+    def insert_ddl_columns(self, settings):
+        func_run_id = uuid.uuid4()
+        source_schema_name = settings['source_schema_name']
+        source_table_name = settings['source_table_name']
+        source_column_name = settings['source_column_name']
+        source_data_type = settings['source_data_type']
+        source_is_nullable = settings.get('source_is_nullable', True)
+        source_default_value = settings.get('source_default_value', None)
+        source_pk_indicator = settings.get('source_pk_indicator', False)
+        source_column_sql = settings.get('source_column_sql', None)
+        source_column_comment = settings.get('source_column_comment', None)
+        source_is_identity = settings.get('source_is_identity', False)
+
+        query = f"""
+            INSERT INTO "{self.protocol_schema}"."ddl_columns"
+            (source_schema_name, source_table_name, source_column_name, source_data_type,
+            source_is_nullable, source_default_value, source_pk_indicator, source_is_identity,
+            source_column_sql, source_column_comment)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
+        """
+        params = (source_schema_name, source_table_name, source_column_name, source_data_type,
+                  source_is_nullable, source_default_value, source_pk_indicator,
+                  source_is_identity, source_column_sql, source_column_comment)
+        self.config_parser.print_log_message('DEBUG3', f"migrator_tables: insert_ddl_columns: inserting: {params}")
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+            return row[0] if row else None
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_ddl_columns: Error inserting column {settings.get('source_column_name')} into ddl_columns.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_ddl_columns: Error: {e}")
+            raise
+
+    def insert_ddl_indexes(self, settings):
+        func_run_id = uuid.uuid4()
+        query = f"""
+            INSERT INTO "{self.protocol_schema}"."ddl_indexes"
+            (source_schema_name, source_table_name, source_index_name, source_is_unique, source_columns_list, source_index_sql, source_index_comment)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
+        """
+        params = (settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_index_name'), settings.get('source_is_unique'), settings.get('source_columns_list'), settings.get('source_index_sql'), settings.get('source_index_comment'))
+        self.config_parser.print_log_message('DEBUG3', f"migrator_tables: insert_ddl_indexes: inserting: {params}")
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row_id = cursor.fetchone()[0]
+            cursor.close()
+            return row_id
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_ddl_indexes: ({func_run_id}): Exception: {e}")
+            raise
+
+    def insert_ddl_foreign_keys(self, settings):
+        func_run_id = uuid.uuid4()
+        query = f"""
+            INSERT INTO "{self.protocol_schema}"."ddl_foreign_keys"
+            (source_schema_name, source_table_name, source_fk_name, source_columns_list, source_ref_schema_name, source_ref_table_name, source_ref_columns_list, source_fk_sql, source_fk_comment)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
+        """
+        params = (settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_fk_name'), settings.get('source_columns_list'), settings.get('source_ref_schema_name'), settings.get('source_ref_table_name'), settings.get('source_ref_columns_list'), settings.get('source_fk_sql'), settings.get('source_fk_comment'))
+        self.config_parser.print_log_message('DEBUG3', f"migrator_tables: insert_ddl_foreign_keys: inserting: {params}")
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row_id = cursor.fetchone()[0]
+            cursor.close()
+            return row_id
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_ddl_foreign_keys: ({func_run_id}): Exception: {e}")
+            raise
+
+    def insert_ddl_sequences(self, settings):
+        func_run_id = uuid.uuid4()
+        query = f"""
+            INSERT INTO "{self.protocol_schema}"."ddl_sequences"
+            (source_schema_name, source_seq_name, source_ddl_text, source_seq_comment)
+            VALUES (%s, %s, %s, %s)
+            RETURNING id
+        """
+        params = (settings.get('source_schema_name'), settings.get('source_seq_name'), settings.get('source_ddl_text'), settings.get('source_seq_comment'))
+        self.config_parser.print_log_message('DEBUG3', f"migrator_tables: insert_ddl_sequences: inserting: {params}")
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row_id = cursor.fetchone()[0]
+            cursor.close()
+            return row_id
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_ddl_sequences: ({func_run_id}): Exception: {e}")
+            raise
+
+    def insert_ddl_views(self, settings):
+        func_run_id = uuid.uuid4()
+        query = f"""
+            INSERT INTO "{self.protocol_schema}"."ddl_views"
+            (source_schema_name, source_view_name, source_view_sql, source_view_comment)
+            VALUES (%s, %s, %s, %s)
+            RETURNING id
+        """
+        params = (settings.get('source_schema_name'), settings.get('source_view_name'), settings.get('source_view_sql'), settings.get('source_view_comment'))
+        self.config_parser.print_log_message('DEBUG3', f"migrator_tables: insert_ddl_views: ({func_run_id}): inserting: {params}")
+        try:
+            self.config_parser.print_log_message('DEBUG3', f"migrator_tables: insert_ddl_views: ({func_run_id}): open cursor")
+            cursor = self.protocol_connection.connection.cursor()
+            self.config_parser.print_log_message('DEBUG3', f"migrator_tables: insert_ddl_views: ({func_run_id}): execute query")
+            cursor.execute(query, params)
+            self.config_parser.print_log_message('DEBUG3', f"migrator_tables: insert_ddl_views: ({func_run_id}): fetchone")
+            row_id = cursor.fetchone()[0]
+            self.config_parser.print_log_message('DEBUG3', f"migrator_tables: insert_ddl_views: ({func_run_id}): close cursor")
+            cursor.close()
+            return row_id
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_ddl_views: ({func_run_id}): Exception: {e}\n{traceback.format_exc()}")
+            raise
+
+    def insert_ddl_aliases(self, settings):
+        func_run_id = uuid.uuid4()
+        query = f"""
+            INSERT INTO "{self.protocol_schema}"."ddl_aliases"
+            (source_schema_name, source_alias_name, source_target_schema, source_target_name, source_alias_sql, source_alias_comment)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            RETURNING id
+        """
+        params = (settings.get('source_schema_name'), settings.get('source_alias_name'), settings.get('source_target_schema'), settings.get('source_target_name'), settings.get('source_alias_sql'), settings.get('source_alias_comment'))
+        self.config_parser.print_log_message('DEBUG3', f"migrator_tables: insert_ddl_aliases: inserting: {params}")
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row_id = cursor.fetchone()[0]
+            cursor.close()
+            return row_id
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_ddl_aliases: ({func_run_id}): Exception: {e}")
+            raise
+
+    def insert_ddl_triggers(self, settings):
+        func_run_id = uuid.uuid4()
+        query = f"""
+            INSERT INTO "{self.protocol_schema}"."ddl_triggers"
+            (source_schema_name, source_trigger_name, source_ddl_text, source_trigger_sql, source_trigger_comment)
+            VALUES (%s, %s, %s, %s, %s)
+            RETURNING id
+        """
+        params = (settings.get('source_schema_name'), settings.get('source_trigger_name'), settings.get('source_ddl_text'), settings.get('source_trigger_sql'), settings.get('source_trigger_comment'))
+        self.config_parser.print_log_message('DEBUG3', f"migrator_tables: insert_ddl_triggers: inserting: {params}")
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row_id = cursor.fetchone()[0]
+            cursor.close()
+            return row_id
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_ddl_triggers: ({func_run_id}): Exception: {e}")
+            raise
+
+    def update_ddl_comment(self, settings):
+        obj_type = settings.get('object_type')
+        schema = settings.get('source_schema_name')
+        name = settings.get('source_name')
+        col_name = settings.get('source_column_name')
+        comment = settings.get('comment')
+
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            if obj_type == 'TABLE':
+                query = f"""UPDATE "{self.protocol_schema}"."ddl_tables" SET source_table_comment = %s WHERE source_schema_name = %s AND source_table_name = %s"""
+                cursor.execute(query, (comment, schema, name))
+            elif obj_type == 'COLUMN':
+                query = f"""UPDATE "{self.protocol_schema}"."ddl_columns" SET source_column_comment = %s WHERE source_schema_name = %s AND source_table_name = %s AND source_column_name = %s"""
+                cursor.execute(query, (comment, schema, name, col_name))
+            elif obj_type == 'INDEX':
+                query = f"""UPDATE "{self.protocol_schema}"."ddl_indexes" SET source_index_comment = %s WHERE source_schema_name = %s AND source_index_name = %s"""
+                cursor.execute(query, (comment, schema, name))
+            elif obj_type == 'VIEW':
+                query = f"""UPDATE "{self.protocol_schema}"."ddl_views" SET source_view_comment = %s WHERE source_schema_name = %s AND source_view_name = %s"""
+                cursor.execute(query, (comment, schema, name))
+            elif obj_type == 'ALIAS':
+                query = f"""UPDATE "{self.protocol_schema}"."ddl_aliases" SET source_alias_comment = %s WHERE source_schema_name = %s AND source_alias_name = %s"""
+                cursor.execute(query, (comment, schema, name))
+            elif obj_type == 'TRIGGER':
+                query = f"""UPDATE "{self.protocol_schema}"."ddl_triggers" SET source_trigger_comment = %s WHERE source_schema_name = %s AND source_trigger_name = %s"""
+                cursor.execute(query, (comment, schema, name))
+            elif obj_type == 'SEQUENCE':
+                query = f"""UPDATE "{self.protocol_schema}"."ddl_sequences" SET source_seq_comment = %s WHERE source_schema_name = %s AND source_seq_name = %s"""
+                cursor.execute(query, (comment, schema, name))
+            cursor.close()
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_ddl_comment: Exception: {e}")
+            raise
 
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

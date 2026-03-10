@@ -21,7 +21,7 @@ import traceback
 import time
 import datetime
 
-class IBMDB2Connector(DatabaseConnector):
+class IbmDb2LuwConnector(DatabaseConnector):
     def __init__(self, config_parser, source_or_target):
         if source_or_target != 'source':
             raise ValueError("IBM DB2 is only supported as a source database")
@@ -29,6 +29,7 @@ class IBMDB2Connector(DatabaseConnector):
         self.connection = None
         self.config_parser = config_parser
         self.source_or_target = source_or_target
+        self.connectivity = self.config_parser.get_connectivity(self.source_or_target)
         self.on_error_action = self.config_parser.get_on_error_action()
         self.logger = MigratorLogger(self.config_parser.get_log_file()).logger
 
@@ -39,7 +40,7 @@ class IBMDB2Connector(DatabaseConnector):
             if not self.connection:
                 raise Exception("Failed to connect to the database")
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Unexpected error while conneting into the database: {e}")
+            self.config_parser.print_log_message('ERROR', f"ibm_db2_luw_connector: connect: Unexpected error while connecting into the database: {e}")
             raise
 
     def disconnect(self):
@@ -55,7 +56,7 @@ class IBMDB2Connector(DatabaseConnector):
         if target_db_type == 'postgresql':
             return {}
         else:
-            self.config_parser.print_log_message('ERROR', f"Unsupported target database type: {target_db_type}")
+            self.config_parser.print_log_message('ERROR', f"ibm_db2_luw_connector: get_sql_functions_mapping: Unsupported target database type: {target_db_type}")
 
     def migrate_sequences(self, target_connector, settings):
         return True
@@ -87,7 +88,7 @@ class IBMDB2Connector(DatabaseConnector):
             self.disconnect()
             return tables
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', f"ibm_db2_luw_connector: fetch_table_names: Error executing query: {query}")
             self.config_parser.print_log_message('ERROR', e)
             raise
 
@@ -107,7 +108,8 @@ class IBMDB2Connector(DatabaseConnector):
                         "SCALE",
                         "NULLS",
                         "DEFAULT",
-                        "REMARKS"
+                        "REMARKS",
+                        IDENTITY
                     FROM SYSCAT.COLUMNS
                     WHERE TABSCHEMA = upper('{table_schema}') AND tabname = '{table_name}' ORDER BY COLNO
                 """
@@ -121,9 +123,11 @@ class IBMDB2Connector(DatabaseConnector):
                         NUMERIC_PRECISION,
                         NUMERIC_SCALE,
                         IS_NULLABLE,
-                        COLUMN_DEFAULT
+                        COLUMN_DEFAULT,
+                        '' AS REMARKS,
+                        'N' AS IDENTITY
                     FROM SYSIBM.COLUMNS
-                    WHERE TABLE_NAME = '{table_name}' AND TBCREATOR = upper('{table_schema}') ORDER BY COLNO
+                    WHERE TABLE_NAME = '{table_name}' AND TABLE_SCHEMA = upper('{table_schema}') ORDER BY ORDINAL_POSITION
                 """
             else:
                 raise ValueError(f"Unsupported system catalog: {self.config_parser.get_system_catalog()}")
@@ -142,6 +146,11 @@ class IBMDB2Connector(DatabaseConnector):
                     is_nullable = 'NO' if is_nullable == 'N' else 'YES'
                 column_default = row[7]
                 column_comment = row[8] if len(row) > 8 else ''
+                is_identity = 'YES' if (len(row) > 9 and row[9] in ('Y', 'YES')) else 'NO'
+
+                # when column is identity, code shall ignore default value if this is set
+                if is_identity == 'YES' and column_default is not None:
+                    column_default = None
 
                 column_type = data_type
                 if self.is_string_type(data_type) and character_maximum_length is not None:
@@ -161,13 +170,13 @@ class IBMDB2Connector(DatabaseConnector):
                     'is_nullable': is_nullable,
                     'column_default_value': column_default,
                     'column_comment': column_comment,
-                    'is_identity': 'NO',
+                    'is_identity': is_identity,
                 }
             cursor.close()
             self.disconnect()
             return result
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', f"ibm_db2_luw_connector: fetch_table_columns: Error executing query: {query}")
             self.config_parser.print_log_message('ERROR', e)
             raise
 
@@ -258,13 +267,13 @@ class IBMDB2Connector(DatabaseConnector):
         order_by_clause = ''
         try:
             worker_id = settings['worker_id']
-            source_schema = settings['source_schema']
-            source_table = settings['source_table']
+            source_schema_name = settings['source_schema_name']
+            source_table_name = settings['source_table_name']
             source_table_id = settings['source_table_id']
             source_columns = settings['source_columns']
-            # target_schema = self.config_parser.convert_names_case(settings['target_schema'])
-            target_schema = settings['target_schema'] ## target schema is used as it is defined in config, not converted to upper/lower case
-            target_table = self.config_parser.convert_names_case(settings['target_table'])
+            # target_schema_name = self.config_parser.convert_names_case(settings['target_schema_name'])
+            target_schema_name = settings['target_schema_name'] ## target schema is used as it is defined in config, not converted to upper/lower case
+            target_table_name = self.config_parser.convert_names_case(settings['target_table_name'])
             target_columns = settings['target_columns']
             batch_size = settings['batch_size']
             migrator_tables = settings['migrator_tables']
@@ -274,8 +283,8 @@ class IBMDB2Connector(DatabaseConnector):
             resume_after_crash = settings['resume_after_crash']
             drop_unfinished_tables = settings['drop_unfinished_tables']
 
-            source_table_rows = self.get_rows_count(source_schema, source_table, migration_limitation)
-            target_table_rows = migrate_target_connection.get_rows_count(target_schema, target_table)
+            source_table_rows = self.get_rows_count(source_schema_name, source_table_name, migration_limitation)
+            target_table_rows = migrate_target_connection.get_rows_count(target_schema_name, target_table_name)
 
             total_chunks = self.config_parser.get_total_chunks(source_table_rows, chunk_size)
             if chunk_size == -1:
@@ -289,20 +298,20 @@ class IBMDB2Connector(DatabaseConnector):
                 'target_table_rows': target_table_rows,
                 'finished': True if source_table_rows == 0 else False,
             }
-            ## source_schema, source_table, source_table_id, source_table_rows, worker_id, target_schema, target_table, target_table_rows
+            ## source_schema_name, source_table_name, source_table_id, source_table_rows, worker_id, target_schema_name, target_table_name, target_table_rows
             protocol_id = migrator_tables.insert_data_migration({
                 'worker_id': worker_id,
                 'source_table_id': source_table_id,
-                'source_schema': source_schema,
-                'source_table': source_table,
-                'target_schema': target_schema,
-                'target_table': target_table,
+                'source_schema_name': source_schema_name,
+                'source_table_name': source_table_name,
+                'target_schema_name': target_schema_name,
+                'target_table_name': target_table_name,
                 'source_table_rows': source_table_rows,
                 'target_table_rows': target_table_rows,
             })
 
             if source_table_rows == 0:
-                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {source_table} is empty - skipping data migration.")
+                self.config_parser.print_log_message('INFO', f"ibm_db2_luw_connector: migrate_table: Worker {worker_id}: Table {source_table_name} is empty - skipping data migration.")
                 migrator_tables.update_data_migration_status({
                         'row_id': protocol_id,
                         'success': True,
@@ -318,19 +327,19 @@ class IBMDB2Connector(DatabaseConnector):
 
             else:
                 part_name = 'migrate_table in batches using cursor'
-                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {source_table} has {source_table_rows} rows - starting data migration.")
+                self.config_parser.print_log_message('INFO', f"ibm_db2_luw_connector: migrate_table: Worker {worker_id}: Table {source_table_name} has {source_table_rows} rows - starting data migration.")
 
                 if source_table_rows > target_table_rows:
 
                     part_name = 'migrate_table in batches using cursor'
-                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Source table {source_table}: {source_table_rows} rows / Target table {target_table}: {target_table_rows} rows - starting data migration.")
+                    self.config_parser.print_log_message('INFO', f"ibm_db2_luw_connector: migrate_table: Worker {worker_id}: Source table {source_table_name}: {source_table_rows} rows / Target table {target_table_name}: {target_table_rows} rows - starting data migration.")
 
                     select_columns_list = []
                     orderby_columns_list = []
                     insert_columns_list = []
                     for order_num, col in source_columns.items():
                         self.config_parser.print_log_message('DEBUG2',
-                                                            f"Worker {worker_id}: Table {source_schema}.{source_table}: Processing column {col['column_name']} ({order_num}) with data type {col['data_type']}")
+                                                            f"Worker {worker_id}: Table {source_schema_name}.{source_table_name}: Processing column {col['column_name']} ({order_num}) with data type {col['data_type']}")
 
 			            # if col['data_type'].lower() == 'datetime':
 			            #     select_columns_list.append(f"TO_CHAR({col['column_name']}, '%Y-%m-%d %H:%M:%S') as {col['column_name']}")
@@ -349,7 +358,7 @@ class IBMDB2Connector(DatabaseConnector):
 
                     if resume_after_crash and not drop_unfinished_tables:
                         chunk_number = self.config_parser.get_total_chunks(target_table_rows, chunk_size)
-                        self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Resuming migration for table {source_schema}.{source_table} from chunk {chunk_number} with data chunk size {chunk_size}.")
+                        self.config_parser.print_log_message('DEBUG', f"ibm_db2_luw_connector: migrate_table: Worker {worker_id}: Resuming migration for table {source_schema_name}.{source_table_name} from chunk {chunk_number} with data chunk size {chunk_size}.")
                         chunk_offset = target_table_rows
                     else:
                         chunk_offset = (chunk_number - 1) * chunk_size
@@ -357,22 +366,22 @@ class IBMDB2Connector(DatabaseConnector):
                     chunk_start_row_number = chunk_offset + 1
                     chunk_end_row_number = chunk_offset + chunk_size
 
-                    self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Migrating table {source_schema}.{source_table}: chunk {chunk_number}, data chunk size {chunk_size}, batch size {batch_size}, chunk offset {chunk_offset}, chunk end row number {chunk_end_row_number}, source table rows {source_table_rows}")
+                    self.config_parser.print_log_message('DEBUG', f"ibm_db2_luw_connector: migrate_table: Worker {worker_id}: Migrating table {source_schema_name}.{source_table_name}: chunk {chunk_number}, data chunk size {chunk_size}, batch size {batch_size}, chunk offset {chunk_offset}, chunk end row number {chunk_end_row_number}, source table rows {source_table_rows}")
                     order_by_clause = ''
 
                     # if table is small, skipping ordering does not make sense because it will not speed up the migration
 
-                    query = f'''SELECT {select_columns} FROM {source_schema.upper()}."{source_table}"'''
+                    query = f'''SELECT {select_columns} FROM {source_schema_name.upper()}."{source_table_name}"'''
                     if migration_limitation:
                         query += f" WHERE {migration_limitation}"
-                    primary_key_columns = migrator_tables.select_primary_key(source_schema, source_table)
-                    self.config_parser.print_log_message('DEBUG2', f"Worker {worker_id}: Primary key columns for {source_schema}.{source_table}: {primary_key_columns}")
+                    primary_key_columns = migrator_tables.select_primary_key({'source_schema_name': source_schema_name, 'source_table_name': source_table_name})
+                    self.config_parser.print_log_message('DEBUG2', f"ibm_db2_luw_connector: migrate_table: Worker {worker_id}: Primary key columns for {source_schema_name}.{source_table_name}: {primary_key_columns}")
                     if primary_key_columns:
                         orderby_columns = primary_key_columns
                     order_by_clause = f""" ORDER BY {orderby_columns}"""
                     query += order_by_clause + f" LIMIT {chunk_size} OFFSET {chunk_offset}"
 
-                    self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Fetching data with cursor using query: {query}")
+                    self.config_parser.print_log_message('DEBUG', f"ibm_db2_luw_connector: migrate_table: Worker {worker_id}: Fetching data with cursor using query: {query}")
 
                     part_name = 'execute query'
                     cursor = self.connection.cursor()
@@ -393,7 +402,7 @@ class IBMDB2Connector(DatabaseConnector):
                         batch_number += 1
                         reading_end_time = time.time()
                         reading_duration = reading_end_time - reading_start_time
-                        self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Fetched {len(records)} rows (batch {batch_number}) from source table {source_table}.")
+                        self.config_parser.print_log_message('DEBUG', f"ibm_db2_luw_connector: migrate_table: Worker {worker_id}: Fetched {len(records)} rows (batch {batch_number}) from source table {source_table_name}.")
 
                         transforming_start_time = time.time()
                         records = [
@@ -410,13 +419,13 @@ class IBMDB2Connector(DatabaseConnector):
                                     record[column_name] = str(record[column_name]) if record[column_name] is not None else None
 
                         # Insert batch into target table
-                        self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Starting insert of {len(records)} rows from source table {source_table}")
+                        self.config_parser.print_log_message('DEBUG', f"ibm_db2_luw_connector: migrate_table: Worker {worker_id}: Starting insert of {len(records)} rows from source table {source_table_name}")
                         transforming_end_time = time.time()
                         transforming_duration = transforming_end_time - transforming_start_time
                         inserting_start_time = time.time()
                         inserted_rows = migrate_target_connection.insert_batch({
-                            'target_schema': target_schema,
-                            'target_table': target_table,
+                            'target_schema_name': target_schema_name,
+                            'target_table_name': target_table_name,
                             'target_columns': target_columns,
                             'data': records,
                             'worker_id': worker_id,
@@ -437,8 +446,8 @@ class IBMDB2Connector(DatabaseConnector):
                         batch_start_str = batch_start_dt.strftime('%Y-%m-%d %H:%M:%S.%f')
                         batch_end_str = batch_end_dt.strftime('%Y-%m-%d %H:%M:%S.%f')
                         migrator_tables.insert_batches_stats({
-                            'source_schema': source_schema,
-                            'source_table': source_table,
+                            'source_schema_name': source_schema_name,
+                            'source_table_name': source_table_name,
                             'source_table_id': source_table_id,
                             'chunk_number': chunk_number,
                             'batch_number': batch_number,
@@ -455,7 +464,7 @@ class IBMDB2Connector(DatabaseConnector):
                         msg = (
                             f"Worker {worker_id}: Inserted {inserted_rows} "
                             f"(total: {total_inserted_rows} from: {source_table_rows} "
-                            f"({percent_done}%)) rows into target table '{target_table}': "
+                            f"({percent_done}%)) rows into target table '{target_table_name}': "
                             f"Batch {batch_number} duration: {batch_duration:.2f} seconds "
                             f"(r: {reading_duration:.2f}, t: {transforming_duration:.2f}, w: {inserting_duration:.2f})"
                         )
@@ -464,20 +473,20 @@ class IBMDB2Connector(DatabaseConnector):
                         batch_start_time = time.time()
                         reading_start_time = batch_start_time
 
-                    target_table_rows = migrate_target_connection.get_rows_count(target_schema, target_table)
-                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Target table {target_schema}.{target_table} has {target_table_rows} rows")
+                    target_table_rows = migrate_target_connection.get_rows_count(target_schema_name, target_table_name)
+                    self.config_parser.print_log_message('INFO', f"ibm_db2_luw_connector: migrate_table: Worker {worker_id}: Target table {target_schema_name}.{target_table_name} has {target_table_rows} rows")
 
                     shortest_batch_seconds = min(batch_durations) if batch_durations else 0
                     longest_batch_seconds = max(batch_durations) if batch_durations else 0
                     average_batch_seconds = sum(batch_durations) / len(batch_durations) if batch_durations else 0
-                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Migrated {total_inserted_rows} rows from {source_table} to {target_schema}.{target_table} in {batch_number} batches: "
+                    self.config_parser.print_log_message('INFO', f"ibm_db2_luw_connector: migrate_table: Worker {worker_id}: Migrated {total_inserted_rows} rows from {source_table_name} to {target_schema_name}.{target_table_name} in {batch_number} batches: "
                                                             f"Shortest batch: {shortest_batch_seconds:.2f} seconds, "
                                                             f"Longest batch: {longest_batch_seconds:.2f} seconds, "
                                                             f"Average batch: {average_batch_seconds:.2f} seconds")
                     cursor.close()
 
                 elif source_table_rows <= target_table_rows:
-                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Source table {source_table} has {source_table_rows} rows, which is less than or equal to target table {target_table} with {target_table_rows} rows. No data migration needed.")
+                    self.config_parser.print_log_message('INFO', f"ibm_db2_luw_connector: migrate_table: Worker {worker_id}: Source table {source_table_name} has {source_table_rows} rows, which is less than or equal to target table {target_table_name} with {target_table_rows} rows. No data migration needed.")
 
                 migration_stats = {
                     'rows_migrated': total_inserted_rows,
@@ -488,9 +497,9 @@ class IBMDB2Connector(DatabaseConnector):
                     'finished': False,
                 }
 
-                self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Migration stats: {migration_stats}")
+                self.config_parser.print_log_message('DEBUG', f"ibm_db2_luw_connector: migrate_table: Worker {worker_id}: Migration stats: {migration_stats}")
                 if source_table_rows == target_table_rows or chunk_number >= total_chunks:
-                    self.config_parser.print_log_message('DEBUG3', f"Worker {worker_id}: Setting migration status to finished for table {source_table} (chunk {chunk_number}/{total_chunks})")
+                    self.config_parser.print_log_message('DEBUG3', f"ibm_db2_luw_connector: migrate_table: Worker {worker_id}: Setting migration status to finished for table {source_table_name} (chunk {chunk_number}/{total_chunks})")
                     migration_stats['finished'] = True
                     migrator_tables.update_data_migration_status({
                         'row_id': protocol_id,
@@ -506,10 +515,10 @@ class IBMDB2Connector(DatabaseConnector):
                 migrator_tables.insert_data_chunk({
                     'worker_id': worker_id,
                     'source_table_id': source_table_id,
-                    'source_schema': source_schema,
-                    'source_table': source_table,
-                    'target_schema': target_schema,
-                    'target_table': target_table,
+                    'source_schema_name': source_schema_name,
+                    'source_table_name': source_table_name,
+                    'target_schema_name': target_schema_name,
+                    'target_table_name': target_table_name,
                     'source_table_rows': source_table_rows,
                     'target_table_rows': target_table_rows,
                     'chunk_number': chunk_number,
@@ -526,8 +535,8 @@ class IBMDB2Connector(DatabaseConnector):
                 })
                 return migration_stats
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Error during {part_name} -> {e}")
-            self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Full stack trace: {traceback.format_exc()}")
+            self.config_parser.print_log_message('ERROR', f"ibm_db2_luw_connector: migrate_table: Worker {worker_id}: Error during {part_name} -> {e}")
+            self.config_parser.print_log_message('ERROR', f"ibm_db2_luw_connector: migrate_table: Worker {worker_id}: Full stack trace: {traceback.format_exc()}")
             raise e
 
     def fetch_indexes(self, settings):
@@ -571,10 +580,10 @@ class IBMDB2Connector(DatabaseConnector):
 
             cursor.close()
             self.disconnect()
-            self.config_parser.print_log_message( 'DEBUG2', f"Indexes for table {source_table_name} ({source_table_schema}): {index_columns}")
+            self.config_parser.print_log_message( 'DEBUG2', f"ibm_db2_luw_connector: fetch_indexes: Indexes for table {source_table_name} ({source_table_schema}): {index_columns}")
             return table_indexes
         except Exception as e:
-            self.config_parser.print_log_message( 'ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message( 'ERROR', f"ibm_db2_luw_connector: fetch_indexes: Error executing query: {query}")
             self.config_parser.print_log_message( 'ERROR', str(e))
             raise
 
@@ -612,7 +621,8 @@ class IBMDB2Connector(DatabaseConnector):
                         SELECT
                             PK_COLNAMES,
                             REFTABNAME,
-                            FK_COLNAMES
+                            FK_COLNAMES,
+                            REFTABSCHEMA
                         FROM SYSCAT.REFERENCES
                         WHERE TABSCHEMA = '{source_table_schema.upper()}'
                         AND TABNAME = '{source_table_name}'
@@ -626,13 +636,16 @@ class IBMDB2Connector(DatabaseConnector):
                         ref_table_name = fk_row[1]
                         fk_columns = fk_row[2].strip().lstrip('+').split('+')
                         fk_columns = ', '.join(f'"{col}"' for col in fk_columns)
+                        ref_table_schema = fk_row[3].strip() if fk_row[3] else source_table_schema
+                    else:
+                        ref_table_schema = source_table_schema
 
                     table_constraints[order_num] = {
                         'constraint_name': constraint_name,
                         'constraint_type': constraint_type,
                         'constraint_owner': source_table_schema,
                         'constraint_columns': fk_columns,
-                        'referenced_table_schema': '',
+                        'referenced_table_schema': ref_table_schema,
                         'referenced_table_name': ref_table_name,
                         'referenced_columns': pk_columns,
                         'constraint_sql': '',
@@ -644,7 +657,7 @@ class IBMDB2Connector(DatabaseConnector):
             self.disconnect()
             return table_constraints
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', f"ibm_db2_luw_connector: fetch_constraints: Error executing query: {query}")
             self.config_parser.print_log_message('ERROR', e)
             raise
 
@@ -670,8 +683,8 @@ class IBMDB2Connector(DatabaseConnector):
     def convert_funcproc_code(self, settings):
         funcproc_code = settings['funcproc_code']
         target_db_type = settings['target_db_type']
-        source_schema = settings['source_schema']
-        target_schema = settings['target_schema']
+        source_schema_name = settings['source_schema_name']
+        target_schema_name = settings['target_schema_name']
         table_list = settings['table_list']
         view_list = settings['view_list']
         converted_code = ''
@@ -686,15 +699,76 @@ class IBMDB2Connector(DatabaseConnector):
         # Placeholder for fetching sequence details
         return {}
 
-    def fetch_views_names(self, source_schema: str):
+    def get_aliases(self, settings):
+        source_schema_name = settings.get('source_schema_name')
+        aliases = {}
+        order_num = 1
+        query = ""
+        try:
+            if self.config_parser.get_system_catalog() in ('SYSCAT', 'NONE'):
+                query = f"""
+                    SELECT
+                        TABNAME,
+                        BASE_TABSCHEMA,
+                        BASE_TABNAME,
+                        TABSCHEMA,
+                        REMARKS
+                    FROM SYSCAT.TABLES
+                    WHERE TYPE = 'A' AND TABSCHEMA = upper('{source_schema_name}')
+                    ORDER BY TABNAME
+                """
+            elif self.config_parser.get_system_catalog() == 'SYSIBM':
+                query = f"""
+                    SELECT
+                        NAME,
+                        CREATOR,
+                        NAME,
+                        CREATOR,
+                        REMARKS
+                    FROM SYSIBM.SYSTABLES
+                    WHERE TYPE = 'A' AND CREATOR = upper('{source_schema_name}')
+                    ORDER BY NAME
+                """
+            else:
+                raise ValueError(f"Unsupported system catalog: {self.config_parser.get_system_catalog()}")
+
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            for row in cursor.fetchall():
+                alias_name = row[0]
+                aliased_schema_name = row[1] if row[1] else ''
+                aliased_table_name = row[2] if row[2] else ''
+                alias_owner = row[3] if row[3] else source_schema_name
+                alias_comment = row[4]
+                aliases[order_num] = {
+                    'id': order_num,
+                    'alias_schema_name': source_schema_name,
+                    'alias_name': alias_name,
+                    'aliased_schema_name': aliased_schema_name,
+                    'aliased_table_name': aliased_table_name,
+                    'alias_owner': alias_owner,
+                    'alias_sql': f"CREATE ALIAS {source_schema_name}.{alias_name} FOR {aliased_schema_name}.{aliased_table_name}",
+                    'alias_comment': alias_comment
+                }
+                order_num += 1
+            cursor.close()
+            self.disconnect()
+            return aliases
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"ibm_db2_luw_connector: get_aliases: Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
+            raise
+
+    def fetch_views_names(self, source_schema_name: str):
         # Placeholder for fetching view names
         return {}
 
     def fetch_view_code(self, settings):
         view_id = settings['view_id']
-        source_schema = settings['source_schema']
+        source_schema_name = settings['source_schema_name']
         source_view_name = settings['source_view_name']
-        target_schema = settings['target_schema']
+        target_schema_name = settings['target_schema_name']
         target_view_name = settings['target_view_name']
         # Placeholder for fetching view code
         return ""
@@ -717,7 +791,7 @@ class IBMDB2Connector(DatabaseConnector):
                 cursor.execute(query)
             cursor.close()
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', f"ibm_db2_luw_connector: execute_query: Error executing query: {query}")
             self.config_parser.print_log_message('ERROR', e)
             raise
 
@@ -729,7 +803,7 @@ class IBMDB2Connector(DatabaseConnector):
             cursor.execute(script)
             cursor.close()
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error executing script: {script_path}")
+            self.config_parser.print_log_message('ERROR', f"ibm_db2_luw_connector: execute_sql_script: Error executing script: {script_path}")
             self.config_parser.print_log_message('ERROR', e)
             raise
 
@@ -754,7 +828,7 @@ class IBMDB2Connector(DatabaseConnector):
             cursor.close()
             return count
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', f"ibm_db2_luw_connector: get_rows_count: Error executing query: {query}")
             self.config_parser.print_log_message('ERROR', e)
             raise
 
@@ -780,7 +854,7 @@ class IBMDB2Connector(DatabaseConnector):
 
     def get_table_description(self, settings) -> dict:
         # Placeholder for fetching table description
-        self.config_parser.print_log_message('DEBUG3', f"IBM DB2 connector: Getting table description for {settings['table_schema']}.{settings['table_name']}")
+        self.config_parser.print_log_message('DEBUG3', f"ibm_db2_luw_connector: get_table_description: IBM DB2 connector: Getting table description for {settings['table_schema']}.{settings['table_name']}")
         return { 'table_description': '' }
 
     def testing_select(self):
@@ -795,7 +869,7 @@ class IBMDB2Connector(DatabaseConnector):
             cursor.close()
             return version
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error fetching database version: {e}")
+            self.config_parser.print_log_message('ERROR', f"ibm_db2_luw_connector: get_database_version: Error fetching database version: {e}")
             raise
 
     def get_database_size(self):
@@ -807,7 +881,7 @@ class IBMDB2Connector(DatabaseConnector):
             cursor.close()
             return size
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error fetching database size: {e}")
+            self.config_parser.print_log_message('ERROR', f"ibm_db2_luw_connector: get_database_size: Error fetching database size: {e}")
             raise
 
     def get_top_n_tables(self, settings):
@@ -818,7 +892,7 @@ class IBMDB2Connector(DatabaseConnector):
         top_tables['by_indexes'] = {}
         top_tables['by_constraints'] = {}
 
-        source_schema = settings['source_schema']
+        source_schema_name = settings['source_schema_name']
         try:
             order_num = 1
             top_n = self.config_parser.get_top_n_tables_by_rows()
@@ -830,12 +904,12 @@ class IBMDB2Connector(DatabaseConnector):
                     STATS_ROWS_MODIFIED,
                     SUM(DATA_OBJECT_P_SIZE + INDEX_OBJECT_P_SIZE) AS TOTAL_SIZE
                     FROM SYSIBMADM.ADMINTABINFO
-                    WHERE TABSCHEMA = upper('{source_schema}')
+                    WHERE TABSCHEMA = upper('{source_schema_name}')
                     GROUP BY TABSCHEMA, TABNAME, STATS_ROWS_MODIFIED
                     ORDER BY STATS_ROWS_MODIFIED DESC
                     FETCH FIRST {top_n} ROWS ONLY
                 """
-                self.config_parser.print_log_message('DEBUG', f"Fetching top {top_n} tables by row count for schema {source_schema} with query: {query}")
+                self.config_parser.print_log_message('DEBUG', f"ibm_db2_luw_connector: get_top_n_tables: Fetching top {top_n} tables by row count for schema {source_schema_name} with query: {query}")
                 cursor = self.connection.cursor()
                 cursor.execute(query)
                 tables = cursor.fetchall()
@@ -850,20 +924,20 @@ class IBMDB2Connector(DatabaseConnector):
                         'table_size': row[3],
                     }
                     order_num += 1
-                self.config_parser.print_log_message('DEBUG2', f"Top {top_n} tables BY ROWS: {top_tables}")
+                self.config_parser.print_log_message('DEBUG2', f"ibm_db2_luw_connector: get_top_n_tables: Top {top_n} tables BY ROWS: {top_tables}")
             else:
-                self.config_parser.print_log_message('DEBUG', f"Top N tables by rows is set to 0, skipping fetching top tables by row count.")
+                self.config_parser.print_log_message('DEBUG', f"ibm_db2_luw_connector: get_top_n_tables: Top N tables by rows is set to 0, skipping fetching top tables by row count.")
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error fetching top {top_n} tables by row count: {e}")
+            self.config_parser.print_log_message('ERROR', f"ibm_db2_luw_connector: get_top_n_tables: Error fetching top {top_n} tables by row count: {e}")
 
         return top_tables
 
-    def target_table_exists(self, target_schema, target_table):
+    def target_table_exists(self, target_schema_name, target_table_name):
         exists = False
         query = f"""
             SELECT COUNT(*)
             FROM SYSCAT.TABLES
-            WHERE TABSCHEMA = upper('{target_schema}') AND TABNAME = '{target_table}'
+            WHERE TABSCHEMA = upper('{target_schema_name}') AND TABNAME = '{target_table_name}'
         """
         try:
             self.connect()
@@ -874,7 +948,7 @@ class IBMDB2Connector(DatabaseConnector):
             self.disconnect()
             return exists
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error checking if target table exists: {query}")
+            self.config_parser.print_log_message('ERROR', f"ibm_db2_luw_connector: target_table_exists: Error checking if target table exists: {query}")
             self.config_parser.print_log_message('ERROR', e)
             raise
 
@@ -888,6 +962,10 @@ class IBMDB2Connector(DatabaseConnector):
         rows = cursor.fetchall()
         cursor.close()
         return rows
+
+    def convert_default_value(self, settings) -> dict:
+        extracted_default_value = settings['extracted_default_value']
+        return extracted_default_value
 
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

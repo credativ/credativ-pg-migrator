@@ -176,6 +176,20 @@ class DatabaseConnector(ABC):
         pass
 
     @abstractmethod
+    def convert_default_value(self, settings) -> dict:
+        """
+        settings - dictionary with the following keys
+            - default_value_schema: str,
+            - default_value_name: str,
+            - default_value_sql: str,
+            - extracted_default_value: str,
+            - default_value_data_type: str,
+            - default_value_comment: str,
+        Returns converted default value
+        """
+        pass
+
+    @abstractmethod
     def is_string_type(self, column_type: str) -> bool:
         """
         Check if the column type is a string type.
@@ -218,7 +232,7 @@ class DatabaseConnector(ABC):
         Centralizes creation of SQL DDL statement
         settings - dictionary with the following keys
             - target_db_type: str - target database type
-            - target_schema: str - schema name of the table in the target database
+            - target_schema_name: str - schema name of the table in the target database
             - target_table_name: str - table name in the source database
             - source_columns: dict - dictionary of columns to be converted
             - converted_columns: dict - dictionary of converted columns
@@ -347,6 +361,28 @@ class DatabaseConnector(ABC):
         pass
 
     @abstractmethod
+    def get_aliases(self, settings):
+        """
+        Fetch all aliases from source database. PostgreSQL does not have direct equivalent for aliases.
+        But we need to know them for consistency.
+        settings:
+            - source_schema_name
+        Returns a dictionary:
+            { ordinary_number: {
+                'id': alias_id,
+                'alias_schema_name': schema_name,
+                'alias_name': alias_name,
+                'aliased_schema_name': aliased_schema_name,
+                'aliased_table_name': aliased_table_name,
+                'alias_owner': alias_owner,
+                'alias_sql': alias_sql,
+                'alias_comment': alias_comment
+                }
+            }
+        """
+        pass
+
+    @abstractmethod
     def get_create_constraint_sql(self, settings):
         """
         This function is currently relevant only for target database
@@ -407,13 +443,13 @@ class DatabaseConnector(ABC):
         settings - dictionary with the following keys:
             - funcproc_code: str - code of the function or procedure in the source database
             - target_db_type: str - target database type
-            - source_schema: str - schema name of the function or procedure in the source database
-            - target_schema: str - schema name of the function or procedure in the target database
+            - source_schema_name: str - schema name of the function or procedure in the source database
+            - target_schema_name: str - schema name of the function or procedure in the target database
             - table_list: list - list of all tables in the migrated schema
             - view_list: list - list of all views in the migrated schema
 
         Convert function or procedure to the target database type.
-        table_list - contains the list of all tables in the target schema - used for adding target_schema prefix to table names in the function code.
+        table_list - contains the list of all tables in the target schema - used for adding target_schema_name prefix to table names in the function code.
         """
         pass
 
@@ -454,7 +490,7 @@ class DatabaseConnector(ABC):
         pass
 
     @abstractmethod
-    def fetch_views_names(self, source_schema: str):
+    def fetch_views_names(self, source_schema_name: str):
         """
         Fetch view names in the specified schema.
         Returns: dict
@@ -473,9 +509,9 @@ class DatabaseConnector(ABC):
         """
         settings - dictionary with the following keys
             - view_id: id of the view in the source database (does not exist in MySQL)
-            - source_schema: schema name of the view in the source database
+            - source_schema_name: schema name of the view in the source database
             - source_view_name: view name in the source database
-            - target_schema: target schema name
+            - target_schema_name: target schema name
             - target_view_name: target view name
         Fetch the code of a view.
         Returns a string with the code.
@@ -483,10 +519,15 @@ class DatabaseConnector(ABC):
         pass
 
     @abstractmethod
-    def convert_view_code(self, view_code: str, settings: dict):
+    def convert_view_code(self, settings: dict):
         """
+        settings - dictionary with the following keys
+            - view_code: id of the view in the source database (does not exist in MySQL)
+            - view_name: view name
+            - schema_name: schema name
+            - view_type: type of the view
         Convert view to the target database type.
-        table_list - contains the list of all tables in the target schema - used for adding target_schema prefix to table names in the view code.
+        table_list - contains the list of all tables in the target schema - used for adding target_schema_name prefix to table names in the view code.
         """
         pass
 
@@ -616,7 +657,7 @@ class DatabaseConnector(ABC):
     def get_top_n_tables(self, settings):
         """
         Settings - dictionary with the following keys
-            - source_schema: str - schema name of the tables to be checked
+            - source_schema_name: str - schema name of the tables to be checked
         Returns a dictionary with the top N tables in the specified schema.
         The dictionary contains the following keys:
             - 'by_rows': dict - top tables by number of rows
@@ -642,7 +683,7 @@ class DatabaseConnector(ABC):
         """
         Fetch top foreign key dependencies in the specified schema.
         settings - dictionary with the following keys
-            - source_schema: str - schema name of the tables to be checked
+            - source_schema_name: str - schema name of the tables to be checked
         Returns a dictionary with the top foreign key dependencies.
         Each of these keys contains a dictionary with structure like this:
         { ordinary_number: {
@@ -656,7 +697,7 @@ class DatabaseConnector(ABC):
         pass
 
     @abstractmethod
-    def target_table_exists(self, target_schema, target_table):
+    def target_table_exists(self, target_schema_name, target_table_name):
         """
         Check if the target table exists in the target database.
         Returns True if the table exists, False otherwise.

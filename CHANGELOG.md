@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.11.3 - 2026.03.10
+
+- 2026.03.10
+
+  - Implemented `ddl` connectivity type - allows reading database objects directly from DDL file(s) rather than connecting to the source database, configured via the `ddl.directory` option. Currently implemented only as proof of concept for IBM DB2 z/OS.
+  - Renamed IBM DB2 connector to `ibm_db2_luw` to explicitly denote Linux/Unix/Windows variants.
+  - Added initial support for IBM DB2 z/OS via the new `ibm_db2_zos` connector (currently only with DDL connectivity).
+  - Extensive internal refactoring - migrator protocol table functions (`insert_`, `update_`, `fetch_`) now accept a single `settings` dictionary instead of multiple positional arguments, improving code maintainability.
+  - Added new protocol tables and corresponding fetch/insert functions for handling partitioning, columns, and aliases.
+  - Replaced hardcoded connectivity string mappings with unified constants (`ddl`, `odbc`, `jdbc`, `native`) in `constants.py`.
+  - Repaired identification of identity columns for Sybase ASE by explicitly checking the status bit (0x80) instead of relying on non-zero status.
+  - Repaired identification of identity columns for MS SQL Server when using `INFORMATION_SCHEMA` by properly evaluating 'YES'/'TRUE'/'1' strings instead of relying on default boolean cast of non-empty 'NO' strings.
+
 ## 0.11.2 - 2026.03.02
 
 - 2026.03.02
@@ -133,7 +146,7 @@
   - UNL import can now also skip import of LOB values based on migration.migrate_lob_values setting - LOB value will contain UNL pointer to external LOB data
   - added missing option "table_schema" into individual table_settings in the config file
   - added setting database_export.on_missing_data_file to define globally action on missing data files if database_export is specified in the config file
-    - Possible values: "error", "skip", "source_table" - use source table from the source database instead of the data file
+    - Possible values: "error", "skip", "source_table_name" - use source table from the source database instead of the data file
 
 - 2025.07.31:
 
@@ -218,10 +231,10 @@
     - Function skips tables which are excluded from migration (exclude_tables parameter in the config file)
   - Added new part of pre-migration analysis - function get_top_fk_dependencies which returns details about foreign key dependencies for the tables with the biggest count of foreign keys
     - This is very useful in case we need to migrate only some parts of data - allows to identify tables which are heavily dependent on other tables and have therefore the biggest probability of breaking foreign key constraints during migration
-  - Improved usage of dry-run command line parameter - if "--dry-run" is used, migrator will do pre-migration analysis of the source database, read all objects of the data model and store them in protocol tables but will not migrate any data - this allows to better understand the source database and its structure before starting the actual migration
+  - Improved usage of dry-run command line parameter - if "--dry-source_schema_name migrator will do pre-migration analysis of the source database, read all objects of the data model and store them in protocol tables but will not migrate any data - this allows to better understand the source database and its structure before starting the actual migration
   - Added listing of FK and PK columns in the output of the Informix pre-migration analysis - this is useful for further analysis / setting migration limitations
   - Added check if table contains ROWID column in the pre-migration analysis of Informix
-  - Migration limitations in config file now allow placeholders {source_schema} and {source_table} - referencing current table to which the limitation applies
+  - Migration limitations in config file now allow placeholders {source_schema} and {source_table_name} - referencing current table to which the limitation applies
 
 - 2025.07.06:
 

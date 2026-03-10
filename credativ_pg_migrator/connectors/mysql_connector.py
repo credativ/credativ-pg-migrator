@@ -77,7 +77,7 @@ class MySQLConnector(DatabaseConnector):
         if target_db_type == 'postgresql':
             return {}
         else:
-            self.config_parser.print_log_message('ERROR', f"Unsupported target database type: {target_db_type}")
+            self.config_parser.print_log_message('ERROR', f"mysql_connector: get_sql_functions_mapping: Unsupported target database type: {target_db_type}")
 
     def migrate_sequences(self, target_connector, settings):
         return True
@@ -107,7 +107,7 @@ class MySQLConnector(DatabaseConnector):
             self.disconnect()
             return tables
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error fetching table names: {e}")
+            self.config_parser.print_log_message('ERROR', f"mysql_connector: fetch_table_names: Error fetching table names: {e}")
             raise
 
     def fetch_table_columns(self, settings) -> dict:
@@ -175,8 +175,8 @@ class MySQLConnector(DatabaseConnector):
             self.disconnect()
             return columns
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error fetching table columns: {e}")
-            self.config_parser.print_log_message('ERROR', "Full stack trace:")
+            self.config_parser.print_log_message('ERROR', f"mysql_connector: fetch_table_columns: Error fetching table columns: {e}")
+            self.config_parser.print_log_message('ERROR', "mysql_connector: fetch_table_columns: Full stack trace:")
             self.config_parser.print_log_message('ERROR', traceback.format_exc())
             raise
 
@@ -247,13 +247,13 @@ class MySQLConnector(DatabaseConnector):
         order_by_clause = ''
         try:
             worker_id = settings['worker_id']
-            source_schema = settings['source_schema']
-            source_table = settings['source_table']
+            source_schema_name = settings['source_schema_name']
+            source_table_name = settings['source_table_name']
             source_table_id = settings['source_table_id']
             source_columns = settings['source_columns']
-            # target_schema = self.config_parser.convert_names_case(settings['target_schema'])
-            target_schema = settings['target_schema']  ## target schema is used as it is defined in config, not converted to upper/lower case
-            target_table = self.config_parser.convert_names_case(settings['target_table'])
+            # target_schema_name = self.config_parser.convert_names_case(settings['target_schema_name'])
+            target_schema_name = settings['target_schema_name']  ## target schema is used as it is defined in config, not converted to upper/lower case
+            target_table_name = self.config_parser.convert_names_case(settings['target_table_name'])
             target_columns = settings['target_columns']
             batch_size = settings['batch_size']
             migrator_tables = settings['migrator_tables']
@@ -263,8 +263,8 @@ class MySQLConnector(DatabaseConnector):
             resume_after_crash = settings['resume_after_crash']
             drop_unfinished_tables = settings['drop_unfinished_tables']
 
-            source_table_rows = self.get_rows_count(source_schema, source_table, migration_limitation)
-            target_table_rows = migrate_target_connection.get_rows_count(target_schema, target_table)
+            source_table_rows = self.get_rows_count(source_schema_name, source_table_name, migration_limitation)
+            target_table_rows = migrate_target_connection.get_rows_count(target_schema_name, target_table_name)
 
             total_chunks = self.config_parser.get_total_chunks(source_table_rows, chunk_size)
             if chunk_size == -1:
@@ -282,16 +282,16 @@ class MySQLConnector(DatabaseConnector):
             protocol_id = migrator_tables.insert_data_migration({
                 'worker_id': worker_id,
                 'source_table_id': source_table_id,
-                'source_schema': source_schema,
-                'source_table': source_table,
-                'target_schema': target_schema,
-                'target_table': target_table,
+                'source_schema_name': source_schema_name,
+                'source_table_name': source_table_name,
+                'target_schema_name': target_schema_name,
+                'target_table_name': target_table_name,
                 'source_table_rows': source_table_rows,
                 'target_table_rows': target_table_rows,
             })
 
             if source_table_rows == 0:
-                self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Table {source_table} is empty - skipping data migration.")
+                self.config_parser.print_log_message('INFO', f"mysql_connector: migrate_table: Worker {worker_id}: Table {source_table_name} is empty - skipping data migration.")
                 migrator_tables.update_data_migration_status({
                         'row_id': protocol_id,
                         'success': True,
@@ -309,7 +309,7 @@ class MySQLConnector(DatabaseConnector):
 
                 if source_table_rows > target_table_rows:
 
-                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Source table {source_table}: {source_table_rows} rows / Target table {target_table}: {target_table_rows} rows - starting data migration.")
+                    self.config_parser.print_log_message('INFO', f"mysql_connector: migrate_table: Worker {worker_id}: Source table {source_table_name}: {source_table_rows} rows / Target table {target_table_name}: {target_table_rows} rows - starting data migration.")
 
                     select_columns_list = []
                     orderby_columns_list = []
@@ -317,7 +317,7 @@ class MySQLConnector(DatabaseConnector):
 
                     for order_num, col in source_columns.items():
                         self.config_parser.print_log_message('DEBUG2',
-                                                            f"Worker {worker_id}: Table {source_schema}.{source_table}: Processing column {col['column_name']} ({order_num}) with data type {col['data_type']}")
+                                                            f"Worker {worker_id}: Table {source_schema_name}.{source_table_name}: Processing column {col['column_name']} ({order_num}) with data type {col['data_type']}")
 
                         if col['data_type'].lower() == 'geometry':
                             select_columns_list.append(f"ST_asText(`{col['column_name']}`) as `{col['column_name']}`")
@@ -335,7 +335,7 @@ class MySQLConnector(DatabaseConnector):
 
                     if resume_after_crash and not drop_unfinished_tables:
                         chunk_number = self.config_parser.get_total_chunks(target_table_rows, chunk_size)
-                        self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Resuming migration for table {source_schema}.{source_table} from chunk {chunk_number} with data chunk size {chunk_size}.")
+                        self.config_parser.print_log_message('DEBUG', f"mysql_connector: migrate_table: Worker {worker_id}: Resuming migration for table {source_schema_name}.{source_table_name} from chunk {chunk_number} with data chunk size {chunk_size}.")
                         chunk_offset = target_table_rows
                     else:
                         chunk_offset = (chunk_number - 1) * chunk_size
@@ -343,20 +343,20 @@ class MySQLConnector(DatabaseConnector):
                     chunk_start_row_number = chunk_offset + 1
                     chunk_end_row_number = chunk_offset + chunk_size
 
-                    self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Migrating table {source_schema}.{source_table}: chunk {chunk_number}, data chunk size {chunk_size}, batch size {batch_size}, chunk offset {chunk_offset}, chunk end row number {chunk_end_row_number}, source table rows {source_table_rows}")
+                    self.config_parser.print_log_message('DEBUG', f"mysql_connector: migrate_table: Worker {worker_id}: Migrating table {source_schema_name}.{source_table_name}: chunk {chunk_number}, data chunk size {chunk_size}, batch size {batch_size}, chunk offset {chunk_offset}, chunk end row number {chunk_end_row_number}, source table rows {source_table_rows}")
                     order_by_clause = ''
 
-                    query = f'''SELECT {select_columns} FROM `{source_schema}`.`{source_table}` '''
+                    query = f'''SELECT {select_columns} FROM `{source_schema_name}`.`{source_table_name}` '''
                     if migration_limitation:
                         query += f" WHERE {migration_limitation}"
-                    primary_key_columns = migrator_tables.select_primary_key(source_schema, source_table)
-                    self.config_parser.print_log_message('DEBUG2', f"Worker {worker_id}: Primary key columns for {source_schema}.{source_table}: {primary_key_columns}")
+                    primary_key_columns = migrator_tables.select_primary_key({'source_schema_name': source_schema_name, 'source_table_name': source_table_name})
+                    self.config_parser.print_log_message('DEBUG2', f"mysql_connector: migrate_table: Worker {worker_id}: Primary key columns for {source_schema_name}.{source_table_name}: {primary_key_columns}")
                     if primary_key_columns:
                         orderby_columns = primary_key_columns
                     order_by_clause = f""" ORDER BY {orderby_columns}"""
                     query += order_by_clause + f" LIMIT {chunk_size} OFFSET {chunk_offset}"
 
-                    self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Fetching data with cursor using query: {query}")
+                    self.config_parser.print_log_message('DEBUG', f"mysql_connector: migrate_table: Worker {worker_id}: Fetching data with cursor using query: {query}")
 
                     part_name = 'execute query'
                     cursor = self.connection.cursor()
@@ -378,7 +378,7 @@ class MySQLConnector(DatabaseConnector):
                         batch_number += 1
                         reading_end_time = time.time()
                         reading_duration = reading_end_time - reading_start_time
-                        self.config_parser.print_log_message('DEBUG',f"Worker {worker_id}: Fetched {len(records)} rows (batch {batch_number}) from source table {source_table}.")
+                        self.config_parser.print_log_message('DEBUG',f"mysql_connector: migrate_table: Worker {worker_id}: Fetched {len(records)} rows (batch {batch_number}) from source table {source_table_name}.")
 
                         transforming_start_time = time.time()
                         records = [
@@ -432,13 +432,13 @@ class MySQLConnector(DatabaseConnector):
                         # ]
 
                         self.config_parser.print_log_message('DEBUG',
-                            f"Worker {worker_id}: Starting insert of {len(records)} rows from source table {source_table}")
+                            f"Worker {worker_id}: Starting insert of {len(records)} rows from source table {source_table_name}")
                         transforming_end_time = time.time()
                         transforming_duration = transforming_end_time - transforming_start_time
                         inserting_start_time = time.time()
                         inserted_rows = migrate_target_connection.insert_batch({
-                            'target_schema': target_schema,
-                            'target_table': target_table,
+                            'target_schema_name': target_schema_name,
+                            'target_table_name': target_table_name,
                             'target_columns': target_columns,
                             'data': records,
                             'worker_id': worker_id,
@@ -459,8 +459,8 @@ class MySQLConnector(DatabaseConnector):
                         batch_start_str = batch_start_dt.strftime('%Y-%m-%d %H:%M:%S.%f')
                         batch_end_str = batch_end_dt.strftime('%Y-%m-%d %H:%M:%S.%f')
                         migrator_tables.insert_batches_stats({
-                            'source_schema': source_schema,
-                            'source_table': source_table,
+                            'source_schema_name': source_schema_name,
+                            'source_table_name': source_table_name,
                             'source_table_id': source_table_id,
                             'chunk_number': chunk_number,
                             'batch_number': batch_number,
@@ -477,7 +477,7 @@ class MySQLConnector(DatabaseConnector):
                         msg = (
                             f"Worker {worker_id}: Inserted {inserted_rows} "
                             f"(total: {total_inserted_rows} from: {source_table_rows} "
-                            f"({percent_done}%)) rows into target table '{target_table}': "
+                            f"({percent_done}%)) rows into target table '{target_table_name}': "
                             f"Batch {batch_number} duration: {batch_duration:.2f} seconds "
                             f"(r: {reading_duration:.2f}, t: {transforming_duration:.2f}, w: {inserting_duration:.2f})"
                         )
@@ -486,13 +486,13 @@ class MySQLConnector(DatabaseConnector):
                         batch_start_time = time.time()
                         reading_start_time = batch_start_time
 
-                    target_table_rows = migrate_target_connection.get_rows_count(target_schema, target_table)
-                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Target table {target_schema}.{target_table} has {target_table_rows} rows")
+                    target_table_rows = migrate_target_connection.get_rows_count(target_schema_name, target_table_name)
+                    self.config_parser.print_log_message('INFO', f"mysql_connector: migrate_table: Worker {worker_id}: Target table {target_schema_name}.{target_table_name} has {target_table_rows} rows")
 
                     shortest_batch_seconds = min(batch_durations) if batch_durations else 0
                     longest_batch_seconds = max(batch_durations) if batch_durations else 0
                     average_batch_seconds = sum(batch_durations) / len(batch_durations) if batch_durations else 0
-                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Migrated {total_inserted_rows} rows from {source_table} to {target_schema}.{target_table} in {batch_number} batches: "
+                    self.config_parser.print_log_message('INFO', f"mysql_connector: migrate_table: Worker {worker_id}: Migrated {total_inserted_rows} rows from {source_table_name} to {target_schema_name}.{target_table_name} in {batch_number} batches: "
                                                             f"Shortest batch: {shortest_batch_seconds:.2f} seconds, "
                                                             f"Longest batch: {longest_batch_seconds:.2f} seconds, "
                                                             f"Average batch: {average_batch_seconds:.2f} seconds")
@@ -500,7 +500,7 @@ class MySQLConnector(DatabaseConnector):
                     cursor.close()
 
                 elif source_table_rows <= target_table_rows:
-                    self.config_parser.print_log_message('INFO', f"Worker {worker_id}: Source table {source_table} has {source_table_rows} rows, which is less than or equal to target table {target_table} with {target_table_rows} rows. No data migration needed.")
+                    self.config_parser.print_log_message('INFO', f"mysql_connector: migrate_table: Worker {worker_id}: Source table {source_table_name} has {source_table_rows} rows, which is less than or equal to target table {target_table_name} with {target_table_rows} rows. No data migration needed.")
 
                 migration_stats = {
                     'rows_migrated': total_inserted_rows,
@@ -511,9 +511,9 @@ class MySQLConnector(DatabaseConnector):
                     'finished': False,
                 }
 
-                self.config_parser.print_log_message('DEBUG', f"Worker {worker_id}: Migration stats: {migration_stats}")
+                self.config_parser.print_log_message('DEBUG', f"mysql_connector: migrate_table: Worker {worker_id}: Migration stats: {migration_stats}")
                 if source_table_rows <= target_table_rows or chunk_number >= total_chunks:
-                    self.config_parser.print_log_message('DEBUG3', f"Worker {worker_id}: Setting migration status to finished for table {source_table} (chunk {chunk_number}/{total_chunks})")
+                    self.config_parser.print_log_message('DEBUG3', f"mysql_connector: migrate_table: Worker {worker_id}: Setting migration status to finished for table {source_table_name} (chunk {chunk_number}/{total_chunks})")
                     migration_stats['finished'] = True
                     migrator_tables.update_data_migration_status({
                         'row_id': protocol_id,
@@ -529,10 +529,10 @@ class MySQLConnector(DatabaseConnector):
                 migrator_tables.insert_data_chunk({
                     'worker_id': worker_id,
                     'source_table_id': source_table_id,
-                    'source_schema': source_schema,
-                    'source_table': source_table,
-                    'target_schema': target_schema,
-                    'target_table': target_table,
+                    'source_schema_name': source_schema_name,
+                    'source_table_name': source_table_name,
+                    'target_schema_name': target_schema_name,
+                    'target_table_name': target_table_name,
                     'source_table_rows': source_table_rows,
                     'target_table_rows': target_table_rows,
                     'chunk_number': chunk_number,
@@ -549,8 +549,8 @@ class MySQLConnector(DatabaseConnector):
                 })
                 return migration_stats
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Error during {part_name} -> {e}")
-            self.config_parser.print_log_message('ERROR', f"Worker {worker_id}: Full stack trace: {traceback.format_exc()}")
+            self.config_parser.print_log_message('ERROR', f"mysql_connector: migrate_table: Worker {worker_id}: Error during {part_name} -> {e}")
+            self.config_parser.print_log_message('ERROR', f"mysql_connector: migrate_table: Worker {worker_id}: Full stack trace: {traceback.format_exc()}")
             raise e
 
     def fetch_indexes(self, settings):
@@ -614,7 +614,7 @@ class MySQLConnector(DatabaseConnector):
                 order_num += 1
             return returned_indexes
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error fetching indexes: {e}")
+            self.config_parser.print_log_message('ERROR', f"mysql_connector: fetch_indexes: Error fetching indexes: {e}")
             raise
 
     def get_create_index_sql(self, settings):
@@ -701,11 +701,14 @@ class MySQLConnector(DatabaseConnector):
             return returned_constraints
 
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error fetching constraints: {e}")
+            self.config_parser.print_log_message('ERROR', f"mysql_connector: fetch_constraints: Error fetching constraints: {e}")
             raise
 
     def get_create_constraint_sql(self, settings):
         return ""
+
+    def get_aliases(self, settings):
+        return {}
 
     def fetch_triggers(self, table_id: int, table_schema: str, table_name: str):
         # Implement trigger fetching logic
@@ -726,8 +729,8 @@ class MySQLConnector(DatabaseConnector):
     def convert_funcproc_code(self, settings):
         funcproc_code = settings['funcproc_code']
         target_db_type = settings['target_db_type']
-        source_schema = settings['source_schema']
-        target_schema = settings['target_schema']
+        source_schema_name = settings['source_schema_name']
+        target_schema_name = settings['target_schema_name']
         table_list = settings['table_list']
         view_list = settings['view_list']
         converted_code = ''
@@ -742,14 +745,14 @@ class MySQLConnector(DatabaseConnector):
         # Placeholder for fetching sequence details
         return {}
 
-    def fetch_views_names(self, source_schema: str):
+    def fetch_views_names(self, source_schema_name: str):
         views = {}
         order_num = 1
         query = f"""
             SELECT
                 TABLE_NAME
             FROM INFORMATION_SCHEMA.VIEWS
-            WHERE TABLE_SCHEMA = '{source_schema}'"""
+            WHERE TABLE_SCHEMA = '{source_schema_name}'"""
         try:
             self.connect()
             cursor = self.connection.cursor()
@@ -758,7 +761,7 @@ class MySQLConnector(DatabaseConnector):
                 view_name = row[0]
                 views[order_num] = {
                     'id': None,
-                    'schema_name': source_schema,
+                    'schema_name': source_schema_name,
                     'view_name': view_name,
                     'comment': ''
                 }
@@ -767,20 +770,20 @@ class MySQLConnector(DatabaseConnector):
             self.disconnect()
             return views
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error fetching view names: {e}")
+            self.config_parser.print_log_message('ERROR', f"mysql_connector: fetch_views_names: Error fetching view names: {e}")
             raise
 
     def fetch_view_code(self, settings):
         # view_id = settings['view_id']
-        source_schema = settings['source_schema']
+        source_schema_name = settings['source_schema_name']
         source_view_name = settings['source_view_name']
-        # target_schema = settings['target_schema']
+        # target_schema_name = settings['target_schema_name']
         # target_view_name = settings['target_view_name']
         query = f"""
             SELECT
                 VIEW_DEFINITION
             FROM INFORMATION_SCHEMA.VIEWS
-            WHERE TABLE_SCHEMA = '{source_schema}'
+            WHERE TABLE_SCHEMA = '{source_schema_name}'
             AND TABLE_NAME = '{source_view_name}'
         """
         try:
@@ -792,15 +795,15 @@ class MySQLConnector(DatabaseConnector):
             self.disconnect()
             return view_code
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error fetching view {source_view_name} code: {e}")
+            self.config_parser.print_log_message('ERROR', f"mysql_connector: fetch_view_code: Error fetching view {source_view_name} code: {e}")
             raise
 
     def convert_view_code(self, settings: dict):
         view_code = settings['view_code']
         converted_view_code = view_code
         converted_view_code = converted_view_code.replace('`', '"')
-        converted_view_code = converted_view_code.replace(f'''"{settings['source_schema']}".''', f'''"{settings['target_schema']}".''')
-        converted_view_code = converted_view_code.replace(f'''{settings['source_schema']}.''', f'''"{settings['target_schema']}".''')
+        converted_view_code = converted_view_code.replace(f'''"{settings['source_schema_name']}".''', f'''"{settings['target_schema_name']}".''')
+        converted_view_code = converted_view_code.replace(f'''{settings['source_schema_name']}.''', f'''"{settings['target_schema_name']}".''')
         converted_view_code = converted_view_code.replace('""', '"')
         return converted_view_code
 
@@ -814,7 +817,7 @@ class MySQLConnector(DatabaseConnector):
             cursor.execute(query, params)
             cursor.close()
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error executing query: {e}")
+            self.config_parser.print_log_message('ERROR', f"mysql_connector: execute_query: Error executing query: {e}")
             raise
 
     def execute_sql_script(self, script_path: str):
@@ -827,7 +830,7 @@ class MySQLConnector(DatabaseConnector):
                     cursor.execute(statement)
             cursor.close()
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error executing SQL script: {e}")
+            self.config_parser.print_log_message('ERROR', f"mysql_connector: execute_sql_script: Error executing SQL script: {e}")
             raise
 
     def begin_transaction(self):
@@ -850,7 +853,7 @@ class MySQLConnector(DatabaseConnector):
             cursor.close()
             return count
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error fetching row count: {e}")
+            self.config_parser.print_log_message('ERROR', f"mysql_connector: get_rows_count: Error fetching row count: {e}")
             raise
 
     def get_table_size(self, table_schema: str, table_name: str):
@@ -866,7 +869,7 @@ class MySQLConnector(DatabaseConnector):
             cursor.close()
             return size
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error fetching table size: {e}")
+            self.config_parser.print_log_message('ERROR', f"mysql_connector: get_table_size: Error fetching table size: {e}")
             raise
 
     def fetch_user_defined_types(self, schema: str):
@@ -886,7 +889,7 @@ class MySQLConnector(DatabaseConnector):
         return {}
 
     def get_table_description(self, settings) -> dict:
-        self.config_parser.print_log_message('DEBUG3', f"MySQL connector: Getting table description for {settings['table_schema']}.{settings['table_name']}")
+        self.config_parser.print_log_message('DEBUG3', f"mysql_connector: get_table_description: MySQL connector: Getting table description for {settings['table_schema']}.{settings['table_name']}")
         table_schema = settings['table_schema']
         table_name = settings['table_name']
         output = ""
@@ -926,7 +929,7 @@ class MySQLConnector(DatabaseConnector):
             cursor.close()
             self.disconnect()
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error fetching table description for {table_schema}.{table_name}: {e}")
+            self.config_parser.print_log_message('ERROR', f"mysql_connector: get_table_description: Error fetching table description for {table_schema}.{table_name}: {e}")
             raise
 
         return { 'table_description': output.strip() }
@@ -945,7 +948,7 @@ class MySQLConnector(DatabaseConnector):
             self.disconnect()
             return version
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error fetching database version: {e}")
+            self.config_parser.print_log_message('ERROR', f"mysql_connector: get_database_version: Error fetching database version: {e}")
             raise
 
     def get_database_size(self):
@@ -959,7 +962,7 @@ class MySQLConnector(DatabaseConnector):
             self.disconnect()
             return size
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error fetching database size: {e}")
+            self.config_parser.print_log_message('ERROR', f"mysql_connector: get_database_size: Error fetching database size: {e}")
             raise
 
     def get_top_n_tables(self, settings):
@@ -981,7 +984,7 @@ class MySQLConnector(DatabaseConnector):
                     TABLE_ROWS,
                     (DATA_LENGTH + INDEX_LENGTH) AS table_size
                     FROM information_schema.tables
-                    WHERE TABLE_SCHEMA = '{settings['source_schema']}'
+                    WHERE TABLE_SCHEMA = '{settings['source_schema_name']}'
                     ORDER BY TABLE_ROWS DESC
                     LIMIT {top_n}
                 """
@@ -999,12 +1002,12 @@ class MySQLConnector(DatabaseConnector):
                     order_num += 1
                 cursor.close()
                 self.disconnect()
-                self.config_parser.print_log_message('DEBUG2', f"Top {top_n} tables by rows: {top_tables['by_rows']}")
+                self.config_parser.print_log_message('DEBUG2', f"mysql_connector: get_top_n_tables: Top {top_n} tables by rows: {top_tables['by_rows']}")
             else:
-                self.config_parser.print_log_message('DEBUG', "Top N tables by rows is not configured or set to 0, skipping this part.")
+                self.config_parser.print_log_message('DEBUG', "mysql_connector: get_top_n_tables: Top N tables by rows is not configured or set to 0, skipping this part.")
 
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error fetching top {top_n} tables by rows: {e}")
+            self.config_parser.print_log_message('ERROR', f"mysql_connector: get_top_n_tables: Error fetching top {top_n} tables by rows: {e}")
 
         return top_tables
 
@@ -1012,11 +1015,11 @@ class MySQLConnector(DatabaseConnector):
         top_fk_dependencies = {}
         return top_fk_dependencies
 
-    def target_table_exists(self, target_schema, target_table):
+    def target_table_exists(self, target_schema_name, target_table_name):
         query = f"""
             SELECT COUNT(*)
             FROM INFORMATION_SCHEMA.TABLES
-            WHERE TABLE_SCHEMA = '{target_schema}' AND TABLE_NAME = '{target_table}'
+            WHERE TABLE_SCHEMA = '{target_schema_name}' AND TABLE_NAME = '{target_table_name}'
         """
         try:
             cursor = self.connection.cursor()
@@ -1025,7 +1028,7 @@ class MySQLConnector(DatabaseConnector):
             cursor.close()
             return exists
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"Error checking if target table exists: {e}")
+            self.config_parser.print_log_message('ERROR', f"mysql_connector: target_table_exists: Error checking if target table exists: {e}")
             raise
 
     def fetch_all_rows(self, query):
@@ -1034,6 +1037,10 @@ class MySQLConnector(DatabaseConnector):
         rows = cursor.fetchall()
         cursor.close()
         return rows
+
+    def convert_default_value(self, settings) -> dict:
+        extracted_default_value = settings['extracted_default_value']
+        return extracted_default_value
 
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

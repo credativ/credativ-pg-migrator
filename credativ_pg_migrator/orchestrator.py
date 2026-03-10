@@ -637,13 +637,14 @@ class Orchestrator:
 
                                     elif data_source_settings['format_options']['format'].upper() == 'CSV':
                                         self.config_parser.print_log_message('DEBUG3', f"orchestrator: table_worker: Worker {worker_id}: Table {target_table_name}: Data source for table {target_table_name} is CSV format. Char set: {data_source_settings['format_options']['character_set']}")
-                                        if data_source_settings['format_options']['character_set'].upper() != 'UTF-8':
-                                            self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Table {target_table_name}: Data source for table {target_table_name} is CSV format with character set {data_source_settings['format_options']['character_set']}. Converting to UTF-8.")
-                                            self.config_parser.convert_csv_to_utf8(data_source_settings)
-                                        # CSV data source - use the file directly
+                                        # Always convert CSV to UTF-8 to apply DB2 timestamp fixes and null replacements
+                                        self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Table {target_table_name}: Converting CSV to UTF-8 and applying DB2 fixes.")
+                                        self.config_parser.convert_csv_to_utf8(data_source_settings)
+                                        
+                                        # CSV data source - use the converted file
                                         part_name = 'use CSV'
-                                        csv_file_name = data_source_settings['file_name']
-                                        self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Data source for table {target_table_name} is CSV format. Using file {csv_file_name}.")
+                                        csv_file_name = data_source_settings['converted_file_name']
+                                        self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Data source for table {target_table_name} is CSV format. Using converted file {csv_file_name}.")
 
                                     try:
                                         if data_source_settings['lob_columns'] != '' and self.config_parser.should_migrate_lob_values():

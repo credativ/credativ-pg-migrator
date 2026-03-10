@@ -1234,6 +1234,8 @@ class PostgreSQLConnector(DatabaseConnector):
         worker_id = settings['worker_id']
         insert_columns = settings.get('insert_columns', None)
 
+        insert_columns_provided = settings.get('insert_columns', None)
+
         if not insert_columns:
             insert_columns = [f'"{columns[col]["column_name"]}"' for col in sorted(columns.keys())]
 
@@ -1246,19 +1248,18 @@ class PostgreSQLConnector(DatabaseConnector):
             # Ensure data is a list of tuples
             self.config_parser.print_log_message('DEBUG2', f"postgresql_connector: insert_batch: Worker {worker_id}: Started insert batch into {target_schema_name}.{target_table_name} with {len(data)} rows")
             if isinstance(data, list) and all(isinstance(item, dict) for item in data):
+                
+                # Symmetrically unpack the payload values
+                if insert_columns_provided and len(data) > 0:
+                    extract_keys = list(data[0].keys())
+                else:
+                    extract_keys = [columns[col]['column_name'] for col in sorted(columns.keys())]
+
                 formatted_data = []
                 for item in data:
                     row = []
-                    for col in columns.keys():
-                        column_name = columns[col]['column_name']
-                        # column_type = columns[col]['data_type'].lower()
-                        # if column_type in ['bytea', 'blob']:
-                        #     if item.get(column_name) is not None:
-                        #         row.append(psycopg2.Binary(item.get(column_name)))
-                        #     else:
-                        #         row.append(None)
-                        # else:
-                        row.append(item.get(column_name))
+                    for col_name in extract_keys:
+                        row.append(item.get(col_name))
                     formatted_data.append(tuple(row))
                 data = formatted_data
             else:

@@ -108,7 +108,8 @@ class IbmDb2LuwConnector(DatabaseConnector):
                         "SCALE",
                         "NULLS",
                         "DEFAULT",
-                        "REMARKS"
+                        "REMARKS",
+                        IDENTITY
                     FROM SYSCAT.COLUMNS
                     WHERE TABSCHEMA = upper('{table_schema}') AND tabname = '{table_name}' ORDER BY COLNO
                 """
@@ -122,7 +123,9 @@ class IbmDb2LuwConnector(DatabaseConnector):
                         NUMERIC_PRECISION,
                         NUMERIC_SCALE,
                         IS_NULLABLE,
-                        COLUMN_DEFAULT
+                        COLUMN_DEFAULT,
+                        REMARKS,
+                        IS_IDENTITY
                     FROM SYSIBM.COLUMNS
                     WHERE TABLE_NAME = '{table_name}' AND TBCREATOR = upper('{table_schema}') ORDER BY COLNO
                 """
@@ -143,6 +146,11 @@ class IbmDb2LuwConnector(DatabaseConnector):
                     is_nullable = 'NO' if is_nullable == 'N' else 'YES'
                 column_default = row[7]
                 column_comment = row[8] if len(row) > 8 else ''
+                is_identity = 'YES' if (len(row) > 9 and row[9] in ('Y', 'YES')) else 'NO'
+
+                # when column is identity, code shall ignore default value if this is set
+                if is_identity == 'YES' and column_default is not None:
+                    column_default = None
 
                 column_type = data_type
                 if self.is_string_type(data_type) and character_maximum_length is not None:
@@ -162,7 +170,7 @@ class IbmDb2LuwConnector(DatabaseConnector):
                     'is_nullable': is_nullable,
                     'column_default_value': column_default,
                     'column_comment': column_comment,
-                    'is_identity': 'NO',
+                    'is_identity': is_identity,
                 }
             cursor.close()
             self.disconnect()

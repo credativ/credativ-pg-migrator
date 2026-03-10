@@ -125,6 +125,10 @@ class IbmDb2ZosConnector(DatabaseConnector):
                 is_pk = row[4]
                 is_identity = 'YES' if row[5] else 'NO'
 
+                # when column is identity, code shall ignore default value if this is set
+                if is_identity == 'YES' and default_val is not None:
+                    default_val = None
+
                 base_type = col_type.split('(')[0].strip().upper()
                 char_length = None
                 numeric_prec = None
@@ -781,7 +785,7 @@ class IbmDb2ZosConnector(DatabaseConnector):
             cursor.close()
         return triggers
 
-    def convert_trigger(self, trig: str, settings: dict):
+    def convert_trigger(self, settings: dict):
         pass
 
     def fetch_funcproc_names(self, schema: str):

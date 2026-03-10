@@ -1442,12 +1442,10 @@ class PostgreSQLConnector(DatabaseConnector):
               AND c.relname = '{sequence_name}'
         """
         try:
-            self.connect()
             cursor = self.connection.cursor()
             cursor.execute(query)
             result = cursor.fetchone()
             cursor.close()
-            self.disconnect()
 
             if result:
                 return {
@@ -1607,12 +1605,9 @@ class PostgreSQLConnector(DatabaseConnector):
                         })
                     except Exception as e:
                         self.config_parser.print_log_message('ERROR', f"postgresql_connector: migrate_sequences: Failed to insert sequence {seq_name} into protocol: {e}")
-
                 details = self.get_sequence_details(source_schema_name, seq_name)
 
                 # Fetch current value separately as it's not in pg_sequence catalog
-                # Re-connect because get_sequence_details closes the connection
-                self.connect()
                 curr_val_query = f"SELECT last_value, is_called FROM {source_schema_name}.{seq_name}"
                 cursor = self.connection.cursor()
                 cursor.execute(curr_val_query)
@@ -1620,7 +1615,6 @@ class PostgreSQLConnector(DatabaseConnector):
                 last_value = curr_val_row[0]
                 is_called = curr_val_row[1]
                 cursor.close()
-                self.disconnect()
 
                 # Generate CREATE SEQUENCE
                 # Details: min_value, max_value, increment_by, cycle, cache_size, start_value

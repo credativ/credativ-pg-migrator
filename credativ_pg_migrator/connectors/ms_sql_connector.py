@@ -429,7 +429,7 @@ class MsSQLConnector(DatabaseConnector):
                     'numeric_scale': numeric_scale,
                     'is_nullable': 'YES' if is_nullable else 'NO',
                     'is_identity': 'YES' if is_identity else 'NO',
-                    'column_default_value': column_default,
+                    'column_default_value': column_default if not is_identity else None,
                     'comment': ''
                 }
 
@@ -1425,8 +1425,12 @@ $$ LANGUAGE plpgsql;
                         self.config_parser.print_log_message('DEBUG',f"ms_sql_connector: migrate_table: Worker {worker_id}: Fetched {len(records)} rows (batch {batch_number}) from source table {source_table_name}.")
 
                         transforming_start_time = time.time()
+                        
+                        # Generate sequentially ordered columns to pair identically
+                        ordered_cols = [source_columns[key] for key in sorted(source_columns.keys())]
+                        
                         records = [
-                            {column['column_name']: value for column, value in zip(source_columns.values(), record)}
+                            {column['column_name']: value for column, value in zip(ordered_cols, record)}
                             for record in records
                         ]
                         for record in records:

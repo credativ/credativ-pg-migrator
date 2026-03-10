@@ -883,11 +883,14 @@ class ConfigParser:
 
     def convert_csv_to_utf8(self, data_source_settings):
         part_name = 'convert_csv_to_utf8 start'
-        self.print_log_message('DEBUG3', f"config_parser: convert_csv_to_utf8: ({part_name}): Starting conversion of CSV file '{data_source_settings['file_name']}' to UTF-8.")
+        self.print_log_message('DEBUG3', f"config_parser: convert_csv_to_utf8: ({part_name}): Starting conversion of CSV file '{data_source_settings.get('file_name')}' to UTF-8.")
         try:
+            import csv
+            import re
+            
             input_csv_data_file = data_source_settings['file_name']
-            output_csv_data_file = data_source_settings['converted_file_name'] + '_utf8'
-            source_table_name = data_source_settings['source_table_name']
+            output_csv_data_file = data_source_settings.get('converted_file_name', input_csv_data_file) + '_utf8'
+            source_table_name = data_source_settings.get('source_table_name', 'Unknown')
             file_size_bytes = data_source_settings.get('file_size', None)
             if file_size_bytes is not None:
                 try:
@@ -900,6 +903,9 @@ class ConfigParser:
                 source_file_size = "Unknown"
 
             character_set = data_source_settings.get('format_options', {}).get('character_set', 'UTF-8')
+            csv_delimiter = data_source_settings.get('format_options', {}).get('delimiter', ',')
+            null_symbol = data_source_settings.get('null_symbol', '\\N')
+
             processing_start_time = datetime.now()
 
             if not input_csv_data_file or not output_csv_data_file:
@@ -912,10 +918,37 @@ class ConfigParser:
             self.print_log_message('DEBUG', f"config_parser: convert_csv_to_utf8: ({part_name}): Converting CSV file '{input_csv_data_file}' (charset: {character_set}) to UTF-8 file '{output_csv_data_file}' - source file size: {source_file_size}")
 
             counter = 0
-            with open(input_csv_data_file, 'r', encoding=character_set, errors='replace') as infile, \
-                 open(output_csv_data_file, 'w', encoding='utf-8') as outfile:
-                for line in infile:
-                    outfile.write(line)
+
+            # DB2 timestamp format: YYYY-MM-DD-HH.MM.SS.mmmmmm
+            ts_pattern = re.compile(r'^(\d{4}-\d{2}-\d{2})-(\d{2})\.(\d{2})\.(\d{2})(?:\.(\d+))?$')
+
+            with open(input_csv_data_file, 'r', encoding=character_set, errors='replace', newline='') as infile, \
+                 open(output_csv_data_file, 'w', encoding='utf-8', newline='') as outfile:
+                
+                reader = csv.reader(infile, delimiter=csv_delimiter)
+                writer = csv.writer(outfile, delimiter=csv_delimiter, quoting=csv.QUOTE_MINIMAL)
+                
+                for row in reader:
+                    processed_row = []
+                    for field in row:
+                        if field == '(null)':
+                            processed_row.append(null_symbol)
+                        else:
+                            match = ts_pattern.match(field)
+                            if match:
+                                date_part = match.group(1)
+                                hour = match.group(2)
+                                minute = match.group(3)
+                                second = match.group(4)
+                                frac = match.group(5)
+                                if frac:
+                                    processed_row.append(f"{date_part} {hour}:{minute}:{second}.{frac}")
+                                else:
+                                    processed_row.append(f"{date_part} {hour}:{minute}:{second}")
+                            else:
+                                processed_row.append(field)
+                    
+                    writer.writerow(processed_row)
                     counter += 1
 
             self.print_log_message('INFO', f"config_parser: convert_csv_to_utf8: Processed {counter} lines from {input_csv_data_file} and wrote to {output_csv_data_file} - source file size: {source_file_size} - processing time: {datetime.now() - processing_start_time}")

@@ -1,16 +1,17 @@
 # Changelog
 
-## 0.12.0 - 2026.03.06
+## 0.11.3 - 2026.03.10
 
-- 2026.03.06
+- 2026.03.10
 
-  - Implemented `ddl` connectivity type - allows reading database objects directly from DDL file(s) rather than connecting to the source database, configured via the `ddl.directory` option.
+  - Implemented `ddl` connectivity type - allows reading database objects directly from DDL file(s) rather than connecting to the source database, configured via the `ddl.directory` option. Currently implemented only as proof of concept for IBM DB2 z/OS.
   - Renamed IBM DB2 connector to `ibm_db2_luw` to explicitly denote Linux/Unix/Windows variants.
-  - Added initial support for IBM DB2 z/OS via the new `ibm_db2_zos` connector (currently focusing on DDL connectivity).
+  - Added initial support for IBM DB2 z/OS via the new `ibm_db2_zos` connector (currently only with DDL connectivity).
   - Extensive internal refactoring - migrator protocol table functions (`insert_`, `update_`, `fetch_`) now accept a single `settings` dictionary instead of multiple positional arguments, improving code maintainability.
   - Added new protocol tables and corresponding fetch/insert functions for handling partitioning, columns, and aliases.
   - Replaced hardcoded connectivity string mappings with unified constants (`ddl`, `odbc`, `jdbc`, `native`) in `constants.py`.
-  - Preparations for PoC (Proof of Concept) implementation.
+  - Repaired identification of identity columns for Sybase ASE by explicitly checking the status bit (0x80) instead of relying on non-zero status.
+  - Repaired identification of identity columns for MS SQL Server when using `INFORMATION_SCHEMA` by properly evaluating 'YES'/'TRUE'/'1' strings instead of relying on default boolean cast of non-empty 'NO' strings.
 
 ## 0.11.2 - 2026.03.02
 

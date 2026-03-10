@@ -4109,7 +4109,8 @@ EXECUTE FUNCTION {target_schema_name}.{trigger_name}_func();
                 parsed_code = sqlglot.parse_one(converted_code)
             except Exception as e:
                 self.config_parser.print_log_message('ERROR', f"sybase_ase_connector: convert_string_concatenation: Error parsing View code: {e}")
-                return ''
+                # Fallback to the unparsed converted_code instead of empty string to avoid crashes
+                return converted_code
 
             # double quote column names
             parsed_code = parsed_code.transform(quote_column_names)

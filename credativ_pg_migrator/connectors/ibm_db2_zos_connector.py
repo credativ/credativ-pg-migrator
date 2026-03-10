@@ -894,19 +894,131 @@ class IbmDb2ZosConnector(DatabaseConnector):
         return extracted_default_value
 
     def convert_view_code(self, settings: dict):
-        view_code = settings['view_code']
+        import sqlglot
+        
+        def quote_column_names(node):
+            if isinstance(node, sqlglot.exp.Column) and node.name:
+                node.set("this", sqlglot.exp.Identifier(this=node.name, quoted=True))
+            if isinstance(node, sqlglot.exp.Alias) and isinstance(node.args.get("alias"), sqlglot.exp.Identifier):
+                alias = node.args["alias"]
+                if not alias.args.get("quoted"):
+                    alias.set("quoted", True)
+            return node
 
+        def replace_schema_names(node):
+            if isinstance(node, sqlglot.exp.Table):
+                schema = node.args.get("db")
+                if schema and schema.name == settings['source_schema_name']:
+                    node.set("db", sqlglot.exp.Identifier(this=settings['target_schema_name'], quoted=False))
+            return node
+
+        def quote_schema_and_table_names(node):
+            if isinstance(node, sqlglot.exp.Table):
+                schema = node.args.get("db")
+                if schema and not schema.args.get("quoted"):
+                    schema.set("quoted", True)
+                table = node.args.get("this")
+                if table and not table.args.get("quoted"):
+                    table.set("quoted", True)
+            return node
+
+        def replace_functions(node):
+            mapping = self.get_sql_functions_mapping({ 'target_db_type': settings['target_db_type'] })
+            func_name_map = {}
+            for k, v in mapping.items():
+                if k.endswith('('):
+                    func_name_map[k[:-1].lower()] = v[:-1] if v.endswith('(') else v
+                elif k.endswith('()'):
+                    func_name_map[k[:-2].lower()] = v
+                else:
+                    func_name_map[k.lower()] = v
+
+            if isinstance(node, sqlglot.exp.Anonymous):
+                func_name = node.name.lower()
+                if func_name in func_name_map:
+                    mapped = func_name_map[func_name]
+                    if '(' not in mapped:
+                        node.set("this", sqlglot.exp.Identifier(this=mapped, quoted=False))
+                    else:
+                        if mapped.startswith('extract('):
+                            arg = node.args.get("expressions")
+                            if arg and len(arg) == 1:
+                                return sqlglot.exp.Extract(
+                                    this=sqlglot.exp.Identifier(this=func_name, quoted=False),
+                                    expression=arg[0]
+                                )
+                        else:
+                            for orig, repl in mapping.items():
+                                if orig.endswith('(') and func_name == orig[:-1].lower():
+                                    if repl.endswith('('):
+                                        node.set("this", sqlglot.exp.Identifier(this=repl[:-1], quoted=False))
+                                    else:
+                                        node.set("this", sqlglot.exp.Identifier(this=repl, quoted=False))
+                                    break
+                                elif orig.endswith('()') and func_name == orig[:-2].lower():
+                                    node.set("this", sqlglot.exp.Identifier(this=repl, quoted=False))
+                                    break
+                elif func_name + "()" in func_name_map:
+                    mapped = func_name_map[func_name + "()"]
+                    return sqlglot.exp.Anonymous(this=mapped)
+            return node
+
+        def convert_string_concatenation(node):
+            if isinstance(node, sqlglot.exp.Add):
+                left = node.left
+                right = node.right
+                is_left_string = left.is_string or (isinstance(left, sqlglot.exp.Cast) and left.to.this.name.upper() in ('VARCHAR', 'CHAR', 'TEXT', 'NVARCHAR', 'NCHAR', 'UNIVARCHAR', 'UNICHAR'))
+                is_right_string = right.is_string or (isinstance(right, sqlglot.exp.Cast) and right.to.this.name.upper() in ('VARCHAR', 'CHAR', 'TEXT', 'NVARCHAR', 'NCHAR', 'UNIVARCHAR', 'UNICHAR'))
+
+                if is_left_string or is_right_string:
+                    new_left = left
+                    new_right = right
+                    if not is_left_string:
+                         new_left = sqlglot.exp.Cast(this=left, to=sqlglot.exp.DataType.build('text'))
+                    if not is_right_string:
+                         new_right = sqlglot.exp.Cast(this=right, to=sqlglot.exp.DataType.build('text'))
+                    return sqlglot.exp.DPipe(this=new_left, expression=new_right)
+            return node
+
+        view_code = settings['view_code']
         converted_code = view_code
 
-        sql_functions_mapping = self.get_sql_functions_mapping({ 'target_db_type': settings['target_db_type'] })
+        remote_subs = self.config_parser.get_remote_objects_substitution()
+        if remote_subs:
+            iterator = remote_subs.items() if isinstance(remote_subs, dict) else remote_subs
+            for source_obj, target_obj in iterator:
+                if source_obj and target_obj:
+                    converted_code = re.sub(re.escape(source_obj), target_obj, converted_code, flags=re.IGNORECASE)
 
-        if sql_functions_mapping:
-            for src_func, tgt_func in sql_functions_mapping.items():
-                escaped_src_func = re.escape(src_func)
-                converted_code = re.sub(rf"(?i){escaped_src_func}", tgt_func, converted_code, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
-                self.config_parser.print_log_message('DEBUG', f"ibm_db2_zos_connector: convert_view_code: Checking conversion of function {src_func} to {tgt_func} in view code")
+        if settings['target_db_type'] == 'postgresql':
+            try:
+                # Use default sqlglot dialect because 'db2' dialect is not supported
+                parsed_code = sqlglot.parse_one(converted_code)
+            except Exception as e:
+                self.config_parser.print_log_message('ERROR', f"ibm_db2_zos_connector: convert_view_code: Error parsing View code: {e}")
+                # Fallback to the unparsed converted_code instead of empty string to avoid crashes
+                return converted_code
 
-        return view_code
+            parsed_code = parsed_code.transform(quote_column_names)
+            parsed_code = parsed_code.transform(convert_string_concatenation)
+            parsed_code = parsed_code.transform(replace_schema_names)
+            parsed_code = parsed_code.transform(quote_schema_and_table_names)
+            parsed_code = parsed_code.transform(replace_functions)
+
+            converted_code = parsed_code.sql(dialect="postgres")
+            converted_code = converted_code.replace("()()", "()")
+
+            sql_functions_mapping = self.get_sql_functions_mapping({ 'target_db_type': settings['target_db_type'] })
+            if sql_functions_mapping:
+                for src_func, tgt_func in sql_functions_mapping.items():
+                    escaped_src_func = re.escape(src_func)
+                    converted_code = re.sub(rf"(?i){escaped_src_func}", tgt_func, converted_code, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
+
+            self.config_parser.print_log_message('DEBUG', f"ibm_db2_zos_connector: convert_view_code: Converted view: {converted_code}")
+        else:
+            self.config_parser.print_log_message('ERROR', f"ibm_db2_zos_connector: convert_view_code: Unsupported target database type: {settings['target_db_type']}")
+
+        return converted_code
 
     def get_sequence_current_value(self, sequence_id: int):
         return 0

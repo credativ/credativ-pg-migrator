@@ -786,7 +786,135 @@ class IbmDb2ZosConnector(DatabaseConnector):
         return triggers
 
     def convert_trigger(self, settings: dict):
-        pass
+        trigger_sql = settings.get('trigger_sql', '')
+        trigger_name = settings.get('trigger_name', '')
+        target_schema_name = settings.get('target_schema_name', '')
+        target_table_name = settings.get('target_table_name', '')
+        
+        # Basic cleanup
+        trigger_sql = re.sub(r'--([^\n]*)', r'/*\1*/', trigger_sql)
+        
+        # 1. Timing (BEFORE, AFTER, INSTEAD OF)
+        timing_match = re.search(r'\b(BEFORE|AFTER|INSTEAD\s+OF)\b', trigger_sql, re.IGNORECASE)
+        timing = timing_match.group(1).upper() if timing_match else 'BEFORE'
+        
+        # 2. Event
+        event_match = re.search(r'\b(INSERT|UPDATE|DELETE)(?:\s+OF\s+([a-zA-Z0-9_,\s]+))?\b', trigger_sql[timing_match.end():] if timing_match else trigger_sql, re.IGNORECASE)
+        event = event_match.group(1).upper() if event_match else 'UPDATE'
+        of_cols = event_match.group(2) if event_match and event_match.group(2) else None
+        
+        pg_event = event
+        if of_cols and event == 'UPDATE':
+            cols = [c.strip() for c in of_cols.split(',')]
+            # Discard any matches that leaked to 'ON'
+            cols = [c for c in cols if c and c.upper() != 'ON']
+            # Reconstruct list safely
+            actual_cols = []
+            for c in cols:
+                if ' ON ' in c.upper():
+                    c = c.upper().split(' ON ')[0].strip()
+                if c.upper().endswith(' ON'):
+                    c = c[:-3].strip()
+                if c:
+                    actual_cols.append(c)
+            if actual_cols:
+                pg_event += f" OF {', '.join(actual_cols)}"
+                
+        # 3. Referencing Aliases
+        old_alias, new_alias = 'OLD', 'NEW'
+        old_match = re.search(r'\bOLD\s+AS\s+([a-zA-Z0-9_]+)\b', trigger_sql, re.IGNORECASE)
+        if old_match: old_alias = old_match.group(1)
+            
+        new_match = re.search(r'\bNEW\s+AS\s+([a-zA-Z0-9_]+)\b', trigger_sql, re.IGNORECASE)
+        if new_match: new_alias = new_match.group(1)
+            
+        # 4. Extract WHEN and Body
+        mode_match = re.search(r'\bMODE\s+DB2SQL\b', trigger_sql, re.IGNORECASE)
+        when_clause = ""
+        body = ""
+        remainder = trigger_sql[mode_match.end():].strip() if mode_match else trigger_sql
+        
+        if remainder.upper().startswith('WHEN'):
+            when_text = remainder[4:].lstrip()
+            if when_text.startswith('('):
+                depth = 0
+                for i, char in enumerate(when_text):
+                    if char == '(': depth += 1
+                    elif char == ')': depth -= 1
+                    if depth == 0:
+                        when_clause = when_text[1:i].strip()
+                        body = when_text[i+1:].strip()
+                        break
+        else:
+            body = remainder
+            
+        # Strip BEGIN ATOMIC / END
+        body = re.sub(r'(?i)^BEGIN\s+ATOMIC', '', body).strip()
+        body = re.sub(r'(?i)END;?\s*$', '', body).strip()
+        
+        # 5. Replacements
+        def replace_aliases(text):
+            if not text: return text
+            if old_alias.upper() != 'OLD':
+                text = re.sub(rf'\b{re.escape(old_alias)}\.', 'OLD.', text, flags=re.IGNORECASE)
+            if new_alias.upper() != 'NEW':
+                text = re.sub(rf'\b{re.escape(new_alias)}\.', 'NEW.', text, flags=re.IGNORECASE)
+            return text
+            
+        when_clause = replace_aliases(when_clause)
+        body = replace_aliases(body)
+        
+        # Replace CURRENT DATE / TIMESTAMP
+        body = re.sub(r'\bCURRENT\s+DATE\b', 'CURRENT_DATE', body, flags=re.IGNORECASE)
+        body = re.sub(r'\bCURRENT\s+TIMESTAMP\b', 'CURRENT_TIMESTAMP', body, flags=re.IGNORECASE)
+        when_clause = re.sub(r'\bCURRENT\s+DATE\b', 'CURRENT_DATE', when_clause, flags=re.IGNORECASE)
+        when_clause = re.sub(r'\bCURRENT\s+TIMESTAMP\b', 'CURRENT_TIMESTAMP', when_clause, flags=re.IGNORECASE)
+
+        # Handle SIGNAL SQLSTATE and RAISE_ERROR
+        body = re.sub(r"(?i)SIGNAL\s+SQLSTATE\s+'([^']+)'\s*\(\s*('[^']+')\s*\);?", r"RAISE EXCEPTION \2 USING ERRCODE = '\1';", body)
+        body = re.sub(r"(?i)RAISE_ERROR\s*\(\s*'([^']+)'\s*,\s*('[^']+')\s*\)", r"RAISE EXCEPTION \2 USING ERRCODE = '\1';", body)
+        
+        # Handle assignments: SET a = b or SET (a,b) = (c,d)
+        if body.upper().startswith('SET'):
+            body = re.sub(r'(?i)^SET\s*', '', body)
+            tuple_match = re.match(r'^\(\s*([^)]+)\s*\)\s*=\s*\(\s*(.+)\s*\);?$', body, re.IGNORECASE | re.DOTALL)
+            if tuple_match:
+                cols = [c.strip() for c in tuple_match.group(1).split(',')]
+                vals = [c.strip() for c in tuple_match.group(2).split(',')]
+                if len(cols) == 1:
+                    body = f"{cols[0]} := {tuple_match.group(2)};"
+                elif len(cols) == len(vals):
+                    # Multi-assignment
+                    body = "\n".join([f"{c} := {v};" for c, v in zip(cols, vals)])
+            else:
+                body = re.sub(r'(?i)^([A-Za-z0-9_.]+)\s*=', r'\1 := ', body)
+            if not body.strip().endswith(';'):
+                body += ';'
+                
+        # Handle plain updates 
+        if not body.strip().endswith(';'):
+            body += ';'
+            
+        # Target Generation
+        func_name = f"{trigger_name}_func"
+        
+        pg_func = f"""CREATE OR REPLACE FUNCTION "{target_schema_name}"."{func_name}"()
+RETURNS TRIGGER AS $$
+BEGIN
+{body}
+RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+"""
+        when_sql = f"\nWHEN ({when_clause})" if when_clause else ""
+        pg_trigger = f"""CREATE TRIGGER "{trigger_name}"
+{timing} {pg_event} ON "{target_schema_name}"."{target_table_name}"
+FOR EACH ROW{when_sql}
+EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
+"""
+
+        self.config_parser.print_log_message('DEBUG', f"ibm_db2_zos_connector: convert_trigger: Converted {trigger_name}")
+        return pg_func + '\n' + pg_trigger
 
     def fetch_funcproc_names(self, schema: str):
         return {}

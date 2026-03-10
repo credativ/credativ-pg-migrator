@@ -420,6 +420,14 @@ class MsSQLConnector(DatabaseConnector):
                 elif self.is_numeric_type(column_type) and numeric_precision is not None:
                     column_type += f"({numeric_precision})"
 
+                if self.config_parser.get_source_db_type() == 'sybase_ase':
+                    is_identity_bool = bool(is_identity is not None and (int(is_identity) & 128) == 128)
+                else:
+                    if str(is_identity).strip().upper() in ('YES', 'TRUE', '1'):
+                        is_identity_bool = True
+                    else:
+                        is_identity_bool = False
+
                 result[ordinal_position] = {
                     'column_name': column_name,
                     'data_type': data_type,
@@ -428,8 +436,8 @@ class MsSQLConnector(DatabaseConnector):
                     'numeric_precision': numeric_precision,
                     'numeric_scale': numeric_scale,
                     'is_nullable': 'YES' if is_nullable else 'NO',
-                    'is_identity': 'YES' if is_identity else 'NO',
-                    'column_default_value': column_default if not is_identity else None,
+                    'is_identity': 'YES' if is_identity_bool else 'NO',
+                    'column_default_value': column_default if not is_identity_bool else None,
                     'comment': ''
                 }
 

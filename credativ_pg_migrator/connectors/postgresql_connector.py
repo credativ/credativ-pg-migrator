@@ -1248,7 +1248,7 @@ class PostgreSQLConnector(DatabaseConnector):
             # Ensure data is a list of tuples
             self.config_parser.print_log_message('DEBUG2', f"postgresql_connector: insert_batch: Worker {worker_id}: Started insert batch into {target_schema_name}.{target_table_name} with {len(data)} rows")
             if isinstance(data, list) and all(isinstance(item, dict) for item in data):
-                
+
                 # Symmetrically unpack the payload values
                 if insert_columns_provided and len(data) > 0:
                     extract_keys = list(data[0].keys())
@@ -1261,6 +1261,9 @@ class PostgreSQLConnector(DatabaseConnector):
                     for col_name in extract_keys:
                         row.append(item.get(col_name))
                     formatted_data.append(tuple(row))
+                self.config_parser.print_log_message('DEBUG3', f"postgresql_connector: insert_batch: INSERT COLUMNS: {insert_columns}")
+                self.config_parser.print_log_message('DEBUG3', f"postgresql_connector: insert_batch: EXTRACT KEYS: {extract_keys}")
+                self.config_parser.print_log_message('DEBUG3', f"postgresql_connector: insert_batch: FORMATTED DATA[0]: {formatted_data[0]}")
                 data = formatted_data
             else:
                 self.config_parser.print_log_message('ERROR', f"postgresql_connector: insert_batch: Worker {worker_id}: Data for insert_batch must be a list of dictionaries, got {type(data)}")

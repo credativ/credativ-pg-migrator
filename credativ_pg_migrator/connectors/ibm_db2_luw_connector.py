@@ -124,10 +124,10 @@ class IbmDb2LuwConnector(DatabaseConnector):
                         NUMERIC_SCALE,
                         IS_NULLABLE,
                         COLUMN_DEFAULT,
-                        REMARKS,
-                        IS_IDENTITY
+                        '' AS REMARKS,
+                        'N' AS IDENTITY
                     FROM SYSIBM.COLUMNS
-                    WHERE TABLE_NAME = '{table_name}' AND TBCREATOR = upper('{table_schema}') ORDER BY COLNO
+                    WHERE TABLE_NAME = '{table_name}' AND TABLE_SCHEMA = upper('{table_schema}') ORDER BY ORDINAL_POSITION
                 """
             else:
                 raise ValueError(f"Unsupported system catalog: {self.config_parser.get_system_catalog()}")
@@ -718,7 +718,7 @@ class IbmDb2LuwConnector(DatabaseConnector):
                     SELECT
                         NAME,
                         CREATOR,
-                        TBNAME,
+                        NAME,
                         CREATOR,
                         REMARKS
                     FROM SYSIBM.SYSTABLES

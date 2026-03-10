@@ -110,7 +110,7 @@ class IbmDb2ZosConnector(DatabaseConnector):
         table_name = settings.get('table_name')
         columns = {}
         if self.connectivity == self.config_parser.const_connectivity_ddl():
-            query = f"""SELECT source_column_name, source_data_type, source_is_nullable, source_default_value, source_pk_indicator
+            query = f"""SELECT source_column_name, source_data_type, source_is_nullable, source_default_value, source_pk_indicator, source_is_identity
                         FROM "{self.protocol_schema}"."ddl_columns"
                         WHERE trim(source_schema_name) = trim(%s) AND trim(source_table_name) = trim(%s) ORDER BY id"""
             cursor = self.migrator_tables.protocol_connection.connection.cursor()
@@ -123,6 +123,7 @@ class IbmDb2ZosConnector(DatabaseConnector):
                 is_nullable = 'YES' if row[2] else 'NO'
                 default_val = row[3]
                 is_pk = row[4]
+                is_identity = 'YES' if row[5] else 'NO'
 
                 base_type = col_type.split('(')[0].strip().upper()
                 char_length = None
@@ -156,7 +157,7 @@ class IbmDb2ZosConnector(DatabaseConnector):
                     'basic_numeric_precision': None,
                     'basic_numeric_scale': None,
                     'basic_column_type': None,
-                    'is_identity': 'NO',
+                    'is_identity': is_identity,
                     'column_comment': 'Primary Key' if is_pk else None,
                     'is_generated_virtual': 'NO',
                     'is_generated_stored': 'NO',
@@ -492,14 +493,72 @@ class IbmDb2ZosConnector(DatabaseConnector):
                     if "NOT NULL" in after_type.upper():
                         is_nullable = False
 
+                    is_identity = False
                     default_value = None
-                    default_match = re.search(r"WITH\s+DEFAULT(?:\s+('[^']*'|-?[0-9\.]+|[A-Za-z0-9_]+(?:\s+[A-Za-z0-9_]+)?))?", after_type, re.IGNORECASE)
-                    if default_match:
-                        val = default_match.group(1)
-                        if val is None or val.upper() in ('NOT NULL', 'GENERATED', 'CONSTRAINT'):
-                            default_value = "SYSTEM DEFAULT"
-                        else:
-                            default_value = val
+                    
+                    # Check for Identity Column definition
+                    identity_match = re.search(r"GOVERNING\s+AS\s+IDENTITY|AS\s+IDENTITY\s*\(([^)]+)\)", after_type, re.IGNORECASE)
+                    if not identity_match:
+                        identity_match = re.search(r"GENERATED\s+(?:ALWAYS|BY\s+DEFAULT)\s+AS\s+IDENTITY(?:\s*\(([^)]+)\))?", after_type, re.IGNORECASE)
+
+                    if identity_match:
+                        is_identity = True
+                        seq_params_str = identity_match.group(1) if identity_match.lastindex and identity_match.group(identity_match.lastindex) else ""
+                        
+                        # Set default PostgreSQL Sequence generator mapping
+                        seq_name = f"{table_name}_{col_name}_seq".lower()
+                        default_value = f"nextval('\"{schema_name.lower()}\".\"{seq_name}\"')"
+                        
+                        # Rebuild Sequence SQL Statement based on DB2 properties
+                        seq_sql = f'CREATE SEQUENCE "{schema_name.lower()}"."{seq_name}"'
+                        
+                        if seq_params_str:
+                            seq_params_str = seq_params_str.upper()
+                            
+                            start_with_match = re.search(r"START\s+WITH\s+(-?\d+)", seq_params_str)
+                            if start_with_match:
+                                seq_sql += f" START WITH {start_with_match.group(1)}"
+                                
+                            increment_by_match = re.search(r"INCREMENT\s+BY\s+(-?\d+)", seq_params_str)
+                            if increment_by_match:
+                                seq_sql += f" INCREMENT BY {increment_by_match.group(1)}"
+                                
+                            minvalue_match = re.search(r"MINVALUE\s+(-?\d+)", seq_params_str)
+                            if minvalue_match:
+                                seq_sql += f" MINVALUE {minvalue_match.group(1)}"
+                            elif "NO MINVALUE" in seq_params_str:
+                                seq_sql += " NO MINVALUE"
+                                
+                            maxvalue_match = re.search(r"MAXVALUE\s+(-?\d+)", seq_params_str)
+                            if maxvalue_match:
+                                seq_sql += f" MAXVALUE {maxvalue_match.group(1)}"
+                            elif "NO MAXVALUE" in seq_params_str:
+                                seq_sql += " NO MAXVALUE"
+                                
+                            if "CACHE" in seq_params_str and "NO CACHE" in seq_params_str:
+                                seq_sql += " CACHE 1" # Disable caching
+                            else:
+                                cache_match = re.search(r"CACHE\s+(\d+)", seq_params_str)
+                                if cache_match:
+                                    seq_sql += f" CACHE {cache_match.group(1)}"
+
+                            if "CYCLE" in seq_params_str and "NO CYCLE" not in seq_params_str:
+                                seq_sql += " CYCLE"
+                                
+                        migrator_tables.insert_ddl_sequences({
+                            'source_schema_name': schema_name,
+                            'source_seq_name': seq_name.upper(),
+                            'source_ddl_text': seq_sql,
+                            'source_seq_comment': f"Auto-generated sequence for identity column {table_name}.{col_name}"
+                        })
+                    else:
+                        default_match = re.search(r"WITH\s+DEFAULT(?:\s+('[^']*'|-?[0-9\.]+|[A-Za-z0-9_]+(?:\s+[A-Za-z0-9_]+)?))?", after_type, re.IGNORECASE)
+                        if default_match:
+                            val = default_match.group(1)
+                            if val is None or val.upper() in ('NOT NULL', 'GENERATED', 'CONSTRAINT'):
+                                default_value = "SYSTEM DEFAULT"
+                            else:
+                                default_value = val
 
                     is_pk = col_name in pk_columns
 
@@ -513,7 +572,8 @@ class IbmDb2ZosConnector(DatabaseConnector):
                         'source_default_value': default_value,
                         'source_pk_indicator': is_pk,
                         'source_column_sql': col_def,
-                        'source_column_comment': None
+                        'source_column_comment': None,
+                        'source_is_identity': is_identity
                     })
 
         cursor = migrator_tables.protocol_connection.connection.cursor()

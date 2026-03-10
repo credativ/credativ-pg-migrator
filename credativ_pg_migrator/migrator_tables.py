@@ -3356,6 +3356,7 @@ class MigratorTables:
                 source_is_nullable BOOLEAN,
                 source_default_value VARCHAR,
                 source_pk_indicator BOOLEAN,
+                source_is_identity BOOLEAN,
                 source_column_sql TEXT,
                 source_column_comment TEXT
             )
@@ -3463,22 +3464,38 @@ class MigratorTables:
 
     def insert_ddl_columns(self, settings):
         func_run_id = uuid.uuid4()
+        source_schema_name = settings['source_schema_name']
+        source_table_name = settings['source_table_name']
+        source_column_name = settings['source_column_name']
+        source_data_type = settings['source_data_type']
+        source_is_nullable = settings.get('source_is_nullable', True)
+        source_default_value = settings.get('source_default_value', None)
+        source_pk_indicator = settings.get('source_pk_indicator', False)
+        source_column_sql = settings.get('source_column_sql', None)
+        source_column_comment = settings.get('source_column_comment', None)
+        source_is_identity = settings.get('source_is_identity', False)
+
         query = f"""
             INSERT INTO "{self.protocol_schema}"."ddl_columns"
-            (source_schema_name, source_table_name, source_column_name, source_data_type, source_is_nullable, source_default_value, source_pk_indicator, source_column_sql, source_column_comment)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (source_schema_name, source_table_name, source_column_name, source_data_type,
+            source_is_nullable, source_default_value, source_pk_indicator, source_is_identity,
+            source_column_sql, source_column_comment)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
         """
-        params = (settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_column_name'), settings.get('source_data_type'), settings.get('source_is_nullable'), settings.get('source_default_value'), settings.get('source_pk_indicator'), settings.get('source_column_sql'), settings.get('source_column_comment'))
+        params = (source_schema_name, source_table_name, source_column_name, source_data_type,
+                  source_is_nullable, source_default_value, source_pk_indicator,
+                  source_is_identity, source_column_sql, source_column_comment)
         self.config_parser.print_log_message('DEBUG3', f"migrator_tables: insert_ddl_columns: inserting: {params}")
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
-            row_id = cursor.fetchone()[0]
+            row = cursor.fetchone()
             cursor.close()
-            return row_id
+            return row[0] if row else None
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_ddl_columns: ({func_run_id}): Exception: {e}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_ddl_columns: Error inserting column {settings.get('source_column_name')} into ddl_columns.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_ddl_columns: Error: {e}")
             raise
 
     def insert_ddl_indexes(self, settings):

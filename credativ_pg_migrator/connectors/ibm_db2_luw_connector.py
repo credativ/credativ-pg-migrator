@@ -621,7 +621,8 @@ class IbmDb2LuwConnector(DatabaseConnector):
                         SELECT
                             PK_COLNAMES,
                             REFTABNAME,
-                            FK_COLNAMES
+                            FK_COLNAMES,
+                            REFTABSCHEMA
                         FROM SYSCAT.REFERENCES
                         WHERE TABSCHEMA = '{source_table_schema.upper()}'
                         AND TABNAME = '{source_table_name}'
@@ -635,13 +636,16 @@ class IbmDb2LuwConnector(DatabaseConnector):
                         ref_table_name = fk_row[1]
                         fk_columns = fk_row[2].strip().lstrip('+').split('+')
                         fk_columns = ', '.join(f'"{col}"' for col in fk_columns)
+                        ref_table_schema = fk_row[3].strip() if fk_row[3] else source_table_schema
+                    else:
+                        ref_table_schema = source_table_schema
 
                     table_constraints[order_num] = {
                         'constraint_name': constraint_name,
                         'constraint_type': constraint_type,
                         'constraint_owner': source_table_schema,
                         'constraint_columns': fk_columns,
-                        'referenced_table_schema': '',
+                        'referenced_table_schema': ref_table_schema,
                         'referenced_table_name': ref_table_name,
                         'referenced_columns': pk_columns,
                         'constraint_sql': '',

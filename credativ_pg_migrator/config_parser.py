@@ -17,10 +17,10 @@
 import yaml
 from credativ_pg_migrator.constants import MigratorConstants
 import re
+import csv
 from datetime import datetime
 import os
 import time
-import csv
 from collections import Counter
 
 class ConfigParser:
@@ -247,6 +247,21 @@ class ConfigParser:
 
     def get_migration_settings(self):
         return self.config['migration']
+
+    def is_mapping_workflow(self):
+        return self.get_migration_settings().get('workflow', 'standard') == 'mapping'
+
+    def get_suspend_indexes_constraints(self):
+        return self.get_migration_settings().get('suspend_indexes_constraints', False)
+
+    def get_table_mapping(self, source_schema, source_table):
+        """Returns the mapping rule for a specific source table if it exists within its data_export settings."""
+        table_data_export = self.get_table_data_export(source_schema, source_table)
+        if table_data_export and 'mapping_rules' in table_data_export:
+            mapping_rules = table_data_export.get('mapping_rules', [])
+            if mapping_rules and len(mapping_rules) > 0:
+                return mapping_rules[0]
+        return None
 
     def get_tables_config(self):
         return self.config.get('tables', []) # Default to empty list if not specified
@@ -562,24 +577,24 @@ class ConfigParser:
     def get_target_partitioning(self):
         return self.config.get('target_partitioning', {})
 
-    def get_source_database_export(self):
+    def get_source_data_export(self):
         source_config = self.get_source_config()
-        return source_config.get('database_export', {})
+        return source_config.get('data_export', {})
 
-    def get_source_database_export_on_missing_data_file(self):
-        return self.get_source_database_export().get('on_missing_data_file', 'source_table_name')
+    def get_source_data_export_on_missing_data_file(self):
+        return self.get_source_data_export().get('on_missing_data_file', 'source_table_name')
 
-    def get_source_database_export_format(self):
-        return self.get_source_database_export().get('format', None)
+    def get_source_data_export_format(self):
+        return self.get_source_data_export().get('format', None)
 
-    def get_source_database_export_delimiter(self):
-        return self.get_source_database_export().get('delimiter', "|")
+    def get_source_data_export_delimiter(self):
+        return self.get_source_data_export().get('delimiter', "|")
 
-    def get_source_database_export_file(self):
-        return self.get_source_database_export().get('file', None)
+    def get_source_data_export_file(self):
+        return self.get_source_data_export().get('file', None)
 
-    def get_source_database_export_file_path(self):
-        export_file = self.get_source_database_export_file()
+    def get_source_data_export_file_path(self):
+        export_file = self.get_source_data_export_file()
         if export_file is None:
             return None
         # Remove the file name from the export_file and leave just the path
@@ -587,58 +602,58 @@ class ConfigParser:
             export_file = os.path.dirname(export_file)
         return os.path.abspath(export_file)
 
-    def get_source_database_export_header(self):
-        return self.get_source_database_export().get('header', False)
+    def get_source_data_export_header(self):
+        return self.get_source_data_export().get('header', False)
 
-    def get_source_database_export_workers(self):
-        return self.get_source_database_export().get('workers', 4)
+    def get_source_data_export_workers(self):
+        return self.get_source_data_export().get('workers', 4)
 
-    def get_source_database_export_conversion_path(self):
-        conversion_path = self.get_source_database_export().get('conversion_path', None)
+    def get_source_data_export_conversion_path(self):
+        conversion_path = self.get_source_data_export().get('conversion_path', None)
         if conversion_path is None:
             # If conversion_path is not set, try to extract the directory from the export file path
-            export_file = self.get_source_database_export_file()
+            export_file = self.get_source_data_export_file()
             if export_file:
                 return os.path.dirname(os.path.abspath(export_file))
             return None
         return conversion_path
 
-    def get_source_database_export_clean(self):
-        return self.get_source_database_export().get('clean', False)
+    def get_source_data_export_clean(self):
+        return self.get_source_data_export().get('clean', False)
 
-    def get_source_database_export_big_files_split(self):
-        return self.get_source_database_export().get('big_files_split', None)
+    def get_source_data_export_big_files_split(self):
+        return self.get_source_data_export().get('big_files_split', None)
 
-    def get_source_database_export_big_files_split_enabled(self):
-        big_files_split = self.get_source_database_export_big_files_split()
+    def get_source_data_export_big_files_split_enabled(self):
+        big_files_split = self.get_source_data_export_big_files_split()
         if big_files_split and isinstance(big_files_split, dict):
             return big_files_split.get('enabled', False)
         return False
 
-    def get_source_database_export_big_files_split_threshold_bytes(self):
-        big_files_split = self.get_source_database_export_big_files_split()
+    def get_source_data_export_big_files_split_threshold_bytes(self):
+        big_files_split = self.get_source_data_export_big_files_split()
         if big_files_split and isinstance(big_files_split, dict):
             return self.convert_size_to_bytes(big_files_split.get('threshold', None))
         return None
 
-    def get_source_database_export_big_files_split_chunk_size_bytes(self):
-        big_files_split = self.get_source_database_export_big_files_split()
+    def get_source_data_export_big_files_split_chunk_size_bytes(self):
+        big_files_split = self.get_source_data_export_big_files_split()
         if big_files_split and isinstance(big_files_split, dict):
             return self.convert_size_to_bytes(big_files_split.get('chunk_size', None))
         return None
 
-    def get_source_database_export_big_files_split_workers(self):
-        big_files_split = self.get_source_database_export_big_files_split()
+    def get_source_data_export_big_files_split_workers(self):
+        big_files_split = self.get_source_data_export_big_files_split()
         if big_files_split and isinstance(big_files_split, dict):
             return big_files_split.get('workers', 4)
         return -1  ## by default do not use parallel workers if splitting or workers are not specified
 
-    def get_source_database_export_lob_columns(self):
+    def get_source_data_export_lob_columns(self):
         """
         Get LOB columns configuration from source database export.
         Returns a list of [table_name, column_name] pairs.
         """
-        return self.get_source_database_export().get('lob_columns', [])
+        return self.get_source_data_export().get('lob_columns', [])
 
     def get_table_name_for_lob_import(self, table_name):
         return f"{table_name}_unllobimport"
@@ -721,7 +736,7 @@ class ConfigParser:
                             chunk_size = -1
         return chunk_size
 
-    def get_table_database_export(self, schema_name, table_name):
+    def get_table_data_export(self, schema_name, table_name):
         if table_name:
             table_settings = self.config.get('table_settings', [])
             if isinstance(table_settings, list):
@@ -729,26 +744,26 @@ class ConfigParser:
                     pattern = entry.get('table_name')
                     table_schema = entry.get('table_schema', schema_name)
                     if pattern and re.fullmatch(pattern, table_name, re.IGNORECASE) and table_schema.lower() == schema_name.lower():
-                        return entry.get('database_export', None)
+                        return entry.get('data_export', None)
         return None
 
-    def get_table_database_export_format(self, schema_name, table_name):
-        return self.get_table_database_export(schema_name, table_name).get('format', None)
+    def get_table_data_export_format(self, schema_name, table_name):
+        return self.get_table_data_export(schema_name, table_name).get('format', None)
 
-    def get_table_database_export_delimiter(self, schema_name, table_name):
-        return self.get_table_database_export(schema_name, table_name).get('delimiter', None)
+    def get_table_data_export_delimiter(self, schema_name, table_name):
+        return self.get_table_data_export(schema_name, table_name).get('delimiter', None)
 
-    def get_table_database_export_file(self, schema_name, table_name):
-        return self.get_table_database_export(schema_name, table_name).get('file', None)
+    def get_table_data_export_file(self, schema_name, table_name):
+        return self.get_table_data_export(schema_name, table_name).get('file', None)
 
-    def get_table_database_export_header(self, schema_name, table_name):
-        return self.get_table_database_export(schema_name, table_name).get('header', False)
+    def get_table_data_export_header(self, schema_name, table_name):
+        return self.get_table_data_export(schema_name, table_name).get('header', False)
 
-    def get_table_database_export_conversion_path(self, schema_name, table_name):
-        conversion_path = self.get_table_database_export(schema_name, table_name).get('conversion_path', None)
+    def get_table_data_export_conversion_path(self, schema_name, table_name):
+        conversion_path = self.get_table_data_export(schema_name, table_name).get('conversion_path', None)
         if conversion_path is None:
             # If conversion_path is not set, try to extract the directory from the export file path
-            export_file = self.get_table_database_export_file(schema_name, table_name)
+            export_file = self.get_table_data_export_file(schema_name, table_name)
             if export_file:
                 return os.path.dirname(os.path.abspath(export_file))
             return None
@@ -870,7 +885,7 @@ class ConfigParser:
                 self.print_log_message('DEBUG3', f"config_parser: get_table_lob_columns: Column {column_info['column_name']} in table {source_table_name} is of LOB type {column_info.get('data_type', '').upper()}. Added to LOB columns list.")
             else:
                 # Check if this column is configured as a LOB column in the export settings
-                lob_columns_config = self.get_source_database_export_lob_columns()
+                lob_columns_config = self.get_source_data_export_lob_columns()
                 for lob_config in lob_columns_config:
                     if len(lob_config) >= 2:
                         config_table_name = lob_config[0]
@@ -885,9 +900,6 @@ class ConfigParser:
         part_name = 'convert_csv_to_utf8 start'
         self.print_log_message('DEBUG3', f"config_parser: convert_csv_to_utf8: ({part_name}): Starting conversion of CSV file '{data_source_settings.get('file_name')}' to UTF-8.")
         try:
-            import csv
-            import re
-            
             input_csv_data_file = data_source_settings['file_name']
             output_csv_data_file = data_source_settings.get('converted_file_name', input_csv_data_file) + '_utf8'
             source_table_name = data_source_settings.get('source_table_name', 'Unknown')
@@ -924,10 +936,10 @@ class ConfigParser:
 
             with open(input_csv_data_file, 'r', encoding=character_set, errors='replace', newline='') as infile, \
                  open(output_csv_data_file, 'w', encoding='utf-8', newline='') as outfile:
-                
+
                 reader = csv.reader(infile, delimiter=csv_delimiter)
                 writer = csv.writer(outfile, delimiter=csv_delimiter, quoting=csv.QUOTE_MINIMAL)
-                
+
                 for row in reader:
                     processed_row = []
                     for field in row:
@@ -947,7 +959,7 @@ class ConfigParser:
                                     processed_row.append(f"{date_part} {hour}:{minute}:{second}")
                             else:
                                 processed_row.append(field)
-                    
+
                     writer.writerow(processed_row)
                     counter += 1
 
@@ -1207,15 +1219,15 @@ class ConfigParser:
             raise e
 
     def split_big_unl_file(self, data_source_settings):
-        split_threshold_bytes = self.get_source_database_export_big_files_split_threshold_bytes()
-        chunk_size_bytes = self.get_source_database_export_big_files_split_chunk_size_bytes()
+        split_threshold_bytes = self.get_source_data_export_big_files_split_threshold_bytes()
+        chunk_size_bytes = self.get_source_data_export_big_files_split_chunk_size_bytes()
         source_file_size = data_source_settings.get('file_size', None)
         source_file_name = data_source_settings.get('file_name', None)
         source_file_basename = os.path.basename(source_file_name)
         converted_file_name = data_source_settings.get('converted_file_name', None)
         converted_file_path = os.path.dirname(os.path.abspath(converted_file_name))
         delimiter = data_source_settings.get('format_options', {}).get('delimiter', '|').encode('utf-8')
-        part_size_bytes = self.get_source_database_export_big_files_split_chunk_size_bytes()
+        part_size_bytes = self.get_source_data_export_big_files_split_chunk_size_bytes()
         continuation_seq = b'\r\\'
         source_file_parts = []
         converted_file_parts = []

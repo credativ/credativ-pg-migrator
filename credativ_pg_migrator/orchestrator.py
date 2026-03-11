@@ -68,6 +68,10 @@ class Orchestrator:
                 self.run_migrate_sequences()
                 self.check_pausing_resuming()
 
+                if self.config_parser.is_mapping_workflow() and self.config_parser.get_suspend_indexes_constraints():
+                    self.run_drop_target_indexes_and_constraints()
+                    self.check_pausing_resuming()
+
                 self.run_migrate_tables()
                 self.check_pausing_resuming()
 
@@ -145,6 +149,43 @@ class Orchestrator:
                 self.config_parser.print_log_message('INFO', "orchestrator: run_post_migration_script: Post-migration script executed successfully.")
             except Exception as e:
                 self.handle_error(e, 'post-migration script')
+
+    def run_drop_target_indexes_and_constraints(self):
+        self.config_parser.print_log_message('INFO', "orchestrator: run_drop_target_indexes_and_constraints: Dropping target indexes and constraints for mapping workflow...")
+        try:
+            self.target_connection.connect()
+            cursor = self.target_connection.connection.cursor()
+
+            constraints = self.migrator_tables.get_constraints()
+            if constraints:
+                for constraint in constraints:
+                    # Depending on DB, usually index_owner is schema
+                    schema = constraint.get('target_schema_name', '')
+                    table = constraint.get('target_table_name', '')
+                    name = constraint.get('constraint_name', '')
+                    if name:
+                        drop_sql = f'ALTER TABLE "{schema}"."{table}" DROP CONSTRAINT IF EXISTS "{name}" CASCADE;'
+                        self.config_parser.print_log_message('DEBUG', f"Dropping constraint: {drop_sql}")
+                        cursor.execute(drop_sql)
+
+            indexes = self.migrator_tables.get_indexes()
+            if indexes:
+                for index in indexes:
+                    if index.get('index_type') not in ('PRIMARY KEY', 'UNIQUE', 'CHECK', 'FOREIGN KEY', 'EXCLUSION'):
+                        schema = index.get('target_schema_name', '')
+                        name = index.get('index_name', '')
+                        if name:
+                            drop_sql = f'DROP INDEX IF EXISTS "{schema}"."{name}" CASCADE;'
+                            self.config_parser.print_log_message('DEBUG', f"Dropping index: {drop_sql}")
+                            cursor.execute(drop_sql)
+
+            self.target_connection.connection.commit()
+            cursor.close()
+            self.target_connection.disconnect()
+            self.config_parser.print_log_message('INFO', "orchestrator: run_drop_target_indexes_and_constraints: Successfully dropped target indexes and constraints.")
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"orchestrator: run_drop_target_indexes_and_constraints: Error: {e}")
+            raise e
 
     def run_migrate_tables(self):
         self.migrator_tables.insert_main({'task_name': 'Orchestrator', 'subtask_name': 'tables migration'})
@@ -448,7 +489,9 @@ class Orchestrator:
                 self.config_parser.print_log_message( 'DEBUG', f"orchestrator: table_worker: Worker {worker_id}: Executing session settings: {worker_target_connection.session_settings}")
                 worker_target_connection.execute_query(worker_target_connection.session_settings)
 
-            if ((settings['drop_tables'] and not settings['resume_after_crash'])
+            should_drop_create = not self.config_parser.is_mapping_workflow()
+
+            if should_drop_create and ((settings['drop_tables'] and not settings['resume_after_crash'])
                 or (settings['resume_after_crash'] and settings['drop_unfinished_tables'])
                 or (settings['resume_after_crash'] and not worker_target_connection.target_table_exists(target_schema_name, target_table_name))):
                 part_name = 'drop table'
@@ -472,7 +515,7 @@ class Orchestrator:
                             time.sleep(10)
                 self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Table '{target_table_name}' dropped successfully.")
 
-            if ((settings['create_tables'] and not settings['resume_after_crash'])
+            if should_drop_create and ((settings['create_tables'] and not settings['resume_after_crash'])
                 or (settings['resume_after_crash'] and settings['drop_unfinished_tables'])
                 or (settings['resume_after_crash'] and not worker_target_connection.target_table_exists(target_schema_name, target_table_name))):
                 self.config_parser.print_log_message( 'DEBUG', f"orchestrator: table_worker: Worker {worker_id}: Creating table with SQL: {create_table_sql}")
@@ -541,7 +584,7 @@ class Orchestrator:
 
                 if data_source is not None:
                     self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Data source for table {table_data['source_schema_name']}.{table_data['source_table_name']} is {data_source}.")
-                    clean_objects = self.config_parser.get_source_database_export_clean()
+                    clean_objects = self.config_parser.get_source_data_export_clean()
 
                     if data_source['file_found'] and data_source['file_name'] is not None:
                         self.config_parser.print_log_message('DEBUG', f"orchestrator: table_worker: Worker {worker_id}: Data source file found: {data_source['file_name']} - proceeding with data migration.")
@@ -593,13 +636,13 @@ class Orchestrator:
                                 ## Split of big files is currently implemented only for Informix UNL data files
                                 ## And even here it can be not efficient if client uses slow disk(s)
                                 if self.config_parser.get_source_db_type() == 'informix' and data_source['format_options']['format'].upper() == 'UNL':
-                                    big_files_split_enabled = self.config_parser.get_source_database_export_big_files_split_enabled()
+                                    big_files_split_enabled = self.config_parser.get_source_data_export_big_files_split_enabled()
                                     data_source_file_size = data_source['file_size']
 
                                     data_source_file_size_str = ""
                                     if data_source_file_size is not None:
                                         data_source_file_size_str = f"{data_source_file_size} B ({data_source_file_size / (1024 ** 3):.2f} GB)"
-                                    split_threshold_bytes = self.config_parser.get_source_database_export_big_files_split_threshold_bytes()
+                                    split_threshold_bytes = self.config_parser.get_source_data_export_big_files_split_threshold_bytes()
                                     split_threshold_bytes_str = ""
                                     if split_threshold_bytes is not None:
                                         split_threshold_bytes_str = f"{split_threshold_bytes} B ({split_threshold_bytes / (1024 ** 3):.2f} GB)"
@@ -640,7 +683,7 @@ class Orchestrator:
                                         # Always convert CSV to UTF-8 to apply DB2 timestamp fixes and null replacements
                                         self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Table {target_table_name}: Converting CSV to UTF-8 and applying DB2 fixes.")
                                         self.config_parser.convert_csv_to_utf8(data_source_settings)
-                                        
+
                                         # CSV data source - use the converted file
                                         part_name = 'use CSV'
                                         csv_file_name = data_source_settings['converted_file_name']
@@ -727,7 +770,7 @@ class Orchestrator:
                                                     datafiles_cursor.close()
                                                     self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Table {target_table_name}: Found {len(datafiles)} distinct data files for LOB column {lob_col_name}")
 
-                                                    max_lob_parallel_workers = self.config_parser.get_source_database_export_workers()
+                                                    max_lob_parallel_workers = self.config_parser.get_source_data_export_workers()
                                                     if max_lob_parallel_workers <= 1:
                                                         max_lob_parallel_workers = 1
                                                     else:
@@ -767,7 +810,7 @@ class Orchestrator:
                                                                     'datafiles_count': len(datafiles),
                                                                     'current_datafile_num': current_datafile_num,
                                                                     'occurrences': occurrences,
-                                                                    'lob_files_path': self.config_parser.get_source_database_export_file_path(),
+                                                                    'lob_files_path': self.config_parser.get_source_data_export_file_path(),
                                                                 }
 
                                                                 self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Table {target_table_name}: parallel LOB processing [{lob_col_name}]: futures running count: {len(futures)}")
@@ -865,7 +908,7 @@ class Orchestrator:
                         if not data_source['file_found'] and data_source['file_name'] is not None:
                             self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: ({part_name}) Data file {data_source['file_name']} not found for table {target_table_name}.")
 
-                            on_missing_data_file = self.config_parser.get_source_database_export_on_missing_data_file()
+                            on_missing_data_file = self.config_parser.get_source_data_export_on_missing_data_file()
                             if on_missing_data_file == 'skip':
                                 self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Skipping data migration for table {target_table_name} due to missing data file.")
                                 use_source_table = False

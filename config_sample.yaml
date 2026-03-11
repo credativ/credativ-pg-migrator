@@ -92,7 +92,7 @@ source:
   #   delimiter - delimiter for CSV and UNL files, default is comma for CSV and pipe "|" for UNL
   #
   # In case of Informix, if source table contains CLOB or BLOB columns, import follows different processing path to properly handle LOB values
-  database_export:
+  data_export:
 
     # action to take if data file is not found
     #   error - raise an error and stop the migration
@@ -164,6 +164,8 @@ migration:
   # standard (default) = read source objects from source DB or DDL files, convert them to target objects, create target objects, copy data
   # objects_mapping = map existing objects in target db to existing objects in source database, copy data
   workflow: "standard" # "mapping"
+  # analyzes target indexes and constraints, stores them, drops them, migrates data, recreates them (mapping workflow only)
+  suspend_indexes_constraints: true
   # drop schema if exists - uses DROP CASCADE if true
   drop_schema: true
   drop_tables: true
@@ -251,7 +253,7 @@ table_settings:
     migrate_triggers: false
 
     # individual data export settings for the table - only CSV and UNL formats are supported
-    database_export:
+    data_export:
       file: "/some/other/path/to/data/files/some_specific_name.dump"  # path to the data file
       format: "CSV" # currently only CSV and UNL formats are supported
       delimiter: "|"  # delimiter for CSV and UNL files, default is comma resp. "|"
@@ -273,6 +275,16 @@ table_settings:
       #   threshold: '5GB'
       #   chunk_size: '2GB'
       #   workers: 4  # number of workers to use for parallel processing of the chunks, default is 4
+
+      # mapping rules for the mapping workflow.
+      mapping_rules:
+        - target_schema: "new_target_schema"
+          target_table: "new_table_name"
+          column_mapping:
+            - source_column: "old_column"
+              target_column: "new_column"
+            - source_column: "old_column"
+              target_column: "new_column"
 
     ## currently not implemented, just a preparation for the future
     # individual target LOB storage settings for the table

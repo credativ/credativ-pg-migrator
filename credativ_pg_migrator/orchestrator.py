@@ -1144,16 +1144,14 @@ class Orchestrator:
                     try:
                         part_name = 'read LOB file'
                         if lob_col_type.lower() == 'bytea':
-                            # For BYTEA, read the file as binary
                             with open(filepath, 'rb') as f:
                                 f.seek(start)
                                 chunk = f.read(length)
 
                         elif lob_col_type.lower() == 'text':
-                            # For TEXT, read the file as text
-                            with open(filepath, 'r', encoding='utf-8') as f:
+                            with open(filepath, 'rb') as f:
                                 f.seek(start)
-                                chunk = f.read(length)
+                                chunk = f.read(length).decode('utf-8')
 
                         row[lob_col_index-1] = chunk
                     except Exception as e:

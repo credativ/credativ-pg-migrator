@@ -454,57 +454,13 @@ class Planner:
                     'migrator_tables': self.migrator_tables,
                 }
                 self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_tables: convert_table_columns - settings: {settings}")
-                if self.config_parser.is_mapping_workflow():
-                    mapping_rule = self.config_parser.get_table_mapping(self.source_schema_name, table_info['table_name'])
-                    if mapping_rule:
-                        self.target_schema_name = mapping_rule.get('target_schema', self.target_schema_name)
-                        settings['target_schema_name'] = self.target_schema_name
-                        table_info['target_table_name'] = mapping_rule.get('target_table', table_info['table_name'])
-                        settings['target_table_name'] = table_info['target_table_name']
-                    else:
-                        table_info['target_table_name'] = table_info['table_name']
-
-                    self.target_connection.connect()
-                    target_columns_raw = self.target_connection.fetch_table_columns({
-                        'table_schema': self.target_schema_name,
-                        'table_name': table_info['target_table_name']
-                    })
-                    self.target_connection.disconnect()
-
-                    target_columns = {}
-                    for s_order, s_col in source_columns.items():
-                        target_col_name = s_col['column_name']
-                        if mapping_rule and mapping_rule.get('column_mapping'):
-                            for c_map in mapping_rule['column_mapping']:
-                                if c_map.get('source_column') == s_col['column_name']:
-                                    target_col_name = c_map.get('target_column')
-                                    break
-
-                        t_col_info = None
-                        for t_col in target_columns_raw.values():
-                            if t_col['column_name'].lower() == target_col_name.lower():
-                                t_col_info = t_col
-                                break
-
-                        if not t_col_info:
-                            raise ValueError(f"Mapping failed: target column {target_col_name} not found in {self.target_schema_name}.{table_info['target_table_name']}")
-
-                        if hasattr(self, 'check_compatibility') and not self.check_compatibility(s_col['data_type'], t_col_info['data_type']):
-                            raise ValueError(f"Data type mismatch for {s_col['column_name']} -> {target_col_name}: {s_col['data_type']} is not compatible with {t_col_info['data_type']}")
-
-                        target_columns[s_order] = t_col_info
-
-                    target_table_sql = ""
-                else:
-                    target_columns = self.convert_table_columns(settings)
-                    table_info['target_table_name'] = table_info['table_name']
+                target_columns = self.convert_table_columns(settings)
 
                 settings['target_columns'] = target_columns
                 self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_tables: convert_table_columns - target_columns: {target_columns}")
 
-                if not self.config_parser.is_mapping_workflow():
-                    target_table_sql = self.target_connection.get_create_table_sql(settings)
-                    self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_tables: Target table SQL: {target_table_sql}")
+                target_table_sql = self.target_connection.get_create_table_sql(settings)
+                self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_tables: Target table SQL: {target_table_sql}")
 
                 target_partitioning = self.config_parser.get_target_partitioning()
                 if target_partitioning:
@@ -574,7 +530,6 @@ class Planner:
                 self.source_connection.disconnect()
                 self.config_parser.print_log_message( 'INFO', f"planner: run_prepare_tables: Source table {table_info['table_name']} has {source_table_rows} rows.")
 
-                target_table_name_to_insert = table_info.get('target_table_name', table_info['table_name'])
                 self.migrator_tables.insert_tables({
                     'source_schema_name': self.source_schema_name,
                     'source_table_name': table_info['table_name'],
@@ -584,7 +539,7 @@ class Planner:
                     'source_table_description': table_description,
                     'source_table_sql': table_info.get('source_table_sql', ''),
                     'target_schema_name': self.target_schema_name,
-                    'target_table_name': target_table_name_to_insert,
+                    'target_table_name': table_info['table_name'],
                     'target_columns': target_columns,
                     'target_table_rows': target_table_rows,
                     'target_table_sql': target_table_sql,
@@ -619,34 +574,16 @@ class Planner:
                 continue
 
             if self.config_parser.should_migrate_indexes():
-                if self.config_parser.is_mapping_workflow() and self.config_parser.get_suspend_indexes_constraints():
-                    target_table_id_for_indexes = None
-                    self.target_connection.connect()
-                    target_tables_all = self.target_connection.fetch_table_names(self.target_schema_name)
-                    self.target_connection.disconnect()
-                    for t_id, t_info in target_tables_all.items():
-                        if t_info['table_name'] == table_info.get('target_table_name', table_info['table_name']):
-                            target_table_id_for_indexes = t_info['id']
-                            break
-                    if target_table_id_for_indexes:
-                        indexes = self.target_connection.fetch_indexes({
-                            'source_table_id': target_table_id_for_indexes,
-                            'source_table_schema': self.target_schema_name,
-                            'source_table_name': table_info.get('target_table_name', table_info['table_name'])
-                        })
-                    else:
-                        indexes = {}
-                else:
-                    indexes = self.source_connection.fetch_indexes({
-                        'source_table_id': table_info['id'],
-                        'source_table_name': table_info['table_name'],
-                        'source_table_schema': self.source_schema_name,
-                        'source_db_type': self.config_parser.get_source_db_type(),
-                        'source_db_version': self.config_parser.get_source_db_version(),
-                        'target_table_schema': self.target_schema_name,
-                        'target_table_name': table_info['table_name'],
-                        'target_columns': target_columns,
-                    })
+                indexes = self.source_connection.fetch_indexes({
+                    'source_table_id': table_info['id'],
+                    'source_table_name': table_info['table_name'],
+                    'source_table_schema': self.source_schema_name,
+                    'source_db_type': self.config_parser.get_source_db_type(),
+                    'source_db_version': self.config_parser.get_source_db_version(),
+                    'target_table_schema': self.target_schema_name,
+                    'target_table_name': table_info['table_name'],
+                    'target_columns': target_columns,
+                })
                 self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_tables: Indexes: {indexes}")
                 if indexes:
                     for _, index_details in indexes.items():
@@ -658,15 +595,12 @@ class Planner:
                         values['index_name'] = index_details['index_name']
                         values['index_type'] = index_details['index_type']
                         values['target_schema_name'] = self.target_schema_name
-                        values['target_table_name'] = table_info.get('target_table_name', table_info['table_name'])
+                        values['target_table_name'] = table_info['table_name']
                         values['index_columns'] = index_details['index_columns']
                         values['index_comment'] = index_details['index_comment']
-                        if self.config_parser.is_mapping_workflow() and self.config_parser.get_suspend_indexes_constraints():
-                            values['index_sql'] = index_details.get('index_sql', '')
-                        else:
-                            values['index_sql'] = self.target_connection.get_create_index_sql(values)
+                        values['index_sql'] = self.target_connection.get_create_index_sql(values)
                         values['is_function_based'] = index_details.get('is_function_based', 'NO')
-                        self.migrator_tables.insert_index( values )
+                        self.migrator_tables.insert_indexes( values )
                         self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_tables: Processed index: {values}")
                 else:
                     self.config_parser.print_log_message( 'INFO', f"planner: run_prepare_tables: No indexes found for table {table_info['table_name']}.")
@@ -674,63 +608,42 @@ class Planner:
                 self.config_parser.print_log_message( 'INFO', "planner: run_prepare_tables: Skipping index migration.")
 
             if self.config_parser.should_migrate_constraints():
-                if self.config_parser.is_mapping_workflow() and self.config_parser.get_suspend_indexes_constraints():
-                    target_table_id_for_constraints = None
-                    self.target_connection.connect()
-                    target_tables_all = self.target_connection.fetch_table_names(self.target_schema_name)
-                    self.target_connection.disconnect()
-                    for t_id, t_info in target_tables_all.items():
-                        if t_info['table_name'] == table_info.get('target_table_name', table_info['table_name']):
-                            target_table_id_for_constraints = t_info['id']
-                            break
-                    if target_table_id_for_constraints:
-                        constraints = self.target_connection.fetch_constraints({
-                            'source_table_id': target_table_id_for_constraints,
-                            'source_table_schema': self.target_schema_name,
-                            'source_table_name': table_info.get('target_table_name', table_info['table_name'])
-                        })
-                    else:
-                        constraints = {}
-                else:
-                    constraints = self.source_connection.fetch_constraints({
-                        'source_table_id': table_info['id'],
-                        'source_table_schema': self.source_schema_name,
-                        'source_table_name': table_info['table_name'],
-                    })
+                constraints = self.source_connection.fetch_constraints({
+                    'source_table_id': table_info['id'],
+                    'source_table_schema': self.source_schema_name,
+                    'source_table_name': table_info['table_name'],
+                })
                 self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_tables: Constraints: {constraints}")
                 if constraints:
                     for _, constraint_details in constraints.items():
 
-                        if self.config_parser.is_mapping_workflow() and self.config_parser.get_suspend_indexes_constraints():
-                            target_db_constraint_sql = constraint_details.get('constraint_sql', '')
-                        else:
-                            target_db_constraint_sql = self.target_connection.get_create_constraint_sql({
-                                'source_db_type': self.config_parser.get_source_db_type(),
-                                'source_schema_name': self.source_schema_name,
-                                'source_table_name': table_info['table_name'],
-                                'target_schema_name': self.target_schema_name,
-                                'target_table_name': table_info.get('target_table_name', table_info['table_name']),
-                                'target_columns': target_columns,
-                                'constraint_name': constraint_details['constraint_name'] if 'constraint_name' in constraint_details else '',
-                                'constraint_type': constraint_details['constraint_type'] if 'constraint_type' in constraint_details else '',
-                                'constraint_columns': constraint_details['constraint_columns'] if 'constraint_columns' in constraint_details else '',
-                                'referenced_table_schema': constraint_details['referenced_table_schema'] if 'referenced_table_schema' in constraint_details else '',
-                                'referenced_table_name': constraint_details['referenced_table_name'] if 'referenced_table_name' in constraint_details else '',
-                                'referenced_columns': constraint_details['referenced_columns'] if 'referenced_columns' in constraint_details else '',
-                                'constraint_owner': constraint_details['constraint_owner'] if 'constraint_owner' in constraint_details else '',
-                                'constraint_sql': constraint_details['constraint_sql'] if 'constraint_sql' in constraint_details else '',
-                                'constraint_comment': constraint_details['constraint_comment'] if 'constraint_comment' in constraint_details else '',
-                                'delete_rule': constraint_details['delete_rule'] if 'delete_rule' in constraint_details else '',
-                                'update_rule': constraint_details['update_rule'] if 'update_rule' in constraint_details else '',
-                                'constraint_status': constraint_details['constraint_status'] if 'constraint_status' in constraint_details else '',
-                            })
+                        target_db_constraint_sql = self.target_connection.get_create_constraint_sql({
+                            'source_db_type': self.config_parser.get_source_db_type(),
+                            'source_schema_name': self.source_schema_name,
+                            'source_table_name': table_info['table_name'],
+                            'target_schema_name': self.target_schema_name,
+                            'target_table_name': table_info['table_name'],
+                            'target_columns': target_columns,
+                            'constraint_name': constraint_details['constraint_name'] if 'constraint_name' in constraint_details else '',
+                            'constraint_type': constraint_details['constraint_type'] if 'constraint_type' in constraint_details else '',
+                            'constraint_columns': constraint_details['constraint_columns'] if 'constraint_columns' in constraint_details else '',
+                            'referenced_table_schema': constraint_details['referenced_table_schema'] if 'referenced_table_schema' in constraint_details else '',
+                            'referenced_table_name': constraint_details['referenced_table_name'] if 'referenced_table_name' in constraint_details else '',
+                            'referenced_columns': constraint_details['referenced_columns'] if 'referenced_columns' in constraint_details else '',
+                            'constraint_owner': constraint_details['constraint_owner'] if 'constraint_owner' in constraint_details else '',
+                            'constraint_sql': constraint_details['constraint_sql'] if 'constraint_sql' in constraint_details else '',
+                            'constraint_comment': constraint_details['constraint_comment'] if 'constraint_comment' in constraint_details else '',
+                            'delete_rule': constraint_details['delete_rule'] if 'delete_rule' in constraint_details else '',
+                            'update_rule': constraint_details['update_rule'] if 'update_rule' in constraint_details else '',
+                            'constraint_status': constraint_details['constraint_status'] if 'constraint_status' in constraint_details else '',
+                        })
 
                         self.migrator_tables.insert_constraint( {
                             'source_table_id': table_info['id'],
                             'source_schema_name': self.source_schema_name,
                             'source_table_name': table_info['table_name'],
                             'target_schema_name': self.target_schema_name,
-                            'target_table_name': table_info.get('target_table_name', table_info['table_name']),
+                            'target_table_name': table_info['table_name'],
                             'constraint_name': constraint_details['constraint_name'],
                             'constraint_type': constraint_details['constraint_type'],
                             'constraint_owner': constraint_details['constraint_owner'] if 'constraint_owner' in constraint_details else '',
@@ -794,24 +707,6 @@ class Planner:
 
             self.config_parser.print_log_message('INFO', f"planner: run_prepare_tables: Table {table_info['table_name']} processed successfully.")
         self.config_parser.print_log_message('INFO', "planner: run_prepare_tables: Tables processed successfully.")
-
-    def check_compatibility(self, source_type: str, target_type: str) -> bool:
-        """Basic data type compatibility check for mapping workflow."""
-        source = source_type.upper().split('(')[0]
-        target = target_type.upper().split('(')[0]
-        if source == target:
-            return True
-        numeric_types = {'INTEGER', 'INT', 'SMALLINT', 'BIGINT', 'NUMERIC', 'DECIMAL', 'REAL', 'DOUBLE PRECISION', 'FLOAT'}
-        string_types = {'CHARACTER VARYING', 'VARCHAR', 'CHARACTER', 'CHAR', 'TEXT'}
-        if source in numeric_types and target in numeric_types:
-            return True
-        if source in string_types and target in string_types:
-            return True
-        source_base = source.split(' ')[0]
-        target_base = target.split(' ')[0]
-        if source_base == target_base:
-            return True
-        return False
 
     def convert_table_columns(self, settings):
         target_db_type = settings['target_db_type']

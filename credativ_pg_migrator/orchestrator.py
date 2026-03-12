@@ -68,10 +68,6 @@ class Orchestrator:
                 self.run_migrate_sequences()
                 self.check_pausing_resuming()
 
-                if self.config_parser.is_mapping_workflow() and self.config_parser.get_suspend_indexes_constraints():
-                    self.run_drop_target_indexes_and_constraints()
-                    self.check_pausing_resuming()
-
                 self.run_migrate_tables()
                 self.check_pausing_resuming()
 
@@ -149,43 +145,6 @@ class Orchestrator:
                 self.config_parser.print_log_message('INFO', "orchestrator: run_post_migration_script: Post-migration script executed successfully.")
             except Exception as e:
                 self.handle_error(e, 'post-migration script')
-
-    def run_drop_target_indexes_and_constraints(self):
-        self.config_parser.print_log_message('INFO', "orchestrator: run_drop_target_indexes_and_constraints: Dropping target indexes and constraints for mapping workflow...")
-        try:
-            self.target_connection.connect()
-            cursor = self.target_connection.connection.cursor()
-
-            constraints = self.migrator_tables.get_constraints()
-            if constraints:
-                for constraint in constraints:
-                    # Depending on DB, usually index_owner is schema
-                    schema = constraint.get('target_schema_name', '')
-                    table = constraint.get('target_table_name', '')
-                    name = constraint.get('constraint_name', '')
-                    if name:
-                        drop_sql = f'ALTER TABLE "{schema}"."{table}" DROP CONSTRAINT IF EXISTS "{name}" CASCADE;'
-                        self.config_parser.print_log_message('DEBUG', f"Dropping constraint: {drop_sql}")
-                        cursor.execute(drop_sql)
-
-            indexes = self.migrator_tables.get_indexes()
-            if indexes:
-                for index in indexes:
-                    if index.get('index_type') not in ('PRIMARY KEY', 'UNIQUE', 'CHECK', 'FOREIGN KEY', 'EXCLUSION'):
-                        schema = index.get('target_schema_name', '')
-                        name = index.get('index_name', '')
-                        if name:
-                            drop_sql = f'DROP INDEX IF EXISTS "{schema}"."{name}" CASCADE;'
-                            self.config_parser.print_log_message('DEBUG', f"Dropping index: {drop_sql}")
-                            cursor.execute(drop_sql)
-
-            self.target_connection.connection.commit()
-            cursor.close()
-            self.target_connection.disconnect()
-            self.config_parser.print_log_message('INFO', "orchestrator: run_drop_target_indexes_and_constraints: Successfully dropped target indexes and constraints.")
-        except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"orchestrator: run_drop_target_indexes_and_constraints: Error: {e}")
-            raise e
 
     def run_migrate_tables(self):
         self.migrator_tables.insert_main({'task_name': 'Orchestrator', 'subtask_name': 'tables migration'})
@@ -489,9 +448,7 @@ class Orchestrator:
                 self.config_parser.print_log_message( 'DEBUG', f"orchestrator: table_worker: Worker {worker_id}: Executing session settings: {worker_target_connection.session_settings}")
                 worker_target_connection.execute_query(worker_target_connection.session_settings)
 
-            should_drop_create = not self.config_parser.is_mapping_workflow()
-
-            if should_drop_create and ((settings['drop_tables'] and not settings['resume_after_crash'])
+            if ((settings['drop_tables'] and not settings['resume_after_crash'])
                 or (settings['resume_after_crash'] and settings['drop_unfinished_tables'])
                 or (settings['resume_after_crash'] and not worker_target_connection.target_table_exists(target_schema_name, target_table_name))):
                 part_name = 'drop table'
@@ -515,7 +472,7 @@ class Orchestrator:
                             time.sleep(10)
                 self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Table '{target_table_name}' dropped successfully.")
 
-            if should_drop_create and ((settings['create_tables'] and not settings['resume_after_crash'])
+            if ((settings['create_tables'] and not settings['resume_after_crash'])
                 or (settings['resume_after_crash'] and settings['drop_unfinished_tables'])
                 or (settings['resume_after_crash'] and not worker_target_connection.target_table_exists(target_schema_name, target_table_name))):
                 self.config_parser.print_log_message( 'DEBUG', f"orchestrator: table_worker: Worker {worker_id}: Creating table with SQL: {create_table_sql}")

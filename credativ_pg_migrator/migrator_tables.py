@@ -1572,6 +1572,7 @@ class MigratorTables:
             source_table_sql TEXT,
             target_schema_name TEXT,
             target_table_name TEXT,
+            target_alias_name TEXT,
             target_columns TEXT,
             target_table_rows BIGINT,
             target_table_sql TEXT,
@@ -1666,6 +1667,7 @@ class MigratorTables:
             source_column_sql TEXT,
             target_schema_name TEXT,
             target_table_name TEXT,
+            target_alias_name TEXT,
             target_table_id INTEGER,
             target_column_name TEXT,
             target_column_id INTEGER,
@@ -1833,6 +1835,7 @@ class MigratorTables:
             index_type VARCHAR(30),
             target_schema_name TEXT,
             target_table_name TEXT,
+            target_alias_name TEXT,
             index_sql TEXT,
             index_columns TEXT,
             index_comment TEXT,
@@ -2004,11 +2007,12 @@ class MigratorTables:
             'source_table_sql': row[7],
             'target_schema_name': row[8],
             'target_table_name': row[9],
-            'target_columns': json.loads(row[10]),
-            'target_table_rows': row[11],
-            'target_table_sql': row[12],
-            'table_comment': row[13],
-            'create_partitions_sql': row[14],
+            'target_alias_name': row[10],
+            'target_columns': json.loads(row[11]),
+            'target_table_rows': row[12],
+            'target_table_sql': row[13],
+            'table_comment': row[14],
+            'create_partitions_sql': row[15],
         }
 
     def decode_index_row(self, row):
@@ -2022,10 +2026,11 @@ class MigratorTables:
             'index_type': row[6],
             'target_schema_name': row[7],
             'target_table_name': row[8],
-            'index_sql': row[9],
-            'index_columns': row[10],
-            'index_comment': row[11],
-            'is_function_based': row[12]
+            'target_alias_name': row[9],
+            'index_sql': row[10],
+            'index_columns': row[11],
+            'index_comment': row[12],
+            'is_function_based': row[13]
         }
 
     def decode_funcproc_row(self, row):
@@ -2152,6 +2157,7 @@ class MigratorTables:
         source_table_sql = settings['source_table_sql']
         target_schema_name = settings['target_schema_name']
         target_table_name = settings['target_table_name']
+        target_alias_name = settings.get('target_alias_name', '')
         target_columns = settings['target_columns']
         target_table_rows = settings['target_table_rows']
         target_table_sql = settings['target_table_sql']
@@ -2164,13 +2170,13 @@ class MigratorTables:
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
             (source_schema_name, source_table_name, source_table_id, source_columns, source_table_rows, source_table_description, source_table_sql,
-            target_schema_name, target_table_name, target_columns, target_table_rows, target_table_sql, table_comment,
+            target_schema_name, target_table_name, target_alias_name, target_columns, target_table_rows, target_table_sql, table_comment,
             create_partitions_sql)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
         params = (source_schema_name, source_table_name, source_table_id, source_columns_str, source_table_rows, source_table_description, source_table_sql,
-                  target_schema_name, target_table_name, target_columns_str, target_table_rows, target_table_sql, table_comment,
+                  target_schema_name, target_table_name, target_alias_name, target_columns_str, target_table_rows, target_table_sql, table_comment,
                   create_partitions_sql)
         try:
             cursor = self.protocol_connection.connection.cursor()
@@ -2254,13 +2260,13 @@ class MigratorTables:
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
             (source_schema_name, source_table_name, source_table_id, index_owner, index_name, index_type,
-            target_schema_name, target_table_name, index_sql, index_columns, index_comment, is_function_based)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            target_schema_name, target_table_name, target_alias_name, index_sql, index_columns, index_comment, is_function_based)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
         params = (settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_table_id'), settings.get('index_owner'),
                   settings.get('index_name'), settings.get('index_type'), settings.get('target_schema_name'),
-                  settings.get('target_table_name'), settings.get('index_sql'), settings.get('index_columns'),
+                  settings.get('target_table_name'), settings.get('target_alias_name', ''), settings.get('index_sql'), settings.get('index_columns'),
                   settings.get('index_comment'), True if settings.get('is_function_based') == 'YES' else False)
         try:
             cursor = self.protocol_connection.connection.cursor()
@@ -2321,6 +2327,7 @@ class MigratorTables:
             source_table_name TEXT,
             target_schema_name TEXT,
             target_table_name TEXT,
+            target_alias_name TEXT,
             constraint_name TEXT,
             constraint_type TEXT,
             constraint_owner TEXT,
@@ -2350,11 +2357,12 @@ class MigratorTables:
             'source_table_name': row[3],
             'target_schema_name': row[4],
             'target_table_name': row[5],
-            'constraint_name': row[6],
-            'constraint_type': row[7],
-            'constraint_owner': row[8],
-            'constraint_columns': row[9],
-            'referenced_table_schema': row[10],
+            'target_alias_name': row[6],
+            'constraint_name': row[7],
+            'constraint_type': row[8],
+            'constraint_owner': row[9],
+            'constraint_columns': row[10],
+            'referenced_table_schema': row[11],
             'referenced_table_name': row[11],
             'referenced_columns': row[12],
             'constraint_sql': row[13],
@@ -3288,17 +3296,18 @@ class MigratorTables:
             'source_column_sql': row[30],
             'target_schema_name': row[31],
             'target_table_name': row[32],
-            'target_table_id': row[33],
-            'target_column_name': row[34],
-            'target_column_id': row[35],
-            'target_column_data_type': row[36],
-            'target_column_description': row[37],
-            'target_column_sql': row[38],
-            'task_created': row[39],
-            'task_started': row[40],
-            'task_completed': row[41],
-            'success': row[42],
-            'message': row[43]
+            'target_alias_name': row[33],
+            'target_table_id': row[34],
+            'target_column_name': row[35],
+            'target_column_id': row[36],
+            'target_column_data_type': row[37],
+            'target_column_description': row[38],
+            'target_column_sql': row[39],
+            'task_created': row[40],
+            'task_started': row[41],
+            'task_completed': row[42],
+            'success': row[43],
+            'message': row[44]
         }
 
     def insert_columns(self, settings):
@@ -3306,11 +3315,11 @@ class MigratorTables:
         table_name = self.config_parser.get_protocol_name_columns()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
-            (source_schema_name, source_table_name, source_table_id, source_column_name, source_column_id, source_column_data_type, source_column_is_nullable, source_column_is_primary_key, source_column_is_identity, source_column_default_name, source_column_default_value, source_column_replaced_default_value, source_column_character_maximum_length, source_column_numeric_precision, source_column_numeric_scale, source_column_basic_data_type, source_column_basic_character_maximum_length, source_column_basic_numeric_precision, source_column_basic_numeric_scale, source_column_basic_column_type, source_column_is_generated_virtual, source_column_is_generated_stored, source_column_generation_expression, source_column_stripped_generation_expression, source_column_udt_schema, source_column_udt_name, source_column_domain_schema, source_column_domain_name, source_column_description, source_column_sql, target_schema_name, target_table_name, target_table_id, target_column_name, target_column_id, target_column_data_type, target_column_description, target_column_sql)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (source_schema_name, source_table_name, source_table_id, source_column_name, source_column_id, source_column_data_type, source_column_is_nullable, source_column_is_primary_key, source_column_is_identity, source_column_default_name, source_column_default_value, source_column_replaced_default_value, source_column_character_maximum_length, source_column_numeric_precision, source_column_numeric_scale, source_column_basic_data_type, source_column_basic_character_maximum_length, source_column_basic_numeric_precision, source_column_basic_numeric_scale, source_column_basic_column_type, source_column_is_generated_virtual, source_column_is_generated_stored, source_column_generation_expression, source_column_stripped_generation_expression, source_column_udt_schema, source_column_udt_name, source_column_domain_schema, source_column_domain_name, source_column_description, source_column_sql, target_schema_name, target_table_name, target_alias_name, target_table_id, target_column_name, target_column_id, target_column_data_type, target_column_description, target_column_sql)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_table_id'), settings.get('source_column_name'), settings.get('source_column_id'), settings.get('source_column_data_type'), settings.get('source_column_is_nullable'), settings.get('source_column_is_primary_key'), settings.get('source_column_is_identity'), settings.get('source_column_default_name'), settings.get('source_column_default_value'), settings.get('source_column_replaced_default_value'), settings.get('source_column_character_maximum_length'), settings.get('source_column_numeric_precision'), settings.get('source_column_numeric_scale'), settings.get('source_column_basic_data_type'), settings.get('source_column_basic_character_maximum_length'), settings.get('source_column_basic_numeric_precision'), settings.get('source_column_basic_numeric_scale'), settings.get('source_column_basic_column_type'), settings.get('source_column_is_generated_virtual'), settings.get('source_column_is_generated_stored'), settings.get('source_column_generation_expression'), settings.get('source_column_stripped_generation_expression'), settings.get('source_column_udt_schema'), settings.get('source_column_udt_name'), settings.get('source_column_domain_schema'), settings.get('source_column_domain_name'), settings.get('source_column_description'), settings.get('source_column_sql'), settings.get('target_schema_name'), settings.get('target_table_name'), settings.get('target_table_id'), settings.get('target_column_name'), settings.get('target_column_id'), settings.get('target_column_data_type'), settings.get('target_column_description'), settings.get('target_column_sql'))
+        params = (settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_table_id'), settings.get('source_column_name'), settings.get('source_column_id'), settings.get('source_column_data_type'), settings.get('source_column_is_nullable'), settings.get('source_column_is_primary_key'), settings.get('source_column_is_identity'), settings.get('source_column_default_name'), settings.get('source_column_default_value'), settings.get('source_column_replaced_default_value'), settings.get('source_column_character_maximum_length'), settings.get('source_column_numeric_precision'), settings.get('source_column_numeric_scale'), settings.get('source_column_basic_data_type'), settings.get('source_column_basic_character_maximum_length'), settings.get('source_column_basic_numeric_precision'), settings.get('source_column_basic_numeric_scale'), settings.get('source_column_basic_column_type'), settings.get('source_column_is_generated_virtual'), settings.get('source_column_is_generated_stored'), settings.get('source_column_generation_expression'), settings.get('source_column_stripped_generation_expression'), settings.get('source_column_udt_schema'), settings.get('source_column_udt_name'), settings.get('source_column_domain_schema'), settings.get('source_column_domain_name'), settings.get('source_column_description'), settings.get('source_column_sql'), settings.get('target_schema_name'), settings.get('target_table_name'), settings.get('target_alias_name', ''), settings.get('target_table_id'), settings.get('target_column_name'), settings.get('target_column_id'), settings.get('target_column_data_type'), settings.get('target_column_description'), settings.get('target_column_sql'))
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)

@@ -631,12 +631,13 @@ class Planner:
 
                         referenced_table_schema = constraint_details['referenced_table_schema'] if 'referenced_table_schema' in constraint_details else ''
                         referenced_table_name = constraint_details['referenced_table_name'] if 'referenced_table_name' in constraint_details else ''
+                        aliased_referenced_table_name = referenced_table_name
 
                         if referenced_table_name and self.config_parser.get_use_aliases_as_target_names():
                             alias_name = self.migrator_tables.get_alias_for_table(referenced_table_schema, referenced_table_name)
                             if alias_name:
-                                referenced_table_name = alias_name
-                                self.config_parser.print_log_message('INFO', f"planner: run_prepare_tables: Constraint referenced table {constraint_details['referenced_table_name']} mapped to target alias {referenced_table_name}")
+                                aliased_referenced_table_name = alias_name
+                                self.config_parser.print_log_message('INFO', f"planner: run_prepare_tables: Constraint referenced table {constraint_details['referenced_table_name']} mapped to target alias {aliased_referenced_table_name}")
 
                         target_db_constraint_sql = self.target_connection.get_create_constraint_sql({
                             'source_db_type': self.config_parser.get_source_db_type(),
@@ -649,7 +650,7 @@ class Planner:
                             'constraint_type': constraint_details['constraint_type'] if 'constraint_type' in constraint_details else '',
                             'constraint_columns': constraint_details['constraint_columns'] if 'constraint_columns' in constraint_details else '',
                             'referenced_table_schema': referenced_table_schema,
-                            'referenced_table_name': referenced_table_name,
+                            'referenced_table_name': aliased_referenced_table_name,
                             'referenced_columns': constraint_details['referenced_columns'] if 'referenced_columns' in constraint_details else '',
                             'constraint_owner': constraint_details['constraint_owner'] if 'constraint_owner' in constraint_details else '',
                             'constraint_sql': constraint_details['constraint_sql'] if 'constraint_sql' in constraint_details else '',

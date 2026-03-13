@@ -1255,9 +1255,14 @@ class Orchestrator:
                 worker_target_connection = self.load_connector('target')
                 worker_target_connection.connect()
 
-                if not worker_target_connection.target_table_exists(target_schema_name, target_table_name):
-                    self.config_parser.print_log_message('ERROR', f"orchestrator: constraint_worker: Worker {worker_id}: Target table {target_schema_name}.{target_table_name} for constraint {constraint_name} does not exist - skipping constraint creation.")
-                    self.migrator_tables.update_constraint_status({'row_id': constraint_data['id'], 'success': False, 'message': f'ERROR: target table {target_schema_name}.{target_table_name} does not exist'})
+                use_aliases_as_target_names = self.config_parser.get_use_aliases_as_target_names()
+
+                target_table_name_to_check = constraint_data['target_alias_name'] if use_aliases_as_target_names and constraint_data.get('target_alias_name') else target_table_name
+                target_table_name_to_check = self.config_parser.convert_names_case(target_table_name_to_check)
+
+                if not worker_target_connection.target_table_exists(target_schema_name, target_table_name_to_check):
+                    self.config_parser.print_log_message('ERROR', f"orchestrator: constraint_worker: Worker {worker_id}: Target table {target_schema_name}.{target_table_name_to_check} for constraint {constraint_name} does not exist - skipping constraint creation.")
+                    self.migrator_tables.update_constraint_status({'row_id': constraint_data['id'], 'success': False, 'message': f'ERROR: target table {target_schema_name}.{target_table_name_to_check} does not exist'})
                     return False
 
                 referenced_target_table = self.migrator_tables.select_table_by_source({'source_schema_name': referenced_table_schema, 'source_table_name': referenced_table_name})
@@ -1266,9 +1271,13 @@ class Orchestrator:
                     self.migrator_tables.update_constraint_status({'row_id': constraint_data['id'], 'success': False, 'message': f'ERROR: referenced table {referenced_table_schema}.{referenced_table_name} not found'})
                     worker_target_connection.disconnect()
                     return False
-                if not worker_target_connection.target_table_exists(referenced_target_table['target_schema_name'], referenced_target_table['target_table_name']):
-                    self.config_parser.print_log_message('ERROR', f"orchestrator: constraint_worker: Worker {worker_id}: Referenced table {referenced_target_table['target_schema_name']}.{referenced_target_table['target_table_name']} for constraint {constraint_name} does not exist - skipping constraint creation.")
-                    self.migrator_tables.update_constraint_status({'row_id': constraint_data['id'], 'success': False, 'message': f"ERROR: referenced table {referenced_target_table['target_schema_name']}.{referenced_target_table['target_table_name']} does not exist"})
+
+                referenced_target_table_name_to_check = referenced_target_table['target_alias_name'] if use_aliases_as_target_names and referenced_target_table.get('target_alias_name') else referenced_target_table['target_table_name']
+                referenced_target_table_name_to_check = self.config_parser.convert_names_case(referenced_target_table_name_to_check)
+
+                if not worker_target_connection.target_table_exists(referenced_target_table['target_schema_name'], referenced_target_table_name_to_check):
+                    self.config_parser.print_log_message('ERROR', f"orchestrator: constraint_worker: Worker {worker_id}: Referenced table {referenced_target_table['target_schema_name']}.{referenced_target_table_name_to_check} for constraint {constraint_name} does not exist - skipping constraint creation.")
+                    self.migrator_tables.update_constraint_status({'row_id': constraint_data['id'], 'success': False, 'message': f"ERROR: referenced table {referenced_target_table['target_schema_name']}.{referenced_target_table_name_to_check} does not exist"})
                     return False
 
                 self.config_parser.print_log_message( 'DEBUG', f"orchestrator: constraint_worker: Worker {worker_id}: Creating constraint with SQL: {create_constraint_sql}")

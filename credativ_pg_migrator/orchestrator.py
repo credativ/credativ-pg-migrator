@@ -1538,15 +1538,17 @@ class Orchestrator:
         self.config_parser.print_log_message('INFO', "orchestrator: run_migrate_comments: Migrating comments.")
         all_tables = self.migrator_tables.fetch_all_tables()
         self.target_connection.connect()
+        use_aliases_as_target_names = self.config_parser.get_use_aliases_as_target_names()
 
         try:
             for table_detail in all_tables:
                 table_data = self.migrator_tables.decode_table_row(table_detail)
                 if table_data['table_comment']:
+                    target_table_name = table_data['target_alias_name'] if use_aliases_as_target_names and table_data.get('target_alias_name') else table_data['target_table_name']
                     # Escape single quotes in the comment to prevent SQL injection
                     safe_table_comment = table_data['table_comment'].replace("'", "''")
                     query = f"""COMMENT ON TABLE
-                    "{table_data['target_schema_name']}"."{self.config_parser.convert_names_case(table_data['target_table_name'])}"
+                    "{table_data['target_schema_name']}"."{self.config_parser.convert_names_case(target_table_name)}"
                     IS '{safe_table_comment}'"""
                     self.config_parser.print_log_message('INFO', f"orchestrator: run_migrate_comments: Setting comment for table {table_data['target_table_name']} in target database.")
                     self.config_parser.print_log_message( 'DEBUG', f"orchestrator: run_migrate_comments: Executing comment query: {query}")
@@ -1555,10 +1557,12 @@ class Orchestrator:
                 for col in table_data['target_columns'].keys():
                     column_comment = table_data['target_columns'][col]['column_comment']
                     if column_comment:
+                        target_table_name = table_data['target_alias_name'] if use_aliases_as_target_names and table_data.get('target_alias_name') else table_data['target_table_name']
+                        target_column_name = table_data['target_columns'][col].get('target_alias_name') if use_aliases_as_target_names and table_data['target_columns'][col].get('target_alias_name') else table_data['target_columns'][col]['column_name']
                         # Escape single quotes in the comment to prevent SQL injection
                         safe_column_comment = table_data['target_columns'][col]['column_comment'].replace("'", "''")
                         query = f"""COMMENT ON COLUMN
-                        "{table_data['target_schema_name']}"."{self.config_parser.convert_names_case(table_data['target_table_name'])}"."{self.config_parser.convert_names_case(table_data['target_columns'][col]['column_name'])}"
+                        "{table_data['target_schema_name']}"."{self.config_parser.convert_names_case(target_table_name)}"."{self.config_parser.convert_names_case(target_column_name)}"
                         IS '{safe_column_comment}'"""
                         self.config_parser.print_log_message('INFO', f"orchestrator: run_migrate_comments: Setting comment for column {table_data['target_columns'][col]['column_name']} in target database.")
                         self.config_parser.print_log_message( 'DEBUG', f"orchestrator: run_migrate_comments: Executing comment query: {query}")
@@ -1568,9 +1572,10 @@ class Orchestrator:
             for index_detail in all_indexes:
                 index_data = self.migrator_tables.decode_index_row(index_detail)
                 if index_data['index_comment']:
+                    target_table_name = index_data['target_alias_name'] if use_aliases_as_target_names and index_data.get('target_alias_name') else index_data['target_table_name']
                     # Escape single quotes in the comment to prevent SQL injection
                     safe_index_comment = index_data['index_comment'].replace("'", "''")
-                    index_name = f"{index_data['index_name']}_tab_{index_data['target_table_name']}"
+                    index_name = f"{index_data['index_name']}_tab_{target_table_name}"
                     query = f"""COMMENT ON INDEX
                     "{index_data['target_schema_name']}"."{self.config_parser.convert_names_case(index_name)}"
                     IS '{safe_index_comment}'"""
@@ -1582,11 +1587,12 @@ class Orchestrator:
             for constraint_detail in all_constraints:
                 constraint_data = self.migrator_tables.decode_constraint_row(constraint_detail)
                 if constraint_data['constraint_comment']:
+                    target_table_name = constraint_data['target_alias_name'] if use_aliases_as_target_names and constraint_data.get('target_alias_name') else constraint_data['target_table_name']
                     # Escape single quotes in the comment to prevent SQL injection
                     safe_constraint_comment = constraint_data['constraint_comment'].replace("'", "''")
                     query = f"""COMMENT ON CONSTRAINT
                     "{self.config_parser.convert_names_case(constraint_data['constraint_name'])}"
-                    ON "{constraint_data['target_schema_name']}"."{self.config_parser.convert_names_case(constraint_data['target_table_name'])}"
+                    ON "{constraint_data['target_schema_name']}"."{self.config_parser.convert_names_case(target_table_name)}"
                     IS '{safe_constraint_comment}'"""
                     self.config_parser.print_log_message('INFO', f"orchestrator: run_migrate_comments: Setting comment for constraint {constraint_data['constraint_name']} in target database.")
                     self.config_parser.print_log_message( 'DEBUG', f"orchestrator: run_migrate_comments: Executing comment query: {query}")

@@ -370,10 +370,12 @@ class Planner:
             target_table_rows = 0
             self.config_parser.print_log_message('INFO', f"planner: run_prepare_tables: Processing table ({order_num}/{len(source_tables)}): {table_info['table_name']}")
             target_table_name = table_info['table_name']
+            target_alias_name = ''
             if self.config_parser.get_use_aliases_as_target_names():
                 alias_name = self.migrator_tables.get_alias_for_table(self.source_schema_name, table_info['table_name'])
                 if alias_name:
                     target_table_name = alias_name
+                    target_alias_name = alias_name
                     self.config_parser.print_log_message('INFO', f"planner: run_prepare_tables: Source table {table_info['table_name']} mapped to target alias {target_table_name}")
             # If include_tables is empty, include all tables
             # If include_tables is ['.*'] or contains '.*', include all tables
@@ -546,6 +548,7 @@ class Planner:
                     'source_table_sql': table_info.get('source_table_sql', ''),
                     'target_schema_name': self.target_schema_name,
                     'target_table_name': target_table_name,
+                    'target_alias_name': target_alias_name,
                     'target_columns': target_columns,
                     'target_table_rows': target_table_rows,
                     'target_table_sql': target_table_sql,
@@ -567,6 +570,7 @@ class Planner:
                     'source_table_sql': table_info.get('source_table_sql', ''),
                     'target_schema_name': self.target_schema_name,
                     'target_table_name': target_table_name,
+                    'target_alias_name': target_alias_name,
                     'target_columns': target_columns,
                     'target_table_rows': target_table_rows,
                     'target_table_sql': target_table_sql,
@@ -602,6 +606,7 @@ class Planner:
                         values['index_type'] = index_details['index_type']
                         values['target_schema_name'] = self.target_schema_name
                         values['target_table_name'] = target_table_name
+                        values['target_alias_name'] = target_alias_name
                         values['index_columns'] = index_details['index_columns']
                         values['index_comment'] = index_details['index_comment']
                         values['index_sql'] = self.target_connection.get_create_index_sql(values)
@@ -660,6 +665,7 @@ class Planner:
                             'source_table_name': table_info['table_name'],
                             'target_schema_name': self.target_schema_name,
                             'target_table_name': target_table_name,
+                            'target_alias_name': target_alias_name,
                             'constraint_name': constraint_name,
                             'constraint_type': constraint_details['constraint_type'],
                             'constraint_owner': constraint_details['constraint_owner'] if 'constraint_owner' in constraint_details else '',
@@ -781,6 +787,7 @@ class Planner:
                     'column_default_value': self.source_connection.convert_default_value({'extracted_default_value': column_info['column_default_value'], 'column_type': coltype}) if 'column_default_value' in column_info else '',
                     'replaced_column_default_value': self.source_connection.convert_default_value({'extracted_default_value': column_info['replaced_column_default_value'], 'column_type': coltype}) if 'replaced_column_default_value' in column_info else '',
                     'data_type': coltype,
+                    'target_alias_name': settings.get('target_alias_name', ''),
                     'column_type': column_info['column_type'] if 'column_type' in column_info else '',
                     'column_type_substitution': column_info['column_type_substitution'] if 'column_type_substitution' in column_info else '',
                     'character_maximum_length': '' if coltype == 'TEXT' else column_info['character_maximum_length'] if column_info['character_maximum_length'] is not None else '',

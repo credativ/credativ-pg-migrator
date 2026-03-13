@@ -843,12 +843,22 @@ class Planner:
                     self.config_parser.print_log_message('INFO', f"planner: run_prepare_views: View {view_info['view_name']} is excluded from migration.")
                     continue
                 self.config_parser.print_log_message('INFO', f"planner: run_prepare_views: View {view_info['view_name']} is included for migration.")
+                target_view_name = view_info['view_name']
+                target_alias_name = ''
+                if self.config_parser.get_use_aliases_as_target_names():
+                    alias_name = self.migrator_tables.get_alias_for_table(self.source_schema_name, view_info['view_name'])
+                    if alias_name:
+                        target_alias_name = alias_name
+                        self.config_parser.print_log_message('INFO', f"planner: run_prepare_views: View {view_info['view_name']} mapped to target alias {target_alias_name}")
+
+                target_view_name_to_use = target_alias_name if target_alias_name else target_view_name
+
                 view_sql = self.source_connection.fetch_view_code({
                     'view_id': view_info['id'],
                     'source_schema_name': self.config_parser.get_source_schema(),
                     'source_view_name': view_info['view_name'],
                     'target_schema_name': self.config_parser.get_target_schema(),
-                    'target_view_name': self.config_parser.convert_names_case(view_info['view_name']),
+                    'target_view_name': self.config_parser.convert_names_case(target_view_name_to_use),
                 })
                 self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_views: Source view SQL: {view_sql}")
                 converted_view_sql = self.source_connection.convert_view_code({
@@ -857,7 +867,7 @@ class Planner:
                     'source_schema_name': self.config_parser.get_source_schema(),
                     'target_schema_name': self.config_parser.get_target_schema(),
                     'target_db_type': self.config_parser.get_target_db_type(),
-                    'target_view_name': self.config_parser.convert_names_case(view_info['view_name']), # Pass name
+                    'target_view_name': self.config_parser.convert_names_case(target_view_name_to_use), # Pass name
                     'view_type': view_info.get('view_type', 'VIEW'), # Pass type
                 })
 
@@ -875,7 +885,8 @@ class Planner:
                     'source_view_id': view_info['id'],
                     'source_view_sql': view_sql,
                     'target_schema_name': self.target_schema_name,
-                    'target_view_name': self.config_parser.convert_names_case(view_info['view_name']),
+                    'target_view_name': self.config_parser.convert_names_case(target_view_name),
+                    'target_alias_name': self.config_parser.convert_names_case(target_alias_name) if target_alias_name else '',
                     'target_view_sql': converted_view_sql,
                     'view_comment': view_info['comment']
                 })

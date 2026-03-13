@@ -3373,6 +3373,24 @@ class MigratorTables:
             'message': row[13]
         }
 
+    def get_alias_for_table(self, source_schema_name, source_table_name):
+        table_name = self.config_parser.get_protocol_name_aliases()
+        query = f"""
+            SELECT target_alias_name
+            FROM "{self.protocol_schema}"."{table_name}"
+            WHERE source_referenced_schema_name = %s AND source_referenced_table_name = %s
+        """
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, (source_schema_name, source_table_name))
+            row = cursor.fetchone()
+            cursor.close()
+            if row:
+                return row[0]
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: get_alias_for_table: Error querying alias for {source_schema_name}.{source_table_name}: {e}")
+        return None
+
     def insert_aliases(self, settings):
         func_run_id = uuid.uuid4()
         table_name = self.config_parser.get_protocol_name_aliases()

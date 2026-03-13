@@ -197,6 +197,8 @@ migration:
   # pre_migration_script: pre_migration.sql
   # post_migration_script: post_migration.sql
   names_case_handling: lower # lower, upper, keep - if names of the objects should be converted to lower or upper case or kept as is
+  # if source database has aliases mapping to tables, use the alias name for the target table instead of the original source table name
+  use_aliases_as_target_tables: false
   # if varchar length is bigger than this value, it will be converted to text
   # 0 = always change to text, -1 = never change to text, always migrate as varchar, >0 = convert varchar to text if length is >= this value
   # if parameter is missing, default is -1 -> migrate all varchars as varchars as they are

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.11.4 - 2026.03.13
+
+- 2026.03.13
+
+  - Fix in IBM DB2 z/OS connector - improved parsing of `CREATE VIEW` statements, explicitly handling view column lists so that `names_case_handling` applies correctly.
+  - Fix in IBM DB2 z/OS connector - pre-processed IBM DB2 specific variables like `CURRENT SQLID` during view migration, preventing sqlglot fallback parsing errors and enabling robust lowercase/uppercase schema transformations.
+  - Fix in alias migration - updated migrator protocol tables to properly generate and store `target_schema_name`, `target_alias_name`, and `target_referenced_*` fields for aliases while skipping actual DDL creation since PostgreSQL does not support DB2 aliases natively.
+
 ## 0.11.3 - 2026.03.10
 
 - 2026.03.10

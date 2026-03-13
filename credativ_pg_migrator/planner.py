@@ -369,6 +369,12 @@ class Planner:
             source_table_rows = 0
             target_table_rows = 0
             self.config_parser.print_log_message('INFO', f"planner: run_prepare_tables: Processing table ({order_num}/{len(source_tables)}): {table_info['table_name']}")
+            target_table_name = table_info['table_name']
+            if self.config_parser.get_use_aliases_as_target_tables():
+                alias_name = self.migrator_tables.get_alias_for_table(self.source_schema_name, table_info['table_name'])
+                if alias_name:
+                    target_table_name = alias_name
+                    self.config_parser.print_log_message('INFO', f"planner: run_prepare_tables: Source table {table_info['table_name']} mapped to target alias {target_table_name}")
             # If include_tables is empty, include all tables
             # If include_tables is ['.*'] or contains '.*', include all tables
             if include_tables == ['.*'] or '.*' in include_tables:
@@ -449,7 +455,7 @@ class Planner:
                     'source_table_id': table_info['id'],
                     'target_db_type': self.config_parser.get_target_db_type(),
                     'target_schema_name': self.target_schema_name,
-                    'target_table_name': table_info['table_name'],
+                    'target_table_name': target_table_name,
                     'source_columns': source_columns,
                     'migrator_tables': self.migrator_tables,
                 }
@@ -539,7 +545,7 @@ class Planner:
                     'source_table_description': table_description,
                     'source_table_sql': table_info.get('source_table_sql', ''),
                     'target_schema_name': self.target_schema_name,
-                    'target_table_name': table_info['table_name'],
+                    'target_table_name': target_table_name,
                     'target_columns': target_columns,
                     'target_table_rows': target_table_rows,
                     'target_table_sql': target_table_sql,
@@ -560,7 +566,7 @@ class Planner:
                     'source_table_description': table_description,
                     'source_table_sql': table_info.get('source_table_sql', ''),
                     'target_schema_name': self.target_schema_name,
-                    'target_table_name': table_info['table_name'],
+                    'target_table_name': target_table_name,
                     'target_columns': target_columns,
                     'target_table_rows': target_table_rows,
                     'target_table_sql': target_table_sql,
@@ -581,7 +587,7 @@ class Planner:
                     'source_db_type': self.config_parser.get_source_db_type(),
                     'source_db_version': self.config_parser.get_source_db_version(),
                     'target_table_schema': self.target_schema_name,
-                    'target_table_name': table_info['table_name'],
+                    'target_table_name': target_table_name,
                     'target_columns': target_columns,
                 })
                 self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_tables: Indexes: {indexes}")
@@ -595,7 +601,7 @@ class Planner:
                         values['index_name'] = index_details['index_name']
                         values['index_type'] = index_details['index_type']
                         values['target_schema_name'] = self.target_schema_name
-                        values['target_table_name'] = table_info['table_name']
+                        values['target_table_name'] = target_table_name
                         values['index_columns'] = index_details['index_columns']
                         values['index_comment'] = index_details['index_comment']
                         values['index_sql'] = self.target_connection.get_create_index_sql(values)
@@ -616,15 +622,16 @@ class Planner:
                 self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_tables: Constraints: {constraints}")
                 if constraints:
                     for _, constraint_details in constraints.items():
+                        constraint_name = constraint_details['constraint_name'] if 'constraint_name' in constraint_details else ''
 
                         target_db_constraint_sql = self.target_connection.get_create_constraint_sql({
                             'source_db_type': self.config_parser.get_source_db_type(),
                             'source_schema_name': self.source_schema_name,
                             'source_table_name': table_info['table_name'],
                             'target_schema_name': self.target_schema_name,
-                            'target_table_name': table_info['table_name'],
+                            'target_table_name': target_table_name,
                             'target_columns': target_columns,
-                            'constraint_name': constraint_details['constraint_name'] if 'constraint_name' in constraint_details else '',
+                            'constraint_name': constraint_name,
                             'constraint_type': constraint_details['constraint_type'] if 'constraint_type' in constraint_details else '',
                             'constraint_columns': constraint_details['constraint_columns'] if 'constraint_columns' in constraint_details else '',
                             'referenced_table_schema': constraint_details['referenced_table_schema'] if 'referenced_table_schema' in constraint_details else '',
@@ -643,8 +650,8 @@ class Planner:
                             'source_schema_name': self.source_schema_name,
                             'source_table_name': table_info['table_name'],
                             'target_schema_name': self.target_schema_name,
-                            'target_table_name': table_info['table_name'],
-                            'constraint_name': constraint_details['constraint_name'],
+                            'target_table_name': target_table_name,
+                            'constraint_name': constraint_name,
                             'constraint_type': constraint_details['constraint_type'],
                             'constraint_owner': constraint_details['constraint_owner'] if 'constraint_owner' in constraint_details else '',
                             'constraint_columns': constraint_details['constraint_columns'] if 'constraint_columns' in constraint_details else '',
@@ -658,7 +665,7 @@ class Planner:
                             'constraint_status': constraint_details['constraint_status'] if 'constraint_status' in constraint_details else '',
                             }
                         )
-                    self.config_parser.print_log_message('INFO', f"planner: run_prepare_tables: Constraint {constraint_details['constraint_name']} for table {table_info['table_name']}")
+                    self.config_parser.print_log_message('INFO', f"planner: run_prepare_tables: Constraint {constraint_name} for table {target_table_name}")
                 else:
                     self.config_parser.print_log_message('INFO', f"planner: run_prepare_tables: No constraints found for table {table_info['table_name']}.")
             else:
@@ -669,13 +676,14 @@ class Planner:
                 self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_tables: Number of triggers: {len(triggers) if triggers else 0}, Triggers: {triggers}")
                 if triggers:
                     for _, trigger_details in triggers.items():
+                        trigger_name = trigger_details['name']
 
                         converted_code = self.source_connection.convert_trigger({
                                 'source_schema_name': self.config_parser.get_source_schema(),
                                 'source_table_name': table_info['table_name'],
                                 'target_schema_name': self.config_parser.get_target_schema(),
-                                'target_table_name': table_info['table_name'],
-                                'trigger_name': trigger_details['name'],
+                                'target_table_name': target_table_name,
+                                'trigger_name': trigger_name,
                                 'trigger_sql': trigger_details['sql'],
                                 'table_list': [],
                                 'target_db_type': self.config_parser.get_target_db_type(),

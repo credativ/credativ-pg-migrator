@@ -255,9 +255,9 @@ class ConfigParser:
         settings = self.get_migration_settings()
         return settings.get('suspend_indexes_constraints', True)
 
-    def get_use_aliases_as_target_tables(self):
+    def get_use_aliases_as_target_names(self):
         settings = self.get_migration_settings()
-        return settings.get('use_aliases_as_target_tables', False)
+        return settings.get('use_aliases_as_target_names', False)
 
     def get_table_mapping(self, source_schema, source_table):
         """Returns the mapping rule for a specific source table if it exists within its data_export settings."""

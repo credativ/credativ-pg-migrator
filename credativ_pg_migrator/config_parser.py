@@ -252,7 +252,12 @@ class ConfigParser:
         return self.get_migration_settings().get('workflow', 'standard') == 'mapping'
 
     def get_suspend_indexes_constraints(self):
-        return self.get_migration_settings().get('suspend_indexes_constraints', False)
+        settings = self.get_migration_settings()
+        return settings.get('suspend_indexes_constraints', True)
+
+    def get_use_aliases_as_target_tables(self):
+        settings = self.get_migration_settings()
+        return settings.get('use_aliases_as_target_tables', False)
 
     def get_table_mapping(self, source_schema, source_table):
         """Returns the mapping rule for a specific source table if it exists within its data_export settings."""

@@ -39,29 +39,27 @@ class IbmDb2ZosConnector(DatabaseConnector):
         self.source_db_config = self.config_parser.get_source_config()
 
         if self.connectivity == self.config_parser.const_connectivity_ddl():
-            self.ddl_directory = self.source_db_config['ddl']['directory']
-            self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: __init__: Source_db_config: {self.source_db_config} - ddl_directory: {self.ddl_directory}")
-            if not os.path.exists(self.ddl_directory):
-                raise ValueError(f"DDL directory not found: '{self.ddl_directory}'")
+            self.ddl_path = self.source_db_config['ddl']['path']
+            self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: __init__: Source_db_config: {self.source_db_config} - ddl_path: {self.ddl_path}")
+
+            self.ddl_files = []
+            if os.path.exists(self.ddl_path) and os.path.isdir(self.ddl_path):
+                self.ddl_files = glob.glob(os.path.join(self.ddl_path, '*.*'))
             else:
-                if not os.listdir(self.ddl_directory):
-                    raise ValueError(f"DDL directory is empty: '{self.ddl_directory}'")
-                else:
-                    self.config_parser.print_log_message('INFO', f"ibm_db2_zos_connector: __init__: DDL directory found: '{self.ddl_directory}'")
+                self.ddl_files = glob.glob(self.ddl_path)
 
-                if not os.listdir(self.ddl_directory):
-                    raise ValueError(f"DDL directory is empty: '{self.ddl_directory}'")
-                else:
+            if not self.ddl_files:
+                raise ValueError(f"No DDL files found for path or mask: '{self.ddl_path}'")
 
-                    extension_counts = {}
-                    for filename in os.listdir(self.ddl_directory):
-                        if os.path.isfile(os.path.join(self.ddl_directory, filename)):
-                            ext = os.path.splitext(filename)[1]
-                            extension_counts[ext] = extension_counts.get(ext, 0) + 1
-                    for ext, count in extension_counts.items():
-                        self.config_parser.print_log_message('INFO', f"ibm_db2_zos_connector: __init__: Found {count} files with extension '{ext}'")
+            self.config_parser.print_log_message('INFO', f"ibm_db2_zos_connector: __init__: DDL path valid: '{self.ddl_path}', found {len(self.ddl_files)} files")
 
-                    self.config_parser.print_log_message('INFO', f"ibm_db2_zos_connector: __init__: DDL directory found: {self.ddl_directory}")
+            extension_counts = {}
+            for filepath in self.ddl_files:
+                if os.path.isfile(filepath):
+                    ext = os.path.splitext(filepath)[1]
+                    extension_counts[ext] = extension_counts.get(ext, 0) + 1
+            for ext, count in extension_counts.items():
+                self.config_parser.print_log_message('INFO', f"ibm_db2_zos_connector: __init__: Found {count} files with extension '{ext}'")
         else:
             raise ValueError(f"Unsupported IBM DB2 z/OS connectivity: {self.connectivity}")
 
@@ -213,13 +211,14 @@ class IbmDb2ZosConnector(DatabaseConnector):
 
 
     def parse_ddl_files(self, settings):
-        self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: parse_ddl_files: Starting DDL parser")
+        self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: parse_ddl_files: Starting DDL parser - self.ddl_files: {self.ddl_files}")
         migrator_tables = settings['migrator_tables']
         if not migrator_tables:
             self.config_parser.print_log_message('ERROR', "ibm_db2_zos_connector: parse_ddl_files: migrator_tables not found in settings.")
             return
 
-        for filepath in glob.glob(os.path.join(self.ddl_directory, '*.*')):
+        for filepath in self.ddl_files:
+            self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: parse_ddl_files: Processing file: {filepath}")
             with open(filepath, 'r', encoding='utf-8') as f:
                 content = f.read()
 
@@ -1105,9 +1104,12 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
 
         def quote_column_names(node):
             if isinstance(node, sqlglot.exp.Column) and node.name:
-                node.set("this", sqlglot.exp.Identifier(this=node.name, quoted=True))
+                converted_name = self.config_parser.convert_names_case(node.name)
+                node.set("this", sqlglot.exp.Identifier(this=converted_name, quoted=True))
             if isinstance(node, sqlglot.exp.Alias) and isinstance(node.args.get("alias"), sqlglot.exp.Identifier):
                 alias = node.args["alias"]
+                converted_alias = self.config_parser.convert_names_case(alias.name)
+                alias.set("this", converted_alias)
                 if not alias.args.get("quoted"):
                     alias.set("quoted", True)
             return node
@@ -1122,11 +1124,17 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
         def quote_schema_and_table_names(node):
             if isinstance(node, sqlglot.exp.Table):
                 schema = node.args.get("db")
-                if schema and not schema.args.get("quoted"):
-                    schema.set("quoted", True)
+                if schema:
+                    converted_schema = self.config_parser.convert_names_case(schema.name)
+                    schema.set("this", converted_schema)
+                    if not schema.args.get("quoted"):
+                        schema.set("quoted", True)
                 table = node.args.get("this")
-                if table and not table.args.get("quoted"):
-                    table.set("quoted", True)
+                if table:
+                    converted_table = self.config_parser.convert_names_case(table.name)
+                    table.set("this", converted_table)
+                    if not table.args.get("quoted"):
+                        table.set("quoted", True)
             return node
 
         def replace_functions(node):

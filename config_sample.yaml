@@ -62,7 +62,7 @@ source:
     driver: 'FreeTDS'
     libraries: "/usr/lib/x86_64-linux-gnu/odbc/libtdsodbc.so"
   ddl:
-    directory: "/path/to/ddl/directory"
+    path: "/path/to/ddl/directory" # either directory, or directory with mask for files or one specific file - currently no placeholders are supported here
   # system catalog is used only for some database
   # ibm_db2_luw - SYSCAT or SYSIBM - sysibm simulates the information_schema
   # ibm_db2_zos - currently implements only DDL connectivity

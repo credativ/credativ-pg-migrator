@@ -1044,6 +1044,31 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
                     'view_name': row[2],
                     'comment': None
                 }
+            
+            # Now fetch aliases that point to views
+            alias_query = f"""
+                SELECT a.id, a.source_schema_name, a.source_alias_name
+                FROM "{self.protocol_schema}"."ddl_aliases" a
+                INNER JOIN "{self.protocol_schema}"."ddl_views" v 
+                    ON a.source_target_schema = v.source_schema_name 
+                    AND a.source_target_name = v.source_view_name
+                WHERE a.source_schema_name = %s
+                ORDER BY a.id
+            """
+            cursor.execute(alias_query, (source_schema_name,))
+            alias_rows = cursor.fetchall()
+            self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: fetch_views_names (aliases): ({source_schema_name}): {alias_rows}")
+            
+            # Start appending aliases, preserving unique IDs (shift by 1,000,000 to avoid clash with view IDs)
+            offset = len(views)
+            for j, row in enumerate(alias_rows, 1):
+                views[offset + j] = {
+                    'id': row[0] + 1000000, # Shift ID to avoid collision with actual view IDs
+                    'schema_name': row[1],
+                    'view_name': row[2],
+                    'comment': None
+                }
+            
             cursor.close()
         return views
 
@@ -1083,9 +1108,29 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
             cursor.execute(query, (source_schema_name, source_view_name))
             row = cursor.fetchone()
             self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: fetch_view_code: ({source_schema_name}.{source_view_name}): {row}")
-            cursor.close()
             if row:
+                cursor.close()
                 return row[0]
+            
+            # If not found, try looking up as an alias mapped to a view
+            alias_query = f"""
+                SELECT a.source_schema_name, a.source_alias_name, a.source_target_schema, a.source_target_name
+                FROM "{self.protocol_schema}"."ddl_aliases" a
+                INNER JOIN "{self.protocol_schema}"."ddl_views" v 
+                    ON a.source_target_schema = v.source_schema_name 
+                    AND a.source_target_name = v.source_view_name
+                WHERE a.source_schema_name = %s AND a.source_alias_name = %s
+            """
+            cursor.execute(alias_query, (source_schema_name, source_view_name))
+            alias_row = cursor.fetchone()
+            self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: fetch_view_code (from alias): ({source_schema_name}.{source_view_name}): {alias_row}")
+            cursor.close()
+            
+            if alias_row:
+                # schema_name = alias_row[0], alias_name = alias_row[1]
+                # target_schema = alias_row[2], target_name = alias_row[3]
+                return f'CREATE VIEW "{alias_row[0]}"."{alias_row[1]}" AS SELECT * FROM "{alias_row[2]}"."{alias_row[3]}"'
+                
         return ""
 
     def convert_default_value(self, settings) -> dict:

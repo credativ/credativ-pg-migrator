@@ -2363,18 +2363,18 @@ class MigratorTables:
             'constraint_owner': row[9],
             'constraint_columns': row[10],
             'referenced_table_schema': row[11],
-            'referenced_table_name': row[11],
-            'referenced_columns': row[12],
-            'constraint_sql': row[13],
-            'delete_rule': row[14],
-            'update_rule': row[15],
-            'constraint_comment': row[16],
-            'constraint_status': row[17],
-            'task_created': row[18],
-            'task_started': row[19],
-            'task_completed': row[20],
-            'success': row[21],
-            'message': row[22]
+            'referenced_table_name': row[12],
+            'referenced_columns': row[13],
+            'constraint_sql': row[14],
+            'delete_rule': row[15],
+            'update_rule': row[16],
+            'constraint_comment': row[17],
+            'constraint_status': row[18],
+            'task_created': row[19],
+            'task_started': row[20],
+            'task_completed': row[21],
+            'success': row[22],
+            'message': row[23]
         }
 
     def insert_constraint(self, settings):
@@ -2383,18 +2383,18 @@ class MigratorTables:
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
             (source_table_id, source_schema_name, source_table_name,
-            target_schema_name, target_table_name, constraint_name,
+            target_schema_name, target_table_name, target_alias_name, constraint_name,
             constraint_type,
             constraint_owner, constraint_columns,
             referenced_table_schema, referenced_table_name,
             referenced_columns, constraint_sql,
             delete_rule, update_rule, constraint_comment,
             constraint_status)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
         params = (settings['source_table_id'], settings['source_schema_name'], settings['source_table_name'],
-                    settings['target_schema_name'], settings['target_table_name'], settings['constraint_name'],
+                    settings['target_schema_name'], settings['target_table_name'], settings.get('target_alias_name', ''), settings['constraint_name'],
                     settings['constraint_type'] if 'constraint_type' in settings else '',
                     settings['constraint_owner'] if 'constraint_owner' in settings else '',
                     settings['constraint_columns'] if 'constraint_columns' in settings else '',

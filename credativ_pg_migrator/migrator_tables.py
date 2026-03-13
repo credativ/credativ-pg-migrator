@@ -2779,9 +2779,9 @@ class MigratorTables:
                 return
             summary = cursor.fetchone()[0]
             if objects.lower() not in ['sequences']:
-                self.config_parser.print_log_message('INFO', f"migrator_tables: print_summary: Found in source: {summary}")
+                self.config_parser.print_log_message('INFO', f"migrator_tables: print_summary:     Found in source: {summary}")
             else:
-                self.config_parser.print_log_message('INFO', f"migrator_tables: print_summary: Found: {summary}")
+                self.config_parser.print_log_message('INFO', f"migrator_tables: print_summary:     Found: {summary}")
             if additional_columns:
                 columns_count = len(additional_columns.split(','))
                 columns_numbers = ', '.join(str(i + 2) for i in range(columns_count))
@@ -2789,7 +2789,7 @@ class MigratorTables:
                 cursor.execute(query)
                 rows = cursor.fetchall()
                 for row in rows:
-                    self.config_parser.print_log_message('INFO', f"migrator_tables: print_summary: {row[1:]}: {row[0]}")
+                    self.config_parser.print_log_message('INFO', f"migrator_tables: print_summary:         {row[1:]}: {row[0]}")
 
             if not self.config_parser.is_dry_run():
                 query = f"""SELECT success, COUNT(*) FROM "{self.protocol_schema}"."{migrator_table_name}" GROUP BY 1 ORDER BY 1"""
@@ -2802,14 +2802,14 @@ class MigratorTables:
                 for row in rows:
                     status = success_description if row[0] else "error" if row[0] is False else "unknown status"
                     row_success = row[0] if row[0] is not None else 'NULL'
-                    self.config_parser.print_log_message('INFO', f"migrator_tables: print_summary: {status}: {row[1]}")
+                    self.config_parser.print_log_message('INFO', f"migrator_tables: print_summary:     {status}: {row[1]}")
                     if additional_columns:
                         query = f"""SELECT COUNT(*), {additional_columns} FROM "{self.protocol_schema}"."{migrator_table_name}" WHERE success = {row_success} GROUP BY {columns_numbers} ORDER BY {columns_numbers}"""
                         cursor.execute(query)
                         rows = cursor.fetchall()
                         for row in rows:
                             # status = success_description if row[0] else "error" if row[0] is False else "unknown status"
-                            self.config_parser.print_log_message('INFO', f"migrator_tables: print_summary: {row[1:]}: {row[0]}")
+                            self.config_parser.print_log_message('INFO', f"migrator_tables: print_summary:         {row[1:]}: {row[0]}")
 
             cursor.close()
 
@@ -3534,6 +3534,12 @@ class MigratorTables:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 source_schema_name VARCHAR,
                 source_seq_name VARCHAR,
+                source_start_value BIGINT,
+                source_increment_by BIGINT,
+                source_minvalue BIGINT,
+                source_maxvalue BIGINT,
+                source_cache BIGINT,
+                source_is_cycled BOOLEAN,
                 source_ddl_text VARCHAR,
                 source_seq_comment TEXT
             )
@@ -3678,11 +3684,11 @@ class MigratorTables:
         func_run_id = uuid.uuid4()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."ddl_sequences"
-            (source_schema_name, source_seq_name, source_ddl_text, source_seq_comment)
-            VALUES (%s, %s, %s, %s)
+            (source_schema_name, source_seq_name, source_start_value, source_increment_by, source_minvalue, source_maxvalue, source_cache, source_is_cycled, source_ddl_text, source_seq_comment)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
         """
-        params = (settings.get('source_schema_name'), settings.get('source_seq_name'), settings.get('source_ddl_text'), settings.get('source_seq_comment'))
+        params = (settings.get('source_schema_name'), settings.get('source_seq_name'), settings.get('source_start_value'), settings.get('source_increment_by'), settings.get('source_minvalue'), settings.get('source_maxvalue'), settings.get('source_cache'), settings.get('source_is_cycled'), settings.get('source_ddl_text'), settings.get('source_seq_comment'))
         self.config_parser.print_log_message('DEBUG3', f"migrator_tables: insert_ddl_sequences: inserting: {params}")
         try:
             cursor = self.protocol_connection.connection.cursor()

@@ -473,6 +473,8 @@ class ConfigParser:
         return self.config.get('migration', {}).get('names_case_handling', 'keep').lower()
 
     def convert_names_case(self, name):
+        if name is None:
+            return None
         case_handling = self.get_names_case_handling().lower()
         if case_handling == 'lower':
             return name.lower()

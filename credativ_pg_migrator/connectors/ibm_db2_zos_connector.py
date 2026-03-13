@@ -327,10 +327,67 @@ class IbmDb2ZosConnector(DatabaseConnector):
                 if match_seq:
                     schema_name = match_seq.group(1).upper()
                     seq_name = match_seq.group(2).upper()
+
+                    # Rebuild Sequence SQL Statement based on DB2 properties for PostgreSQL compatibility
+                    seq_sql = f'CREATE SEQUENCE "{schema_name.lower()}"."{seq_name.lower()}"'
+                    seq_params_str = clean_stmt.upper()
+
+                    # Individual parameter tracking
+                    parsed_start = None
+                    parsed_increment = None
+                    parsed_minvalue = None
+                    parsed_maxvalue = None
+                    parsed_cache = None
+                    parsed_cycle = False
+
+                    start_with_match = re.search(r"START\s+WITH\s+(-?\d+)", seq_params_str)
+                    if start_with_match:
+                        parsed_start = int(start_with_match.group(1))
+                        seq_sql += f" START WITH {parsed_start}"
+
+                    increment_by_match = re.search(r"INCREMENT\s+BY\s+(-?\d+)", seq_params_str)
+                    if increment_by_match:
+                        parsed_increment = int(increment_by_match.group(1))
+                        seq_sql += f" INCREMENT BY {parsed_increment}"
+
+                    minvalue_match = re.search(r"MINVALUE\s+(-?\d+)", seq_params_str)
+                    if minvalue_match:
+                        parsed_minvalue = int(minvalue_match.group(1))
+                        seq_sql += f" MINVALUE {parsed_minvalue}"
+                    elif "NO MINVALUE" in seq_params_str:
+                        seq_sql += " NO MINVALUE"
+
+                    maxvalue_match = re.search(r"MAXVALUE\s+(-?\d+)", seq_params_str)
+                    if maxvalue_match:
+                        parsed_maxvalue = int(maxvalue_match.group(1))
+                        seq_sql += f" MAXVALUE {parsed_maxvalue}"
+                    elif "NO MAXVALUE" in seq_params_str:
+                        seq_sql += " NO MAXVALUE"
+
+                    if "CACHE" in seq_params_str and "NO CACHE" in seq_params_str:
+                        seq_sql += " CACHE 1" # Disable caching
+                    else:
+                        cache_match = re.search(r"CACHE\s+(\d+)", seq_params_str)
+                        if cache_match:
+                            parsed_cache = int(cache_match.group(1))
+                            seq_sql += f" CACHE {parsed_cache}"
+
+                    if "CYCLE" in seq_params_str and "NO CYCLE" not in seq_params_str:
+                        parsed_cycle = True
+                        seq_sql += " CYCLE"
+
                     migrator_tables.insert_ddl_sequences({
                         'source_schema_name': schema_name,
                         'source_seq_name': seq_name,
-                        'source_ddl_text': stmt,
+                        'source_table_name': None,
+                        'source_column_name': None,
+                        'source_start_value': parsed_start,
+                        'source_increment_by': parsed_increment,
+                        'source_minvalue': parsed_minvalue,
+                        'source_maxvalue': parsed_maxvalue,
+                        'source_cache': parsed_cache,
+                        'source_is_cycled': parsed_cycle,
+                        'source_ddl_text': seq_sql,
                         'source_seq_comment': comment_text
                     })
                     continue
@@ -499,7 +556,7 @@ class IbmDb2ZosConnector(DatabaseConnector):
 
                     is_identity = False
                     default_value = None
-                    
+
                     # Check for Identity Column definition
                     identity_match = re.search(r"GOVERNING\s+AS\s+IDENTITY|AS\s+IDENTITY\s*\(([^)]+)\)", after_type, re.IGNORECASE)
                     if not identity_match:
@@ -508,50 +565,72 @@ class IbmDb2ZosConnector(DatabaseConnector):
                     if identity_match:
                         is_identity = True
                         seq_params_str = identity_match.group(1) if identity_match.lastindex and identity_match.group(identity_match.lastindex) else ""
-                        
+
                         # Set default PostgreSQL Sequence generator mapping
                         seq_name = f"{table_name}_{col_name}_seq".lower()
                         default_value = f"nextval('\"{schema_name.lower()}\".\"{seq_name}\"')"
-                        
+
                         # Rebuild Sequence SQL Statement based on DB2 properties
                         seq_sql = f'CREATE SEQUENCE "{schema_name.lower()}"."{seq_name}"'
-                        
+
+                        # Individual parameter tracking
+                        parsed_start = None
+                        parsed_increment = None
+                        parsed_minvalue = None
+                        parsed_maxvalue = None
+                        parsed_cache = None
+                        parsed_cycle = False
+
                         if seq_params_str:
                             seq_params_str = seq_params_str.upper()
-                            
+
                             start_with_match = re.search(r"START\s+WITH\s+(-?\d+)", seq_params_str)
                             if start_with_match:
-                                seq_sql += f" START WITH {start_with_match.group(1)}"
-                                
+                                parsed_start = int(start_with_match.group(1))
+                                seq_sql += f" START WITH {parsed_start}"
+
                             increment_by_match = re.search(r"INCREMENT\s+BY\s+(-?\d+)", seq_params_str)
                             if increment_by_match:
-                                seq_sql += f" INCREMENT BY {increment_by_match.group(1)}"
-                                
+                                parsed_increment = int(increment_by_match.group(1))
+                                seq_sql += f" INCREMENT BY {parsed_increment}"
+
                             minvalue_match = re.search(r"MINVALUE\s+(-?\d+)", seq_params_str)
                             if minvalue_match:
-                                seq_sql += f" MINVALUE {minvalue_match.group(1)}"
+                                parsed_minvalue = int(minvalue_match.group(1))
+                                seq_sql += f" MINVALUE {parsed_minvalue}"
                             elif "NO MINVALUE" in seq_params_str:
                                 seq_sql += " NO MINVALUE"
-                                
+
                             maxvalue_match = re.search(r"MAXVALUE\s+(-?\d+)", seq_params_str)
                             if maxvalue_match:
-                                seq_sql += f" MAXVALUE {maxvalue_match.group(1)}"
+                                parsed_maxvalue = int(maxvalue_match.group(1))
+                                seq_sql += f" MAXVALUE {parsed_maxvalue}"
                             elif "NO MAXVALUE" in seq_params_str:
                                 seq_sql += " NO MAXVALUE"
-                                
+
                             if "CACHE" in seq_params_str and "NO CACHE" in seq_params_str:
                                 seq_sql += " CACHE 1" # Disable caching
                             else:
                                 cache_match = re.search(r"CACHE\s+(\d+)", seq_params_str)
                                 if cache_match:
-                                    seq_sql += f" CACHE {cache_match.group(1)}"
+                                    parsed_cache = int(cache_match.group(1))
+                                    seq_sql += f" CACHE {parsed_cache}"
 
                             if "CYCLE" in seq_params_str and "NO CYCLE" not in seq_params_str:
+                                parsed_cycle = True
                                 seq_sql += " CYCLE"
-                                
+
                         migrator_tables.insert_ddl_sequences({
                             'source_schema_name': schema_name,
                             'source_seq_name': seq_name.upper(),
+                            'source_table_name': table_name,
+                            'source_column_name': col_name,
+                            'source_start_value': parsed_start,
+                            'source_increment_by': parsed_increment,
+                            'source_minvalue': parsed_minvalue,
+                            'source_maxvalue': parsed_maxvalue,
+                            'source_cache': parsed_cache,
+                            'source_is_cycled': parsed_cycle,
                             'source_ddl_text': seq_sql,
                             'source_seq_comment': f"Auto-generated sequence for identity column {table_name}.{col_name}"
                         })
@@ -790,19 +869,19 @@ class IbmDb2ZosConnector(DatabaseConnector):
         trigger_name = settings.get('trigger_name', '')
         target_schema_name = settings.get('target_schema_name', '')
         target_table_name = settings.get('target_table_name', '')
-        
+
         # Basic cleanup
         trigger_sql = re.sub(r'--([^\n]*)', r'/*\1*/', trigger_sql)
-        
+
         # 1. Timing (BEFORE, AFTER, INSTEAD OF)
         timing_match = re.search(r'\b(BEFORE|AFTER|INSTEAD\s+OF)\b', trigger_sql, re.IGNORECASE)
         timing = timing_match.group(1).upper() if timing_match else 'BEFORE'
-        
+
         # 2. Event
         event_match = re.search(r'\b(INSERT|UPDATE|DELETE)(?:\s+OF\s+([a-zA-Z0-9_,\s]+))?\b', trigger_sql[timing_match.end():] if timing_match else trigger_sql, re.IGNORECASE)
         event = event_match.group(1).upper() if event_match else 'UPDATE'
         of_cols = event_match.group(2) if event_match and event_match.group(2) else None
-        
+
         pg_event = event
         if of_cols and event == 'UPDATE':
             cols = [c.strip() for c in of_cols.split(',')]
@@ -819,21 +898,21 @@ class IbmDb2ZosConnector(DatabaseConnector):
                     actual_cols.append(c)
             if actual_cols:
                 pg_event += f" OF {', '.join(actual_cols)}"
-                
+
         # 3. Referencing Aliases
         old_alias, new_alias = 'OLD', 'NEW'
         old_match = re.search(r'\bOLD\s+AS\s+([a-zA-Z0-9_]+)\b', trigger_sql, re.IGNORECASE)
         if old_match: old_alias = old_match.group(1)
-            
+
         new_match = re.search(r'\bNEW\s+AS\s+([a-zA-Z0-9_]+)\b', trigger_sql, re.IGNORECASE)
         if new_match: new_alias = new_match.group(1)
-            
+
         # 4. Extract WHEN and Body
         mode_match = re.search(r'\bMODE\s+DB2SQL\b', trigger_sql, re.IGNORECASE)
         when_clause = ""
         body = ""
         remainder = trigger_sql[mode_match.end():].strip() if mode_match else trigger_sql
-        
+
         if remainder.upper().startswith('WHEN'):
             when_text = remainder[4:].lstrip()
             if when_text.startswith('('):
@@ -847,11 +926,11 @@ class IbmDb2ZosConnector(DatabaseConnector):
                         break
         else:
             body = remainder
-            
+
         # Strip BEGIN ATOMIC / END
         body = re.sub(r'(?i)^BEGIN\s+ATOMIC', '', body).strip()
         body = re.sub(r'(?i)END;?\s*$', '', body).strip()
-        
+
         # 5. Replacements
         def replace_aliases(text):
             if not text: return text
@@ -860,10 +939,10 @@ class IbmDb2ZosConnector(DatabaseConnector):
             if new_alias.upper() != 'NEW':
                 text = re.sub(rf'\b{re.escape(new_alias)}\.', 'NEW.', text, flags=re.IGNORECASE)
             return text
-            
+
         when_clause = replace_aliases(when_clause)
         body = replace_aliases(body)
-        
+
         # Replace CURRENT DATE / TIMESTAMP
         body = re.sub(r'\bCURRENT\s+DATE\b', 'CURRENT_DATE', body, flags=re.IGNORECASE)
         body = re.sub(r'\bCURRENT\s+TIMESTAMP\b', 'CURRENT_TIMESTAMP', body, flags=re.IGNORECASE)
@@ -873,7 +952,7 @@ class IbmDb2ZosConnector(DatabaseConnector):
         # Handle SIGNAL SQLSTATE and RAISE_ERROR
         body = re.sub(r"(?i)SIGNAL\s+SQLSTATE\s+'([^']+)'\s*\(\s*('[^']+')\s*\);?", r"RAISE EXCEPTION \2 USING ERRCODE = '\1';", body)
         body = re.sub(r"(?i)RAISE_ERROR\s*\(\s*'([^']+)'\s*,\s*('[^']+')\s*\)", r"RAISE EXCEPTION \2 USING ERRCODE = '\1';", body)
-        
+
         # Handle assignments: SET a = b or SET (a,b) = (c,d)
         if body.upper().startswith('SET'):
             body = re.sub(r'(?i)^SET\s*', '', body)
@@ -890,14 +969,14 @@ class IbmDb2ZosConnector(DatabaseConnector):
                 body = re.sub(r'(?i)^([A-Za-z0-9_.]+)\s*=', r'\1 := ', body)
             if not body.strip().endswith(';'):
                 body += ';'
-                
-        # Handle plain updates 
+
+        # Handle plain updates
         if not body.strip().endswith(';'):
             body += ';'
-            
+
         # Target Generation
         func_name = f"{trigger_name}_func"
-        
+
         pg_func = f"""CREATE OR REPLACE FUNCTION "{target_schema_name}"."{func_name}"()
 RETURNS TRIGGER AS $$
 BEGIN
@@ -1023,7 +1102,7 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
 
     def convert_view_code(self, settings: dict):
         import sqlglot
-        
+
         def quote_column_names(node):
             if isinstance(node, sqlglot.exp.Column) and node.name:
                 node.set("this", sqlglot.exp.Identifier(this=node.name, quoted=True))

@@ -89,6 +89,7 @@ class MigratorTables:
         self.create_table_for_triggers()
         self.create_table_for_views()
         self.create_ddl_tables()
+        self.create_table_for_matching()
 
     def prepare_data_types_substitution(self):
         # Drop table if exists
@@ -392,6 +393,141 @@ class MigratorTables:
         """
         self.protocol_connection.execute_query(query)
         self.config_parser.print_log_message('DEBUG3', f"migrator_tables: create_protocol: Table {table_name} created in schema {self.protocol_schema}")
+
+    def create_table_for_matching(self):
+        self.protocol_connection.execute_query(f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."matching_run" (
+                id SERIAL PRIMARY KEY,
+                start_time TIMESTAMP DEFAULT NOW(),
+                end_time timestamp,
+                matching_script text,
+                config_filename TEXT,
+                source_db_type TEXT,
+                source_schema TEXT,
+                target_db_type TEXT,
+                target_schema TEXT
+            );
+        """)
+        self.protocol_connection.execute_query(f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."matching_tables" (
+                id SERIAL PRIMARY KEY,
+                run_id INTEGER REFERENCES "{self.protocol_schema}"."matching_run"(id) ON DELETE CASCADE,
+                source_table_name TEXT,
+                target_table_name TEXT,
+                match_type TEXT NOT NULL,
+                similarity_score FLOAT,
+                info TEXT
+            );
+        """)
+        self.protocol_connection.execute_query(f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."matching_columns" (
+                id SERIAL PRIMARY KEY,
+                table_match_id INTEGER REFERENCES "{self.protocol_schema}"."matching_tables"(id) ON DELETE CASCADE,
+                source_column_name TEXT,
+                target_column_name TEXT,
+                source_ordinal_number INTEGER,
+                target_ordinal_number INTEGER,
+                source_data_type TEXT,
+                target_data_type TEXT,
+                match_type TEXT NOT NULL
+            );
+        """)
+        self.config_parser.print_log_message('DEBUG3', f"migrator_tables: create_table_for_matching: Matching tables created in schema {self.protocol_schema}")
+
+    def insert_matching_run(self, settings):
+        func_run_id = uuid.uuid4()
+        config_filename = settings.get('config_filename')
+        matching_script = settings.get('matching_script')
+        source_db_type = settings.get('source_db_type')
+        source_schema = settings.get('source_schema')
+        target_db_type = settings.get('target_db_type')
+        target_schema = settings.get('target_schema')
+
+        query = f"""
+            INSERT INTO "{self.protocol_schema}"."matching_run"
+            (matching_script, config_filename, source_db_type, source_schema, target_db_type, target_schema)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            RETURNING id
+        """
+        params = (matching_script, config_filename, source_db_type, source_schema, target_db_type, target_schema)
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+            return row[0] if row else None
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_matching_run: ({func_run_id}): Error: {e}")
+            raise
+
+    def update_matching_run_end_time(self, run_id):
+        func_run_id = uuid.uuid4()
+        query = f"""
+            UPDATE "{self.protocol_schema}"."matching_run"
+            SET end_time = clock_timestamp()
+            WHERE id = %s
+        """
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, (run_id,))
+            cursor.close()
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_matching_run_end_time: ({func_run_id}): Error: {e}")
+            raise
+
+    def insert_matching_tables(self, settings):
+        func_run_id = uuid.uuid4()
+        run_id = settings.get('run_id')
+        source_table_name = settings.get('source_table_name')
+        target_table_name = settings.get('target_table_name')
+        match_type = settings.get('match_type')
+        similarity_score = settings.get('similarity_score')
+        info = settings.get('info')
+
+        query = f"""
+            INSERT INTO "{self.protocol_schema}"."matching_tables"
+            (run_id, source_table_name, target_table_name, match_type, similarity_score, info)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            RETURNING id
+        """
+        params = (run_id, source_table_name, target_table_name, match_type, similarity_score, info)
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+            return row[0] if row else None
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_matching_tables: ({func_run_id}): Error: {e}")
+            raise
+
+    def insert_matching_columns(self, settings):
+        func_run_id = uuid.uuid4()
+        table_match_id = settings.get('table_match_id')
+        source_column_name = settings.get('source_column_name')
+        target_column_name = settings.get('target_column_name')
+        source_ordinal_number = settings.get('source_ordinal_number')
+        target_ordinal_number = settings.get('target_ordinal_number')
+        source_data_type = settings.get('source_data_type')
+        target_data_type = settings.get('target_data_type')
+        match_type = settings.get('match_type')
+
+        query = f"""
+            INSERT INTO "{self.protocol_schema}"."matching_columns"
+            (table_match_id, source_column_name, target_column_name, source_ordinal_number, target_ordinal_number, source_data_type, target_data_type, match_type)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
+        """
+        params = (table_match_id, source_column_name, target_column_name, source_ordinal_number, target_ordinal_number, source_data_type, target_data_type, match_type)
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+            return row[0] if row else None
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_matching_columns: ({func_run_id}): Error: {e}")
+            raise
 
     def create_table_for_main(self):
         table_name = self.config_parser.get_protocol_name_main()

@@ -1203,9 +1203,12 @@ class Planner:
                                             break
 
                     if os.path.exists(table_file_name):
+                        self.config_parser.print_log_message('INFO', f"planner: run_prepare_data_sources: Testing data source file name - {table_file_name} exists.")
                         data_file_found = True
                     else:
-                        self.config_parser.print_log_message('ERROR', f"planner: run_prepare_data_sources: Data source file {table_file_name} does not exist or is not accessible.")
+                        self.config_parser.print_log_message('WARNING', f"planner: run_prepare_data_sources: Testing data source file name - {table_file_name} does not exist or is not accessible.")
+                        if '{{' in table_file_name or '}}' in table_file_name:
+                            self.config_parser.print_log_message('WARNING', f"planner: run_prepare_data_sources: Data source file name {table_file_name} contains placeholder(s) - value was most likely not found for replacement.")
                         data_file_found = False
                         if self.config_parser.get_source_data_export_on_missing_data_file() == 'error':
                             self.config_parser.print_log_message('ERROR', f"planner: run_prepare_data_sources: Data source file {table_file_name} does not exist or is not accessible. Stopping execution.")

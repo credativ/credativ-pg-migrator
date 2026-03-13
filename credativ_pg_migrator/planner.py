@@ -823,7 +823,7 @@ class Planner:
                     'source_schema_name': self.config_parser.get_source_schema(),
                     'source_view_name': view_info['view_name'],
                     'target_schema_name': self.config_parser.get_target_schema(),
-                    'target_view_name': view_info['view_name'],
+                    'target_view_name': self.config_parser.convert_names_case(view_info['view_name']),
                 })
                 self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_views: Source view SQL: {view_sql}")
                 converted_view_sql = self.source_connection.convert_view_code({
@@ -832,7 +832,7 @@ class Planner:
                     'source_schema_name': self.config_parser.get_source_schema(),
                     'target_schema_name': self.config_parser.get_target_schema(),
                     'target_db_type': self.config_parser.get_target_db_type(),
-                    'target_view_name': view_info['view_name'], # Pass name
+                    'target_view_name': self.config_parser.convert_names_case(view_info['view_name']), # Pass name
                     'view_type': view_info.get('view_type', 'VIEW'), # Pass type
                 })
 
@@ -850,7 +850,7 @@ class Planner:
                     'source_view_id': view_info['id'],
                     'source_view_sql': view_sql,
                     'target_schema_name': self.target_schema_name,
-                    'target_view_name': view_info['view_name'],
+                    'target_view_name': self.config_parser.convert_names_case(view_info['view_name']),
                     'target_view_sql': converted_view_sql,
                     'view_comment': view_info['comment']
                 })
@@ -883,7 +883,13 @@ class Planner:
                     'source_referenced_schema_name': alias_info.get('aliased_schema_name', ''),
                     'source_referenced_table_name': alias_info.get('aliased_table_name', ''),
                     'source_referenced_column_name': alias_info.get('aliased_column_name', ''),
-                    'source_alias_comment': alias_info.get('alias_comment', '')
+                    'source_alias_comment': alias_info.get('alias_comment', ''),
+                    'target_schema_name': self.target_schema_name,
+                    'target_alias_name': self.config_parser.convert_names_case(alias_info.get('alias_name', '')),
+                    'target_referenced_schema_name': self.config_parser.convert_names_case(alias_info.get('aliased_schema_name', '')),
+                    'target_referenced_table_name': self.config_parser.convert_names_case(alias_info.get('aliased_table_name', '')),
+                    'target_referenced_column_name': self.config_parser.convert_names_case(alias_info.get('aliased_column_name', '')),
+                    'target_alias_sql': '' # PostgreSQL does not implement pure aliases
                 })
                 self.config_parser.print_log_message( 'INFO', f"planner: run_prepare_aliases: Alias {alias_info.get('alias_name')} processed successfully.")
         else:

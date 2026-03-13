@@ -23,6 +23,7 @@ import datetime
 import os
 import glob
 import re
+import sqlglot
 
 class IbmDb2ZosConnector(DatabaseConnector):
     def __init__(self, config_parser, source_or_target):
@@ -1100,7 +1101,6 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
         return extracted_default_value
 
     def convert_view_code(self, settings: dict):
-        import sqlglot
 
         def quote_column_names(node):
             if isinstance(node, sqlglot.exp.Column) and node.name:
@@ -1112,6 +1112,13 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
                 alias.set("this", converted_alias)
                 if not alias.args.get("quoted"):
                     alias.set("quoted", True)
+            if isinstance(node, sqlglot.exp.Schema):
+                for expr in node.expressions:
+                    if isinstance(expr, sqlglot.exp.Identifier):
+                        converted_name = self.config_parser.convert_names_case(expr.name)
+                        expr.set("this", converted_name)
+                        if not expr.args.get("quoted"):
+                            expr.set("quoted", True)
             return node
 
         def replace_schema_names(node):
@@ -1206,6 +1213,15 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
                     converted_code = re.sub(re.escape(source_obj), target_obj, converted_code, flags=re.IGNORECASE)
 
         if settings['target_db_type'] == 'postgresql':
+            sql_functions_mapping = self.get_sql_functions_mapping({ 'target_db_type': settings['target_db_type'] })
+            if sql_functions_mapping:
+                for src_func, tgt_func in sql_functions_mapping.items():
+                    escaped_src_func = re.escape(src_func)
+                    if escaped_src_func.endswith(r'\(') or escaped_src_func.endswith(r'\)'):
+                        converted_code = re.sub(rf"(?i)\b{escaped_src_func}", tgt_func, converted_code, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
+                    else:
+                        converted_code = re.sub(rf"(?i)\b{escaped_src_func}\b", tgt_func, converted_code, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
+
             try:
                 # Use default sqlglot dialect because 'db2' dialect is not supported
                 parsed_code = sqlglot.parse_one(converted_code)
@@ -1222,12 +1238,6 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
 
             converted_code = parsed_code.sql(dialect="postgres")
             converted_code = converted_code.replace("()()", "()")
-
-            sql_functions_mapping = self.get_sql_functions_mapping({ 'target_db_type': settings['target_db_type'] })
-            if sql_functions_mapping:
-                for src_func, tgt_func in sql_functions_mapping.items():
-                    escaped_src_func = re.escape(src_func)
-                    converted_code = re.sub(rf"(?i){escaped_src_func}", tgt_func, converted_code, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
 
             self.config_parser.print_log_message('DEBUG', f"ibm_db2_zos_connector: convert_view_code: Converted view: {converted_code}")
         else:

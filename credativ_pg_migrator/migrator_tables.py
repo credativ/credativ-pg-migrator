@@ -1910,6 +1910,12 @@ class MigratorTables:
             source_referenced_table_name TEXT,
             source_referenced_column_name TEXT,
             source_alias_comment TEXT,
+            target_schema_name TEXT,
+            target_alias_name TEXT,
+            target_referenced_schema_name TEXT,
+            target_referenced_table_name TEXT,
+            target_referenced_column_name TEXT,
+            target_alias_sql TEXT,
             task_created TIMESTAMP DEFAULT clock_timestamp(),
             task_started TIMESTAMP,
             task_completed TIMESTAMP,
@@ -3372,11 +3378,11 @@ class MigratorTables:
         table_name = self.config_parser.get_protocol_name_aliases()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
-            (source_schema_name, source_alias_name, source_alias_id, source_alias_sql, source_referenced_schema_name, source_referenced_table_name, source_referenced_column_name, source_alias_comment)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            (source_schema_name, source_alias_name, source_alias_id, source_alias_sql, source_referenced_schema_name, source_referenced_table_name, source_referenced_column_name, source_alias_comment, target_schema_name, target_alias_name, target_referenced_schema_name, target_referenced_table_name, target_referenced_column_name, target_alias_sql)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (settings.get('source_schema_name'), settings.get('source_alias_name'), settings.get('source_alias_id'), settings.get('source_alias_sql'), settings.get('source_referenced_schema_name'), settings.get('source_referenced_table_name'), settings.get('source_referenced_column_name'), settings.get('source_alias_comment'))
+        params = (settings.get('source_schema_name'), settings.get('source_alias_name'), settings.get('source_alias_id'), settings.get('source_alias_sql'), settings.get('source_referenced_schema_name'), settings.get('source_referenced_table_name'), settings.get('source_referenced_column_name'), settings.get('source_alias_comment'), settings.get('target_schema_name'), settings.get('target_alias_name'), settings.get('target_referenced_schema_name'), settings.get('target_referenced_table_name'), settings.get('target_referenced_column_name'), settings.get('target_alias_sql'))
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -3567,7 +3573,12 @@ class MigratorTables:
                 source_target_schema VARCHAR,
                 source_target_name VARCHAR,
                 source_alias_sql TEXT,
-                source_alias_comment TEXT
+                source_alias_comment TEXT,
+                target_schema_name VARCHAR,
+                target_alias_name VARCHAR,
+                target_referenced_schema_name VARCHAR,
+                target_referenced_table_name VARCHAR,
+                target_referenced_column_name VARCHAR
             )
         """)
 

@@ -869,6 +869,7 @@ class Planner:
                     'target_db_type': self.config_parser.get_target_db_type(),
                     'target_view_name': self.config_parser.convert_names_case(target_view_name_to_use), # Pass name
                     'view_type': view_info.get('view_type', 'VIEW'), # Pass type
+                    'migrator_tables': self.migrator_tables,
                 })
 
                 self.config_parser.print_log_message( 'DEBUG', "planner: run_prepare_views: Checking for remote objects substitution in view SQL...")

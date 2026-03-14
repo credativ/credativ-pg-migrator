@@ -1178,6 +1178,7 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
         def quote_schema_and_table_names(node):
             if isinstance(node, sqlglot.exp.Table):
                 schema = node.args.get("db")
+                schema_name_for_lookup = schema.name if schema else settings['source_schema_name']
                 if schema:
                     converted_schema = self.config_parser.convert_names_case(schema.name)
                     schema.set("this", converted_schema)
@@ -1185,7 +1186,15 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
                         schema.set("quoted", True)
                 table = node.args.get("this")
                 if table:
-                    converted_table = self.config_parser.convert_names_case(table.name)
+                    # Lookup alias if enabled
+                    table_name_to_use = table.name
+                    if self.config_parser.get_use_aliases_as_target_names() and settings.get('migrator_tables'):
+                        alias_name = settings['migrator_tables'].get_alias_for_table(schema_name_for_lookup, table.name)
+                        if alias_name:
+                            self.config_parser.print_log_message('INFO', f"ibm_db2_zos_connector: convert_view_code: Replaced referenced table '{table.name}' with alias '{alias_name}' inside view generation.")
+                            table_name_to_use = alias_name
+                            
+                    converted_table = self.config_parser.convert_names_case(table_name_to_use)
                     table.set("this", converted_table)
                     if not table.args.get("quoted"):
                         table.set("quoted", True)

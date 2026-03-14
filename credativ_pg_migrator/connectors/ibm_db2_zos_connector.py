@@ -1045,30 +1045,31 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
                     'comment': None
                 }
             
-            # Now fetch aliases that point to views ONLY if use_aliases_as_target_names is not active
-            if not self.config_parser.get_use_aliases_as_target_names():
-                alias_query = f"""
-                    SELECT a.id, a.source_schema_name, a.source_alias_name
-                    FROM "{self.protocol_schema}"."ddl_aliases" a
-                    INNER JOIN "{self.protocol_schema}"."ddl_views" v 
-                        ON a.source_target_schema = v.source_schema_name 
-                        AND a.source_target_name = v.source_view_name
-                    WHERE a.source_schema_name = %s
-                    ORDER BY a.id
-                """
-                cursor.execute(alias_query, (source_schema_name,))
-                alias_rows = cursor.fetchall()
-                self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: fetch_views_names (aliases): ({source_schema_name}): {alias_rows}")
-                
-                # Start appending aliases, preserving unique IDs (shift by 1,000,000 to avoid clash with view IDs)
-                offset = len(views)
-                for j, row in enumerate(alias_rows, 1):
-                    views[offset + j] = {
-                        'id': row[0] + 1000000, # Shift ID to avoid collision with actual view IDs
-                        'schema_name': row[1],
-                        'view_name': row[2],
-                        'comment': None
-                    }
+            # Now fetch aliases that point to views unconditionally
+            # This ensures that even if use_aliases_as_target_names is active for tables,
+            # we always create additional views "select * from <original view>" for view aliases
+            alias_query = f"""
+                SELECT a.id, a.source_schema_name, a.source_alias_name
+                FROM "{self.protocol_schema}"."ddl_aliases" a
+                INNER JOIN "{self.protocol_schema}"."ddl_views" v 
+                    ON a.source_target_schema = v.source_schema_name 
+                    AND a.source_target_name = v.source_view_name
+                WHERE a.source_schema_name = %s
+                ORDER BY a.id
+            """
+            cursor.execute(alias_query, (source_schema_name,))
+            alias_rows = cursor.fetchall()
+            self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: fetch_views_names (aliases): ({source_schema_name}): {alias_rows}")
+            
+            # Start appending aliases, preserving unique IDs (shift by 1,000,000 to avoid clash with view IDs)
+            offset = len(views)
+            for j, row in enumerate(alias_rows, 1):
+                views[offset + j] = {
+                    'id': row[0] + 1000000, # Shift ID to avoid collision with actual view IDs
+                    'schema_name': row[1],
+                    'view_name': row[2],
+                    'comment': None
+                }
             
             cursor.close()
         return views

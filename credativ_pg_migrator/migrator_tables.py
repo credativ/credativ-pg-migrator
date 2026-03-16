@@ -3387,7 +3387,7 @@ class MigratorTables:
         query = f"""
             SELECT target_alias_name
             FROM "{self.protocol_schema}"."{table_name}"
-            WHERE source_referenced_schema_name = %s AND source_referenced_table_name = %s
+            WHERE upper(source_referenced_schema_name) = upper(%s) AND upper(source_referenced_table_name) = upper(%s)
         """
         try:
             cursor = self.protocol_connection.connection.cursor()

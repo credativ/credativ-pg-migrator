@@ -1171,7 +1171,7 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
         def replace_schema_names(node):
             if isinstance(node, sqlglot.exp.Table):
                 schema = node.args.get("db")
-                if schema and schema.name == settings['source_schema_name']:
+                if schema and schema.name.upper() == settings['source_schema_name'].upper():
                     node.set("db", sqlglot.exp.Identifier(this=settings['target_schema_name'], quoted=False))
             return node
 
@@ -1288,8 +1288,8 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
 
             parsed_code = parsed_code.transform(quote_column_names)
             parsed_code = parsed_code.transform(convert_string_concatenation)
-            parsed_code = parsed_code.transform(replace_schema_names)
             parsed_code = parsed_code.transform(quote_schema_and_table_names)
+            parsed_code = parsed_code.transform(replace_schema_names)
             parsed_code = parsed_code.transform(replace_functions)
 
             converted_code = parsed_code.sql(dialect="postgres")

@@ -903,7 +903,7 @@ class ConfigParser:
                             break
         return ','.join(lob_columns_list)
 
-    def convert_csv_to_utf8(self, data_source_settings):
+    def convert_csv_to_utf8(self, data_source_settings, source_columns=None, target_columns=None):
         part_name = 'convert_csv_to_utf8 start'
         self.print_log_message('DEBUG3', f"config_parser: convert_csv_to_utf8: ({part_name}): Starting conversion of CSV file '{data_source_settings.get('file_name')}' to UTF-8.")
         try:
@@ -938,6 +938,11 @@ class ConfigParser:
 
             counter = 0
 
+            if source_columns:
+                expected_types = [col['data_type'].upper() for _, col in source_columns.items()]
+            else:
+                expected_types = []
+
             # DB2 timestamp format: YYYY-MM-DD-HH.MM.SS.mmmmmm
             ts_pattern = re.compile(r'^(\d{4}-\d{2}-\d{2})-(\d{2})\.(\d{2})\.(\d{2})(?:\.(\d+))?$')
 
@@ -949,6 +954,32 @@ class ConfigParser:
 
                 for row in reader:
                     processed_row = []
+                    
+                    if csv_delimiter == ',' and expected_types and len(row) > len(expected_types):
+                        merged_row = []
+                        i = 0
+                        col_idx = 0
+                        
+                        while i < len(row):
+                            field = row[i]
+                            
+                            if col_idx < len(expected_types):
+                                expected_type = expected_types[col_idx]
+                                if expected_type in ('FLOAT', 'REAL', 'DOUBLE', 'DECIMAL', 'NUMERIC') and len(row) - i > len(expected_types) - col_idx:
+                                    if i + 1 < len(row):
+                                        next_field = row[i+1]
+                                        # Only merge if BOTH parts are purely numeric (representing a split comma decimal)
+                                        is_int_part = field.isdigit() or (field.startswith('-') and field[1:].isdigit())
+                                        if is_int_part and next_field.isdigit():
+                                            field = f"{field}.{next_field}"
+                                            i += 1
+                                            
+                            merged_row.append(field)
+                            col_idx += 1
+                            i += 1
+                            
+                        row = merged_row
+
                     for field in row:
                         if field == '(null)':
                             processed_row.append(null_symbol)

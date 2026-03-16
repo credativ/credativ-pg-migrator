@@ -2665,7 +2665,7 @@ class SybaseASEConnector(DatabaseConnector):
 
         return final_code
 
-    def fetch_sequences(self, table_schema: str, table_name: str):
+    def fetch_sequences(self, schema_name: str):
         pass
 
     def get_sequence_details(self, sequence_owner, sequence_name):

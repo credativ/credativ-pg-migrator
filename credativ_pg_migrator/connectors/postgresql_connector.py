@@ -1384,7 +1384,7 @@ class PostgreSQLConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', "postgresql_connector: handle_error: Stopping due to error.")
             exit(1)
 
-    def fetch_sequences(self, table_schema: str, table_name: str):
+    def fetch_sequences(self, schema_name: str):
         sequence_data = {}
         order_num = 1
         try:

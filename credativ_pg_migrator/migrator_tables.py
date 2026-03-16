@@ -3032,6 +3032,33 @@ class MigratorTables:
         tables = cursor.fetchall()
         return tables
 
+    def fetch_all_sequences(self, only_unfinished=False):
+        if only_unfinished:
+            query = f"""SELECT * FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_sequences()}" WHERE success IS NOT TRUE ORDER BY sequence_id"""
+        else:
+            query = f"""SELECT * FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_sequences()}" ORDER BY sequence_id"""
+        cursor = self.protocol_connection.connection.cursor()
+        cursor.execute(query)
+        sequences = cursor.fetchall()
+        return sequences
+
+    def fetch_sequence(self, settings):
+        source_schema_name = settings.get('source_schema_name')
+        source_sequence_name = settings.get('source_sequence_name')
+        query = f"""
+                SELECT *
+                FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_sequences()}"
+                WHERE source_schema_name = '{source_schema_name}'
+                AND source_sequence_name = '{source_sequence_name}'
+                """
+        cursor = self.protocol_connection.connection.cursor()
+        cursor.execute(query)
+        sequence = cursor.fetchone()
+        cursor.close()
+        if not sequence:
+            return None
+        return sequence
+
     def fetch_table(self, settings):
         source_schema_name = settings.get('source_schema_name')
         source_table_name = settings.get('source_table_name')

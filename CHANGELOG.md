@@ -1,6 +1,11 @@
 # Changelog
 
-## 0.11.4 - 2026.03.13
+## 0.11.4 - 2026.03.16
+
+- 2026.03.16
+
+  - Fix in CSV data conversion - repaired CSV to UTF-8 parsing to dynamically merge fields where commas were incorrectly acting as decimal separators; securely validates the column definitions to ensure merging only triggers for `NUMERIC`/`DECIMAL`/`FLOAT` target columns possessing a strict >0 scale specification, ignoring explicitly unscaled integers.
+  - Improvements in Sequence migration - restructured sequence extraction to efficiently fetch and migrate via the `ddl_sequences` system instead of standard code conversion; refined reset assignments utilizing `fetch_table_sequences` parallel execution handlers after dataset migrations.
 
 - 2026.03.13
 

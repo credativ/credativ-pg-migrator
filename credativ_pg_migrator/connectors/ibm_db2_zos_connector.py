@@ -1007,7 +1007,7 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
     def fetch_sequences(self, schema_name: str):
         seqs = {}
         if self.connectivity == self.config_parser.const_connectivity_ddl():
-            query = f"""SELECT id, source_seq_name, source_ddl_text
+            query = f"""SELECT id, source_seq_name, source_ddl_text, source_start_value, source_increment_by, source_minvalue, source_maxvalue, source_cache, source_is_cycled
                         FROM "{self.protocol_schema}"."ddl_sequences"
                         WHERE source_schema_name = %s ORDER BY id"""
             cursor = self.migrator_tables.protocol_connection.connection.cursor()
@@ -1019,7 +1019,13 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
                     'id': row[0],
                     'sequence_name': row[1],
                     'column_name': None,
-                    'source_sequence_sql': row[2]
+                    'source_sequence_sql': row[2],
+                    'source_start_value': row[3],
+                    'source_increment_by': row[4],
+                    'source_minvalue': row[5],
+                    'source_maxvalue': row[6],
+                    'source_cache': row[7],
+                    'source_is_cycled': row[8]
                 }
             cursor.close()
         return seqs
@@ -1030,43 +1036,33 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
     def migrate_sequences(self, target_connector, settings):
         target_schema_name = settings.get('target_schema_name', '')
         target_sequence_name = settings.get('target_sequence_name', '')
-        source_sequence_sql = settings.get('source_sequence_sql', '')
-        
-        if not source_sequence_sql:
-            self.config_parser.print_log_message('INFO', f"ibm_db2_zos_connector: migrate_sequences: No SQL provided for sequence {target_sequence_name}. Skipping.")
+        source_start_value = settings.get('source_start_value')
+        source_increment_by = settings.get('source_increment_by')
+        source_minvalue = settings.get('source_minvalue')
+        source_maxvalue = settings.get('source_maxvalue')
+        source_cache = settings.get('source_cache')
+        source_is_cycled = settings.get('source_is_cycled')
+
+        if not target_sequence_name:
             return True
 
         if self.connectivity == self.config_parser.const_connectivity_ddl():
             try:
-                # Basic cleanup: remove AS INTEGER for postgres compatibility if problematic, though Postgres 10+ supports it.
-                # Just replace schema name using simple string replacement or the existing logic if we had sqlglot, 
-                # but DB2 sequences usually specify the schema explicitly. We'll use sqlglot parsing like with views, or simple regex.
-                # For safety, let's parse with sqlglot and replace schema, then generate.
-                import sqlglot
-                import sqlglot.expressions as exp
+                sql_parts = [f'CREATE SEQUENCE "{target_schema_name}"."{target_sequence_name}"']
+                if source_increment_by is not None:
+                    sql_parts.append(f"INCREMENT BY {source_increment_by}")
+                if source_minvalue is not None:
+                    sql_parts.append(f"MINVALUE {source_minvalue}")
+                if source_maxvalue is not None:
+                    sql_parts.append(f"MAXVALUE {source_maxvalue}")
+                if source_start_value is not None:
+                    sql_parts.append(f"START WITH {source_start_value}")
+                if source_cache is not None:
+                    sql_parts.append(f"CACHE {source_cache}")
+                if source_is_cycled:
+                    sql_parts.append("CYCLE")
                 
-                try:
-                    expression = sqlglot.parse_one(source_sequence_sql, read="db2")
-                    
-                    # Convert names case based on config
-                    if self.config_parser.get_target_names_case() == 'lower':
-                        for identifier in expression.find_all(exp.Identifier):
-                            identifier.set("this", identifier.this.lower())
-                    elif self.config_parser.get_target_names_case() == 'upper':
-                        for identifier in expression.find_all(exp.Identifier):
-                            identifier.set("this", identifier.this.upper())
-                            
-                    # Change schema
-                    if isinstance(expression, exp.Create) and isinstance(expression.this, exp.Sequence):
-                        expression.this.set("db", exp.identifier(target_schema_name, quoted=True))
-                        expression.this.set("this", exp.identifier(target_sequence_name, quoted=True))
-                        
-                    target_sequence_sql = expression.sql(dialect="postgres")
-                except Exception as parse_e:
-                    self.config_parser.print_log_message('WARNING', f"ibm_db2_zos_connector: migrate_sequences: sqlglot parse failed for {target_sequence_name}. Falling back to basic regex. Error: {parse_e}")
-                    # regex fallback
-                    import re
-                    target_sequence_sql = re.sub(r'CREATE SEQUENCE \w+\.', f'CREATE SEQUENCE "{target_schema_name}".', source_sequence_sql, flags=re.IGNORECASE)
+                target_sequence_sql = " ".join(sql_parts)
                     
                 self.config_parser.print_log_message('INFO', f"ibm_db2_zos_connector: migrate_sequences: Creating sequence {target_sequence_name} ...")
                 target_connector.execute_query(target_sequence_sql)

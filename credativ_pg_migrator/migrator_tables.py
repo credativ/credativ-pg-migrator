@@ -1883,6 +1883,12 @@ class MigratorTables:
             source_column_name TEXT,
             source_sequence_name TEXT,
             source_sequence_sql TEXT,
+            source_start_value BIGINT,
+            source_increment_by BIGINT,
+            source_minvalue BIGINT,
+            source_maxvalue BIGINT,
+            source_cache BIGINT,
+            source_is_cycled BOOLEAN,
             source_sequence_comment TEXT,
             target_schema_name TEXT,
             target_table_name TEXT,
@@ -2054,13 +2060,19 @@ class MigratorTables:
             'source_column_name': row[3],
             'source_sequence_name': row[4],
             'source_sequence_sql': row[5],
-            'source_sequence_comment': row[6],
-            'target_schema_name': row[7],
-            'target_table_name': row[8],
-            'target_column_name': row[9],
-            'target_sequence_name': row[10],
-            'target_sequence_sql': row[11],
-            'target_sequence_comment': row[12]
+            'source_start_value': row[6],
+            'source_increment_by': row[7],
+            'source_minvalue': row[8],
+            'source_maxvalue': row[9],
+            'source_cache': row[10],
+            'source_is_cycled': row[11],
+            'source_sequence_comment': row[12],
+            'target_schema_name': row[13],
+            'target_table_name': row[14],
+            'target_column_name': row[15],
+            'target_sequence_name': row[16],
+            'target_sequence_sql': row[17],
+            'target_sequence_comment': row[18]
         }
 
     def decode_trigger_row(self, row):
@@ -2521,11 +2533,11 @@ class MigratorTables:
         protocol_table_name = self.config_parser.get_protocol_name_sequences()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{protocol_table_name}"
-            (sequence_id, source_schema_name, source_table_name, source_column_name, source_sequence_name, source_sequence_sql, source_sequence_comment, target_schema_name, target_table_name, target_column_name, target_sequence_name, target_sequence_sql, target_sequence_comment)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (sequence_id, source_schema_name, source_table_name, source_column_name, source_sequence_name, source_sequence_sql, source_start_value, source_increment_by, source_minvalue, source_maxvalue, source_cache, source_is_cycled, source_sequence_comment, target_schema_name, target_table_name, target_column_name, target_sequence_name, target_sequence_sql, target_sequence_comment)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (settings.get('sequence_id'), settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_column_name'), settings.get('source_sequence_name'), settings.get('source_sequence_sql'), settings.get('source_sequence_comment'), settings.get('target_schema_name'), settings.get('target_table_name'), settings.get('target_column_name'), settings.get('target_sequence_name'), settings.get('target_sequence_sql'), settings.get('target_sequence_comment'))
+        params = (settings.get('sequence_id'), settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_column_name'), settings.get('source_sequence_name'), settings.get('source_sequence_sql'), settings.get('source_start_value'), settings.get('source_increment_by'), settings.get('source_minvalue'), settings.get('source_maxvalue'), settings.get('source_cache'), settings.get('source_is_cycled'), settings.get('source_sequence_comment'), settings.get('target_schema_name'), settings.get('target_table_name'), settings.get('target_column_name'), settings.get('target_sequence_name'), settings.get('target_sequence_sql'), settings.get('target_sequence_comment'))
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)

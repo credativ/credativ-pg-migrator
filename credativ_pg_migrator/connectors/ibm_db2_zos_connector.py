@@ -1004,28 +1004,78 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
     def convert_funcproc_code(self, settings):
         pass
 
-    def fetch_sequences(self, table_schema: str, table_name: str):
+    def fetch_sequences(self, schema_name: str):
         seqs = {}
         if self.connectivity == self.config_parser.const_connectivity_ddl():
             query = f"""SELECT id, source_seq_name, source_ddl_text
                         FROM "{self.protocol_schema}"."ddl_sequences"
                         WHERE source_schema_name = %s ORDER BY id"""
             cursor = self.migrator_tables.protocol_connection.connection.cursor()
-            cursor.execute(query, (table_schema,))
+            cursor.execute(query, (schema_name,))
             rows = cursor.fetchall()
-            self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: fetch_sequences: ({table_schema}): {rows}")
+            self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: fetch_sequences: ({schema_name}): {rows}")
             for i, row in enumerate(rows, 1):
                 seqs[i] = {
                     'id': row[0],
-                    'name': row[1],
+                    'sequence_name': row[1],
                     'column_name': None,
-                    'set_sequence_sql': row[2]
+                    'source_sequence_sql': row[2]
                 }
             cursor.close()
         return seqs
 
     def get_sequence_details(self, sequence_owner, sequence_name):
         return {}
+
+    def migrate_sequences(self, target_connector, settings):
+        target_schema_name = settings.get('target_schema_name', '')
+        target_sequence_name = settings.get('target_sequence_name', '')
+        source_sequence_sql = settings.get('source_sequence_sql', '')
+        
+        if not source_sequence_sql:
+            self.config_parser.print_log_message('INFO', f"ibm_db2_zos_connector: migrate_sequences: No SQL provided for sequence {target_sequence_name}. Skipping.")
+            return True
+
+        if self.connectivity == self.config_parser.const_connectivity_ddl():
+            try:
+                # Basic cleanup: remove AS INTEGER for postgres compatibility if problematic, though Postgres 10+ supports it.
+                # Just replace schema name using simple string replacement or the existing logic if we had sqlglot, 
+                # but DB2 sequences usually specify the schema explicitly. We'll use sqlglot parsing like with views, or simple regex.
+                # For safety, let's parse with sqlglot and replace schema, then generate.
+                import sqlglot
+                import sqlglot.expressions as exp
+                
+                try:
+                    expression = sqlglot.parse_one(source_sequence_sql, read="db2")
+                    
+                    # Convert names case based on config
+                    if self.config_parser.get_target_names_case() == 'lower':
+                        for identifier in expression.find_all(exp.Identifier):
+                            identifier.set("this", identifier.this.lower())
+                    elif self.config_parser.get_target_names_case() == 'upper':
+                        for identifier in expression.find_all(exp.Identifier):
+                            identifier.set("this", identifier.this.upper())
+                            
+                    # Change schema
+                    if isinstance(expression, exp.Create) and isinstance(expression.this, exp.Sequence):
+                        expression.this.set("db", exp.identifier(target_schema_name, quoted=True))
+                        expression.this.set("this", exp.identifier(target_sequence_name, quoted=True))
+                        
+                    target_sequence_sql = expression.sql(dialect="postgres")
+                except Exception as parse_e:
+                    self.config_parser.print_log_message('WARNING', f"ibm_db2_zos_connector: migrate_sequences: sqlglot parse failed for {target_sequence_name}. Falling back to basic regex. Error: {parse_e}")
+                    # regex fallback
+                    import re
+                    target_sequence_sql = re.sub(r'CREATE SEQUENCE \w+\.', f'CREATE SEQUENCE "{target_schema_name}".', source_sequence_sql, flags=re.IGNORECASE)
+                    
+                self.config_parser.print_log_message('INFO', f"ibm_db2_zos_connector: migrate_sequences: Creating sequence {target_sequence_name} ...")
+                target_connector.execute_query(target_sequence_sql)
+                return True
+            except Exception as e:
+                self.config_parser.print_log_message('ERROR', f"ibm_db2_zos_connector: migrate_sequences: Error creating sequence {target_sequence_name}: {e}")
+                return False
+        
+        return True
 
     def fetch_views_names(self, source_schema_name: str):
         views = {}

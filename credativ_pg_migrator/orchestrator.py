@@ -1669,23 +1669,79 @@ class Orchestrator:
             self.config_parser.print_log_message('INFO', f"orchestrator: check_pausing_resuming: resumed.")
 
     def run_migrate_sequences(self):
-        """
-        Migrate sequences from source to target database.
-        """
-        self.config_parser.print_log_message('INFO', "orchestrator: run_migrate_sequences: Starting sequence migration...")
         self.migrator_tables.insert_main({'task_name': 'Orchestrator', 'subtask_name': 'sequences migration'})
-
+        workers_requested = self.config_parser.get_parallel_workers_count()
         settings = {
-            'source_schema_name': self.config_parser.get_source_schema(),
-            'target_schema_name': self.config_parser.get_target_schema(),
+            'source_db_type': self.config_parser.get_source_db_type(),
+            'target_db_type': self.config_parser.get_target_db_type(),
             'migrator_tables': self.migrator_tables,
         }
 
+        self.config_parser.print_log_message('INFO', f"orchestrator: run_migrate_sequences: Starting {workers_requested} parallel workers to create sequences in target database.")
+
+        migrate_sequences = self.migrator_tables.fetch_all_sequences(self.config_parser.is_resume_after_crash())
+
+        if len(migrate_sequences) > 0:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers_requested) as executor:
+                futures = {}
+                for sequence_row in migrate_sequences:
+                    sequence_data = self.migrator_tables.decode_sequence_row(sequence_row)
+                    self.config_parser.print_log_message('DEBUG3', f"orchestrator: run_migrate_sequences: futures running count: {len(futures)}")
+                    while len(futures) >= workers_requested:
+                        done, _ = concurrent.futures.wait(futures, return_when=concurrent.futures.FIRST_COMPLETED)
+                        for future in done:
+                            sequence_done = futures.pop(future)
+                            if future.result() == False:
+                                if self.on_error_action == 'stop':
+                                    self.config_parser.print_log_message('ERROR', "orchestrator: run_migrate_sequences: Stopping execution due to error.")
+                                    exit(1)
+                            else:
+                                self.migrator_tables.update_sequence_status({'sequence_id': sequence_done['sequence_id'], 'success': True, 'message': 'migrated OK'})
+
+                    future = executor.submit(self.sequence_worker, sequence_data, settings)
+                    futures[future] = sequence_data
+
+                self.config_parser.print_log_message('INFO', "orchestrator: run_migrate_sequences: Processing remaining futures")
+                for future in concurrent.futures.as_completed(futures):
+                    sequence_done = futures[future]
+                    if future.result() == False:
+                        if self.on_error_action == 'stop':
+                            self.config_parser.print_log_message('ERROR', "orchestrator: run_migrate_sequences: Stopping execution due to error.")
+                            exit(1)
+                    else:
+                        self.migrator_tables.update_sequence_status({'sequence_id': sequence_done['sequence_id'], 'success': True, 'message': 'migrated OK'})
+
+            self.config_parser.print_log_message('INFO', "orchestrator: run_migrate_sequences: Sequences processed successfully.")
+        else:
+            self.config_parser.print_log_message('INFO', "orchestrator: run_migrate_sequences: No sequences to create.")
+
+        self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': 'sequences migration', 'success': True, 'message': 'finished OK'})
+
+    def sequence_worker(self, sequence_data, settings):
+        worker_id = uuid.uuid4()
         try:
-            self.source_connection.migrate_sequences(self.target_connection, settings)
-            self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': 'sequences migration', 'success': True, 'message': 'finished OK'})
+            target_sequence_name = sequence_data['target_sequence_name']
+            self.config_parser.print_log_message('INFO', f"orchestrator: sequence_worker: Worker {worker_id}: Creating sequence {target_sequence_name} in target database.")
+
+            worker_target_connection = self.load_connector('target')
+            worker_target_connection.connect()
+
+            result = self.source_connection.migrate_sequences(worker_target_connection, sequence_data)
+            
+            worker_target_connection.disconnect()
+            
+            if not result:
+                self.config_parser.print_log_message('ERROR', f"orchestrator: sequence_worker: Worker {worker_id}: Error migrating sequence {target_sequence_name}.")
+                self.migrator_tables.update_sequence_status({'sequence_id': sequence_data['sequence_id'], 'success': False, 'message': 'ERROR: migration failed in connector'})
+                return False
+                
+            self.config_parser.print_log_message('INFO', f"orchestrator: sequence_worker: Worker {worker_id}: Sequence '{target_sequence_name}' created successfully.")
+            return True
+            
         except Exception as e:
-            self.handle_error(e, 'Sequence Migration')
+            self.config_parser.print_log_message('ERROR', f"orchestrator: sequence_worker: Worker {worker_id}: Exception migrating sequence: {e}")
+            self.migrator_tables.update_sequence_status({'sequence_id': sequence_data['sequence_id'], 'success': False, 'message': f'ERROR: {e}'})
+            return False
 
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

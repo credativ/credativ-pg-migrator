@@ -78,6 +78,7 @@ class Planner:
                 self.check_pausing_resuming()
 
                 self.run_prepare_aliases()
+                self.run_prepare_sequences()
                 self.run_prepare_tables()
                 self.run_prepare_data_sources()
 
@@ -350,6 +351,45 @@ class Planner:
         finally:
             self.source_connection.disconnect()
             self.target_connection.disconnect()
+
+    def run_prepare_sequences(self):
+        self.config_parser.print_log_message('INFO', "planner: run_prepare_sequences: Preparing sequences...")
+        source_sequences = self.source_connection.fetch_sequences(self.source_schema_name)
+
+        self.config_parser.print_log_message('DEBUG', f"planner: run_prepare_sequences: Source schema: {self.source_schema_name}")
+        self.config_parser.print_log_message('DEBUG', f"planner: run_prepare_sequences: Source sequences: {source_sequences}")
+
+        for order_num, sequence_info in source_sequences.items():
+            self.config_parser.print_log_message('INFO', f"planner: run_prepare_sequences: Processing sequence ({order_num}/{len(source_sequences)}): {sequence_info['sequence_name']}")
+            target_sequence_name = sequence_info['sequence_name']
+            if self.config_parser.get_use_aliases_as_target_names():
+                target_sequence_name = self.config_parser.convert_names_case(sequence_info['sequence_name'])
+                # Sequences don't generally have aliases like tables, but names-case-handling should still apply
+            else:
+                target_sequence_name = self.config_parser.convert_names_case(sequence_info['sequence_name'])
+
+            settings = {
+                'sequence_id': sequence_info.get('id', order_num),
+                'source_schema_name': self.source_schema_name,
+                'source_table_name': sequence_info.get('table_name', None),
+                'source_column_name': sequence_info.get('column_name', None),
+                'source_sequence_name': sequence_info['sequence_name'],
+                'source_sequence_sql': sequence_info.get('source_sequence_sql', ''),
+                'source_sequence_comment': '',
+                'target_schema_name': self.target_schema_name,
+                'target_table_name': sequence_info.get('target_table_name', None),
+                'target_column_name': sequence_info.get('target_column_name', None),
+                'target_sequence_name': target_sequence_name,
+                'target_sequence_sql': '',
+                'target_sequence_comment': ''
+            }
+            try:
+                self.migrator_tables.insert_sequence(settings)
+                self.config_parser.print_log_message('INFO', f"planner: run_prepare_sequences: Sequence {sequence_info['sequence_name']} prepared successfully.")
+            except Exception as e:
+                self.config_parser.print_log_message('ERROR', f"planner: run_prepare_sequences: Error processing sequence {sequence_info['sequence_name']}: {e}")
+
+        self.config_parser.print_log_message('INFO', "planner: run_prepare_sequences: Sequences processed successfully.")
 
     def run_prepare_tables(self):
         self.config_parser.print_log_message('INFO', "planner: run_prepare_tables: Preparing tables...")

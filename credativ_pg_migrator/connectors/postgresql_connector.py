@@ -1385,6 +1385,9 @@ class PostgreSQLConnector(DatabaseConnector):
             exit(1)
 
     def fetch_sequences(self, schema_name: str):
+        return {}
+
+    def fetch_table_sequences(self, table_schema: str, table_name: str):
         sequence_data = {}
         order_num = 1
         try:

@@ -466,7 +466,16 @@ class DatabaseConnector(ABC):
             }
         }
         """
-        pass
+        return {}
+
+    def fetch_table_sequences(self, table_schema: str, table_name: str):
+        """
+        Fetches sequences exclusively attached to a specific table column, typically for post-data migration sequence RESETS.
+        Target connection specific.
+        Returns: dict
+        """
+        return {}
+
 
     @abstractmethod
     def get_sequence_details(self, sequence_owner, sequence_name):

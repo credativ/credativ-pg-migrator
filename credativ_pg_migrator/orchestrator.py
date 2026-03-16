@@ -939,7 +939,7 @@ class Orchestrator:
                     # sequences setting
                     part_name = 'sequences'
                     self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Setting sequences for table {target_table_name} in target database.")
-                    sequences = worker_target_connection.fetch_sequences(target_schema_name, target_table_name)
+                    sequences = worker_target_connection.fetch_table_sequences(target_schema_name, target_table_name)
                     if sequences:
                         for order_num, sequence_details in sequences.items():
                             sequence_id = sequence_details['id']

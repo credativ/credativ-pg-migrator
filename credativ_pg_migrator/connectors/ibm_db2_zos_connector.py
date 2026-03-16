@@ -1007,9 +1007,12 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
     def fetch_sequences(self, schema_name: str):
         seqs = {}
         if self.connectivity == self.config_parser.const_connectivity_ddl():
+            ## we migrate only sequences not attached to tables
             query = f"""SELECT id, source_seq_name, source_ddl_text, source_start_value, source_increment_by, source_minvalue, source_maxvalue, source_cache, source_is_cycled
                         FROM "{self.protocol_schema}"."ddl_sequences"
-                        WHERE source_schema_name = %s ORDER BY id"""
+                        WHERE source_schema_name = %s
+                        AND source_table_name IS NULL AND source_column_name IS NULL
+                        ORDER BY id"""
             cursor = self.migrator_tables.protocol_connection.connection.cursor()
             cursor.execute(query, (schema_name,))
             rows = cursor.fetchall()
@@ -1061,16 +1064,16 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
                     sql_parts.append(f"CACHE {source_cache}")
                 if source_is_cycled:
                     sql_parts.append("CYCLE")
-                
+
                 target_sequence_sql = " ".join(sql_parts)
-                    
+
                 self.config_parser.print_log_message('INFO', f"ibm_db2_zos_connector: migrate_sequences: Creating sequence {target_sequence_name} ...")
                 target_connector.execute_query(target_sequence_sql)
                 return True
             except Exception as e:
                 self.config_parser.print_log_message('ERROR', f"ibm_db2_zos_connector: migrate_sequences: Error creating sequence {target_sequence_name}: {e}")
                 return False
-        
+
         return True
 
     def fetch_views_names(self, source_schema_name: str):
@@ -1090,15 +1093,15 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
                     'view_name': row[2],
                     'comment': None
                 }
-            
+
             # Now fetch aliases that point to views unconditionally
             # This ensures that even if use_aliases_as_target_names is active for tables,
             # we always create additional views "select * from <original view>" for view aliases
             alias_query = f"""
                 SELECT a.id, a.source_schema_name, a.source_alias_name
                 FROM "{self.protocol_schema}"."ddl_aliases" a
-                INNER JOIN "{self.protocol_schema}"."ddl_views" v 
-                    ON a.source_target_schema = v.source_schema_name 
+                INNER JOIN "{self.protocol_schema}"."ddl_views" v
+                    ON a.source_target_schema = v.source_schema_name
                     AND a.source_target_name = v.source_view_name
                 WHERE a.source_schema_name = %s
                 ORDER BY a.id
@@ -1106,7 +1109,7 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
             cursor.execute(alias_query, (source_schema_name,))
             alias_rows = cursor.fetchall()
             self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: fetch_views_names (aliases): ({source_schema_name}): {alias_rows}")
-            
+
             # Start appending aliases, preserving unique IDs (shift by 1,000,000 to avoid clash with view IDs)
             offset = len(views)
             for j, row in enumerate(alias_rows, 1):
@@ -1116,7 +1119,7 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
                     'view_name': row[2],
                     'comment': None
                 }
-            
+
             cursor.close()
         return views
 
@@ -1159,13 +1162,13 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
             if row:
                 cursor.close()
                 return row[0]
-            
+
             # If not found, try looking up as an alias mapped to a view
             alias_query = f"""
                 SELECT a.source_schema_name, a.source_alias_name, a.source_target_schema, a.source_target_name
                 FROM "{self.protocol_schema}"."ddl_aliases" a
-                INNER JOIN "{self.protocol_schema}"."ddl_views" v 
-                    ON a.source_target_schema = v.source_schema_name 
+                INNER JOIN "{self.protocol_schema}"."ddl_views" v
+                    ON a.source_target_schema = v.source_schema_name
                     AND a.source_target_name = v.source_view_name
                 WHERE a.source_schema_name = %s AND a.source_alias_name = %s
             """
@@ -1173,12 +1176,12 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
             alias_row = cursor.fetchone()
             self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: fetch_view_code (from alias): ({source_schema_name}.{source_view_name}): {alias_row}")
             cursor.close()
-            
+
             if alias_row:
                 # schema_name = alias_row[0], alias_name = alias_row[1]
                 # target_schema = alias_row[2], target_name = alias_row[3]
                 return f'CREATE VIEW "{alias_row[0]}"."{alias_row[1]}" AS SELECT * FROM "{alias_row[2]}"."{alias_row[3]}"'
-                
+
         return ""
 
     def convert_default_value(self, settings) -> dict:
@@ -1239,7 +1242,7 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
                         if alias_name:
                             self.config_parser.print_log_message('INFO', f"ibm_db2_zos_connector: convert_view_code: Replaced referenced table '{table.name}' with alias '{alias_name}' inside view generation.")
                             table_name_to_use = alias_name
-                            
+
                     converted_table = self.config_parser.convert_names_case(table_name_to_use)
                     table.set("this", converted_table)
                     if not table.args.get("quoted"):

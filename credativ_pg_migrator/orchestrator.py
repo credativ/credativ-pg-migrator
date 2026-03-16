@@ -639,7 +639,7 @@ class Orchestrator:
                                         self.config_parser.print_log_message('DEBUG3', f"orchestrator: table_worker: Worker {worker_id}: Table {target_table_name}: Data source for table {target_table_name} is CSV format. Char set: {data_source_settings['format_options']['character_set']}")
                                         # Always convert CSV to UTF-8 to apply DB2 timestamp fixes and null replacements
                                         self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Table {target_table_name}: Converting CSV to UTF-8 and applying DB2 fixes.")
-                                        self.config_parser.convert_csv_to_utf8(data_source_settings)
+                                        self.config_parser.convert_csv_to_utf8(data_source_settings, table_data.get('source_columns'), table_data.get('target_columns'))
 
                                         # CSV data source - use the converted file
                                         part_name = 'use CSV'

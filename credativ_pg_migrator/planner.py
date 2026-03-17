@@ -935,7 +935,7 @@ class Planner:
                     'target_view_name': self.config_parser.convert_names_case(target_view_name),
                     'target_view_alias': self.config_parser.convert_names_case(target_alias_name) if target_alias_name else '',
                     'target_view_sql': converted_view_sql,
-                    'alias_view': True if target_alias_name else False,
+                    'alias_view': view_info.get('is_alias', False),
                     'view_comment': view_info['comment']
                 })
                 self.config_parser.print_log_message( 'INFO', f"planner: run_prepare_views: View {view_info['view_name']} processed successfully.")

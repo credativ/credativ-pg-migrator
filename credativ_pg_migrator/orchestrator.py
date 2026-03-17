@@ -1503,6 +1503,34 @@ class Orchestrator:
         except Exception as e:
             self.handle_error(e, 'migrate_triggers')
 
+    def view_worker(self, view_detail):
+        worker_id = uuid.uuid4()
+        try:
+            # Each worker uses its own separate connection to the target database
+            worker_target_connection = self.load_connector('target')
+            worker_target_connection.connect()
+
+            if worker_target_connection.session_settings:
+                self.config_parser.print_log_message( 'DEBUG', f"orchestrator: view_worker: Worker {worker_id}: Executing session settings: {worker_target_connection.session_settings}")
+                worker_target_connection.execute_query(worker_target_connection.session_settings)
+
+            query = f'''SET SESSION search_path TO {view_detail['target_schema_name']};'''
+            worker_target_connection.execute_query(query)
+
+            worker_target_connection.execute_query(view_detail['target_view_sql'])
+
+            query = f'''RESET search_path;'''
+            worker_target_connection.execute_query(query)
+            worker_target_connection.disconnect()
+            return True
+        except Exception as e:
+            self.handle_error(e, f"view_worker {worker_id} migrate_view {view_detail['source_view_name']}")
+            try:
+                worker_target_connection.disconnect()
+            except:
+                pass
+            return False
+
     def run_migrate_views(self):
         self.migrator_tables.insert_main({'task_name': 'Orchestrator', 'subtask_name': 'views migration'})
 
@@ -1511,31 +1539,52 @@ class Orchestrator:
 
             all_views = self.migrator_tables.fetch_all_views()
             if all_views:
+                normal_views = []
+                alias_views = []
                 for one_view in all_views:
                     view_detail = self.migrator_tables.decode_view_row(one_view)
-                    self.config_parser.print_log_message('INFO', f"orchestrator: run_migrate_views: Processing view {view_detail['source_view_name']}")
-                    self.config_parser.print_log_message( 'DEBUG', f"orchestrator: run_migrate_views: View details: {view_detail}")
+                    if view_detail.get('alias_view', False):
+                        alias_views.append(view_detail)
+                    else:
+                        normal_views.append(view_detail)
 
-                    try:
-                        self.target_connection.connect()
+                max_workers = self.config_parser.get_parallel_workers_count()
 
-                        if self.target_connection.session_settings:
-                            self.config_parser.print_log_message( 'DEBUG', f"orchestrator: run_migrate_views: Executing session settings: {self.target_connection.session_settings}")
-                            self.target_connection.execute_query(self.target_connection.session_settings)
+                # Process normal views first
+                if normal_views:
+                    self.config_parser.print_log_message('INFO', "orchestrator: run_migrate_views: Starting parallel creation of normal views.")
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                        futures = {executor.submit(self.view_worker, view_detail): view_detail for view_detail in normal_views}
+                        for future in concurrent.futures.as_completed(futures):
+                            view_detail = futures[future]
+                            try:
+                                success = future.result()
+                                if success:
+                                    self.migrator_tables.update_view_status({'row_id': view_detail['id'], 'success': True, 'message': 'migrated OK'})
+                                    self.config_parser.print_log_message('INFO', f"orchestrator: run_migrate_views: View {view_detail['source_view_name']} migrated successfully.")
+                                else:
+                                    self.config_parser.print_log_message('ERROR', f"orchestrator: run_migrate_views: Error migrating view {view_detail['source_view_name']}.")
+                            except Exception as e:
+                                self.config_parser.print_log_message('ERROR', f"orchestrator: run_migrate_views: Exception migrating view {view_detail['source_view_name']}: {e}")
+                                self.migrator_tables.update_view_status({'row_id': view_detail['id'], 'success': False, 'message': f'ERROR: {e}'})
 
-                        query = f'''SET SESSION search_path TO {view_detail['target_schema_name']};'''
-                        self.target_connection.execute_query(query)
-
-                        self.target_connection.execute_query(view_detail['target_view_sql'])
-                        self.migrator_tables.update_view_status({'row_id': view_detail['id'], 'success': True, 'message': 'migrated OK'})
-                        self.config_parser.print_log_message('INFO', f"orchestrator: run_migrate_views: View {view_detail['source_view_name']} migrated successfully.")
-
-                        query = f'''RESET search_path;'''
-                        self.target_connection.execute_query(query)
-                        self.target_connection.disconnect()
-                    except Exception as e:
-                        self.migrator_tables.update_view_status({'row_id': view_detail['id'], 'success': False, 'message': f'ERROR: {e}'})
-                        self.handle_error(e, f"migrate_view {view_detail['source_view_name']}")
+                # Process alias views after all normal views have completed
+                if alias_views:
+                    self.config_parser.print_log_message('INFO', "orchestrator: run_migrate_views: Starting parallel creation of alias views.")
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                        futures = {executor.submit(self.view_worker, view_detail): view_detail for view_detail in alias_views}
+                        for future in concurrent.futures.as_completed(futures):
+                            view_detail = futures[future]
+                            try:
+                                success = future.result()
+                                if success:
+                                    self.migrator_tables.update_view_status({'row_id': view_detail['id'], 'success': True, 'message': 'migrated OK'})
+                                    self.config_parser.print_log_message('INFO', f"orchestrator: run_migrate_views: Alias view {view_detail['source_view_name']} migrated successfully.")
+                                else:
+                                    self.config_parser.print_log_message('ERROR', f"orchestrator: run_migrate_views: Error migrating alias view {view_detail['source_view_name']}.")
+                            except Exception as e:
+                                self.config_parser.print_log_message('ERROR', f"orchestrator: run_migrate_views: Exception migrating alias view {view_detail['source_view_name']}: {e}")
+                                self.migrator_tables.update_view_status({'row_id': view_detail['id'], 'success': False, 'message': f'ERROR: {e}'})
             else:
                 self.config_parser.print_log_message('INFO', "orchestrator: run_migrate_views: No views found to migrate.")
         else:

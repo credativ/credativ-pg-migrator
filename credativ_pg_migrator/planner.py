@@ -903,8 +903,8 @@ class Planner:
                     'view_id': view_info['id'],
                     'source_schema_name': self.config_parser.get_source_schema(),
                     'source_view_name': view_info['view_name'],
-                    'target_schema_name': self.config_parser.get_target_schema(),
-                    'target_view_name': self.config_parser.convert_names_case(target_view_name_to_use),
+                    'target_schema_name': view_info.get('target_schema_name', ''),
+                    'target_view_name': view_info.get('target_view_name', ''),
                 })
                 self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_views: Source view SQL: {view_sql}")
                 converted_view_sql = self.source_connection.convert_view_code({
@@ -935,6 +935,7 @@ class Planner:
                     'target_view_name': self.config_parser.convert_names_case(target_view_name),
                     'target_view_alias': self.config_parser.convert_names_case(target_alias_name) if target_alias_name else '',
                     'target_view_sql': converted_view_sql,
+                    'alias_view': True if target_alias_name else False,
                     'view_comment': view_info['comment']
                 })
                 self.config_parser.print_log_message( 'INFO', f"planner: run_prepare_views: View {view_info['view_name']} processed successfully.")

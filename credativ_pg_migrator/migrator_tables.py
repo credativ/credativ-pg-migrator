@@ -1977,6 +1977,7 @@ class MigratorTables:
             target_view_name TEXT,
             target_view_alias TEXT,
             target_view_sql TEXT,
+            alias_view BOOLEAN default FALSE,
             view_comment TEXT,
             task_created TIMESTAMP DEFAULT clock_timestamp(),
             task_started TIMESTAMP,
@@ -2106,7 +2107,8 @@ class MigratorTables:
             'target_view_name': row[6],
             'target_view_alias': row[7],
             'target_view_sql': row[8],
-            'view_comment': row[9]
+            'alias_view': row[9],
+            'view_comment': row[10]
         }
 
     def insert_protocol(self, settings):
@@ -2669,11 +2671,11 @@ class MigratorTables:
         table_name = self.config_parser.get_protocol_name_views()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
-            (source_schema_name, source_view_name, source_view_id, source_view_sql, target_schema_name, target_view_name, target_view_alias, target_view_sql, view_comment)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (source_schema_name, source_view_name, source_view_id, source_view_sql, target_schema_name, target_view_name, target_view_alias, target_view_sql, alias_view, view_comment)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (settings.get('source_schema_name'), settings.get('source_view_name'), settings.get('source_view_id'), settings.get('source_view_sql'), settings.get('target_schema_name'), settings.get('target_view_name'), settings.get('target_view_alias', ''), settings.get('target_view_sql'), settings.get('view_comment'))
+        params = (settings.get('source_schema_name'), settings.get('source_view_name'), settings.get('source_view_id'), settings.get('source_view_sql'), settings.get('target_schema_name'), settings.get('target_view_name'), settings.get('target_view_alias', ''), settings.get('target_view_sql'), settings.get('alias_view', False), settings.get('view_comment'))
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)

@@ -933,7 +933,7 @@ class Planner:
                     'source_view_sql': view_sql,
                     'target_schema_name': self.target_schema_name,
                     'target_view_name': self.config_parser.convert_names_case(target_view_name),
-                    'target_alias_name': self.config_parser.convert_names_case(target_alias_name) if target_alias_name else '',
+                    'target_view_alias': self.config_parser.convert_names_case(target_alias_name) if target_alias_name else '',
                     'target_view_sql': converted_view_sql,
                     'view_comment': view_info['comment']
                 })

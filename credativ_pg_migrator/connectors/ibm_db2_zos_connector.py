@@ -1134,9 +1134,18 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
         source_schema_name = settings.get('source_schema_name')
         aliases = {}
         if self.connectivity == self.config_parser.const_connectivity_ddl():
-            query = f"""SELECT id, source_schema_name, source_alias_name, source_target_schema, source_target_name, source_alias_sql, source_alias_comment
-                        FROM "{self.protocol_schema}"."ddl_aliases"
-                        WHERE source_schema_name = %s ORDER BY id"""
+            query = f"""SELECT a.id, a.source_schema_name, a.source_alias_name, a.source_target_schema, a.source_target_name, a.source_alias_sql, a.source_alias_comment,
+                            CASE 
+                                WHEN t.source_table_name IS NOT NULL THEN 'TABLE'
+                                WHEN v.source_view_name IS NOT NULL THEN 'VIEW'
+                                ELSE 'UNKNOWN'
+                            END as alias_target_type
+                        FROM "{self.protocol_schema}"."ddl_aliases" a
+                        LEFT JOIN "{self.protocol_schema}"."ddl_tables" t 
+                            ON a.source_target_schema = t.source_schema_name AND a.source_target_name = t.source_table_name
+                        LEFT JOIN "{self.protocol_schema}"."ddl_views" v 
+                            ON a.source_target_schema = v.source_schema_name AND a.source_target_name = v.source_view_name
+                        WHERE a.source_schema_name = %s ORDER BY a.id"""
             cursor = self.migrator_tables.protocol_connection.connection.cursor()
             cursor.execute(query, (source_schema_name,))
             rows = cursor.fetchall()
@@ -1150,7 +1159,8 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
                     'aliased_table_name': row[4],
                     'alias_owner': row[1],
                     'alias_sql': row[5],
-                    'alias_comment': row[6]
+                    'alias_comment': row[6],
+                    'alias_target_type': row[7]
                 }
             cursor.close()
         return aliases
@@ -1246,13 +1256,19 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
                     table_name_to_use = table.name
                     if not isinstance(node.parent, sqlglot.exp.Create):
                         if self.config_parser.get_use_aliases_as_target_names() and settings.get('migrator_tables'):
-                            alias_name = settings['migrator_tables'].get_alias_for_table(schema_name_for_lookup, table.name)
-                            if alias_name and not settings.get('alias_view'):
-                                if alias_name.lower() == settings.get('target_view_name', '').lower() or alias_name.lower() == settings.get('source_view_name', '').lower():
-                                    self.config_parser.print_log_message('INFO', f"ibm_db2_zos_connector: convert_view_code: Skipped replacing referenced table '{table.name}' with alias '{alias_name}' to avoid circular reference. Settings: {settings}")
+                            alias_dict = settings['migrator_tables'].get_alias_for_table(schema_name_for_lookup, table.name)
+                            if alias_dict and not settings.get('alias_view'):
+                                alias_name = alias_dict.get('target_alias_name')
+                                alias_target_type = alias_dict.get('alias_target_type', 'UNKNOWN')
+
+                                if alias_target_type == 'TABLE':
+                                    if alias_name.lower() == settings.get('target_view_name', '').lower() or alias_name.lower() == settings.get('source_view_name', '').lower():
+                                        self.config_parser.print_log_message('INFO', f"ibm_db2_zos_connector: convert_view_code: Skipped replacing referenced table '{table.name}' with alias '{alias_name}' to avoid circular reference. Settings: {settings}")
+                                    else:
+                                        self.config_parser.print_log_message('INFO', f"ibm_db2_zos_connector: convert_view_code: Replaced referenced table '{table.name}' with alias '{alias_name}' inside view generation. Settings: {settings}")
+                                        table_name_to_use = alias_name
                                 else:
-                                    self.config_parser.print_log_message('INFO', f"ibm_db2_zos_connector: convert_view_code: Replaced referenced table '{table.name}' with alias '{alias_name}' inside view generation. Settings: {settings}")
-                                    table_name_to_use = alias_name
+                                    self.config_parser.print_log_message('DEBUG', f"ibm_db2_zos_connector: convert_view_code: Skipped replacing '{table.name}' with alias '{alias_name}' because alias points to a {alias_target_type}, not a TABLE.")
 
                     converted_table = self.config_parser.convert_names_case(table_name_to_use)
                     table.set("this", converted_table)

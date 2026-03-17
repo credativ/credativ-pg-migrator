@@ -418,8 +418,9 @@ class Planner:
             target_table_name = table_info['table_name']
             target_alias_name = ''
             if self.config_parser.get_use_aliases_as_target_names():
-                alias_name = self.migrator_tables.get_alias_for_table(self.source_schema_name, table_info['table_name'])
-                if alias_name:
+                alias_dict = self.migrator_tables.get_alias_for_table(self.source_schema_name, table_info['table_name'])
+                if alias_dict:
+                    alias_name = alias_dict.get('target_alias_name')
                     target_table_name = alias_name
                     target_alias_name = alias_name
                     self.config_parser.print_log_message('INFO', f"planner: run_prepare_tables: Source table {table_info['table_name']} mapped to target alias {target_table_name}")
@@ -680,8 +681,9 @@ class Planner:
                         aliased_referenced_table_name = referenced_table_name
 
                         if referenced_table_name and self.config_parser.get_use_aliases_as_target_names():
-                            alias_name = self.migrator_tables.get_alias_for_table(referenced_table_schema, referenced_table_name)
-                            if alias_name:
+                            alias_dict = self.migrator_tables.get_alias_for_table(referenced_table_schema, referenced_table_name)
+                            if alias_dict:
+                                alias_name = alias_dict.get('target_alias_name')
                                 aliased_referenced_table_name = alias_name
                                 self.config_parser.print_log_message('INFO', f"planner: run_prepare_tables: Constraint referenced table {constraint_details['referenced_table_name']} mapped to target alias {aliased_referenced_table_name}")
 

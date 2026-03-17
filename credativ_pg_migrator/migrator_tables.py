@@ -1921,6 +1921,7 @@ class MigratorTables:
             source_alias_comment TEXT,
             target_schema_name TEXT,
             target_alias_name TEXT,
+            alias_target_type TEXT,
             target_referenced_schema_name TEXT,
             target_referenced_table_name TEXT,
             target_referenced_column_name TEXT,

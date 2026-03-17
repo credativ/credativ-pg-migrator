@@ -691,7 +691,7 @@ class IbmDb2LuwConnector(DatabaseConnector):
         # placeholder for actual conversion logic
         return converted_code
 
-    def fetch_sequences(self, table_schema: str, table_name: str):
+    def fetch_sequences(self, schema_name: str):
         # Placeholder for fetching sequences
         return {}
 

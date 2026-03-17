@@ -778,7 +778,7 @@ class PostgreSQLConnector(DatabaseConnector):
         delete_rule = settings['delete_rule'] if 'delete_rule' in settings else 'NO ACTION'
         update_rule = settings['update_rule'] if 'update_rule' in settings else 'NO ACTION'
         constraint_comment = settings['constraint_comment']
-        constraint_sql = self.config_parser.convert_names_case(settings['constraint_sql']) if 'constraint_sql' in settings else ''
+        constraint_sql = self.config_parser.convert_names_case(settings['constraint_sql']) if settings.get('constraint_sql') else ''
         constraint_status = settings['constraint_status'] if 'constraint_status' in settings else 'ENABLED'
 
         # Split constraint_columns by comma, clean up quotes, convert case, and re-quote
@@ -1384,7 +1384,10 @@ class PostgreSQLConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', "postgresql_connector: handle_error: Stopping due to error.")
             exit(1)
 
-    def fetch_sequences(self, table_schema: str, table_name: str):
+    def fetch_sequences(self, schema_name: str):
+        return {}
+
+    def fetch_table_sequences(self, table_schema: str, table_name: str):
         sequence_data = {}
         order_num = 1
         try:

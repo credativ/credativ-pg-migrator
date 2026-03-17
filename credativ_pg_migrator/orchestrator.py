@@ -541,7 +541,7 @@ class Orchestrator:
 
                 if data_source is not None:
                     self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Data source for table {table_data['source_schema_name']}.{table_data['source_table_name']} is {data_source}.")
-                    clean_objects = self.config_parser.get_source_database_export_clean()
+                    clean_objects = self.config_parser.get_source_data_export_clean()
 
                     if data_source['file_found'] and data_source['file_name'] is not None:
                         self.config_parser.print_log_message('DEBUG', f"orchestrator: table_worker: Worker {worker_id}: Data source file found: {data_source['file_name']} - proceeding with data migration.")
@@ -593,13 +593,13 @@ class Orchestrator:
                                 ## Split of big files is currently implemented only for Informix UNL data files
                                 ## And even here it can be not efficient if client uses slow disk(s)
                                 if self.config_parser.get_source_db_type() == 'informix' and data_source['format_options']['format'].upper() == 'UNL':
-                                    big_files_split_enabled = self.config_parser.get_source_database_export_big_files_split_enabled()
+                                    big_files_split_enabled = self.config_parser.get_source_data_export_big_files_split_enabled()
                                     data_source_file_size = data_source['file_size']
 
                                     data_source_file_size_str = ""
                                     if data_source_file_size is not None:
                                         data_source_file_size_str = f"{data_source_file_size} B ({data_source_file_size / (1024 ** 3):.2f} GB)"
-                                    split_threshold_bytes = self.config_parser.get_source_database_export_big_files_split_threshold_bytes()
+                                    split_threshold_bytes = self.config_parser.get_source_data_export_big_files_split_threshold_bytes()
                                     split_threshold_bytes_str = ""
                                     if split_threshold_bytes is not None:
                                         split_threshold_bytes_str = f"{split_threshold_bytes} B ({split_threshold_bytes / (1024 ** 3):.2f} GB)"
@@ -639,8 +639,8 @@ class Orchestrator:
                                         self.config_parser.print_log_message('DEBUG3', f"orchestrator: table_worker: Worker {worker_id}: Table {target_table_name}: Data source for table {target_table_name} is CSV format. Char set: {data_source_settings['format_options']['character_set']}")
                                         # Always convert CSV to UTF-8 to apply DB2 timestamp fixes and null replacements
                                         self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Table {target_table_name}: Converting CSV to UTF-8 and applying DB2 fixes.")
-                                        self.config_parser.convert_csv_to_utf8(data_source_settings)
-                                        
+                                        self.config_parser.convert_csv_to_utf8(data_source_settings, table_data.get('source_columns'), table_data.get('target_columns'))
+
                                         # CSV data source - use the converted file
                                         part_name = 'use CSV'
                                         csv_file_name = data_source_settings['converted_file_name']
@@ -727,7 +727,7 @@ class Orchestrator:
                                                     datafiles_cursor.close()
                                                     self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Table {target_table_name}: Found {len(datafiles)} distinct data files for LOB column {lob_col_name}")
 
-                                                    max_lob_parallel_workers = self.config_parser.get_source_database_export_workers()
+                                                    max_lob_parallel_workers = self.config_parser.get_source_data_export_workers()
                                                     if max_lob_parallel_workers <= 1:
                                                         max_lob_parallel_workers = 1
                                                     else:
@@ -767,7 +767,7 @@ class Orchestrator:
                                                                     'datafiles_count': len(datafiles),
                                                                     'current_datafile_num': current_datafile_num,
                                                                     'occurrences': occurrences,
-                                                                    'lob_files_path': self.config_parser.get_source_database_export_file_path(),
+                                                                    'lob_files_path': self.config_parser.get_source_data_export_file_path(),
                                                                 }
 
                                                                 self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Table {target_table_name}: parallel LOB processing [{lob_col_name}]: futures running count: {len(futures)}")
@@ -865,7 +865,7 @@ class Orchestrator:
                         if not data_source['file_found'] and data_source['file_name'] is not None:
                             self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: ({part_name}) Data file {data_source['file_name']} not found for table {target_table_name}.")
 
-                            on_missing_data_file = self.config_parser.get_source_database_export_on_missing_data_file()
+                            on_missing_data_file = self.config_parser.get_source_data_export_on_missing_data_file()
                             if on_missing_data_file == 'skip':
                                 self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Skipping data migration for table {target_table_name} due to missing data file.")
                                 use_source_table = False
@@ -939,7 +939,7 @@ class Orchestrator:
                     # sequences setting
                     part_name = 'sequences'
                     self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Setting sequences for table {target_table_name} in target database.")
-                    sequences = worker_target_connection.fetch_sequences(target_schema_name, target_table_name)
+                    sequences = worker_target_connection.fetch_table_sequences(target_schema_name, target_table_name)
                     if sequences:
                         for order_num, sequence_details in sequences.items():
                             sequence_id = sequence_details['id']
@@ -1144,16 +1144,14 @@ class Orchestrator:
                     try:
                         part_name = 'read LOB file'
                         if lob_col_type.lower() == 'bytea':
-                            # For BYTEA, read the file as binary
                             with open(filepath, 'rb') as f:
                                 f.seek(start)
                                 chunk = f.read(length)
 
                         elif lob_col_type.lower() == 'text':
-                            # For TEXT, read the file as text
-                            with open(filepath, 'r', encoding='utf-8') as f:
+                            with open(filepath, 'rb') as f:
                                 f.seek(start)
-                                chunk = f.read(length)
+                                chunk = f.read(length).decode('utf-8')
 
                         row[lob_col_index-1] = chunk
                     except Exception as e:
@@ -1257,9 +1255,14 @@ class Orchestrator:
                 worker_target_connection = self.load_connector('target')
                 worker_target_connection.connect()
 
-                if not worker_target_connection.target_table_exists(target_schema_name, target_table_name):
-                    self.config_parser.print_log_message('ERROR', f"orchestrator: constraint_worker: Worker {worker_id}: Target table {target_schema_name}.{target_table_name} for constraint {constraint_name} does not exist - skipping constraint creation.")
-                    self.migrator_tables.update_constraint_status({'row_id': constraint_data['id'], 'success': False, 'message': f'ERROR: target table {target_schema_name}.{target_table_name} does not exist'})
+                use_aliases_as_target_names = self.config_parser.get_use_aliases_as_target_names()
+
+                target_table_name_to_check = constraint_data['target_alias_name'] if use_aliases_as_target_names and constraint_data.get('target_alias_name') else target_table_name
+                target_table_name_to_check = self.config_parser.convert_names_case(target_table_name_to_check)
+
+                if not worker_target_connection.target_table_exists(target_schema_name, target_table_name_to_check):
+                    self.config_parser.print_log_message('ERROR', f"orchestrator: constraint_worker: Worker {worker_id}: Target table {target_schema_name}.{target_table_name_to_check} for constraint {constraint_name} does not exist - skipping constraint creation.")
+                    self.migrator_tables.update_constraint_status({'row_id': constraint_data['id'], 'success': False, 'message': f'ERROR: target table {target_schema_name}.{target_table_name_to_check} does not exist'})
                     return False
 
                 referenced_target_table = self.migrator_tables.select_table_by_source({'source_schema_name': referenced_table_schema, 'source_table_name': referenced_table_name})
@@ -1268,9 +1271,13 @@ class Orchestrator:
                     self.migrator_tables.update_constraint_status({'row_id': constraint_data['id'], 'success': False, 'message': f'ERROR: referenced table {referenced_table_schema}.{referenced_table_name} not found'})
                     worker_target_connection.disconnect()
                     return False
-                if not worker_target_connection.target_table_exists(referenced_target_table['target_schema_name'], referenced_target_table['target_table_name']):
-                    self.config_parser.print_log_message('ERROR', f"orchestrator: constraint_worker: Worker {worker_id}: Referenced table {referenced_target_table['target_schema_name']}.{referenced_target_table['target_table_name']} for constraint {constraint_name} does not exist - skipping constraint creation.")
-                    self.migrator_tables.update_constraint_status({'row_id': constraint_data['id'], 'success': False, 'message': f"ERROR: referenced table {referenced_target_table['target_schema_name']}.{referenced_target_table['target_table_name']} does not exist"})
+
+                referenced_target_table_name_to_check = referenced_target_table['target_alias_name'] if use_aliases_as_target_names and referenced_target_table.get('target_alias_name') else referenced_target_table['target_table_name']
+                referenced_target_table_name_to_check = self.config_parser.convert_names_case(referenced_target_table_name_to_check)
+
+                if not worker_target_connection.target_table_exists(referenced_target_table['target_schema_name'], referenced_target_table_name_to_check):
+                    self.config_parser.print_log_message('ERROR', f"orchestrator: constraint_worker: Worker {worker_id}: Referenced table {referenced_target_table['target_schema_name']}.{referenced_target_table_name_to_check} for constraint {constraint_name} does not exist - skipping constraint creation.")
+                    self.migrator_tables.update_constraint_status({'row_id': constraint_data['id'], 'success': False, 'message': f"ERROR: referenced table {referenced_target_table['target_schema_name']}.{referenced_target_table_name_to_check} does not exist"})
                     return False
 
                 self.config_parser.print_log_message( 'DEBUG', f"orchestrator: constraint_worker: Worker {worker_id}: Creating constraint with SQL: {create_constraint_sql}")
@@ -1496,6 +1503,41 @@ class Orchestrator:
         except Exception as e:
             self.handle_error(e, 'migrate_triggers')
 
+    def view_worker(self, view_detail):
+        worker_id = uuid.uuid4()
+        view_type_str = "alias view" if view_detail.get('alias_view', False) else "normal view"
+        try:
+            # Each worker uses its own separate connection to the target database
+            worker_target_connection = self.load_connector('target')
+            worker_target_connection.connect()
+
+            if worker_target_connection.session_settings:
+                self.config_parser.print_log_message( 'DEBUG', f"orchestrator: view_worker: Worker {worker_id}: Executing session settings for {view_type_str}: {worker_target_connection.session_settings}")
+                worker_target_connection.execute_query(worker_target_connection.session_settings)
+
+            query = f'''SET SESSION search_path TO {view_detail['target_schema_name']};'''
+            worker_target_connection.execute_query(query)
+
+            self.config_parser.print_log_message( 'DEBUG', f"orchestrator: view_worker: Worker {worker_id}: Creating {view_type_str} {view_detail['source_view_name']} with SQL: {view_detail['target_view_sql']}")
+            worker_target_connection.execute_query(view_detail['target_view_sql'])
+
+            # Commit the view creation
+            if hasattr(worker_target_connection, 'connection') and hasattr(worker_target_connection.connection, 'commit'):
+                worker_target_connection.connection.commit()
+
+            query = f'''RESET search_path;'''
+            worker_target_connection.execute_query(query)
+            worker_target_connection.disconnect()
+            return True
+        except Exception as e:
+            self.config_parser.print_log_message( 'DEBUG', f"orchestrator: view_worker: Worker {worker_id}: Error creating {view_type_str} {view_detail['source_view_name']}: {e}")
+            self.handle_error(e, f"view_worker {worker_id} migrate {view_type_str} {view_detail['source_view_name']}")
+            try:
+                worker_target_connection.disconnect()
+            except:
+                pass
+            return False
+
     def run_migrate_views(self):
         self.migrator_tables.insert_main({'task_name': 'Orchestrator', 'subtask_name': 'views migration'})
 
@@ -1504,31 +1546,52 @@ class Orchestrator:
 
             all_views = self.migrator_tables.fetch_all_views()
             if all_views:
+                normal_views = []
+                alias_views = []
                 for one_view in all_views:
                     view_detail = self.migrator_tables.decode_view_row(one_view)
-                    self.config_parser.print_log_message('INFO', f"orchestrator: run_migrate_views: Processing view {view_detail['source_view_name']}")
-                    self.config_parser.print_log_message( 'DEBUG', f"orchestrator: run_migrate_views: View details: {view_detail}")
+                    if view_detail.get('alias_view', False):
+                        alias_views.append(view_detail)
+                    else:
+                        normal_views.append(view_detail)
 
-                    try:
-                        self.target_connection.connect()
+                max_workers = self.config_parser.get_parallel_workers_count()
 
-                        if self.target_connection.session_settings:
-                            self.config_parser.print_log_message( 'DEBUG', f"orchestrator: run_migrate_views: Executing session settings: {self.target_connection.session_settings}")
-                            self.target_connection.execute_query(self.target_connection.session_settings)
+                # Process normal views first
+                if normal_views:
+                    self.config_parser.print_log_message('INFO', "orchestrator: run_migrate_views: Starting parallel creation of normal views.")
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                        futures = {executor.submit(self.view_worker, view_detail): view_detail for view_detail in normal_views}
+                        for future in concurrent.futures.as_completed(futures):
+                            view_detail = futures[future]
+                            try:
+                                success = future.result()
+                                if success:
+                                    self.migrator_tables.update_view_status({'row_id': view_detail['id'], 'success': True, 'message': 'migrated OK'})
+                                    self.config_parser.print_log_message('INFO', f"orchestrator: run_migrate_views: View {view_detail['source_view_name']} migrated successfully.")
+                                else:
+                                    self.config_parser.print_log_message('ERROR', f"orchestrator: run_migrate_views: Error migrating view {view_detail['source_view_name']}.")
+                            except Exception as e:
+                                self.config_parser.print_log_message('ERROR', f"orchestrator: run_migrate_views: Exception migrating view {view_detail['source_view_name']}: {e}")
+                                self.migrator_tables.update_view_status({'row_id': view_detail['id'], 'success': False, 'message': f'ERROR: {e}'})
 
-                        query = f'''SET SESSION search_path TO {view_detail['target_schema_name']};'''
-                        self.target_connection.execute_query(query)
-
-                        self.target_connection.execute_query(view_detail['target_view_sql'])
-                        self.migrator_tables.update_view_status({'row_id': view_detail['id'], 'success': True, 'message': 'migrated OK'})
-                        self.config_parser.print_log_message('INFO', f"orchestrator: run_migrate_views: View {view_detail['source_view_name']} migrated successfully.")
-
-                        query = f'''RESET search_path;'''
-                        self.target_connection.execute_query(query)
-                        self.target_connection.disconnect()
-                    except Exception as e:
-                        self.migrator_tables.update_view_status({'row_id': view_detail['id'], 'success': False, 'message': f'ERROR: {e}'})
-                        self.handle_error(e, f"migrate_view {view_detail['source_view_name']}")
+                # Process alias views after all normal views have completed
+                if alias_views:
+                    self.config_parser.print_log_message('INFO', "orchestrator: run_migrate_views: Starting parallel creation of alias views.")
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                        futures = {executor.submit(self.view_worker, view_detail): view_detail for view_detail in alias_views}
+                        for future in concurrent.futures.as_completed(futures):
+                            view_detail = futures[future]
+                            try:
+                                success = future.result()
+                                if success:
+                                    self.migrator_tables.update_view_status({'row_id': view_detail['id'], 'success': True, 'message': 'migrated OK'})
+                                    self.config_parser.print_log_message('INFO', f"orchestrator: run_migrate_views: Alias view {view_detail['source_view_name']} migrated successfully.")
+                                else:
+                                    self.config_parser.print_log_message('ERROR', f"orchestrator: run_migrate_views: Error migrating alias view {view_detail['source_view_name']}.")
+                            except Exception as e:
+                                self.config_parser.print_log_message('ERROR', f"orchestrator: run_migrate_views: Exception migrating alias view {view_detail['source_view_name']}: {e}")
+                                self.migrator_tables.update_view_status({'row_id': view_detail['id'], 'success': False, 'message': f'ERROR: {e}'})
             else:
                 self.config_parser.print_log_message('INFO', "orchestrator: run_migrate_views: No views found to migrate.")
         else:
@@ -1540,15 +1603,17 @@ class Orchestrator:
         self.config_parser.print_log_message('INFO', "orchestrator: run_migrate_comments: Migrating comments.")
         all_tables = self.migrator_tables.fetch_all_tables()
         self.target_connection.connect()
+        use_aliases_as_target_names = self.config_parser.get_use_aliases_as_target_names()
 
         try:
             for table_detail in all_tables:
                 table_data = self.migrator_tables.decode_table_row(table_detail)
                 if table_data['table_comment']:
+                    target_table_name = table_data['target_alias_name'] if use_aliases_as_target_names and table_data.get('target_alias_name') else table_data['target_table_name']
                     # Escape single quotes in the comment to prevent SQL injection
                     safe_table_comment = table_data['table_comment'].replace("'", "''")
                     query = f"""COMMENT ON TABLE
-                    "{table_data['target_schema_name']}"."{self.config_parser.convert_names_case(table_data['target_table_name'])}"
+                    "{table_data['target_schema_name']}"."{self.config_parser.convert_names_case(target_table_name)}"
                     IS '{safe_table_comment}'"""
                     self.config_parser.print_log_message('INFO', f"orchestrator: run_migrate_comments: Setting comment for table {table_data['target_table_name']} in target database.")
                     self.config_parser.print_log_message( 'DEBUG', f"orchestrator: run_migrate_comments: Executing comment query: {query}")
@@ -1557,10 +1622,12 @@ class Orchestrator:
                 for col in table_data['target_columns'].keys():
                     column_comment = table_data['target_columns'][col]['column_comment']
                     if column_comment:
+                        target_table_name = table_data['target_alias_name'] if use_aliases_as_target_names and table_data.get('target_alias_name') else table_data['target_table_name']
+                        target_column_name = table_data['target_columns'][col].get('target_alias_name') if use_aliases_as_target_names and table_data['target_columns'][col].get('target_alias_name') else table_data['target_columns'][col]['column_name']
                         # Escape single quotes in the comment to prevent SQL injection
                         safe_column_comment = table_data['target_columns'][col]['column_comment'].replace("'", "''")
                         query = f"""COMMENT ON COLUMN
-                        "{table_data['target_schema_name']}"."{self.config_parser.convert_names_case(table_data['target_table_name'])}"."{self.config_parser.convert_names_case(table_data['target_columns'][col]['column_name'])}"
+                        "{table_data['target_schema_name']}"."{self.config_parser.convert_names_case(target_table_name)}"."{self.config_parser.convert_names_case(target_column_name)}"
                         IS '{safe_column_comment}'"""
                         self.config_parser.print_log_message('INFO', f"orchestrator: run_migrate_comments: Setting comment for column {table_data['target_columns'][col]['column_name']} in target database.")
                         self.config_parser.print_log_message( 'DEBUG', f"orchestrator: run_migrate_comments: Executing comment query: {query}")
@@ -1570,9 +1637,10 @@ class Orchestrator:
             for index_detail in all_indexes:
                 index_data = self.migrator_tables.decode_index_row(index_detail)
                 if index_data['index_comment']:
+                    target_table_name = index_data['target_alias_name'] if use_aliases_as_target_names and index_data.get('target_alias_name') else index_data['target_table_name']
                     # Escape single quotes in the comment to prevent SQL injection
                     safe_index_comment = index_data['index_comment'].replace("'", "''")
-                    index_name = f"{index_data['index_name']}_tab_{index_data['target_table_name']}"
+                    index_name = f"{index_data['index_name']}_tab_{target_table_name}"
                     query = f"""COMMENT ON INDEX
                     "{index_data['target_schema_name']}"."{self.config_parser.convert_names_case(index_name)}"
                     IS '{safe_index_comment}'"""
@@ -1584,11 +1652,12 @@ class Orchestrator:
             for constraint_detail in all_constraints:
                 constraint_data = self.migrator_tables.decode_constraint_row(constraint_detail)
                 if constraint_data['constraint_comment']:
+                    target_table_name = constraint_data['target_alias_name'] if use_aliases_as_target_names and constraint_data.get('target_alias_name') else constraint_data['target_table_name']
                     # Escape single quotes in the comment to prevent SQL injection
                     safe_constraint_comment = constraint_data['constraint_comment'].replace("'", "''")
                     query = f"""COMMENT ON CONSTRAINT
                     "{self.config_parser.convert_names_case(constraint_data['constraint_name'])}"
-                    ON "{constraint_data['target_schema_name']}"."{self.config_parser.convert_names_case(constraint_data['target_table_name'])}"
+                    ON "{constraint_data['target_schema_name']}"."{self.config_parser.convert_names_case(target_table_name)}"
                     IS '{safe_constraint_comment}'"""
                     self.config_parser.print_log_message('INFO', f"orchestrator: run_migrate_comments: Setting comment for constraint {constraint_data['constraint_name']} in target database.")
                     self.config_parser.print_log_message( 'DEBUG', f"orchestrator: run_migrate_comments: Executing comment query: {query}")
@@ -1611,12 +1680,14 @@ class Orchestrator:
             for view_detail in all_views:
                 view_data = self.migrator_tables.decode_view_row(view_detail)
                 if view_data['view_comment']:
+                    # target_view_name = view_data['target_view_alias'] if use_aliases_as_target_names and view_data.get('target_view_alias') else view_data['target_view_name']
+                    target_view_name = self.config_parser.convert_names_case(target_view_name)
                     # Escape single quotes in the comment to prevent SQL injection
                     safe_view_comment = view_data['view_comment'].replace("'", "''")
                     query = f"""COMMENT ON VIEW
-                    "{view_data['target_schema_name']}"."{self.config_parser.convert_names_case(view_data['view_name'])}"
+                    "{view_data['target_schema_name']}"."{target_view_name}"
                     IS '{safe_view_comment}'"""
-                    self.config_parser.print_log_message('INFO', f"orchestrator: run_migrate_comments: Setting comment for view {view_data['view_name']} in target database.")
+                    self.config_parser.print_log_message('INFO', f"orchestrator: run_migrate_comments: Setting comment for view {target_view_name} in target database.")
                     self.config_parser.print_log_message( 'DEBUG', f"orchestrator: run_migrate_comments: Executing comment query: {query}")
                     self.target_connection.execute_query(query)
 
@@ -1656,23 +1727,79 @@ class Orchestrator:
             self.config_parser.print_log_message('INFO', f"orchestrator: check_pausing_resuming: resumed.")
 
     def run_migrate_sequences(self):
-        """
-        Migrate sequences from source to target database.
-        """
-        self.config_parser.print_log_message('INFO', "orchestrator: run_migrate_sequences: Starting sequence migration...")
         self.migrator_tables.insert_main({'task_name': 'Orchestrator', 'subtask_name': 'sequences migration'})
-
+        workers_requested = self.config_parser.get_parallel_workers_count()
         settings = {
-            'source_schema_name': self.config_parser.get_source_schema(),
-            'target_schema_name': self.config_parser.get_target_schema(),
+            'source_db_type': self.config_parser.get_source_db_type(),
+            'target_db_type': self.config_parser.get_target_db_type(),
             'migrator_tables': self.migrator_tables,
         }
 
+        self.config_parser.print_log_message('INFO', f"orchestrator: run_migrate_sequences: Starting {workers_requested} parallel workers to create sequences in target database.")
+
+        migrate_sequences = self.migrator_tables.fetch_all_sequences(self.config_parser.is_resume_after_crash())
+
+        if len(migrate_sequences) > 0:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers_requested) as executor:
+                futures = {}
+                for sequence_row in migrate_sequences:
+                    sequence_data = self.migrator_tables.decode_sequence_row(sequence_row)
+                    self.config_parser.print_log_message('DEBUG3', f"orchestrator: run_migrate_sequences: futures running count: {len(futures)}")
+                    while len(futures) >= workers_requested:
+                        done, _ = concurrent.futures.wait(futures, return_when=concurrent.futures.FIRST_COMPLETED)
+                        for future in done:
+                            sequence_done = futures.pop(future)
+                            if future.result() == False:
+                                if self.on_error_action == 'stop':
+                                    self.config_parser.print_log_message('ERROR', "orchestrator: run_migrate_sequences: Stopping execution due to error.")
+                                    exit(1)
+                            else:
+                                self.migrator_tables.update_sequence_status({'sequence_id': sequence_done['sequence_id'], 'success': True, 'message': 'migrated OK'})
+
+                    future = executor.submit(self.sequence_worker, sequence_data, settings)
+                    futures[future] = sequence_data
+
+                self.config_parser.print_log_message('INFO', "orchestrator: run_migrate_sequences: Processing remaining futures")
+                for future in concurrent.futures.as_completed(futures):
+                    sequence_done = futures[future]
+                    if future.result() == False:
+                        if self.on_error_action == 'stop':
+                            self.config_parser.print_log_message('ERROR', "orchestrator: run_migrate_sequences: Stopping execution due to error.")
+                            exit(1)
+                    else:
+                        self.migrator_tables.update_sequence_status({'sequence_id': sequence_done['sequence_id'], 'success': True, 'message': 'migrated OK'})
+
+            self.config_parser.print_log_message('INFO', "orchestrator: run_migrate_sequences: Sequences processed successfully.")
+        else:
+            self.config_parser.print_log_message('INFO', "orchestrator: run_migrate_sequences: No sequences to create.")
+
+        self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': 'sequences migration', 'success': True, 'message': 'finished OK'})
+
+    def sequence_worker(self, sequence_data, settings):
+        worker_id = uuid.uuid4()
         try:
-            self.source_connection.migrate_sequences(self.target_connection, settings)
-            self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': 'sequences migration', 'success': True, 'message': 'finished OK'})
+            target_sequence_name = sequence_data['target_sequence_name']
+            self.config_parser.print_log_message('INFO', f"orchestrator: sequence_worker: Worker {worker_id}: Creating sequence {target_sequence_name} in target database.")
+
+            worker_target_connection = self.load_connector('target')
+            worker_target_connection.connect()
+
+            result = self.source_connection.migrate_sequences(worker_target_connection, sequence_data)
+
+            worker_target_connection.disconnect()
+
+            if not result:
+                self.config_parser.print_log_message('ERROR', f"orchestrator: sequence_worker: Worker {worker_id}: Error migrating sequence {target_sequence_name}.")
+                self.migrator_tables.update_sequence_status({'sequence_id': sequence_data['sequence_id'], 'success': False, 'message': 'ERROR: migration failed in connector'})
+                return False
+
+            self.config_parser.print_log_message('INFO', f"orchestrator: sequence_worker: Worker {worker_id}: Sequence '{target_sequence_name}' created successfully.")
+            return True
+
         except Exception as e:
-            self.handle_error(e, 'Sequence Migration')
+            self.config_parser.print_log_message('ERROR', f"orchestrator: sequence_worker: Worker {worker_id}: Exception migrating sequence: {e}")
+            self.migrator_tables.update_sequence_status({'sequence_id': sequence_data['sequence_id'], 'success': False, 'message': f'ERROR: {e}'})
+            return False
 
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

@@ -234,7 +234,7 @@ Beyond the basics, the configuration file supports several advanced features:
   - You can schedule actions to `pause`, `stop`, or `continue` the migration at specific times.
   - Useful for pausing migration during business hours and resuming during maintenance windows.
 
-- **File-based Data Source (`database_export`)**:
+- **File-based Data Source (`data_export`)**:
   - (Currently primarily for Informix)
   - Allows using exported data files (CSV, UNL, SQL dump) as the source of data instead of reading directly from the source database.
   - Useful for very large databases where parallel export/import via files is faster or when direct connectivity is limited.

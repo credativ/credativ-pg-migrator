@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.11.4 - 2026.03.17
+
+- 2026.03.17
+
+  - Fix in Orchestrator - refactored `run_migrate_views` to operate via `concurrent.futures.ThreadPoolExecutor` for parallel execution of standard database views. Alias views are now only processed concurrently after all primary standard views finish, avoiding missing view dependency collisions.
+  - Fix in IBM DB2 z/OS connector - modified `convert_view_code` to skip alias generation against referenced table substrings if that specific alias is mapped to another valid View instead of a Table inside the database catalog.
+  - Fix in DB2 Alias resolution - implemented dynamic `LEFT JOIN` resolution inside `ibm_db2_zos_connector.py` fetching queries to accurately label the target pointer for Database Aliases as either `'TABLE'` or `'VIEW'`. This `alias_target_type` property is now explicitly handled mapping through `migrator_tables.py` into both `ddl_aliases` and `protocol_aliases` allowing the planner to securely prevent view-to-alias circular dependencies.
+
+- 2026.03.16
+
+  - Fix in CSV data conversion - repaired CSV to UTF-8 parsing to dynamically merge fields where commas were incorrectly acting as decimal separators; securely validates the column definitions to ensure merging only triggers for `NUMERIC`/`DECIMAL`/`FLOAT` target columns possessing a strict >0 scale specification, ignoring explicitly unscaled integers.
+  - Improvements in Sequence migration - restructured sequence extraction to efficiently fetch and migrate via the `ddl_sequences` system instead of standard code conversion; refined reset assignments utilizing `fetch_table_sequences` parallel execution handlers after dataset migrations.
+
+- 2026.03.13
+
+  - Fix in IBM DB2 z/OS connector - improved parsing of `CREATE VIEW` statements, explicitly handling view column lists so that `names_case_handling` applies correctly.
+  - Fix in IBM DB2 z/OS connector - pre-processed IBM DB2 specific variables like `CURRENT SQLID` during view migration, preventing sqlglot fallback parsing errors and enabling robust lowercase/uppercase schema transformations.
+  - Fix in alias migration - updated migrator protocol tables to properly generate and store `target_schema_name`, `target_alias_name`, and `target_referenced_*` fields for aliases while skipping actual DDL creation since PostgreSQL does not support DB2 aliases natively.
+
 ## 0.11.3 - 2026.03.10
 
 - 2026.03.10
@@ -145,7 +164,7 @@
   - Significant improvements in UNL to CSV conversion - added check for expected target data types for better validation of processed data
   - UNL import can now also skip import of LOB values based on migration.migrate_lob_values setting - LOB value will contain UNL pointer to external LOB data
   - added missing option "table_schema" into individual table_settings in the config file
-  - added setting database_export.on_missing_data_file to define globally action on missing data files if database_export is specified in the config file
+  - added setting data_export.on_missing_data_file to define globally action on missing data files if data_export is specified in the config file
     - Possible values: "error", "skip", "source_table_name" - use source table from the source database instead of the data file
 
 - 2025.07.31:

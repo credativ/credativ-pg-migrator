@@ -3144,7 +3144,8 @@ class MigratorTables:
         view_names = []
         for view in views:
             values = self.decode_view_row(view)
-            target_view_name = values['target_view_alias'] if self.config_parser.get_use_aliases_as_target_names() and values.get('target_view_alias') else values['target_view_name']
+            # target_view_name = values['target_view_alias'] if self.config_parser.get_use_aliases_as_target_names() and values.get('target_view_alias') else values['target_view_name']
+            target_view_name = values['target_view_name']
             if target_view_name:
                 view_names.append(target_view_name)
         return view_names

@@ -889,7 +889,7 @@ class Planner:
                     self.config_parser.print_log_message('INFO', f"planner: run_prepare_views: View {view_info['view_name']} is excluded from migration.")
                     continue
                 self.config_parser.print_log_message('INFO', f"planner: run_prepare_views: View {view_info['view_name']} is included for migration.")
-                target_view_name = view_info['view_name']
+                target_view_name = view_info['target_view_name']
                 target_alias_name = ''
                 # if self.config_parser.get_use_aliases_as_target_names() and self.config_parser.get_source_db_type() != 'ibm_db2_zos':
                 #     alias_name = self.migrator_tables.get_alias_for_table(self.source_schema_name, view_info['view_name'])
@@ -897,7 +897,7 @@ class Planner:
                 #         target_alias_name = alias_name
                 #         self.config_parser.print_log_message('INFO', f"planner: run_prepare_views: View {view_info['view_name']} mapped to target alias {target_alias_name}")
 
-                target_view_name_to_use = target_alias_name if target_alias_name else target_view_name
+                # target_view_name_to_use = target_alias_name if target_alias_name else target_view_name
 
                 view_sql = self.source_connection.fetch_view_code({
                     'view_id': view_info['id'],
@@ -906,17 +906,20 @@ class Planner:
                     'target_schema_name': view_info.get('target_schema_name', ''),
                     'target_view_name': view_info.get('target_view_name', ''),
                 })
-                self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_views: Source view SQL: {view_sql}")
+                self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_views: Source view SQL data: {view_info}")
+                self.config_parser.print_log_message( 'DEBUG3', f"planner: run_prepare_views: Source view SQL: {view_sql}")
                 converted_view_sql = self.source_connection.convert_view_code({
                     'view_code': view_sql,
                     'source_database': self.config_parser.get_source_db_name(),
                     'source_schema_name': self.config_parser.get_source_schema(),
                     'target_schema_name': self.config_parser.get_target_schema(),
                     'target_db_type': self.config_parser.get_target_db_type(),
-                    'target_view_name': self.config_parser.convert_names_case(target_view_name_to_use), # Pass name
+                    'target_view_name': self.config_parser.convert_names_case(target_view_name), # Pass name
                     'view_type': view_info.get('view_type', 'VIEW'), # Pass type
                     'migrator_tables': self.migrator_tables,
+                    'alias_view': view_info.get('is_alias', False),
                 })
+                self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_views: Converted view SQL: {converted_view_sql}")
 
                 self.config_parser.print_log_message( 'DEBUG', "planner: run_prepare_views: Checking for remote objects substitution in view SQL...")
                 rows = self.migrator_tables.get_records_remote_objects_substitution()

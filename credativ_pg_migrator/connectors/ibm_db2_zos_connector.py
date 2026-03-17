@@ -1091,7 +1091,10 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
                     'id': row[0],
                     'schema_name': row[1],
                     'view_name': row[2],
-                    'comment': None
+                    'target_schema_name': '',
+                    'target_view_name': '',
+                    'comment': None,
+                    'is_alias': False
                 }
 
             # Now fetch aliases that point to views unconditionally
@@ -1241,14 +1244,15 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
                 if table:
                     # Lookup alias if enabled
                     table_name_to_use = table.name
-                    if self.config_parser.get_use_aliases_as_target_names() and settings.get('migrator_tables'):
-                        alias_name = settings['migrator_tables'].get_alias_for_table(schema_name_for_lookup, table.name)
-                        if alias_name:
-                            if alias_name.lower() == settings.get('target_view_name', '').lower() or alias_name.lower() == settings.get('source_view_name', '').lower():
-                                self.config_parser.print_log_message('INFO', f"ibm_db2_zos_connector: convert_view_code: Skipped replacing referenced table '{table.name}' with alias '{alias_name}' to avoid circular reference.")
-                            else:
-                                self.config_parser.print_log_message('INFO', f"ibm_db2_zos_connector: convert_view_code: Replaced referenced table '{table.name}' with alias '{alias_name}' inside view generation.")
-                                table_name_to_use = alias_name
+                    if not isinstance(node.parent, sqlglot.exp.Create):
+                        if self.config_parser.get_use_aliases_as_target_names() and settings.get('migrator_tables'):
+                            alias_name = settings['migrator_tables'].get_alias_for_table(schema_name_for_lookup, table.name)
+                            if alias_name and not settings.get('alias_view'):
+                                if alias_name.lower() == settings.get('target_view_name', '').lower() or alias_name.lower() == settings.get('source_view_name', '').lower():
+                                    self.config_parser.print_log_message('INFO', f"ibm_db2_zos_connector: convert_view_code: Skipped replacing referenced table '{table.name}' with alias '{alias_name}' to avoid circular reference. Settings: {settings}")
+                                else:
+                                    self.config_parser.print_log_message('INFO', f"ibm_db2_zos_connector: convert_view_code: Replaced referenced table '{table.name}' with alias '{alias_name}' inside view generation. Settings: {settings}")
+                                    table_name_to_use = alias_name
 
                     converted_table = self.config_parser.convert_names_case(table_name_to_use)
                     table.set("this", converted_table)

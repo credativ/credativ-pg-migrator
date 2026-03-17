@@ -1518,13 +1518,19 @@ class Orchestrator:
             query = f'''SET SESSION search_path TO {view_detail['target_schema_name']};'''
             worker_target_connection.execute_query(query)
 
+            self.config_parser.print_log_message( 'DEBUG', f"orchestrator: view_worker: Worker {worker_id}: Creating {view_type_str} {view_detail['source_view_name']} with SQL: {view_detail['target_view_sql']}")
             worker_target_connection.execute_query(view_detail['target_view_sql'])
+
+            # Commit the view creation
+            if hasattr(worker_target_connection, 'connection') and hasattr(worker_target_connection.connection, 'commit'):
+                worker_target_connection.connection.commit()
 
             query = f'''RESET search_path;'''
             worker_target_connection.execute_query(query)
             worker_target_connection.disconnect()
             return True
         except Exception as e:
+            self.config_parser.print_log_message( 'DEBUG', f"orchestrator: view_worker: Worker {worker_id}: Error creating {view_type_str} {view_detail['source_view_name']}: {e}")
             self.handle_error(e, f"view_worker {worker_id} migrate {view_type_str} {view_detail['source_view_name']}")
             try:
                 worker_target_connection.disconnect()

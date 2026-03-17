@@ -1154,14 +1154,6 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
     def fetch_view_code(self, settings):
         source_schema_name = settings.get('source_schema_name')
         source_view_name = settings.get('source_view_name')
-        
-        # Check if this view itself is an alias acting as a view
-        alias_target_schema = settings.get('target_schema_name')
-        alias_target_view = settings.get('target_view_name')
-        
-        if alias_target_schema and alias_target_view:
-             return f'CREATE VIEW "{source_schema_name}"."{source_view_name}" AS SELECT * FROM "{alias_target_schema}"."{alias_target_view}"'
-
         if self.connectivity == self.config_parser.const_connectivity_ddl():
             query = f"""SELECT source_view_sql
                         FROM "{self.protocol_schema}"."ddl_views"
@@ -1251,8 +1243,11 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
                     if self.config_parser.get_use_aliases_as_target_names() and settings.get('migrator_tables'):
                         alias_name = settings['migrator_tables'].get_alias_for_table(schema_name_for_lookup, table.name)
                         if alias_name:
-                            self.config_parser.print_log_message('INFO', f"ibm_db2_zos_connector: convert_view_code: Replaced referenced table '{table.name}' with alias '{alias_name}' inside view generation.")
-                            table_name_to_use = alias_name
+                            if alias_name.lower() == settings.get('target_view_name', '').lower() or alias_name.lower() == settings.get('source_view_name', '').lower():
+                                self.config_parser.print_log_message('INFO', f"ibm_db2_zos_connector: convert_view_code: Skipped replacing referenced table '{table.name}' with alias '{alias_name}' to avoid circular reference.")
+                            else:
+                                self.config_parser.print_log_message('INFO', f"ibm_db2_zos_connector: convert_view_code: Replaced referenced table '{table.name}' with alias '{alias_name}' inside view generation.")
+                                table_name_to_use = alias_name
 
                     converted_table = self.config_parser.convert_names_case(table_name_to_use)
                     table.set("this", converted_table)

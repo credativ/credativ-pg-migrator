@@ -1975,6 +1975,7 @@ class MigratorTables:
             source_view_sql TEXT,
             target_schema_name TEXT,
             target_view_name TEXT,
+            target_view_alias TEXT,
             target_view_sql TEXT,
             view_comment TEXT,
             task_created TIMESTAMP DEFAULT clock_timestamp(),
@@ -2103,8 +2104,9 @@ class MigratorTables:
             'source_view_sql': row[4],
             'target_schema_name': row[5],
             'target_view_name': row[6],
-            'target_view_sql': row[7],
-            'view_comment': row[8]
+            'target_view_alias': row[7],
+            'target_view_sql': row[8],
+            'view_comment': row[9]
         }
 
     def insert_protocol(self, settings):
@@ -2667,11 +2669,11 @@ class MigratorTables:
         table_name = self.config_parser.get_protocol_name_views()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
-            (source_schema_name, source_view_name, source_view_id, source_view_sql, target_schema_name, target_view_name, target_view_sql, view_comment)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            (source_schema_name, source_view_name, source_view_id, source_view_sql, target_schema_name, target_view_name, target_view_alias, target_view_sql, view_comment)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (settings.get('source_schema_name'), settings.get('source_view_name'), settings.get('source_view_id'), settings.get('source_view_sql'), settings.get('target_schema_name'), settings.get('target_view_name'), settings.get('target_view_sql'), settings.get('view_comment'))
+        params = (settings.get('source_schema_name'), settings.get('source_view_name'), settings.get('source_view_id'), settings.get('source_view_sql'), settings.get('target_schema_name'), settings.get('target_view_name'), settings.get('target_view_alias', ''), settings.get('target_view_sql'), settings.get('view_comment'))
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -3140,7 +3142,9 @@ class MigratorTables:
         view_names = []
         for view in views:
             values = self.decode_view_row(view)
-            view_names.append(values['target_view_name'])
+            target_view_name = values['target_view_alias'] if self.config_parser.get_use_aliases_as_target_names() and values.get('target_view_alias') else values['target_view_name']
+            if target_view_name:
+                view_names.append(target_view_name)
         return view_names
 
     def fetch_all_indexes(self):

@@ -1624,12 +1624,14 @@ class Orchestrator:
             for view_detail in all_views:
                 view_data = self.migrator_tables.decode_view_row(view_detail)
                 if view_data['view_comment']:
+                    # target_view_name = view_data['target_view_alias'] if use_aliases_as_target_names and view_data.get('target_view_alias') else view_data['target_view_name']
+                    target_view_name = self.config_parser.convert_names_case(target_view_name)
                     # Escape single quotes in the comment to prevent SQL injection
                     safe_view_comment = view_data['view_comment'].replace("'", "''")
                     query = f"""COMMENT ON VIEW
-                    "{view_data['target_schema_name']}"."{self.config_parser.convert_names_case(view_data['view_name'])}"
+                    "{view_data['target_schema_name']}"."{target_view_name}"
                     IS '{safe_view_comment}'"""
-                    self.config_parser.print_log_message('INFO', f"orchestrator: run_migrate_comments: Setting comment for view {view_data['view_name']} in target database.")
+                    self.config_parser.print_log_message('INFO', f"orchestrator: run_migrate_comments: Setting comment for view {target_view_name} in target database.")
                     self.config_parser.print_log_message( 'DEBUG', f"orchestrator: run_migrate_comments: Executing comment query: {query}")
                     self.target_connection.execute_query(query)
 
@@ -1727,17 +1729,17 @@ class Orchestrator:
             worker_target_connection.connect()
 
             result = self.source_connection.migrate_sequences(worker_target_connection, sequence_data)
-            
+
             worker_target_connection.disconnect()
-            
+
             if not result:
                 self.config_parser.print_log_message('ERROR', f"orchestrator: sequence_worker: Worker {worker_id}: Error migrating sequence {target_sequence_name}.")
                 self.migrator_tables.update_sequence_status({'sequence_id': sequence_data['sequence_id'], 'success': False, 'message': 'ERROR: migration failed in connector'})
                 return False
-                
+
             self.config_parser.print_log_message('INFO', f"orchestrator: sequence_worker: Worker {worker_id}: Sequence '{target_sequence_name}' created successfully.")
             return True
-            
+
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"orchestrator: sequence_worker: Worker {worker_id}: Exception migrating sequence: {e}")
             self.migrator_tables.update_sequence_status({'sequence_id': sequence_data['sequence_id'], 'success': False, 'message': f'ERROR: {e}'})

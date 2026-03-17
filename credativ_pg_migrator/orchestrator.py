@@ -1505,13 +1505,14 @@ class Orchestrator:
 
     def view_worker(self, view_detail):
         worker_id = uuid.uuid4()
+        view_type_str = "alias view" if view_detail.get('alias_view', False) else "normal view"
         try:
             # Each worker uses its own separate connection to the target database
             worker_target_connection = self.load_connector('target')
             worker_target_connection.connect()
 
             if worker_target_connection.session_settings:
-                self.config_parser.print_log_message( 'DEBUG', f"orchestrator: view_worker: Worker {worker_id}: Executing session settings: {worker_target_connection.session_settings}")
+                self.config_parser.print_log_message( 'DEBUG', f"orchestrator: view_worker: Worker {worker_id}: Executing session settings for {view_type_str}: {worker_target_connection.session_settings}")
                 worker_target_connection.execute_query(worker_target_connection.session_settings)
 
             query = f'''SET SESSION search_path TO {view_detail['target_schema_name']};'''
@@ -1524,7 +1525,7 @@ class Orchestrator:
             worker_target_connection.disconnect()
             return True
         except Exception as e:
-            self.handle_error(e, f"view_worker {worker_id} migrate_view {view_detail['source_view_name']}")
+            self.handle_error(e, f"view_worker {worker_id} migrate {view_type_str} {view_detail['source_view_name']}")
             try:
                 worker_target_connection.disconnect()
             except:

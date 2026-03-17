@@ -3421,17 +3421,24 @@ class MigratorTables:
             'source_referenced_table_name': row[6],
             'source_referenced_column_name': row[7],
             'source_alias_comment': row[8],
-            'task_created': row[9],
-            'task_started': row[10],
-            'task_completed': row[11],
-            'success': row[12],
-            'message': row[13]
+            'target_schema_name': row[9],
+            'target_alias_name': row[10],
+            'alias_target_type': row[11], # Added alias_target_type
+            'target_referenced_schema_name': row[12],
+            'target_referenced_table_name': row[13],
+            'target_referenced_column_name': row[14],
+            'target_alias_sql': row[15],
+            'task_created': row[16],
+            'task_started': row[17],
+            'task_completed': row[18],
+            'success': row[19],
+            'message': row[20]
         }
 
     def get_alias_for_table(self, source_schema_name, source_table_name):
         table_name = self.config_parser.get_protocol_name_aliases()
         query = f"""
-            SELECT target_alias_name
+            SELECT target_alias_name, alias_target_type
             FROM "{self.protocol_schema}"."{table_name}"
             WHERE upper(source_referenced_schema_name) = upper(%s) AND upper(source_referenced_table_name) = upper(%s)
         """
@@ -3441,7 +3448,7 @@ class MigratorTables:
             row = cursor.fetchone()
             cursor.close()
             if row:
-                return row[0]
+                return {'target_alias_name': row[0], 'alias_target_type': row[1]}
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"migrator_tables: get_alias_for_table: Error querying alias for {source_schema_name}.{source_table_name}: {e}")
         return None
@@ -3451,11 +3458,11 @@ class MigratorTables:
         table_name = self.config_parser.get_protocol_name_aliases()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
-            (source_schema_name, source_alias_name, source_alias_id, source_alias_sql, source_referenced_schema_name, source_referenced_table_name, source_referenced_column_name, source_alias_comment, target_schema_name, target_alias_name, target_referenced_schema_name, target_referenced_table_name, target_referenced_column_name, target_alias_sql)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (source_schema_name, source_alias_name, source_alias_id, source_alias_sql, source_referenced_schema_name, source_referenced_table_name, source_referenced_column_name, source_alias_comment, target_schema_name, target_alias_name, alias_target_type, target_referenced_schema_name, target_referenced_table_name, target_referenced_column_name, target_alias_sql)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (settings.get('source_schema_name'), settings.get('source_alias_name'), settings.get('source_alias_id'), settings.get('source_alias_sql'), settings.get('source_referenced_schema_name'), settings.get('source_referenced_table_name'), settings.get('source_referenced_column_name'), settings.get('source_alias_comment'), settings.get('target_schema_name'), settings.get('target_alias_name'), settings.get('target_referenced_schema_name'), settings.get('target_referenced_table_name'), settings.get('target_referenced_column_name'), settings.get('target_alias_sql'))
+        params = (settings.get('source_schema_name'), settings.get('source_alias_name'), settings.get('source_alias_id'), settings.get('source_alias_sql'), settings.get('source_referenced_schema_name'), settings.get('source_referenced_table_name'), settings.get('source_referenced_column_name'), settings.get('source_alias_comment'), settings.get('target_schema_name'), settings.get('target_alias_name'), settings.get('alias_target_type'), settings.get('target_referenced_schema_name'), settings.get('target_referenced_table_name'), settings.get('target_referenced_column_name'), settings.get('target_alias_sql'))
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -3647,6 +3654,7 @@ class MigratorTables:
                 source_target_name VARCHAR,
                 source_alias_sql TEXT,
                 source_alias_comment TEXT,
+                alias_target_type VARCHAR,
                 target_schema_name VARCHAR,
                 target_alias_name VARCHAR,
                 target_referenced_schema_name VARCHAR,
@@ -3814,11 +3822,11 @@ class MigratorTables:
         func_run_id = uuid.uuid4()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."ddl_aliases"
-            (source_schema_name, source_alias_name, source_target_schema, source_target_name, source_alias_sql, source_alias_comment)
-            VALUES (%s, %s, %s, %s, %s, %s)
+            (source_schema_name, source_alias_name, source_target_schema, source_target_name, source_alias_sql, source_alias_comment, alias_target_type)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             RETURNING id
         """
-        params = (settings.get('source_schema_name'), settings.get('source_alias_name'), settings.get('source_target_schema'), settings.get('source_target_name'), settings.get('source_alias_sql'), settings.get('source_alias_comment'))
+        params = (settings.get('source_schema_name'), settings.get('source_alias_name'), settings.get('source_target_schema'), settings.get('source_target_name'), settings.get('source_alias_sql'), settings.get('source_alias_comment'), settings.get('alias_target_type'))
         self.config_parser.print_log_message('DEBUG3', f"migrator_tables: insert_ddl_aliases: inserting: {params}")
         try:
             cursor = self.protocol_connection.connection.cursor()

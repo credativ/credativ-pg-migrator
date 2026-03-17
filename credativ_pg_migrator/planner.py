@@ -973,6 +973,7 @@ class Planner:
                     'source_alias_comment': alias_info.get('alias_comment', ''),
                     'target_schema_name': self.target_schema_name,
                     'target_alias_name': self.config_parser.convert_names_case(alias_info.get('alias_name', '')),
+                    'alias_target_type': alias_info.get('alias_target_type', 'UNKNOWN'),
                     'target_referenced_schema_name': self.config_parser.convert_names_case(alias_info.get('aliased_schema_name', '')),
                     'target_referenced_table_name': self.config_parser.convert_names_case(alias_info.get('aliased_table_name', '')),
                     'target_referenced_column_name': self.config_parser.convert_names_case(alias_info.get('aliased_column_name', '')),

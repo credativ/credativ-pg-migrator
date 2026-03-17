@@ -278,15 +278,15 @@ table_settings:
       #   chunk_size: '2GB'
       #   workers: 4  # number of workers to use for parallel processing of the chunks, default is 4
 
-      # mapping rules for the mapping workflow.
-      mapping_rules:
-        - target_schema: "new_target_schema"
-          target_table: "new_table_name"
-          column_mapping:
-            - source_column: "old_column"
-              target_column: "new_column"
-            - source_column: "old_column"
-              target_column: "new_column"
+      ## mapping rules for the mapping workflow.
+      # mapping_rules:
+      #  - target_schema: "new_target_schema"
+      #    target_table: "new_table_name"
+      #    column_mapping:
+      #      - source_column: "old_column"
+      #        target_column: "new_column"
+      #      - source_column: "old_column"
+      #        target_column: "new_column"
 
     ## currently not implemented, just a preparation for the future
     # individual target LOB storage settings for the table

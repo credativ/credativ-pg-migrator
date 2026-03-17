@@ -454,20 +454,28 @@ class DatabaseConnector(ABC):
         pass
 
     @abstractmethod
-    def fetch_sequences(self, table_schema: str, table_name: str):
+    def fetch_sequences(self, schema_name: str):
         """
-        Fetch sequences for the specified schema and table.
+        Fetch sequences for the specified schema.
         This function is only relevant for target databases that uses sequences.
         Returns: dict
         { ordinary_number: {
-            'name': sequence_name:
+            'sequence_name': sequence_name:
             'id': sequence_id,
-            'column_name': column_name,
-            'set_sequence_sql': set_sequence_sql
+            'source_sequence_sql': source_sequence_sql
             }
         }
         """
-        pass
+        return {}
+
+    def fetch_table_sequences(self, table_schema: str, table_name: str):
+        """
+        Fetches sequences exclusively attached to a specific table column, typically for post-data migration sequence RESETS.
+        Target connection specific.
+        Returns: dict
+        """
+        return {}
+
 
     @abstractmethod
     def get_sequence_details(self, sequence_owner, sequence_name):

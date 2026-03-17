@@ -1861,7 +1861,7 @@ EXECUTE FUNCTION "{func_schema}"."{func_name}"();
         """
         pass
 
-    def fetch_sequences(self):
+    def fetch_sequences(self, schema_name: str):
         query = """
             SELECT
                 s.name AS sequence_name,

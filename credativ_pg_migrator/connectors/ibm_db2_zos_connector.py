@@ -23,6 +23,7 @@ import datetime
 import os
 import glob
 import re
+import sqlglot
 
 class IbmDb2ZosConnector(DatabaseConnector):
     def __init__(self, config_parser, source_or_target):
@@ -39,29 +40,27 @@ class IbmDb2ZosConnector(DatabaseConnector):
         self.source_db_config = self.config_parser.get_source_config()
 
         if self.connectivity == self.config_parser.const_connectivity_ddl():
-            self.ddl_directory = self.source_db_config['ddl']['directory']
-            self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: __init__: Source_db_config: {self.source_db_config} - ddl_directory: {self.ddl_directory}")
-            if not os.path.exists(self.ddl_directory):
-                raise ValueError(f"DDL directory not found: '{self.ddl_directory}'")
+            self.ddl_path = self.source_db_config['ddl']['path']
+            self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: __init__: Source_db_config: {self.source_db_config} - ddl_path: {self.ddl_path}")
+
+            self.ddl_files = []
+            if os.path.exists(self.ddl_path) and os.path.isdir(self.ddl_path):
+                self.ddl_files = glob.glob(os.path.join(self.ddl_path, '*.*'))
             else:
-                if not os.listdir(self.ddl_directory):
-                    raise ValueError(f"DDL directory is empty: '{self.ddl_directory}'")
-                else:
-                    self.config_parser.print_log_message('INFO', f"ibm_db2_zos_connector: __init__: DDL directory found: '{self.ddl_directory}'")
+                self.ddl_files = glob.glob(self.ddl_path)
 
-                if not os.listdir(self.ddl_directory):
-                    raise ValueError(f"DDL directory is empty: '{self.ddl_directory}'")
-                else:
+            if not self.ddl_files:
+                raise ValueError(f"No DDL files found for path or mask: '{self.ddl_path}'")
 
-                    extension_counts = {}
-                    for filename in os.listdir(self.ddl_directory):
-                        if os.path.isfile(os.path.join(self.ddl_directory, filename)):
-                            ext = os.path.splitext(filename)[1]
-                            extension_counts[ext] = extension_counts.get(ext, 0) + 1
-                    for ext, count in extension_counts.items():
-                        self.config_parser.print_log_message('INFO', f"ibm_db2_zos_connector: __init__: Found {count} files with extension '{ext}'")
+            self.config_parser.print_log_message('INFO', f"ibm_db2_zos_connector: __init__: DDL path valid: '{self.ddl_path}', found {len(self.ddl_files)} files")
 
-                    self.config_parser.print_log_message('INFO', f"ibm_db2_zos_connector: __init__: DDL directory found: {self.ddl_directory}")
+            extension_counts = {}
+            for filepath in self.ddl_files:
+                if os.path.isfile(filepath):
+                    ext = os.path.splitext(filepath)[1]
+                    extension_counts[ext] = extension_counts.get(ext, 0) + 1
+            for ext, count in extension_counts.items():
+                self.config_parser.print_log_message('INFO', f"ibm_db2_zos_connector: __init__: Found {count} files with extension '{ext}'")
         else:
             raise ValueError(f"Unsupported IBM DB2 z/OS connectivity: {self.connectivity}")
 
@@ -213,13 +212,14 @@ class IbmDb2ZosConnector(DatabaseConnector):
 
 
     def parse_ddl_files(self, settings):
-        self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: parse_ddl_files: Starting DDL parser")
+        self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: parse_ddl_files: Starting DDL parser - self.ddl_files: {self.ddl_files}")
         migrator_tables = settings['migrator_tables']
         if not migrator_tables:
             self.config_parser.print_log_message('ERROR', "ibm_db2_zos_connector: parse_ddl_files: migrator_tables not found in settings.")
             return
 
-        for filepath in glob.glob(os.path.join(self.ddl_directory, '*.*')):
+        for filepath in self.ddl_files:
+            self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: parse_ddl_files: Processing file: {filepath}")
             with open(filepath, 'r', encoding='utf-8') as f:
                 content = f.read()
 
@@ -327,10 +327,67 @@ class IbmDb2ZosConnector(DatabaseConnector):
                 if match_seq:
                     schema_name = match_seq.group(1).upper()
                     seq_name = match_seq.group(2).upper()
+
+                    # Rebuild Sequence SQL Statement based on DB2 properties for PostgreSQL compatibility
+                    seq_sql = f'CREATE SEQUENCE "{schema_name.lower()}"."{seq_name.lower()}"'
+                    seq_params_str = clean_stmt.upper()
+
+                    # Individual parameter tracking
+                    parsed_start = None
+                    parsed_increment = None
+                    parsed_minvalue = None
+                    parsed_maxvalue = None
+                    parsed_cache = None
+                    parsed_cycle = False
+
+                    start_with_match = re.search(r"START\s+WITH\s+(-?\d+)", seq_params_str)
+                    if start_with_match:
+                        parsed_start = int(start_with_match.group(1))
+                        seq_sql += f" START WITH {parsed_start}"
+
+                    increment_by_match = re.search(r"INCREMENT\s+BY\s+(-?\d+)", seq_params_str)
+                    if increment_by_match:
+                        parsed_increment = int(increment_by_match.group(1))
+                        seq_sql += f" INCREMENT BY {parsed_increment}"
+
+                    minvalue_match = re.search(r"MINVALUE\s+(-?\d+)", seq_params_str)
+                    if minvalue_match:
+                        parsed_minvalue = int(minvalue_match.group(1))
+                        seq_sql += f" MINVALUE {parsed_minvalue}"
+                    elif "NO MINVALUE" in seq_params_str:
+                        seq_sql += " NO MINVALUE"
+
+                    maxvalue_match = re.search(r"MAXVALUE\s+(-?\d+)", seq_params_str)
+                    if maxvalue_match:
+                        parsed_maxvalue = int(maxvalue_match.group(1))
+                        seq_sql += f" MAXVALUE {parsed_maxvalue}"
+                    elif "NO MAXVALUE" in seq_params_str:
+                        seq_sql += " NO MAXVALUE"
+
+                    if "CACHE" in seq_params_str and "NO CACHE" in seq_params_str:
+                        seq_sql += " CACHE 1" # Disable caching
+                    else:
+                        cache_match = re.search(r"CACHE\s+(\d+)", seq_params_str)
+                        if cache_match:
+                            parsed_cache = int(cache_match.group(1))
+                            seq_sql += f" CACHE {parsed_cache}"
+
+                    if "CYCLE" in seq_params_str and "NO CYCLE" not in seq_params_str:
+                        parsed_cycle = True
+                        seq_sql += " CYCLE"
+
                     migrator_tables.insert_ddl_sequences({
                         'source_schema_name': schema_name,
                         'source_seq_name': seq_name,
-                        'source_ddl_text': stmt,
+                        'source_table_name': None,
+                        'source_column_name': None,
+                        'source_start_value': parsed_start,
+                        'source_increment_by': parsed_increment,
+                        'source_minvalue': parsed_minvalue,
+                        'source_maxvalue': parsed_maxvalue,
+                        'source_cache': parsed_cache,
+                        'source_is_cycled': parsed_cycle,
+                        'source_ddl_text': seq_sql,
                         'source_seq_comment': comment_text
                     })
                     continue
@@ -499,7 +556,7 @@ class IbmDb2ZosConnector(DatabaseConnector):
 
                     is_identity = False
                     default_value = None
-                    
+
                     # Check for Identity Column definition
                     identity_match = re.search(r"GOVERNING\s+AS\s+IDENTITY|AS\s+IDENTITY\s*\(([^)]+)\)", after_type, re.IGNORECASE)
                     if not identity_match:
@@ -508,50 +565,72 @@ class IbmDb2ZosConnector(DatabaseConnector):
                     if identity_match:
                         is_identity = True
                         seq_params_str = identity_match.group(1) if identity_match.lastindex and identity_match.group(identity_match.lastindex) else ""
-                        
+
                         # Set default PostgreSQL Sequence generator mapping
                         seq_name = f"{table_name}_{col_name}_seq".lower()
                         default_value = f"nextval('\"{schema_name.lower()}\".\"{seq_name}\"')"
-                        
+
                         # Rebuild Sequence SQL Statement based on DB2 properties
                         seq_sql = f'CREATE SEQUENCE "{schema_name.lower()}"."{seq_name}"'
-                        
+
+                        # Individual parameter tracking
+                        parsed_start = None
+                        parsed_increment = None
+                        parsed_minvalue = None
+                        parsed_maxvalue = None
+                        parsed_cache = None
+                        parsed_cycle = False
+
                         if seq_params_str:
                             seq_params_str = seq_params_str.upper()
-                            
+
                             start_with_match = re.search(r"START\s+WITH\s+(-?\d+)", seq_params_str)
                             if start_with_match:
-                                seq_sql += f" START WITH {start_with_match.group(1)}"
-                                
+                                parsed_start = int(start_with_match.group(1))
+                                seq_sql += f" START WITH {parsed_start}"
+
                             increment_by_match = re.search(r"INCREMENT\s+BY\s+(-?\d+)", seq_params_str)
                             if increment_by_match:
-                                seq_sql += f" INCREMENT BY {increment_by_match.group(1)}"
-                                
+                                parsed_increment = int(increment_by_match.group(1))
+                                seq_sql += f" INCREMENT BY {parsed_increment}"
+
                             minvalue_match = re.search(r"MINVALUE\s+(-?\d+)", seq_params_str)
                             if minvalue_match:
-                                seq_sql += f" MINVALUE {minvalue_match.group(1)}"
+                                parsed_minvalue = int(minvalue_match.group(1))
+                                seq_sql += f" MINVALUE {parsed_minvalue}"
                             elif "NO MINVALUE" in seq_params_str:
                                 seq_sql += " NO MINVALUE"
-                                
+
                             maxvalue_match = re.search(r"MAXVALUE\s+(-?\d+)", seq_params_str)
                             if maxvalue_match:
-                                seq_sql += f" MAXVALUE {maxvalue_match.group(1)}"
+                                parsed_maxvalue = int(maxvalue_match.group(1))
+                                seq_sql += f" MAXVALUE {parsed_maxvalue}"
                             elif "NO MAXVALUE" in seq_params_str:
                                 seq_sql += " NO MAXVALUE"
-                                
+
                             if "CACHE" in seq_params_str and "NO CACHE" in seq_params_str:
                                 seq_sql += " CACHE 1" # Disable caching
                             else:
                                 cache_match = re.search(r"CACHE\s+(\d+)", seq_params_str)
                                 if cache_match:
-                                    seq_sql += f" CACHE {cache_match.group(1)}"
+                                    parsed_cache = int(cache_match.group(1))
+                                    seq_sql += f" CACHE {parsed_cache}"
 
                             if "CYCLE" in seq_params_str and "NO CYCLE" not in seq_params_str:
+                                parsed_cycle = True
                                 seq_sql += " CYCLE"
-                                
+
                         migrator_tables.insert_ddl_sequences({
                             'source_schema_name': schema_name,
                             'source_seq_name': seq_name.upper(),
+                            'source_table_name': table_name,
+                            'source_column_name': col_name,
+                            'source_start_value': parsed_start,
+                            'source_increment_by': parsed_increment,
+                            'source_minvalue': parsed_minvalue,
+                            'source_maxvalue': parsed_maxvalue,
+                            'source_cache': parsed_cache,
+                            'source_is_cycled': parsed_cycle,
                             'source_ddl_text': seq_sql,
                             'source_seq_comment': f"Auto-generated sequence for identity column {table_name}.{col_name}"
                         })
@@ -790,19 +869,19 @@ class IbmDb2ZosConnector(DatabaseConnector):
         trigger_name = settings.get('trigger_name', '')
         target_schema_name = settings.get('target_schema_name', '')
         target_table_name = settings.get('target_table_name', '')
-        
+
         # Basic cleanup
         trigger_sql = re.sub(r'--([^\n]*)', r'/*\1*/', trigger_sql)
-        
+
         # 1. Timing (BEFORE, AFTER, INSTEAD OF)
         timing_match = re.search(r'\b(BEFORE|AFTER|INSTEAD\s+OF)\b', trigger_sql, re.IGNORECASE)
         timing = timing_match.group(1).upper() if timing_match else 'BEFORE'
-        
+
         # 2. Event
         event_match = re.search(r'\b(INSERT|UPDATE|DELETE)(?:\s+OF\s+([a-zA-Z0-9_,\s]+))?\b', trigger_sql[timing_match.end():] if timing_match else trigger_sql, re.IGNORECASE)
         event = event_match.group(1).upper() if event_match else 'UPDATE'
         of_cols = event_match.group(2) if event_match and event_match.group(2) else None
-        
+
         pg_event = event
         if of_cols and event == 'UPDATE':
             cols = [c.strip() for c in of_cols.split(',')]
@@ -819,21 +898,21 @@ class IbmDb2ZosConnector(DatabaseConnector):
                     actual_cols.append(c)
             if actual_cols:
                 pg_event += f" OF {', '.join(actual_cols)}"
-                
+
         # 3. Referencing Aliases
         old_alias, new_alias = 'OLD', 'NEW'
         old_match = re.search(r'\bOLD\s+AS\s+([a-zA-Z0-9_]+)\b', trigger_sql, re.IGNORECASE)
         if old_match: old_alias = old_match.group(1)
-            
+
         new_match = re.search(r'\bNEW\s+AS\s+([a-zA-Z0-9_]+)\b', trigger_sql, re.IGNORECASE)
         if new_match: new_alias = new_match.group(1)
-            
+
         # 4. Extract WHEN and Body
         mode_match = re.search(r'\bMODE\s+DB2SQL\b', trigger_sql, re.IGNORECASE)
         when_clause = ""
         body = ""
         remainder = trigger_sql[mode_match.end():].strip() if mode_match else trigger_sql
-        
+
         if remainder.upper().startswith('WHEN'):
             when_text = remainder[4:].lstrip()
             if when_text.startswith('('):
@@ -847,11 +926,11 @@ class IbmDb2ZosConnector(DatabaseConnector):
                         break
         else:
             body = remainder
-            
+
         # Strip BEGIN ATOMIC / END
         body = re.sub(r'(?i)^BEGIN\s+ATOMIC', '', body).strip()
         body = re.sub(r'(?i)END;?\s*$', '', body).strip()
-        
+
         # 5. Replacements
         def replace_aliases(text):
             if not text: return text
@@ -860,10 +939,10 @@ class IbmDb2ZosConnector(DatabaseConnector):
             if new_alias.upper() != 'NEW':
                 text = re.sub(rf'\b{re.escape(new_alias)}\.', 'NEW.', text, flags=re.IGNORECASE)
             return text
-            
+
         when_clause = replace_aliases(when_clause)
         body = replace_aliases(body)
-        
+
         # Replace CURRENT DATE / TIMESTAMP
         body = re.sub(r'\bCURRENT\s+DATE\b', 'CURRENT_DATE', body, flags=re.IGNORECASE)
         body = re.sub(r'\bCURRENT\s+TIMESTAMP\b', 'CURRENT_TIMESTAMP', body, flags=re.IGNORECASE)
@@ -873,7 +952,7 @@ class IbmDb2ZosConnector(DatabaseConnector):
         # Handle SIGNAL SQLSTATE and RAISE_ERROR
         body = re.sub(r"(?i)SIGNAL\s+SQLSTATE\s+'([^']+)'\s*\(\s*('[^']+')\s*\);?", r"RAISE EXCEPTION \2 USING ERRCODE = '\1';", body)
         body = re.sub(r"(?i)RAISE_ERROR\s*\(\s*'([^']+)'\s*,\s*('[^']+')\s*\)", r"RAISE EXCEPTION \2 USING ERRCODE = '\1';", body)
-        
+
         # Handle assignments: SET a = b or SET (a,b) = (c,d)
         if body.upper().startswith('SET'):
             body = re.sub(r'(?i)^SET\s*', '', body)
@@ -890,14 +969,14 @@ class IbmDb2ZosConnector(DatabaseConnector):
                 body = re.sub(r'(?i)^([A-Za-z0-9_.]+)\s*=', r'\1 := ', body)
             if not body.strip().endswith(';'):
                 body += ';'
-                
-        # Handle plain updates 
+
+        # Handle plain updates
         if not body.strip().endswith(';'):
             body += ';'
-            
+
         # Target Generation
         func_name = f"{trigger_name}_func"
-        
+
         pg_func = f"""CREATE OR REPLACE FUNCTION "{target_schema_name}"."{func_name}"()
 RETURNS TRIGGER AS $$
 BEGIN
@@ -925,28 +1004,77 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
     def convert_funcproc_code(self, settings):
         pass
 
-    def fetch_sequences(self, table_schema: str, table_name: str):
+    def fetch_sequences(self, schema_name: str):
         seqs = {}
         if self.connectivity == self.config_parser.const_connectivity_ddl():
-            query = f"""SELECT id, source_seq_name, source_ddl_text
+            ## we migrate only sequences not attached to tables
+            query = f"""SELECT id, source_seq_name, source_ddl_text, source_start_value, source_increment_by, source_minvalue, source_maxvalue, source_cache, source_is_cycled
                         FROM "{self.protocol_schema}"."ddl_sequences"
-                        WHERE source_schema_name = %s ORDER BY id"""
+                        WHERE source_schema_name = %s
+                        AND source_table_name IS NULL AND source_column_name IS NULL
+                        ORDER BY id"""
             cursor = self.migrator_tables.protocol_connection.connection.cursor()
-            cursor.execute(query, (table_schema,))
+            cursor.execute(query, (schema_name,))
             rows = cursor.fetchall()
-            self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: fetch_sequences: ({table_schema}): {rows}")
+            self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: fetch_sequences: ({schema_name}): {rows}")
             for i, row in enumerate(rows, 1):
                 seqs[i] = {
                     'id': row[0],
-                    'name': row[1],
+                    'sequence_name': row[1],
                     'column_name': None,
-                    'set_sequence_sql': row[2]
+                    'source_sequence_sql': row[2],
+                    'source_start_value': row[3],
+                    'source_increment_by': row[4],
+                    'source_minvalue': row[5],
+                    'source_maxvalue': row[6],
+                    'source_cache': row[7],
+                    'source_is_cycled': row[8]
                 }
             cursor.close()
         return seqs
 
     def get_sequence_details(self, sequence_owner, sequence_name):
         return {}
+
+    def migrate_sequences(self, target_connector, settings):
+        target_schema_name = settings.get('target_schema_name', '')
+        target_sequence_name = settings.get('target_sequence_name', '')
+        source_start_value = settings.get('source_start_value')
+        source_increment_by = settings.get('source_increment_by')
+        source_minvalue = settings.get('source_minvalue')
+        source_maxvalue = settings.get('source_maxvalue')
+        source_cache = settings.get('source_cache')
+        source_is_cycled = settings.get('source_is_cycled')
+
+        if not target_sequence_name:
+            return True
+
+        if self.connectivity == self.config_parser.const_connectivity_ddl():
+            try:
+                sql_parts = [f'CREATE SEQUENCE "{target_schema_name}"."{target_sequence_name}"']
+                if source_increment_by is not None:
+                    sql_parts.append(f"INCREMENT BY {source_increment_by}")
+                if source_minvalue is not None:
+                    sql_parts.append(f"MINVALUE {source_minvalue}")
+                if source_maxvalue is not None:
+                    sql_parts.append(f"MAXVALUE {source_maxvalue}")
+                if source_start_value is not None:
+                    sql_parts.append(f"START WITH {source_start_value}")
+                if source_cache is not None:
+                    sql_parts.append(f"CACHE {source_cache}")
+                if source_is_cycled:
+                    sql_parts.append("CYCLE")
+
+                target_sequence_sql = " ".join(sql_parts)
+
+                self.config_parser.print_log_message('INFO', f"ibm_db2_zos_connector: migrate_sequences: Creating sequence {target_sequence_name} ...")
+                target_connector.execute_query(target_sequence_sql)
+                return True
+            except Exception as e:
+                self.config_parser.print_log_message('ERROR', f"ibm_db2_zos_connector: migrate_sequences: Error creating sequence {target_sequence_name}: {e}")
+                return False
+
+        return True
 
     def fetch_views_names(self, source_schema_name: str):
         views = {}
@@ -963,8 +1091,42 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
                     'id': row[0],
                     'schema_name': row[1],
                     'view_name': row[2],
-                    'comment': None
+                    'target_schema_name': '',
+                    'target_view_name': '',
+                    'comment': None,
+                    'is_alias': False
                 }
+
+            # Now fetch aliases that point to views unconditionally
+            # This ensures that even if use_aliases_as_target_names is active for tables,
+            # we always create additional views "select * from <original view>" for view aliases
+            alias_query = f"""
+                SELECT a.id, a.source_schema_name, a.source_alias_name,
+                       a.source_target_schema, a.source_target_name
+                FROM "{self.protocol_schema}"."ddl_aliases" a
+                INNER JOIN "{self.protocol_schema}"."ddl_views" v
+                    ON a.source_target_schema = v.source_schema_name
+                    AND a.source_target_name = v.source_view_name
+                WHERE a.source_schema_name = %s
+                ORDER BY a.id
+            """
+            cursor.execute(alias_query, (source_schema_name,))
+            alias_rows = cursor.fetchall()
+            self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: fetch_views_names (aliases): ({source_schema_name}): {alias_rows}")
+
+            # Start appending aliases, preserving unique IDs (shift by 1,000,000 to avoid clash with view IDs)
+            offset = len(views)
+            for j, row in enumerate(alias_rows, 1):
+                views[offset + j] = {
+                    'id': row[0] + 1000000, # Shift ID to avoid collision with actual view IDs
+                    'schema_name': row[1],
+                    'view_name': row[2],
+                    'target_schema_name': row[3],
+                    'target_view_name': row[4],
+                    'comment': None,
+                    'is_alias': True
+                }
+
             cursor.close()
         return views
 
@@ -972,9 +1134,18 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
         source_schema_name = settings.get('source_schema_name')
         aliases = {}
         if self.connectivity == self.config_parser.const_connectivity_ddl():
-            query = f"""SELECT id, source_schema_name, source_alias_name, source_target_schema, source_target_name, source_alias_sql, source_alias_comment
-                        FROM "{self.protocol_schema}"."ddl_aliases"
-                        WHERE source_schema_name = %s ORDER BY id"""
+            query = f"""SELECT a.id, a.source_schema_name, a.source_alias_name, a.source_target_schema, a.source_target_name, a.source_alias_sql, a.source_alias_comment,
+                            CASE 
+                                WHEN t.source_table_name IS NOT NULL THEN 'TABLE'
+                                WHEN v.source_view_name IS NOT NULL THEN 'VIEW'
+                                ELSE 'UNKNOWN'
+                            END as alias_target_type
+                        FROM "{self.protocol_schema}"."ddl_aliases" a
+                        LEFT JOIN "{self.protocol_schema}"."ddl_tables" t 
+                            ON a.source_target_schema = t.source_schema_name AND a.source_target_name = t.source_table_name
+                        LEFT JOIN "{self.protocol_schema}"."ddl_views" v 
+                            ON a.source_target_schema = v.source_schema_name AND a.source_target_name = v.source_view_name
+                        WHERE a.source_schema_name = %s ORDER BY a.id"""
             cursor = self.migrator_tables.protocol_connection.connection.cursor()
             cursor.execute(query, (source_schema_name,))
             rows = cursor.fetchall()
@@ -988,7 +1159,8 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
                     'aliased_table_name': row[4],
                     'alias_owner': row[1],
                     'alias_sql': row[5],
-                    'alias_comment': row[6]
+                    'alias_comment': row[6],
+                    'alias_target_type': row[7]
                 }
             cursor.close()
         return aliases
@@ -1004,9 +1176,29 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
             cursor.execute(query, (source_schema_name, source_view_name))
             row = cursor.fetchone()
             self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: fetch_view_code: ({source_schema_name}.{source_view_name}): {row}")
-            cursor.close()
             if row:
+                cursor.close()
                 return row[0]
+
+            # If not found, try looking up as an alias mapped to a view
+            alias_query = f"""
+                SELECT a.source_schema_name, a.source_alias_name, a.source_target_schema, a.source_target_name
+                FROM "{self.protocol_schema}"."ddl_aliases" a
+                INNER JOIN "{self.protocol_schema}"."ddl_views" v
+                    ON a.source_target_schema = v.source_schema_name
+                    AND a.source_target_name = v.source_view_name
+                WHERE a.source_schema_name = %s AND a.source_alias_name = %s
+            """
+            cursor.execute(alias_query, (source_schema_name, source_view_name))
+            alias_row = cursor.fetchone()
+            self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: fetch_view_code (from alias): ({source_schema_name}.{source_view_name}): {alias_row}")
+            cursor.close()
+
+            if alias_row:
+                # schema_name = alias_row[0], alias_name = alias_row[1]
+                # target_schema = alias_row[2], target_name = alias_row[3]
+                return f'CREATE VIEW "{alias_row[0]}"."{alias_row[1]}" AS SELECT * FROM "{alias_row[2]}"."{alias_row[3]}"'
+
         return ""
 
     def convert_default_value(self, settings) -> dict:
@@ -1022,32 +1214,66 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
         return extracted_default_value
 
     def convert_view_code(self, settings: dict):
-        import sqlglot
-        
+
         def quote_column_names(node):
             if isinstance(node, sqlglot.exp.Column) and node.name:
-                node.set("this", sqlglot.exp.Identifier(this=node.name, quoted=True))
+                converted_name = self.config_parser.convert_names_case(node.name)
+                node.set("this", sqlglot.exp.Identifier(this=converted_name, quoted=True))
             if isinstance(node, sqlglot.exp.Alias) and isinstance(node.args.get("alias"), sqlglot.exp.Identifier):
                 alias = node.args["alias"]
+                converted_alias = self.config_parser.convert_names_case(alias.name)
+                alias.set("this", converted_alias)
                 if not alias.args.get("quoted"):
                     alias.set("quoted", True)
+            if isinstance(node, sqlglot.exp.Schema):
+                for expr in node.expressions:
+                    if isinstance(expr, sqlglot.exp.Identifier):
+                        converted_name = self.config_parser.convert_names_case(expr.name)
+                        expr.set("this", converted_name)
+                        if not expr.args.get("quoted"):
+                            expr.set("quoted", True)
             return node
 
         def replace_schema_names(node):
             if isinstance(node, sqlglot.exp.Table):
                 schema = node.args.get("db")
-                if schema and schema.name == settings['source_schema_name']:
+                if schema and schema.name.upper() == settings['source_schema_name'].upper():
                     node.set("db", sqlglot.exp.Identifier(this=settings['target_schema_name'], quoted=False))
             return node
 
         def quote_schema_and_table_names(node):
             if isinstance(node, sqlglot.exp.Table):
                 schema = node.args.get("db")
-                if schema and not schema.args.get("quoted"):
-                    schema.set("quoted", True)
+                schema_name_for_lookup = schema.name if schema else settings['source_schema_name']
+                if schema:
+                    converted_schema = self.config_parser.convert_names_case(schema.name)
+                    schema.set("this", converted_schema)
+                    if not schema.args.get("quoted"):
+                        schema.set("quoted", True)
                 table = node.args.get("this")
-                if table and not table.args.get("quoted"):
-                    table.set("quoted", True)
+                if table:
+                    # Lookup alias if enabled
+                    table_name_to_use = table.name
+                    if not isinstance(node.parent, sqlglot.exp.Create):
+                        if self.config_parser.get_use_aliases_as_target_names() and settings.get('migrator_tables'):
+                            alias_dict = settings['migrator_tables'].get_alias_for_table(schema_name_for_lookup, table.name)
+                            if alias_dict and not settings.get('alias_view'):
+                                alias_name = alias_dict.get('target_alias_name')
+                                alias_target_type = alias_dict.get('alias_target_type', 'UNKNOWN')
+
+                                if alias_target_type == 'TABLE':
+                                    if alias_name.lower() == settings.get('target_view_name', '').lower() or alias_name.lower() == settings.get('source_view_name', '').lower():
+                                        self.config_parser.print_log_message('INFO', f"ibm_db2_zos_connector: convert_view_code: Skipped replacing referenced table '{table.name}' with alias '{alias_name}' to avoid circular reference. Settings: {settings}")
+                                    else:
+                                        self.config_parser.print_log_message('INFO', f"ibm_db2_zos_connector: convert_view_code: Replaced referenced table '{table.name}' with alias '{alias_name}' inside view generation. Settings: {settings}")
+                                        table_name_to_use = alias_name
+                                else:
+                                    self.config_parser.print_log_message('DEBUG', f"ibm_db2_zos_connector: convert_view_code: Skipped replacing '{table.name}' with alias '{alias_name}' because alias points to a {alias_target_type}, not a TABLE.")
+
+                    converted_table = self.config_parser.convert_names_case(table_name_to_use)
+                    table.set("this", converted_table)
+                    if not table.args.get("quoted"):
+                        table.set("quoted", True)
             return node
 
         def replace_functions(node):
@@ -1119,6 +1345,15 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
                     converted_code = re.sub(re.escape(source_obj), target_obj, converted_code, flags=re.IGNORECASE)
 
         if settings['target_db_type'] == 'postgresql':
+            sql_functions_mapping = self.get_sql_functions_mapping({ 'target_db_type': settings['target_db_type'] })
+            if sql_functions_mapping:
+                for src_func, tgt_func in sql_functions_mapping.items():
+                    escaped_src_func = re.escape(src_func)
+                    if escaped_src_func.endswith(r'\(') or escaped_src_func.endswith(r'\)'):
+                        converted_code = re.sub(rf"(?i)\b{escaped_src_func}", tgt_func, converted_code, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
+                    else:
+                        converted_code = re.sub(rf"(?i)\b{escaped_src_func}\b", tgt_func, converted_code, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
+
             try:
                 # Use default sqlglot dialect because 'db2' dialect is not supported
                 parsed_code = sqlglot.parse_one(converted_code)
@@ -1129,18 +1364,12 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
 
             parsed_code = parsed_code.transform(quote_column_names)
             parsed_code = parsed_code.transform(convert_string_concatenation)
-            parsed_code = parsed_code.transform(replace_schema_names)
             parsed_code = parsed_code.transform(quote_schema_and_table_names)
+            parsed_code = parsed_code.transform(replace_schema_names)
             parsed_code = parsed_code.transform(replace_functions)
 
             converted_code = parsed_code.sql(dialect="postgres")
             converted_code = converted_code.replace("()()", "()")
-
-            sql_functions_mapping = self.get_sql_functions_mapping({ 'target_db_type': settings['target_db_type'] })
-            if sql_functions_mapping:
-                for src_func, tgt_func in sql_functions_mapping.items():
-                    escaped_src_func = re.escape(src_func)
-                    converted_code = re.sub(rf"(?i){escaped_src_func}", tgt_func, converted_code, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
 
             self.config_parser.print_log_message('DEBUG', f"ibm_db2_zos_connector: convert_view_code: Converted view: {converted_code}")
         else:

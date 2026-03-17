@@ -89,6 +89,7 @@ class MigratorTables:
         self.create_table_for_triggers()
         self.create_table_for_views()
         self.create_ddl_tables()
+        self.create_table_for_matching()
 
     def prepare_data_types_substitution(self):
         # Drop table if exists
@@ -392,6 +393,141 @@ class MigratorTables:
         """
         self.protocol_connection.execute_query(query)
         self.config_parser.print_log_message('DEBUG3', f"migrator_tables: create_protocol: Table {table_name} created in schema {self.protocol_schema}")
+
+    def create_table_for_matching(self):
+        self.protocol_connection.execute_query(f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."matching_run" (
+                id SERIAL PRIMARY KEY,
+                start_time TIMESTAMP DEFAULT NOW(),
+                end_time timestamp,
+                matching_script text,
+                config_filename TEXT,
+                source_db_type TEXT,
+                source_schema TEXT,
+                target_db_type TEXT,
+                target_schema TEXT
+            );
+        """)
+        self.protocol_connection.execute_query(f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."matching_tables" (
+                id SERIAL PRIMARY KEY,
+                run_id INTEGER REFERENCES "{self.protocol_schema}"."matching_run"(id) ON DELETE CASCADE,
+                source_table_name TEXT,
+                target_table_name TEXT,
+                match_type TEXT NOT NULL,
+                similarity_score FLOAT,
+                info TEXT
+            );
+        """)
+        self.protocol_connection.execute_query(f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."matching_columns" (
+                id SERIAL PRIMARY KEY,
+                table_match_id INTEGER REFERENCES "{self.protocol_schema}"."matching_tables"(id) ON DELETE CASCADE,
+                source_column_name TEXT,
+                target_column_name TEXT,
+                source_ordinal_number INTEGER,
+                target_ordinal_number INTEGER,
+                source_data_type TEXT,
+                target_data_type TEXT,
+                match_type TEXT NOT NULL
+            );
+        """)
+        self.config_parser.print_log_message('DEBUG3', f"migrator_tables: create_table_for_matching: Matching tables created in schema {self.protocol_schema}")
+
+    def insert_matching_run(self, settings):
+        func_run_id = uuid.uuid4()
+        config_filename = settings.get('config_filename')
+        matching_script = settings.get('matching_script')
+        source_db_type = settings.get('source_db_type')
+        source_schema = settings.get('source_schema')
+        target_db_type = settings.get('target_db_type')
+        target_schema = settings.get('target_schema')
+
+        query = f"""
+            INSERT INTO "{self.protocol_schema}"."matching_run"
+            (matching_script, config_filename, source_db_type, source_schema, target_db_type, target_schema)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            RETURNING id
+        """
+        params = (matching_script, config_filename, source_db_type, source_schema, target_db_type, target_schema)
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+            return row[0] if row else None
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_matching_run: ({func_run_id}): Error: {e}")
+            raise
+
+    def update_matching_run_end_time(self, run_id):
+        func_run_id = uuid.uuid4()
+        query = f"""
+            UPDATE "{self.protocol_schema}"."matching_run"
+            SET end_time = clock_timestamp()
+            WHERE id = %s
+        """
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, (run_id,))
+            cursor.close()
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_matching_run_end_time: ({func_run_id}): Error: {e}")
+            raise
+
+    def insert_matching_tables(self, settings):
+        func_run_id = uuid.uuid4()
+        run_id = settings.get('run_id')
+        source_table_name = settings.get('source_table_name')
+        target_table_name = settings.get('target_table_name')
+        match_type = settings.get('match_type')
+        similarity_score = settings.get('similarity_score')
+        info = settings.get('info')
+
+        query = f"""
+            INSERT INTO "{self.protocol_schema}"."matching_tables"
+            (run_id, source_table_name, target_table_name, match_type, similarity_score, info)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            RETURNING id
+        """
+        params = (run_id, source_table_name, target_table_name, match_type, similarity_score, info)
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+            return row[0] if row else None
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_matching_tables: ({func_run_id}): Error: {e}")
+            raise
+
+    def insert_matching_columns(self, settings):
+        func_run_id = uuid.uuid4()
+        table_match_id = settings.get('table_match_id')
+        source_column_name = settings.get('source_column_name')
+        target_column_name = settings.get('target_column_name')
+        source_ordinal_number = settings.get('source_ordinal_number')
+        target_ordinal_number = settings.get('target_ordinal_number')
+        source_data_type = settings.get('source_data_type')
+        target_data_type = settings.get('target_data_type')
+        match_type = settings.get('match_type')
+
+        query = f"""
+            INSERT INTO "{self.protocol_schema}"."matching_columns"
+            (table_match_id, source_column_name, target_column_name, source_ordinal_number, target_ordinal_number, source_data_type, target_data_type, match_type)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
+        """
+        params = (table_match_id, source_column_name, target_column_name, source_ordinal_number, target_ordinal_number, source_data_type, target_data_type, match_type)
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+            return row[0] if row else None
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_matching_columns: ({func_run_id}): Error: {e}")
+            raise
 
     def create_table_for_main(self):
         table_name = self.config_parser.get_protocol_name_main()
@@ -1436,6 +1572,7 @@ class MigratorTables:
             source_table_sql TEXT,
             target_schema_name TEXT,
             target_table_name TEXT,
+            target_alias_name TEXT,
             target_columns TEXT,
             target_table_rows BIGINT,
             target_table_sql TEXT,
@@ -1530,6 +1667,7 @@ class MigratorTables:
             source_column_sql TEXT,
             target_schema_name TEXT,
             target_table_name TEXT,
+            target_alias_name TEXT,
             target_table_id INTEGER,
             target_column_name TEXT,
             target_column_id INTEGER,
@@ -1697,6 +1835,7 @@ class MigratorTables:
             index_type VARCHAR(30),
             target_schema_name TEXT,
             target_table_name TEXT,
+            target_alias_name TEXT,
             index_sql TEXT,
             index_columns TEXT,
             index_comment TEXT,
@@ -1744,6 +1883,12 @@ class MigratorTables:
             source_column_name TEXT,
             source_sequence_name TEXT,
             source_sequence_sql TEXT,
+            source_start_value BIGINT,
+            source_increment_by BIGINT,
+            source_minvalue BIGINT,
+            source_maxvalue BIGINT,
+            source_cache BIGINT,
+            source_is_cycled BOOLEAN,
             source_sequence_comment TEXT,
             target_schema_name TEXT,
             target_table_name TEXT,
@@ -1774,6 +1919,13 @@ class MigratorTables:
             source_referenced_table_name TEXT,
             source_referenced_column_name TEXT,
             source_alias_comment TEXT,
+            target_schema_name TEXT,
+            target_alias_name TEXT,
+            alias_target_type TEXT,
+            target_referenced_schema_name TEXT,
+            target_referenced_table_name TEXT,
+            target_referenced_column_name TEXT,
+            target_alias_sql TEXT,
             task_created TIMESTAMP DEFAULT clock_timestamp(),
             task_started TIMESTAMP,
             task_completed TIMESTAMP,
@@ -1824,7 +1976,9 @@ class MigratorTables:
             source_view_sql TEXT,
             target_schema_name TEXT,
             target_view_name TEXT,
+            target_view_alias TEXT,
             target_view_sql TEXT,
+            alias_view BOOLEAN default FALSE,
             view_comment TEXT,
             task_created TIMESTAMP DEFAULT clock_timestamp(),
             task_started TIMESTAMP,
@@ -1862,11 +2016,12 @@ class MigratorTables:
             'source_table_sql': row[7],
             'target_schema_name': row[8],
             'target_table_name': row[9],
-            'target_columns': json.loads(row[10]),
-            'target_table_rows': row[11],
-            'target_table_sql': row[12],
-            'table_comment': row[13],
-            'create_partitions_sql': row[14],
+            'target_alias_name': row[10],
+            'target_columns': json.loads(row[11]),
+            'target_table_rows': row[12],
+            'target_table_sql': row[13],
+            'table_comment': row[14],
+            'create_partitions_sql': row[15],
         }
 
     def decode_index_row(self, row):
@@ -1880,10 +2035,11 @@ class MigratorTables:
             'index_type': row[6],
             'target_schema_name': row[7],
             'target_table_name': row[8],
-            'index_sql': row[9],
-            'index_columns': row[10],
-            'index_comment': row[11],
-            'is_function_based': row[12]
+            'target_alias_name': row[9],
+            'index_sql': row[10],
+            'index_columns': row[11],
+            'index_comment': row[12],
+            'is_function_based': row[13]
         }
 
     def decode_funcproc_row(self, row):
@@ -1907,13 +2063,19 @@ class MigratorTables:
             'source_column_name': row[3],
             'source_sequence_name': row[4],
             'source_sequence_sql': row[5],
-            'source_sequence_comment': row[6],
-            'target_schema_name': row[7],
-            'target_table_name': row[8],
-            'target_column_name': row[9],
-            'target_sequence_name': row[10],
-            'target_sequence_sql': row[11],
-            'target_sequence_comment': row[12]
+            'source_start_value': row[6],
+            'source_increment_by': row[7],
+            'source_minvalue': row[8],
+            'source_maxvalue': row[9],
+            'source_cache': row[10],
+            'source_is_cycled': row[11],
+            'source_sequence_comment': row[12],
+            'target_schema_name': row[13],
+            'target_table_name': row[14],
+            'target_column_name': row[15],
+            'target_sequence_name': row[16],
+            'target_sequence_sql': row[17],
+            'target_sequence_comment': row[18]
         }
 
     def decode_trigger_row(self, row):
@@ -1944,8 +2106,10 @@ class MigratorTables:
             'source_view_sql': row[4],
             'target_schema_name': row[5],
             'target_view_name': row[6],
-            'target_view_sql': row[7],
-            'view_comment': row[8]
+            'target_view_alias': row[7],
+            'target_view_sql': row[8],
+            'alias_view': row[9],
+            'view_comment': row[10]
         }
 
     def insert_protocol(self, settings):
@@ -2010,6 +2174,7 @@ class MigratorTables:
         source_table_sql = settings['source_table_sql']
         target_schema_name = settings['target_schema_name']
         target_table_name = settings['target_table_name']
+        target_alias_name = settings.get('target_alias_name', '')
         target_columns = settings['target_columns']
         target_table_rows = settings['target_table_rows']
         target_table_sql = settings['target_table_sql']
@@ -2022,13 +2187,13 @@ class MigratorTables:
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
             (source_schema_name, source_table_name, source_table_id, source_columns, source_table_rows, source_table_description, source_table_sql,
-            target_schema_name, target_table_name, target_columns, target_table_rows, target_table_sql, table_comment,
+            target_schema_name, target_table_name, target_alias_name, target_columns, target_table_rows, target_table_sql, table_comment,
             create_partitions_sql)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
         params = (source_schema_name, source_table_name, source_table_id, source_columns_str, source_table_rows, source_table_description, source_table_sql,
-                  target_schema_name, target_table_name, target_columns_str, target_table_rows, target_table_sql, table_comment,
+                  target_schema_name, target_table_name, target_alias_name, target_columns_str, target_table_rows, target_table_sql, table_comment,
                   create_partitions_sql)
         try:
             cursor = self.protocol_connection.connection.cursor()
@@ -2112,13 +2277,13 @@ class MigratorTables:
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
             (source_schema_name, source_table_name, source_table_id, index_owner, index_name, index_type,
-            target_schema_name, target_table_name, index_sql, index_columns, index_comment, is_function_based)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            target_schema_name, target_table_name, target_alias_name, index_sql, index_columns, index_comment, is_function_based)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
         params = (settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_table_id'), settings.get('index_owner'),
                   settings.get('index_name'), settings.get('index_type'), settings.get('target_schema_name'),
-                  settings.get('target_table_name'), settings.get('index_sql'), settings.get('index_columns'),
+                  settings.get('target_table_name'), settings.get('target_alias_name', ''), settings.get('index_sql'), settings.get('index_columns'),
                   settings.get('index_comment'), True if settings.get('is_function_based') == 'YES' else False)
         try:
             cursor = self.protocol_connection.connection.cursor()
@@ -2179,6 +2344,7 @@ class MigratorTables:
             source_table_name TEXT,
             target_schema_name TEXT,
             target_table_name TEXT,
+            target_alias_name TEXT,
             constraint_name TEXT,
             constraint_type TEXT,
             constraint_owner TEXT,
@@ -2208,23 +2374,24 @@ class MigratorTables:
             'source_table_name': row[3],
             'target_schema_name': row[4],
             'target_table_name': row[5],
-            'constraint_name': row[6],
-            'constraint_type': row[7],
-            'constraint_owner': row[8],
-            'constraint_columns': row[9],
-            'referenced_table_schema': row[10],
-            'referenced_table_name': row[11],
-            'referenced_columns': row[12],
-            'constraint_sql': row[13],
-            'delete_rule': row[14],
-            'update_rule': row[15],
-            'constraint_comment': row[16],
-            'constraint_status': row[17],
-            'task_created': row[18],
-            'task_started': row[19],
-            'task_completed': row[20],
-            'success': row[21],
-            'message': row[22]
+            'target_alias_name': row[6],
+            'constraint_name': row[7],
+            'constraint_type': row[8],
+            'constraint_owner': row[9],
+            'constraint_columns': row[10],
+            'referenced_table_schema': row[11],
+            'referenced_table_name': row[12],
+            'referenced_columns': row[13],
+            'constraint_sql': row[14],
+            'delete_rule': row[15],
+            'update_rule': row[16],
+            'constraint_comment': row[17],
+            'constraint_status': row[18],
+            'task_created': row[19],
+            'task_started': row[20],
+            'task_completed': row[21],
+            'success': row[22],
+            'message': row[23]
         }
 
     def insert_constraint(self, settings):
@@ -2233,18 +2400,18 @@ class MigratorTables:
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
             (source_table_id, source_schema_name, source_table_name,
-            target_schema_name, target_table_name, constraint_name,
+            target_schema_name, target_table_name, target_alias_name, constraint_name,
             constraint_type,
             constraint_owner, constraint_columns,
             referenced_table_schema, referenced_table_name,
             referenced_columns, constraint_sql,
             delete_rule, update_rule, constraint_comment,
             constraint_status)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
         params = (settings['source_table_id'], settings['source_schema_name'], settings['source_table_name'],
-                    settings['target_schema_name'], settings['target_table_name'], settings['constraint_name'],
+                    settings['target_schema_name'], settings['target_table_name'], settings.get('target_alias_name', ''), settings['constraint_name'],
                     settings['constraint_type'] if 'constraint_type' in settings else '',
                     settings['constraint_owner'] if 'constraint_owner' in settings else '',
                     settings['constraint_columns'] if 'constraint_columns' in settings else '',
@@ -2371,11 +2538,11 @@ class MigratorTables:
         protocol_table_name = self.config_parser.get_protocol_name_sequences()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{protocol_table_name}"
-            (sequence_id, source_schema_name, source_table_name, source_column_name, source_sequence_name, source_sequence_sql, source_sequence_comment, target_schema_name, target_table_name, target_column_name, target_sequence_name, target_sequence_sql, target_sequence_comment)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (sequence_id, source_schema_name, source_table_name, source_column_name, source_sequence_name, source_sequence_sql, source_start_value, source_increment_by, source_minvalue, source_maxvalue, source_cache, source_is_cycled, source_sequence_comment, target_schema_name, target_table_name, target_column_name, target_sequence_name, target_sequence_sql, target_sequence_comment)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (settings.get('sequence_id'), settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_column_name'), settings.get('source_sequence_name'), settings.get('source_sequence_sql'), settings.get('source_sequence_comment'), settings.get('target_schema_name'), settings.get('target_table_name'), settings.get('target_column_name'), settings.get('target_sequence_name'), settings.get('target_sequence_sql'), settings.get('target_sequence_comment'))
+        params = (settings.get('sequence_id'), settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_column_name'), settings.get('source_sequence_name'), settings.get('source_sequence_sql'), settings.get('source_start_value'), settings.get('source_increment_by'), settings.get('source_minvalue'), settings.get('source_maxvalue'), settings.get('source_cache'), settings.get('source_is_cycled'), settings.get('source_sequence_comment'), settings.get('target_schema_name'), settings.get('target_table_name'), settings.get('target_column_name'), settings.get('target_sequence_name'), settings.get('target_sequence_sql'), settings.get('target_sequence_comment'))
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -2505,11 +2672,11 @@ class MigratorTables:
         table_name = self.config_parser.get_protocol_name_views()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
-            (source_schema_name, source_view_name, source_view_id, source_view_sql, target_schema_name, target_view_name, target_view_sql, view_comment)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            (source_schema_name, source_view_name, source_view_id, source_view_sql, target_schema_name, target_view_name, target_view_alias, target_view_sql, alias_view, view_comment)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (settings.get('source_schema_name'), settings.get('source_view_name'), settings.get('source_view_id'), settings.get('source_view_sql'), settings.get('target_schema_name'), settings.get('target_view_name'), settings.get('target_view_sql'), settings.get('view_comment'))
+        params = (settings.get('source_schema_name'), settings.get('source_view_name'), settings.get('source_view_id'), settings.get('source_view_sql'), settings.get('target_schema_name'), settings.get('target_view_name'), settings.get('target_view_alias', ''), settings.get('target_view_sql'), settings.get('alias_view', False), settings.get('view_comment'))
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -2643,9 +2810,9 @@ class MigratorTables:
                 return
             summary = cursor.fetchone()[0]
             if objects.lower() not in ['sequences']:
-                self.config_parser.print_log_message('INFO', f"migrator_tables: print_summary: Found in source: {summary}")
+                self.config_parser.print_log_message('INFO', f"migrator_tables: print_summary:     Found in source: {summary}")
             else:
-                self.config_parser.print_log_message('INFO', f"migrator_tables: print_summary: Found: {summary}")
+                self.config_parser.print_log_message('INFO', f"migrator_tables: print_summary:     Found: {summary}")
             if additional_columns:
                 columns_count = len(additional_columns.split(','))
                 columns_numbers = ', '.join(str(i + 2) for i in range(columns_count))
@@ -2653,7 +2820,7 @@ class MigratorTables:
                 cursor.execute(query)
                 rows = cursor.fetchall()
                 for row in rows:
-                    self.config_parser.print_log_message('INFO', f"migrator_tables: print_summary: {row[1:]}: {row[0]}")
+                    self.config_parser.print_log_message('INFO', f"migrator_tables: print_summary:         {row[1:]}: {row[0]}")
 
             if not self.config_parser.is_dry_run():
                 query = f"""SELECT success, COUNT(*) FROM "{self.protocol_schema}"."{migrator_table_name}" GROUP BY 1 ORDER BY 1"""
@@ -2666,14 +2833,14 @@ class MigratorTables:
                 for row in rows:
                     status = success_description if row[0] else "error" if row[0] is False else "unknown status"
                     row_success = row[0] if row[0] is not None else 'NULL'
-                    self.config_parser.print_log_message('INFO', f"migrator_tables: print_summary: {status}: {row[1]}")
+                    self.config_parser.print_log_message('INFO', f"migrator_tables: print_summary:     {status}: {row[1]}")
                     if additional_columns:
                         query = f"""SELECT COUNT(*), {additional_columns} FROM "{self.protocol_schema}"."{migrator_table_name}" WHERE success = {row_success} GROUP BY {columns_numbers} ORDER BY {columns_numbers}"""
                         cursor.execute(query)
                         rows = cursor.fetchall()
                         for row in rows:
                             # status = success_description if row[0] else "error" if row[0] is False else "unknown status"
-                            self.config_parser.print_log_message('INFO', f"migrator_tables: print_summary: {row[1:]}: {row[0]}")
+                            self.config_parser.print_log_message('INFO', f"migrator_tables: print_summary:         {row[1:]}: {row[0]}")
 
             cursor.close()
 
@@ -2882,6 +3049,33 @@ class MigratorTables:
         tables = cursor.fetchall()
         return tables
 
+    def fetch_all_sequences(self, only_unfinished=False):
+        if only_unfinished:
+            query = f"""SELECT * FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_sequences()}" WHERE success IS NOT TRUE ORDER BY sequence_id"""
+        else:
+            query = f"""SELECT * FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_sequences()}" ORDER BY sequence_id"""
+        cursor = self.protocol_connection.connection.cursor()
+        cursor.execute(query)
+        sequences = cursor.fetchall()
+        return sequences
+
+    def fetch_sequence(self, settings):
+        source_schema_name = settings.get('source_schema_name')
+        source_sequence_name = settings.get('source_sequence_name')
+        query = f"""
+                SELECT *
+                FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_sequences()}"
+                WHERE source_schema_name = '{source_schema_name}'
+                AND source_sequence_name = '{source_sequence_name}'
+                """
+        cursor = self.protocol_connection.connection.cursor()
+        cursor.execute(query)
+        sequence = cursor.fetchone()
+        cursor.close()
+        if not sequence:
+            return None
+        return sequence
+
     def fetch_table(self, settings):
         source_schema_name = settings.get('source_schema_name')
         source_table_name = settings.get('source_table_name')
@@ -2951,7 +3145,10 @@ class MigratorTables:
         view_names = []
         for view in views:
             values = self.decode_view_row(view)
-            view_names.append(values['target_view_name'])
+            # target_view_name = values['target_view_alias'] if self.config_parser.get_use_aliases_as_target_names() and values.get('target_view_alias') else values['target_view_name']
+            target_view_name = values['target_view_name']
+            if target_view_name:
+                view_names.append(target_view_name)
         return view_names
 
     def fetch_all_indexes(self):
@@ -3146,17 +3343,18 @@ class MigratorTables:
             'source_column_sql': row[30],
             'target_schema_name': row[31],
             'target_table_name': row[32],
-            'target_table_id': row[33],
-            'target_column_name': row[34],
-            'target_column_id': row[35],
-            'target_column_data_type': row[36],
-            'target_column_description': row[37],
-            'target_column_sql': row[38],
-            'task_created': row[39],
-            'task_started': row[40],
-            'task_completed': row[41],
-            'success': row[42],
-            'message': row[43]
+            'target_alias_name': row[33],
+            'target_table_id': row[34],
+            'target_column_name': row[35],
+            'target_column_id': row[36],
+            'target_column_data_type': row[37],
+            'target_column_description': row[38],
+            'target_column_sql': row[39],
+            'task_created': row[40],
+            'task_started': row[41],
+            'task_completed': row[42],
+            'success': row[43],
+            'message': row[44]
         }
 
     def insert_columns(self, settings):
@@ -3164,11 +3362,11 @@ class MigratorTables:
         table_name = self.config_parser.get_protocol_name_columns()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
-            (source_schema_name, source_table_name, source_table_id, source_column_name, source_column_id, source_column_data_type, source_column_is_nullable, source_column_is_primary_key, source_column_is_identity, source_column_default_name, source_column_default_value, source_column_replaced_default_value, source_column_character_maximum_length, source_column_numeric_precision, source_column_numeric_scale, source_column_basic_data_type, source_column_basic_character_maximum_length, source_column_basic_numeric_precision, source_column_basic_numeric_scale, source_column_basic_column_type, source_column_is_generated_virtual, source_column_is_generated_stored, source_column_generation_expression, source_column_stripped_generation_expression, source_column_udt_schema, source_column_udt_name, source_column_domain_schema, source_column_domain_name, source_column_description, source_column_sql, target_schema_name, target_table_name, target_table_id, target_column_name, target_column_id, target_column_data_type, target_column_description, target_column_sql)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (source_schema_name, source_table_name, source_table_id, source_column_name, source_column_id, source_column_data_type, source_column_is_nullable, source_column_is_primary_key, source_column_is_identity, source_column_default_name, source_column_default_value, source_column_replaced_default_value, source_column_character_maximum_length, source_column_numeric_precision, source_column_numeric_scale, source_column_basic_data_type, source_column_basic_character_maximum_length, source_column_basic_numeric_precision, source_column_basic_numeric_scale, source_column_basic_column_type, source_column_is_generated_virtual, source_column_is_generated_stored, source_column_generation_expression, source_column_stripped_generation_expression, source_column_udt_schema, source_column_udt_name, source_column_domain_schema, source_column_domain_name, source_column_description, source_column_sql, target_schema_name, target_table_name, target_alias_name, target_table_id, target_column_name, target_column_id, target_column_data_type, target_column_description, target_column_sql)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_table_id'), settings.get('source_column_name'), settings.get('source_column_id'), settings.get('source_column_data_type'), settings.get('source_column_is_nullable'), settings.get('source_column_is_primary_key'), settings.get('source_column_is_identity'), settings.get('source_column_default_name'), settings.get('source_column_default_value'), settings.get('source_column_replaced_default_value'), settings.get('source_column_character_maximum_length'), settings.get('source_column_numeric_precision'), settings.get('source_column_numeric_scale'), settings.get('source_column_basic_data_type'), settings.get('source_column_basic_character_maximum_length'), settings.get('source_column_basic_numeric_precision'), settings.get('source_column_basic_numeric_scale'), settings.get('source_column_basic_column_type'), settings.get('source_column_is_generated_virtual'), settings.get('source_column_is_generated_stored'), settings.get('source_column_generation_expression'), settings.get('source_column_stripped_generation_expression'), settings.get('source_column_udt_schema'), settings.get('source_column_udt_name'), settings.get('source_column_domain_schema'), settings.get('source_column_domain_name'), settings.get('source_column_description'), settings.get('source_column_sql'), settings.get('target_schema_name'), settings.get('target_table_name'), settings.get('target_table_id'), settings.get('target_column_name'), settings.get('target_column_id'), settings.get('target_column_data_type'), settings.get('target_column_description'), settings.get('target_column_sql'))
+        params = (settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_table_id'), settings.get('source_column_name'), settings.get('source_column_id'), settings.get('source_column_data_type'), settings.get('source_column_is_nullable'), settings.get('source_column_is_primary_key'), settings.get('source_column_is_identity'), settings.get('source_column_default_name'), settings.get('source_column_default_value'), settings.get('source_column_replaced_default_value'), settings.get('source_column_character_maximum_length'), settings.get('source_column_numeric_precision'), settings.get('source_column_numeric_scale'), settings.get('source_column_basic_data_type'), settings.get('source_column_basic_character_maximum_length'), settings.get('source_column_basic_numeric_precision'), settings.get('source_column_basic_numeric_scale'), settings.get('source_column_basic_column_type'), settings.get('source_column_is_generated_virtual'), settings.get('source_column_is_generated_stored'), settings.get('source_column_generation_expression'), settings.get('source_column_stripped_generation_expression'), settings.get('source_column_udt_schema'), settings.get('source_column_udt_name'), settings.get('source_column_domain_schema'), settings.get('source_column_domain_name'), settings.get('source_column_description'), settings.get('source_column_sql'), settings.get('target_schema_name'), settings.get('target_table_name'), settings.get('target_alias_name', ''), settings.get('target_table_id'), settings.get('target_column_name'), settings.get('target_column_id'), settings.get('target_column_data_type'), settings.get('target_column_description'), settings.get('target_column_sql'))
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -3224,23 +3422,48 @@ class MigratorTables:
             'source_referenced_table_name': row[6],
             'source_referenced_column_name': row[7],
             'source_alias_comment': row[8],
-            'task_created': row[9],
-            'task_started': row[10],
-            'task_completed': row[11],
-            'success': row[12],
-            'message': row[13]
+            'target_schema_name': row[9],
+            'target_alias_name': row[10],
+            'alias_target_type': row[11], # Added alias_target_type
+            'target_referenced_schema_name': row[12],
+            'target_referenced_table_name': row[13],
+            'target_referenced_column_name': row[14],
+            'target_alias_sql': row[15],
+            'task_created': row[16],
+            'task_started': row[17],
+            'task_completed': row[18],
+            'success': row[19],
+            'message': row[20]
         }
+
+    def get_alias_for_table(self, source_schema_name, source_table_name):
+        table_name = self.config_parser.get_protocol_name_aliases()
+        query = f"""
+            SELECT target_alias_name, alias_target_type
+            FROM "{self.protocol_schema}"."{table_name}"
+            WHERE upper(source_referenced_schema_name) = upper(%s) AND upper(source_referenced_table_name) = upper(%s)
+        """
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, (source_schema_name, source_table_name))
+            row = cursor.fetchone()
+            cursor.close()
+            if row:
+                return {'target_alias_name': row[0], 'alias_target_type': row[1]}
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: get_alias_for_table: Error querying alias for {source_schema_name}.{source_table_name}: {e}")
+        return None
 
     def insert_aliases(self, settings):
         func_run_id = uuid.uuid4()
         table_name = self.config_parser.get_protocol_name_aliases()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
-            (source_schema_name, source_alias_name, source_alias_id, source_alias_sql, source_referenced_schema_name, source_referenced_table_name, source_referenced_column_name, source_alias_comment)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            (source_schema_name, source_alias_name, source_alias_id, source_alias_sql, source_referenced_schema_name, source_referenced_table_name, source_referenced_column_name, source_alias_comment, target_schema_name, target_alias_name, alias_target_type, target_referenced_schema_name, target_referenced_table_name, target_referenced_column_name, target_alias_sql)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (settings.get('source_schema_name'), settings.get('source_alias_name'), settings.get('source_alias_id'), settings.get('source_alias_sql'), settings.get('source_referenced_schema_name'), settings.get('source_referenced_table_name'), settings.get('source_referenced_column_name'), settings.get('source_alias_comment'))
+        params = (settings.get('source_schema_name'), settings.get('source_alias_name'), settings.get('source_alias_id'), settings.get('source_alias_sql'), settings.get('source_referenced_schema_name'), settings.get('source_referenced_table_name'), settings.get('source_referenced_column_name'), settings.get('source_alias_comment'), settings.get('target_schema_name'), settings.get('target_alias_name'), settings.get('alias_target_type'), settings.get('target_referenced_schema_name'), settings.get('target_referenced_table_name'), settings.get('target_referenced_column_name'), settings.get('target_alias_sql'))
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -3398,6 +3621,14 @@ class MigratorTables:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 source_schema_name VARCHAR,
                 source_seq_name VARCHAR,
+                source_table_name VARCHAR,
+                source_column_name VARCHAR,
+                source_start_value BIGINT,
+                source_increment_by BIGINT,
+                source_minvalue BIGINT,
+                source_maxvalue BIGINT,
+                source_cache BIGINT,
+                source_is_cycled BOOLEAN,
                 source_ddl_text VARCHAR,
                 source_seq_comment TEXT
             )
@@ -3423,7 +3654,13 @@ class MigratorTables:
                 source_target_schema VARCHAR,
                 source_target_name VARCHAR,
                 source_alias_sql TEXT,
-                source_alias_comment TEXT
+                source_alias_comment TEXT,
+                alias_target_type VARCHAR,
+                target_schema_name VARCHAR,
+                target_alias_name VARCHAR,
+                target_referenced_schema_name VARCHAR,
+                target_referenced_table_name VARCHAR,
+                target_referenced_column_name VARCHAR
             )
         """)
 
@@ -3542,11 +3779,11 @@ class MigratorTables:
         func_run_id = uuid.uuid4()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."ddl_sequences"
-            (source_schema_name, source_seq_name, source_ddl_text, source_seq_comment)
-            VALUES (%s, %s, %s, %s)
+            (source_schema_name, source_seq_name, source_table_name, source_column_name, source_start_value, source_increment_by, source_minvalue, source_maxvalue, source_cache, source_is_cycled, source_ddl_text, source_seq_comment)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
         """
-        params = (settings.get('source_schema_name'), settings.get('source_seq_name'), settings.get('source_ddl_text'), settings.get('source_seq_comment'))
+        params = (settings.get('source_schema_name'), settings.get('source_seq_name'), settings.get('source_table_name'), settings.get('source_column_name'), settings.get('source_start_value'), settings.get('source_increment_by'), settings.get('source_minvalue'), settings.get('source_maxvalue'), settings.get('source_cache'), settings.get('source_is_cycled'), settings.get('source_ddl_text'), settings.get('source_seq_comment'))
         self.config_parser.print_log_message('DEBUG3', f"migrator_tables: insert_ddl_sequences: inserting: {params}")
         try:
             cursor = self.protocol_connection.connection.cursor()
@@ -3586,11 +3823,11 @@ class MigratorTables:
         func_run_id = uuid.uuid4()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."ddl_aliases"
-            (source_schema_name, source_alias_name, source_target_schema, source_target_name, source_alias_sql, source_alias_comment)
-            VALUES (%s, %s, %s, %s, %s, %s)
+            (source_schema_name, source_alias_name, source_target_schema, source_target_name, source_alias_sql, source_alias_comment, alias_target_type)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             RETURNING id
         """
-        params = (settings.get('source_schema_name'), settings.get('source_alias_name'), settings.get('source_target_schema'), settings.get('source_target_name'), settings.get('source_alias_sql'), settings.get('source_alias_comment'))
+        params = (settings.get('source_schema_name'), settings.get('source_alias_name'), settings.get('source_target_schema'), settings.get('source_target_name'), settings.get('source_alias_sql'), settings.get('source_alias_comment'), settings.get('alias_target_type'))
         self.config_parser.print_log_message('DEBUG3', f"migrator_tables: insert_ddl_aliases: inserting: {params}")
         try:
             cursor = self.protocol_connection.connection.cursor()

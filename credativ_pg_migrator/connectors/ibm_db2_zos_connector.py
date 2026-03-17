@@ -1120,7 +1120,8 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
                     'view_name': row[2],
                     'target_schema_name': row[3],
                     'target_view_name': row[4],
-                    'comment': None
+                    'comment': None,
+                    'is_alias': True
                 }
 
             cursor.close()

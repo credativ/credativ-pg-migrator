@@ -1,6 +1,12 @@
 # Changelog
 
-## 0.11.4 - 2026.03.16
+## 0.11.4 - 2026.03.17
+
+- 2026.03.17
+
+  - Fix in Orchestrator - refactored `run_migrate_views` to operate via `concurrent.futures.ThreadPoolExecutor` for parallel execution of standard database views. Alias views are now only processed concurrently after all primary standard views finish, avoiding missing view dependency collisions.
+  - Fix in IBM DB2 z/OS connector - modified `convert_view_code` to skip alias generation against referenced table substrings if that specific alias is mapped to another valid View instead of a Table inside the database catalog.
+  - Fix in DB2 Alias resolution - implemented dynamic `LEFT JOIN` resolution inside `ibm_db2_zos_connector.py` fetching queries to accurately label the target pointer for Database Aliases as either `'TABLE'` or `'VIEW'`. This `alias_target_type` property is now explicitly handled mapping through `migrator_tables.py` into both `ddl_aliases` and `protocol_aliases` allowing the planner to securely prevent view-to-alias circular dependencies.
 
 - 2026.03.16
 

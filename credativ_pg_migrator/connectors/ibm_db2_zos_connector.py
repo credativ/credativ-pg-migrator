@@ -1098,7 +1098,8 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
             # This ensures that even if use_aliases_as_target_names is active for tables,
             # we always create additional views "select * from <original view>" for view aliases
             alias_query = f"""
-                SELECT a.id, a.source_schema_name, a.source_alias_name
+                SELECT a.id, a.source_schema_name, a.source_alias_name,
+                       a.source_target_schema, a.source_target_name
                 FROM "{self.protocol_schema}"."ddl_aliases" a
                 INNER JOIN "{self.protocol_schema}"."ddl_views" v
                     ON a.source_target_schema = v.source_schema_name
@@ -1117,6 +1118,8 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
                     'id': row[0] + 1000000, # Shift ID to avoid collision with actual view IDs
                     'schema_name': row[1],
                     'view_name': row[2],
+                    'target_schema_name': row[3],
+                    'target_view_name': row[4],
                     'comment': None
                 }
 
@@ -1151,6 +1154,14 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
     def fetch_view_code(self, settings):
         source_schema_name = settings.get('source_schema_name')
         source_view_name = settings.get('source_view_name')
+        
+        # Check if this view itself is an alias acting as a view
+        alias_target_schema = settings.get('target_schema_name')
+        alias_target_view = settings.get('target_view_name')
+        
+        if alias_target_schema and alias_target_view:
+             return f'CREATE VIEW "{source_schema_name}"."{source_view_name}" AS SELECT * FROM "{alias_target_schema}"."{alias_target_view}"'
+
         if self.connectivity == self.config_parser.const_connectivity_ddl():
             query = f"""SELECT source_view_sql
                         FROM "{self.protocol_schema}"."ddl_views"

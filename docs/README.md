@@ -54,6 +54,8 @@ Architecture:
 
 Configuration is done via the YAML config file and the command line.
 
+For a deep dive into the technical execution and process mapping of these components, see the [Standard Migration Workflow](workflow/standard/migration_workflow.md).
+
 ### 2.3 Databases involved
 
 There are three logical databases in a migration:
@@ -119,16 +121,42 @@ sudo apt-get install credativ-pg-migrator
 
 ### 4.1 General connectivity options
 
-The tool supports connecting to source databases using:
-- ODBC (via pyodbc and system ODBC drivers)
-- JDBC (via jaydebeapi and JDBC .jar files)
-- Native Python drivers (where available)
+The tool supports connecting to source databases using multiple strategies depending on the engine:
+- **ODBC**: via `pyodbc` and system ODBC drivers.
+- **JDBC**: via `jaydebeapi` and JDBC `.jar` files.
+- **Native Python drivers**: via engine-specific modules (e.g., `ibm_db`, `cx_Oracle`, `psycopg2`).
+- **DDL Parsing (Offline)**: Parses `.sql` schema files offline without an active network connection to the source database.
 
 Which option is used is controlled in the YAML config for that source. At minimum specify:
-- connectivity: "odbc", "jdbc", or a connector-specific keyword
-- A subsection with driver configuration (e.g. odbc: or jdbc:).
+- `connectivity`: "odbc", "jdbc", "native", "ddl", or a connector-specific keyword.
+- A subsection with driver configuration (e.g., `odbc:`, `jdbc:`, or `ddl:`).
 
-### 4.2 Informix (JDBC example)
+### 4.2 IBM DB2
+
+IBM DB2 is supported via two fundamentally different connectors, heavily depending on the deployment target (LUW vs. z/OS):
+
+#### 4.2.1 DB2 LUW (Linux, UNIX, Windows)
+- **Mode**: Native Connection
+- **Python Module**: `ibm_db` (using `ibm_db_dbi`)
+- **Configuration**: Uses native connect strings. Set `connectivity: "native"`.
+
+#### 4.2.2 DB2 z/OS (Mainframe)
+- **Mode**: DDL Parsing (Offline Connectivity)
+- **Python Module**: `psycopg2`
+- **Configuration**: Uses `connectivity: "ddl"`. Unlike LUW, the z/OS connector does not connect directly to the mainframe instance. Instead, it reads provided `.sql`/DDL schema extracts offline. It uses the `psycopg2` connection strictly to interact with the PostgreSQL `migrator_tables` for protocol persistence and mapping.
+- **Usage**: You must define a `ddl:` -> `path:` attribute pointing to the directory containing your source schema DDL files.
+
+### 4.3 Oracle
+- **Mode**: Native Connection
+- **Python Module**: `cx_Oracle`
+- **Configuration**: Set `connectivity: "native"`. Configures natively via Oracle DSN strings. Supports `SYSDBA` connections when the username is `SYS`.
+
+### 4.4 PostgreSQL
+- **Mode**: Native Connection
+- **Python Module**: `psycopg2`
+- **Configuration**: Set `connectivity: "native"`. Utilized for migrations between PostgreSQL instances.
+
+### 4.5 Informix (JDBC example)
 
 See more on the “Connection to Informix” wiki page:
 
@@ -144,9 +172,9 @@ See more on the “Connection to Informix” wiki page:
     - libraries: a colon‑separated classpath with your JAR files, e.g.:
 	/usr/share/java/jdbc-4.50.10.1.jar:/usr/share/java/bson-3.8.0.jar
 
-Host, port, database name, and credentials are specified in other fields of the same source‑DB section (see config_sample.yaml in the repo for the exact parameter names).
+Host, port, database name, and credentials are specified in other fields of the same source‑DB section (see config_sample.yaml in the repo for the exact parameter names). Informix also supports ODBC connectivity via `pyodbc`.
 
-### 4.3 Sybase ASE (ODBC example)
+### 4.6 Sybase ASE (ODBC example)
 
 See more at the “Connection to Sybase ASE” wiki page:
 
@@ -166,11 +194,16 @@ See more at the “Connection to Sybase ASE” wiki page:
   - Under an odbc block:
     - driver: "FreeTDS"
 
-Other ODBC parameters such as DSN or connection string are configured alongside the driver (see config_sample.yaml in the repo for the exact parameter names).
+Other ODBC parameters such as DSN or connection string are configured alongside the driver (see config_sample.yaml in the repo for the exact parameter names). Sybase ASE also supports JDBC connectivity via `jaydebeapi`.
 
-### 4.4 Other databases
+### 4.7 Other databases
 
-Other supported engines (Oracle, DB2 LUW, MS SQL Server, MySQL/MariaDB, SQL Anywhere, PostgreSQL) are accessed via their respective connectors using ODBC, JDBC, or native Python drivers. The exact features supported per connector (e.g. whether stored procedures or triggers are handled) are summarized in FEATURE_MATRIX.md in the repo.
+Other supported engines (MS SQL Server, MySQL/MariaDB, SQL Anywhere) are accessed via their respective connectors utilizing:
+- **MS SQL**: JDBC (`jaydebeapi`) or ODBC (`pyodbc`)
+- **MySQL/MariaDB**: Native (`mysql-connector-python`), JDBC (`jaydebeapi`), or ODBC (`pyodbc`)
+- **SQL Anywhere**: ODBC (`pyodbc`)
+
+The exact features supported per connector (e.g. whether stored procedures or triggers are handled) are summarized in FEATURE_MATRIX.md in the repo.
 
 ---
 

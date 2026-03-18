@@ -27,6 +27,13 @@ It is is written in Python in multiple classes and modules.
 - By default logging messages are printed both to console and to log file, name of the log file is configurable in command line arguments.
 - Rich information is also logged to the migration database - see below.
 
+## Documentation
+
+Detailed documentation and technical insights are available in the `docs/` directory:
+- [User Guide & Connectivity Options](docs/README.md)
+- [Standard Migration Workflow](docs/workflow/standard/migration_workflow.md)
+- [Configuration Parameters Map](docs/config_parameters_map.md)
+
 ## Installation
 
 Via PyPI:

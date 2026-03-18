@@ -17,10 +17,10 @@ def normalize_name(name: str, rules: List[str] = None, settings: dict = None) ->
     - 'remove_vowels': Removes all vowels (a, e, i, o, u)
     """
     if not name: return ""
-    
+
     if rules is None:
-        rules = ['lowercase', 'strip_trailing_numbers']
-        
+        rules = ['lowercase']
+
     result = name
     for rule in rules:
         if rule == 'lowercase':
@@ -86,7 +86,8 @@ def match_tables(settings: dict) -> dict:
     source_columns_map = settings.get('source_columns_map', {})
     target_columns_map = settings.get('target_columns_map', {})
     column_prefixes = settings.get('column_prefixes', ["gov_", "log_"])
-    norm_rules = settings.get('normalization_rules', ['lowercase', 'strip_trailing_numbers'])
+    table_norm_rules = settings.get('table_normalization_rules', ['lowercase'])
+    column_norm_rules = settings.get('column_normalization_rules', ['lowercase'])
     norm_settings = settings.get('normalization_settings', {})
 
     matched_pairs = []
@@ -105,13 +106,13 @@ def match_tables(settings: dict) -> dict:
     def add_match(source_t, target_t, score, method, details, evidence):
         stats = {}
         stats['exact_name'] = (source_t.lower() == target_t.lower())
-        stats['normalized_name'] = (normalize_name(source_t, norm_rules, norm_settings) == normalize_name(target_t, norm_rules, norm_settings))
+        stats['normalized_name'] = (normalize_name(source_t, table_norm_rules, norm_settings) == normalize_name(target_t, table_norm_rules, norm_settings))
         votes = internal_table_map.get(source_t, {}).get(target_t, [])
         stats['internal_mapping'] = len(votes)
 
         source_cols = source_columns_map.get(source_t, [])
         target_cols = target_columns_map.get(target_t, [])
-        stats['jaccard'] = calculate_enhanced_jaccard(source_cols, target_cols, column_prefixes, norm_rules, norm_settings)
+        stats['jaccard'] = calculate_enhanced_jaccard(source_cols, target_cols, column_prefixes, column_norm_rules, norm_settings)
 
         matched_pairs.append({
             'source_table': source_t,
@@ -137,14 +138,14 @@ def match_tables(settings: dict) -> dict:
     target_norm_map = {}
     for t in target_tables:
         if t.lower() not in matched_target_set:
-            norm = normalize_name(t.lower(), norm_rules, norm_settings)
+            norm = normalize_name(t.lower(), table_norm_rules, norm_settings)
             target_norm_map[norm] = t.lower()
 
     for t_source_raw in source_tables:
         t_source = t_source_raw.lower()
         if t_source in matched_source_set: continue
 
-        norm_source = normalize_name(t_source, norm_rules, norm_settings)
+        norm_source = normalize_name(t_source, table_norm_rules, norm_settings)
 
         if t_source in [t.lower() for t in target_tables] and t_source not in matched_target_set:
             # find original case for target table
@@ -170,7 +171,7 @@ def match_tables(settings: dict) -> dict:
             if t_target.lower() in matched_target_set: continue
             target_cols = target_columns_map.get(t_target, [])
 
-            score = calculate_enhanced_jaccard(source_cols, target_cols, column_prefixes, norm_rules, norm_settings)
+            score = calculate_enhanced_jaccard(source_cols, target_cols, column_prefixes, column_norm_rules, norm_settings)
 
             if score > best_jaccard:
                 best_jaccard = score
@@ -192,7 +193,7 @@ def match_columns(settings: dict) -> dict:
     source_columns = settings.get('source_columns', [])
     target_columns = settings.get('target_columns', [])
     column_prefixes = settings.get('column_prefixes', ['gov_', 'log_'])
-    norm_rules = settings.get('normalization_rules', ['lowercase', 'strip_trailing_numbers'])
+    column_norm_rules = settings.get('column_normalization_rules', ['lowercase'])
     norm_settings = settings.get('normalization_settings', {})
 
     matched = []
@@ -200,10 +201,10 @@ def match_columns(settings: dict) -> dict:
     target_col_norm_map = {}
     for c in target_columns:
         c_name = c.get('name', '')
-        target_col_norm_map[normalize_name(c_name, norm_rules, norm_settings)] = c
+        target_col_norm_map[normalize_name(c_name, column_norm_rules, norm_settings)] = c
         for p in column_prefixes:
             if c_name.lower().startswith(p.lower()):
-                 target_col_norm_map[normalize_name(c_name[len(p):], norm_rules, norm_settings)] = c
+                 target_col_norm_map[normalize_name(c_name[len(p):], column_norm_rules, norm_settings)] = c
 
     matched_source_names = set()
     matched_target_names = set()
@@ -226,7 +227,7 @@ def match_columns(settings: dict) -> dict:
     for c_source in source_columns:
         c_source_name = c_source.get('name', '')
         if c_source_name in matched_source_names: continue
-        norm = normalize_name(c_source_name, norm_rules, norm_settings)
+        norm = normalize_name(c_source_name, column_norm_rules, norm_settings)
         if norm in target_col_norm_map:
             c_target = target_col_norm_map[norm]
             c_target_name = c_target.get('name', '')

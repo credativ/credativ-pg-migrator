@@ -378,7 +378,12 @@ class OracleConnector(DatabaseConnector):
                             select_columns_list.append(f'''"{col['column_name']}"''')
 
                         insert_columns_list.append(f'''"{self.config_parser.convert_names_case(col['column_name'])}"''')
-                        orderby_columns_list.append(f'''"{col['column_name']}"''')
+                        if col['data_type'].lower() not in ('clob', 'nclob', 'blob', 'bfile', 'long', 'long raw', 'xmltype'):
+                            orderby_columns_list.append(f'''"{col['column_name']}"''')
+
+                    if not orderby_columns_list:
+                        first_valid_col = next(iter(source_columns.values()))['column_name']
+                        orderby_columns_list.append(f'''"{first_valid_col}"''')
 
                     select_columns = ', '.join(select_columns_list)
                     orderby_columns = ', '.join(orderby_columns_list)

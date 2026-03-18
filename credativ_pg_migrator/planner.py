@@ -1588,6 +1588,10 @@ class Planner:
             source_table_rows = self.source_connection.get_rows_count(self.source_schema_name, source_t)
             self.source_connection.disconnect()
             
+            self.target_connection.connect()
+            target_table_rows = self.target_connection.get_rows_count(self.target_schema_name, target_t)
+            self.target_connection.disconnect()
+            
             self.migrator_tables.insert_tables({
                 'source_schema_name': self.source_schema_name,
                 'source_table_name': source_t,
@@ -1600,7 +1604,7 @@ class Planner:
                 'target_table_name': target_t,
                 'target_alias_name': '',
                 'target_columns': target_columns_dict,
-                'target_table_rows': 0,
+                'target_table_rows': target_table_rows,
                 'target_table_sql': '',
                 'table_comment': source_t_info.get('comment', ''),
                 'partitioned': False,

@@ -108,6 +108,9 @@ def match_tables(settings: dict) -> dict:
     true_case_target = {t.lower(): t for t in target_tables}
 
     def add_match(source_t, target_t, score, method, details, evidence):
+        if source_t.lower() not in true_case_source or target_t.lower() not in true_case_target:
+            return
+
         orig_source_t = source_t
         orig_target_t = target_t
         

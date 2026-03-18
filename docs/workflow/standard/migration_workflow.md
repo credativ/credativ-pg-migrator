@@ -41,7 +41,7 @@ The Planning phase reads the source constraints, applies YAML mapping rules, tra
 
 #### 2.1 Pre-Planning & Protocol Initialization
 *   **Implementation**: [`credativ_pg_migrator/planner.py:pre_planning()`](../../../credativ_pg_migrator/planner.py#L128)
-*   **Process**: Plugs into target databases using dynamic connector loading in [`load_connector()`](../../../credativ_pg_migrator/planner.py#L107). Drop/Creates target schemas if required. Initializes metadata tables natively in the migration database by initializing `MigratorTables`. Also populates substitution rules (data types, default values) defined in the configuration. 
+*   **Process**: Plugs into target databases using dynamic connector loading in [`load_connector()`](../../../credativ_pg_migrator/planner.py#L107). Drop/Creates target schemas if required. Initializes metadata tables natively in the migration database by initializing `MigratorTables`. Also populates substitution rules (data types, default values) defined in the configuration. For a detailed breakdown of the internal schema, see the [Migration Database Tables](migration_tables.md) reference.
 
 #### 2.2 Pre-Migration Analysis
 *   **Implementation**: [`credativ_pg_migrator/planner.py:run_premigration_analysis()`](../../../credativ_pg_migrator/planner.py#L186)

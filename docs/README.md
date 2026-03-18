@@ -74,6 +74,7 @@ There are three logical databases in a migration:
     - generated PostgreSQL code
     - success/failure indicators and timestamps for each migrated object
   - Often this is the same database as the target (same cluster), but it can also be a separate PostgreSQL database.
+  - For the exact details on tracking tables and multithreading chunk coordination, see the [Migration Database Tables](workflow/standard/migration_tables.md) document.
 
 ---
 

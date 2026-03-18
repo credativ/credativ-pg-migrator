@@ -2,14 +2,54 @@ import re
 from typing import List, Dict, Tuple, Optional, Set
 from collections import defaultdict
 
-def normalize_name(name: str) -> str:
-    """Removes trailing numeric suffixes and downcases."""
+def normalize_name(name: str, rules: List[str] = None, settings: dict = None) -> str:
+    """
+    Normalizes a name based on a list of specified normalization methods.
+    Available rules:
+    - 'lowercase': Converts to lowercase
+    - 'uppercase': Converts to uppercase
+    - 'strip_trailing_numbers': Removes trailing numeric suffixes (e.g., '_123', '123')
+    - 'strip_leading_numbers': Removes leading numeric prefixes (e.g., '123_', '123')
+    - 'remove_underscores': Removes all underscores
+    - 'alphanumeric_only': Removes all characters except letters and numbers
+    - 'strip_prefixes': Removes prefixes specified in settings['prefixes']
+    - 'strip_suffixes': Removes suffixes specified in settings['suffixes']
+    - 'remove_vowels': Removes all vowels (a, e, i, o, u)
+    """
     if not name: return ""
-    return re.sub(r'_\d+$|\d+$', '', name.lower())
+    
+    if rules is None:
+        rules = ['lowercase', 'strip_trailing_numbers']
+        
+    result = name
+    for rule in rules:
+        if rule == 'lowercase':
+            result = result.lower()
+        elif rule == 'uppercase':
+            result = result.upper()
+        elif rule == 'strip_trailing_numbers':
+            result = re.sub(r'_\d+$|\d+$', '', result)
+        elif rule == 'strip_leading_numbers':
+            result = re.sub(r'^_\d+|^\d+', '', result)
+        elif rule == 'remove_underscores':
+            result = result.replace('_', '')
+        elif rule == 'alphanumeric_only':
+            result = re.sub(r'[^a-zA-Z0-9]', '', result)
+        elif rule == 'remove_vowels':
+            result = re.sub(r'[aeiouAEIOU]', '', result)
+        elif rule == 'strip_prefixes' and settings and 'prefixes' in settings:
+            for p in settings['prefixes']:
+                if result.startswith(p):
+                    result = result[len(p):]
+        elif rule == 'strip_suffixes' and settings and 'suffixes' in settings:
+            for s in settings['suffixes']:
+                if result.endswith(s):
+                    result = result[:-len(s)]
+    return result
 
-def calculate_jaccard_similarity(source_cols: List[Dict], target_cols: List[Dict]) -> float:
-    names1 = set(normalize_name(c.get('name', '')) for c in source_cols)
-    names2 = set(normalize_name(c.get('name', '')) for c in target_cols)
+def calculate_jaccard_similarity(source_cols: List[Dict], target_cols: List[Dict], rules: List[str] = None, settings: dict = None) -> float:
+    names1 = set(normalize_name(c.get('name', ''), rules, settings) for c in source_cols)
+    names2 = set(normalize_name(c.get('name', ''), rules, settings) for c in target_cols)
 
     if not names1 and not names2: return 1.0
     if not names1 or not names2: return 0.0
@@ -18,20 +58,20 @@ def calculate_jaccard_similarity(source_cols: List[Dict], target_cols: List[Dict
     union = names1.union(names2)
     return len(intersection) / len(union)
 
-def calculate_enhanced_jaccard(source_cols: List[Dict], target_cols: List[Dict], prefixes: List[str]) -> float:
+def calculate_enhanced_jaccard(source_cols: List[Dict], target_cols: List[Dict], prefixes: List[str], rules: List[str] = None, settings: dict = None) -> float:
     """Calculates Jaccard similarity with enhanced prefix/suffix handling."""
-    score = calculate_jaccard_similarity(source_cols, target_cols)
+    score = calculate_jaccard_similarity(source_cols, target_cols, rules, settings)
 
     if score < 0.8:
-        names1 = set(normalize_name(c.get('name', '')) for c in source_cols)
+        names1 = set(normalize_name(c.get('name', ''), rules, settings) for c in source_cols)
         names2 = set()
         for c in target_cols:
             raw_name = c.get('name', '')
-            n = normalize_name(raw_name)
+            n = normalize_name(raw_name, rules, settings)
             names2.add(n)
             for p in prefixes:
                 if raw_name.lower().startswith(p.lower()):
-                    names2.add(normalize_name(raw_name[len(p):]))
+                    names2.add(normalize_name(raw_name[len(p):], rules, settings))
 
         if names1 and names2:
             score = len(names1 & names2) / len(names1 | names2)
@@ -46,6 +86,8 @@ def match_tables(settings: dict) -> dict:
     source_columns_map = settings.get('source_columns_map', {})
     target_columns_map = settings.get('target_columns_map', {})
     column_prefixes = settings.get('column_prefixes', ["gov_", "log_"])
+    norm_rules = settings.get('normalization_rules', ['lowercase', 'strip_trailing_numbers'])
+    norm_settings = settings.get('normalization_settings', {})
 
     matched_pairs = []
     matched_source_set = set()
@@ -63,13 +105,13 @@ def match_tables(settings: dict) -> dict:
     def add_match(source_t, target_t, score, method, details, evidence):
         stats = {}
         stats['exact_name'] = (source_t.lower() == target_t.lower())
-        stats['normalized_name'] = (normalize_name(source_t) == normalize_name(target_t))
+        stats['normalized_name'] = (normalize_name(source_t, norm_rules, norm_settings) == normalize_name(target_t, norm_rules, norm_settings))
         votes = internal_table_map.get(source_t, {}).get(target_t, [])
         stats['internal_mapping'] = len(votes)
 
         source_cols = source_columns_map.get(source_t, [])
         target_cols = target_columns_map.get(target_t, [])
-        stats['jaccard'] = calculate_enhanced_jaccard(source_cols, target_cols, column_prefixes)
+        stats['jaccard'] = calculate_enhanced_jaccard(source_cols, target_cols, column_prefixes, norm_rules, norm_settings)
 
         matched_pairs.append({
             'source_table': source_t,
@@ -95,14 +137,14 @@ def match_tables(settings: dict) -> dict:
     target_norm_map = {}
     for t in target_tables:
         if t.lower() not in matched_target_set:
-            norm = normalize_name(t.lower())
+            norm = normalize_name(t.lower(), norm_rules, norm_settings)
             target_norm_map[norm] = t.lower()
 
     for t_source_raw in source_tables:
         t_source = t_source_raw.lower()
         if t_source in matched_source_set: continue
 
-        norm_source = normalize_name(t_source)
+        norm_source = normalize_name(t_source, norm_rules, norm_settings)
 
         if t_source in [t.lower() for t in target_tables] and t_source not in matched_target_set:
             # find original case for target table
@@ -128,7 +170,7 @@ def match_tables(settings: dict) -> dict:
             if t_target.lower() in matched_target_set: continue
             target_cols = target_columns_map.get(t_target, [])
 
-            score = calculate_enhanced_jaccard(source_cols, target_cols, column_prefixes)
+            score = calculate_enhanced_jaccard(source_cols, target_cols, column_prefixes, norm_rules, norm_settings)
 
             if score > best_jaccard:
                 best_jaccard = score
@@ -150,16 +192,18 @@ def match_columns(settings: dict) -> dict:
     source_columns = settings.get('source_columns', [])
     target_columns = settings.get('target_columns', [])
     column_prefixes = settings.get('column_prefixes', ['gov_', 'log_'])
+    norm_rules = settings.get('normalization_rules', ['lowercase', 'strip_trailing_numbers'])
+    norm_settings = settings.get('normalization_settings', {})
 
     matched = []
     target_col_map = {c.get('name', '').lower(): c for c in target_columns}
     target_col_norm_map = {}
     for c in target_columns:
         c_name = c.get('name', '')
-        target_col_norm_map[normalize_name(c_name)] = c
+        target_col_norm_map[normalize_name(c_name, norm_rules, norm_settings)] = c
         for p in column_prefixes:
             if c_name.lower().startswith(p.lower()):
-                 target_col_norm_map[normalize_name(c_name[len(p):])] = c
+                 target_col_norm_map[normalize_name(c_name[len(p):], norm_rules, norm_settings)] = c
 
     matched_source_names = set()
     matched_target_names = set()
@@ -182,7 +226,7 @@ def match_columns(settings: dict) -> dict:
     for c_source in source_columns:
         c_source_name = c_source.get('name', '')
         if c_source_name in matched_source_names: continue
-        norm = normalize_name(c_source_name)
+        norm = normalize_name(c_source_name, norm_rules, norm_settings)
         if norm in target_col_norm_map:
             c_target = target_col_norm_map[norm]
             c_target_name = c_target.get('name', '')

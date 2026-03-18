@@ -49,70 +49,85 @@ class Orchestrator:
             self.migrator_tables.insert_main({'task_name': 'Orchestrator', 'subtask_name': ''})
 
     def run(self):
-        try:
-            self.config_parser.print_log_message('INFO', "orchestrator: run: Starting Orchestrator...")
-
-            if self.config_parser.is_resume_after_crash():
-                self.config_parser.print_log_message('INFO', "orchestrator: run: In current version of crash recovery we assume user defined types and domains already exist, so we skip them.")
-            else:
-                self.run_create_user_defined_types()
-                self.check_pausing_resuming()
-
-                ## migration of domains is a bit unclear currently
-                ## domains in PostgreSQL are special data types
-                ## But in Sybase ASE they are defined as sort of additional check constraint on the column
-                self.run_create_domains()
-
-            # In case of crash recovery, we currently continue from this point as in normal migration
-            if not self.config_parser.is_dry_run():
-                self.run_migrate_sequences()
-                self.check_pausing_resuming()
-
-                self.run_migrate_tables()
-                self.check_pausing_resuming()
-
-                self.run_migrate_indexes('standard')
-                self.check_pausing_resuming()
-
-                self.run_migrate_constraints()
-                self.check_pausing_resuming()
-
-                self.run_migrate_views()
-                self.check_pausing_resuming()
-
-                self.run_migrate_funcprocs()
-                self.check_pausing_resuming()
-
-                self.run_migrate_triggers()
-                self.check_pausing_resuming()
-
-                self.run_migrate_indexes('function_based')
-                self.check_pausing_resuming()
-
-                self.run_migrate_comments()
-                self.check_pausing_resuming()
-
-                self.run_post_migration_script()
-            else:
-                self.config_parser.print_log_message('INFO', "orchestrator: run: Dry run mode enabled. No data migration performed.")
-
-            self.config_parser.print_log_message('INFO', "orchestrator: run: Orchestration complete.")
-            self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': '', 'success': True, 'message': 'finished OK'})
-
-            self.migrator_tables.print_migration_summary()
+        if self.config_parser.is_standard_workflow():
+            self.config_parser.print_log_message('INFO', "orchestrator: run: Standard workflow")
 
             try:
-                self.source_connection.disconnect()
-            except Exception as e:
-                pass
-            try:
-                self.target_connection.disconnect()
-            except Exception as e:
-                pass
+                self.config_parser.print_log_message('INFO', "orchestrator: run: Starting Orchestrator...")
 
-        except Exception as e:
-            self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': '', 'success': False, 'message': f'ERROR: {e}'})
-            self.handle_error(e, 'orchestration')
+                if self.config_parser.is_resume_after_crash():
+                    self.config_parser.print_log_message('INFO', "orchestrator: run: In current version of crash recovery we assume user defined types and domains already exist, so we skip them.")
+                else:
+                    self.run_create_user_defined_types()
+                    self.check_pausing_resuming()
+
+                    ## migration of domains is a bit unclear currently
+                    ## domains in PostgreSQL are special data types
+                    ## But in Sybase ASE they are defined as sort of additional check constraint on the column
+                    self.run_create_domains()
+
+                # In case of crash recovery, we currently continue from this point as in normal migration
+                if not self.config_parser.is_dry_run():
+                    self.stdwf_migrate_sequences()
+                    self.check_pausing_resuming()
+
+                    self.stdwf_migrate_tables()
+                    self.check_pausing_resuming()
+
+                    self.stdwf_migrate_indexes('standard')
+                    self.check_pausing_resuming()
+
+                    self.stdwf_migrate_constraints()
+                    self.check_pausing_resuming()
+
+                    self.stdwf_migrate_views()
+                    self.check_pausing_resuming()
+
+                    self.stdwf_migrate_funcprocs()
+                    self.check_pausing_resuming()
+
+                    self.stdwf_migrate_triggers()
+                    self.check_pausing_resuming()
+
+                    self.stdwf_migrate_indexes('function_based')
+                    self.check_pausing_resuming()
+
+                    self.stdwf_migrate_comments()
+                    self.check_pausing_resuming()
+
+                    self.run_post_migration_script()
+                else:
+                    self.config_parser.print_log_message('INFO', "orchestrator: run: Dry run mode enabled. No data migration performed.")
+
+                self.config_parser.print_log_message('INFO', "orchestrator: run: Orchestration complete.")
+                self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': '', 'success': True, 'message': 'finished OK'})
+
+                self.migrator_tables.print_migration_summary()
+
+                try:
+                    self.source_connection.disconnect()
+                except Exception as e:
+                    pass
+                try:
+                    self.target_connection.disconnect()
+                except Exception as e:
+                    pass
+
+            except Exception as e:
+                self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': '', 'success': False, 'message': f'ERROR: {e}'})
+                self.handle_error(e, 'orchestration')
+
+        elif self.config_parser.is_mapping_workflow():
+            self.config_parser.print_log_message('INFO', "orchestrator: run: Mapping workflow")
+
+            try:
+
+                self.mapping_copy_data()
+
+            except Exception as e:
+                self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': '', 'success': False, 'message': f'ERROR: {e}'})
+                self.handle_error(e, 'orchestration')
+
 
     def load_connector(self, source_or_target):
         """Dynamically load the database connector."""
@@ -146,7 +161,7 @@ class Orchestrator:
             except Exception as e:
                 self.handle_error(e, 'post-migration script')
 
-    def run_migrate_tables(self):
+    def stdwf_migrate_tables(self):
         self.migrator_tables.insert_main({'task_name': 'Orchestrator', 'subtask_name': 'tables migration'})
         workers_requested = self.config_parser.get_parallel_workers_count()
         settings = {
@@ -308,7 +323,7 @@ class Orchestrator:
             self.config_parser.print_log_message('INFO', "orchestrator: run_create_domains: No domains found to migrate.")
         self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': 'domains migration', 'success': True, 'message': 'finished OK'})
 
-    def run_migrate_indexes(self, run_mode='standard'):
+    def stdwf_migrate_indexes(self, run_mode='standard'):
         self.migrator_tables.insert_main({'task_name': 'Orchestrator', 'subtask_name': 'indexes migration'})
         workers_requested = self.config_parser.get_parallel_workers_count()
         target_db_type = self.config_parser.get_target_db_type()
@@ -363,7 +378,7 @@ class Orchestrator:
 
         self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': 'indexes migration', 'success': True, 'message': 'finished OK'})
 
-    def run_migrate_constraints(self):
+    def stdwf_migrate_constraints(self):
         self.migrator_tables.insert_main({'task_name': 'Orchestrator', 'subtask_name': 'constraints migration'})
         workers_requested = self.config_parser.get_parallel_workers_count()
         target_db_type = self.config_parser.get_target_db_type()
@@ -1331,7 +1346,7 @@ class Orchestrator:
             self.handle_error(e, f"constraint_worker {worker_id} {constraint_name}")
             return False
 
-    def run_migrate_funcprocs(self):
+    def stdwf_migrate_funcprocs(self):
         self.migrator_tables.insert_main({'task_name': 'Orchestrator', 'subtask_name': 'functions/procedures migration'})
         include_funcprocs = self.config_parser.get_include_funcprocs()
         exclude_funcprocs = self.config_parser.get_exclude_funcprocs() or []
@@ -1443,7 +1458,7 @@ class Orchestrator:
 
         self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': 'functions/procedures migration', 'success': True, 'message': 'finished OK'})
 
-    def run_migrate_triggers(self):
+    def stdwf_migrate_triggers(self):
         self.migrator_tables.insert_main({'task_name': 'Orchestrator', 'subtask_name': 'triggers migration'})
         try:
             if self.config_parser.should_migrate_triggers():
@@ -1538,7 +1553,7 @@ class Orchestrator:
                 pass
             return False
 
-    def run_migrate_views(self):
+    def stdwf_migrate_views(self):
         self.migrator_tables.insert_main({'task_name': 'Orchestrator', 'subtask_name': 'views migration'})
 
         if self.config_parser.should_migrate_views():
@@ -1598,7 +1613,7 @@ class Orchestrator:
             self.config_parser.print_log_message('INFO', "orchestrator: run_migrate_views: Skipping view migration as requested.")
         self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': 'views migration', 'success': True, 'message': 'finished OK'})
 
-    def run_migrate_comments(self):
+    def stdwf_migrate_comments(self):
         self.migrator_tables.insert_main({'task_name': 'Orchestrator', 'subtask_name': 'comments migration'})
         self.config_parser.print_log_message('INFO', "orchestrator: run_migrate_comments: Migrating comments.")
         all_tables = self.migrator_tables.fetch_all_tables()
@@ -1726,7 +1741,7 @@ class Orchestrator:
             self.config_parser.wait_for_resume()
             self.config_parser.print_log_message('INFO', f"orchestrator: check_pausing_resuming: resumed.")
 
-    def run_migrate_sequences(self):
+    def stdwf_migrate_sequences(self):
         self.migrator_tables.insert_main({'task_name': 'Orchestrator', 'subtask_name': 'sequences migration'})
         workers_requested = self.config_parser.get_parallel_workers_count()
         settings = {

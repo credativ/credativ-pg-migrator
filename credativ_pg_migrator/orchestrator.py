@@ -121,13 +121,117 @@ class Orchestrator:
             self.config_parser.print_log_message('INFO', "orchestrator: run: Mapping workflow")
 
             try:
-
                 self.mapping_copy_data()
-
             except Exception as e:
                 self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': '', 'success': False, 'message': f'ERROR: {e}'})
                 self.handle_error(e, 'orchestration')
 
+
+    def mapping_copy_data(self):
+        self.migrator_tables.insert_main({'task_name': 'Orchestrator', 'subtask_name': 'mapping data copy'})
+        workers_requested = self.config_parser.get_parallel_workers_count()
+
+        self.config_parser.print_log_message('INFO', f"orchestrator: mapping_copy_data: Starting {workers_requested} parallel workers for mapping data copy.")
+
+        raw_tables = self.migrator_tables.fetch_all_tables(check_run_id=False)
+        migrate_tables = []
+        for table_row in raw_tables:
+            table_data = self.migrator_tables.decode_table_row(table_row)
+            if table_data.get('source_table_rows', 0) > 0 and table_data.get('target_table_rows', -1) == 0:
+                migrate_tables.append(table_data)
+
+        if len(migrate_tables) > 0:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers_requested) as executor:
+                futures = {}
+                for table_data in migrate_tables:
+                    self.config_parser.print_log_message('DEBUG3', f"orchestrator: mapping_copy_data: futures running count: {len(futures)}")
+                    while len(futures) >= workers_requested:
+                        done, _ = concurrent.futures.wait(futures, return_when=concurrent.futures.FIRST_COMPLETED)
+                        for future in done:
+                            table_done = futures.pop(future)
+                            if future.result() == False:
+                                if self.on_error_action == 'stop':
+                                    self.config_parser.print_log_message('ERROR', "orchestrator: mapping_copy_data: Stopping execution due to error.")
+                                    exit(1)
+                            else:
+                                self.migrator_tables.update_table_status({'row_id': table_done['id'], 'success': True, 'message': 'mapped data OK'})
+
+                    future = executor.submit(self.mapping_data_worker, table_data)
+                    futures[future] = table_data
+
+                self.config_parser.print_log_message('INFO', "orchestrator: mapping_copy_data: Processing remaining futures")
+                for future in concurrent.futures.as_completed(futures):
+                    table_done = futures[future]
+                    if future.result() == False:
+                        if self.on_error_action == 'stop':
+                            self.config_parser.print_log_message('ERROR', "orchestrator: mapping_copy_data: Stopping execution due to error.")
+                            exit(1)
+                    else:
+                        self.migrator_tables.update_table_status({'row_id': table_done['id'], 'success': True, 'message': 'mapped data OK'})
+
+            self.config_parser.print_log_message('INFO', "orchestrator: mapping_copy_data: Tables data copied successfully.")
+        else:
+            self.config_parser.print_log_message('INFO', "orchestrator: mapping_copy_data: No tables met the criteria for data copy.")
+
+        self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': 'mapping data copy', 'success': True, 'message': 'finished OK'})
+
+    def mapping_data_worker(self, table_data):
+        worker_id = uuid.uuid4()
+        part_name = 'start'
+        worker_source_connection = None
+        worker_target_connection = None
+        try:
+            self.config_parser.print_log_message('INFO', f"orchestrator: mapping_data_worker: Worker {worker_id}: Processing table {table_data['target_table_name']}")
+            
+            worker_source_connection = self.load_connector('source')
+            worker_target_connection = self.load_connector('target')
+            
+            part_name = 'connect source and target'
+            worker_source_connection.connect()
+            worker_target_connection.connect()
+            
+            if worker_source_connection.session_settings:
+                worker_source_connection.execute_query(worker_source_connection.session_settings)
+            
+            if getattr(worker_target_connection, 'session_settings', None):
+                worker_target_connection.execute_query(worker_target_connection.session_settings)
+            
+            chunk_size = -1
+            try:
+                chunk_size = self.config_parser.get_chunk_size()
+            except Exception:
+                pass
+
+            settings = {
+                'worker_id': worker_id,
+                'source_schema_name': table_data['source_schema_name'],
+                'source_table_name': table_data['source_table_name'],
+                'source_table_id': table_data['source_table_id'],
+                'source_columns': table_data['source_columns'],
+                'target_schema_name': table_data['target_schema_name'],
+                'target_table_name': table_data['target_table_name'],
+                'target_columns': table_data['target_columns'],
+                'primary_key_columns': self.migrator_tables.select_primary_key({'source_schema_name': table_data['source_schema_name'], 'source_table_name': table_data['source_table_name']}),
+                'batch_size': self.config_parser.get_batch_size(),
+                'migrator_tables': self.migrator_tables,
+                'migration_limitation': None,
+                'chunk_size': chunk_size,
+                'chunk_number': 1,
+                'resume_after_crash': False,
+                'drop_unfinished_tables': False
+            }
+            
+            part_name = 'migrate_table'
+            worker_source_connection.migrate_table(worker_target_connection, settings)
+            
+            worker_source_connection.disconnect()
+            worker_target_connection.disconnect()
+            
+            return True
+            
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"orchestrator: mapping_data_worker: Worker {worker_id}: Error during {part_name} -> {e}")
+            return False
 
     def load_connector(self, source_or_target):
         """Dynamically load the database connector."""

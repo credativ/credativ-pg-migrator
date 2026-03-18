@@ -120,6 +120,10 @@ class Planner:
                     self.migrator_tables.update_main_status({'task_name': 'Planner', 'subtask_name': '', 'success': False, 'message': f'ERROR: {e}'})
                     self.handle_error(e, "Planner")
 
+            else:
+                self.config_parser.print_log_message('ERROR', f"planner: create_plan: Unknown workflow type: {self.config_parser.get_workflow()}")
+                exit(1)
+
     def load_connector(self, source_or_target):
         """Dynamically load the database connector."""
         # Get the database type from the config
@@ -1458,10 +1462,10 @@ class Planner:
         self.config_parser.print_log_message('INFO', "planner: mapping_match_tables: Matching tables...")
         from credativ_pg_migrator.connectors import match_schemas
         import json
-        
+
         source_tables_raw = self.source_connection.fetch_table_names(self.source_schema_name)
         target_tables_raw = self.target_connection.fetch_table_names(self.target_schema_name)
-        
+
         source_tables = [v['table_name'] for v in source_tables_raw.values()]
         target_tables = [v['table_name'] for v in target_tables_raw.values()]
 
@@ -1472,15 +1476,15 @@ class Planner:
 
         self.config_parser.print_log_message('INFO', "planner: mapping_match_tables: Fetching source/target metadata...")
         for _, t in source_tables_raw.items():
-            cols = self.source_connection.fetch_table_columns({'source_schema_name': self.source_schema_name, 'source_table_name': t['table_name']})
+            cols = self.source_connection.fetch_table_columns({'table_schema': self.source_schema_name, 'table_name': t['table_name']})
             source_cols_raw[t['table_name']] = cols
             source_columns_map[t['table_name']] = [{'name': c['column_name'], **c} for c in cols.values()]
-            
+
         for _, t in target_tables_raw.items():
-            cols = self.target_connection.fetch_table_columns({'source_schema_name': self.target_schema_name, 'source_table_name': t['table_name']})
+            cols = self.target_connection.fetch_table_columns({'table_schema': self.target_schema_name, 'table_name': t['table_name']})
             target_cols_raw[t['table_name']] = cols
             target_columns_map[t['table_name']] = [{'name': c['column_name'], **c} for c in cols.values()]
-            
+
         settings = {
             'source_tables': source_tables,
             'target_tables': target_tables,
@@ -1525,14 +1529,14 @@ class Planner:
             self.target_connection.disconnect()
         except:
             pass
-            
+
         match_result = match_schemas.match_tables(settings)
         self.config_parser.print_log_message('INFO', f"planner: mapping_match_tables: Found {len(match_result['matched_pairs'])} matched tables.")
-        
+
         for pair in match_result['matched_pairs']:
             source_t = pair['source_table']
             target_t = pair['target_table']
-            
+
             info_json = json.dumps({
                 'details': pair['details'],
                 'evidence': pair.get('evidence', []),
@@ -1548,7 +1552,7 @@ class Planner:
                 'similarity_score': pair['score'],
                 'info': info_json
             })
-            
+
             col_settings = {
                 'source_columns': source_columns_map[source_t],
                 'target_columns': target_columns_map[target_t],
@@ -1557,14 +1561,14 @@ class Planner:
                 'normalization_settings': settings['normalization_settings']
             }
             col_match_res = match_schemas.match_columns(col_settings)
-            
+
             source_columns_dict = {}
             target_columns_dict = {}
-            
+
             for idx, cpair in enumerate(col_match_res['matched_columns']):
                 source_c = cpair['source_column']
                 target_c = cpair['target_column']
-                
+
                 self.migrator_tables.insert_matching_columns({
                     'source_schema_name': self.source_schema_name,
                     'source_table_name': source_t,
@@ -1578,20 +1582,20 @@ class Planner:
                     'target_data_type': target_c.get('data_type', ''),
                     'match_type': cpair['method']
                 })
-                
+
                 source_columns_dict[idx] = source_c
                 target_columns_dict[idx] = target_c
 
             source_t_info = next((v for v in source_tables_raw.values() if v['table_name'] == source_t), {})
-            
+
             self.source_connection.connect()
             source_table_rows = self.source_connection.get_rows_count(self.source_schema_name, source_t)
             self.source_connection.disconnect()
-            
+
             self.target_connection.connect()
             target_table_rows = self.target_connection.get_rows_count(self.target_schema_name, target_t)
             self.target_connection.disconnect()
-            
+
             self.migrator_tables.insert_tables({
                 'source_schema_name': self.source_schema_name,
                 'source_table_name': source_t,

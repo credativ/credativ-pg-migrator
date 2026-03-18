@@ -103,11 +103,22 @@ def match_tables(settings: dict) -> dict:
             target_t, target_c = target_loc.split('.')
             internal_table_map[source_t][target_t].append(prop)
 
+    # Preserve correct casing across all matching phases
+    true_case_source = {t.lower(): t for t in source_tables}
+    true_case_target = {t.lower(): t for t in target_tables}
+
     def add_match(source_t, target_t, score, method, details, evidence):
+        orig_source_t = source_t
+        orig_target_t = target_t
+        
+        # Override with exact database casing for robust downstream map lookups
+        source_t = true_case_source.get(source_t.lower(), source_t)
+        target_t = true_case_target.get(target_t.lower(), target_t)
+
         stats = {}
         stats['exact_name'] = (source_t.lower() == target_t.lower())
         stats['normalized_name'] = (normalize_name(source_t, table_norm_rules, norm_settings) == normalize_name(target_t, table_norm_rules, norm_settings))
-        votes = internal_table_map.get(source_t, {}).get(target_t, [])
+        votes = internal_table_map.get(orig_source_t, {}).get(orig_target_t, [])
         stats['internal_mapping'] = len(votes)
 
         source_cols = source_columns_map.get(source_t, [])

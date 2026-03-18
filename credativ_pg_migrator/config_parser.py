@@ -248,11 +248,14 @@ class ConfigParser:
     def get_migration_settings(self):
         return self.config['migration']
 
+    def get_workflow(self):
+        return self.get_migration_settings().get('workflow', 'standard')
+
     def is_standard_workflow(self):
-        return self.get_migration_settings().get('workflow', 'standard') == 'standard'
+        return self.get_workflow() == 'standard'
 
     def is_mapping_workflow(self):
-        return self.get_migration_settings().get('workflow', 'standard') == 'mapping'
+        return self.get_workflow() == 'mapping'
 
     def get_suspend_indexes_constraints(self):
         settings = self.get_migration_settings()

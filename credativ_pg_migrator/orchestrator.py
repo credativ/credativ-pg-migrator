@@ -133,7 +133,7 @@ class Orchestrator:
 
         self.config_parser.print_log_message('INFO', f"orchestrator: mapping_copy_data: Starting {workers_requested} parallel workers for mapping data copy.")
 
-        raw_tables = self.migrator_tables.fetch_all_tables(check_run_id=False)
+        raw_tables = self.migrator_tables.fetch_all_tables(only_unfinished=False)
         migrate_tables = []
         for table_row in raw_tables:
             table_data = self.migrator_tables.decode_table_row(table_row)
@@ -190,7 +190,7 @@ class Orchestrator:
             worker_source_connection.connect()
             worker_target_connection.connect()
             
-            if worker_source_connection.session_settings:
+            if getattr(worker_source_connection, 'session_settings', None):
                 worker_source_connection.execute_query(worker_source_connection.session_settings)
             
             if getattr(worker_target_connection, 'session_settings', None):

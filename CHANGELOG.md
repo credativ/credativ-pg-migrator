@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.13.0 - 2026.03.18
+
+- 2026.03.18
+
+  - Feature - Orchestrator `mapping_copy_data`: Implemented parallel batch data copying capability specifically for the mapping workflow. Automatically clones rows from populated source tables straight into natively mapped, empty target tables securely without standard UNL/CSV files.
+  - Feature - Planner `mapping_match_tables`: Integrated the internal property table/column metric matcher natively into the planner config. This feature computes Jaccard similarity across column fingerprints to systematically match objects and tracks metadata comparisons inside the internal tracking logs.
+  - Fix - Connector Object Schemas: Fixed `KeyError` regressions produced natively inside `match_schemas.py` by forcing all mapped objects to exactly mirror their system catalog casings (uppercase on Oracle) prior to returning matches downstream to strict dictionaries.
+  - Fix - Internal Mappings: Ensured virtual internal properties that don't legally translate to target tables (`nscale_al_ixpropdef` aliases like 'transient') are immediately discarded from mapping candidates to unblock downstream query builders.
+  - Fix - Generic Workers Session Safety: Added `getattr` defenses against `AttributeError` for databases that lack default static `session_settings` declarations (such as the `OracleConnector`) ensuring unhindered `db_to_db` threading.
+  - Fix - Planner Table Configs: Switched mismatched `source_schema_name`/`source_table_name` metadata keys out for standard `table_schema`/`table_name` payload structures for valid structural fetching across generic database adapters.
+
 ## 0.12.0 - 2026.03.17
 
 - 2026.03.17

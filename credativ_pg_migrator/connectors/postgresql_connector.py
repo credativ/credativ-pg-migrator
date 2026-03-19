@@ -1411,9 +1411,13 @@ class PostgreSQLConnector(DatabaseConnector):
         insert_columns = settings.get('insert_columns', None)
 
         insert_columns_provided = settings.get('insert_columns', None)
+        insert_values = settings.get('insert_values', None)
 
         if not insert_columns:
-            insert_columns = [f'"{columns[col]["column_name"]}"' for col in sorted(columns.keys())]
+            insert_columns = [f'"{columns[col]["column_name"]}"' for col in sorted(columns.keys(), key=lambda x: int(x))]
+
+        if not insert_values:
+            insert_values = ', '.join(['%s' for _ in columns.keys()])
 
         if isinstance(insert_columns, list):
             insert_columns = ', '.join(insert_columns)
@@ -1429,7 +1433,7 @@ class PostgreSQLConnector(DatabaseConnector):
                 if insert_columns_provided and len(data) > 0:
                     extract_keys = list(data[0].keys())
                 else:
-                    extract_keys = [columns[col]['column_name'] for col in sorted(columns.keys())]
+                    extract_keys = [columns[col]['column_name'] for col in sorted(columns.keys(), key=lambda x: int(x))]
 
                 formatted_data = []
                 for item in data:
@@ -1448,7 +1452,7 @@ class PostgreSQLConnector(DatabaseConnector):
             self.config_parser.print_log_message('DEBUG2', f"postgresql_connector: insert_batch: Worker {worker_id}: insert_batch [2] into {target_schema_name}.{target_table_name} with {len(data)} rows, columns: |{insert_columns}| data type: {type(data)}")
 
             with self.connection.cursor() as cursor:
-                insert_query = sql.SQL(f"""INSERT INTO "{target_schema_name}"."{target_table_name}" ({insert_columns}) VALUES ({', '.join(['%s' for _ in columns.keys()])})""")
+                insert_query = sql.SQL(f"""INSERT INTO "{target_schema_name}"."{target_table_name}" ({insert_columns}) VALUES ({insert_values})""")
                 self.config_parser.print_log_message('DEBUG3', f"postgresql_connector: insert_batch: Worker {worker_id}: Insert query: {insert_query}")
                 self.connection.autocommit = False
                 try:

@@ -113,6 +113,7 @@ class Orchestrator:
                 self.mapping_drop_indexes_and_constraints()
                 self.mapping_copy_data()
                 self.mapping_create_indexes_and_constraints()
+                self.mapping_check_indexes_and_constraints()
             except Exception as e:
                 self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': '', 'success': False, 'message': f'ERROR: {e}'})
                 self.handle_error(e, 'orchestration')
@@ -207,6 +208,45 @@ class Orchestrator:
 
         target_conn.disconnect()
 
+    def mapping_check_indexes_and_constraints(self):
+        self.config_parser.print_log_message('INFO', "orchestrator: mapping_check_indexes_and_constraints: Starting global verification of indexes and constraints")
+        target_conn = self.load_connector('target')
+        
+        tables = self.migrator_tables.fetch_all_tables(only_unfinished=False)
+        
+        total_checked_constraints = 0
+        total_missing_constraints = 0
+        total_checked_indexes = 0
+        total_missing_indexes = 0
+        
+        for table_row in tables:
+            table_data = self.migrator_tables.decode_table_row(table_row)
+            target_schema_name_eval = table_data['target_schema_name']
+            target_table_name_eval = self.config_parser.convert_names_case(table_data['target_table_name'])
+            
+            expected_constraints = self.migrator_tables.fetch_mapping_target_constraints(target_schema_name_eval, target_table_name_eval)
+            actual_constraints = target_conn.fetch_mapping_target_constraints(target_schema_name_eval, target_table_name_eval)
+            actual_constraint_names = {c['constraint_name'] for c in actual_constraints}
+            
+            for expected in expected_constraints:
+                total_checked_constraints += 1
+                if expected['constraint_name'] not in actual_constraint_names:
+                    total_missing_constraints += 1
+                    self.config_parser.print_log_message('WARNING', f"orchestrator: Target database is missing constraint '{expected['constraint_name']}' on {target_schema_name_eval}.{target_table_name_eval}")
+                    
+            expected_indexes = self.migrator_tables.fetch_mapping_target_indexes(target_schema_name_eval, target_table_name_eval)
+            actual_indexes = target_conn.fetch_mapping_target_indexes(target_schema_name_eval, target_table_name_eval)
+            actual_index_names = {i['index_name'] for i in actual_indexes}
+            
+            for expected in expected_indexes:
+                total_checked_indexes += 1
+                if expected['index_name'] not in actual_index_names:
+                    total_missing_indexes += 1
+                    self.config_parser.print_log_message('WARNING', f"orchestrator: Target database is missing index '{expected['index_name']}' on {target_schema_name_eval}.{target_table_name_eval}")
+
+        self.config_parser.print_log_message('INFO', f"orchestrator: mapping_check_indexes_and_constraints: Constraints Summary: {total_checked_constraints} checked, {total_missing_constraints} missing.")
+        self.config_parser.print_log_message('INFO', f"orchestrator: mapping_check_indexes_and_constraints: Indexes Summary: {total_checked_indexes} checked, {total_missing_indexes} missing.")
+
     def mapping_copy_data(self):
         self.migrator_tables.insert_main({'task_name': 'Orchestrator', 'subtask_name': 'mapping data copy'})
         workers_requested = self.config_parser.get_parallel_workers_count()
@@ -218,6 +258,16 @@ class Orchestrator:
         for table_row in raw_tables:
             table_data = self.migrator_tables.decode_table_row(table_row)
             if table_data.get('source_table_rows', 0) > 0 and table_data.get('target_table_rows', -1) == 0:
+                target_columns = table_data.get('target_columns', {})
+                insert_values = []
+                keys_sorted = sorted(target_columns.keys(), key=lambda x: int(x))
+                for col_key in keys_sorted:
+                    col_data_type = target_columns[col_key].get('data_type', '')
+                    if col_data_type:
+                        insert_values.append(f'%s::{col_data_type}')
+                    else:
+                        insert_values.append('%s')
+                table_data['insert_values'] = ', '.join(insert_values)
                 migrate_tables.append(table_data)
 
         if len(migrate_tables) > 0:
@@ -291,6 +341,7 @@ class Orchestrator:
                 'target_schema_name': table_data['target_schema_name'],
                 'target_table_name': table_data['target_table_name'],
                 'target_columns': table_data['target_columns'],
+                'insert_values': table_data.get('insert_values'),
                 'primary_key_columns': self.migrator_tables.select_primary_key({'source_schema_name': table_data['source_schema_name'], 'source_table_name': table_data['source_table_name']}),
                 'batch_size': self.config_parser.get_batch_size(),
                 'migrator_tables': self.migrator_tables,

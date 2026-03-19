@@ -1608,6 +1608,26 @@ class Planner:
             target_table_rows = self.target_connection.get_rows_count(self.target_schema_name, target_t)
             self.target_connection.disconnect()
 
+            if self.config_parser.get_target_db_type() == 'postgresql':
+                target_indexes = self.target_connection.fetch_mapping_target_indexes(self.target_schema_name, target_t)
+                for idx_info in target_indexes:
+                    self.migrator_tables.insert_mapping_target_indexes({
+                        'target_schema_name': self.target_schema_name,
+                        'target_table_name': target_t,
+                        'index_name': idx_info['index_name'],
+                        'index_def': idx_info['index_def']
+                    })
+
+                target_constraints = self.target_connection.fetch_mapping_target_constraints(self.target_schema_name, target_t)
+                for col_info in target_constraints:
+                    self.migrator_tables.insert_mapping_target_constraints({
+                        'target_schema_name': self.target_schema_name,
+                        'target_table_name': target_t,
+                        'constraint_name': col_info['constraint_name'],
+                        'constraint_type': col_info['constraint_type'],
+                        'constraint_def': col_info['constraint_def']
+                    })
+
             self.migrator_tables.insert_tables({
                 'source_schema_name': self.source_schema_name,
                 'source_table_name': source_t,

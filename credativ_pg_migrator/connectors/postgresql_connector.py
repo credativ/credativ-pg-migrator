@@ -759,6 +759,67 @@ class PostgreSQLConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', e)
             raise
 
+    def fetch_mapping_target_indexes(self, schema_name: str, table_name: str):
+        query = f"""
+            SELECT indexname, indexdef
+            FROM pg_indexes
+            WHERE schemaname = '{schema_name}' AND tablename = '{table_name}'
+        """
+        indexes = []
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            for row in cursor.fetchall():
+                indexes.append({
+                    'index_name': row[0],
+                    'index_def': row[1]
+                })
+            cursor.close()
+            self.disconnect()
+            return indexes
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"postgresql_connector: fetch_mapping_target_indexes: Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
+            return []
+
+    def fetch_mapping_target_constraints(self, schema_name: str, table_name: str):
+        query = f"""
+            SELECT
+                c.conname,
+                pg_get_constraintdef(c.oid) as condef,
+                CASE WHEN contype = 'c' THEN 'CHECK'
+                     WHEN contype = 'f' THEN 'FOREIGN KEY'
+                     WHEN contype = 'p' THEN 'PRIMARY KEY'
+                     WHEN contype = 'u' THEN 'UNIQUE'
+                     WHEN contype = 't' THEN 'TRIGGER'
+                     WHEN contype = 'x' THEN 'EXCLUSION'
+                     ELSE contype::text END as type
+            FROM pg_constraint c
+            JOIN pg_class t ON c.conrelid = t.oid
+            JOIN pg_namespace n ON t.relnamespace = n.oid
+            WHERE n.nspname = '{schema_name}' AND t.relname = '{table_name}'
+            AND c.contype NOT IN ('n')
+        """
+        constraints = []
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            for row in cursor.fetchall():
+                constraints.append({
+                    'constraint_name': row[0],
+                    'constraint_def': row[1],
+                    'constraint_type': row[2]
+                })
+            cursor.close()
+            self.disconnect()
+            return constraints
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"postgresql_connector: fetch_mapping_target_constraints: Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
+            return []
+
     def get_create_constraint_sql(self, settings):
         create_constraint_query = ''
         source_db_type = settings['source_db_type']

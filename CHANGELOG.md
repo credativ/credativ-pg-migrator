@@ -2,6 +2,14 @@
 
 ## 0.13.0 - 2026.03.18
 
+- 2026.03.19
+
+  - Feature - Orchestrator: Redesigned the sequence of operations for index and constraint mapping to execute a dedicated global `DROP` phase before concurrent data copying starts, and a complete global `CREATE` phase after all tables merge.
+  - Feature - PostgreSQL Connector: Automatically discovers and tracks mapping destination sequences specifically applied to default columns, `IDENTITY` configurations, or internal object triggers.
+  - Fix - Orchestrator: Expands the constraint `DROP` definitions to successfully filter and drop *all* non-primary key constraints (including `UNIQUE`, `CHECK`, and `EXCLUSION`), and specifically skips explicit `CREATE INDEX` duplication collisions for natively mapped `UNIQUE` constraints during recreation.
+  - Feature - Orchestrator: Embedded an explicit end-state mapping verification function `mapping_check_indexes_and_constraints()` that audits strictly against the live PostgreSQL catalog immediately following mapping copy payloads, emitting `WARNING` digests for any unexpectedly missing table objects.
+  - Fix - Connector Casting: Strengthened parallel worker bindings inside the PostgreSQL pipeline by pushing dynamic strict database `::type` castings straight into the `INSERT INTO` construction loops natively inherited from defined target data schemas.
+
 - 2026.03.18
 
   - Feature - Orchestrator `mapping_copy_data`: Implemented parallel batch data copying capability specifically for the mapping workflow. Automatically clones rows from populated source tables straight into natively mapped, empty target tables securely without standard UNL/CSV files.

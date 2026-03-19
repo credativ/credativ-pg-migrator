@@ -236,22 +236,24 @@ class Orchestrator:
             # Drop indexes
             target_indexes = self.migrator_tables.fetch_mapping_target_indexes(target_schema_name_eval, target_table_name_eval)
             for index in target_indexes:
-                part_name = f"drop index {index['index_name']}"
-                self.config_parser.print_log_message('INFO', f"orchestrator: mapping_data_worker: Worker {worker_id}: Dropping index {index['index_name']}")
-                drop_sql = f'DROP INDEX IF EXISTS "{target_schema_name_eval}"."{index["index_name"]}"'
-                worker_target_connection.execute_query(drop_sql)
+                if not index.get('is_primary_key', False):
+                    part_name = f"drop index {index['index_name']}"
+                    self.config_parser.print_log_message('INFO', f"orchestrator: mapping_data_worker: Worker {worker_id}: Dropping index {index['index_name']}")
+                    drop_sql = f'DROP INDEX IF EXISTS "{target_schema_name_eval}"."{index["index_name"]}"'
+                    worker_target_connection.execute_query(drop_sql)
 
             part_name = 'migrate_table'
             worker_source_connection.migrate_table(worker_target_connection, settings)
 
             # Recreate indexes
             for index in target_indexes:
-                part_name = f"recreate index {index['index_name']}"
-                self.config_parser.print_log_message('INFO', f"orchestrator: mapping_data_worker: Worker {worker_id}: Recreating index {index['index_name']}")
-                try:
-                    worker_target_connection.execute_query(index['index_def'])
-                except Exception as ex:
-                    self.config_parser.print_log_message('ERROR', f"orchestrator: mapping_data_worker: Worker {worker_id}: Error recreating index {index['index_name']}: {ex}")
+                if not index.get('is_primary_key', False):
+                    part_name = f"recreate index {index['index_name']}"
+                    self.config_parser.print_log_message('INFO', f"orchestrator: mapping_data_worker: Worker {worker_id}: Recreating index {index['index_name']}")
+                    try:
+                        worker_target_connection.execute_query(index['index_def'])
+                    except Exception as ex:
+                        self.config_parser.print_log_message('ERROR', f"orchestrator: mapping_data_worker: Worker {worker_id}: Error recreating index {index['index_name']}: {ex}")
 
             # Recreate foreign keys
             for constraint in target_constraints:

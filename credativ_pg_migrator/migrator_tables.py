@@ -429,7 +429,8 @@ class MigratorTables:
                 target_schema_name TEXT,
                 target_table_name TEXT,
                 index_name TEXT,
-                index_def TEXT
+                index_def TEXT,
+                is_primary_key BOOLEAN DEFAULT FALSE
             );
         """)
         self.protocol_connection.execute_query(f"""
@@ -510,14 +511,15 @@ class MigratorTables:
         target_table_name = settings.get('target_table_name')
         index_name = settings.get('index_name')
         index_def = settings.get('index_def')
+        is_primary_key = settings.get('is_primary_key', False)
 
         query = f"""
             INSERT INTO "{self.protocol_schema}"."mapping_target_indexes"
-            (target_schema_name, target_table_name, index_name, index_def)
-            VALUES (%s, %s, %s, %s)
+            (target_schema_name, target_table_name, index_name, index_def, is_primary_key)
+            VALUES (%s, %s, %s, %s, %s)
             RETURNING id
         """
-        params = (target_schema_name, target_table_name, index_name, index_def)
+        params = (target_schema_name, target_table_name, index_name, index_def, is_primary_key)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -555,7 +557,7 @@ class MigratorTables:
 
     def fetch_mapping_target_indexes(self, target_schema_name, target_table_name):
         query = f"""
-            SELECT index_name, index_def
+            SELECT index_name, index_def, is_primary_key
             FROM "{self.protocol_schema}"."mapping_target_indexes"
             WHERE target_schema_name = %s AND target_table_name = %s
         """
@@ -564,7 +566,7 @@ class MigratorTables:
             cursor.execute(query, (target_schema_name, target_table_name))
             rows = cursor.fetchall()
             cursor.close()
-            return [{'index_name': row[0], 'index_def': row[1]} for row in rows]
+            return [{'index_name': row[0], 'index_def': row[1], 'is_primary_key': row[2]} for row in rows]
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"migrator_tables: fetch_mapping_target_indexes: Error fetching for {target_schema_name}.{target_table_name}")
             self.config_parser.print_log_message('ERROR', e)

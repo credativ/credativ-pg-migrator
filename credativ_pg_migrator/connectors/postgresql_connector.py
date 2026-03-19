@@ -761,9 +761,15 @@ class PostgreSQLConnector(DatabaseConnector):
 
     def fetch_mapping_target_indexes(self, schema_name: str, table_name: str):
         query = f"""
-            SELECT indexname, indexdef
-            FROM pg_indexes
-            WHERE schemaname = '{schema_name}' AND tablename = '{table_name}'
+            SELECT
+                i.relname as indexname,
+                pg_get_indexdef(i.oid) as indexdef,
+                ix.indisprimary as is_primary_key
+            FROM pg_class t
+            JOIN pg_index ix ON t.oid = ix.indrelid
+            JOIN pg_class i ON i.oid = ix.indexrelid
+            JOIN pg_namespace n ON t.relnamespace = n.oid
+            WHERE n.nspname = '{schema_name}' AND t.relname = '{table_name}'
         """
         indexes = []
         try:
@@ -773,7 +779,8 @@ class PostgreSQLConnector(DatabaseConnector):
             for row in cursor.fetchall():
                 indexes.append({
                     'index_name': row[0],
-                    'index_def': row[1]
+                    'index_def': row[1],
+                    'is_primary_key': row[2]
                 })
             cursor.close()
             self.disconnect()

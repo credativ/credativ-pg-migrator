@@ -443,6 +443,20 @@ class MigratorTables:
                 constraint_def TEXT
             );
         """)
+        self.protocol_connection.execute_query(f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."mapping_target_sequences" (
+                id SERIAL PRIMARY KEY,
+                target_schema_name TEXT,
+                target_table_name TEXT,
+                sequence_schema_name TEXT,
+                sequence_name TEXT,
+                used_in_default BOOLEAN DEFAULT FALSE,
+                used_in_identity BOOLEAN DEFAULT FALSE,
+                used_in_trigger BOOLEAN DEFAULT FALSE,
+                trigger_name TEXT,
+                column_name TEXT
+            );
+        """)
         self.config_parser.print_log_message('DEBUG3', f"migrator_tables: create_table_for_mapping: Mapping tables created in schema {self.protocol_schema}")
 
 
@@ -555,6 +569,35 @@ class MigratorTables:
             self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_mapping_target_constraints: ({func_run_id}): Error: {e}")
             raise
 
+    def insert_mapping_target_sequences(self, settings):
+        func_run_id = uuid.uuid4()
+        target_schema_name = settings.get('target_schema_name')
+        target_table_name = settings.get('target_table_name')
+        sequence_schema_name = settings.get('sequence_schema_name')
+        sequence_name = settings.get('sequence_name')
+        used_in_default = settings.get('used_in_default', False)
+        used_in_identity = settings.get('used_in_identity', False)
+        used_in_trigger = settings.get('used_in_trigger', False)
+        trigger_name = settings.get('trigger_name')
+        column_name = settings.get('column_name')
+
+        query = f"""
+            INSERT INTO "{self.protocol_schema}"."mapping_target_sequences"
+            (target_schema_name, target_table_name, sequence_schema_name, sequence_name, used_in_default, used_in_identity, used_in_trigger, trigger_name, column_name)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
+        """
+        params = (target_schema_name, target_table_name, sequence_schema_name, sequence_name, used_in_default, used_in_identity, used_in_trigger, trigger_name, column_name)
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+            return row[0] if row else None
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_mapping_target_sequences: ({func_run_id}): Error: {e}")
+            raise
+
     def fetch_mapping_target_indexes(self, target_schema_name, target_table_name):
         query = f"""
             SELECT index_name, index_def, is_primary_key
@@ -569,6 +612,31 @@ class MigratorTables:
             return [{'index_name': row[0], 'index_def': row[1], 'is_primary_key': row[2]} for row in rows]
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"migrator_tables: fetch_mapping_target_indexes: Error fetching for {target_schema_name}.{target_table_name}")
+            self.config_parser.print_log_message('ERROR', e)
+            return []
+
+    def fetch_mapping_target_sequences(self, target_schema_name, target_table_name):
+        query = f"""
+            SELECT sequence_schema_name, sequence_name, used_in_default, used_in_identity, used_in_trigger, trigger_name, column_name
+            FROM "{self.protocol_schema}"."mapping_target_sequences"
+            WHERE target_schema_name = %s AND target_table_name = %s
+        """
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, (target_schema_name, target_table_name))
+            rows = cursor.fetchall()
+            cursor.close()
+            return [{
+                'sequence_schema_name': row[0],
+                'sequence_name': row[1],
+                'used_in_default': row[2],
+                'used_in_identity': row[3],
+                'used_in_trigger': row[4],
+                'trigger_name': row[5],
+                'column_name': row[6]
+            } for row in rows]
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: fetch_mapping_target_sequences: Error fetching for {target_schema_name}.{target_table_name}")
             self.config_parser.print_log_message('ERROR', e)
             return []
 

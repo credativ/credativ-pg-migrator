@@ -827,6 +827,114 @@ class PostgreSQLConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', e)
             return []
 
+    def fetch_mapping_target_sequences(self, schema_name: str, table_name: str):
+        self.config_parser.print_log_message('DEBUG', f"postgresql_connector: fetch_mapping_target_sequences: Fetching sequences for {schema_name}.{table_name}")
+        query_general = f"""
+            SELECT 
+                a.attname as column_name,
+                s.relname as sequence_name,
+                n.nspname as sequence_schema_name,
+                a.attidentity != '' as is_identity,
+                pg_get_expr(ad.adbin, ad.adrelid) as default_expr
+            FROM pg_class t
+            JOIN pg_namespace tn ON t.relnamespace = tn.oid
+            JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum > 0 AND NOT a.attisdropped
+            LEFT JOIN pg_attrdef ad ON ad.adrelid = t.oid AND ad.adnum = a.attnum
+            LEFT JOIN pg_depend d ON d.refobjid = t.oid AND d.refobjsubid = a.attnum AND d.classid = 'pg_class'::regclass AND d.refclassid = 'pg_class'::regclass
+            LEFT JOIN pg_class s ON s.oid = d.objid AND s.relkind = 'S'
+            LEFT JOIN pg_namespace n ON s.relnamespace = n.oid
+            WHERE tn.nspname = '{schema_name}' AND t.relname = '{table_name}'
+            AND (
+                s.oid IS NOT NULL 
+                OR (ad.adbin IS NOT NULL AND pg_get_expr(ad.adbin, ad.adrelid) LIKE '%nextval(%')
+            )
+        """
+
+        sequences = []
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            
+            # Fetch default and identity sequences
+            cursor.execute(query_general)
+            for row in cursor.fetchall():
+                col_name = row[0]
+                seq_name = row[1]
+                seq_schema = row[2]
+                is_identity = row[3]
+                default_expr = row[4]
+                
+                used_in_default = False
+                if default_expr and 'nextval(' in default_expr:
+                    used_in_default = True
+                    if not seq_name:
+                        import re
+                        match = re.search(r"nextval\('([^']+)'", default_expr)
+                        if match:
+                            full_name = match.group(1).replace('"', '').replace("'::regclass", "")
+                            if '.' in full_name:
+                                seq_schema, seq_name = full_name.split('.', 1)
+                            else:
+                                seq_schema = schema_name
+                                seq_name = full_name
+                
+                if seq_name:
+                    sequences.append({
+                        'sequence_schema_name': seq_schema,
+                        'sequence_name': seq_name,
+                        'used_in_default': used_in_default,
+                        'used_in_identity': is_identity,
+                        'used_in_trigger': False,
+                        'trigger_name': None,
+                        'column_name': col_name
+                    })
+
+            # Fetch triggered sequences
+            query_triggers = f"""
+                SELECT tg.tgname, pg_get_triggerdef(tg.oid) as trigger_def
+                FROM pg_trigger tg
+                JOIN pg_class t ON tg.tgrelid = t.oid
+                JOIN pg_namespace n ON t.relnamespace = n.oid
+                WHERE n.nspname = '{schema_name}' AND t.relname = '{table_name}' AND tg.tgname NOT LIKE 'RI_ConstraintTrigger%'
+            """
+            cursor.execute(query_triggers)
+            for row in cursor.fetchall():
+                tgname = row[0]
+                tgdef = row[1]
+                if tgdef and 'nextval(' in tgdef:
+                    import re
+                    matches = re.findall(r"nextval\('([^']+)'", tgdef)
+                    for match in matches:
+                        full_name = match.replace('"', '').replace("'::regclass", "")
+                        if '.' in full_name:
+                            seq_schema, seq_name = full_name.split('.', 1)
+                        else:
+                            seq_schema = schema_name
+                            seq_name = full_name
+                        sequences.append({
+                            'sequence_schema_name': seq_schema,
+                            'sequence_name': seq_name,
+                            'used_in_default': False,
+                            'used_in_identity': False,
+                            'used_in_trigger': True,
+                            'trigger_name': tgname,
+                            'column_name': None
+                        })
+
+            cursor.close()
+            self.disconnect()
+            
+            # Deduplicate
+            unique_seqs = {}
+            for s in sequences:
+                key = (s['sequence_schema_name'], s['sequence_name'], s['column_name'], s['trigger_name'])
+                unique_seqs[key] = s
+            return list(unique_seqs.values())
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"postgresql_connector: fetch_mapping_target_sequences: Error fetching sequences for {schema_name}.{table_name}")
+            self.config_parser.print_log_message('ERROR', e)
+            return []
+
     def get_create_constraint_sql(self, settings):
         create_constraint_query = ''
         source_db_type = settings['source_db_type']

@@ -110,7 +110,9 @@ class Orchestrator:
             self.config_parser.print_log_message('INFO', "orchestrator: run: Mapping workflow")
 
             try:
+                self.mapping_drop_indexes_and_constraints()
                 self.mapping_copy_data()
+                self.mapping_create_indexes_and_constraints()
             except Exception as e:
                 self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': '', 'success': False, 'message': f'ERROR: {e}'})
                 self.handle_error(e, 'orchestration')
@@ -126,6 +128,81 @@ class Orchestrator:
         except Exception as e:
             pass
 
+
+    def mapping_drop_indexes_and_constraints(self):
+        self.config_parser.print_log_message('INFO', "orchestrator: mapping_drop_indexes_and_constraints: Starting global drop for constraints and indexes")
+        target_conn = self.load_connector('target')
+        target_conn.connect()
+        
+        tables = self.migrator_tables.fetch_all_tables(only_unfinished=False)
+        
+        # 1. Drop constraints
+        self.config_parser.print_log_message('INFO', "orchestrator: mapping_drop_indexes_and_constraints: Dropping foreign key constraints")
+        for table_row in tables:
+            table_data = self.migrator_tables.decode_table_row(table_row)
+            target_schema_name_eval = table_data['target_schema_name']
+            target_table_name_eval = self.config_parser.convert_names_case(table_data['target_table_name'])
+            target_constraints = self.migrator_tables.fetch_mapping_target_constraints(target_schema_name_eval, target_table_name_eval)
+            for constraint in target_constraints:
+                if constraint['constraint_type'] == 'FOREIGN KEY':
+                    self.config_parser.print_log_message('DEBUG', f"orchestrator: Dropping foreign key {constraint['constraint_name']} on {target_schema_name_eval}.{target_table_name_eval}")
+                    drop_sql = f'ALTER TABLE "{target_schema_name_eval}"."{target_table_name_eval}" DROP CONSTRAINT IF EXISTS "{constraint["constraint_name"]}"'
+                    target_conn.execute_query(drop_sql)
+                    
+        # 2. Drop indexes
+        self.config_parser.print_log_message('INFO', "orchestrator: mapping_drop_indexes_and_constraints: Dropping non-primary key indexes")
+        for table_row in tables:
+            table_data = self.migrator_tables.decode_table_row(table_row)
+            target_schema_name_eval = table_data['target_schema_name']
+            target_table_name_eval = self.config_parser.convert_names_case(table_data['target_table_name'])
+            target_indexes = self.migrator_tables.fetch_mapping_target_indexes(target_schema_name_eval, target_table_name_eval)
+            for index in target_indexes:
+                if not index.get('is_primary_key', False):
+                    self.config_parser.print_log_message('DEBUG', f"orchestrator: Dropping index {index['index_name']} on {target_schema_name_eval}.{target_table_name_eval}")
+                    drop_sql = f'DROP INDEX IF EXISTS "{target_schema_name_eval}"."{index["index_name"]}"'
+                    target_conn.execute_query(drop_sql)
+
+        target_conn.disconnect()
+
+    def mapping_create_indexes_and_constraints(self):
+        self.config_parser.print_log_message('INFO', "orchestrator: mapping_create_indexes_and_constraints: Starting global recreate for indexes and constraints")
+        target_conn = self.load_connector('target')
+        target_conn.connect()
+        
+        tables = self.migrator_tables.fetch_all_tables(only_unfinished=False)
+        
+        # 1. Recreate indexes
+        self.config_parser.print_log_message('INFO', "orchestrator: mapping_create_indexes_and_constraints: Recreating non-primary key indexes")
+        for table_row in tables:
+            table_data = self.migrator_tables.decode_table_row(table_row)
+            target_schema_name_eval = table_data['target_schema_name']
+            target_table_name_eval = self.config_parser.convert_names_case(table_data['target_table_name'])
+            target_indexes = self.migrator_tables.fetch_mapping_target_indexes(target_schema_name_eval, target_table_name_eval)
+            for index in target_indexes:
+                if not index.get('is_primary_key', False):
+                    self.config_parser.print_log_message('DEBUG', f"orchestrator: Recreating index {index['index_name']} on {target_schema_name_eval}.{target_table_name_eval}")
+                    try:
+                        target_conn.execute_query(index['index_def'])
+                    except Exception as ex:
+                        self.config_parser.print_log_message('ERROR', f"orchestrator: Error recreating index {index['index_name']}: {ex}")
+
+        # 2. Recreate constraints
+        self.config_parser.print_log_message('INFO', "orchestrator: mapping_create_indexes_and_constraints: Recreating foreign key constraints")
+        for table_row in tables:
+            table_data = self.migrator_tables.decode_table_row(table_row)
+            target_schema_name_eval = table_data['target_schema_name']
+            target_table_name_eval = self.config_parser.convert_names_case(table_data['target_table_name'])
+            target_constraints = self.migrator_tables.fetch_mapping_target_constraints(target_schema_name_eval, target_table_name_eval)
+            for constraint in target_constraints:
+                if constraint['constraint_type'] == 'FOREIGN KEY':
+                    self.config_parser.print_log_message('DEBUG', f"orchestrator: Recreating foreign key {constraint['constraint_name']} on {target_schema_name_eval}.{target_table_name_eval}")
+                    add_sql = f'ALTER TABLE "{target_schema_name_eval}"."{target_table_name_eval}" ADD CONSTRAINT "{constraint["constraint_name"]}" {constraint["constraint_def"]}'
+                    try:
+                        target_conn.execute_query(add_sql)
+                    except Exception as ex:
+                        self.config_parser.print_log_message('ERROR', f"orchestrator: Error recreating foreign key {constraint['constraint_name']}: {ex}")
+
+        target_conn.disconnect()
 
     def mapping_copy_data(self):
         self.migrator_tables.insert_main({'task_name': 'Orchestrator', 'subtask_name': 'mapping data copy'})
@@ -221,50 +298,8 @@ class Orchestrator:
                 'drop_unfinished_tables': False
             }
 
-            target_schema_name_eval = table_data['target_schema_name']
-            target_table_name_eval = self.config_parser.convert_names_case(table_data['target_table_name'])
-
-            # Drop foreign keys
-            target_constraints = self.migrator_tables.fetch_mapping_target_constraints(target_schema_name_eval, target_table_name_eval)
-            for constraint in target_constraints:
-                if constraint['constraint_type'] == 'FOREIGN KEY':
-                    part_name = f"drop foreign key {constraint['constraint_name']}"
-                    self.config_parser.print_log_message('INFO', f"orchestrator: mapping_data_worker: Worker {worker_id}: Dropping foreign key {constraint['constraint_name']}")
-                    drop_sql = f'ALTER TABLE "{target_schema_name_eval}"."{target_table_name_eval}" DROP CONSTRAINT IF EXISTS "{constraint["constraint_name"]}"'
-                    worker_target_connection.execute_query(drop_sql)
-
-            # Drop indexes
-            target_indexes = self.migrator_tables.fetch_mapping_target_indexes(target_schema_name_eval, target_table_name_eval)
-            for index in target_indexes:
-                if not index.get('is_primary_key', False):
-                    part_name = f"drop index {index['index_name']}"
-                    self.config_parser.print_log_message('INFO', f"orchestrator: mapping_data_worker: Worker {worker_id}: Dropping index {index['index_name']}")
-                    drop_sql = f'DROP INDEX IF EXISTS "{target_schema_name_eval}"."{index["index_name"]}"'
-                    worker_target_connection.execute_query(drop_sql)
-
             part_name = 'migrate_table'
             worker_source_connection.migrate_table(worker_target_connection, settings)
-
-            # Recreate indexes
-            for index in target_indexes:
-                if not index.get('is_primary_key', False):
-                    part_name = f"recreate index {index['index_name']}"
-                    self.config_parser.print_log_message('INFO', f"orchestrator: mapping_data_worker: Worker {worker_id}: Recreating index {index['index_name']}")
-                    try:
-                        worker_target_connection.execute_query(index['index_def'])
-                    except Exception as ex:
-                        self.config_parser.print_log_message('ERROR', f"orchestrator: mapping_data_worker: Worker {worker_id}: Error recreating index {index['index_name']}: {ex}")
-
-            # Recreate foreign keys
-            for constraint in target_constraints:
-                if constraint['constraint_type'] == 'FOREIGN KEY':
-                    part_name = f"recreate foreign key {constraint['constraint_name']}"
-                    self.config_parser.print_log_message('INFO', f"orchestrator: mapping_data_worker: Worker {worker_id}: Recreating foreign key {constraint['constraint_name']}")
-                    add_sql = f'ALTER TABLE "{target_schema_name_eval}"."{target_table_name_eval}" ADD CONSTRAINT "{constraint["constraint_name"]}" {constraint["constraint_def"]}'
-                    try:
-                        worker_target_connection.execute_query(add_sql)
-                    except Exception as ex:
-                        self.config_parser.print_log_message('ERROR', f"orchestrator: mapping_data_worker: Worker {worker_id}: Error recreating foreign key {constraint['constraint_name']}: {ex}")
 
             worker_source_connection.disconnect()
             worker_target_connection.disconnect()

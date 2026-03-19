@@ -1629,6 +1629,20 @@ class Planner:
                         'constraint_def': col_info['constraint_def']
                     })
 
+                target_sequences = self.target_connection.fetch_mapping_target_sequences(self.target_schema_name, target_t)
+                for seq_info in target_sequences:
+                    self.migrator_tables.insert_mapping_target_sequences({
+                        'target_schema_name': self.target_schema_name,
+                        'target_table_name': target_t,
+                        'sequence_schema_name': seq_info['sequence_schema_name'],
+                        'sequence_name': seq_info['sequence_name'],
+                        'used_in_default': seq_info['used_in_default'],
+                        'used_in_identity': seq_info['used_in_identity'],
+                        'used_in_trigger': seq_info['used_in_trigger'],
+                        'trigger_name': seq_info['trigger_name'],
+                        'column_name': seq_info['column_name']
+                    })
+
             self.migrator_tables.insert_tables({
                 'source_schema_name': self.source_schema_name,
                 'source_table_name': source_t,

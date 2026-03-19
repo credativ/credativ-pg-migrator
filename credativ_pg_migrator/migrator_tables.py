@@ -89,7 +89,7 @@ class MigratorTables:
         self.create_table_for_triggers()
         self.create_table_for_views()
         self.create_ddl_tables()
-        self.create_table_for_matching()
+        self.create_table_for_mapping()
 
     def prepare_data_types_substitution(self):
         # Drop table if exists
@@ -394,9 +394,9 @@ class MigratorTables:
         self.protocol_connection.execute_query(query)
         self.config_parser.print_log_message('DEBUG3', f"migrator_tables: create_protocol: Table {table_name} created in schema {self.protocol_schema}")
 
-    def create_table_for_matching(self):
+    def create_table_for_mapping(self):
         self.protocol_connection.execute_query(f"""
-            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."matching_tables" (
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."mapping_tables" (
                 id SERIAL PRIMARY KEY,
                 source_schema_name TEXT,
                 source_table_name TEXT,
@@ -408,7 +408,7 @@ class MigratorTables:
             );
         """)
         self.protocol_connection.execute_query(f"""
-            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."matching_columns" (
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."mapping_columns" (
                 id SERIAL PRIMARY KEY,
                 source_schema_name TEXT,
                 source_table_name TEXT,
@@ -423,11 +423,30 @@ class MigratorTables:
                 match_type TEXT NOT NULL
             );
         """)
-        self.config_parser.print_log_message('DEBUG3', f"migrator_tables: create_table_for_matching: Matching tables created in schema {self.protocol_schema}")
+        self.protocol_connection.execute_query(f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."mapping_target_indexes" (
+                id SERIAL PRIMARY KEY,
+                target_schema_name TEXT,
+                target_table_name TEXT,
+                index_name TEXT,
+                index_def TEXT
+            );
+        """)
+        self.protocol_connection.execute_query(f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."mapping_target_constraints" (
+                id SERIAL PRIMARY KEY,
+                target_schema_name TEXT,
+                target_table_name TEXT,
+                constraint_name TEXT,
+                constraint_type TEXT,
+                constraint_def TEXT
+            );
+        """)
+        self.config_parser.print_log_message('DEBUG3', f"migrator_tables: create_table_for_mapping: Mapping tables created in schema {self.protocol_schema}")
 
 
 
-    def insert_matching_tables(self, settings):
+    def insert_mapping_tables(self, settings):
         func_run_id = uuid.uuid4()
         source_schema_name = settings.get('source_schema_name')
         source_table_name = settings.get('source_table_name')
@@ -438,7 +457,7 @@ class MigratorTables:
         info = settings.get('info')
 
         query = f"""
-            INSERT INTO "{self.protocol_schema}"."matching_tables"
+            INSERT INTO "{self.protocol_schema}"."mapping_tables"
             (source_schema_name, source_table_name, target_schema_name, target_table_name, match_type, similarity_score, info)
             VALUES (%s, %s, %s, %s, %s, %s, %s)
             RETURNING id
@@ -451,10 +470,10 @@ class MigratorTables:
             cursor.close()
             return row[0] if row else None
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_matching_tables: ({func_run_id}): Error: {e}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_mapping_tables: ({func_run_id}): Error: {e}")
             raise
 
-    def insert_matching_columns(self, settings):
+    def insert_mapping_columns(self, settings):
         func_run_id = uuid.uuid4()
         source_schema_name = settings.get('source_schema_name')
         source_table_name = settings.get('source_table_name')
@@ -469,7 +488,7 @@ class MigratorTables:
         match_type = settings.get('match_type')
 
         query = f"""
-            INSERT INTO "{self.protocol_schema}"."matching_columns"
+            INSERT INTO "{self.protocol_schema}"."mapping_columns"
             (source_schema_name, source_table_name, source_column_name, target_schema_name, target_table_name, target_column_name, source_ordinal_number, target_ordinal_number, source_data_type, target_data_type, match_type)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
@@ -482,7 +501,56 @@ class MigratorTables:
             cursor.close()
             return row[0] if row else None
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_matching_columns: ({func_run_id}): Error: {e}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_mapping_columns: ({func_run_id}): Error: {e}")
+            raise
+
+    def insert_mapping_target_indexes(self, settings):
+        func_run_id = uuid.uuid4()
+        target_schema_name = settings.get('target_schema_name')
+        target_table_name = settings.get('target_table_name')
+        index_name = settings.get('index_name')
+        index_def = settings.get('index_def')
+
+        query = f"""
+            INSERT INTO "{self.protocol_schema}"."mapping_target_indexes"
+            (target_schema_name, target_table_name, index_name, index_def)
+            VALUES (%s, %s, %s, %s)
+            RETURNING id
+        """
+        params = (target_schema_name, target_table_name, index_name, index_def)
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+            return row[0] if row else None
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_mapping_target_indexes: ({func_run_id}): Error: {e}")
+            raise
+
+    def insert_mapping_target_constraints(self, settings):
+        func_run_id = uuid.uuid4()
+        target_schema_name = settings.get('target_schema_name')
+        target_table_name = settings.get('target_table_name')
+        constraint_name = settings.get('constraint_name')
+        constraint_type = settings.get('constraint_type')
+        constraint_def = settings.get('constraint_def')
+
+        query = f"""
+            INSERT INTO "{self.protocol_schema}"."mapping_target_constraints"
+            (target_schema_name, target_table_name, constraint_name, constraint_type, constraint_def)
+            VALUES (%s, %s, %s, %s, %s)
+            RETURNING id
+        """
+        params = (target_schema_name, target_table_name, constraint_name, constraint_type, constraint_def)
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+            return row[0] if row else None
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_mapping_target_constraints: ({func_run_id}): Error: {e}")
             raise
 
     def create_table_for_main(self):

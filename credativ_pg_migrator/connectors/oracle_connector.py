@@ -377,9 +377,11 @@ class OracleConnector(DatabaseConnector):
                         else:
                             select_columns_list.append(f'''"{col['column_name']}"''')
 
-                        insert_columns_list.append(f'''"{self.config_parser.convert_names_case(col['column_name'])}"''')
                         if col['data_type'].lower() not in ('clob', 'nclob', 'blob', 'bfile', 'long', 'long raw', 'xmltype'):
                             orderby_columns_list.append(f'''"{col['column_name']}"''')
+
+                    for order_num, col in target_columns.items():
+                        insert_columns_list.append(f'''"{self.config_parser.convert_names_case(col['column_name'])}"''')
 
                     if not orderby_columns_list:
                         first_valid_col = next(iter(source_columns.values()))['column_name']
@@ -808,7 +810,7 @@ class OracleConnector(DatabaseConnector):
                 aliased_table_name = row[2].strip() if row[2] else ''
                 alias_owner = row[3].strip() if row[3] else source_schema_name
                 alias_sql = f"CREATE SYNONYM {alias_owner}.{alias_name} FOR {aliased_schema_name}.{aliased_table_name}"
-                
+
                 aliases[order_num] = {
                     'id': order_num,
                     'alias_schema_name': source_schema_name,

@@ -102,17 +102,6 @@ class Orchestrator:
                 self.config_parser.print_log_message('INFO', "orchestrator: run: Orchestration complete.")
                 self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': '', 'success': True, 'message': 'finished OK'})
 
-                self.migrator_tables.print_migration_summary()
-
-                try:
-                    self.source_connection.disconnect()
-                except Exception as e:
-                    pass
-                try:
-                    self.target_connection.disconnect()
-                except Exception as e:
-                    pass
-
             except Exception as e:
                 self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': '', 'success': False, 'message': f'ERROR: {e}'})
                 self.handle_error(e, 'orchestration')
@@ -125,6 +114,17 @@ class Orchestrator:
             except Exception as e:
                 self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': '', 'success': False, 'message': f'ERROR: {e}'})
                 self.handle_error(e, 'orchestration')
+
+        self.migrator_tables.print_migration_summary()
+
+        try:
+            self.source_connection.disconnect()
+        except Exception as e:
+            pass
+        try:
+            self.target_connection.disconnect()
+        except Exception as e:
+            pass
 
 
     def mapping_copy_data(self):
@@ -182,20 +182,20 @@ class Orchestrator:
         worker_target_connection = None
         try:
             self.config_parser.print_log_message('INFO', f"orchestrator: mapping_data_worker: Worker {worker_id}: Processing table {table_data['target_table_name']}")
-            
+
             worker_source_connection = self.load_connector('source')
             worker_target_connection = self.load_connector('target')
-            
+
             part_name = 'connect source and target'
             worker_source_connection.connect()
             worker_target_connection.connect()
-            
+
             if getattr(worker_source_connection, 'session_settings', None):
                 worker_source_connection.execute_query(worker_source_connection.session_settings)
-            
+
             if getattr(worker_target_connection, 'session_settings', None):
                 worker_target_connection.execute_query(worker_target_connection.session_settings)
-            
+
             chunk_size = -1
             try:
                 chunk_size = self.config_parser.get_chunk_size()
@@ -220,15 +220,15 @@ class Orchestrator:
                 'resume_after_crash': False,
                 'drop_unfinished_tables': False
             }
-            
+
             part_name = 'migrate_table'
             worker_source_connection.migrate_table(worker_target_connection, settings)
-            
+
             worker_source_connection.disconnect()
             worker_target_connection.disconnect()
-            
+
             return True
-            
+
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"orchestrator: mapping_data_worker: Worker {worker_id}: Error during {part_name} -> {e}")
             return False

@@ -1543,14 +1543,19 @@ class Planner:
                 'stats': pair.get('stats', {})
             })
 
-            self.migrator_tables.insert_matching_tables({
-                'source_schema_name': self.source_schema_name,
-                'source_table_name': source_t,
-                'target_schema_name': self.target_schema_name,
-                'target_table_name': target_t,
-                'match_type': pair['method'],
-                'similarity_score': pair['score'],
-                'info': info_json
+            # Define variables for the new structure
+            source_schema_name = self.source_schema_name
+            target_schema_name = self.target_schema_name
+            mapped_table = pair # Assuming 'pair' itself represents the mapped table info
+
+            self.migrator_tables.insert_mapping_tables({
+                'source_schema_name': source_schema_name,
+                'source_table_name': source_t, # Use source_t from the loop
+                'target_schema_name': target_schema_name,
+                'target_table_name': target_t, # Use target_t from the loop
+                'match_type': mapped_table['method'], # Use 'method' from 'pair'
+                'similarity_score': mapped_table.get('score', 0.0), # Use 'score' from 'pair'
+                'info': info_json # Use the already prepared info_json
             })
 
             col_settings = {
@@ -1569,18 +1574,25 @@ class Planner:
                 source_c = cpair['source_column']
                 target_c = cpair['target_column']
 
-                self.migrator_tables.insert_matching_columns({
-                    'source_schema_name': self.source_schema_name,
-                    'source_table_name': source_t,
-                    'source_column_name': source_c['name'],
-                    'target_schema_name': self.target_schema_name,
-                    'target_table_name': target_t,
-                    'target_column_name': target_c['name'],
-                    'source_ordinal_number': source_c.get('ordinal_position', 0),
-                    'target_ordinal_number': target_c.get('ordinal_position', 0),
-                    'source_data_type': source_c.get('data_type', ''),
-                    'target_data_type': target_c.get('data_type', ''),
-                    'match_type': cpair['method']
+                # Define variables for the new structure
+                source_column_name = source_c['name']
+                target_column_name = target_c['name']
+                source_col = source_c
+                target_col = target_c
+                match_type = cpair['method']
+
+                self.migrator_tables.insert_mapping_columns({
+                    'source_schema_name': source_schema_name,
+                    'source_table_name': source_t, # Use source_t from the outer loop
+                    'source_column_name': source_column_name,
+                    'target_schema_name': target_schema_name,
+                    'target_table_name': target_t, # Use target_t from the outer loop
+                    'target_column_name': target_column_name,
+                    'source_ordinal_number': source_col.get('ordinal_position', 0) if source_col else 0,
+                    'target_ordinal_number': target_col.get('ordinal_position', 0) if target_col else 0,
+                    'source_data_type': source_col.get('data_type', '') if source_col else '',
+                    'target_data_type': target_col.get('data_type', '') if target_col else '',
+                    'match_type': match_type
                 })
 
                 source_columns_dict[idx] = source_c

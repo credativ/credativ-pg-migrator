@@ -137,15 +137,15 @@ class Orchestrator:
         tables = self.migrator_tables.fetch_all_tables(only_unfinished=False)
         
         # 1. Drop constraints
-        self.config_parser.print_log_message('INFO', "orchestrator: mapping_drop_indexes_and_constraints: Dropping foreign key constraints")
+        self.config_parser.print_log_message('INFO', "orchestrator: mapping_drop_indexes_and_constraints: Dropping non-primary key constraints")
         for table_row in tables:
             table_data = self.migrator_tables.decode_table_row(table_row)
             target_schema_name_eval = table_data['target_schema_name']
             target_table_name_eval = self.config_parser.convert_names_case(table_data['target_table_name'])
             target_constraints = self.migrator_tables.fetch_mapping_target_constraints(target_schema_name_eval, target_table_name_eval)
             for constraint in target_constraints:
-                if constraint['constraint_type'] == 'FOREIGN KEY':
-                    self.config_parser.print_log_message('DEBUG', f"orchestrator: Dropping foreign key {constraint['constraint_name']} on {target_schema_name_eval}.{target_table_name_eval}")
+                if constraint['constraint_type'] != 'PRIMARY KEY':
+                    self.config_parser.print_log_message('DEBUG', f"orchestrator: Dropping constraint {constraint['constraint_name']} on {target_schema_name_eval}.{target_table_name_eval}")
                     drop_sql = f'ALTER TABLE "{target_schema_name_eval}"."{target_table_name_eval}" DROP CONSTRAINT IF EXISTS "{constraint["constraint_name"]}"'
                     target_conn.execute_query(drop_sql)
                     
@@ -177,9 +177,12 @@ class Orchestrator:
             table_data = self.migrator_tables.decode_table_row(table_row)
             target_schema_name_eval = table_data['target_schema_name']
             target_table_name_eval = self.config_parser.convert_names_case(table_data['target_table_name'])
+            target_constraints = self.migrator_tables.fetch_mapping_target_constraints(target_schema_name_eval, target_table_name_eval)
+            constraint_index_names = {c['constraint_name'] for c in target_constraints if c['constraint_type'] in ('UNIQUE', 'EXCLUSION')}
+
             target_indexes = self.migrator_tables.fetch_mapping_target_indexes(target_schema_name_eval, target_table_name_eval)
             for index in target_indexes:
-                if not index.get('is_primary_key', False):
+                if not index.get('is_primary_key', False) and index['index_name'] not in constraint_index_names:
                     self.config_parser.print_log_message('DEBUG', f"orchestrator: Recreating index {index['index_name']} on {target_schema_name_eval}.{target_table_name_eval}")
                     try:
                         target_conn.execute_query(index['index_def'])
@@ -187,20 +190,20 @@ class Orchestrator:
                         self.config_parser.print_log_message('ERROR', f"orchestrator: Error recreating index {index['index_name']}: {ex}")
 
         # 2. Recreate constraints
-        self.config_parser.print_log_message('INFO', "orchestrator: mapping_create_indexes_and_constraints: Recreating foreign key constraints")
+        self.config_parser.print_log_message('INFO', "orchestrator: mapping_create_indexes_and_constraints: Recreating non-primary key constraints")
         for table_row in tables:
             table_data = self.migrator_tables.decode_table_row(table_row)
             target_schema_name_eval = table_data['target_schema_name']
             target_table_name_eval = self.config_parser.convert_names_case(table_data['target_table_name'])
             target_constraints = self.migrator_tables.fetch_mapping_target_constraints(target_schema_name_eval, target_table_name_eval)
             for constraint in target_constraints:
-                if constraint['constraint_type'] == 'FOREIGN KEY':
-                    self.config_parser.print_log_message('DEBUG', f"orchestrator: Recreating foreign key {constraint['constraint_name']} on {target_schema_name_eval}.{target_table_name_eval}")
+                if constraint['constraint_type'] != 'PRIMARY KEY':
+                    self.config_parser.print_log_message('DEBUG', f"orchestrator: Recreating constraint {constraint['constraint_name']} on {target_schema_name_eval}.{target_table_name_eval}")
                     add_sql = f'ALTER TABLE "{target_schema_name_eval}"."{target_table_name_eval}" ADD CONSTRAINT "{constraint["constraint_name"]}" {constraint["constraint_def"]}'
                     try:
                         target_conn.execute_query(add_sql)
                     except Exception as ex:
-                        self.config_parser.print_log_message('ERROR', f"orchestrator: Error recreating foreign key {constraint['constraint_name']}: {ex}")
+                        self.config_parser.print_log_message('ERROR', f"orchestrator: Error recreating constraint {constraint['constraint_name']}: {ex}")
 
         target_conn.disconnect()
 

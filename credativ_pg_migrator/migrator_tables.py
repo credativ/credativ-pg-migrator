@@ -553,6 +553,40 @@ class MigratorTables:
             self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_mapping_target_constraints: ({func_run_id}): Error: {e}")
             raise
 
+    def fetch_mapping_target_indexes(self, target_schema_name, target_table_name):
+        query = f"""
+            SELECT index_name, index_def
+            FROM "{self.protocol_schema}"."mapping_target_indexes"
+            WHERE target_schema_name = %s AND target_table_name = %s
+        """
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, (target_schema_name, target_table_name))
+            rows = cursor.fetchall()
+            cursor.close()
+            return [{'index_name': row[0], 'index_def': row[1]} for row in rows]
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: fetch_mapping_target_indexes: Error fetching for {target_schema_name}.{target_table_name}")
+            self.config_parser.print_log_message('ERROR', e)
+            return []
+
+    def fetch_mapping_target_constraints(self, target_schema_name, target_table_name):
+        query = f"""
+            SELECT constraint_name, constraint_type, constraint_def
+            FROM "{self.protocol_schema}"."mapping_target_constraints"
+            WHERE target_schema_name = %s AND target_table_name = %s
+        """
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, (target_schema_name, target_table_name))
+            rows = cursor.fetchall()
+            cursor.close()
+            return [{'constraint_name': row[0], 'constraint_type': row[1], 'constraint_def': row[2]} for row in rows]
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: fetch_mapping_target_constraints: Error fetching for {target_schema_name}.{target_table_name}")
+            self.config_parser.print_log_message('ERROR', e)
+            return []
+
     def create_table_for_main(self):
         table_name = self.config_parser.get_protocol_name_main()
         self.protocol_connection.execute_query(self.drop_table_sql.format(protocol_schema=self.protocol_schema, table_name=table_name))

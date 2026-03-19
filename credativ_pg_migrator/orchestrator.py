@@ -264,7 +264,10 @@ class Orchestrator:
                 for col_key in keys_sorted:
                     col_data_type = target_columns[col_key].get('data_type', '')
                     if col_data_type:
-                        insert_values.append(f'%s::{col_data_type}')
+                        if col_data_type.lower() in ('boolean', 'bool'):
+                            insert_values.append(f'cast(%s as text)::{col_data_type}')
+                        else:
+                            insert_values.append(f'%s::{col_data_type}')
                     else:
                         insert_values.append('%s')
                 table_data['insert_values'] = ', '.join(insert_values)

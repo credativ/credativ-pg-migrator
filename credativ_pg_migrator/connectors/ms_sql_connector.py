@@ -1459,6 +1459,7 @@ $$ LANGUAGE plpgsql;
                             'worker_id': worker_id,
                             'migrator_tables': migrator_tables,
                             'insert_columns': insert_columns,
+                            'insert_values': settings.get('insert_values'),
                         })
                         total_inserted_rows += inserted_rows
                         inserting_end_time = time.time()

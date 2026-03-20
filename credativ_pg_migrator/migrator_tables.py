@@ -3211,6 +3211,7 @@ class MigratorTables:
             self.config_parser.print_log_message('ERROR', f"migrator_tables: print_mapping_migration_summary: Error printing mapping summary.")
             self.config_parser.print_log_message('ERROR', e)
 
+        self.print_summary({'objects': 'Tables', 'migrator_table_name': self.config_parser.get_protocol_name_tables(), 'additional_columns': None})
         self.print_data_migration_summary()
 
         if self.config_parser.is_dry_run():

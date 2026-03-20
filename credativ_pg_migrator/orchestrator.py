@@ -275,6 +275,31 @@ class Orchestrator:
                         insert_values.append('%s')
                 table_data['insert_values'] = ', '.join(insert_values)
                 migrate_tables.append(table_data)
+            else:
+                if table_data.get('source_table_rows', 0) == 0:
+                    protocol_id = self.migrator_tables.insert_data_migration({
+                        'worker_id': None,
+                        'source_table_id': table_data['source_table_id'],
+                        'source_schema_name': table_data['source_schema_name'],
+                        'source_table_name': table_data['source_table_name'],
+                        'target_schema_name': table_data['target_schema_name'],
+                        'target_table_name': table_data['target_table_name'],
+                        'source_table_rows': 0,
+                        'target_table_rows': 0,
+                        })
+                    self.migrator_tables.update_data_migration_status({
+                        'row_id': protocol_id,
+                        'success': True,
+                        'message': 'Skipped (0 rows)',
+                        'target_table_rows': 0,
+                        'batch_count': 0,
+                        'shortest_batch_seconds': 0,
+                        'longest_batch_seconds': 0,
+                        'average_batch_seconds': 0,
+                    })
+                    self.migrator_tables.update_table_status({'row_id': table_data['id'], 'success': True, 'message': 'mapped data OK (0 rows)'})
+                else:
+                    self.migrator_tables.update_table_status({'row_id': table_data['id'], 'success': True, 'message': f"mapped data skipped (source_rows={table_data.get('source_table_rows', 0)}, target_rows={table_data.get('target_table_rows', -1)})"})
 
         if len(migrate_tables) > 0:
             with concurrent.futures.ThreadPoolExecutor(max_workers=workers_requested) as executor:
@@ -359,7 +384,19 @@ class Orchestrator:
             }
 
             part_name = 'migrate_table'
-            worker_source_connection.migrate_table(worker_target_connection, settings)
+            rows_migrated = 0
+            while True:
+                if self.config_parser.pause_migration_fired():
+                    self.config_parser.print_log_message('INFO', f"orchestrator: mapping_data_worker: Worker {worker_id}: Migration paused for table {table_data['target_table_name']}.")
+                    self.config_parser.wait_for_resume()
+                    self.config_parser.print_log_message('INFO', f"orchestrator: mapping_data_worker: Worker {worker_id}: Resuming migration for table {table_data['target_table_name']}.")
+                
+                migration_stats = worker_source_connection.migrate_table(worker_target_connection, settings)
+                
+                rows_migrated += migration_stats.get('rows_migrated', 0)
+                if migration_stats.get('finished', True):
+                    break
+                settings['chunk_number'] += 1
 
             worker_source_connection.disconnect()
 

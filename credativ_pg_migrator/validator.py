@@ -11,7 +11,7 @@ class Validator:
         self.config_parser = config_parser
         self.migrator_tables = MigratorTables(self.config_parser)
         
-        log_file = self.config_parser.get_validation_log_file()
+        log_file = self.config_parser.get_log_file()
         self.val_logger = MigratorLogger(log_file)
         self.val_logger.logger.info("Initializing Data Validator...")
 

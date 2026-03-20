@@ -533,9 +533,6 @@ class ConfigParser:
     def get_validator_config(self):
         return self.config.get('validator', {})
 
-    def get_validation_log_file(self):
-        return self.get_validator_config().get('validation_log_file', 'validator.log')
-
     def get_validator_workers(self):
         return int(self.get_validator_config().get('workers', 4))
 

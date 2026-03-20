@@ -389,7 +389,6 @@ data_migration_limitation:
 # - check_random_sample: Validates individual random row arrays querying mapped precise primary keys bridging origin to destination
 # - check_lob_sizes: Validates exact byte size allocations for migrated LOB (BLOB/CLOB) instances on the sampled rows
 validator:
-  validation_log_file: "./validation.log"  # Log file output for the validation workflow isolated from main migrator log
   workers: 4                               # Number of parallel worker threads used simultaneously for table evaluations (default is 4)
   check_row_counts: true                   # Simply compares total row counts between corresponding source and target tables
   check_table_checksums: true              # Computes explicit hashes containing aggregates of string-casted structures across the entire tables

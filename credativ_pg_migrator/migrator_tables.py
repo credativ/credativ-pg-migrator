@@ -431,6 +431,7 @@ class MigratorTables:
                 index_name TEXT,
                 index_def TEXT,
                 is_primary_key BOOLEAN DEFAULT FALSE,
+                dropped BOOLEAN,
                 success BOOLEAN,
                 message TEXT
             );
@@ -443,6 +444,7 @@ class MigratorTables:
                 constraint_name TEXT,
                 constraint_type TEXT,
                 constraint_def TEXT,
+                dropped BOOLEAN,
                 success BOOLEAN,
                 message TEXT
             );
@@ -604,7 +606,7 @@ class MigratorTables:
 
     def fetch_mapping_target_indexes(self, target_schema_name, target_table_name):
         query = f"""
-            SELECT index_name, index_def, is_primary_key
+            SELECT id, index_name, index_def, is_primary_key
             FROM "{self.protocol_schema}"."mapping_target_indexes"
             WHERE target_schema_name = %s AND target_table_name = %s
         """
@@ -613,7 +615,7 @@ class MigratorTables:
             cursor.execute(query, (target_schema_name, target_table_name))
             rows = cursor.fetchall()
             cursor.close()
-            return [{'index_name': row[0], 'index_def': row[1], 'is_primary_key': row[2]} for row in rows]
+            return [{'id': row[0], 'index_name': row[1], 'index_def': row[2], 'is_primary_key': row[3]} for row in rows]
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"migrator_tables: fetch_mapping_target_indexes: Error fetching for {target_schema_name}.{target_table_name}")
             self.config_parser.print_log_message('ERROR', e)
@@ -646,7 +648,7 @@ class MigratorTables:
 
     def fetch_mapping_target_constraints(self, target_schema_name, target_table_name):
         query = f"""
-            SELECT constraint_name, constraint_type, constraint_def
+            SELECT id, constraint_name, constraint_type, constraint_def
             FROM "{self.protocol_schema}"."mapping_target_constraints"
             WHERE target_schema_name = %s AND target_table_name = %s
         """
@@ -655,10 +657,10 @@ class MigratorTables:
             cursor.execute(query, (target_schema_name, target_table_name))
             rows = cursor.fetchall()
             cursor.close()
-            return [self.decode_mapping_target_constraint_row(row) for row in rows]
+            return [{'id': row[0], 'constraint_name': row[1], 'constraint_type': row[2], 'constraint_def': row[3]} for row in rows]
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"migrator_tables: fetch_mapping_target_constraints: Error fetching for {target_schema_name}.{target_table_name}")
-            self.config_parser.print_log_message('ERROR', f"migrator_tables: fetch_mapping_target_constraints: ({func_run_id}): Error: {e}")
+            self.config_parser.print_log_message('ERROR', e)
             return []
 
     def update_mapping_target_index_status(self, settings):
@@ -707,6 +709,54 @@ class MigratorTables:
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"migrator_tables: update_mapping_target_constraint_status: ({func_run_id}): Error updating status for constraint row_id {row_id}.")
             self.config_parser.print_log_message('ERROR', f"migrator_tables: update_mapping_target_constraint_status: ({func_run_id}): Exception: {e}")
+            raise
+
+    def update_mapping_target_index_drop_status(self, settings):
+        func_run_id = uuid.uuid4()
+        row_id = settings['row_id']
+        dropped = settings['dropped']
+        message = settings['message']
+
+        query = f"""
+            UPDATE "{self.protocol_schema}"."mapping_target_indexes"
+            SET dropped = %s,
+            message = %s
+            WHERE id = %s
+            RETURNING *
+        """
+        params = (dropped, message, row_id)
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_mapping_target_index_drop_status: ({func_run_id}): Error updating dropped status for index row_id {row_id}.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_mapping_target_index_drop_status: ({func_run_id}): Exception: {e}")
+            raise
+
+    def update_mapping_target_constraint_drop_status(self, settings):
+        func_run_id = uuid.uuid4()
+        row_id = settings['row_id']
+        dropped = settings['dropped']
+        message = settings['message']
+
+        query = f"""
+            UPDATE "{self.protocol_schema}"."mapping_target_constraints"
+            SET dropped = %s,
+            message = %s
+            WHERE id = %s
+            RETURNING *
+        """
+        params = (dropped, message, row_id)
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_mapping_target_constraint_drop_status: ({func_run_id}): Error updating dropped status for constraint row_id {row_id}.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_mapping_target_constraint_drop_status: ({func_run_id}): Exception: {e}")
             raise
 
     def create_table_for_main(self):
@@ -3218,6 +3268,50 @@ class MigratorTables:
         if self.config_parser.is_dry_run():
             self.config_parser.print_log_message('INFO', "migrator_tables: print_migration_summary: ! Dry run mode enabled. No migration performed !")
 
+    def __print_mapping_metric_summary(self, object_name, table_name, is_index=False):
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            self.config_parser.print_log_message('INFO', f"migrator_tables: print_mapping_migration_summary: {object_name} summary:")
+            
+            cursor.execute(f'SELECT count(*) FROM "{self.protocol_schema}"."{table_name}"')
+            total = cursor.fetchone()[0]
+            self.config_parser.print_log_message('INFO', f"migrator_tables: print_mapping_migration_summary:     Found on target database: {total}")
+
+            if is_index:
+                cursor.execute(f'SELECT count(*) FROM "{self.protocol_schema}"."{table_name}" WHERE is_primary_key = TRUE')
+                pks = cursor.fetchone()[0]
+                if pks > 0:
+                    self.config_parser.print_log_message('INFO', f"migrator_tables: print_mapping_migration_summary:     Primary Keys (kept): {pks}")
+            else:
+                cursor.execute(f'SELECT count(*) FROM "{self.protocol_schema}"."{table_name}" WHERE constraint_type = \'PRIMARY KEY\'')
+                pks = cursor.fetchone()[0]
+                if pks > 0:
+                    self.config_parser.print_log_message('INFO', f"migrator_tables: print_mapping_migration_summary:         (\'PRIMARY KEY\',): {pks}")
+
+            cursor.execute(f'SELECT dropped, count(*) FROM "{self.protocol_schema}"."{table_name}" WHERE ' + ("not is_primary_key" if is_index else "constraint_type != 'PRIMARY KEY'") + ' GROUP BY dropped ORDER BY dropped')
+            for row in cursor.fetchall():
+                if row[0] is True:
+                    self.config_parser.print_log_message('INFO', f"migrator_tables: print_mapping_migration_summary:     successfully dropped: {row[1]}")
+                elif row[0] is False:
+                    self.config_parser.print_log_message('INFO', f"migrator_tables: print_mapping_migration_summary:     error dropping: {row[1]}")
+                else:
+                    self.config_parser.print_log_message('INFO', f"migrator_tables: print_mapping_migration_summary:     drop unknown status: {row[1]}")
+
+            cursor.execute(f'SELECT success, count(*) FROM "{self.protocol_schema}"."{table_name}" WHERE ' + ("not is_primary_key" if is_index else "constraint_type != 'PRIMARY KEY'") + ' GROUP BY success ORDER BY success')
+            for row in cursor.fetchall():
+                if row[0] is True:
+                    self.config_parser.print_log_message('INFO', f"migrator_tables: print_mapping_migration_summary:     successfully recreated: {row[1]}")
+                elif row[0] is False:
+                    self.config_parser.print_log_message('INFO', f"migrator_tables: print_mapping_migration_summary:     error recreating: {row[1]}")
+                else:
+                    msg = "recreate skipped (handled by constraint)" if is_index else "recreate unknown status"
+                    self.config_parser.print_log_message('INFO', f"migrator_tables: print_mapping_migration_summary:     {msg}: {row[1]}")
+
+            cursor.close()
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: print_mapping_migration_summary: Error printing {object_name} summary.")
+            self.config_parser.print_log_message('ERROR', e)
+
     def print_mapping_migration_summary(self):
         self.config_parser.print_log_message('INFO', "migrator_tables: print_mapping_migration_summary: Mapping Migration stats:")
         self.config_parser.print_log_message('INFO', f"migrator_tables: print_mapping_migration_summary: Source database: {self.config_parser.get_source_db_name()}, schema: {self.config_parser.get_source_owner()} ({self.config_parser.get_source_db_type()})")
@@ -3251,8 +3345,8 @@ class MigratorTables:
             self.config_parser.print_log_message('ERROR', f"migrator_tables: print_mapping_migration_summary: Error printing mapping summary.")
             self.config_parser.print_log_message('ERROR', e)
 
-        self.print_summary({'objects': 'Target Indexes', 'migrator_table_name': 'mapping_target_indexes', 'additional_columns': None})
-        self.print_summary({'objects': 'Target Constraints', 'migrator_table_name': 'mapping_target_constraints', 'additional_columns': 'constraint_type'})
+        self.__print_mapping_metric_summary('Target Indexes', 'mapping_target_indexes', is_index=True)
+        self.__print_mapping_metric_summary('Target Constraints', 'mapping_target_constraints', is_index=False)
 
         try:
             cursor = self.protocol_connection.connection.cursor()
@@ -3264,6 +3358,8 @@ class MigratorTables:
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"migrator_tables: print_mapping_migration_summary: Error printing mapping summary sequences.")
             self.config_parser.print_log_message('ERROR', e)
+
+        self.print_summary({'objects': 'Sequences', 'migrator_table_name': self.config_parser.get_protocol_name_sequences(), 'additional_columns': None})
 
         self.print_summary({'objects': 'Tables', 'migrator_table_name': self.config_parser.get_protocol_name_tables(), 'additional_columns': None})
         self.print_data_migration_summary()

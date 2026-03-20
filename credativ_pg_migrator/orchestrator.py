@@ -151,7 +151,11 @@ class Orchestrator:
                 if constraint['constraint_type'] != 'PRIMARY KEY':
                     self.config_parser.print_log_message('DEBUG', f"orchestrator: Dropping constraint {constraint['constraint_name']} on {target_schema_name_eval}.{target_table_name_eval}")
                     drop_sql = f'ALTER TABLE "{target_schema_name_eval}"."{target_table_name_eval}" DROP CONSTRAINT IF EXISTS "{constraint["constraint_name"]}"'
-                    target_conn.execute_query(drop_sql)
+                    try:
+                        target_conn.execute_query(drop_sql)
+                        self.migrator_tables.update_mapping_target_constraint_drop_status({'row_id': constraint['id'], 'dropped': True, 'message': 'dropped OK'})
+                    except Exception as ex:
+                        self.migrator_tables.update_mapping_target_constraint_drop_status({'row_id': constraint['id'], 'dropped': False, 'message': f'ERROR: {ex}'})
                     
         # 2. Drop indexes
         self.config_parser.print_log_message('INFO', "orchestrator: mapping_drop_indexes_and_constraints: Dropping non-primary key indexes")
@@ -164,7 +168,11 @@ class Orchestrator:
                 if not index.get('is_primary_key', False):
                     self.config_parser.print_log_message('DEBUG', f"orchestrator: Dropping index {index['index_name']} on {target_schema_name_eval}.{target_table_name_eval}")
                     drop_sql = f'DROP INDEX IF EXISTS "{target_schema_name_eval}"."{index["index_name"]}"'
-                    target_conn.execute_query(drop_sql)
+                    try:
+                        target_conn.execute_query(drop_sql)
+                        self.migrator_tables.update_mapping_target_index_drop_status({'row_id': index['id'], 'dropped': True, 'message': 'dropped OK'})
+                    except Exception as ex:
+                        self.migrator_tables.update_mapping_target_index_drop_status({'row_id': index['id'], 'dropped': False, 'message': f'ERROR: {ex}'})
 
         target_conn.disconnect()
 

@@ -1476,16 +1476,19 @@ class Planner:
 
         self.config_parser.print_log_message('INFO', "planner: mapping_match_tables: Fetching source/target metadata...")
         for _, t in source_tables_raw.items():
+            self.config_parser.print_log_message('DEBUG3', f"planner: mapping_match_tables: Fetching columns for source table: {t['table_name']}")
             cols = self.source_connection.fetch_table_columns({'table_schema': self.source_schema_name, 'table_name': t['table_name']})
             source_cols_raw[t['table_name']] = cols
             source_columns_map[t['table_name']] = [{'name': c['column_name'], **c} for c in cols.values()]
 
         for _, t in target_tables_raw.items():
+            self.config_parser.print_log_message('DEBUG3', f"planner: mapping_match_tables: Fetching columns for target table: {t['table_name']}")
             cols = self.target_connection.fetch_table_columns({'table_schema': self.target_schema_name, 'table_name': t['table_name']})
             target_cols_raw[t['table_name']] = cols
             target_columns_map[t['table_name']] = [{'name': c['column_name'], **c} for c in cols.values()]
 
         settings = {
+            'config_parser': self.config_parser,
             'source_tables': source_tables,
             'target_tables': target_tables,
             'source_internal': {},
@@ -1500,6 +1503,7 @@ class Planner:
 
         try:
             query = f"SELECT name, table_name, column_name FROM {self.source_schema_name}.nscale_al_ixpropdef"
+            self.config_parser.print_log_message('DEBUG', f"planner: mapping_match_tables: Fetching source internal mappings using query: {query}")
             self.source_connection.connect()
             cursor = self.source_connection.connection.cursor()
             cursor.execute(query)
@@ -1511,11 +1515,13 @@ class Planner:
                     settings['source_internal'][prop_name] = f"{t_name}.{c_name}"
             cursor.close()
             self.source_connection.disconnect()
-        except:
-            pass
+            self.config_parser.print_log_message('DEBUG', f"planner: mapping_match_tables: Loaded {len(settings['source_internal'])} source internal mapping properties.")
+        except Exception as e:
+            self.config_parser.print_log_message('DEBUG', f"planner: mapping_match_tables: Failed to fetch source internal mappings: {e}")
 
         try:
             query = f"SELECT name, table_name, column_name FROM {self.target_schema_name}.nscale_al_ixpropdef"
+            self.config_parser.print_log_message('DEBUG', f"planner: mapping_match_tables: Fetching target internal mappings using query: {query}")
             self.target_connection.connect()
             cursor = self.target_connection.connection.cursor()
             cursor.execute(query)
@@ -1527,8 +1533,9 @@ class Planner:
                     settings['target_internal'][prop_name] = f"{t_name}.{c_name}"
             cursor.close()
             self.target_connection.disconnect()
-        except:
-            pass
+            self.config_parser.print_log_message('DEBUG', f"planner: mapping_match_tables: Loaded {len(settings['target_internal'])} target internal mapping properties.")
+        except Exception as e:
+            self.config_parser.print_log_message('DEBUG', f"planner: mapping_match_tables: Failed to fetch target internal mappings: {e}")
 
         match_result = match_schemas.match_tables(settings)
         self.config_parser.print_log_message('INFO', f"planner: mapping_match_tables: Found {len(match_result['matched_pairs'])} matched tables.")
@@ -1536,6 +1543,7 @@ class Planner:
         for pair in match_result['matched_pairs']:
             source_t = pair['source_table']
             target_t = pair['target_table']
+            self.config_parser.print_log_message('DEBUG', f"planner: mapping_match_tables: Processing paired tables '{source_t}' -> '{target_t}' (method: {pair['method']})")
 
             info_json = json.dumps({
                 'details': pair['details'],
@@ -1559,6 +1567,7 @@ class Planner:
             })
 
             col_settings = {
+                'config_parser': self.config_parser,
                 'source_columns': source_columns_map[source_t],
                 'target_columns': target_columns_map[target_t],
                 'column_prefixes': settings['column_prefixes'],
@@ -1566,6 +1575,7 @@ class Planner:
                 'normalization_settings': settings['normalization_settings']
             }
             col_match_res = match_schemas.match_columns(col_settings)
+            self.config_parser.print_log_message('DEBUG', f"planner: mapping_match_tables: Matched {len(col_match_res['matched_columns'])} columns for pair '{source_t}' -> '{target_t}'")
 
             source_columns_dict = {}
             target_columns_dict = {}
@@ -1600,15 +1610,18 @@ class Planner:
 
             source_t_info = next((v for v in source_tables_raw.values() if v['table_name'] == source_t), {})
 
+            self.config_parser.print_log_message('DEBUG3', f"planner: mapping_match_tables: Fetching source rows count for '{source_t}'")
             self.source_connection.connect()
             source_table_rows = self.source_connection.get_rows_count(self.source_schema_name, source_t)
             self.source_connection.disconnect()
 
+            self.config_parser.print_log_message('DEBUG3', f"planner: mapping_match_tables: Fetching target rows count for '{target_t}'")
             self.target_connection.connect()
             target_table_rows = self.target_connection.get_rows_count(self.target_schema_name, target_t)
             self.target_connection.disconnect()
 
             if self.config_parser.get_target_db_type() == 'postgresql':
+                self.config_parser.print_log_message('DEBUG', f"planner: mapping_match_tables: Fetching target indexes, constraints and sequences for PG table '{target_t}'")
                 target_indexes = self.target_connection.fetch_mapping_target_indexes(self.target_schema_name, target_t)
                 for idx_info in target_indexes:
                     self.migrator_tables.insert_mapping_target_indexes({

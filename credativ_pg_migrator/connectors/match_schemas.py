@@ -79,6 +79,9 @@ def calculate_enhanced_jaccard(source_cols: List[Dict], target_cols: List[Dict],
     return score
 
 def match_tables(settings: dict) -> dict:
+    config_parser = settings.get('config_parser')
+    if config_parser: config_parser.print_log_message('DEBUG', "match_schemas: match_tables: Starting table matching process.")
+
     source_tables = settings.get('source_tables', [])
     target_tables = settings.get('target_tables', [])
     source_internal = settings.get('source_internal', {})
@@ -95,6 +98,7 @@ def match_tables(settings: dict) -> dict:
     matched_target_set = set()
 
     # 1. Internal Mapping Analysis
+    if config_parser: config_parser.print_log_message('DEBUG3', "match_schemas: match_tables: Analyzing internal table mappings...")
     internal_table_map = defaultdict(lambda: defaultdict(list))
     for prop, source_loc in source_internal.items():
         if prop in target_internal:
@@ -128,6 +132,8 @@ def match_tables(settings: dict) -> dict:
         target_cols = target_columns_map.get(target_t, [])
         stats['jaccard'] = calculate_enhanced_jaccard(source_cols, target_cols, column_prefixes, column_norm_rules, norm_settings)
 
+        if config_parser: config_parser.print_log_message('DEBUG', f"match_schemas: match_tables: SUCCESS match '{source_t}' to '{target_t}' (method: {method}, score: {score})")
+
         matched_pairs.append({
             'source_table': source_t,
             'target_table': target_t,
@@ -141,14 +147,17 @@ def match_tables(settings: dict) -> dict:
         matched_target_set.add(target_t.lower())
 
     # Phase 1: Internal Mapping Match
+    if config_parser: config_parser.print_log_message('DEBUG', "match_schemas: match_tables: Phase 1 - Internal Mapping Match")
     for source_t, target_votes in internal_table_map.items():
         best_target = max(target_votes, key=lambda k: len(target_votes[k]))
         props = target_votes[best_target]
         score = len(props)
+        if config_parser: config_parser.print_log_message('DEBUG3', f"match_schemas: match_tables: Phase 1: Investigating mapping '{source_t}' -> '{best_target}' (score: {score})")
         if source_t.lower() not in matched_source_set and best_target.lower() not in matched_target_set:
              add_match(source_t, best_target, 100, "Internal Mapping", f"Matched via {score} properties", props)
 
     # Phase 2: Name Matching
+    if config_parser: config_parser.print_log_message('DEBUG', "match_schemas: match_tables: Phase 2 - Name Matching")
     target_norm_map = {}
     for t in target_tables:
         if t.lower() not in matched_target_set:
@@ -160,6 +169,7 @@ def match_tables(settings: dict) -> dict:
         if t_source in matched_source_set: continue
 
         norm_source = normalize_name(t_source, table_norm_rules, norm_settings)
+        if config_parser: config_parser.print_log_message('DEBUG3', f"match_schemas: match_tables: Phase 2: Comparing '{t_source_raw}' (normalized: '{norm_source}')")
 
         if t_source in [t.lower() for t in target_tables] and t_source not in matched_target_set:
             # find original case for target table
@@ -172,6 +182,7 @@ def match_tables(settings: dict) -> dict:
             del target_norm_map[norm_source]
 
     # Phase 3: Advanced Column Matching (Jaccard)
+    if config_parser: config_parser.print_log_message('DEBUG', "match_schemas: match_tables: Phase 3 - Advanced Column Matching (Jaccard)")
     unmatched_source_list = [t for t in source_tables if t.lower() not in matched_source_set]
     unmatched_target_list = [t for t in target_tables if t.lower() not in matched_target_set]
 
@@ -191,6 +202,8 @@ def match_tables(settings: dict) -> dict:
                 best_jaccard = score
                 best_target = t_target
 
+        if config_parser: config_parser.print_log_message('DEBUG3', f"match_schemas: match_tables: Phase 3: For '{t_source}', best Jaccard was '{best_target}' ({best_jaccard:.2f})")
+
         if best_jaccard > 0.5:
              add_match(t_source, best_target, int(best_jaccard * 100), "Column Fingerprint", f"Jaccard: {best_jaccard:.2f}", None)
 
@@ -204,6 +217,8 @@ def match_tables(settings: dict) -> dict:
     }
 
 def match_columns(settings: dict) -> dict:
+    config_parser = settings.get('config_parser')
+    if config_parser: config_parser.print_log_message('DEBUG', "match_schemas: match_columns: Starting column matching process.")
     source_columns = settings.get('source_columns', [])
     target_columns = settings.get('target_columns', [])
     column_prefixes = settings.get('column_prefixes', ['gov_', 'log_'])
@@ -223,12 +238,14 @@ def match_columns(settings: dict) -> dict:
     matched_source_names = set()
     matched_target_names = set()
 
+    if config_parser: config_parser.print_log_message('DEBUG', "match_schemas: match_columns: Trying Exact Name Match")
     for c_source in source_columns:
         c_source_name = c_source.get('name', '')
         if c_source_name.lower() in target_col_map:
              c_target = target_col_map[c_source_name.lower()]
              c_target_name = c_target.get('name', '')
              if c_target_name not in matched_target_names:
+                 if config_parser: config_parser.print_log_message('DEBUG3', f"match_schemas: match_columns: MATCHED Exact: '{c_source_name}' to '{c_target_name}'")
                  matched.append({
                      'source_column': c_source,
                      'target_column': c_target,
@@ -238,6 +255,7 @@ def match_columns(settings: dict) -> dict:
                  matched_target_names.add(c_target_name)
                  continue
 
+    if config_parser: config_parser.print_log_message('DEBUG', "match_schemas: match_columns: Trying Fuzzy/Normalized Match")
     for c_source in source_columns:
         c_source_name = c_source.get('name', '')
         if c_source_name in matched_source_names: continue
@@ -246,6 +264,7 @@ def match_columns(settings: dict) -> dict:
             c_target = target_col_norm_map[norm]
             c_target_name = c_target.get('name', '')
             if c_target_name not in matched_target_names:
+                if config_parser: config_parser.print_log_message('DEBUG3', f"match_schemas: match_columns: MATCHED Normalized: '{c_source_name}' to '{c_target_name}' (norm: '{norm}')")
                 matched.append({
                      'source_column': c_source,
                      'target_column': c_target,

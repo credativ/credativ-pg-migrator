@@ -158,7 +158,7 @@ class OracleConnector(DatabaseConnector):
                     'comment': '',
                 }
 
-                self.config_parser.print_log_message('DEBUG', f"oracle_connector: fetch_table_columns: Checking if default value is a sequence for column {column_name} ({column_default})...")
+                self.config_parser.print_log_message('DEBUG3', f"oracle_connector: fetch_table_columns: Checking if default value is a sequence for column {column_name} ({column_default})...")
                 if (isinstance(column_default, str)
                     and 'nextval' in column_default.lower()):
                     parts = column_default.replace('"', '').split(".")
@@ -166,7 +166,7 @@ class OracleConnector(DatabaseConnector):
                         owner, seq_name, _ = parts
                         sequence_details = self.get_sequence_details(owner, seq_name)
                         if sequence_details:
-                            self.config_parser.print_log_message('DEBUG', f"oracle_connector: fetch_table_columns: Found sequence {sequence_details['name']} for column {column_name}.")
+                            self.config_parser.print_log_message('DEBUG3', f"oracle_connector: fetch_table_columns: Found sequence {sequence_details['name']} for column {column_name}.")
                             result[column_id]['column_default_value'] = ""
                             result[column_id]['is_identity'] = 'YES'
                             # if data_type in ('NUMBER'):

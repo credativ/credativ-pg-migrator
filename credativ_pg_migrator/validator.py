@@ -36,41 +36,48 @@ class Validator:
         self.val_logger.logger.info("      Starting Data Validator Module     ")
         self.val_logger.logger.info("=========================================")
         
-        self.migrator_tables.create_table_for_validation()
+        try:
+            self.migrator_tables.create_table_for_validation()
+    
+            tables = self.migrator_tables.fetch_all_tables(only_unfinished=False)
+            if not tables:
+                self.val_logger.logger.info("No tables found in migrator tracking to validate.")
+                return
+    
+            threads = self.config_parser.get_validator_workers()
+            check_counts = self.config_parser.is_validation_row_counts_enabled()
+            check_table_sum = self.config_parser.is_validation_table_checksums_enabled()
+            check_random = self.config_parser.is_validation_random_sample_enabled()
+            check_lob = self.config_parser.is_validation_lob_sizes_enabled()
+            sample_size = self.config_parser.get_validation_sample_size()
+    
+            results = []
+            with concurrent.futures.ThreadPoolExecutor(max_workers=threads) as executor:
+                futures = []
+                for t in tables:
+                    if t.get('target_table_rows', 0) > 0 or t.get('source_table_rows', 0) > 0:
+                        futures.append(executor.submit(
+                            self.validate_table, 
+                            t, check_counts, check_table_sum, check_random, check_lob, sample_size
+                        ))
+                
+                for future in concurrent.futures.as_completed(futures):
+                    try:
+                        res = future.result()
+                        if res:
+                            results.append(res)
+                    except Exception as e:
+                        self.val_logger.logger.error(f"Error validating table: {e}")
+                        self.val_logger.logger.error(traceback.format_exc())
+    
+            self.migrator_tables.print_validation_summary(val_logger=self.val_logger.logger)
 
-        tables = self.migrator_tables.fetch_all_tables(only_unfinished=False)
-        if not tables:
-            self.val_logger.logger.info("No tables found in migrator tracking to validate.")
-            return
-
-        threads = self.config_parser.get_validator_workers()
-        check_counts = self.config_parser.is_validation_row_counts_enabled()
-        check_table_sum = self.config_parser.is_validation_table_checksums_enabled()
-        check_random = self.config_parser.is_validation_random_sample_enabled()
-        check_lob = self.config_parser.is_validation_lob_sizes_enabled()
-        sample_size = self.config_parser.get_validation_sample_size()
-
-        results = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=threads) as executor:
-            futures = []
-            for t in tables.values():
-                if t.get('target_table_rows', 0) > 0 or t.get('source_table_rows', 0) > 0:
-                    futures.append(executor.submit(
-                        self.validate_table, 
-                        t, check_counts, check_table_sum, check_random, check_lob, sample_size
-                    ))
-            
-            for future in concurrent.futures.as_completed(futures):
-                try:
-                    res = future.result()
-                    if res:
-                        results.append(res)
-                except Exception as e:
-                    self.val_logger.logger.error(f"Error validating table: {e}")
-                    self.val_logger.logger.error(traceback.format_exc())
-
-        self.migrator_tables.print_validation_summary(val_logger=self.val_logger.logger)
-        self.val_logger.stop_logging()
+        except Exception as e:
+            self.val_logger.logger.error(f"Fatal error in validator module: {e}")
+            self.val_logger.logger.error(traceback.format_exc())
+            raise
+        finally:
+            self.val_logger.stop_logging()
 
     def validate_table(self, table_info, check_counts, check_table_sum, check_random, check_lob, sample_size):
         source_conn = self._get_connector('source')
@@ -104,8 +111,8 @@ class Validator:
             columns_dict = self.migrator_tables.fetch_table_columns_target(table_info['id'])
             source_columns = self.migrator_tables.fetch_table_columns_source(table_info['id'])
 
-        target_cols = [col for col in columns_dict.values()]
-        source_cols = [col for col in source_columns.values()]
+        target_cols = columns_dict
+        source_cols = source_columns
         
         pk_cols = self.migrator_tables.select_primary_key({'source_schema_name': source_schema, 'source_table_name': source_table})
         if pk_cols:
@@ -186,6 +193,7 @@ class Validator:
 
         except Exception as e:
             self.val_logger.logger.error(f"Validation crash on {res['target_table']}: {e}")
+            self.val_logger.logger.error(traceback.format_exc())
             res['passed'] = False
             res['row_msg'] = f"Error: {e}"
 
@@ -210,6 +218,7 @@ class Validator:
             })
         except Exception as e:
             self.val_logger.logger.error(f"Error persisting validation protocol for {res['target_table']}: {e}")
+            self.val_logger.logger.error(traceback.format_exc())
 
         return res
 

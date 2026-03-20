@@ -750,5 +750,13 @@ class DatabaseConnector(ABC):
         """
         pass
 
+    @abstractmethod
+    def get_lob_sizes(self, schema_name: str, table_name: str, pk_columns: list, pk_values_list: list, lob_columns: list):
+        """
+        Calculates internal length attributes explicitly for large objects mapping PKs against lengths.
+        Returns dictionary mapping PKs to arrays of integer bounds.
+        """
+        pass
+
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

@@ -41,6 +41,7 @@ class Validator:
         check_counts = self.config_parser.is_validation_row_counts_enabled()
         check_table_sum = self.config_parser.is_validation_table_checksums_enabled()
         check_random = self.config_parser.is_validation_random_sample_enabled()
+        check_lob = self.config_parser.is_validation_lob_sizes_enabled()
         sample_size = self.config_parser.get_validation_sample_size()
 
         results = []
@@ -50,7 +51,7 @@ class Validator:
                 if t.get('target_table_rows', 0) > 0 or t.get('source_table_rows', 0) > 0:
                     futures.append(executor.submit(
                         self.validate_table, 
-                        t, check_counts, check_table_sum, check_random, sample_size
+                        t, check_counts, check_table_sum, check_random, check_lob, sample_size
                     ))
             
             for future in concurrent.futures.as_completed(futures):
@@ -65,7 +66,7 @@ class Validator:
         self.migrator_tables.print_validation_summary(val_logger=self.val_logger.logger)
         self.val_logger.stop_logging()
 
-    def validate_table(self, table_info, check_counts, check_table_sum, check_random, sample_size):
+    def validate_table(self, table_info, check_counts, check_table_sum, check_random, check_lob, sample_size):
         source_conn = self._get_connector('source')
         target_conn = self._get_connector('target')
         
@@ -82,6 +83,8 @@ class Validator:
             'table_msg': '',
             'row_hash_logic': None,
             'row_hash_msg': '',
+            'lob_size_logic': None,
+            'lob_size_msg': '',
             'passed': True
         }
         
@@ -147,6 +150,34 @@ class Validator:
             elif check_random and not pk_cols_list:
                 res['row_hash_msg'] = "Skip: No PKs available"
 
+            if check_lob and pk_cols_list:
+                s_lobs = [c for c in source_cols if any(x in c.get('data_type', '').lower() for x in ['lob', 'text', 'bytea', 'image', 'xml', 'json'])]
+                t_lobs = [c for c in target_cols if any(x in c.get('data_type', '').lower() for x in ['lob', 'text', 'bytea', 'image', 'xml', 'json'])]
+                if s_lobs and t_lobs and len(s_lobs) == len(t_lobs):
+                    pks = target_conn.get_random_pks(target_schema, target_table, pk_cols_list, sample_size)
+                    if pks:
+                        s_lob_sizes = source_conn.get_lob_sizes(source_schema, source_table, pk_cols_list, pks, s_lobs)
+                        t_lob_sizes = target_conn.get_lob_sizes(target_schema, target_table, pk_cols_list, pks, t_lobs)
+                        
+                        mismatches = 0
+                        for pk_val, t_sizes in t_lob_sizes.items():
+                            s_sizes = s_lob_sizes.get(pk_val)
+                            if s_sizes != t_sizes:
+                                mismatches += 1
+                                
+                        res['lob_size_logic'] = (mismatches == 0)
+                        if mismatches > 0:
+                            res['passed'] = False
+                            res['lob_size_msg'] = f"Fail: {mismatches}/{len(pks)} sample LOB sizes mismatched"
+                        else:
+                            res['lob_size_msg'] = f"Pass: {len(pks)} samples matched"
+                    else:
+                        res['lob_size_msg'] = "Skip: No samples fetched"
+                else:
+                    res['lob_size_msg'] = "Skip: No matching LOB columns identified"
+            elif check_lob and not pk_cols_list:
+                res['lob_size_msg'] = "Skip: No PKs available"
+
         except Exception as e:
             self.val_logger.logger.error(f"Validation crash on {res['target_table']}: {e}")
             res['passed'] = False
@@ -167,6 +198,8 @@ class Validator:
                 'table_msg': res['table_msg'],
                 'row_hash_logic': res['row_hash_logic'],
                 'row_hash_msg': res['row_hash_msg'],
+                'lob_size_logic': res['lob_size_logic'],
+                'lob_size_msg': res['lob_size_msg'],
                 'passed': res['passed']
             })
         except Exception as e:

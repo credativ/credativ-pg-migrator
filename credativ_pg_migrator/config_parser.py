@@ -546,7 +546,10 @@ class ConfigParser:
         return self.get_validator_config().get('check_table_checksums', False)
 
     def is_validation_random_sample_enabled(self):
-        return self.get_validator_config().get('check_random_sample', True)
+        return self.get_validator_config().get('check_random_sample', False)
+
+    def is_validation_lob_sizes_enabled(self):
+        return self.get_validator_config().get('check_lob_sizes', False)
 
     def get_validation_sample_size(self):
         return int(self.get_validator_config().get('random_sample_size', 1000))

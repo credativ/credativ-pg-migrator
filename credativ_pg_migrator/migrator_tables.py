@@ -4245,6 +4245,8 @@ class MigratorTables:
                 table_msg text,
                 row_hash_logic boolean,
                 row_hash_msg text,
+                lob_size_logic boolean,
+                lob_size_msg text,
                 passed boolean,
                 validated_at timestamp default current_timestamp
             )
@@ -4267,14 +4269,16 @@ class MigratorTables:
         table_msg = settings.get('table_msg')
         row_hash_logic = settings.get('row_hash_logic')
         row_hash_msg = settings.get('row_hash_msg')
+        lob_size_logic = settings.get('lob_size_logic')
+        lob_size_msg = settings.get('lob_size_msg')
         passed = settings.get('passed')
 
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{self.config_parser.get_protocol_name_validation()}"
-            (target_schema_name, target_table_name, row_logic, row_msg, table_hash_logic, table_msg, row_hash_logic, row_hash_msg, passed)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (target_schema_name, target_table_name, row_logic, row_msg, table_hash_logic, table_msg, row_hash_logic, row_hash_msg, lob_size_logic, lob_size_msg, passed)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
-        params = (target_schema_name, target_table_name, row_logic, row_msg, table_hash_logic, table_msg, row_hash_logic, row_hash_msg, passed)
+        params = (target_schema_name, target_table_name, row_logic, row_msg, table_hash_logic, table_msg, row_hash_logic, row_hash_msg, lob_size_logic, lob_size_msg, passed)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -4292,7 +4296,7 @@ class MigratorTables:
                 self.config_parser.print_log_message('INFO', msg)
 
         query = f"""
-            SELECT target_schema_name, target_table_name, row_logic, row_msg, table_hash_logic, table_msg, row_hash_logic, row_hash_msg, passed
+            SELECT target_schema_name, target_table_name, row_logic, row_msg, table_hash_logic, table_msg, row_hash_logic, row_hash_msg, lob_size_logic, lob_size_msg, passed
             FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_validation()}"
             ORDER BY target_schema_name, target_table_name
         """
@@ -4307,7 +4311,7 @@ class MigratorTables:
             log_info("=========================================")
             
             total = len(results)
-            passed_count = sum(1 for r in results if r[8])
+            passed_count = sum(1 for r in results if r[10])
             failed_count = total - passed_count
             
             log_info(f"Total Tables Validated: {total}")
@@ -4317,7 +4321,7 @@ class MigratorTables:
             if failed_count > 0:
                 log_info("--- Failed Tables Detail ---")
                 for r in results:
-                    if not r[8]:
+                    if not r[10]:
                         log_info(f"Table: {r[0]}.{r[1]}")
                         if r[2] is False:
                             log_info(f"  Row Counts: {r[3]}")
@@ -4325,6 +4329,8 @@ class MigratorTables:
                             log_info(f"  Table Checksum: {r[5]}")
                         if r[6] is False:
                             log_info(f"  Row Checksums: {r[7]}")
+                        if r[8] is False:
+                            log_info(f"  LOB Sizes: {r[9]}")
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"migrator_tables: print_validation_summary: Error: {e}")
 

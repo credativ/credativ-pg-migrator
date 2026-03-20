@@ -2293,6 +2293,56 @@ class PostgreSQLConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', e)
             return {}
 
+    def get_lob_sizes(self, schema_name: str, table_name: str, pk_columns: list, pk_values_list: list, lob_columns: list):
+        if not lob_columns or not pk_columns or not pk_values_list:
+            return {}
+            
+        size_cols = []
+        for col in lob_columns:
+            if 'bytea' in col['data_type'].lower():
+                size_cols.append(f"octet_length(\"{col['column_name']}\")")
+            else:
+                size_cols.append(f"length(\"{col['column_name']}\")")
+                
+        size_selects = ", ".join(size_cols)
+        pk_cols_str = ", ".join([f'"{c}"' for c in pk_columns])
+        
+        in_values = []
+        for pk_dict in pk_values_list:
+            vals = []
+            for c in pk_columns:
+                val = pk_dict[c]
+                if val is None:
+                    vals.append("NULL")
+                elif isinstance(val, str):
+                    vals.append(f"'{val.replace('\'', '\'\'')}'")
+                else:
+                    vals.append(str(val))
+            in_values.append(f"({', '.join(vals)})")
+        
+        where_clause = f"({pk_cols_str}) IN ({', '.join(in_values)})"
+        if len(pk_columns) == 1:
+            where_clause = f"{pk_cols_str} IN ({', '.join([v.strip('()') for v in in_values])})"
+            
+        query = f'SELECT {pk_cols_str}, {size_selects} FROM "{schema_name}"."{table_name}" WHERE {where_clause}'
+        
+        sizes = {}
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            for row in cursor.fetchall():
+                pk_tuple = tuple(row[:len(pk_columns)])
+                pk_key = pk_tuple[0] if len(pk_tuple) == 1 else pk_tuple
+                sizes[pk_key] = row[len(pk_columns):]
+            cursor.close()
+            self.disconnect()
+            return sizes
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"postgresql_connector: get_lob_sizes: Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
+            return {}
+
     def get_top_fk_dependencies(self, settings):
         top_fk_dependencies = {}
         return top_fk_dependencies

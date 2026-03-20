@@ -19,7 +19,7 @@ def normalize_name(name: str, rules: List[str] = None, settings: dict = None) ->
     if not name: return ""
 
     if rules is None:
-        rules = ['lowercase']
+        rules = ['lowercase', 'strip_trailing_numbers']
 
     result = name
     for rule in rules:
@@ -89,8 +89,8 @@ def match_tables(settings: dict) -> dict:
     source_columns_map = settings.get('source_columns_map', {})
     target_columns_map = settings.get('target_columns_map', {})
     column_prefixes = settings.get('column_prefixes', ["gov_", "log_"])
-    table_norm_rules = settings.get('table_normalization_rules', ['lowercase'])
-    column_norm_rules = settings.get('column_normalization_rules', ['lowercase'])
+    table_norm_rules = settings.get('table_normalization_rules', ['lowercase', 'strip_trailing_numbers'])
+    column_norm_rules = settings.get('column_normalization_rules', ['lowercase', 'strip_trailing_numbers'])
     norm_settings = settings.get('normalization_settings', {})
 
     matched_pairs = []
@@ -117,7 +117,7 @@ def match_tables(settings: dict) -> dict:
 
         orig_source_t = source_t
         orig_target_t = target_t
-        
+
         # Override with exact database casing for robust downstream map lookups
         source_t = true_case_source.get(source_t.lower(), source_t)
         target_t = true_case_target.get(target_t.lower(), target_t)
@@ -222,7 +222,7 @@ def match_columns(settings: dict) -> dict:
     source_columns = settings.get('source_columns', [])
     target_columns = settings.get('target_columns', [])
     column_prefixes = settings.get('column_prefixes', ['gov_', 'log_'])
-    column_norm_rules = settings.get('column_normalization_rules', ['lowercase'])
+    column_norm_rules = settings.get('column_normalization_rules', ['lowercase', 'strip_trailing_numbers'])
     norm_settings = settings.get('normalization_settings', {})
 
     matched = []

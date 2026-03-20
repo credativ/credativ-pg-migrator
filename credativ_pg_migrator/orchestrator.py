@@ -190,8 +190,10 @@ class Orchestrator:
                     self.config_parser.print_log_message('DEBUG', f"orchestrator: Recreating index {index['index_name']} on {target_schema_name_eval}.{target_table_name_eval}")
                     try:
                         target_conn.execute_query(index['index_def'])
+                        self.migrator_tables.update_mapping_target_index_status({'row_id': index['id'], 'success': True, 'message': 'migrated OK'})
                     except Exception as ex:
                         self.config_parser.print_log_message('ERROR', f"orchestrator: Error recreating index {index['index_name']}: {ex}")
+                        self.migrator_tables.update_mapping_target_index_status({'row_id': index['id'], 'success': False, 'message': f'ERROR: {ex}'})
 
         # 2. Recreate constraints
         self.config_parser.print_log_message('INFO', "orchestrator: mapping_create_indexes_and_constraints: Recreating non-primary key constraints")
@@ -206,8 +208,10 @@ class Orchestrator:
                     add_sql = f'ALTER TABLE "{target_schema_name_eval}"."{target_table_name_eval}" ADD CONSTRAINT "{constraint["constraint_name"]}" {constraint["constraint_def"]}'
                     try:
                         target_conn.execute_query(add_sql)
+                        self.migrator_tables.update_mapping_target_constraint_status({'row_id': constraint['id'], 'success': True, 'message': 'migrated OK'})
                     except Exception as ex:
                         self.config_parser.print_log_message('ERROR', f"orchestrator: Error recreating constraint {constraint['constraint_name']}: {ex}")
+                        self.migrator_tables.update_mapping_target_constraint_status({'row_id': constraint['id'], 'success': False, 'message': f'ERROR: {ex}'})
 
         target_conn.disconnect()
 

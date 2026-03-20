@@ -430,7 +430,9 @@ class MigratorTables:
                 target_table_name TEXT,
                 index_name TEXT,
                 index_def TEXT,
-                is_primary_key BOOLEAN DEFAULT FALSE
+                is_primary_key BOOLEAN DEFAULT FALSE,
+                success BOOLEAN,
+                message TEXT
             );
         """)
         self.protocol_connection.execute_query(f"""
@@ -440,7 +442,9 @@ class MigratorTables:
                 target_table_name TEXT,
                 constraint_name TEXT,
                 constraint_type TEXT,
-                constraint_def TEXT
+                constraint_def TEXT,
+                success BOOLEAN,
+                message TEXT
             );
         """)
         self.protocol_connection.execute_query(f"""
@@ -651,11 +655,59 @@ class MigratorTables:
             cursor.execute(query, (target_schema_name, target_table_name))
             rows = cursor.fetchall()
             cursor.close()
-            return [{'constraint_name': row[0], 'constraint_type': row[1], 'constraint_def': row[2]} for row in rows]
+            return [self.decode_mapping_target_constraint_row(row) for row in rows]
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"migrator_tables: fetch_mapping_target_constraints: Error fetching for {target_schema_name}.{target_table_name}")
-            self.config_parser.print_log_message('ERROR', e)
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: fetch_mapping_target_constraints: ({func_run_id}): Error: {e}")
             return []
+
+    def update_mapping_target_index_status(self, settings):
+        func_run_id = uuid.uuid4()
+        row_id = settings['row_id']
+        success = settings['success']
+        message = settings['message']
+
+        query = f"""
+            UPDATE "{self.protocol_schema}"."mapping_target_indexes"
+            SET success = %s,
+            message = %s
+            WHERE id = %s
+            RETURNING *
+        """
+        params = (success, message, row_id)
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_mapping_target_index_status: ({func_run_id}): Error updating status for index row_id {row_id}.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_mapping_target_index_status: ({func_run_id}): Exception: {e}")
+            raise
+
+    def update_mapping_target_constraint_status(self, settings):
+        func_run_id = uuid.uuid4()
+        row_id = settings['row_id']
+        success = settings['success']
+        message = settings['message']
+
+        query = f"""
+            UPDATE "{self.protocol_schema}"."mapping_target_constraints"
+            SET success = %s,
+            message = %s
+            WHERE id = %s
+            RETURNING *
+        """
+        params = (success, message, row_id)
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_mapping_target_constraint_status: ({func_run_id}): Error updating status for constraint row_id {row_id}.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_mapping_target_constraint_status: ({func_run_id}): Exception: {e}")
+            raise
 
     def create_table_for_main(self):
         table_name = self.config_parser.get_protocol_name_main()
@@ -3194,21 +3246,23 @@ class MigratorTables:
             for row in cursor.fetchall():
                 self.config_parser.print_log_message('INFO', f"migrator_tables: print_mapping_migration_summary:     Found via {row[0]}: {row[1]}")
 
-            cursor.execute(f'SELECT count(*) FROM "{self.protocol_schema}"."mapping_target_indexes"')
-            indexes_count = cursor.fetchone()[0]
-            self.config_parser.print_log_message('INFO', f"migrator_tables: print_mapping_migration_summary: Target Indexes to map: {indexes_count}")
+            cursor.close()
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: print_mapping_migration_summary: Error printing mapping summary.")
+            self.config_parser.print_log_message('ERROR', e)
 
-            cursor.execute(f'SELECT count(*) FROM "{self.protocol_schema}"."mapping_target_constraints"')
-            constraints_count = cursor.fetchone()[0]
-            self.config_parser.print_log_message('INFO', f"migrator_tables: print_mapping_migration_summary: Target Constraints to map: {constraints_count}")
+        self.print_summary({'objects': 'Target Indexes', 'migrator_table_name': 'mapping_target_indexes', 'additional_columns': None})
+        self.print_summary({'objects': 'Target Constraints', 'migrator_table_name': 'mapping_target_constraints', 'additional_columns': 'constraint_type'})
 
+        try:
+            cursor = self.protocol_connection.connection.cursor()
             cursor.execute(f'SELECT count(*) FROM "{self.protocol_schema}"."mapping_target_sequences"')
             sequences_count = cursor.fetchone()[0]
             self.config_parser.print_log_message('INFO', f"migrator_tables: print_mapping_migration_summary: Target Sequences to map: {sequences_count}")
 
             cursor.close()
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"migrator_tables: print_mapping_migration_summary: Error printing mapping summary.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: print_mapping_migration_summary: Error printing mapping summary sequences.")
             self.config_parser.print_log_message('ERROR', e)
 
         self.print_summary({'objects': 'Tables', 'migrator_table_name': self.config_parser.get_protocol_name_tables(), 'additional_columns': None})

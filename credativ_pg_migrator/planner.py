@@ -1629,7 +1629,8 @@ class Planner:
                         'target_table_name': target_t,
                         'index_name': idx_info['index_name'],
                         'index_def': idx_info['index_def'],
-                        'is_primary_key': idx_info['is_primary_key']
+                        'is_primary_key': idx_info['is_primary_key'],
+                        'index_type': idx_info.get('index_type', 'UNKNOWN')
                     })
 
                 target_constraints = self.target_connection.fetch_mapping_target_constraints(self.target_schema_name, target_t)

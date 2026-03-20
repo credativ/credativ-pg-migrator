@@ -764,11 +764,13 @@ class PostgreSQLConnector(DatabaseConnector):
             SELECT
                 i.relname as indexname,
                 pg_get_indexdef(i.oid) as indexdef,
-                ix.indisprimary as is_primary_key
+                ix.indisprimary as is_primary_key,
+                am.amname as indextype
             FROM pg_class t
             JOIN pg_index ix ON t.oid = ix.indrelid
             JOIN pg_class i ON i.oid = ix.indexrelid
             JOIN pg_namespace n ON t.relnamespace = n.oid
+            JOIN pg_am am ON i.relam = am.oid
             WHERE n.nspname = '{schema_name}' AND t.relname = '{table_name}'
         """
         indexes = []
@@ -780,7 +782,8 @@ class PostgreSQLConnector(DatabaseConnector):
                 indexes.append({
                     'index_name': row[0],
                     'index_def': row[1],
-                    'is_primary_key': row[2]
+                    'is_primary_key': row[2],
+                    'index_type': row[3].upper() if row[3] else 'UNKNOWN'
                 })
             cursor.close()
             self.disconnect()

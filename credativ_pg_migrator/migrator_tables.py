@@ -431,6 +431,7 @@ class MigratorTables:
                 index_name TEXT,
                 index_def TEXT,
                 is_primary_key BOOLEAN DEFAULT FALSE,
+                index_type TEXT,
                 dropped BOOLEAN,
                 success BOOLEAN,
                 message TEXT
@@ -532,14 +533,15 @@ class MigratorTables:
         index_name = settings.get('index_name')
         index_def = settings.get('index_def')
         is_primary_key = settings.get('is_primary_key', False)
+        index_type = settings.get('index_type', 'UNKNOWN')
 
         query = f"""
             INSERT INTO "{self.protocol_schema}"."mapping_target_indexes"
-            (target_schema_name, target_table_name, index_name, index_def, is_primary_key)
-            VALUES (%s, %s, %s, %s, %s)
+            (target_schema_name, target_table_name, index_name, index_def, is_primary_key, index_type)
+            VALUES (%s, %s, %s, %s, %s, %s)
             RETURNING id
         """
-        params = (target_schema_name, target_table_name, index_name, index_def, is_primary_key)
+        params = (target_schema_name, target_table_name, index_name, index_def, is_primary_key, index_type)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -606,7 +608,7 @@ class MigratorTables:
 
     def fetch_mapping_target_indexes(self, target_schema_name, target_table_name):
         query = f"""
-            SELECT id, index_name, index_def, is_primary_key
+            SELECT id, index_name, index_def, is_primary_key, index_type
             FROM "{self.protocol_schema}"."mapping_target_indexes"
             WHERE target_schema_name = %s AND target_table_name = %s
         """
@@ -615,7 +617,7 @@ class MigratorTables:
             cursor.execute(query, (target_schema_name, target_table_name))
             rows = cursor.fetchall()
             cursor.close()
-            return [{'id': row[0], 'index_name': row[1], 'index_def': row[2], 'is_primary_key': row[3]} for row in rows]
+            return [{'id': row[0], 'index_name': row[1], 'index_def': row[2], 'is_primary_key': row[3], 'index_type': row[4]} for row in rows]
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"migrator_tables: fetch_mapping_target_indexes: Error fetching for {target_schema_name}.{target_table_name}")
             self.config_parser.print_log_message('ERROR', e)
@@ -3278,34 +3280,42 @@ class MigratorTables:
             self.config_parser.print_log_message('INFO', f"migrator_tables: print_mapping_migration_summary:     Found on target database: {total}")
 
             if is_index:
-                cursor.execute(f'SELECT count(*) FROM "{self.protocol_schema}"."{table_name}" WHERE is_primary_key = TRUE')
-                pks = cursor.fetchone()[0]
-                if pks > 0:
-                    self.config_parser.print_log_message('INFO', f"migrator_tables: print_mapping_migration_summary:     Primary Keys (kept): {pks}")
+                cursor.execute(f'SELECT index_type, count(*) FROM "{self.protocol_schema}"."{table_name}" WHERE is_primary_key = TRUE GROUP BY 1 ORDER BY 1')
+                for row in cursor.fetchall():
+                    self.config_parser.print_log_message('INFO', f"migrator_tables: print_mapping_migration_summary:     Primary Keys (kept) - {row[0]}: {row[1]}")
             else:
                 cursor.execute(f'SELECT count(*) FROM "{self.protocol_schema}"."{table_name}" WHERE constraint_type = \'PRIMARY KEY\'')
                 pks = cursor.fetchone()[0]
                 if pks > 0:
                     self.config_parser.print_log_message('INFO', f"migrator_tables: print_mapping_migration_summary:         (\'PRIMARY KEY\',): {pks}")
 
-            cursor.execute(f'SELECT dropped, count(*) FROM "{self.protocol_schema}"."{table_name}" WHERE ' + ("not is_primary_key" if is_index else "constraint_type != 'PRIMARY KEY'") + ' GROUP BY dropped ORDER BY dropped')
-            for row in cursor.fetchall():
-                if row[0] is True:
-                    self.config_parser.print_log_message('INFO', f"migrator_tables: print_mapping_migration_summary:     successfully dropped: {row[1]}")
-                elif row[0] is False:
-                    self.config_parser.print_log_message('INFO', f"migrator_tables: print_mapping_migration_summary:     error dropping: {row[1]}")
-                else:
-                    self.config_parser.print_log_message('INFO', f"migrator_tables: print_mapping_migration_summary:     drop unknown status: {row[1]}")
+            type_col = "index_type" if is_index else "constraint_type"
+            filter_sql = "not is_primary_key" if is_index else "constraint_type != 'PRIMARY KEY'"
 
-            cursor.execute(f'SELECT success, count(*) FROM "{self.protocol_schema}"."{table_name}" WHERE ' + ("not is_primary_key" if is_index else "constraint_type != 'PRIMARY KEY'") + ' GROUP BY success ORDER BY success')
+            cursor.execute(f'SELECT {type_col}, count(*) FROM "{self.protocol_schema}"."{table_name}" WHERE {filter_sql} AND dropped = TRUE GROUP BY 1 ORDER BY 1')
             for row in cursor.fetchall():
-                if row[0] is True:
-                    self.config_parser.print_log_message('INFO', f"migrator_tables: print_mapping_migration_summary:     successfully recreated: {row[1]}")
-                elif row[0] is False:
-                    self.config_parser.print_log_message('INFO', f"migrator_tables: print_mapping_migration_summary:     error recreating: {row[1]}")
-                else:
-                    msg = "recreate skipped (handled by constraint)" if is_index else "recreate unknown status"
-                    self.config_parser.print_log_message('INFO', f"migrator_tables: print_mapping_migration_summary:     {msg}: {row[1]}")
+                self.config_parser.print_log_message('INFO', f"migrator_tables: print_mapping_migration_summary:     successfully dropped ({row[0]}): {row[1]}")
+
+            cursor.execute(f'SELECT {type_col}, count(*) FROM "{self.protocol_schema}"."{table_name}" WHERE {filter_sql} AND dropped = FALSE GROUP BY 1 ORDER BY 1')
+            for row in cursor.fetchall():
+                self.config_parser.print_log_message('INFO', f"migrator_tables: print_mapping_migration_summary:     error dropping ({row[0]}): {row[1]}")
+
+            cursor.execute(f'SELECT {type_col}, count(*) FROM "{self.protocol_schema}"."{table_name}" WHERE {filter_sql} AND dropped IS NULL GROUP BY 1 ORDER BY 1')
+            for row in cursor.fetchall():
+                self.config_parser.print_log_message('INFO', f"migrator_tables: print_mapping_migration_summary:     drop unknown status ({row[0]}): {row[1]}")
+
+            cursor.execute(f'SELECT {type_col}, count(*) FROM "{self.protocol_schema}"."{table_name}" WHERE {filter_sql} AND success = TRUE GROUP BY 1 ORDER BY 1')
+            for row in cursor.fetchall():
+                self.config_parser.print_log_message('INFO', f"migrator_tables: print_mapping_migration_summary:     successfully recreated ({row[0]}): {row[1]}")
+
+            cursor.execute(f'SELECT {type_col}, count(*) FROM "{self.protocol_schema}"."{table_name}" WHERE {filter_sql} AND success = FALSE GROUP BY 1 ORDER BY 1')
+            for row in cursor.fetchall():
+                self.config_parser.print_log_message('INFO', f"migrator_tables: print_mapping_migration_summary:     error recreating ({row[0]}): {row[1]}")
+
+            cursor.execute(f'SELECT {type_col}, count(*) FROM "{self.protocol_schema}"."{table_name}" WHERE {filter_sql} AND success IS NULL GROUP BY 1 ORDER BY 1')
+            for row in cursor.fetchall():
+                msg = "recreate skipped (handled by constraint)" if is_index else "recreate unknown status"
+                self.config_parser.print_log_message('INFO', f"migrator_tables: print_mapping_migration_summary:     {msg} ({row[0]}): {row[1]}")
 
             cursor.close()
         except Exception as e:

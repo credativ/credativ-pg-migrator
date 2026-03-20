@@ -4233,6 +4233,100 @@ class MigratorTables:
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"migrator_tables: update_ddl_comment: Exception: {e}")
             raise
+    def create_table_for_validation(self):
+        query = f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."{self.config_parser.get_protocol_name_validation()}" (
+                id SERIAL PRIMARY KEY,
+                target_schema_name text,
+                target_table_name text,
+                row_logic boolean,
+                row_msg text,
+                table_hash_logic boolean,
+                table_msg text,
+                row_hash_logic boolean,
+                row_hash_msg text,
+                passed boolean,
+                validated_at timestamp default current_timestamp
+            )
+        """
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query)
+            cursor.close()
+            self.protocol_connection.connection.commit()
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: create_table_for_validation: Error: {e}")
+            raise
+
+    def insert_validation_result(self, settings):
+        target_schema_name = settings.get('target_schema_name')
+        target_table_name = settings.get('target_table_name')
+        row_logic = settings.get('row_logic')
+        row_msg = settings.get('row_msg')
+        table_hash_logic = settings.get('table_hash_logic')
+        table_msg = settings.get('table_msg')
+        row_hash_logic = settings.get('row_hash_logic')
+        row_hash_msg = settings.get('row_hash_msg')
+        passed = settings.get('passed')
+
+        query = f"""
+            INSERT INTO "{self.protocol_schema}"."{self.config_parser.get_protocol_name_validation()}"
+            (target_schema_name, target_table_name, row_logic, row_msg, table_hash_logic, table_msg, row_hash_logic, row_hash_msg, passed)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """
+        params = (target_schema_name, target_table_name, row_logic, row_msg, table_hash_logic, table_msg, row_hash_logic, row_hash_msg, passed)
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            cursor.close()
+            self.protocol_connection.connection.commit()
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_validation_result: Error: {e}")
+            raise
+
+    def print_validation_summary(self, val_logger=None):
+        def log_info(msg):
+            if val_logger:
+                val_logger.info(msg)
+            else:
+                self.config_parser.print_log_message('INFO', msg)
+
+        query = f"""
+            SELECT target_schema_name, target_table_name, row_logic, row_msg, table_hash_logic, table_msg, row_hash_logic, row_hash_msg, passed
+            FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_validation()}"
+            ORDER BY target_schema_name, target_table_name
+        """
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query)
+            results = cursor.fetchall()
+            cursor.close()
+
+            log_info("=========================================")
+            log_info("       Data Validation Summary           ")
+            log_info("=========================================")
+            
+            total = len(results)
+            passed_count = sum(1 for r in results if r[8])
+            failed_count = total - passed_count
+            
+            log_info(f"Total Tables Validated: {total}")
+            log_info(f"Passed: {passed_count}")
+            log_info(f"Failed: {failed_count}")
+            
+            if failed_count > 0:
+                log_info("--- Failed Tables Detail ---")
+                for r in results:
+                    if not r[8]:
+                        log_info(f"Table: {r[0]}.{r[1]}")
+                        if r[2] is False:
+                            log_info(f"  Row Counts: {r[3]}")
+                        if r[4] is False:
+                            log_info(f"  Table Checksum: {r[5]}")
+                        if r[6] is False:
+                            log_info(f"  Row Checksums: {r[7]}")
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: print_validation_summary: Error: {e}")
 
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

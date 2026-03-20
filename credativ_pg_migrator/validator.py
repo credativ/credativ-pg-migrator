@@ -29,6 +29,8 @@ class Validator:
         self.val_logger.logger.info("=========================================")
         self.val_logger.logger.info("      Starting Data Validator Module     ")
         self.val_logger.logger.info("=========================================")
+        
+        self.migrator_tables.create_table_for_validation()
 
         tables = self.migrator_tables.fetch_all_tables(only_unfinished=False)
         if not tables:
@@ -60,7 +62,7 @@ class Validator:
                     self.val_logger.logger.error(f"Error validating table: {e}")
                     self.val_logger.logger.error(traceback.format_exc())
 
-        self.print_summary(results)
+        self.migrator_tables.print_validation_summary(val_logger=self.val_logger.logger)
         self.val_logger.stop_logging()
 
     def validate_table(self, table_info, check_counts, check_table_sum, check_random, sample_size):
@@ -155,29 +157,21 @@ class Validator:
         else:
             self.val_logger.logger.warning(f"FAIL: {res['target_table']} failed validation.")
 
+        try:
+            self.migrator_tables.insert_validation_result({
+                'target_schema_name': target_schema,
+                'target_table_name': target_table,
+                'row_logic': res['row_logic'],
+                'row_msg': res['row_msg'],
+                'table_hash_logic': res['table_hash_logic'],
+                'table_msg': res['table_msg'],
+                'row_hash_logic': res['row_hash_logic'],
+                'row_hash_msg': res['row_hash_msg'],
+                'passed': res['passed']
+            })
+        except Exception as e:
+            self.val_logger.logger.error(f"Error persisting validation protocol for {res['target_table']}: {e}")
+
         return res
 
-    def print_summary(self, results):
-        self.val_logger.logger.info("=========================================")
-        self.val_logger.logger.info("       Data Validation Summary           ")
-        self.val_logger.logger.info("=========================================")
-        
-        total = len(results)
-        passed = sum(1 for r in results if r['passed'])
-        failed = total - passed
-        
-        self.val_logger.logger.info(f"Total Tables Validated: {total}")
-        self.val_logger.logger.info(f"Passed: {passed}")
-        self.val_logger.logger.info(f"Failed: {failed}")
-        
-        if failed > 0:
-            self.val_logger.logger.info("--- Failed Tables Detail ---")
-            for r in results:
-                if not r['passed']:
-                    self.val_logger.logger.info(f"Table: {r['target_table']}")
-                    if r.get('row_logic') is False:
-                        self.val_logger.logger.info(f"  Row Counts: {r['row_msg']}")
-                    if r.get('table_hash_logic') is False:
-                        self.val_logger.logger.info(f"  Table Checksum: {r['table_msg']}")
-                    if r.get('row_hash_logic') is False:
-                        self.val_logger.logger.info(f"  Row Checksums: {r['row_hash_msg']}")
+

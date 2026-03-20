@@ -2,6 +2,13 @@
 
 ## 0.13.0 - 2026.03.18
 
+- 2026.03.20
+
+  - Feature - Validator Module: Redesigned the validation module (`--validate`) to support fully transparent cross-engine table and data evaluation. Implemented discrete parallel worker threads encapsulating precise connection lifecycles tailored to active verification blocks.
+  - Feature - Validator Diagnostics: Overhauled validation runtime logs and final summaries to natively quantify and categorize passing and failing results explicitly across Row Counts, Table Checksums, Random Row Hashes, and LOB Size verifications.
+  - Fix - Validation Hashing Limits: Addressed native `ORA-01489` and `ORA-22835` errors during Oracle evaluation by dropping LOB types from raw generalized checksums and relying instead on dedicated size validations evaluating `DBMS_LOB.GETLENGTH()` natively without bridging memory limits.
+  - Fix - Validation Tuple Decoding: Resolved `AttributeError` and `TypeError` exceptions caused by attempting to iterate rows as dictionaries within the validator sequence. Upgraded data column validations to gracefully evaluate JSON dictionary string footprints precisely across architectures.
+
 - 2026.03.19
 
   - Feature - Orchestrator: Redesigned the sequence of operations for index and constraint mapping to execute a dedicated global `DROP` phase before concurrent data copying starts, and a complete global `CREATE` phase after all tables merge.

@@ -23,6 +23,7 @@ It is is written in Python in multiple classes and modules.
 - Conversion and migration of functions, procedures, triggers currently fully works for Informix. Can be added on demand for other databases too.
 - Migrator allows customizable substitutions of data types, default values of columns, calls of remote objects.
 - User can also define limitations for migration of data - as where conditions for tables. This option requires good analysis of dependencies in the source database. Missing data can break Foreign Key constraints in the target database. See further in the documentation.
+- Migrator supports strict post-migration verification utilizing discrete parallel tests measuring row counts, table checksums, random row hashes, and explicit byte-size telemetry for Large Object (LOB) columns securely processed without native text memory constraints.
 - Migrator provides reach logging and error handling, has 2 levels of logging - INFO and DEBUG, in case of error, detailed error message is printed.
 - By default logging messages are printed both to console and to log file, name of the log file is configurable in command line arguments.
 - Rich information is also logged to the migration database - see below.

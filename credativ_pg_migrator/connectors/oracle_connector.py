@@ -1195,12 +1195,16 @@ class OracleConnector(DatabaseConnector):
         return extracted_default_value
 
     def get_table_checksum(self, schema_name: str, table_name: str, columns: list):
-        if not columns:
-            return None
-            
         hash_parts = []
         for i, col in enumerate(columns):
+            dtype = col.get('data_type', '').lower()
+            if any(x in dtype for x in ['lob', 'bfile', 'xml', 'json', 'long']):
+                continue
             hash_parts.append(f"ORA_HASH(COALESCE(TO_CHAR(\"{col['column_name']}\"), ''), 4294967295, {i+1})")
+            
+        if not hash_parts:
+            return None
+            
         cols_concat = " + ".join(hash_parts)
         
         query = f'SELECT sum({cols_concat}) FROM "{schema_name.upper()}"."{table_name.upper()}"'
@@ -1238,12 +1242,16 @@ class OracleConnector(DatabaseConnector):
             return []
 
     def get_row_checksums(self, schema_name: str, table_name: str, pk_columns: list, pk_values_list: list, columns: list):
-        if not columns or not pk_columns or not pk_values_list:
-            return {}
-            
         hash_parts = []
         for i, col in enumerate(columns):
+            dtype = col.get('data_type', '').lower()
+            if any(x in dtype for x in ['lob', 'bfile', 'xml', 'json', 'long']):
+                continue
             hash_parts.append(f"ORA_HASH(COALESCE(TO_CHAR(\"{col['column_name']}\"), ''), 4294967295, {i+1})")
+            
+        if not hash_parts:
+            return {}
+            
         cols_concat = " + ".join(hash_parts)
         
         pk_cols_str = ", ".join([f'"{c}"' for c in pk_columns])

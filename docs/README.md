@@ -28,6 +28,8 @@ High‑level features:
   - triggers (Informix, Sybase ASE)
   - views (currently simple parsing and schema-name replacement)
   - Adjusts sequences on the target to match the imported data.
+- Validates:
+  - Actively validates migrated data establishing independent parity checks for row counts, complete table checksum hashing, random tuple hashes, and exact LOB size byte-verification.
 - Customizable:
   - data type mappings
   - default value mappings
@@ -308,6 +310,8 @@ Parameters:
       - Resume the migration process after a crash or stop (default: False = start from scratch).
     - --drop-unfinished-tables
       - Drop and recreate unfinished tables when resuming after a crash. Works only together with --resume parameter (default: False = continue with partially migrated tables without dropping them).
+    - --validate
+      - Run the parallel data validation verification suite post-migration, matching table geometries mathematically between the source and target endpoints.
     - --version
       - Show the version of the tool.
 

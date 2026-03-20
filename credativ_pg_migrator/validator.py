@@ -2,28 +2,34 @@ import concurrent.futures
 import time
 from credativ_pg_migrator.migrator_tables import MigratorTables
 from credativ_pg_migrator.migrator_logging import MigratorLogger
-from credativ_pg_migrator.connectors.postgresql_connector import PostgresqlConnector
-from credativ_pg_migrator.connectors.oracle_connector import OracleConnector
 import traceback
 
 class Validator:
     def __init__(self, config_parser):
         self.config_parser = config_parser
-        self.migrator_tables = MigratorTables(self.config_parser)
         
         log_file = self.config_parser.get_log_file()
         self.val_logger = MigratorLogger(log_file)
         self.val_logger.logger.info("Initializing Data Validator...")
 
-    def _get_connector(self, source_or_target):
-        db_type = self.config_parser.get_db_type(source_or_target)
-        if db_type == 'postgresql':
-            return PostgresqlConnector(self.config_parser, source_or_target)
-        elif db_type == 'oracle':
-            return OracleConnector(self.config_parser, source_or_target)
-        else:
-            self.val_logger.logger.warning(f"Validation functions might not be fully implemented for {db_type}")
-            raise NotImplementedError(f"Validation not supported for {db_type}")
+        self.migrator_tables = MigratorTables(self.val_logger, self.config_parser)
+
+    def _get_connector(self, direction):
+        import importlib
+        from credativ_pg_migrator.constants import MigratorConstants
+        
+        database_type = self.config_parser.get_db_type(direction)
+        database_module = MigratorConstants.get_modules().get(database_type)
+        
+        if not database_module:
+            self.val_logger.logger.error(f"Unsupported database type: {database_type}")
+            raise ValueError(f"Unsupported database type: {database_type}")
+            
+        module_name, class_name = database_module.split(':')
+        module = importlib.import_module(module_name)
+        connector_class = getattr(module, class_name)
+        
+        return connector_class(self.config_parser, direction)
 
     def run(self):
         self.val_logger.logger.info("=========================================")

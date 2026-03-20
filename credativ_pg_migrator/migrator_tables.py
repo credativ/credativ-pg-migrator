@@ -4314,23 +4314,49 @@ class MigratorTables:
             passed_count = sum(1 for r in results if r[10])
             failed_count = total - passed_count
             
-            log_info(f"Total Tables Validated: {total}")
-            log_info(f"Passed: {passed_count}")
-            log_info(f"Failed: {failed_count}")
+            row_count_tests = sum(1 for r in results if r[2] is not None)
+            row_count_pass = sum(1 for r in results if r[2] is True)
+            row_count_fail = sum(1 for r in results if r[2] is False)
             
-            if failed_count > 0:
-                log_info("--- Failed Tables Detail ---")
+            table_hash_tests = sum(1 for r in results if r[4] is not None)
+            table_hash_pass = sum(1 for r in results if r[4] is True)
+            table_hash_fail = sum(1 for r in results if r[4] is False)
+            
+            row_hash_tests = sum(1 for r in results if r[6] is not None)
+            row_hash_pass = sum(1 for r in results if r[6] is True)
+            row_hash_fail = sum(1 for r in results if r[6] is False)
+            
+            lob_size_tests = sum(1 for r in results if r[8] is not None)
+            lob_size_pass = sum(1 for r in results if r[8] is True)
+            lob_size_fail = sum(1 for r in results if r[8] is False)
+            
+            log_info(f"Total Tables Validated: {total}")
+            log_info(f"Tables Passed: {passed_count}")
+            log_info(f"Tables Failed: {failed_count}")
+            
+            log_info("--- Test Category Totals ---")
+            if row_count_tests > 0:
+                log_info(f"Row Counts   : {row_count_pass} Passed, {row_count_fail} Failed (Total: {row_count_tests})")
+            if table_hash_tests > 0:
+                log_info(f"Table Hashes : {table_hash_pass} Passed, {table_hash_fail} Failed (Total: {table_hash_tests})")
+            if row_hash_tests > 0:
+                log_info(f"Row Hashes   : {row_hash_pass} Passed, {row_hash_fail} Failed (Total: {row_hash_tests})")
+            if lob_size_tests > 0:
+                log_info(f"LOB Sizes    : {lob_size_pass} Passed, {lob_size_fail} Failed (Total: {lob_size_tests})")
+            
+            if total > 0:
+                log_info("--- Validation Details ---")
                 for r in results:
-                    if not r[10]:
-                        log_info(f"Table: {r[0]}.{r[1]}")
-                        if r[2] is False:
-                            log_info(f"  Row Counts: {r[3]}")
-                        if r[4] is False:
-                            log_info(f"  Table Checksum: {r[5]}")
-                        if r[6] is False:
-                            log_info(f"  Row Checksums: {r[7]}")
-                        if r[8] is False:
-                            log_info(f"  LOB Sizes: {r[9]}")
+                    status = "PASS" if r[10] else "FAIL"
+                    log_info(f"[{status}] Table: {r[0]}.{r[1]}")
+                    if r[2] is not None:
+                        log_info(f"  Row Counts: {'[PASS]' if r[2] else '[FAIL]'} {r[3].strip()}")
+                    if r[4] is not None:
+                        log_info(f"  Table Checksum: {'[PASS]' if r[4] else '[FAIL]'} {r[5].strip()}")
+                    if r[6] is not None:
+                        log_info(f"  Row Checksums: {'[PASS]' if r[6] else '[FAIL]'} {r[7].strip()}")
+                    if r[8] is not None:
+                        log_info(f"  LOB Sizes: {'[PASS]' if r[8] else '[FAIL]'} {r[9].strip()}")
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"migrator_tables: print_validation_summary: Error: {e}")
 

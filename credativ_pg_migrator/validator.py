@@ -39,10 +39,12 @@ class Validator:
         try:
             self.migrator_tables.create_table_for_validation()
     
-            tables = self.migrator_tables.fetch_all_tables(only_unfinished=False)
-            if not tables:
+            tables_raw = self.migrator_tables.fetch_all_tables(only_unfinished=False)
+            if not tables_raw:
                 self.val_logger.logger.info("No tables found in migrator tracking to validate.")
                 return
+                
+            tables = [self.migrator_tables.decode_table_row(t) for t in tables_raw]
     
             threads = self.config_parser.get_validator_workers()
             check_counts = self.config_parser.is_validation_row_counts_enabled()
@@ -103,16 +105,8 @@ class Validator:
         
         self.val_logger.logger.info(f"Validating {res['target_table']} ...")
         
-        workflow = self.config_parser.get_workflow()
-        if workflow == 'mapping':
-            columns_dict = self.migrator_tables.fetch_mapping_target_columns({'table_id': table_info['id']})
-            source_columns = self.migrator_tables.fetch_mapping_source_columns(table_info['id'])
-        else:
-            columns_dict = self.migrator_tables.fetch_table_columns_target(table_info['id'])
-            source_columns = self.migrator_tables.fetch_table_columns_source(table_info['id'])
-
-        target_cols = columns_dict
-        source_cols = source_columns
+        target_cols = table_info.get('target_columns') or []
+        source_cols = table_info.get('source_columns') or []
         
         pk_cols = self.migrator_tables.select_primary_key({'source_schema_name': source_schema, 'source_table_name': source_table})
         if pk_cols:

@@ -359,6 +359,41 @@ class Orchestrator:
             worker_source_connection.migrate_table(worker_target_connection, settings)
 
             worker_source_connection.disconnect()
+
+            # sequences setting
+            target_schema_name = table_data['target_schema_name']
+            target_table_name = table_data['target_table_name']
+            part_name = 'sequences'
+            self.config_parser.print_log_message('INFO', f"orchestrator: mapping_data_worker: Worker {worker_id}: Setting sequences for table {target_table_name} in target database.")
+            sequences = worker_target_connection.fetch_table_sequences(target_schema_name, target_table_name)
+            if sequences:
+                for order_num, sequence_details in sequences.items():
+                    sequence_id = sequence_details['id']
+                    sequence_name = sequence_details['name']
+                    column_name = sequence_details['column_name']
+                    sequence_sql = sequence_details['set_sequence_sql']
+                    self.migrator_tables.insert_sequence({
+                        'sequence_id': sequence_id,
+                        'target_schema_name': target_schema_name,
+                        'target_table_name': target_table_name,
+                        'target_column_name': column_name,
+                        'target_sequence_name': sequence_name,
+                        'target_sequence_sql': sequence_sql
+                    })
+                    self.config_parser.print_log_message( 'DEBUG', f"orchestrator: mapping_data_worker: Worker {worker_id}: Setting sequence with SQL: {sequence_sql}")
+                    try:
+                        worker_target_connection.execute_query(sequence_sql)
+                        self.config_parser.print_log_message('INFO', f"orchestrator: mapping_data_worker: Worker {worker_id}: Sequence ({order_num}) {sequence_name} set successfully for table {target_table_name}.")
+                        seq_curr_val = worker_target_connection.get_sequence_current_value(sequence_id)
+                        self.config_parser.print_log_message('INFO', f"orchestrator: mapping_data_worker: Worker {worker_id}: Current value of sequence {sequence_name} is {seq_curr_val}.")
+                        self.migrator_tables.update_sequence_status({'sequence_id': sequence_id, 'success': True, 'message': 'migrated OK'})
+                    except Exception as e:
+                        self.migrator_tables.update_sequence_status({'sequence_id': sequence_id, 'success': False, 'message': f'ERROR: {e}'})
+                        self.migrator_tables.update_table_status({'row_id': table_data['id'], 'success': False, 'message': f'ERROR: {e}'})
+                        self.config_parser.print_log_message('ERROR', f"orchestrator: mapping_data_worker: Worker {worker_id}: Error setting sequence {sequence_name} for table {target_table_name}: {e}")
+            else:
+                self.config_parser.print_log_message('INFO', f"orchestrator: mapping_data_worker: Worker {worker_id}: No sequences found for table {target_table_name}.")
+
             worker_target_connection.disconnect()
 
             return True

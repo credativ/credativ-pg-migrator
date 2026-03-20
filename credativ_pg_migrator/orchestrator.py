@@ -276,30 +276,37 @@ class Orchestrator:
                 table_data['insert_values'] = ', '.join(insert_values)
                 migrate_tables.append(table_data)
             else:
-                if table_data.get('source_table_rows', 0) == 0:
-                    protocol_id = self.migrator_tables.insert_data_migration({
-                        'worker_id': None,
-                        'source_table_id': table_data['source_table_id'],
-                        'source_schema_name': table_data['source_schema_name'],
-                        'source_table_name': table_data['source_table_name'],
-                        'target_schema_name': table_data['target_schema_name'],
-                        'target_table_name': table_data['target_table_name'],
-                        'source_table_rows': 0,
-                        'target_table_rows': 0,
-                        })
-                    self.migrator_tables.update_data_migration_status({
-                        'row_id': protocol_id,
-                        'success': True,
-                        'message': 'Skipped (0 rows)',
-                        'target_table_rows': 0,
-                        'batch_count': 0,
-                        'shortest_batch_seconds': 0,
-                        'longest_batch_seconds': 0,
-                        'average_batch_seconds': 0,
-                    })
-                    self.migrator_tables.update_table_status({'row_id': table_data['id'], 'success': True, 'message': 'mapped data OK (0 rows)'})
+                target_rows = table_data.get('target_table_rows', -1)
+                source_rows = table_data.get('source_table_rows', 0)
+                protocol_id = self.migrator_tables.insert_data_migration({
+                    'worker_id': None,
+                    'source_table_id': table_data['source_table_id'],
+                    'source_schema_name': table_data['source_schema_name'],
+                    'source_table_name': table_data['source_table_name'],
+                    'target_schema_name': table_data['target_schema_name'],
+                    'target_table_name': table_data['target_table_name'],
+                    'source_table_rows': source_rows,
+                    'target_table_rows': target_rows if target_rows != -1 else 0,
+                })
+                
+                if source_rows == 0:
+                    msg = 'Skipped (0 rows)'
+                    status_msg = 'mapped data OK (0 rows)'
                 else:
-                    self.migrator_tables.update_table_status({'row_id': table_data['id'], 'success': True, 'message': f"mapped data skipped (source_rows={table_data.get('source_table_rows', 0)}, target_rows={table_data.get('target_table_rows', -1)})"})
+                    msg = f"Skipped (target_rows={target_rows})"
+                    status_msg = f"mapped data skipped (source_rows={source_rows}, target_rows={target_rows})"
+
+                self.migrator_tables.update_data_migration_status({
+                    'row_id': protocol_id,
+                    'success': True,
+                    'message': msg,
+                    'target_table_rows': target_rows if target_rows != -1 else 0,
+                    'batch_count': 0,
+                    'shortest_batch_seconds': 0,
+                    'longest_batch_seconds': 0,
+                    'average_batch_seconds': 0,
+                })
+                self.migrator_tables.update_table_status({'row_id': table_data['id'], 'success': True, 'message': status_msg})
 
         if len(migrate_tables) > 0:
             with concurrent.futures.ThreadPoolExecutor(max_workers=workers_requested) as executor:

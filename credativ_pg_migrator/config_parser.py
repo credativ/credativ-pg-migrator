@@ -526,6 +526,28 @@ class ConfigParser:
         else:
             return []
 
+    ## Validator
+    def get_validator_config(self):
+        return self.config.get('validator', {})
+
+    def get_validation_log_file(self):
+        return self.get_validator_config().get('validation_log_file', 'validator.log')
+
+    def get_validator_workers(self):
+        return int(self.get_validator_config().get('workers', 4))
+
+    def is_validation_row_counts_enabled(self):
+        return self.get_validator_config().get('check_row_counts', True)
+
+    def is_validation_table_checksums_enabled(self):
+        return self.get_validator_config().get('check_table_checksums', False)
+
+    def is_validation_random_sample_enabled(self):
+        return self.get_validator_config().get('check_random_sample', True)
+
+    def get_validation_sample_size(self):
+        return int(self.get_validator_config().get('random_sample_size', 1000))
+
     def get_exclude_tables(self):
         return self.config['exclude_tables']
 

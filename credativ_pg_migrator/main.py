@@ -72,16 +72,26 @@ def main():
                     logger.logger.warning(f"Invalid environment variable configuration: {env_var}")
             logger.logger.info("Environment variables set from configuration.")
 
-        logger.logger.info('Starting planner...')
-        planner = Planner(config_parser)
-        planner.create_plan()
+        if args.validate:
+            logger.logger.info('Starting validator...')
+            from credativ_pg_migrator.validator import Validator
+            validator = Validator(config_parser)
+            validator.run()
 
-        logger.logger.info('Starting orchestrator...')
-        orchestrator = Orchestrator(config_parser)
-        orchestrator.run()
+            logger.logger.info(f"""{MigratorConstants.get_full_name()}, version: {MigratorConstants.get_version()}""")
+            logger.logger.info("Validation Done")
 
-        logger.logger.info(f"""{MigratorConstants.get_full_name()}, version: {MigratorConstants.get_version()}""")
-        logger.logger.info("Migration Done")
+        else:
+            logger.logger.info('Starting planner...')
+            planner = Planner(config_parser)
+            planner.create_plan()
+
+            logger.logger.info('Starting orchestrator...')
+            orchestrator = Orchestrator(config_parser)
+            orchestrator.run()
+
+            logger.logger.info(f"""{MigratorConstants.get_full_name()}, version: {MigratorConstants.get_version()}""")
+            logger.logger.info("Migration Done")
         logger.stop_logging()
 
     except Exception as e:

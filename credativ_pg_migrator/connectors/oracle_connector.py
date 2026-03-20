@@ -1194,5 +1194,85 @@ class OracleConnector(DatabaseConnector):
         extracted_default_value = settings['extracted_default_value']
         return extracted_default_value
 
+    def get_table_checksum(self, schema_name: str, table_name: str, columns: list):
+        if not columns:
+            return None
+        cols_concat = " || ".join([f"COALESCE(TO_CHAR(\"{col['column_name']}\"), '')" for col in columns])
+        query = f'SELECT sum(ORA_HASH({cols_concat})) FROM "{schema_name.upper()}"."{table_name.upper()}"'
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            result = cursor.fetchone()[0]
+            cursor.close()
+            self.disconnect()
+            return result
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"oracle_connector: get_table_checksum: Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
+            return None
+
+    def get_random_pks(self, schema_name: str, table_name: str, pk_columns: list, sample_size: int):
+        if not pk_columns:
+            return []
+        cols = ", ".join([f'"{c}"' for c in pk_columns])
+        query = f'SELECT * FROM (SELECT {cols} FROM "{schema_name.upper()}"."{table_name.upper()}" ORDER BY DBMS_RANDOM.VALUE) WHERE ROWNUM <= {sample_size}'
+        pks = []
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            for row in cursor.fetchall():
+                pks.append(dict(zip(pk_columns, row)))
+            cursor.close()
+            self.disconnect()
+            return pks
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"oracle_connector: get_random_pks: Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
+            return []
+
+    def get_row_checksums(self, schema_name: str, table_name: str, pk_columns: list, pk_values_list: list, columns: list):
+        if not columns or not pk_columns or not pk_values_list:
+            return {}
+        cols_concat = " || ".join([f"COALESCE(TO_CHAR(\"{col['column_name']}\"), '')" for col in columns])
+        pk_cols_str = ", ".join([f'"{c}"' for c in pk_columns])
+        
+        in_values = []
+        for pk_dict in pk_values_list:
+            vals = []
+            for c in pk_columns:
+                val = pk_dict[c]
+                if val is None:
+                    vals.append("NULL")
+                elif isinstance(val, str):
+                    vals.append(f"'{val.replace('\'', '\'\'')}'")
+                else:
+                    vals.append(str(val))
+            in_values.append(f"({', '.join(vals)})")
+        
+        where_clause = f"({pk_cols_str}) IN ({', '.join(in_values)})"
+        if len(pk_columns) == 1:
+            where_clause = f"{pk_cols_str} IN ({', '.join([v.strip('()') for v in in_values])})"
+            
+        query = f'SELECT {pk_cols_str}, ORA_HASH({cols_concat}) FROM "{schema_name.upper()}"."{table_name.upper()}" WHERE {where_clause}'
+        
+        checksums = {}
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            for row in cursor.fetchall():
+                pk_tuple = tuple(row[:len(pk_columns)])
+                pk_key = pk_tuple[0] if len(pk_tuple) == 1 else pk_tuple
+                checksums[pk_key] = row[-1]
+            cursor.close()
+            self.disconnect()
+            return checksums
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"oracle_connector: get_row_checksums: Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
+            return {}
+
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

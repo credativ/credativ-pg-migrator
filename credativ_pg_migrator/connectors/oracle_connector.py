@@ -1197,8 +1197,13 @@ class OracleConnector(DatabaseConnector):
     def get_table_checksum(self, schema_name: str, table_name: str, columns: list):
         if not columns:
             return None
-        cols_concat = " || ".join([f"COALESCE(TO_CHAR(\"{col['column_name']}\"), '')" for col in columns])
-        query = f'SELECT sum(ORA_HASH({cols_concat})) FROM "{schema_name.upper()}"."{table_name.upper()}"'
+            
+        hash_parts = []
+        for i, col in enumerate(columns):
+            hash_parts.append(f"ORA_HASH(COALESCE(TO_CHAR(\"{col['column_name']}\"), ''), 4294967295, {i+1})")
+        cols_concat = " + ".join(hash_parts)
+        
+        query = f'SELECT sum({cols_concat}) FROM "{schema_name.upper()}"."{table_name.upper()}"'
         try:
             self.connect()
             cursor = self.connection.cursor()
@@ -1235,7 +1240,12 @@ class OracleConnector(DatabaseConnector):
     def get_row_checksums(self, schema_name: str, table_name: str, pk_columns: list, pk_values_list: list, columns: list):
         if not columns or not pk_columns or not pk_values_list:
             return {}
-        cols_concat = " || ".join([f"COALESCE(TO_CHAR(\"{col['column_name']}\"), '')" for col in columns])
+            
+        hash_parts = []
+        for i, col in enumerate(columns):
+            hash_parts.append(f"ORA_HASH(COALESCE(TO_CHAR(\"{col['column_name']}\"), ''), 4294967295, {i+1})")
+        cols_concat = " + ".join(hash_parts)
+        
         pk_cols_str = ", ".join([f'"{c}"' for c in pk_columns])
         
         in_values = []
@@ -1255,7 +1265,7 @@ class OracleConnector(DatabaseConnector):
         if len(pk_columns) == 1:
             where_clause = f"{pk_cols_str} IN ({', '.join([v.strip('()') for v in in_values])})"
             
-        query = f'SELECT {pk_cols_str}, ORA_HASH({cols_concat}) FROM "{schema_name.upper()}"."{table_name.upper()}" WHERE {where_clause}'
+        query = f'SELECT {pk_cols_str}, ({cols_concat}) FROM "{schema_name.upper()}"."{table_name.upper()}" WHERE {where_clause}'
         
         checksums = {}
         try:

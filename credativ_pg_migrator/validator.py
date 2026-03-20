@@ -85,6 +85,21 @@ class Validator:
         source_conn = self._get_connector('source')
         target_conn = self._get_connector('target')
         
+        try:
+            source_conn.connect()
+            target_conn.connect()
+            return self._validate_table_inner(source_conn, target_conn, table_info, check_counts, check_table_sum, check_random, check_lob, sample_size)
+        except Exception as e:
+            self.val_logger.logger.error(f"Failed to connect to databases for validating table {table_info.get('target_table_name')}: {e}")
+            self.val_logger.logger.error(traceback.format_exc())
+            return None
+        finally:
+            if getattr(source_conn, 'connection', None):
+                source_conn.disconnect()
+            if getattr(target_conn, 'connection', None):
+                target_conn.disconnect()
+
+    def _validate_table_inner(self, source_conn, target_conn, table_info, check_counts, check_table_sum, check_random, check_lob, sample_size):
         source_schema = table_info['source_schema_name']
         source_table = table_info['source_table_name']
         target_schema = table_info['target_schema_name']
@@ -105,8 +120,11 @@ class Validator:
         
         self.val_logger.logger.info(f"Validating {res['target_table']} ...")
         
-        target_cols = table_info.get('target_columns') or []
-        source_cols = table_info.get('source_columns') or []
+        t_cols_raw = table_info.get('target_columns') or []
+        s_cols_raw = table_info.get('source_columns') or []
+        
+        target_cols = list(t_cols_raw.values()) if isinstance(t_cols_raw, dict) else t_cols_raw
+        source_cols = list(s_cols_raw.values()) if isinstance(s_cols_raw, dict) else s_cols_raw
         
         pk_cols = self.migrator_tables.select_primary_key({'source_schema_name': source_schema, 'source_table_name': source_table})
         if pk_cols:
@@ -191,10 +209,25 @@ class Validator:
             res['passed'] = False
             res['row_msg'] = f"Error: {e}"
 
+        details = []
+        if res.get('row_logic') is not None:
+            details.append(f"Row Counts ({res.get('row_msg', '').strip()})")
+        if res.get('table_hash_logic') is not None:
+            details.append(f"Table Checksum ({res.get('table_msg', '').strip()})")
+        if res.get('row_hash_logic') is not None:
+            details.append(f"Row Level Hash ({res.get('row_hash_msg', '').strip()})")
+        if res.get('lob_size_logic') is not None:
+            details.append(f"LOB Size Check ({res.get('lob_size_msg', '').strip()})")
+            
+        if not details and res.get('row_msg', '').startswith('Error:'):
+            details.append(f"Fatal Execution Details ({res.get('row_msg', '').strip()})")
+            
+        fail_str = ", ".join(details)
+        
         if res['passed']:
-            self.val_logger.logger.info(f"OK: {res['target_table']} passed all active validations.")
+            self.val_logger.logger.info(f"OK: {res['target_table']} passed all active validations against source {source_schema}.{source_table}. Details: {fail_str}")
         else:
-            self.val_logger.logger.warning(f"FAIL: {res['target_table']} failed validation.")
+            self.val_logger.logger.warning(f"FAIL: {res['target_table']} failed validation against source {source_schema}.{source_table}. Details: {fail_str}")
 
         try:
             self.migrator_tables.insert_validation_result({

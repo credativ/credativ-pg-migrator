@@ -1303,7 +1303,6 @@ class OracleConnector(DatabaseConnector):
         
         sizes = {}
         try:
-            self.connect()
             cursor = self.connection.cursor()
             cursor.execute(query)
             for row in cursor.fetchall():
@@ -1311,7 +1310,6 @@ class OracleConnector(DatabaseConnector):
                 pk_key = pk_tuple[0] if len(pk_tuple) == 1 else pk_tuple
                 sizes[pk_key] = row[len(pk_columns):]
             cursor.close()
-            self.disconnect()
             return sizes
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"oracle_connector: get_lob_sizes: Error executing query: {query}")

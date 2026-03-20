@@ -118,7 +118,10 @@ class Orchestrator:
                 self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': '', 'success': False, 'message': f'ERROR: {e}'})
                 self.handle_error(e, 'orchestration')
 
-        self.migrator_tables.print_migration_summary()
+        if self.config_parser.is_mapping_workflow():
+            self.migrator_tables.print_mapping_migration_summary()
+        else:
+            self.migrator_tables.print_migration_summary()
 
         try:
             self.source_connection.disconnect()

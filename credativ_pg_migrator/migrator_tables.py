@@ -3166,6 +3166,57 @@ class MigratorTables:
         if self.config_parser.is_dry_run():
             self.config_parser.print_log_message('INFO', "migrator_tables: print_migration_summary: ! Dry run mode enabled. No migration performed !")
 
+    def print_mapping_migration_summary(self):
+        self.config_parser.print_log_message('INFO', "migrator_tables: print_mapping_migration_summary: Mapping Migration stats:")
+        self.config_parser.print_log_message('INFO', f"migrator_tables: print_mapping_migration_summary: Source database: {self.config_parser.get_source_db_name()}, schema: {self.config_parser.get_source_owner()} ({self.config_parser.get_source_db_type()})")
+        self.config_parser.print_log_message('INFO', f"migrator_tables: print_mapping_migration_summary: Target database: {self.config_parser.get_target_db_name()}, schema: {self.config_parser.get_target_schema()} ({self.config_parser.get_target_db_type()})")
+        self.print_main(self.config_parser.get_protocol_name_main())
+        self.config_parser.print_log_message('INFO', "migrator_tables: print_mapping_migration_summary: Mapping summary:")
+        if self.config_parser.is_dry_run():
+            self.config_parser.print_log_message('INFO', "migrator_tables: print_mapping_migration_summary: ! Dry run mode enabled. No migration performed !")
+
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            
+            cursor.execute(f'SELECT count(*) FROM "{self.protocol_schema}"."mapping_tables"')
+            tables_count = cursor.fetchone()[0]
+            self.config_parser.print_log_message('INFO', f"migrator_tables: print_mapping_migration_summary: Mapped Tables: {tables_count}")
+
+            cursor.execute(f'SELECT match_type, count(*) FROM "{self.protocol_schema}"."mapping_tables" GROUP BY match_type ORDER BY count(*) DESC')
+            for row in cursor.fetchall():
+                self.config_parser.print_log_message('INFO', f"migrator_tables: print_mapping_migration_summary:     Found via {row[0]}: {row[1]}")
+
+            cursor.execute(f'SELECT count(*) FROM "{self.protocol_schema}"."mapping_columns"')
+            columns_count = cursor.fetchone()[0]
+            self.config_parser.print_log_message('INFO', f"migrator_tables: print_mapping_migration_summary: Mapped Columns: {columns_count}")
+
+            cursor.execute(f'SELECT match_type, count(*) FROM "{self.protocol_schema}"."mapping_columns" GROUP BY match_type ORDER BY count(*) DESC')
+            for row in cursor.fetchall():
+                self.config_parser.print_log_message('INFO', f"migrator_tables: print_mapping_migration_summary:     Found via {row[0]}: {row[1]}")
+
+            cursor.execute(f'SELECT count(*) FROM "{self.protocol_schema}"."mapping_target_indexes"')
+            indexes_count = cursor.fetchone()[0]
+            self.config_parser.print_log_message('INFO', f"migrator_tables: print_mapping_migration_summary: Target Indexes to map: {indexes_count}")
+
+            cursor.execute(f'SELECT count(*) FROM "{self.protocol_schema}"."mapping_target_constraints"')
+            constraints_count = cursor.fetchone()[0]
+            self.config_parser.print_log_message('INFO', f"migrator_tables: print_mapping_migration_summary: Target Constraints to map: {constraints_count}")
+
+            cursor.execute(f'SELECT count(*) FROM "{self.protocol_schema}"."mapping_target_sequences"')
+            sequences_count = cursor.fetchone()[0]
+            self.config_parser.print_log_message('INFO', f"migrator_tables: print_mapping_migration_summary: Target Sequences to map: {sequences_count}")
+
+            cursor.close()
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: print_mapping_migration_summary: Error printing mapping summary.")
+            self.config_parser.print_log_message('ERROR', e)
+
+        self.print_data_migration_summary()
+
+        if self.config_parser.is_dry_run():
+            self.config_parser.print_log_message('INFO', "migrator_tables: print_mapping_migration_summary: ! Dry run mode enabled. No migration performed !")
+
+
     def fetch_all_tables(self, only_unfinished=False):
         if only_unfinished:
             query = f"""SELECT * FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_tables()}" WHERE success IS NOT TRUE ORDER BY id"""

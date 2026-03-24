@@ -1111,7 +1111,8 @@ class InformixConnector(DatabaseConnector):
             raise ValueError(f"Unsupported target database type: {target_db_type}")
 
     def fetch_sequences(self, schema_name: str):
-        pass
+        # Placeholder for fetching sequences
+        return {}
 
     def get_sequence_details(self, sequence_owner, sequence_name):
         # Placeholder for fetching sequence details

@@ -4493,5 +4493,17 @@ EXECUTE FUNCTION {target_schema_name}.{trigger_name}_func();
         extracted_default_value = settings['extracted_default_value']
         return extracted_default_value
 
+    def get_table_checksum(self, schema_name: str, table_name: str, columns: list):
+        return None
+
+    def get_random_pks(self, schema_name: str, table_name: str, pk_columns: list, sample_size: int):
+        return []
+
+    def get_row_checksums(self, schema_name: str, table_name: str, pk_columns: list, pk_values_list: list, columns: list):
+        return {}
+
+    def get_lob_sizes(self, schema_name: str, table_name: str, pk_columns: list, pk_values_list: list, lob_columns: list):
+        return {}
+
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

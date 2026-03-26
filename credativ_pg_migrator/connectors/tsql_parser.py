@@ -67,8 +67,21 @@ class TsqlParser:
         # Determine body start (after 'AS')
         for i, line in enumerate(self.raw_lines):
             # Check for isolated AS
-            if re.search(r'\bAS\b', line.content, re.IGNORECASE):
+            match = re.search(r'\bAS\b', line.content, re.IGNORECASE)
+            if match:
                 as_index = i
+                # Check if there's anything after 'AS'
+                after_as = line.content[match.end():]
+                if after_as.strip():
+                    # Split the line into two SourceLines
+                    header_part = line.content[:match.end()]
+                    body_part = after_as
+                    
+                    # Update current line to be just the header part
+                    self.raw_lines[i].content = header_part
+                    
+                    # Insert the rest as the next line (preserve line_number for tracking)
+                    self.raw_lines.insert(i + 1, SourceLine(line.line_number, body_part))
                 break
 
         if as_index != -1:

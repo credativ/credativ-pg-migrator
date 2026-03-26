@@ -2738,6 +2738,20 @@ EXECUTE FUNCTION {target_schema_name}.{trigger_name}_func();
 
             return expression
 
+        def replace_cast_types(node):
+            if isinstance(node, sqlglot.exp.Cast) and isinstance(node.to, sqlglot.exp.DataType):
+                type_name = node.to.this.name.upper() if getattr(node.to.this, 'name', None) else str(node.to.this).upper()
+                if type_name == 'USERDEFINED' and 'kind' in node.to.args:
+                    type_name = node.to.args['kind'].upper()
+                
+                mapping = self.get_types_mapping({ 'target_db_type': settings['target_db_type'] })
+                if type_name in mapping:
+                    mapped = mapping[type_name]
+                    # We utilize sqlglot DataType.build which securely accepts nested expressions, 
+                    # ensuring limits like VARCHAR(10) translate intact. 
+                    node.set('to', sqlglot.exp.DataType.build(mapped, expressions=node.to.expressions))
+            return node
+
         def convert_string_concatenation(node):
             if isinstance(node, sqlglot.exp.Add):
                 left = node.left
@@ -2798,7 +2812,7 @@ EXECUTE FUNCTION {target_schema_name}.{trigger_name}_func();
         if settings['target_db_type'] == 'postgresql':
 
             try:
-                parsed_code = sqlglot.parse_one(converted_code)
+                parsed_code = sqlglot.parse_one(converted_code, read='tsql')
             except Exception as e:
                 self.config_parser.print_log_message('ERROR', f"sybase_ase_connector: convert_string_concatenation: Error parsing View code: {e}")
                 # Fallback to the unparsed converted_code instead of empty string to avoid crashes
@@ -2812,6 +2826,9 @@ EXECUTE FUNCTION {target_schema_name}.{trigger_name}_func();
 
             # Convert string concatenation + to ||
             parsed_code = parsed_code.transform(convert_string_concatenation)
+
+            # Map Sybase native cast datatypes to Postgres native equivalents
+            parsed_code = parsed_code.transform(replace_cast_types)
 
             self.config_parser.print_log_message('DEBUG3', f"sybase_ase_connector: convert_string_concatenation: Double quoted columns: {parsed_code.sql()}")
 

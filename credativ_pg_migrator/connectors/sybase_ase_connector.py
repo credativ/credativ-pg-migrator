@@ -2786,6 +2786,15 @@ EXECUTE FUNCTION {target_schema_name}.{trigger_name}_func();
 
         converted_code = self._apply_udt_to_base_type_substitutions(converted_code, settings)
 
+        # Convert double-quoted string literals to single-quoted strings
+        # Sybase often allows "string" where PostgreSQL expects 'string' (which would otherwise parse as an identifier)
+        def replacer_dq(m):
+            inner = m.group(1)
+            inner = inner.replace("'", "''")
+            return f"'{inner}'"
+            
+        converted_code = re.sub(r'"([^"]*)"', replacer_dq, converted_code)
+
         if settings['target_db_type'] == 'postgresql':
 
             try:

@@ -1174,6 +1174,16 @@ class SybaseASEConnector(DatabaseConnector):
     def convert_funcproc_code(self, settings):
         try:
             funcproc_code = settings['funcproc_code']
+            
+            # Convert double-quoted string literals to single-quoted strings
+            # Sybase often allows "string" where PostgreSQL expects 'string' (which would otherwise parse as an identifier)
+            def replacer_dq(m):
+                inner = m.group(1)
+                inner = inner.replace("'", "''")
+                return f"'{inner}'"
+                
+            funcproc_code = re.sub(r'"([^"]*)"', replacer_dq, funcproc_code)
+
             target_db_type = settings.get('target_db_type', 'postgresql')
             types_mapping = self.get_types_mapping({'target_db_type': target_db_type})
 
@@ -2740,17 +2750,27 @@ EXECUTE FUNCTION {target_schema_name}.{trigger_name}_func();
             return expression
 
         def replace_cast_types(node):
-            if isinstance(node, sqlglot.exp.Cast) and isinstance(node.to, sqlglot.exp.DataType):
-                type_name = node.to.this.name.upper() if getattr(node.to.this, 'name', None) else str(node.to.this).upper()
-                if type_name == 'USERDEFINED' and 'kind' in node.to.args:
-                    type_name = node.to.args['kind'].upper()
+            if isinstance(node, (sqlglot.exp.Cast, sqlglot.exp.TryCast, sqlglot.exp.Convert)):
+                # Convert and Cast have different properties for the target DataType
+                type_node = node.to if isinstance(node, (sqlglot.exp.Cast, sqlglot.exp.TryCast)) else node.args.get('this')
+                expr_node = node.this if isinstance(node, (sqlglot.exp.Cast, sqlglot.exp.TryCast)) else node.args.get('expression')
                 
-                mapping = self.get_types_mapping({ 'target_db_type': settings['target_db_type'] })
-                if type_name in mapping:
-                    mapped = mapping[type_name]
-                    # We utilize sqlglot DataType.build which securely accepts nested expressions, 
-                    # ensuring limits like VARCHAR(10) translate intact. 
-                    node.set('to', sqlglot.exp.DataType.build(mapped, expressions=node.to.expressions))
+                if isinstance(type_node, sqlglot.exp.DataType):
+                    type_name = type_node.this.name.upper() if getattr(type_node.this, 'name', None) else str(type_node.this).upper()
+                    if type_name == 'USERDEFINED' and 'kind' in type_node.args:
+                        type_name = type_node.args['kind'].upper()
+                    
+                    mapping = self.get_types_mapping({ 'target_db_type': settings['target_db_type'] })
+                    if type_name in mapping:
+                        mapped = mapping[type_name]
+                        # Construct a new mapped Postgres DataType securely accepting nested constraints like VARCHAR(10)
+                        new_type_node = sqlglot.exp.DataType.build(mapped, expressions=type_node.expressions)
+                    else:
+                        new_type_node = type_node
+
+                    # Safely convert everything uniformly into a standard safe CAST wrapper 
+                    # for strictly Postgres compatible execution
+                    return sqlglot.exp.Cast(this=expr_node, to=new_type_node)
             return node
 
         def convert_string_concatenation(node):

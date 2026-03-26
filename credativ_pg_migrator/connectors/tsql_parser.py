@@ -605,6 +605,9 @@ class TsqlParser:
                 # Using regex with MULTILINE flag to match $ at end of each line
                 full_decl = re.sub(r',\s*$', ';', full_decl, flags=re.MULTILINE)
 
+                if not full_decl.strip().endswith(';'):
+                    full_decl = full_decl.rstrip() + ';'
+
                 self.variables.append({
                     "line": start_line,
                     "content": full_decl
@@ -1194,9 +1197,20 @@ class TsqlParser:
         # Sort by line number
         body_parts.sort(key=lambda x: x[0])
         
+        # Inject BEGIN and END if they are missing from the Sybase source
+        if body_parts:
+            first_content = next((x[1].strip().upper() for x in body_parts if x[1].strip()), "")
+            if first_content != "BEGIN":
+                add_line("injected_begin", 0, "BEGIN")
+                
         # Append to output_array
         for item in body_parts:
             add_line(item[2], item[0], item[1])
+            
+        if body_parts:
+            last_content = next((x[1].strip().upper() for x in reversed(body_parts) if x[1].strip()), "")
+            if last_content not in ("END", "END;"):
+                add_line("injected_end", 0, "END;")
             
         # 6. Final Separator
         add_line("separator", 0, "$$ LANGUAGE plpgsql;")

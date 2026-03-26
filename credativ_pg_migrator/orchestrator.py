@@ -1630,7 +1630,7 @@ class Orchestrator:
                     self.migrator_tables.update_constraint_status({'row_id': constraint_data['id'], 'success': False, 'message': f'ERROR: target table {target_schema_name}.{target_table_name_to_check} does not exist'})
                     return False
 
-                # if constraint_data['constraint_type'] is 'FOREIGN KEY': ## original version on main - must be tested
+                # if constraint_data['constraint_type'] is 'FOREIGN KEY': ## original version on main, must be tested
                 if referenced_table_name and referenced_table_name.strip():
                     referenced_target_table = self.migrator_tables.select_table_by_source({'source_schema_name': referenced_table_schema, 'source_table_name': referenced_table_name})
                     if referenced_target_table is None:

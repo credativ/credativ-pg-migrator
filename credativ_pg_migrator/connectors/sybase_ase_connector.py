@@ -1279,6 +1279,7 @@ class SybaseASEConnector(DatabaseConnector):
                 if stripped == "$$":
                     indent_level = 0
                     ddl += get_indent(0) + line_obj.content + "\n"
+                    in_body = True
                     continue
                     
                 if stripped.upper() == "$$ LANGUAGE PLPGSQL;":

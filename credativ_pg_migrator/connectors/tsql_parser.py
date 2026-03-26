@@ -1144,14 +1144,16 @@ class TsqlParser:
         else:
             for line in self.header_lines:
                 add_line("header", line.line_number, line.content)
-            add_line("separator", 0, "$$")
+        
+        add_line("separator", 0, "$$")
         
         # 3. DECLARE
-        add_line("declare_section", 0, "DECLARE")
-        
-        # 4. Variables
-        for var in self.variables:
-            add_line("variable_declaration", var['line'], var['content'])
+        if self.variables:
+            add_line("declare_section", 0, "DECLARE")
+            
+            # 4. Variables
+            for var in self.variables:
+                add_line("variable_declaration", var['line'], var['content'])
             
         # 5. Body Output Array
         # Collect all parts, sort by original line number, then append.
@@ -1317,6 +1319,7 @@ class TsqlParser:
                 if stripped == "$$":
                     indent_level = 0
                     f.write(get_indent(0) + line_obj.content + "\n")
+                    in_body = True
                     continue
                     
                 if stripped.upper() == "$$ LANGUAGE PLPGSQL;":

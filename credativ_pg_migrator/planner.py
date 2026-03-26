@@ -911,7 +911,7 @@ class Planner:
                     self.config_parser.print_log_message('INFO', f"planner: stdwf_prepare_views: View {view_info['view_name']} is excluded from migration.")
                     continue
                 self.config_parser.print_log_message('INFO', f"planner: stdwf_prepare_views: View {view_info['view_name']} is included for migration.")
-                target_view_name = view_info['target_view_name']
+                target_view_name = view_info.get('target_view_name', view_info['view_name'])
                 target_alias_name = ''
                 # if self.config_parser.get_use_aliases_as_target_names() and self.config_parser.get_source_db_type() != 'ibm_db2_zos':
                 #     alias_name = self.migrator_tables.get_alias_for_table(self.source_schema_name, view_info['view_name'])

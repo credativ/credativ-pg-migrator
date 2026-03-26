@@ -137,9 +137,9 @@ class Orchestrator:
         self.config_parser.print_log_message('INFO', "orchestrator: mapping_drop_indexes_and_constraints: Starting global drop for constraints and indexes")
         target_conn = self.load_connector('target')
         target_conn.connect()
-        
+
         tables = self.migrator_tables.fetch_all_tables(only_unfinished=False)
-        
+
         # 1. Drop constraints
         self.config_parser.print_log_message('INFO', "orchestrator: mapping_drop_indexes_and_constraints: Dropping non-primary key constraints")
         for table_row in tables:
@@ -156,7 +156,7 @@ class Orchestrator:
                         self.migrator_tables.update_mapping_target_constraint_drop_status({'row_id': constraint['id'], 'dropped': True, 'message': 'dropped OK'})
                     except Exception as ex:
                         self.migrator_tables.update_mapping_target_constraint_drop_status({'row_id': constraint['id'], 'dropped': False, 'message': f'ERROR: {ex}'})
-                    
+
         # 2. Drop indexes
         self.config_parser.print_log_message('INFO', "orchestrator: mapping_drop_indexes_and_constraints: Dropping non-primary key indexes")
         for table_row in tables:
@@ -180,9 +180,9 @@ class Orchestrator:
         self.config_parser.print_log_message('INFO', "orchestrator: mapping_create_indexes_and_constraints: Starting global recreate for indexes and constraints")
         target_conn = self.load_connector('target')
         target_conn.connect()
-        
+
         tables = self.migrator_tables.fetch_all_tables(only_unfinished=False)
-        
+
         # 1. Recreate indexes
         self.config_parser.print_log_message('INFO', "orchestrator: mapping_create_indexes_and_constraints: Recreating non-primary key indexes")
         for table_row in tables:
@@ -226,33 +226,33 @@ class Orchestrator:
     def mapping_check_indexes_and_constraints(self):
         self.config_parser.print_log_message('INFO', "orchestrator: mapping_check_indexes_and_constraints: Starting global verification of indexes and constraints")
         target_conn = self.load_connector('target')
-        
+
         tables = self.migrator_tables.fetch_all_tables(only_unfinished=False)
-        
+
         total_checked_constraints = 0
         total_missing_constraints = 0
         total_checked_indexes = 0
         total_missing_indexes = 0
-        
+
         for table_row in tables:
             table_data = self.migrator_tables.decode_table_row(table_row)
             target_schema_name_eval = table_data['target_schema_name']
             target_table_name_eval = self.config_parser.convert_names_case(table_data['target_table_name'])
-            
+
             expected_constraints = self.migrator_tables.fetch_mapping_target_constraints(target_schema_name_eval, target_table_name_eval)
             actual_constraints = target_conn.fetch_mapping_target_constraints(target_schema_name_eval, target_table_name_eval)
             actual_constraint_names = {c['constraint_name'] for c in actual_constraints}
-            
+
             for expected in expected_constraints:
                 total_checked_constraints += 1
                 if expected['constraint_name'] not in actual_constraint_names:
                     total_missing_constraints += 1
                     self.config_parser.print_log_message('WARNING', f"orchestrator: Target database is missing constraint '{expected['constraint_name']}' on {target_schema_name_eval}.{target_table_name_eval}")
-                    
+
             expected_indexes = self.migrator_tables.fetch_mapping_target_indexes(target_schema_name_eval, target_table_name_eval)
             actual_indexes = target_conn.fetch_mapping_target_indexes(target_schema_name_eval, target_table_name_eval)
             actual_index_names = {i['index_name'] for i in actual_indexes}
-            
+
             for expected in expected_indexes:
                 total_checked_indexes += 1
                 if expected['index_name'] not in actual_index_names:
@@ -300,7 +300,7 @@ class Orchestrator:
                     'source_table_rows': source_rows,
                     'target_table_rows': target_rows if target_rows != -1 else 0,
                 })
-                
+
                 if source_rows == 0:
                     msg = 'Skipped (0 rows)'
                     status_msg = 'mapped data OK (0 rows)'
@@ -409,9 +409,9 @@ class Orchestrator:
                     self.config_parser.print_log_message('INFO', f"orchestrator: mapping_data_worker: Worker {worker_id}: Migration paused for table {table_data['target_table_name']}.")
                     self.config_parser.wait_for_resume()
                     self.config_parser.print_log_message('INFO', f"orchestrator: mapping_data_worker: Worker {worker_id}: Resuming migration for table {table_data['target_table_name']}.")
-                
+
                 migration_stats = worker_source_connection.migrate_table(worker_target_connection, settings)
-                
+
                 rows_migrated += migration_stats.get('rows_migrated', 0)
                 if migration_stats.get('finished', True):
                     break
@@ -1892,6 +1892,7 @@ class Orchestrator:
             self.config_parser.print_log_message('INFO', "orchestrator: run_migrate_views: Migrating views.")
 
             all_views = self.migrator_tables.fetch_all_views()
+            self.config_parser.print_log_message('DEBUG', f"orchestrator: run_migrate_views: found views: {len(all_views)}")
             if all_views:
                 normal_views = []
                 alias_views = []

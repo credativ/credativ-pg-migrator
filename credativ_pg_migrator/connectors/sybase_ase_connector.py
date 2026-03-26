@@ -2994,11 +2994,15 @@ EXECUTE FUNCTION {target_schema_name}.{trigger_name}_func();
             """
             cursor.execute(query)
             row = cursor.fetchone()
-            if row:
+            if row and row[0]:
                 basic_data_type = row[0]
                 domains[rule_name]['domain_data_type'] = basic_data_type
             else:
-                domains[rule_name]['domain_data_type'] = None
+                domain_sql_lower = domains[rule_name]['source_domain_sql'].lower()
+                if re.search(r'\blike\b', domain_sql_lower) or "'" in domains[rule_name]['source_domain_sql']:
+                    domains[rule_name]['domain_data_type'] = 'TEXT'
+                else:
+                    domains[rule_name]['domain_data_type'] = 'NUMERIC'
 
             domains[rule_name]['source_domain_sql'] = domains[rule_name]['source_domain_sql'].replace('\n', ' ')
 
@@ -3009,6 +3013,8 @@ EXECUTE FUNCTION {target_schema_name}.{trigger_name}_func();
             domain_check_sql = domain_check_sql.replace('"', "'")
             # Remove all comments starting with /* and ending with */
             domain_check_sql = re.sub(r'/\*.*?\*/', '', domain_check_sql, flags=re.DOTALL)
+            # Ensure PostgreSQL standalone constraints rely on VALUE
+            domain_check_sql = re.sub(r'(?i)(CHECK\s*\(\s*)([a-zA-Z_]\w*)(\s+|[<>=!])', r'\g<1>VALUE\g<3>', domain_check_sql)
             domains[rule_name]['source_domain_check_sql'] = domain_check_sql.strip()
 
         cursor.close()

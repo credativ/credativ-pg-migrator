@@ -993,8 +993,9 @@ class TsqlParser:
                 # "replace all ',' characters with semicolons"
                 cleaned = cleaned.replace(',', ';')
                 
-                # 3. Replace = with := (Rule 112)
-                cleaned = cleaned.replace('=', ':=')
+                # 3. Replace = with := for the assignment exclusively (Rule 112)
+                # Instead of a global .replace(), target only the assignment operator matching the @variable definition!
+                cleaned = re.sub(r'(@[\w@]+)\s*=', r'\1 :=', cleaned, count=1)
                 
                 # 4. Add semicolon at end (Rule 110)
                 cleaned = cleaned + ";"

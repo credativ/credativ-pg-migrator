@@ -1274,11 +1274,29 @@ class SybaseASEConnector(DatabaseConnector):
             indent_level = 0
             in_body = False
             first_begin_found = False
+            if_stack = []
             
-            for line_obj in final_output:
+            for index, line_obj in enumerate(final_output):
                 stripped = line_obj.content.strip()
                 current_indent = indent_level
                 
+                # Contextual block evaluation lookahead
+                next_stripped = final_output[index + 1].content.strip().upper() if index + 1 < len(final_output) else ""
+                is_next_else = bool(re.match(r'^(ELSE|ELSIF)\b', next_stripped))
+                
+                is_if = bool(re.match(r'^IF\b', stripped, re.IGNORECASE))
+                is_elsif = bool(re.match(r'^ELSIF\b', stripped, re.IGNORECASE))
+                is_else = bool(re.match(r'^ELSE\b', stripped, re.IGNORECASE))
+                is_begin = bool(re.match(r'^BEGIN\b', stripped, re.IGNORECASE))
+                is_end = bool(re.match(r'^END;', stripped, re.IGNORECASE))
+                
+                if is_if:
+                    if_stack.append({'has_begin': False, 'statements': 0, 'expecting_statement': True, 'indent': current_indent})
+                elif is_elsif or is_else:
+                    if if_stack:
+                        if_stack[-1]['statements'] = 0
+                        if_stack[-1]['expecting_statement'] = True
+
                 if stripped.upper() == "DECLARE":
                     indent_level = 0
                     in_body = True
@@ -1293,6 +1311,9 @@ class SybaseASEConnector(DatabaseConnector):
                     continue
                     
                 if stripped.upper() == "$$ LANGUAGE PLPGSQL;":
+                    while if_stack:
+                        top = if_stack.pop()
+                        ddl += get_indent(top['indent']) + "END IF;\n"
                     indent_level = 0
                     ddl += get_indent(0) + line_obj.content + "\n"
                     continue
@@ -1302,7 +1323,7 @@ class SybaseASEConnector(DatabaseConnector):
                     ddl += get_indent(0) + line_obj.content + "\n"
                     continue
                     
-                if re.match(r'^BEGIN\b', stripped, re.IGNORECASE):
+                if is_begin:
                     if not first_begin_found:
                         first_begin_found = True
                         current_indent = 0
@@ -1310,16 +1331,48 @@ class SybaseASEConnector(DatabaseConnector):
                     else:
                         current_indent = indent_level
                         indent_level += 1
-                elif re.match(r'^END;', stripped, re.IGNORECASE):
+                        
+                    if if_stack and if_stack[-1]['expecting_statement']:
+                        if_stack[-1]['has_begin'] = True
+                        if_stack[-1]['expecting_statement'] = False
+                elif is_end:
                     indent_level -= 1
                     current_indent = indent_level
                     if indent_level < 0:
                         indent_level = 0
                         current_indent = 0
-                else:
-                    pass
-                    
+                        
                 ddl += get_indent(current_indent) + line_obj.content + "\n"
+                
+                # Check branch completion boundaries
+                if is_end:
+                    if if_stack and if_stack[-1]['has_begin']:
+                        if not is_next_else:
+                            top = if_stack.pop()
+                            ddl += get_indent(top['indent']) + "END IF;\n"
+                    continue
+
+                if is_if or is_elsif or is_else:
+                    continue
+                    
+                if if_stack:
+                    for level in reversed(if_stack):
+                        if level['expecting_statement'] and not level['has_begin']:
+                            level['statements'] += 1
+                            break
+                            
+                    while if_stack:
+                        top_if = if_stack[-1]
+                        if top_if['has_begin']:
+                            break
+                        if top_if['statements'] >= 1:
+                            if not is_next_else:
+                                top = if_stack.pop()
+                                ddl += get_indent(top['indent']) + "END IF;\n"
+                            else:
+                                break
+                        else:
+                            break
                 
             return ddl
         except Exception as e:

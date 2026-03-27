@@ -2,6 +2,13 @@
 
 ## 0.13.0 - 2026.03.18
 
+- 2026.03.27
+
+  - Feature - T-SQL Parser: Designed and integrated a comprehensive native T-SQL parser matrix natively utilized across both the MS SQL and Sybase ASE connectors. Ensures extensive capability to systematically resolve complex or incomplete legacy syntax structures before target PostgreSQL generation.
+  - Fix - MS SQL Connector: Resolved a critical scope-shadowing bug where procedure variable type mappings silently overwrote global table column architectures, restoring full dynamic type binding and preventing widespread `TEXT` fallbacks.
+  - Fix - MS SQL Connector: Implemented advanced AST-based parsing via `sqlglot` to explicitly cast mathematical view operands to numeric types natively, preventing downstream text-multiplication operator failures in PostgreSQL.
+  - Fix - MS SQL Procedures: Upgraded the T-SQL parser matrix to flawlessly identify missing `END` block markers, safely inject required string-encapsulation layers for aliases, and dynamically translate legacy `SET ROWCOUNT` directives into PostgreSQL-compliant `LIMIT` clauses.
+
 - 2026.03.20
 
   - Feature - Validator Module: Redesigned the validation module (`--validate`) to support fully transparent cross-engine table and data evaluation. Implemented discrete parallel worker threads encapsulating precise connection lifecycles tailored to active verification blocks.

@@ -1877,7 +1877,7 @@ class Orchestrator:
             query = f'''RESET search_path;'''
             worker_target_connection.execute_query(query)
             worker_target_connection.disconnect()
-            return True
+            return True, "migrated OK"
         except Exception as e:
             self.config_parser.print_log_message( 'DEBUG', f"orchestrator: view_worker: Worker {worker_id}: Error creating {view_type_str} {view_detail['source_view_name']}: {e}")
             self.handle_error(e, f"view_worker {worker_id} migrate {view_type_str} {view_detail['source_view_name']}")
@@ -1885,7 +1885,7 @@ class Orchestrator:
                 worker_target_connection.disconnect()
             except:
                 pass
-            return False
+            return False, f"ERROR: {e}"
 
     def stdwf_migrate_views(self):
         self.migrator_tables.insert_main({'task_name': 'Orchestrator', 'subtask_name': 'views migration'})
@@ -1915,12 +1915,13 @@ class Orchestrator:
                         for future in concurrent.futures.as_completed(futures):
                             view_detail = futures[future]
                             try:
-                                success = future.result()
+                                success, message = future.result()
                                 if success:
                                     self.migrator_tables.update_view_status({'row_id': view_detail['id'], 'success': True, 'message': 'migrated OK'})
                                     self.config_parser.print_log_message('INFO', f"orchestrator: run_migrate_views: View {view_detail['source_view_name']} migrated successfully.")
                                 else:
                                     self.config_parser.print_log_message('ERROR', f"orchestrator: run_migrate_views: Error migrating view {view_detail['source_view_name']}.")
+                                    self.migrator_tables.update_view_status({'row_id': view_detail['id'], 'success': False, 'message': message})
                             except Exception as e:
                                 self.config_parser.print_log_message('ERROR', f"orchestrator: run_migrate_views: Exception migrating view {view_detail['source_view_name']}: {e}")
                                 self.migrator_tables.update_view_status({'row_id': view_detail['id'], 'success': False, 'message': f'ERROR: {e}'})
@@ -1933,12 +1934,13 @@ class Orchestrator:
                         for future in concurrent.futures.as_completed(futures):
                             view_detail = futures[future]
                             try:
-                                success = future.result()
+                                success, message = future.result()
                                 if success:
                                     self.migrator_tables.update_view_status({'row_id': view_detail['id'], 'success': True, 'message': 'migrated OK'})
                                     self.config_parser.print_log_message('INFO', f"orchestrator: run_migrate_views: Alias view {view_detail['source_view_name']} migrated successfully.")
                                 else:
                                     self.config_parser.print_log_message('ERROR', f"orchestrator: run_migrate_views: Error migrating alias view {view_detail['source_view_name']}.")
+                                    self.migrator_tables.update_view_status({'row_id': view_detail['id'], 'success': False, 'message': message})
                             except Exception as e:
                                 self.config_parser.print_log_message('ERROR', f"orchestrator: run_migrate_views: Exception migrating alias view {view_detail['source_view_name']}: {e}")
                                 self.migrator_tables.update_view_status({'row_id': view_detail['id'], 'success': False, 'message': f'ERROR: {e}'})

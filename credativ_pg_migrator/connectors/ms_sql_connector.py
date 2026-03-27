@@ -207,25 +207,7 @@ class CustomTSQL(TSQL):
         if hasattr(TokenType, 'IF'):
              STATEMENT_PARSERS[getattr(TokenType, 'IF')] = lambda self: self._parse_if()
 
-        def _parse(self, parse_method, raw_tokens, sql=None):
-            self.reset()
-            self.sql = sql or ""
-            self._tokens = raw_tokens
-            self._index = -1
-            self._advance()
 
-            expressions = []
-            while self._curr:
-                if self._match(TokenType.SEMICOLON):
-                     continue
-
-                stmt = parse_method(self)
-                if not stmt:
-                     if self._curr:
-                          self.raise_error("Invalid expression / Unexpected token")
-                     break
-                expressions.append(stmt)
-            return expressions
 
     class Generator(TSQL.Generator):
         TRANSFORMS = TSQL.Generator.TRANSFORMS.copy()
@@ -414,12 +396,22 @@ class MsSQLConnector(DatabaseConnector):
                 column_default = row[8]
 
                 column_type = data_type.upper()
+                target_db_type = settings.get('target_db_type', self.config_parser.get_target_db_type())
+                types_mapping = self.get_types_mapping({'target_db_type': target_db_type})
+                mapped_type = types_mapping.get(column_type, column_type)
+
                 if self.is_string_type(column_type) and character_maximum_length is not None:
-                    column_type += f"({character_maximum_length})"
+                    # In SQL Server, NVARCHAR(MAX) and VARCHAR(MAX) return -1 for max_length
+                    if character_maximum_length == -1:
+                        mapped_type = 'TEXT'
+                    else:
+                        mapped_type += f"({character_maximum_length})"
                 elif self.is_numeric_type(column_type) and numeric_precision is not None and numeric_scale is not None:
-                    column_type += f"({numeric_precision}, {numeric_scale})"
+                    mapped_type += f"({numeric_precision}, {numeric_scale})"
                 elif self.is_numeric_type(column_type) and numeric_precision is not None:
-                    column_type += f"({numeric_precision})"
+                    mapped_type += f"({numeric_precision})"
+                
+                column_type = mapped_type
 
                 if self.config_parser.get_source_db_type() == 'sybase_ase':
                     is_identity_bool = bool(is_identity is not None and (int(is_identity) & 128) == 128)
@@ -855,6 +847,9 @@ class MsSQLConnector(DatabaseConnector):
         funcproc_code = re.sub(r'\bGO\b', '', funcproc_code, flags=re.IGNORECASE)
 
         # Initialize TsqlParser
+        # Standardize MS SQL bracket identifiers to PostgreSQL double quotes
+        funcproc_code = re.sub(r'\[([^\]]+)\]', r'"\1"', funcproc_code)
+
         parser = TsqlParser(funcproc_code, self.config_parser)
         final_output = parser.run()
 
@@ -880,7 +875,7 @@ class MsSQLConnector(DatabaseConnector):
 
         self.config_parser.print_log_message('DEBUG', f"ms_sql_connector: convert_funcproc_code: DEBUG Parsing: obj_type_raw={obj_type_raw}, is_proc={is_proc}, pg_type={pg_type}, implicit_return={is_implicit_return}")
 
-        types_mapping = self.get_types_mapping(settings)
+        types_mapping = self._get_variable_types_mapping(settings)
 
         # 4. Construct Header (Parameters)
         header_clean = header_str[type_match.end():].strip()
@@ -926,7 +921,7 @@ class MsSQLConnector(DatabaseConnector):
             for p in params_list:
                 p = p.strip()
                 if not p: continue
-                p_match = re.search(r'@([\w]+)\s+([\w\(\)]+)(.*)', p)
+                p_match = re.search(r'(?:@|locvar_)([\w]+)\s+([\w\(\)]+)(.*)', p, flags=re.IGNORECASE)
                 if p_match:
                     p_name = p_match.group(1)
                     p_type = p_match.group(2)
@@ -1147,16 +1142,21 @@ class MsSQLConnector(DatabaseConnector):
             if isinstance(node, (sqlglot.exp.Table, sqlglot.exp.Column)):
                 # Quote schema name if present
                 schema = node.args.get("db")
-                if schema and not schema.args.get("quoted"):
+                if schema and getattr(schema, "set", None) and not schema.args.get("quoted"):
                     schema.set("quoted", True)
 
                 # Quote table name
                 if isinstance(node, sqlglot.exp.Table):
                     table = node.args.get("this")
+                    alias = node.args.get("alias")
+                    if alias:
+                        alias_id = alias.args.get("this")
+                        if alias_id and getattr(alias_id, "set", None) and not alias_id.args.get("quoted"):
+                            alias_id.set("quoted", True)
                 else:
                     table = node.args.get("table")
 
-                if table and not table.args.get("quoted"):
+                if table and getattr(table, "set", None) and not table.args.get("quoted"):
                     table.set("quoted", True)
             return node
 
@@ -1222,6 +1222,23 @@ class MsSQLConnector(DatabaseConnector):
                      return sqlglot.exp.DataType.build(udt_info['sql']) # Use 'sql' or 'definition'
             return node
 
+        def cast_arithmetic_operands(node):
+            def peel_parentheses_and_cast(n):
+                if isinstance(n, sqlglot.exp.Column):
+                    return sqlglot.exp.Cast(this=n, to=sqlglot.exp.DataType.build('numeric'))
+                elif isinstance(n, sqlglot.exp.Paren):
+                    inner = n.args.get("this")
+                    if inner:
+                        n.set("this", peel_parentheses_and_cast(inner))
+                return n
+
+            if isinstance(node, (sqlglot.exp.Mul, sqlglot.exp.Div, sqlglot.exp.Add, sqlglot.exp.Sub)):
+                for arg in ["this", "expression"]:
+                    child = node.args.get(arg)
+                    if child:
+                        node.set(arg, peel_parentheses_and_cast(child))
+            return node
+
         def transform_sybase_joins(expression):
             # Check for EQ nodes with outer join comments (sqlglot default parsing of *=)
             # OR check for 'outer_join' property if parsing handles it.
@@ -1253,6 +1270,7 @@ class MsSQLConnector(DatabaseConnector):
                 expression = expression.transform(replace_schema_names)
                 expression = expression.transform(quote_schema_and_table_names)
                 expression = expression.transform(replace_udts)
+                expression = expression.transform(cast_arithmetic_operands)
                 # expression = transform_sybase_joins(expression) # Not needed if standard SQL
 
                 pg_sql = expression.sql(dialect='postgres')
@@ -2417,7 +2435,7 @@ EXECUTE FUNCTION "{func_schema}"."{func_name}"();
             parts.append(current.strip())
         return parts
 
-    def get_types_mapping(self, settings):
+    def _get_variable_types_mapping(self, settings):
         # Basic mapping for variable declarations
         return {
             'nvarchar': 'varchar',

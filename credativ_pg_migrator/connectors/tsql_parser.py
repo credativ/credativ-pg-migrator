@@ -90,20 +90,8 @@ class TsqlParser:
             raw_header = self.raw_lines[:as_index+1]
             self.header_lines = [SourceLine(l.line_number, l.content.strip()) for l in raw_header]
 
-            # Find END
-            # "Body ... ends with "END" key word"
-            for i in range(len(self.raw_lines) - 1, as_index, -1):
-                 if re.search(r'\bEND\b', self.raw_lines[i].content, re.IGNORECASE):
-                     end_index = i
-                     break
-            
-            raw_body = []
-            if end_index != -1:
-                # Body lines: as_index+1 to end_index (inclusive)
-                raw_body = self.raw_lines[as_index+1 : end_index+1]
-            else:
-                raw_body = self.raw_lines[as_index+1:] # No END found?
-                self.log("Warning: No END keyword found.")
+            # Body is everything after 'AS'
+            raw_body = self.raw_lines[as_index+1:]
             
             # Rule: "remove all spaces at the beginning and at the end of each line"
             self.body_lines = [SourceLine(l.line_number, l.content.strip()) for l in raw_body]
@@ -1119,6 +1107,10 @@ class TsqlParser:
             if re.match(r'^BEGIN\b', content, re.IGNORECASE) and content.upper() == "BEGIN":
                 continue
             
+            # Allow SET ROWCOUNT to pass through cleanly so it can be handled by pass 11
+            if re.match(r'^SET\s+ROWCOUNT\b', content, re.IGNORECASE):
+                continue
+            
             # Rule 123: Anything else -> add TODO
             # Check if it was modified by above rules?
             
@@ -1198,6 +1190,29 @@ class TsqlParser:
         # Sort by line number
         body_parts.sort(key=lambda x: x[0])
         
+        # Apply SET ROWCOUNT limit to subsequent SELECT commands
+        active_rowcount_limit = None
+        new_body_parts = []
+        for line_num, content, source_name in body_parts:
+            # Detect SET ROWCOUNT N
+            m = re.match(r'^\s*SET\s+ROWCOUNT\s+(\d+)', content, re.IGNORECASE)
+            if m:
+                limit_val = m.group(1)
+                active_rowcount_limit = None if limit_val == '0' else limit_val
+                content = re.sub(r'(?i)^\s*SET\s+ROWCOUNT\s+\d+', f'/* SET ROWCOUNT {limit_val} converted to LIMIT */', content)
+            
+            # Apply LIMIT to SELECT commands
+            elif source_name == "select_commands" and active_rowcount_limit:
+                if not re.search(r'\bLIMIT\s+\d+', content, re.IGNORECASE):
+                    if content.strip().endswith(';'):
+                        content = content.strip()[:-1] + f" LIMIT {active_rowcount_limit};"
+                    else:
+                        content = content.strip() + f" LIMIT {active_rowcount_limit}"
+                        
+            new_body_parts.append((line_num, content, source_name))
+            
+        body_parts = new_body_parts
+
         # Inject BEGIN and END if they are missing from the Sybase source
         if body_parts:
             first_content = next((x[1].strip().upper() for x in body_parts if x[1].strip()), "")

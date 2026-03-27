@@ -834,8 +834,7 @@ class Planner:
                                         coltype = column_info['basic_data_type'].upper()
                                         if types_mapping.get(coltype, 'UNKNOWN').startswith('UNKNOWN'):
                                             self.config_parser.print_log_message('INFO', f"planner: convert_table_columns: Column {column_info['column_name']} - unknown basic data type: {column_info['basic_data_type']} - mapping missing, using TEXT...")
-
-                    coltype = types_mapping.get(coltype, 'TEXT').upper()
+                                            coltype = types_mapping.get(coltype, 'TEXT').upper()
 
                     if self.config_parser.get_varchar_to_text_length() >= 0 or self.config_parser.get_char_to_text_length() >= 0:
                         if (self.source_connection.is_string_type(coltype)

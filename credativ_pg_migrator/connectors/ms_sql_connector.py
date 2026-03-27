@@ -713,7 +713,7 @@ class MsSQLConnector(DatabaseConnector):
                 aliased_table_name = row[2].strip() if row[2] else ''
                 alias_owner = row[3].strip() if row[3] else source_schema_name
                 alias_sql = f"CREATE SYNONYM [{alias_owner}].[{alias_name}] FOR [{aliased_schema_name}].[{aliased_table_name}]"
-                
+
                 aliases[order_num] = {
                     'id': order_num,
                     'alias_schema_name': source_schema_name,
@@ -837,7 +837,7 @@ class MsSQLConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', f"ms_sql_connector: fetch_funcproc_code: Error fetching function/procedure code for id {funcproc_id}: {e}")
             return None
 
-        def convert_funcproc_code(self, settings):
+    def convert_funcproc_code(self, settings):
         funcproc_code_input = settings['funcproc_code']
         # Handle dict input (with schema) vs string input
         if isinstance(funcproc_code_input, dict):
@@ -918,10 +918,10 @@ class MsSQLConnector(DatabaseConnector):
             as_match = re.search(r'\bAS\b', header_clean, re.IGNORECASE)
             if as_match:
                 header_clean = header_clean[:as_match.start()].strip()
-            
+
             if header_clean.startswith('(') and header_clean.endswith(')'):
                 header_clean = header_clean[1:-1]
-            
+
             params_list = re.split(r',(?![^(]*\))', header_clean)
             for p in params_list:
                 p = p.strip()
@@ -944,7 +944,7 @@ class MsSQLConnector(DatabaseConnector):
 
         pg_params_str = ", ".join(pg_params)
         pg_name = f'"{obj_name}"'
-        
+
         pg_header_str = f"CREATE OR REPLACE {pg_type} \"{target_schema_name}\".{pg_name}({pg_params_str})\n"
         if pg_type == 'FUNCTION':
             pg_header_str += f"{returns_clause} AS"
@@ -957,25 +957,25 @@ class MsSQLConnector(DatabaseConnector):
         ddl = ""
         def get_indent(level):
             return "    " * max(0, level)
-            
+
         indent_level = 0
         in_body = False
         first_begin_found = False
         if_stack = []
-        
+
         for index, line_obj in enumerate(final_output):
             stripped = line_obj.content.strip()
             current_indent = indent_level
-            
+
             next_stripped = final_output[index + 1].content.strip().upper() if index + 1 < len(final_output) else ""
             is_next_else = bool(re.match(r'^(ELSE|ELSIF)\b', next_stripped))
-            
+
             is_if = bool(re.match(r'^IF\b', stripped, re.IGNORECASE))
             is_elsif = bool(re.match(r'^ELSIF\b', stripped, re.IGNORECASE))
             is_else = bool(re.match(r'^ELSE\b', stripped, re.IGNORECASE))
             is_begin = bool(re.match(r'^BEGIN\b', stripped, re.IGNORECASE))
             is_end = bool(re.match(r'^END;', stripped, re.IGNORECASE))
-            
+
             if is_if:
                 if_stack.append({'has_begin': False, 'statements': 0, 'expecting_statement': True, 'indent': current_indent})
             elif is_elsif or is_else:
@@ -989,13 +989,13 @@ class MsSQLConnector(DatabaseConnector):
                 ddl += get_indent(0) + line_obj.content + "\n"
                 indent_level = 1
                 continue
-                
+
             if stripped == "$$":
                 indent_level = 0
                 ddl += get_indent(0) + line_obj.content + "\n"
                 in_body = True
                 continue
-                
+
             if stripped.upper() == "$$ LANGUAGE PLPGSQL;":
                 while if_stack:
                     top = if_stack.pop()
@@ -1003,12 +1003,12 @@ class MsSQLConnector(DatabaseConnector):
                 indent_level = 0
                 ddl += get_indent(0) + line_obj.content + "\n"
                 continue
-                
+
             if not in_body:
                 current_indent = 0
                 ddl += get_indent(0) + line_obj.content + "\n"
                 continue
-                
+
             if is_begin:
                 if not first_begin_found:
                     first_begin_found = True
@@ -1017,7 +1017,7 @@ class MsSQLConnector(DatabaseConnector):
                 else:
                     current_indent = indent_level
                     indent_level += 1
-                    
+
                 if if_stack and if_stack[-1]['expecting_statement']:
                     if_stack[-1]['has_begin'] = True
                     if_stack[-1]['expecting_statement'] = False
@@ -1027,9 +1027,9 @@ class MsSQLConnector(DatabaseConnector):
                 if indent_level < 0:
                     indent_level = 0
                     current_indent = 0
-                    
+
             ddl += get_indent(current_indent) + line_obj.content + "\n"
-            
+
             if is_end:
                 if if_stack and if_stack[-1]['has_begin']:
                     if not is_next_else:
@@ -1039,13 +1039,13 @@ class MsSQLConnector(DatabaseConnector):
 
             if is_if or is_elsif or is_else:
                 continue
-                
+
             if if_stack:
                 for level in reversed(if_stack):
                     if level['expecting_statement'] and not level['has_begin']:
                         level['statements'] += 1
                         break
-                        
+
                 while if_stack:
                     top_if = if_stack[-1]
                     if top_if['has_begin']:
@@ -1633,7 +1633,7 @@ class MsSQLConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', f"ms_sql_connector: fetch_triggers: Error fetching triggers: {e}")
             return {}
 
-        def convert_trigger(self, settings):
+    def convert_trigger(self, settings):
         trigger_name = settings['trigger_name']
         trigger_code = settings['trigger_sql']
         source_schema_name = settings['source_schema_name']
@@ -1668,7 +1668,7 @@ class MsSQLConnector(DatabaseConnector):
         in_body = False
         first_begin_found = False
         indent_level = 0
-        
+
         def get_indent(level):
             return "    " * max(0, level)
 
@@ -1680,15 +1680,15 @@ class MsSQLConnector(DatabaseConnector):
             if not stripped: continue
             if stripped in ('$$', '$$ LANGUAGE PLPGSQL;', '$$ LANGUAGE plpgsql;'): continue
             if line_obj.source_array == "header": continue
-            
+
             if stripped.upper() == "DECLARE":
                 in_body = True
                 continue
-                
+
             if stripped.upper().startswith("DECLARE "):
                 declarations.append(stripped)
                 continue
-                
+
             if re.match(r'^BEGIN\b', stripped, re.IGNORECASE):
                 if not first_begin_found:
                     first_begin_found = True
@@ -1698,7 +1698,7 @@ class MsSQLConnector(DatabaseConnector):
             elif re.match(r'^END;', stripped, re.IGNORECASE):
                 indent_level -= 1
                 if indent_level < 0: indent_level = 0
-            
+
             final_stmts_clean.append(get_indent(indent_level) + line_obj.content)
 
         if has_rowcount:
@@ -1863,19 +1863,52 @@ EXECUTE FUNCTION "{func_schema}"."{func_name}"();
         pass
 
     def fetch_sequences(self, schema_name: str):
-        query = """
+        sequences = {}
+        order_num = 1
+        query = f"""
             SELECT
                 s.name AS sequence_name,
                 s.object_id AS sequence_id,
-                s.start_value AS start_value,
-                s.increment AS increment_value,
-                s.min_value AS min_value,
-                s.max_value AS max_value,
-                s.cycle_option AS cycle_option
+                CAST(s.start_value AS VARCHAR(50)) AS start_value,
+                CAST(s.increment AS VARCHAR(50)) AS increment_value,
+                CAST(s.minimum_value AS VARCHAR(50)) AS min_value,
+                CAST(s.maximum_value AS VARCHAR(50)) AS max_value,
+                s.is_cycling AS cycle_option,
+                sch.name AS schema_name
             FROM sys.sequences s
+            JOIN sys.schemas sch ON s.schema_id = sch.schema_id
+            WHERE sch.name = '{schema_name}'
         """
-        # ...existing code from SybaseASEConnector.fetch_sequences...
-        pass
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            for row in rows:
+                sequence_name = row[0]
+                sequence_id = row[1]
+                start_value = row[2]
+                increment_value = row[3]
+                min_value = row[4]
+                max_value = row[5]
+                cycle_option = "CYCLE" if row[6] else "NO CYCLE"
+                sch_name = row[7]
+
+                source_sequence_sql = f"CREATE SEQUENCE [{sch_name}].[{sequence_name}] START WITH {start_value} INCREMENT BY {increment_value} MINVALUE {min_value} MAXVALUE {max_value} {cycle_option};"
+
+                sequences[order_num] = {
+                    'sequence_name': sequence_name,
+                    'id': sequence_id,
+                    'source_sequence_sql': source_sequence_sql
+                }
+                order_num += 1
+            cursor.close()
+            self.disconnect()
+            return sequences
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"ms_sql_connector: fetch_sequences: Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
+            raise
 
     def get_sequence_details(self, sequence_owner, sequence_name):
         # Placeholder for fetching sequence details

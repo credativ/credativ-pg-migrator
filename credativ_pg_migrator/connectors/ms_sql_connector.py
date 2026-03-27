@@ -20,6 +20,7 @@ import pyodbc
 from pyodbc import Error
 from credativ_pg_migrator.database_connector import DatabaseConnector
 from credativ_pg_migrator.migrator_logging import MigratorLogger
+from credativ_pg_migrator.connectors.tsql_parser import TsqlParser
 import re
 import traceback
 import time
@@ -836,7 +837,7 @@ class MsSQLConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', f"ms_sql_connector: fetch_funcproc_code: Error fetching function/procedure code for id {funcproc_id}: {e}")
             return None
 
-    def convert_funcproc_code(self, settings):
+        def convert_funcproc_code(self, settings):
         funcproc_code_input = settings['funcproc_code']
         # Handle dict input (with schema) vs string input
         if isinstance(funcproc_code_input, dict):
@@ -846,28 +847,27 @@ class MsSQLConnector(DatabaseConnector):
              funcproc_code = str(funcproc_code_input)
              implicit_return_schema = []
 
-        # target_db_type = settings['target_db_type'] # Unused
-        # source_schema_name = settings['source_schema_name'] # Unused
         target_schema_name = settings['target_schema_name']
-        # table_list = settings['table_list']
-        # view_list = settings['view_list']
 
         # 1. Cleanup
         funcproc_code = funcproc_code.strip()
         # Remove usage of GO
         funcproc_code = re.sub(r'\bGO\b', '', funcproc_code, flags=re.IGNORECASE)
 
-        # 2. Identify Type and Name
-        # Support names with spaces [Name with Space] or "Name" or Name
-        # Regex to match CREATE [OR ALTER] {PROC|PROCEDURE|FUNCTION} [schema.]name ...
+        # Initialize TsqlParser
+        parser = TsqlParser(funcproc_code, self.config_parser)
+        final_output = parser.run()
 
-        type_match = re.search(r'CREATE\s+(?:OR\s+ALTER\s+)?(PROC|PROCEDURE|FUNCTION)\s+(?:(\[.*?\]|".*?"|[\w]+)\.)?(\[.*?\]|".*?"|[\w]+)', funcproc_code, re.IGNORECASE)
+        # Reconstruct header string to parse parameters
+        header_str = "\n".join(l.content for l in parser.header_lines)
+
+        # 2. Identify Type and Name
+        type_match = re.search(r'CREATE\s+(?:OR\s+ALTER\s+)?(PROC|PROCEDURE|FUNCTION)\s+(?:(\[.*?\]|".*?"|[\w]+)\.)?(\[.*?\]|".*?"|[\w]+)', header_str, re.IGNORECASE)
 
         if not type_match:
              return f"/* FAILED TO PARSE DEFINITION */\n{funcproc_code}"
 
         obj_type_raw = type_match.group(1).upper()
-        # schema_name = type_match.group(2) # Ignore source schema, use target_schema_name
         obj_name = type_match.group(3).strip('[]"')
 
         is_proc = 'PROC' in obj_type_raw
@@ -880,188 +880,184 @@ class MsSQLConnector(DatabaseConnector):
 
         self.config_parser.print_log_message('DEBUG', f"ms_sql_connector: convert_funcproc_code: DEBUG Parsing: obj_type_raw={obj_type_raw}, is_proc={is_proc}, pg_type={pg_type}, implicit_return={is_implicit_return}")
 
-
-
-
-
-        # I must include the middle parts.
-
-        # NOTE: To minimize context size, I will break this into two edits if needed, or include the whole block.
-        # Lines 766 to 848 is ~80 lines.
-
-
-
-
-        # 3. separate Body from Header
-        # Usually AS begins the body. But parameters can be complex.
-        # Simple heuristic: Split on first AS not inside parens?
-        # Or just use the regex to extract finding the FIRST AS after the CREATE line.
-
-        # Better: Convert the whole thing using declaration processing first
-
-        # Extract Variables (Parameters + Body Locals)
-        # We need to distinguish parameters because they go into the signature.
-
-        # Regex to find parameters section
-        # Logic: From Object Name end to 'AS'
-
-        header_end_match = re.search(r'\bAS\b', funcproc_code, re.IGNORECASE)
-        if not header_end_match:
-             return f"/* COULD NOT FIND 'AS' KEYWORD */\n{funcproc_code}"
-
-        header_part = funcproc_code[:header_end_match.start()]
-        body_part = funcproc_code[header_end_match.end():]
-
-        # Process Body declarations
-        declarations = []
         types_mapping = self.get_types_mapping(settings)
 
-        declaration_replacer = lambda m: self._declaration_replacer(m, settings, types_mapping, declarations)
-
-        # Replace DECLAREs in body
-        processed_body = re.sub(r'DECLARE\s+@.*?(?=\bBEGIN\b|\bIF\b|\bWHILE\b|\bSELECT\b|\bINSERT\b|\bUPDATE\b|\bDELETE\b|\bRETURN\b|\bSET\b|\bFETCH\b|\bOPEN\b|\bCLOSE\b|\bDEALLOCATE\b|\bDECLARE\b|$)', declaration_replacer, body_part, flags=re.IGNORECASE | re.DOTALL)
-
-        # Apply substitutions
-        processed_body = self._apply_data_type_substitutions(processed_body)
-        processed_body = self._apply_udt_to_base_type_substitutions(processed_body, settings)
-
-        # Convert Body Statements
-        has_rowcount = '@@rowcount' in processed_body.lower()
-        if has_rowcount:
-             declarations.append('_rowcount INTEGER;')
-
-        converted_stmts = self._convert_stmts(processed_body, settings, has_rowcount=has_rowcount, implicit_return=is_implicit_return)
-        pg_body_content = "\n".join(converted_stmts)
-
         # 4. Construct Header (Parameters)
-        # We need to parse parameters from header_part
-        # This is tricky without a full parser.
-        # Basic approach: Extract everything after name until AS.
-        # But wait, header_part INCLUDES the Name.
+        header_clean = header_str[type_match.end():].strip()
 
-        # Let's clean header part: remove CREATE ... Name
-        header_clean = header_part[type_match.end():].strip()
-
-        # Look for RETURNS clause (for functions)
-        returns_clause = "RETURNS VOID" # Default for proc? No, Proc has no return
-
+        returns_clause = "RETURNS VOID"
         if is_implicit_return:
-             # Construct RETURNS TABLE for implicit result sets
              col_defs = []
              for col in implicit_return_schema:
                   c_name = col['name']
-                  c_type = col.get('system_type_name', 'text') # Default text
-
-                  # Map column type
+                  c_type = col.get('system_type_name', 'text')
                   t_mapped = self._apply_data_type_substitutions(c_type)
                   t_mapped = self._apply_udt_to_base_type_substitutions(t_mapped, settings)
                   for ms, pg_tgt in types_mapping.items():
                        t_mapped = re.sub(rf'\b{re.escape(ms)}\b', pg_tgt, t_mapped, flags=re.IGNORECASE)
-
                   col_defs.append(f'"{c_name}" {t_mapped}')
-
              if col_defs:
                   returns_clause = f"RETURNS TABLE ({', '.join(col_defs)})"
-             else:
-                  returns_clause = "RETURNS VOID" # Schema was empty?
-
         elif not is_proc:
              ret_match = re.search(r'\bRETURNS\s+(.*)', header_clean, re.IGNORECASE)
              if ret_match:
                   ret_type_raw = ret_match.group(1).strip()
-                  # Clean wrapping parens if table variable
-                  # If returns table -> RETURNS TABLE (...)
-
-                  # Apply Type mapping
-                  # For now: simple string replacement or simple parsing
-                  # Check if it has @var TABLE
                   if 'TABLE' in ret_type_raw.upper():
-                       returns_clause = f"RETURNS TABLE ({ret_type_raw.split('TABLE')[-1].strip()})"
-                       # Need to fix types inside TABLE(...) definition too? Yes.
+                       returns_clause = f"RETURNS TABLE ({ret_type_raw.split('TABLE', 1)[-1].strip()})"
                        returns_clause = self._apply_data_type_substitutions(returns_clause)
                   else:
-                       # scalar type
                        ret_mapped = self._apply_data_type_substitutions(ret_type_raw)
                        ret_mapped = self._apply_udt_to_base_type_substitutions(ret_mapped, settings)
                        for ms_type, pg_target_type in types_mapping.items():
                            ret_mapped = re.sub(rf'\b{re.escape(ms_type)}\b', pg_target_type, ret_mapped, flags=re.IGNORECASE)
                        returns_clause = f"RETURNS {ret_mapped}"
-
-                  # Remove RETURNS from params string
                   header_clean = header_clean[:ret_match.start()].strip()
-             else:
-                  returns_clause = "RETURNS VOID" # Scalar func must have return?
-
-        # Parse Parameters string `header_clean`
-        # @p1 int, @p2 varchar(10) ...
-        # Need to map types and replace @ with nothing or _
 
         pg_params = []
         if header_clean:
-            # Clean outer parens if they exist (optional in TSQL)
+            as_match = re.search(r'\bAS\b', header_clean, re.IGNORECASE)
+            if as_match:
+                header_clean = header_clean[:as_match.start()].strip()
+            
             if header_clean.startswith('(') and header_clean.endswith(')'):
                 header_clean = header_clean[1:-1]
-
-            # Split by comma respecting parens (for decimal(10,2))
-            # Reuse _split_respecting_parens but it doesn't handle comma.
-            # Lazy split:
-            param_parts = self._split_respecting_parens(header_clean)
-            # Wait, _split_respecting_parens doesn't split by comma.
-            # It tokenizes? No, viewing it: it looks like it iterates char by char but doesn't return list...
-            # Ah, `view_file` cut off `_split_respecting_parens` implementation.
-
-            # Assume naive split for now or regex
+            
             params_list = re.split(r',(?![^(]*\))', header_clean)
-
             for p in params_list:
                 p = p.strip()
                 if not p: continue
-
-                # Format: @name type [= default] [OUTPUT] [READONLY]
-                # Regex search
                 p_match = re.search(r'@([\w]+)\s+([\w\(\)]+)(.*)', p)
                 if p_match:
                     p_name = p_match.group(1)
                     p_type = p_match.group(2)
                     p_rest = p_match.group(3) or ""
-
-                    # Map type
                     p_type = self._apply_data_type_substitutions(p_type)
                     p_type = self._apply_udt_to_base_type_substitutions(p_type, settings)
-
-                    # Apply built-in mapping
                     for ms_type, pg_target_type in types_mapping.items():
                         p_type = re.sub(rf'\b{re.escape(ms_type)}\b', pg_target_type, p_type, flags=re.IGNORECASE)
-
-                    # Handle OUTPUT
                     mode = "INOUT " if "OUTPUT" in p_rest.upper() else ""
-
-                    # Handle Default
                     default_val = ""
                     def_match = re.search(r'=\s*([^ ]+)', p_rest)
                     if def_match:
                         default_val = f" DEFAULT {def_match.group(1)}"
-
                     pg_params.append(f"{mode}locvar_{p_name} {p_type}{default_val}")
 
         pg_params_str = ", ".join(pg_params)
-
-        # 5. Assembly
-        # Quote Object Name for PG
         pg_name = f'"{obj_name}"'
+        
+        pg_header_str = f"CREATE OR REPLACE {pg_type} \"{target_schema_name}\".{pg_name}({pg_params_str})\n"
+        if pg_type == 'FUNCTION':
+            pg_header_str += f"{returns_clause} AS"
+        else:
+            pg_header_str += "AS"
 
-        decl_section = "DECLARE\n" + "\n".join(declarations) if declarations else ""
+        final_output = parser.pass_11_assemble_output(pg_header_str)
+        parser.pass_12_add_if_levels(final_output)
 
-        ddl = f"""
-CREATE OR REPLACE {pg_type} "{target_schema_name}".{pg_name}({pg_params_str})
-{returns_clause if pg_type == 'FUNCTION' else ''}
-AS $$
-{decl_section}
-BEGIN
-{pg_body_content}
-END;
-$$ LANGUAGE plpgsql;
-"""
+        ddl = ""
+        def get_indent(level):
+            return "    " * max(0, level)
+            
+        indent_level = 0
+        in_body = False
+        first_begin_found = False
+        if_stack = []
+        
+        for index, line_obj in enumerate(final_output):
+            stripped = line_obj.content.strip()
+            current_indent = indent_level
+            
+            next_stripped = final_output[index + 1].content.strip().upper() if index + 1 < len(final_output) else ""
+            is_next_else = bool(re.match(r'^(ELSE|ELSIF)\b', next_stripped))
+            
+            is_if = bool(re.match(r'^IF\b', stripped, re.IGNORECASE))
+            is_elsif = bool(re.match(r'^ELSIF\b', stripped, re.IGNORECASE))
+            is_else = bool(re.match(r'^ELSE\b', stripped, re.IGNORECASE))
+            is_begin = bool(re.match(r'^BEGIN\b', stripped, re.IGNORECASE))
+            is_end = bool(re.match(r'^END;', stripped, re.IGNORECASE))
+            
+            if is_if:
+                if_stack.append({'has_begin': False, 'statements': 0, 'expecting_statement': True, 'indent': current_indent})
+            elif is_elsif or is_else:
+                if if_stack:
+                    if_stack[-1]['statements'] = 0
+                    if_stack[-1]['expecting_statement'] = True
+
+            if stripped.upper() == "DECLARE":
+                indent_level = 0
+                in_body = True
+                ddl += get_indent(0) + line_obj.content + "\n"
+                indent_level = 1
+                continue
+                
+            if stripped == "$$":
+                indent_level = 0
+                ddl += get_indent(0) + line_obj.content + "\n"
+                in_body = True
+                continue
+                
+            if stripped.upper() == "$$ LANGUAGE PLPGSQL;":
+                while if_stack:
+                    top = if_stack.pop()
+                    ddl += get_indent(top['indent']) + "END IF;\n"
+                indent_level = 0
+                ddl += get_indent(0) + line_obj.content + "\n"
+                continue
+                
+            if not in_body:
+                current_indent = 0
+                ddl += get_indent(0) + line_obj.content + "\n"
+                continue
+                
+            if is_begin:
+                if not first_begin_found:
+                    first_begin_found = True
+                    current_indent = 0
+                    indent_level = 1
+                else:
+                    current_indent = indent_level
+                    indent_level += 1
+                    
+                if if_stack and if_stack[-1]['expecting_statement']:
+                    if_stack[-1]['has_begin'] = True
+                    if_stack[-1]['expecting_statement'] = False
+            elif is_end:
+                indent_level -= 1
+                current_indent = indent_level
+                if indent_level < 0:
+                    indent_level = 0
+                    current_indent = 0
+                    
+            ddl += get_indent(current_indent) + line_obj.content + "\n"
+            
+            if is_end:
+                if if_stack and if_stack[-1]['has_begin']:
+                    if not is_next_else:
+                        top = if_stack.pop()
+                        ddl += get_indent(top['indent']) + "END IF;\n"
+                continue
+
+            if is_if or is_elsif or is_else:
+                continue
+                
+            if if_stack:
+                for level in reversed(if_stack):
+                    if level['expecting_statement'] and not level['has_begin']:
+                        level['statements'] += 1
+                        break
+                        
+                while if_stack:
+                    top_if = if_stack[-1]
+                    if top_if['has_begin']:
+                        break
+                    if top_if['statements'] >= 1:
+                        if not is_next_else:
+                            top = if_stack.pop()
+                            ddl += get_indent(top['indent']) + "END IF;\n"
+                        else:
+                            break
+                    else:
+                        break
         return ddl
 
     def fetch_views_names(self, owner_name):
@@ -1637,67 +1633,81 @@ $$ LANGUAGE plpgsql;
             self.config_parser.print_log_message('ERROR', f"ms_sql_connector: fetch_triggers: Error fetching triggers: {e}")
             return {}
 
-    def convert_trigger(self, settings):
+        def convert_trigger(self, settings):
         trigger_name = settings['trigger_name']
         trigger_code = settings['trigger_sql']
         source_schema_name = settings['source_schema_name']
         target_schema_name = settings['target_schema_name']
         table_list = settings['table_list']
 
-        # Clean up code
         trigger_code = trigger_code.strip()
 
-        # Regular Expressions to extract info
-        # ON [Schema].[Table]
         table_match = re.search(r'ON\s+(?:\[?(\w+)\]?\.)?\[?(\w+)\]?', trigger_code, re.IGNORECASE)
         table_name = table_match.group(2) if table_match else "UNKNOWN_TABLE"
 
-        # Events
         events = []
         if re.search(r'\bINSERT\b', trigger_code, re.IGNORECASE): events.append('INSERT')
         if re.search(r'\bUPDATE\b', trigger_code, re.IGNORECASE): events.append('UPDATE')
         if re.search(r'\bDELETE\b', trigger_code, re.IGNORECASE): events.append('DELETE')
 
-        # Timing
         timing = 'AFTER'
         if re.search(r'\bINSTEAD\s+OF\b', trigger_code, re.IGNORECASE):
             timing = 'INSTEAD OF'
 
-        # Body Isolation
         body_match = re.search(r'CREATE\s+TRIGGER\s+.*?\s+AS\s+(.*)', trigger_code, re.IGNORECASE | re.DOTALL)
-        body_start = body_match.group(1) if body_match else ""
+        body_content = body_match.group(1) if body_match else ""
 
-        if not body_start:
+        if not body_content:
              return f"/* COULD NOT ISOLATE BODY FOR {trigger_name} */ {trigger_code}"
 
-        # --- Conversion Logic adhering to Sybase pattern ---
+        fake_code = f"CREATE PROCEDURE dummy AS\n{body_content}"
+        parser = TsqlParser(fake_code, self.config_parser)
+        final_output = parser.run(pg_header_str=" ")
 
-        # 1. Variable Declarations Extraction
-        declarations = []
-        types_mapping = self.get_types_mapping(settings)
+        final_stmts_clean = []
+        in_body = False
+        first_begin_found = False
+        indent_level = 0
+        
+        def get_indent(level):
+            return "    " * max(0, level)
 
-        # Helper wrapper for replacer
-        declaration_replacer = lambda m: self._declaration_replacer(m, settings, types_mapping, declarations)
-
-        # Extract declarations
-        body_content = re.sub(r'DECLARE\s+@.*?(?=\bBEGIN\b|\bIF\b|\bWHILE\b|\bSELECT\b|\bINSERT\b|\bUPDATE\b|\bDELETE\b|\bRETURN\b|\bSET\b|\bFETCH\b|\bOPEN\b|\bCLOSE\b|\bDEALLOCATE\b|\bDECLARE\b|$)', declaration_replacer, body_start, flags=re.IGNORECASE | re.DOTALL)
-
-        # 2. UDT & Type Substitutions
-        body_content = self._apply_data_type_substitutions(body_content)
-        body_content = self._apply_udt_to_base_type_substitutions(body_content, settings)
-
-        # 3. Convert Statements
         has_rowcount = '@@rowcount' in body_content.lower()
+        declarations = []
+
+        for line_obj in final_output:
+            stripped = line_obj.content.strip()
+            if not stripped: continue
+            if stripped in ('$$', '$$ LANGUAGE PLPGSQL;', '$$ LANGUAGE plpgsql;'): continue
+            if line_obj.source_array == "header": continue
+            
+            if stripped.upper() == "DECLARE":
+                in_body = True
+                continue
+                
+            if stripped.upper().startswith("DECLARE "):
+                declarations.append(stripped)
+                continue
+                
+            if re.match(r'^BEGIN\b', stripped, re.IGNORECASE):
+                if not first_begin_found:
+                    first_begin_found = True
+                    indent_level = 1
+                else:
+                    indent_level += 1
+            elif re.match(r'^END;', stripped, re.IGNORECASE):
+                indent_level -= 1
+                if indent_level < 0: indent_level = 0
+            
+            final_stmts_clean.append(get_indent(indent_level) + line_obj.content)
+
         if has_rowcount:
-             declarations.append('_rowcount INTEGER;')
+             declarations.insert(0, "locvar_rowcount INTEGER;")
 
-        converted_stmts = self._convert_stmts(body_content, settings, has_rowcount=has_rowcount, is_trigger=True)
-        pg_body = "\n".join(converted_stmts)
+        pg_body = "\n".join(final_stmts_clean)
 
-        # Construct Function
         func_name = f"tf_{trigger_name}"
         func_schema = target_schema_name
-
         decl_section = "DECLARE\n" + "\n".join(declarations) if declarations else ""
 
         func_ddl = f"""
@@ -1711,16 +1721,7 @@ END;
 $$ LANGUAGE plpgsql;
 """
 
-        # Construct Trigger (Changed to Row Level to support NEW/OLD replacement)
-        # Transition tables (inserted/deleted) are replaced by NEW/OLD record access by AST transformer
-
         events_str = " OR ".join(events)
-
-        # NOTE: MSSQL Triggers are statement-level by default but access 'inserted' set.
-        # User requested mapping 'inserted' -> NEW and 'deleted' -> OLD.
-        # This implies running FOR EACH ROW.
-        # Warning: This changes semantics if the logic was doing set-based aggregation.
-        # But for row-processing logic (select @var = col from inserted), this conversion is correct.
 
         trigger_ddl = f"""
 CREATE TRIGGER "{trigger_name}"
@@ -1730,7 +1731,6 @@ EXECUTE FUNCTION "{func_schema}"."{func_name}"();
 """
 
         return f"{func_ddl}\n{trigger_ddl}"
-
 
     def execute_query(self, query: str, params=None):
         pass # Placeholder

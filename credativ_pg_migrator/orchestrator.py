@@ -564,6 +564,7 @@ class Orchestrator:
         if len(user_defined_types) > 0:
             for type_row in user_defined_types:
                 type_data = self.migrator_tables.decode_user_defined_type_row(type_row)
+                self.migrator_tables.update_protocol_task_started('user_defined_types', type_data['id'])
                 self.config_parser.print_log_message('INFO', f"orchestrator: run_create_user_defined_types: Creating user defined type {type_data['target_type_name']} in target database.")
                 self.config_parser.print_log_message('DEBUG3', f"orchestrator: run_create_user_defined_types: type_data: {type_data['target_type_sql']}")
                 try:
@@ -640,6 +641,7 @@ class Orchestrator:
         if len(domains) > 0:
             for domain_row in domains:
                 domain_data = self.migrator_tables.decode_domain_row(domain_row)
+                self.migrator_tables.update_protocol_task_started('domains', domain_data['id'])
                 self.config_parser.print_log_message('INFO', f"orchestrator: run_create_domains: Creating domain {domain_data['target_domain_name']} in target database using SQL: {domain_data['target_domain_sql']}")
                 try:
                     self.target_connection.connect()
@@ -780,6 +782,7 @@ class Orchestrator:
                 self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Table {target_table_name} does not have a CREATE TABLE statement - skipping.")
                 return False
 
+            self.migrator_tables.update_protocol_task_started('tables', table_data['id'])
             self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Creating table {target_table_name} in target database ({settings['source_db_type']}:{settings['target_db_type']}-{settings['drop_tables']}/{settings['truncate_tables']}/{settings['create_tables']}/{settings['migrate_data']}).")
 
             # Each worker uses its own separate connection to the target database
@@ -1561,6 +1564,7 @@ class Orchestrator:
             index_name = index_data['index_name']
             create_index_sql = index_data['index_sql']
 
+            self.migrator_tables.update_protocol_task_started('indexes', index_data['id'])
             self.config_parser.print_log_message('INFO', f"orchestrator: index_worker: Worker {worker_id}: Creating index {index_name} in target database.")
 
             # Each worker uses its own separate connection to the target database
@@ -1588,6 +1592,7 @@ class Orchestrator:
         worker_id = uuid.uuid4()
         try:
             constraint_name = constraint_data['constraint_name']
+            self.migrator_tables.update_protocol_task_started('constraints', constraint_data['id'])
             self.config_parser.print_log_message('INFO', f"orchestrator: constraint_worker: Worker {worker_id}: Creating constraint {constraint_name} in target database.")
             create_constraint_sql = constraint_data['constraint_sql']
 
@@ -1704,6 +1709,7 @@ class Orchestrator:
 
                     funcproc_id = funcproc_data['id']
                     funcproc_type = funcproc_data['type']
+                    self.migrator_tables.update_protocol_task_started('funcprocs', funcproc_data['id'])
                     self.config_parser.print_log_message('INFO', f"orchestrator: run_migrate_funcprocs: Migrating {funcproc_type} {funcproc_data['name']}.")
                     try:
                         funcproc_code = self.source_connection.fetch_funcproc_code(funcproc_id)
@@ -1819,6 +1825,7 @@ class Orchestrator:
 
                             try:
                                 if converted_code is not None and converted_code.strip():
+                                    self.migrator_tables.update_protocol_task_started('triggers', trigger_detail['id'])
                                     self.config_parser.print_log_message('INFO', f"orchestrator: run_migrate_triggers: Creating trigger {trigger_detail['trigger_name']} in target database.")
                                     self.target_connection.connect()
                                     self.target_connection.execute_query(converted_code)
@@ -1868,6 +1875,7 @@ class Orchestrator:
             query = f'''SET SESSION search_path TO {view_detail['target_schema_name']};'''
             worker_target_connection.execute_query(query)
 
+            self.migrator_tables.update_protocol_task_started('views', view_detail['id'])
             self.config_parser.print_log_message( 'DEBUG', f"orchestrator: view_worker: Worker {worker_id}: Creating {view_type_str} {view_detail['source_view_name']} with SQL: {view_detail['target_view_sql']}")
             worker_target_connection.execute_query(view_detail['target_view_sql'])
 
@@ -2132,6 +2140,7 @@ class Orchestrator:
         worker_id = uuid.uuid4()
         try:
             target_sequence_name = sequence_data['target_sequence_name']
+            self.migrator_tables.update_protocol_task_started('sequences', sequence_data['sequence_id'])
             self.config_parser.print_log_message('INFO', f"orchestrator: sequence_worker: Worker {worker_id}: Creating sequence {target_sequence_name} in target database.")
 
             worker_target_connection = self.load_connector('target')

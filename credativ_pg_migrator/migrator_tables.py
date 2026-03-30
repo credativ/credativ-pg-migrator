@@ -800,6 +800,41 @@ class MigratorTables:
             self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_main: ({func_run_id}): Error: {e}")
             raise
 
+    def update_protocol_task_started(self, object_type, row_id):
+        func_run_id = uuid.uuid4()
+        table_name = None
+        method_name = f"get_protocol_name_{object_type}"
+        if hasattr(self.config_parser, method_name):
+            try:
+                method = getattr(self.config_parser, method_name)
+                table_name = method()
+            except BaseException as e:
+                self.config_parser.print_log_message('ERROR', f"migrator_tables: update_protocol_task_started: ({func_run_id}): Error calling {method_name}: {e}")
+                return
+        else:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_protocol_task_started: ({func_run_id}): Invalid object_type '{object_type}'. Method {method_name} not found.")
+            return
+
+        query = f"""
+            UPDATE "{self.protocol_schema}"."{table_name}"
+            SET task_started = clock_timestamp()
+            WHERE id = %s
+            RETURNING *
+        """
+        params = (row_id,)
+        self.config_parser.print_log_message('DEBUG3', f"migrator_tables: update_protocol_task_started: ({func_run_id}): Updating record for table {table_name} with params: {params}, query: {query}")
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            self.protocol_connection.connection.commit()
+            row = cursor.fetchone()
+            cursor.close()
+            self.config_parser.print_log_message('DEBUG3', f"migrator_tables: update_protocol_task_started: ({func_run_id}): Returned row: {row}")
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_protocol_task_started: ({func_run_id}): Error updating started status for object type {object_type} {row_id} in {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_protocol_task_started: ({func_run_id}): Exception: {e}")
+            raise
+
     def update_main_status(self, settings):
         task_name = settings.get('task_name')
         subtask_name = settings.get('subtask_name')

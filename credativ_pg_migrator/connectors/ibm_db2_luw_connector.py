@@ -330,6 +330,7 @@ class IbmDb2LuwConnector(DatabaseConnector):
                 self.config_parser.print_log_message('INFO', f"ibm_db2_luw_connector: migrate_table: Worker {worker_id}: Table {source_table_name} has {source_table_rows} rows - starting data migration.")
 
                 if source_table_rows > target_table_rows:
+                    migrator_tables.update_data_migration_started(protocol_id)
 
                     part_name = 'migrate_table in batches using cursor'
                     self.config_parser.print_log_message('INFO', f"ibm_db2_luw_connector: migrate_table: Worker {worker_id}: Source table {source_table_name}: {source_table_rows} rows / Target table {target_table_name}: {target_table_rows} rows - starting data migration.")

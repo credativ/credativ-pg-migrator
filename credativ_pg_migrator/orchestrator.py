@@ -932,6 +932,7 @@ class Orchestrator:
                                     'average_batch_seconds': 0,
                                 })
                             else:
+                                migrator_tables.update_data_migration_started(protocol_id)
                                 self.config_parser.print_log_message('DEBUG3', f"orchestrator: table_worker: Worker {worker_id}: Data source format is {data_source['format_options']['format'].upper()} - size: {data_source['file_size']} - proceeding with data migration.")
                                 data_import_start_time = time.time()
                                 source_files_to_process = []

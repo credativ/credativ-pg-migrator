@@ -1584,9 +1584,11 @@ class MigratorTables:
             RETURNING *
         """
         params = (row_id,)
+        self.config_parser.print_log_message('DEBUG3', f"migrator_tables: update_data_migration_started: ({func_run_id}): Updating data migration record for table {table_name} with params: {params}, query: {query}")
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
+            self.protocol_connection.connection.commit()
             row = cursor.fetchone()
             cursor.close()
 
@@ -3274,7 +3276,7 @@ class MigratorTables:
         try:
             cursor = self.protocol_connection.connection.cursor()
             self.config_parser.print_log_message('INFO', f"migrator_tables: print_mapping_migration_summary: {object_name} summary:")
-            
+
             cursor.execute(f'SELECT count(*) FROM "{self.protocol_schema}"."{table_name}"')
             total = cursor.fetchone()[0]
             self.config_parser.print_log_message('INFO', f"migrator_tables: print_mapping_migration_summary:     Found on target database: {total}")
@@ -3333,7 +3335,7 @@ class MigratorTables:
 
         try:
             cursor = self.protocol_connection.connection.cursor()
-            
+
             cursor.execute(f'SELECT count(*) FROM "{self.protocol_schema}"."mapping_tables"')
             tables_count = cursor.fetchone()[0]
             self.config_parser.print_log_message('INFO', f"migrator_tables: print_mapping_migration_summary: Mapped Tables: {tables_count}")
@@ -4309,31 +4311,31 @@ class MigratorTables:
             log_info("=========================================")
             log_info("       Data Validation Summary           ")
             log_info("=========================================")
-            
+
             total = len(results)
             passed_count = sum(1 for r in results if r[10])
             failed_count = total - passed_count
-            
+
             row_count_tests = sum(1 for r in results if r[2] is not None)
             row_count_pass = sum(1 for r in results if r[2] is True)
             row_count_fail = sum(1 for r in results if r[2] is False)
-            
+
             table_hash_tests = sum(1 for r in results if r[4] is not None)
             table_hash_pass = sum(1 for r in results if r[4] is True)
             table_hash_fail = sum(1 for r in results if r[4] is False)
-            
+
             row_hash_tests = sum(1 for r in results if r[6] is not None)
             row_hash_pass = sum(1 for r in results if r[6] is True)
             row_hash_fail = sum(1 for r in results if r[6] is False)
-            
+
             lob_size_tests = sum(1 for r in results if r[8] is not None)
             lob_size_pass = sum(1 for r in results if r[8] is True)
             lob_size_fail = sum(1 for r in results if r[8] is False)
-            
+
             log_info(f"Total Tables Validated: {total}")
             log_info(f"Tables Passed: {passed_count}")
             log_info(f"Tables Failed: {failed_count}")
-            
+
             log_info("--- Test Category Totals ---")
             if row_count_tests > 0:
                 log_info(f"Row Counts   : {row_count_pass} Passed, {row_count_fail} Failed (Total: {row_count_tests})")
@@ -4343,7 +4345,7 @@ class MigratorTables:
                 log_info(f"Row Hashes   : {row_hash_pass} Passed, {row_hash_fail} Failed (Total: {row_hash_tests})")
             if lob_size_tests > 0:
                 log_info(f"LOB Sizes    : {lob_size_pass} Passed, {lob_size_fail} Failed (Total: {lob_size_tests})")
-            
+
             if total > 0:
                 log_info("--- Validation Details ---")
                 for r in results:

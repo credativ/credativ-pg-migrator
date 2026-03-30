@@ -621,6 +621,7 @@ class SybaseASEConnector(DatabaseConnector):
                 'DATE': 'DATE',
                 'DATETIME': 'TIMESTAMP',
                 'BIGTIME': 'TIMESTAMP',
+                'SMALLDATETIME(4)': 'TIMESTAMP',
                 'SMALLDATETIME': 'TIMESTAMP',
                 'TIME': 'TIME',
                 'TIMESTAMP': 'TIMESTAMP',
@@ -1174,14 +1175,14 @@ class SybaseASEConnector(DatabaseConnector):
     def convert_funcproc_code(self, settings):
         try:
             funcproc_code = settings['funcproc_code']
-            
+
             # Convert double-quoted string literals to single-quoted strings
             # Sybase often allows "string" where PostgreSQL expects 'string' (which would otherwise parse as an identifier)
             def replacer_dq(m):
                 inner = m.group(1)
                 inner = inner.replace("'", "''")
                 return f"'{inner}'"
-                
+
             funcproc_code = re.sub(r'"([^"]*)"', replacer_dq, funcproc_code)
 
             target_db_type = settings.get('target_db_type', 'postgresql')
@@ -1189,18 +1190,18 @@ class SybaseASEConnector(DatabaseConnector):
 
             parser = TsqlParser(funcproc_code, self.config_parser)
             self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: convert_funcproc_code: Running 12-pass parser for {settings.get('funcproc_name')}")
-            
+
             final_output = parser.run()
-            
+
             # Reconstruct header string to parse parameters
             header_str = "\n".join(l.content for l in parser.header_lines)
-            
+
             header_match = re.search(r'CREATE\s+(?:PROC|PROCEDURE|FUNCTION)\s+([a-zA-Z0-9_\.]+)(.*?)(\bAS\b)', header_str, flags=re.IGNORECASE | re.DOTALL)
-            
+
             func_schema = ""
             proc_name = settings.get('funcproc_name', '')
             params_str = ""
-            
+
             if header_match:
                  full_name = header_match.group(1)
                  params_str = header_match.group(2).strip()
@@ -1210,10 +1211,10 @@ class SybaseASEConnector(DatabaseConnector):
                      if not proc_name: proc_name = parts[1]
                  else:
                      if not proc_name: proc_name = full_name
-            
+
             if not func_schema:
                  func_schema = settings.get('target_schema_name', 'public')
-                 
+
             pg_params_str = ""
             output_params = []
             if params_str:
@@ -1222,29 +1223,29 @@ class SybaseASEConnector(DatabaseConnector):
                  while clean_params.startswith('(') and clean_params.endswith(')'):
                      clean_params = clean_params[1:-1].strip()
                      clean_params = re.sub(r'/\*.*?\*/', '', clean_params, flags=re.DOTALL).strip()
-                 
+
                  clean_params = clean_params.replace('@', '')
                  clean_params = self._apply_data_type_substitutions(clean_params)
                  clean_params = self._apply_udt_to_base_type_substitutions(clean_params, settings)
-                 
+
                  param_parts = self._split_respecting_parens(clean_params)
                  processed_params = []
-                 
+
                  for p in param_parts:
                      p_clean = p.strip()
                      output_match = re.search(r'\bOUTPUT\b', p_clean, flags=re.IGNORECASE)
                      if output_match:
                          p_clean = re.sub(r'\bOUTPUT\b', '', p_clean, flags=re.IGNORECASE).strip()
                          p_clean = "INOUT " + p_clean
-                     
+
                      for sybase_type, pg_type in types_mapping.items():
                          p_clean = re.sub(rf'\b{re.escape(sybase_type)}\b', pg_type, p_clean, flags=re.IGNORECASE)
-                         
+
                      processed_params.append(p_clean)
-                 
+
                  pg_params_str = ", ".join(processed_params)
                  output_params = re.findall(r'\b(?:INOUT|OUT)\b', pg_params_str, flags=re.IGNORECASE)
-                 
+
             returns_clause = "RETURNS void"
             if output_params:
                  if len(output_params) > 1:
@@ -1255,41 +1256,41 @@ class SybaseASEConnector(DatabaseConnector):
                            returns_clause = f"RETURNS {single_out.group(1)}"
                       else:
                            returns_clause = "RETURNS RECORD"
-                           
+
             # Now we generate the PostgreSQL DDL string using the parsed output array
             # and append it with appropriate indentations
-            
+
             # The pg header string formatted just like TsqlParser outputs:
             pg_header_str = f"CREATE OR REPLACE FUNCTION {func_schema}.{proc_name}({pg_params_str})\n{returns_clause} AS"
-            
+
             # Re-run pass_11 with the customized header to let the parser cleanly merge it
             final_output = parser.pass_11_assemble_output(pg_header_str)
             parser.pass_12_add_if_levels(final_output)
-            
+
             # Build DDL with indentation (Logic ported from TsqlParser.print_with_indentation)
             ddl = ""
             def get_indent(level):
                 return "    " * max(0, level)
-                
+
             indent_level = 0
             in_body = False
             first_begin_found = False
             if_stack = []
-            
+
             for index, line_obj in enumerate(final_output):
                 stripped = line_obj.content.strip()
                 current_indent = indent_level
-                
+
                 # Contextual block evaluation lookahead
                 next_stripped = final_output[index + 1].content.strip().upper() if index + 1 < len(final_output) else ""
                 is_next_else = bool(re.match(r'^(ELSE|ELSIF)\b', next_stripped))
-                
+
                 is_if = bool(re.match(r'^IF\b', stripped, re.IGNORECASE))
                 is_elsif = bool(re.match(r'^ELSIF\b', stripped, re.IGNORECASE))
                 is_else = bool(re.match(r'^ELSE\b', stripped, re.IGNORECASE))
                 is_begin = bool(re.match(r'^BEGIN\b', stripped, re.IGNORECASE))
                 is_end = bool(re.match(r'^END;', stripped, re.IGNORECASE))
-                
+
                 if is_if:
                     if_stack.append({'has_begin': False, 'statements': 0, 'expecting_statement': True, 'indent': current_indent})
                 elif is_elsif or is_else:
@@ -1303,13 +1304,13 @@ class SybaseASEConnector(DatabaseConnector):
                     ddl += get_indent(0) + line_obj.content + "\n"
                     indent_level = 1
                     continue
-                    
+
                 if stripped == "$$":
                     indent_level = 0
                     ddl += get_indent(0) + line_obj.content + "\n"
                     in_body = True
                     continue
-                    
+
                 if stripped.upper() == "$$ LANGUAGE PLPGSQL;":
                     while if_stack:
                         top = if_stack.pop()
@@ -1317,12 +1318,12 @@ class SybaseASEConnector(DatabaseConnector):
                     indent_level = 0
                     ddl += get_indent(0) + line_obj.content + "\n"
                     continue
-                    
+
                 if not in_body:
                     current_indent = 0
                     ddl += get_indent(0) + line_obj.content + "\n"
                     continue
-                    
+
                 if is_begin:
                     if not first_begin_found:
                         first_begin_found = True
@@ -1331,7 +1332,7 @@ class SybaseASEConnector(DatabaseConnector):
                     else:
                         current_indent = indent_level
                         indent_level += 1
-                        
+
                     if if_stack and if_stack[-1]['expecting_statement']:
                         if_stack[-1]['has_begin'] = True
                         if_stack[-1]['expecting_statement'] = False
@@ -1341,9 +1342,9 @@ class SybaseASEConnector(DatabaseConnector):
                     if indent_level < 0:
                         indent_level = 0
                         current_indent = 0
-                        
+
                 ddl += get_indent(current_indent) + line_obj.content + "\n"
-                
+
                 # Check branch completion boundaries
                 if is_end:
                     if if_stack and if_stack[-1]['has_begin']:
@@ -1354,13 +1355,13 @@ class SybaseASEConnector(DatabaseConnector):
 
                 if is_if or is_elsif or is_else:
                     continue
-                    
+
                 if if_stack:
                     for level in reversed(if_stack):
                         if level['expecting_statement'] and not level['has_begin']:
                             level['statements'] += 1
                             break
-                            
+
                     while if_stack:
                         top_if = if_stack[-1]
                         if top_if['has_begin']:
@@ -1373,7 +1374,7 @@ class SybaseASEConnector(DatabaseConnector):
                                 break
                         else:
                             break
-                
+
             return ddl
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"sybase_ase_connector: convert_funcproc_code: Critical Failure: {e}")
@@ -2027,29 +2028,29 @@ class SybaseASEConnector(DatabaseConnector):
         fake_code = f"CREATE PROCEDURE dummy AS\n{body_content}"
         parser = TsqlParser(fake_code, self.config_parser)
         final_output = parser.run(pg_header_str=" ") # space prevents default header
-        
+
         final_stmts_clean = []
         in_body = False
         first_begin_found = False
         indent_level = 0
-        
+
         def get_indent(level):
             return "    " * max(0, level)
-            
+
         for line_obj in final_output:
             stripped = line_obj.content.strip()
             if not stripped: continue
             if stripped in ('$$', '$$ LANGUAGE PLPGSQL;', '$$ LANGUAGE plpgsql;'): continue
             if line_obj.source_array == "header": continue
-            
+
             if stripped.upper() == "DECLARE":
                 in_body = True
                 continue
-                
+
             if stripped.upper().startswith("DECLARE "):
                 declarations.append(stripped)
                 continue
-                
+
             if re.match(r'^BEGIN\b', stripped, re.IGNORECASE):
                 if not first_begin_found:
                     first_begin_found = True
@@ -2059,7 +2060,7 @@ class SybaseASEConnector(DatabaseConnector):
             elif re.match(r'^END;', stripped, re.IGNORECASE):
                 indent_level -= 1
                 if indent_level < 0: indent_level = 0
-            
+
             final_stmts_clean.append(get_indent(indent_level) + line_obj.content)
 
         if has_rowcount:
@@ -2808,12 +2809,12 @@ EXECUTE FUNCTION {target_schema_name}.{trigger_name}_func();
                 # Convert and Cast have different properties for the target DataType
                 type_node = node.to if isinstance(node, (sqlglot.exp.Cast, sqlglot.exp.TryCast)) else node.args.get('this')
                 expr_node = node.this if isinstance(node, (sqlglot.exp.Cast, sqlglot.exp.TryCast)) else node.args.get('expression')
-                
+
                 if isinstance(type_node, sqlglot.exp.DataType):
                     type_name = type_node.this.name.upper() if getattr(type_node.this, 'name', None) else str(type_node.this).upper()
                     if type_name == 'USERDEFINED' and 'kind' in type_node.args:
                         type_name = type_node.args['kind'].upper()
-                    
+
                     mapping = self.get_types_mapping({ 'target_db_type': settings['target_db_type'] })
                     if type_name in mapping:
                         mapped = mapping[type_name]
@@ -2822,7 +2823,7 @@ EXECUTE FUNCTION {target_schema_name}.{trigger_name}_func();
                     else:
                         new_type_node = type_node
 
-                    # Safely convert everything uniformly into a standard safe CAST wrapper 
+                    # Safely convert everything uniformly into a standard safe CAST wrapper
                     # for strictly Postgres compatible execution
                     return sqlglot.exp.Cast(this=expr_node, to=new_type_node)
             return node
@@ -2881,7 +2882,7 @@ EXECUTE FUNCTION {target_schema_name}.{trigger_name}_func();
             inner = m.group(1)
             inner = inner.replace("'", "''")
             return f"'{inner}'"
-            
+
         converted_code = re.sub(r'"([^"]*)"', replacer_dq, converted_code)
 
         if settings['target_db_type'] == 'postgresql':

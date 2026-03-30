@@ -355,7 +355,8 @@ class PostgreSQLConnector(DatabaseConnector):
             # if column_info['column_type_substitution'] != '':
             #     column_data_type = column_info['column_type_substitution'].upper()
             if column_info['data_type'] == 'USER-DEFINED' and column_info['udt_schema'] != '' and column_info['udt_name'] != '':
-                column_data_type = f'''"{column_info['udt_schema']}"."{column_info['udt_name']}"'''
+                mapped_schema = target_schema_name if column_info['udt_schema'] == source_schema_name else column_info['udt_schema']
+                column_data_type = f'''"{mapped_schema}"."{column_info['udt_name']}"'''
             # elif column_info['basic_data_type'] != '':
             #     column_data_type = column_info['basic_data_type'].upper()
 

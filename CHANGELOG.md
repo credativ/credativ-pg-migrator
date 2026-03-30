@@ -2,6 +2,12 @@
 
 ## 0.13.0 - 2026.03.18
 
+- 2026.03.30
+
+  - Fix - Protocol Tables: Resolved an issue where the `task_started` timestamp was null while tasks were running. The Orchestrator now immediately and actively updates the `task_started` column across all protocol tables as soon as migration payload processing begins.
+  - Fix - PostgreSQL Connector: Repaired the creation of User Defined Data Types (UDTs). When migrating from PostgreSQL to PostgreSQL, UDTs utilized within a table's structure now dynamically bind to the designated target schema rather than improperly retaining the original source schema name, preventing 'type does not exist' instantiation failures.
+  - Fix - Global Planner: Addressed a foundational bug in `planner.py` where successfully mapped data types (e.g., Sybase ASE `SMALLDATETIME` to `TIMESTAMP`) were orphaned during generation. The mapping dictionary application logic has been rewritten to explicitly override the live pointer upon confirmation, guaranteeing accurate cross-engine data structures.
+
 - 2026.03.27
 
   - Feature - T-SQL Parser: Designed and integrated a comprehensive native T-SQL parser matrix natively utilized across both the MS SQL and Sybase ASE connectors. Ensures extensive capability to systematically resolve complex or incomplete legacy syntax structures before target PostgreSQL generation.

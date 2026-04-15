@@ -815,10 +815,11 @@ class MigratorTables:
             self.config_parser.print_log_message('ERROR', f"migrator_tables: update_protocol_task_started: ({func_run_id}): Invalid object_type '{object_type}'. Method {method_name} not found.")
             return
 
+        id_column = "sequence_id" if object_type == "sequences" else "id"
         query = f"""
             UPDATE "{self.protocol_schema}"."{table_name}"
             SET task_started = clock_timestamp()
-            WHERE id = %s
+            WHERE {id_column} = %s
             RETURNING *
         """
         params = (row_id,)

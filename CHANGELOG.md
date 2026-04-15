@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.12.1 - 2026.04.15
+
+- 2026.04.15
+
+  - Fix migration of check constraints (#57)
+  - Fix fetching sequences on Informix, MySQL and Sybase ASE/Anywhere (#63)
+  - Fix migration of views for most connectors (#65)
+  - Fix data type substitution for postgres->postgres migrations (#67)
+  - Add missing validation dummy methods to DB connectors
+
 ## 0.12.0 - 2026.03.17
 
 - 2026.03.17

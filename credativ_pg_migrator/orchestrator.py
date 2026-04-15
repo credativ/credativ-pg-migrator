@@ -1266,7 +1266,7 @@ class Orchestrator:
                     return False
 
                 referenced_target_table = self.migrator_tables.select_table_by_source({'source_schema_name': referenced_table_schema, 'source_table_name': referenced_table_name})
-                if constraint_data['constraint_type'] is 'FOREIGN KEY':
+                if constraint_data['constraint_type'] == 'FOREIGN KEY':
                     if referenced_target_table is None:
                         self.config_parser.print_log_message('INFO', f"orchestrator: type is {constraint_data['constraint_type']}")
                         self.config_parser.print_log_message('ERROR', f"orchestrator: constraint_worker: Worker {worker_id}: Referenced table {referenced_table_schema}.{referenced_table_name} for constraint {constraint_name} not found - skipping constraint creation.")

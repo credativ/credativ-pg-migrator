@@ -3283,30 +3283,177 @@ class MigratorTables:
         cursor.close()
 
     def print_migration_summary(self):
-        self.config_parser.print_log_message('INFO', "migrator_tables: print_migration_summary: Migration stats:")
-        self.config_parser.print_log_message('INFO', f"migrator_tables: print_migration_summary: Source database: {self.config_parser.get_source_db_name()}, schema: {self.config_parser.get_source_owner()} ({self.config_parser.get_source_db_type()})")
-        self.config_parser.print_log_message('INFO', f"migrator_tables: print_migration_summary: Target database: {self.config_parser.get_target_db_name()}, schema: {self.config_parser.get_target_schema()} ({self.config_parser.get_target_db_type()})")
-        self.print_main(self.config_parser.get_protocol_name_main())
-        self.config_parser.print_log_message('INFO', "migrator_tables: print_migration_summary: Migration summary:")
+        lines = []
+        lines.append("=" * 80)
+        lines.append("                       CREDATIV PG-MIGRATOR SUMMARY                             ")
+        lines.append("=" * 80)
+        lines.append("")
+        lines.append("[ DATABASE CONTEXT ]")
+        lines.append(f"Source: {self.config_parser.get_source_db_name()}, schema: {self.config_parser.get_source_owner()} ({self.config_parser.get_source_db_type()})")
+        lines.append(f"Target: {self.config_parser.get_target_db_name()}, schema: {self.config_parser.get_target_schema()} ({self.config_parser.get_target_db_type()})")
+        lines.append("")
+        
         if self.config_parser.is_dry_run():
-            self.config_parser.print_log_message('INFO', "migrator_tables: print_migration_summary: ! Dry run mode enabled. No migration performed !")
-        self.print_summary({'objects': 'User Defined Types', 'migrator_table_name': self.config_parser.get_protocol_name_user_defined_types(), 'additional_columns': None})
-        self.print_summary({'objects': 'Tables', 'migrator_table_name': self.config_parser.get_protocol_name_tables(), 'additional_columns': None})
-        self.print_summary({'objects': 'Source Table Partitioning', 'migrator_table_name': self.config_parser.get_protocol_name_source_table_partitioning(), 'additional_columns': None})
-        self.print_summary({'objects': 'Target Table Partitioning', 'migrator_table_name': self.config_parser.get_protocol_name_target_table_partitioning(), 'additional_columns': None})
-        self.print_summary({'objects': 'Columns', 'migrator_table_name': self.config_parser.get_protocol_name_columns(), 'additional_columns': None})
-        self.print_data_migration_summary()
-        self.print_summary({'objects': 'Altered columns', 'migrator_table_name': self.config_parser.get_protocol_name_target_columns_alterations(), 'additional_columns': 'reason'})
-        self.print_summary({'objects': 'Sequences', 'migrator_table_name': self.config_parser.get_protocol_name_sequences(), 'additional_columns': None})
-        self.print_summary({'objects': 'Indexes', 'migrator_table_name': self.config_parser.get_protocol_name_indexes(), 'additional_columns': 'index_type, index_owner'})
-        self.print_summary({'objects': 'Constraints', 'migrator_table_name': self.config_parser.get_protocol_name_constraints(), 'additional_columns': 'constraint_type'})
-        self.print_summary({'objects': 'Domains', 'migrator_table_name': self.config_parser.get_protocol_name_domains(), 'additional_columns': 'migrated_as'})
-        self.print_summary({'objects': 'Functions / procedures', 'migrator_table_name': self.config_parser.get_protocol_name_funcprocs(), 'additional_columns': None})
-        self.print_summary({'objects': 'Triggers', 'migrator_table_name': self.config_parser.get_protocol_name_triggers(), 'additional_columns': None})
-        self.print_summary({'objects': 'Views', 'migrator_table_name': self.config_parser.get_protocol_name_views(), 'additional_columns': None})
-        self.print_summary({'objects': 'Aliases', 'migrator_table_name': self.config_parser.get_protocol_name_aliases(), 'additional_columns': None})
-        if self.config_parser.is_dry_run():
-            self.config_parser.print_log_message('INFO', "migrator_tables: print_migration_summary: ! Dry run mode enabled. No migration performed !")
+            lines.append("! DRY RUN MODE ENABLED - NO MIGRATION PERFORMED !")
+            lines.append("")
+
+        lines.append("[ TIMING & EXECUTION PROFILES ]")
+        lines.append("-" * 80)
+        lines.append(f"{'Phase / Step':<44} | {'Duration':<14} | Start Time")
+        lines.append("-" * 80)
+        
+        try:
+            query = f"""SELECT * FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_main()}" ORDER BY id"""
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            for row in rows:
+                task_data = self.decode_main_row(row)
+                if task_data['task_completed'] and task_data['task_started']:
+                    length = task_data['task_completed'] - task_data['task_started']
+                    length_str = str(length)[:str(length).find('.')+3] if '.' in str(length) else str(length) 
+                else:
+                    length_str = "-"
+                started_str = str(task_data['task_started']).split()[1][:8] if task_data['task_started'] else "-"
+                
+                name = task_data['task_name']
+                sub = task_data['subtask_name']
+                display_name = f"  {sub}" if sub else name
+                display_name = display_name[:44]
+                lines.append(f"{display_name:<44} | {length_str:<14} | {started_str}")
+        except Exception:
+            pass
+
+        lines.append("")
+        lines.append("[ OBJECTS MIGRATION RESULTS ]")
+        lines.append("-" * 80)
+        lines.append(f"{'Object Type':<24} | {'Source':>6} | {'Success':>7} | {'Failed':>6} | Details")
+        lines.append("-" * 80)
+        
+        objects_to_check = [
+            ('User Defined Types', self.config_parser.get_protocol_name_user_defined_types(), None),
+            ('Domains', self.config_parser.get_protocol_name_domains(), 'migrated_as'),
+            ('Sequences', self.config_parser.get_protocol_name_sequences(), None),
+            ('Tables', self.config_parser.get_protocol_name_tables(), None),
+            ('Table Partitions', self.config_parser.get_protocol_name_source_table_partitioning(), None),
+            ('Columns', self.config_parser.get_protocol_name_columns(), None),
+            ('Altered Columns', self.config_parser.get_protocol_name_target_columns_alterations(), 'reason'),
+            ('Indexes', self.config_parser.get_protocol_name_indexes(), 'index_type, index_owner'),
+            ('Constraints', self.config_parser.get_protocol_name_constraints(), 'constraint_type'),
+            ('Functions / Procedures', self.config_parser.get_protocol_name_funcprocs(), None),
+            ('Triggers', self.config_parser.get_protocol_name_triggers(), None),
+            ('Views', self.config_parser.get_protocol_name_views(), None),
+            ('Aliases', self.config_parser.get_protocol_name_aliases(), None)
+        ]
+
+        for obj_name, table_name, add_cols in objects_to_check:
+            try:
+                cursor.execute(f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{table_name}" """)
+                total = cursor.fetchone()[0]
+                
+                success_count = 0
+                error_count = 0
+                if not self.config_parser.is_dry_run():
+                    cursor.execute(f"""SELECT success, COUNT(*) FROM "{self.protocol_schema}"."{table_name}" GROUP BY 1""")
+                    for s, c in cursor.fetchall():
+                        if s is True: success_count = c
+                        elif s is False: error_count = c
+
+                details = []
+                if add_cols and not self.config_parser.is_dry_run():
+                    cols_count = len(add_cols.split(','))
+                    cols_enum = ", ".join(str(i+2) for i in range(cols_count))
+                    cursor.execute(f"""SELECT COUNT(*), {add_cols} FROM "{self.protocol_schema}"."{table_name}" GROUP BY {cols_enum} ORDER BY {cols_enum}""")
+                    for r in cursor.fetchall():
+                        c = r[0]
+                        val = " ".join(str(x) for x in r[1:] if x)
+                        if val: details.append(f"{val}: {c}")
+
+                if obj_name == 'Tables':
+                    cursor.execute(f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_data_migration()}" WHERE source_table_rows = 0 OR source_table_rows IS NULL""")
+                    empty_tables = cursor.fetchone()[0]
+                    cursor.execute(f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_data_migration()}" WHERE source_table_rows > 0""")
+                    data_tables = cursor.fetchone()[0]
+                    details.append(f"Empty: {empty_tables}, With Data: {data_tables}")
+
+                details_str = ", ".join(details)
+                if obj_name == 'Altered Columns':
+                    lines.append(f"{obj_name:<24} | {total:>6} | {'-':>7} | {'-':>6} | {details_str}")
+                else:
+                    lines.append(f"{obj_name:<24} | {total:>6} | {success_count:>7} | {error_count:>6} | {details_str}")
+
+            except psycopg2.errors.UndefinedTable:
+                self.protocol_connection.connection.rollback()
+            except Exception:
+                self.protocol_connection.connection.rollback()
+
+        lines.append("")
+        lines.append("[ DATA MIGRATION RESULTS ]")
+        lines.append("-" * 80)
+        dm_table = self.config_parser.get_protocol_name_data_migration()
+        stats_table = self.config_parser.get_protocol_name_batches_stats()
+        
+        try:
+            cursor.execute(f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{dm_table}" """)
+            total_dm = cursor.fetchone()[0]
+            if total_dm > 0:
+                cursor.execute(f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{dm_table}" WHERE source_table_rows = 0 OR source_table_rows IS NULL""")
+                empty_dm = cursor.fetchone()[0]
+                cursor.execute(f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{dm_table}" WHERE source_table_rows > 0""")
+                data_dm = cursor.fetchone()[0]
+                cursor.execute(f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{dm_table}" WHERE source_table_rows > 0 AND source_table_rows = target_table_rows""")
+                full_dm = cursor.fetchone()[0]
+                cursor.execute(f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{dm_table}" WHERE source_table_rows > 0 AND source_table_rows <> target_table_rows""")
+                diff_dm = cursor.fetchone()[0]
+                
+                lines.append(f"Total Tables Processed   : {total_dm}")
+                lines.append(f"Empty Tables (0 rows)    : {empty_dm}")
+                lines.append(f"Tables with Data         : {data_dm}")
+                lines.append(f"Fully Migrated (Matched) : {full_dm}")
+                lines.append(f"Row Count Mismatches     : {diff_dm}")
+                
+                if diff_dm > 0:
+                    lines.append("")
+                    lines.append("Tables with row count mismatches (Top 10):")
+                    lines.append(f"{'Table Name':<35} | {'Source Rows':>15} | {'Target Rows':>15}")
+                    lines.append("-" * 80)
+                    cursor.execute(f"""SELECT target_schema_name, target_table_name, source_table_rows, target_table_rows 
+                                       FROM "{self.protocol_schema}"."{dm_table}" 
+                                       WHERE source_table_rows > 0 AND source_table_rows <> target_table_rows 
+                                       ORDER BY source_table_rows DESC LIMIT 10""")
+                    for sch, tbl, s_rows, t_rows in cursor.fetchall():
+                        s_fmt = f"{s_rows:,}"
+                        t_fmt = f"{t_rows:,}"
+                        lines.append(f"{sch + '.' + tbl:<35} | {s_fmt:>15} | {t_fmt:>15}")
+
+                cursor.execute(f"""SELECT target_schema_name, target_table_name, batch_number, 
+                                   round(batch_seconds::numeric, 2), round(reading_seconds::numeric, 2), 
+                                   round(transforming_seconds::numeric, 2), round(writing_seconds::numeric, 2)
+                                   FROM "{self.protocol_schema}"."{stats_table}"
+                                   ORDER BY batch_seconds DESC LIMIT 10""")
+                batches = cursor.fetchall()
+                if batches:
+                    lines.append("")
+                    lines.append("Longest Data Batches (Top 10):")
+                    lines.append(f"{'Table Name':<30} | {'Batch':>5} | {'Total(s)':>8} | {'Read(s)':>8} | {'Trans(s)':>8} | {'Write(s)':>8}")
+                    lines.append("-" * 80)
+                    for sch, tbl, b_num, b_sec, r_sec, t_sec, w_sec in batches:
+                        b_fmt = f"{b_sec:,}"
+                        r_fmt = f"{r_sec:,}"
+                        t_fmt = f"{t_sec:,}"
+                        w_fmt = f"{w_sec:,}"
+                        lines.append(f"{sch + '.' + tbl:<30} | {b_num:>5} | {b_fmt:>8} | {r_fmt:>8} | {t_fmt:>8} | {w_fmt:>8}")
+            else:
+                lines.append("No data migration executed in this run.")
+
+        except psycopg2.errors.UndefinedTable:
+            self.protocol_connection.connection.rollback()
+        except Exception:
+            self.protocol_connection.connection.rollback()
+
+        lines.append("=" * 80)
+        final_summary = "\n" + "\n".join(lines)
+        self.config_parser.print_log_message('INFO', final_summary)
 
     def __print_mapping_metric_summary(self, object_name, table_name, is_index=False):
         try:

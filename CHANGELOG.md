@@ -4,6 +4,7 @@
 
 - 2026.04.15
 
+  - Significant improvement in summary output, now showing results in better format and without timestamp and other prefixes for better readability.
   - Fix - IBM DB2 z/OS Connector: Allow "@" as a statement terminator in addition to ";". Added debug messages to trace the DDL parsing process.
   - Fix - T-SQL Parser: Fixed missing comments in PostgreSQL converted code, fixed conversion of data types in stored procedures, key word "noholdlock" removed from select statements.
 

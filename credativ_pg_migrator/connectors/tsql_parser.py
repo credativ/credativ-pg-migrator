@@ -834,6 +834,8 @@ class TsqlParser:
                 cleaned_lines = [l.strip() for l in select_lines]
                 full_select = " ".join(cleaned_lines)
 
+                full_select = re.sub(r'\bnoholdlock\b', '', full_select, flags=re.IGNORECASE)
+
                 self.select_commands.append({
                     "line": start_line,
                     "content": full_select
@@ -1186,6 +1188,9 @@ class TsqlParser:
             content = re.sub(r'ELSIF\(', 'ELSIF (', content, flags=re.IGNORECASE)
             
             body_parts.append((f['line'], content, "if_commands"))
+            
+        for c in self.comments:
+            body_parts.append((c['line'], c['content'], "comments"))
             
         # Sort by line number
         body_parts.sort(key=lambda x: x[0])

@@ -285,8 +285,7 @@ class SybaseASEConnector(DatabaseConnector):
         content_clean = content.replace('@', '')
         content_clean = self._apply_data_type_substitutions(content_clean)
         content_clean = self._apply_udt_to_base_type_substitutions(content_clean, settings)
-        for sybase_type, pg_type in types_mapping.items():
-            content_clean = re.sub(rf'\b{re.escape(sybase_type)}\b', pg_type, content_clean, flags=re.IGNORECASE)
+        content_clean = self._apply_types_mapping(content_clean, types_mapping)
 
         parts = self._split_respecting_parens(content_clean)
         for part in parts:
@@ -675,6 +674,14 @@ class SybaseASEConnector(DatabaseConnector):
             raise ValueError(f"Unsupported target database type: {target_db_type}")
 
         return types_mapping
+
+    def _apply_types_mapping(self, text, types_mapping):
+        types_without_length = ('BYTEA', 'TEXT', 'BOOLEAN', 'INTEGER', 'BIGINT', 'SMALLINT', 'DATE', 'TIMESTAMP', 'TIME')
+        for sybase_type, pg_type in types_mapping.items():
+            if pg_type.upper() in types_without_length:
+                text = re.sub(rf'\b{re.escape(sybase_type)}\s*\(\s*\d+\s*(?:,\s*\d+\s*)?\)', pg_type, text, flags=re.IGNORECASE)
+            text = re.sub(rf'\b{re.escape(sybase_type)}\b', pg_type, text, flags=re.IGNORECASE)
+        return text
 
     def get_create_table_sql(self, settings):
         return ""
@@ -1188,6 +1195,8 @@ class SybaseASEConnector(DatabaseConnector):
             target_db_type = settings.get('target_db_type', 'postgresql')
             types_mapping = self.get_types_mapping({'target_db_type': target_db_type})
 
+            funcproc_code = self._apply_types_mapping(funcproc_code, types_mapping)
+
             parser = TsqlParser(funcproc_code, self.config_parser)
             self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: convert_funcproc_code: Running 12-pass parser for {settings.get('funcproc_name')}")
 
@@ -1238,8 +1247,7 @@ class SybaseASEConnector(DatabaseConnector):
                          p_clean = re.sub(r'\bOUTPUT\b', '', p_clean, flags=re.IGNORECASE).strip()
                          p_clean = "INOUT " + p_clean
 
-                     for sybase_type, pg_type in types_mapping.items():
-                         p_clean = re.sub(rf'\b{re.escape(sybase_type)}\b', pg_type, p_clean, flags=re.IGNORECASE)
+                     p_clean = self._apply_types_mapping(p_clean, types_mapping)
 
                      processed_params.append(p_clean)
 
@@ -2026,6 +2034,9 @@ class SybaseASEConnector(DatabaseConnector):
         # 5. Convert Statements using new 12-pass Parser
         # We wrap the body_content in a dummy header so the parser triggers properly
         fake_code = f"CREATE PROCEDURE dummy AS\n{body_content}"
+        
+        fake_code = self._apply_types_mapping(fake_code, types_mapping)
+            
         parser = TsqlParser(fake_code, self.config_parser)
         final_output = parser.run(pg_header_str=" ") # space prevents default header
 

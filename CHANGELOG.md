@@ -1,6 +1,10 @@
 # Changelog
 
-## 0.13.0 - 2026.03.18
+## 0.13.0 - 2026.04.15
+
+- 2026.04.15
+
+  - Fix - IBM DB2 z/OS Connector: Allow "@" as a statement terminator in addition to ";". Added debug messages to trace the DDL parsing process.
 
 - 2026.03.30
 

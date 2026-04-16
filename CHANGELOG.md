@@ -1,6 +1,10 @@
 # Changelog
 
-## 0.13.0 - 2026.04.15
+## 0.13.0 - 2026.04.16
+
+- 2026.04.16
+
+  - Fixes - added missing row counts to the protocol tables in IBM DB2 z/OS migration path from CSV files, added missing logging of success when alias is used for table or view, added missing print of TOP 5 successfully migrated tables and TOP 5 tables with row count mismatches in summary output.
 
 - 2026.04.15
 

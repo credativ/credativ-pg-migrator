@@ -3443,19 +3443,38 @@ class MigratorTables:
                 lines.append(f"Fully Migrated (Matched) : {full_dm}")
                 lines.append(f"Row Count Mismatches     : {diff_dm}")
                 
+                if full_dm > 0:
+                    lines.append("")
+                    lines.append("Biggest Successfully Migrated Tables (Top 5):")
+                    lines.append(f"{'Table Name':<35} | {'Row Count':>15} | {'Time Spent (s)':>15}")
+                    lines.append("-" * 80)
+                    cursor.execute(f"""SELECT target_schema_name, target_table_name, target_table_rows, 
+                                       EXTRACT(EPOCH FROM (task_completed - task_started))
+                                       FROM "{self.protocol_schema}"."{dm_table}" 
+                                       WHERE source_table_rows > 0 AND source_table_rows = target_table_rows AND success = TRUE
+                                       ORDER BY source_table_rows DESC LIMIT 5""")
+                    for sch, tbl, t_rows, duration in cursor.fetchall():
+                        t_fmt = f"{t_rows:,}"
+                        d_fmt = f"{round(duration, 2) if duration else 0.0}"
+                        lines.append(f"{sch + '.' + tbl:<35} | {t_fmt:>15} | {d_fmt:>15}")
+
                 if diff_dm > 0:
                     lines.append("")
-                    lines.append("Tables with row count mismatches (Top 10):")
-                    lines.append(f"{'Table Name':<35} | {'Source Rows':>15} | {'Target Rows':>15}")
+                    lines.append("Tables with row count mismatches (Top 5 by Source Rows):")
+                    lines.append(f"{'Table Name':<28} | {'Src Rows':>11} | {'Tgt Rows':>11} | {'Diff':>8} | {'Time(s)':>8}")
                     lines.append("-" * 80)
-                    cursor.execute(f"""SELECT target_schema_name, target_table_name, source_table_rows, target_table_rows 
+                    cursor.execute(f"""SELECT target_schema_name, target_table_name, source_table_rows, target_table_rows,
+                                       ABS(source_table_rows - target_table_rows),
+                                       EXTRACT(EPOCH FROM (task_completed - task_started))
                                        FROM "{self.protocol_schema}"."{dm_table}" 
                                        WHERE source_table_rows > 0 AND source_table_rows <> target_table_rows 
-                                       ORDER BY source_table_rows DESC LIMIT 10""")
-                    for sch, tbl, s_rows, t_rows in cursor.fetchall():
+                                       ORDER BY source_table_rows DESC LIMIT 5""")
+                    for sch, tbl, s_rows, t_rows, diff, duration in cursor.fetchall():
                         s_fmt = f"{s_rows:,}"
                         t_fmt = f"{t_rows:,}"
-                        lines.append(f"{sch + '.' + tbl:<35} | {s_fmt:>15} | {t_fmt:>15}")
+                        diff_fmt = f"{diff:,}"
+                        d_fmt = f"{round(duration, 2) if duration else 0.0}"
+                        lines.append(f"{sch + '.' + tbl:<28} | {s_fmt:>11} | {t_fmt:>11} | {diff_fmt:>8} | {d_fmt:>8}")
 
                 cursor.execute(f"""SELECT target_schema_name, target_table_name, batch_number, 
                                    round(batch_seconds::numeric, 2), round(reading_seconds::numeric, 2), 

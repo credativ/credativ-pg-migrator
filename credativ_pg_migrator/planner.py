@@ -1219,10 +1219,13 @@ class Planner:
                     data_migration_info = self.migrator_tables.decode_data_migration_row(record)
 
                     part_name = 'check row counts for table ' + data_migration_info['source_table_name']
-                    source_table_rows = self.source_connection.get_rows_count(
-                        data_migration_info['source_schema_name'],
-                        data_migration_info['source_table_name']
-                    )
+                    if self.config_parser.get_source_db_type() == 'ibm_db2_zos':
+                        source_table_rows = data_migration_info.get('source_table_rows', 0)
+                    else:
+                        source_table_rows = self.source_connection.get_rows_count(
+                            data_migration_info['source_schema_name'],
+                            data_migration_info['source_table_name']
+                        )
                     target_table_rows = self.target_connection.get_rows_count(
                         data_migration_info['target_schema_name'],
                         data_migration_info['target_table_name']
@@ -1232,6 +1235,11 @@ class Planner:
                     if source_table_rows != target_table_rows:
                         self.config_parser.print_log_message('INFO', f"planner: run_check_tables_migration_status: Row counts do not match for table {data_migration_info['source_table_name']}: source={source_table_rows}, target={target_table_rows}. Marking as not fully migrated.")
                         self.migrator_tables.update_table_status({'row_id': table_info['id'], 'success': False, 'message': ''})
+                        self.migrator_tables.update_table_rows_counts({
+                            "row_id": table_info['id'],
+                            "source_table_rows": source_table_rows,
+                            "target_table_rows": target_table_rows,
+                        })
                         self.migrator_tables.update_data_migration_rows({
                             "row_id": data_migration_info['id'],
                             "source_table_rows": source_table_rows,
@@ -1246,6 +1254,11 @@ class Planner:
                     else:
                         self.config_parser.print_log_message('DEBUG', f"planner: run_check_tables_migration_status: Row counts match for table {data_migration_info['source_table_name']}: source={source_table_rows}, target={target_table_rows}. Marking as fully migrated.")
                         self.migrator_tables.update_table_status({'row_id': table_info['id'], 'success': True, 'message': 'Fully migrated'})
+                        self.migrator_tables.update_table_rows_counts({
+                            "row_id": table_info['id'],
+                            "source_table_rows": source_table_rows,
+                            "target_table_rows": target_table_rows,
+                        })
                         self.migrator_tables.update_data_migration_rows({
                             "row_id": data_migration_info['id'],
                             "source_table_rows": source_table_rows,

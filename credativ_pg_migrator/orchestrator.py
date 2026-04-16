@@ -1183,6 +1183,18 @@ class Orchestrator:
 
                                         target_table_rows = worker_target_connection.get_rows_count(target_schema_name, target_table_name)
                                         rows_migrated = target_table_rows
+                                        if self.config_parser.get_source_db_type() == 'ibm_db2_zos':
+                                            source_table_rows = target_table_rows
+                                            migrator_tables.update_data_migration_rows({
+                                                "row_id": protocol_id,
+                                                "source_table_rows": source_table_rows,
+                                                "target_table_rows": target_table_rows,
+                                            })
+                                            migrator_tables.update_table_rows_counts({
+                                                "row_id": table_data['id'],
+                                                "source_table_rows": source_table_rows,
+                                                "target_table_rows": target_table_rows,
+                                            })
                                         data_import_end_time = time.time()
                                         data_import_duration = data_import_end_time - data_import_start_time
                                         self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Table {target_table_name}: Data import duration: {data_import_duration:.2f} seconds, rows migrated: {target_table_rows}.")

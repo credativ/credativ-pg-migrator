@@ -2515,6 +2515,35 @@ class MigratorTables:
             self.config_parser.print_log_message('ERROR', f"migrator_tables: update_table_status: ({func_run_id}): Exception: {e}")
             raise
 
+    def update_table_rows_counts(self, settings):
+        row_id = settings.get('row_id')
+        source_table_rows = settings.get('source_table_rows')
+        target_table_rows = settings.get('target_table_rows')
+        func_run_id = uuid.uuid4()
+        table_name = self.config_parser.get_protocol_name_tables()
+        query = f"""
+            UPDATE "{self.protocol_schema}"."{table_name}"
+            SET source_table_rows = %s,
+            target_table_rows = %s
+            WHERE id = %s
+            RETURNING *
+        """
+        params = (source_table_rows, target_table_rows, row_id)
+        self.config_parser.print_log_message('DEBUG3', f"migrator_tables: update_table_rows_counts: ({func_run_id}): Executing query with params: {params}")
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+
+            if not row:
+                self.config_parser.print_log_message('ERROR', f"migrator_tables: update_table_rows_counts: ({func_run_id}): Error updating rows counts for table {row_id} in {table_name}.")
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_table_rows_counts: ({func_run_id}): Error updating rows counts for table {row_id} in {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_table_rows_counts: ({func_run_id}): Query: {query}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_table_rows_counts: ({func_run_id}): Exception: {e}")
+            raise
+
     def select_table_by_source(self, settings):
         source_schema_name = settings.get('source_schema_name')
         source_table_name = settings.get('source_table_name')
@@ -3001,6 +3030,8 @@ class MigratorTables:
                 view_row = self.decode_view_row(row)
                 self.config_parser.print_log_message('DEBUG3', f"migrator_tables: update_view_status: ({func_run_id}): Returned row: {view_row}")
                 self.update_protocol({'object_type': 'view', 'object_protocol_id': view_row['id'], 'execution_success': success, 'execution_error_message': message, 'execution_results': None})
+                if view_row.get('alias_view') and self.config_parser.get_source_db_type() == 'ibm_db2_zos':
+                    self.update_aliases_status({'row_id': view_row.get('source_view_id'), 'success': success, 'message': message})
 
             else:
                 self.config_parser.print_log_message('ERROR', f"migrator_tables: update_view_status: ({func_run_id}): Error updating status for view {row_id} in {table_name}.")

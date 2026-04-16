@@ -4014,7 +4014,7 @@ class MigratorTables:
     def get_alias_for_table(self, source_schema_name, source_table_name):
         table_name = self.config_parser.get_protocol_name_aliases()
         query = f"""
-            SELECT target_alias_name, alias_target_type
+            SELECT target_alias_name, alias_target_type, id
             FROM "{self.protocol_schema}"."{table_name}"
             WHERE upper(source_referenced_schema_name) = upper(%s) AND upper(source_referenced_table_name) = upper(%s)
         """
@@ -4024,7 +4024,7 @@ class MigratorTables:
             row = cursor.fetchone()
             cursor.close()
             if row:
-                return {'target_alias_name': row[0], 'alias_target_type': row[1]}
+                return {'target_alias_name': row[0], 'alias_target_type': row[1], 'id': row[2]}
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"migrator_tables: get_alias_for_table: Error querying alias for {source_schema_name}.{source_table_name}: {e}")
         return None

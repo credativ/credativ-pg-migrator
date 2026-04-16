@@ -444,6 +444,12 @@ class Planner:
                     target_table_name = alias_name
                     target_alias_name = alias_name
                     self.config_parser.print_log_message('INFO', f"planner: stdwf_prepare_tables: Source table {table_info['table_name']} mapped to target alias {target_table_name}")
+                    if 'id' in alias_dict:
+                        self.migrator_tables.update_aliases_status({
+                            'row_id': alias_dict['id'],
+                            'success': True,
+                            'message': f"Alias used as target name for table {table_info['table_name']}"
+                        })
             # If include_tables is empty, include all tables
             # If include_tables is ['.*'] or contains '.*', include all tables
             if include_tables == ['.*'] or '.*' in include_tables:
@@ -920,13 +926,19 @@ class Planner:
                 self.config_parser.print_log_message('INFO', f"planner: stdwf_prepare_views: View {view_info['view_name']} is included for migration.")
                 target_view_name = view_info.get('target_view_name', view_info['view_name'])
                 target_alias_name = ''
-                # if self.config_parser.get_use_aliases_as_target_names() and self.config_parser.get_source_db_type() != 'ibm_db2_zos':
-                #     alias_name = self.migrator_tables.get_alias_for_table(self.source_schema_name, view_info['view_name'])
-                #     if alias_name:
-                #         target_alias_name = alias_name
-                #         self.config_parser.print_log_message('INFO', f"planner: stdwf_prepare_views: View {view_info['view_name']} mapped to target alias {target_alias_name}")
-
-                # target_view_name_to_use = target_alias_name if target_alias_name else target_view_name
+                if self.config_parser.get_use_aliases_as_target_names():
+                    alias_dict = self.migrator_tables.get_alias_for_table(self.source_schema_name, view_info['view_name'])
+                    if alias_dict:
+                        alias_name = alias_dict.get('target_alias_name')
+                        target_view_name = alias_name
+                        target_alias_name = alias_name
+                        self.config_parser.print_log_message('INFO', f"planner: stdwf_prepare_views: View {view_info['view_name']} mapped to target alias {target_alias_name}")
+                        if 'id' in alias_dict:
+                            self.migrator_tables.update_aliases_status({
+                                'row_id': alias_dict['id'],
+                                'success': True,
+                                'message': f"Alias used as target name for view {view_info['view_name']}"
+                            })
 
                 view_sql = self.source_connection.fetch_view_code({
                     'view_id': view_info['id'],

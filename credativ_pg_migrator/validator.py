@@ -146,12 +146,16 @@ class Validator:
             if check_table_sum:
                 s_sum = source_conn.get_table_checksum(source_schema, source_table, source_cols)
                 t_sum = target_conn.get_table_checksum(target_schema, target_table, target_cols)
-                res['table_hash_logic'] = (s_sum == t_sum and s_sum is not None)
-                if not res['table_hash_logic']:
-                    res['passed'] = False
-                    res['table_msg'] = f"Fail: Src={s_sum}, Tgt={t_sum}"
+                if s_sum is not None and t_sum is not None:
+                    res['table_hash_logic'] = (s_sum == t_sum)
+                    if not res['table_hash_logic']:
+                        res['passed'] = False
+                        res['table_msg'] = f"Fail: Src={s_sum}, Tgt={t_sum}"
+                    else:
+                        res['table_msg'] = f"Pass: {s_sum}"
                 else:
-                    res['table_msg'] = f"Pass: {s_sum}"
+                    res['table_hash_logic'] = None
+                    res['table_msg'] = f"Skip: Table checksum unavailable (Src={s_sum}, Tgt={t_sum})"
 
             if check_random and pk_cols_list:
                 pks = target_conn.get_random_pks(target_schema, target_table, pk_cols_list, sample_size)

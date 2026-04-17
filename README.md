@@ -9,7 +9,7 @@ It is is written in Python in multiple classes and modules.
 
 - Pure python solution, uses only standard libraries, structured in modules, written in object-oriented style in classes
 - Currently supported source databases are:
-  - IBM dDB2 LUW
+  - IBM DB2 LUW and DB2 z/OS
   - Informix
   - MS SQL Server
   - MySQL/MariaDB (engines with INFORMATION_SCHEMA)
@@ -22,7 +22,10 @@ It is is written in Python in multiple classes and modules.
 - Migration of views is currently only in rudimentary version, just replacing source schema names in code with target schema names
 - Conversion and migration of functions, procedures, triggers currently fully works for Informix. Can be added on demand for other databases too.
 - Migrator allows customizable substitutions of data types, default values of columns, calls of remote objects.
+- Supports offline, file-based data ingestion for restricted environments (e.g., using offline DDL SQL scripts for schema discovery and CSV files for data migrations from IBM DB2 z/OS, or proactively processing Informix `.unl` export files).
 - User can also define limitations for migration of data - as where conditions for tables. This option requires good analysis of dependencies in the source database. Missing data can break Foreign Key constraints in the target database. See further in the documentation.
+- Migrator features an advanced Mapping Workflow directed by the central orchestrator, enabling complex schema matching, application of customizable normalization rules, and automated dropping and recreating of target indexes and constraints during mapped data migrations.
+- Migrator supports strict post-migration verification utilizing discrete parallel tests measuring row counts, table checksums, random row hashes, and explicit byte-size telemetry. The enhanced validation engine includes detailed validation summaries, structured error handling, and built-in log size monitoring.
 - Migrator provides reach logging and error handling, has 2 levels of logging - INFO and DEBUG, in case of error, detailed error message is printed.
 - By default logging messages are printed both to console and to log file, name of the log file is configurable in command line arguments.
 - Rich information is also logged to the migration database - see below.

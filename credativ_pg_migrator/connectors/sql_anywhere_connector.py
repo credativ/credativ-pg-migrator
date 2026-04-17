@@ -285,7 +285,9 @@ class SQLAnywhereConnector(DatabaseConnector):
                 return migration_stats
 
             else:
+
                 if source_table_rows > target_table_rows:
+                    migrator_tables.update_data_migration_started(protocol_id)
 
                     self.config_parser.print_log_message('INFO', f"sql_anywhere_connector: migrate_table: Worker {worker_id}: Source table {source_table_name}: {source_table_rows} rows / Target table {target_table_name}: {target_table_rows} rows - starting data migration.")
 
@@ -392,6 +394,7 @@ class SQLAnywhereConnector(DatabaseConnector):
                             'worker_id': worker_id,
                             'migrator_tables': migrator_tables,
                             'insert_columns': insert_columns,
+                            'insert_values': settings.get('insert_values'),
                         })
                         total_inserted_rows += inserted_rows
                         inserting_end_time = time.time()
@@ -922,6 +925,18 @@ class SQLAnywhereConnector(DatabaseConnector):
     def convert_default_value(self, settings) -> dict:
         extracted_default_value = settings['extracted_default_value']
         return extracted_default_value
+
+    def get_table_checksum(self, schema_name: str, table_name: str, columns: list):
+        return None
+
+    def get_random_pks(self, schema_name: str, table_name: str, pk_columns: list, sample_size: int):
+        return []
+
+    def get_row_checksums(self, schema_name: str, table_name: str, pk_columns: list, pk_values_list: list, columns: list):
+        return {}
+
+    def get_lob_sizes(self, schema_name: str, table_name: str, pk_columns: list, pk_values_list: list, lob_columns: list):
+        return {}
 
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

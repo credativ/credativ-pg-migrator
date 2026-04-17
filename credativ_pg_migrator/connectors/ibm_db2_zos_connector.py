@@ -226,6 +226,7 @@ class IbmDb2ZosConnector(DatabaseConnector):
             # Extract triggers first to avoid splitting by semicolons inside their bodies
             trigger_pattern = re.compile(r"(CREATE\s+TRIGGER\s+\"?([A-Za-z0-9_]+)\"?\.\"?([A-Za-z0-9_]+)\"?[\s\S]*?(?=(?:CREATE\s+(?:TABLE|VIEW|INDEX|UNIQUE\s+INDEX|ALIAS|SEQUENCE|TRIGGER))|(?:ALTER\s+TABLE)|(?:SET\s+CURRENT\s+SCHEMA)|$))", re.IGNORECASE)
             for match in trigger_pattern.finditer(content):
+                self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: parse_ddl_files: Found trigger: {match.group(1)}")
                 schema_name = match.group(2).upper()
                 trigger_name = match.group(3).upper()
                 ddl_text = match.group(1).strip()
@@ -240,7 +241,8 @@ class IbmDb2ZosConnector(DatabaseConnector):
             # Remove the extracted triggers from content so they aren't parsed again
             content = trigger_pattern.sub("", content)
 
-            statements = content.split(';')
+            # Split statements by ';' or by '@' if it appears at the end of the line
+            statements = re.split(r';|@(?=\s*(?:\n|$))', content)
             for stmt in statements:
                 stmt = stmt.strip()
                 if not stmt:
@@ -265,6 +267,7 @@ class IbmDb2ZosConnector(DatabaseConnector):
                 # Parse Comments (COMMENT ON statements)
                 match_comment = re.search(r"^COMMENT\s+ON\s+(TABLE|COLUMN|INDEX|VIEW|ALIAS|TRIGGER|SEQUENCE)\s+\"?([A-Za-z0-9_]+)\"?\.\"?([A-Za-z0-9_]+)\"?(?:\.\"?([A-Za-z0-9_]+)\"?)?\s+IS\s+'(.*)'", clean_stmt, re.IGNORECASE | re.DOTALL)
                 if match_comment:
+                    self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: parse_ddl_files: Found comment: {match_comment.group(1)}")
                     obj_type = match_comment.group(1).upper()
                     schema_name = match_comment.group(2).upper()
                     obj_name = match_comment.group(3).upper()
@@ -283,6 +286,7 @@ class IbmDb2ZosConnector(DatabaseConnector):
                 # Parse Indexes
                 match_index = re.search(r"^CREATE\s+(UNIQUE\s+)?INDEX\s+([A-Za-z0-9_]+)\.([A-Za-z0-9_]+)\s+ON\s+([A-Za-z0-9_]+)\.([A-Za-z0-9_]+)", clean_stmt, re.IGNORECASE)
                 if match_index:
+                    self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: parse_ddl_files: Found index: {match_index.group(1)}")
                     is_unique = bool(match_index.group(1))
                     idx_schema = match_index.group(2).upper()
                     idx_name = match_index.group(3).upper()
@@ -325,6 +329,7 @@ class IbmDb2ZosConnector(DatabaseConnector):
                 # Parse Sequences
                 match_seq = re.search(r"^CREATE\s+SEQUENCE\s+\"?([A-Za-z0-9_]+)\"?\.\"?([A-Za-z0-9_]+)\"?", clean_stmt, re.IGNORECASE)
                 if match_seq:
+                    self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: parse_ddl_files: Found sequence: {match_seq.group(1)}")
                     schema_name = match_seq.group(1).upper()
                     seq_name = match_seq.group(2).upper()
 
@@ -395,6 +400,7 @@ class IbmDb2ZosConnector(DatabaseConnector):
                 # Parse Views
                 match_view = re.search(r"^CREATE\s+VIEW\s+\"?([A-Za-z0-9_]+)\"?\.\"?([A-Za-z0-9_]+)\"?", clean_stmt, re.IGNORECASE)
                 if match_view:
+                    self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: parse_ddl_files: Found view: {match_view.group(1)}")
                     schema_name = match_view.group(1).upper()
                     view_name = match_view.group(2).upper()
                     migrator_tables.insert_ddl_views({
@@ -408,6 +414,7 @@ class IbmDb2ZosConnector(DatabaseConnector):
                 # Parse Aliases
                 match_alias = re.search(r"^CREATE\s+ALIAS\s+\"?([A-Za-z0-9_]+)\"?\.\"?([A-Za-z0-9_]+)\"?\s+FOR\s+\"?([A-Za-z0-9_]+)\"?\.\"?([A-Za-z0-9_]+)\"?", clean_stmt, re.IGNORECASE)
                 if match_alias:
+                    self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: parse_ddl_files: Found alias: {match_alias.group(1)}")
                     schema_name = match_alias.group(1).upper()
                     alias_name = match_alias.group(2).upper()
                     target_schema = match_alias.group(3).upper()
@@ -425,6 +432,7 @@ class IbmDb2ZosConnector(DatabaseConnector):
                 # Parse Foreign Keys
                 match_fk = re.search(r"^ALTER\s+TABLE\s+([A-Za-z0-9_]+)\.([A-Za-z0-9_]+)\s+ADD\s+CONSTRAINT\s+([A-Za-z0-9_]+)\s+FOREIGN\s+KEY\s*\(([^)]+)\)\s*REFERENCES\s+([A-Za-z0-9_]+)\.([A-Za-z0-9_]+)\s*\(([^)]+)\)", clean_stmt, re.IGNORECASE)
                 if match_fk:
+                    self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: parse_ddl_files: Found foreign key: {match_fk.group(1)}")
                     tbl_schema = match_fk.group(1).upper()
                     tbl_name = match_fk.group(2).upper()
                     fk_name = match_fk.group(3).upper()
@@ -519,6 +527,7 @@ class IbmDb2ZosConnector(DatabaseConnector):
                     partition_ranges = match_part.group(2).strip()
 
                 # Register Table
+                self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: parse_ddl_files: Found table: {match_table.group(1)}")
                 migrator_tables.insert_ddl_tables({
                     'source_schema_name': schema_name,
                     'source_table_name': table_name,
@@ -563,6 +572,7 @@ class IbmDb2ZosConnector(DatabaseConnector):
                         identity_match = re.search(r"GENERATED\s+(?:ALWAYS|BY\s+DEFAULT)\s+AS\s+IDENTITY(?:\s*\(([^)]+)\))?", after_type, re.IGNORECASE)
 
                     if identity_match:
+                        self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: parse_ddl_files: Found identity: {identity_match.group(1)}")
                         is_identity = True
                         seq_params_str = identity_match.group(1) if identity_match.lastindex and identity_match.group(identity_match.lastindex) else ""
 
@@ -620,6 +630,7 @@ class IbmDb2ZosConnector(DatabaseConnector):
                                 parsed_cycle = True
                                 seq_sql += " CYCLE"
 
+                        self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: parse_ddl_files: Found sequence: {seq_name.upper()}")
                         migrator_tables.insert_ddl_sequences({
                             'source_schema_name': schema_name,
                             'source_seq_name': seq_name.upper(),
@@ -1135,15 +1146,15 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
         aliases = {}
         if self.connectivity == self.config_parser.const_connectivity_ddl():
             query = f"""SELECT a.id, a.source_schema_name, a.source_alias_name, a.source_target_schema, a.source_target_name, a.source_alias_sql, a.source_alias_comment,
-                            CASE 
+                            CASE
                                 WHEN t.source_table_name IS NOT NULL THEN 'TABLE'
                                 WHEN v.source_view_name IS NOT NULL THEN 'VIEW'
                                 ELSE 'UNKNOWN'
                             END as alias_target_type
                         FROM "{self.protocol_schema}"."ddl_aliases" a
-                        LEFT JOIN "{self.protocol_schema}"."ddl_tables" t 
+                        LEFT JOIN "{self.protocol_schema}"."ddl_tables" t
                             ON a.source_target_schema = t.source_schema_name AND a.source_target_name = t.source_table_name
-                        LEFT JOIN "{self.protocol_schema}"."ddl_views" v 
+                        LEFT JOIN "{self.protocol_schema}"."ddl_views" v
                             ON a.source_target_schema = v.source_schema_name AND a.source_target_name = v.source_view_name
                         WHERE a.source_schema_name = %s ORDER BY a.id"""
             cursor = self.migrator_tables.protocol_connection.connection.cursor()
@@ -1430,6 +1441,18 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
 
     def fetch_all_rows(self, query):
         return []
+
+    def get_table_checksum(self, schema_name: str, table_name: str, columns: list):
+        return None
+
+    def get_random_pks(self, schema_name: str, table_name: str, pk_columns: list, sample_size: int):
+        return []
+
+    def get_row_checksums(self, schema_name: str, table_name: str, pk_columns: list, pk_values_list: list, columns: list):
+        return {}
+
+    def get_lob_sizes(self, schema_name: str, table_name: str, pk_columns: list, pk_values_list: list, lob_columns: list):
+        return {}
 
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

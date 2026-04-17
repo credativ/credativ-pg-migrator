@@ -46,6 +46,5 @@ Primarily utilized by specific connectors (like IBM DB2 z/OS) that do not connec
 ## 6. Schema Matching Engines
 
 Used extensively in recurring or standardized migration projects (e.g., nscale egov migrations) to run automated heuristics:
-*   **`matching_run`**: Registers the execution and configuration of the matching algorithm.
-*   **`matching_tables`**: Maps source and target tables alongside a `similarity_score` (Jaccard).
-*   **`matching_columns`**: Granular tracking mapping fields based exactly on data type, ordinality, and naming overlap.
+*   **`matching_tables`**: Maps source and target tables alongside a `similarity_score` (Jaccard). Does not rely on a central run ID, instead embedding source and target schema contexts directly.
+*   **`matching_columns`**: Granular tracking mapping fields based exactly on data type, ordinality, and naming overlap, linked completely by text-based schema and table references.

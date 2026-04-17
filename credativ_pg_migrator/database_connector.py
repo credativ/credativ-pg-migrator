@@ -726,5 +726,37 @@ class DatabaseConnector(ABC):
         """
         return True
 
+    @abstractmethod
+    def get_table_checksum(self, schema_name: str, table_name: str, columns: list):
+        """
+        Calculates a deterministic table-level checksum hashing string aggregated values.
+        cross-database compatible types usually required (e.g. TO_CHAR casts).
+        Returns string or numeric hash.
+        """
+        pass
+
+    @abstractmethod
+    def get_random_pks(self, schema_name: str, table_name: str, pk_columns: list, sample_size: int):
+        """
+        Returns a random sample of Primary Key values for validation targets.
+        """
+        pass
+
+    @abstractmethod
+    def get_row_checksums(self, schema_name: str, table_name: str, pk_columns: list, pk_values_list: list, columns: list):
+        """
+        Returns corresponding row-level hashes matched directly against the provided PK filter sets.
+        Returns a dictionary or list mapping PKs to Row Checksums.
+        """
+        pass
+
+    @abstractmethod
+    def get_lob_sizes(self, schema_name: str, table_name: str, pk_columns: list, pk_values_list: list, lob_columns: list):
+        """
+        Calculates internal length attributes explicitly for large objects mapping PKs against lengths.
+        Returns dictionary mapping PKs to arrays of integer bounds.
+        """
+        pass
+
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

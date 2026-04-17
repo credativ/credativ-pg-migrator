@@ -5,7 +5,7 @@
 credativ-pg-migrator is an offline migration tool for moving schemas and data from legacy or proprietary databases into PostgreSQL. It is written in Python and uses modular connectors for different source databases.
 
 Supported source databases:
-- IBM DB2 LUW
+- IBM DB2 LUW and DB2 z/OS
 - Informix
 - MS SQL Server
 - MySQL / MariaDB (engines with INFORMATION_SCHEMA)
@@ -27,7 +27,11 @@ High‑level features:
   - functions / procedures (fully implemented for Informix)
   - triggers (Informix, Sybase ASE)
   - views (currently simple parsing and schema-name replacement)
-  - Adjusts sequences on the target to match the imported data.
+  - Adjusts sequences on the target to match the imported data (with robust fetch routines across all supported engines).
+  - Schema Mapping Workflow handling data normalization, renaming/matching functions, and managed target index/constraint creation.
+- Validates:
+  - Actively validates migrated data establishing independent parity checks for row counts, complete table checksum hashing, random tuple hashes, and exact LOB size byte-verification.
+  - Generates comprehensive validation summaries with structured reporting, strict error handling, and log size thresholds.
 - Customizable:
   - data type mappings
   - default value mappings
@@ -142,10 +146,10 @@ IBM DB2 is supported via two fundamentally different connectors, heavily dependi
 - **Configuration**: Uses native connect strings. Set `connectivity: "native"`.
 
 #### 4.2.2 DB2 z/OS (Mainframe)
-- **Mode**: DDL Parsing (Offline Connectivity)
+- **Mode**: DDL Parsing and File-Based Integration (Offline Connectivity)
 - **Python Module**: `psycopg2`
-- **Configuration**: Uses `connectivity: "ddl"`. Unlike LUW, the z/OS connector does not connect directly to the mainframe instance. Instead, it reads provided `.sql`/DDL schema extracts offline. It uses the `psycopg2` connection strictly to interact with the PostgreSQL `migrator_tables` for protocol persistence and mapping.
-- **Usage**: You must define a `ddl:` -> `path:` attribute pointing to the directory containing your source schema DDL files.
+- **Configuration**: Uses `connectivity: "ddl"`. Unlike LUW, the z/OS connector does not connect directly to the mainframe instance. Instead, it reads provided `.sql`/DDL schema extracts offline to discover structure. Data migration is handled purely offline using source-generated `.csv` exports. It uses the `psycopg2` connection strictly to interact with the PostgreSQL `migrator_tables` for protocol persistence and mapping.
+- **Usage**: You must define a `ddl:` -> `path:` attribute pointing to the directory containing your source schema DDL files and your data CSV exports.
 
 ### 4.3 Oracle
 - **Mode**: Native Connection
@@ -174,6 +178,8 @@ See more on the “Connection to Informix” wiki page:
 	/usr/share/java/jdbc-4.50.10.1.jar:/usr/share/java/bson-3.8.0.jar
 
 Host, port, database name, and credentials are specified in other fields of the same source‑DB section (see config_sample.yaml in the repo for the exact parameter names). Informix also supports ODBC connectivity via `pyodbc`.
+
+**File-based Import (UNL):** For environments where direct connectivity is limited, the Informix connector supports offline file-based ingest using native `.unl` export files via the `data_export` configuration.
 
 ### 4.6 Sybase ASE (ODBC example)
 
@@ -269,8 +275,7 @@ Beyond the basics, the configuration file supports several advanced features:
   - Useful for pausing migration during business hours and resuming during maintenance windows.
 
 - **File-based Data Source (`data_export`)**:
-  - (Currently primarily for Informix)
-  - Allows using exported data files (CSV, UNL, SQL dump) as the source of data instead of reading directly from the source database.
+  - Allows using heavily optimized exported data files (like standard Informix `.unl` or DB2 z/OS `.csv` / `.sql` dumps) as the source of data instead of reading directly from the live database.
   - Useful for very large databases where parallel export/import via files is faster or when direct connectivity is limited.
   - Supports features like `big_files_split` to process large files in parallel chunks.
 
@@ -308,6 +313,8 @@ Parameters:
       - Resume the migration process after a crash or stop (default: False = start from scratch).
     - --drop-unfinished-tables
       - Drop and recreate unfinished tables when resuming after a crash. Works only together with --resume parameter (default: False = continue with partially migrated tables without dropping them).
+    - --validate
+      - Run the parallel data validation verification suite post-migration, matching table geometries mathematically between the source and target endpoints.
     - --version
       - Show the version of the tool.
 
@@ -404,7 +411,14 @@ The tool provides several customization layers:
   - Per-table WHERE conditions that restrict migrated data (e.g., only “recent” rows).
   - If filters omit rows referenced by foreign keys, FK constraints may fail on the target. Dependency analysis of source model is strongly recommended.
 
-### 8.4 Roadmap
+### 8.4 Schema Mapping Workflow
+
+The tool integrates a comprehensive Mapping Workflow managed by the central orchestrator, built to facilitate advanced data migrations with differing geometries. Features include:
+- Execution of multi-metric schema matching functions and customizable data normalization rules.
+- Systematic orchestration of data loads that intelligently drops and recreates target indexes, primary keys, and constraints to maximize transfer performance and mapping integrity.
+- Detailed tracking of mapped objects into the migration protocols.
+
+### 8.5 Roadmap
 
 Planned features:
 - Partitioning support for target tables.

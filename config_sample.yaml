@@ -378,3 +378,20 @@ data_migration_limitation:
 # date - by range, select unique values from the column from source table
 # integer - by range or list
 # hash - even data distribution
+
+# Validator settings
+# On-demand module for post-migration data integrity verification
+# Executes automatically bypassing the standard migrator when --validate is triggered
+#
+# Available Validation Methods:
+# - check_row_counts: Simply compares total row counts between corresponding source and target tables
+# - check_table_checksums: Computes explicit hashes containing aggregates of string-casted structures across the entire tables
+# - check_random_sample: Validates individual random row arrays querying mapped precise primary keys bridging origin to destination
+# - check_lob_sizes: Validates exact byte size allocations for migrated LOB (BLOB/CLOB) instances on the sampled rows
+validator:
+  workers: 4                               # Number of parallel worker threads used simultaneously for table evaluations (default is 4)
+  check_row_counts: true                   # Simply compares total row counts between corresponding source and target tables
+  check_table_checksums: true              # Computes explicit hashes containing aggregates of string-casted structures across the entire tables
+  check_random_sample: true                # Validates individual random row arrays querying mapped precise primary keys bridging origin to destination
+  check_lob_sizes: true                    # Validates exact byte size allocations for migrated LOB (BLOB/CLOB) instances on the sampled rows
+  random_sample_size: 1000                 # Determine the maximum amount of randomized samples queried exclusively when check_random_sample or check_lob_sizes is True

@@ -49,70 +49,417 @@ class Orchestrator:
             self.migrator_tables.insert_main({'task_name': 'Orchestrator', 'subtask_name': ''})
 
     def run(self):
-        try:
-            self.config_parser.print_log_message('INFO', "orchestrator: run: Starting Orchestrator...")
+        if self.config_parser.is_standard_workflow():
+            self.config_parser.print_log_message('INFO', "orchestrator: run: Standard workflow")
 
-            if self.config_parser.is_resume_after_crash():
-                self.config_parser.print_log_message('INFO', "orchestrator: run: In current version of crash recovery we assume user defined types and domains already exist, so we skip them.")
-            else:
-                self.run_create_user_defined_types()
-                self.check_pausing_resuming()
+            try:
+                self.config_parser.print_log_message('INFO', "orchestrator: run: Starting Orchestrator...")
 
-                ## migration of domains is a bit unclear currently
-                ## domains in PostgreSQL are special data types
-                ## But in Sybase ASE they are defined as sort of additional check constraint on the column
-                self.run_create_domains()
+                if self.config_parser.is_resume_after_crash():
+                    self.config_parser.print_log_message('INFO', "orchestrator: run: In current version of crash recovery we assume user defined types and domains already exist, so we skip them.")
+                else:
+                    self.run_create_user_defined_types()
+                    self.check_pausing_resuming()
 
-            # In case of crash recovery, we currently continue from this point as in normal migration
-            if not self.config_parser.is_dry_run():
-                self.run_migrate_sequences()
-                self.check_pausing_resuming()
+                    ## migration of domains is a bit unclear currently
+                    ## domains in PostgreSQL are special data types
+                    ## But in Sybase ASE they are defined as sort of additional check constraint on the column
+                    self.run_create_domains()
 
-                self.run_migrate_tables()
-                self.check_pausing_resuming()
+                # In case of crash recovery, we currently continue from this point as in normal migration
+                if not self.config_parser.is_dry_run():
+                    self.stdwf_migrate_sequences()
+                    self.check_pausing_resuming()
 
-                self.run_migrate_indexes('standard')
-                self.check_pausing_resuming()
+                    self.stdwf_migrate_tables()
+                    self.check_pausing_resuming()
 
-                self.run_migrate_constraints()
-                self.check_pausing_resuming()
+                    self.stdwf_migrate_indexes('standard')
+                    self.check_pausing_resuming()
 
-                self.run_migrate_views()
-                self.check_pausing_resuming()
+                    self.stdwf_migrate_constraints()
+                    self.check_pausing_resuming()
 
-                self.run_migrate_funcprocs()
-                self.check_pausing_resuming()
+                    self.stdwf_migrate_views()
+                    self.check_pausing_resuming()
 
-                self.run_migrate_triggers()
-                self.check_pausing_resuming()
+                    self.stdwf_migrate_funcprocs()
+                    self.check_pausing_resuming()
 
-                self.run_migrate_indexes('function_based')
-                self.check_pausing_resuming()
+                    self.stdwf_migrate_triggers()
+                    self.check_pausing_resuming()
 
-                self.run_migrate_comments()
-                self.check_pausing_resuming()
+                    self.stdwf_migrate_indexes('function_based')
+                    self.check_pausing_resuming()
 
-                self.run_post_migration_script()
-            else:
-                self.config_parser.print_log_message('INFO', "orchestrator: run: Dry run mode enabled. No data migration performed.")
+                    self.stdwf_migrate_comments()
+                    self.check_pausing_resuming()
 
-            self.config_parser.print_log_message('INFO', "orchestrator: run: Orchestration complete.")
-            self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': '', 'success': True, 'message': 'finished OK'})
+                    self.run_post_migration_script()
+                else:
+                    self.config_parser.print_log_message('INFO', "orchestrator: run: Dry run mode enabled. No data migration performed.")
 
+                self.config_parser.print_log_message('INFO', "orchestrator: run: Orchestration complete.")
+                self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': '', 'success': True, 'message': 'finished OK'})
+
+            except Exception as e:
+                self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': '', 'success': False, 'message': f'ERROR: {e}'})
+                self.handle_error(e, 'orchestration')
+
+        elif self.config_parser.is_mapping_workflow():
+            self.config_parser.print_log_message('INFO', "orchestrator: run: Mapping workflow")
+
+            try:
+                self.mapping_drop_indexes_and_constraints()
+                self.mapping_copy_data()
+                self.mapping_create_indexes_and_constraints()
+                self.mapping_check_indexes_and_constraints()
+            except Exception as e:
+                self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': '', 'success': False, 'message': f'ERROR: {e}'})
+                self.handle_error(e, 'orchestration')
+
+        if self.config_parser.is_mapping_workflow():
+            self.migrator_tables.print_mapping_migration_summary()
+        else:
             self.migrator_tables.print_migration_summary()
 
+        try:
+            self.source_connection.disconnect()
+        except Exception as e:
+            pass
+        try:
+            self.target_connection.disconnect()
+        except Exception as e:
+            pass
+
+
+    def mapping_drop_indexes_and_constraints(self):
+        self.config_parser.print_log_message('INFO', "orchestrator: mapping_drop_indexes_and_constraints: Starting global drop for constraints and indexes")
+        target_conn = self.load_connector('target')
+        target_conn.connect()
+
+        tables = self.migrator_tables.fetch_all_tables(only_unfinished=False)
+
+        # 1. Drop constraints
+        self.config_parser.print_log_message('INFO', "orchestrator: mapping_drop_indexes_and_constraints: Dropping non-primary key constraints")
+        for table_row in tables:
+            table_data = self.migrator_tables.decode_table_row(table_row)
+            target_schema_name_eval = table_data['target_schema_name']
+            target_table_name_eval = self.config_parser.convert_names_case(table_data['target_table_name'])
+            target_constraints = self.migrator_tables.fetch_mapping_target_constraints(target_schema_name_eval, target_table_name_eval)
+            for constraint in target_constraints:
+                if constraint['constraint_type'] != 'PRIMARY KEY':
+                    self.config_parser.print_log_message('DEBUG', f"orchestrator: Dropping constraint {constraint['constraint_name']} on {target_schema_name_eval}.{target_table_name_eval}")
+                    drop_sql = f'ALTER TABLE "{target_schema_name_eval}"."{target_table_name_eval}" DROP CONSTRAINT IF EXISTS "{constraint["constraint_name"]}"'
+                    try:
+                        target_conn.execute_query(drop_sql)
+                        self.migrator_tables.update_mapping_target_constraint_drop_status({'row_id': constraint['id'], 'dropped': True, 'message': 'dropped OK'})
+                    except Exception as ex:
+                        self.migrator_tables.update_mapping_target_constraint_drop_status({'row_id': constraint['id'], 'dropped': False, 'message': f'ERROR: {ex}'})
+
+        # 2. Drop indexes
+        self.config_parser.print_log_message('INFO', "orchestrator: mapping_drop_indexes_and_constraints: Dropping non-primary key indexes")
+        for table_row in tables:
+            table_data = self.migrator_tables.decode_table_row(table_row)
+            target_schema_name_eval = table_data['target_schema_name']
+            target_table_name_eval = self.config_parser.convert_names_case(table_data['target_table_name'])
+            target_indexes = self.migrator_tables.fetch_mapping_target_indexes(target_schema_name_eval, target_table_name_eval)
+            for index in target_indexes:
+                if not index.get('is_primary_key', False):
+                    self.config_parser.print_log_message('DEBUG', f"orchestrator: Dropping index {index['index_name']} on {target_schema_name_eval}.{target_table_name_eval}")
+                    drop_sql = f'DROP INDEX IF EXISTS "{target_schema_name_eval}"."{index["index_name"]}"'
+                    try:
+                        target_conn.execute_query(drop_sql)
+                        self.migrator_tables.update_mapping_target_index_drop_status({'row_id': index['id'], 'dropped': True, 'message': 'dropped OK'})
+                    except Exception as ex:
+                        self.migrator_tables.update_mapping_target_index_drop_status({'row_id': index['id'], 'dropped': False, 'message': f'ERROR: {ex}'})
+
+        target_conn.disconnect()
+
+    def mapping_create_indexes_and_constraints(self):
+        self.config_parser.print_log_message('INFO', "orchestrator: mapping_create_indexes_and_constraints: Starting global recreate for indexes and constraints")
+        target_conn = self.load_connector('target')
+        target_conn.connect()
+
+        tables = self.migrator_tables.fetch_all_tables(only_unfinished=False)
+
+        # 1. Recreate indexes
+        self.config_parser.print_log_message('INFO', "orchestrator: mapping_create_indexes_and_constraints: Recreating non-primary key indexes")
+        for table_row in tables:
+            table_data = self.migrator_tables.decode_table_row(table_row)
+            target_schema_name_eval = table_data['target_schema_name']
+            target_table_name_eval = self.config_parser.convert_names_case(table_data['target_table_name'])
+            target_constraints = self.migrator_tables.fetch_mapping_target_constraints(target_schema_name_eval, target_table_name_eval)
+            constraint_index_names = {c['constraint_name'] for c in target_constraints if c['constraint_type'] in ('UNIQUE', 'EXCLUSION')}
+
+            target_indexes = self.migrator_tables.fetch_mapping_target_indexes(target_schema_name_eval, target_table_name_eval)
+            for index in target_indexes:
+                if not index.get('is_primary_key', False) and index['index_name'] not in constraint_index_names:
+                    self.config_parser.print_log_message('DEBUG', f"orchestrator: Recreating index {index['index_name']} on {target_schema_name_eval}.{target_table_name_eval}")
+                    try:
+                        target_conn.execute_query(index['index_def'])
+                        self.migrator_tables.update_mapping_target_index_status({'row_id': index['id'], 'success': True, 'message': 'migrated OK'})
+                    except Exception as ex:
+                        self.config_parser.print_log_message('ERROR', f"orchestrator: Error recreating index {index['index_name']}: {ex}")
+                        self.migrator_tables.update_mapping_target_index_status({'row_id': index['id'], 'success': False, 'message': f'ERROR: {ex}'})
+
+        # 2. Recreate constraints
+        self.config_parser.print_log_message('INFO', "orchestrator: mapping_create_indexes_and_constraints: Recreating non-primary key constraints")
+        for table_row in tables:
+            table_data = self.migrator_tables.decode_table_row(table_row)
+            target_schema_name_eval = table_data['target_schema_name']
+            target_table_name_eval = self.config_parser.convert_names_case(table_data['target_table_name'])
+            target_constraints = self.migrator_tables.fetch_mapping_target_constraints(target_schema_name_eval, target_table_name_eval)
+            for constraint in target_constraints:
+                if constraint['constraint_type'] != 'PRIMARY KEY':
+                    self.config_parser.print_log_message('DEBUG', f"orchestrator: Recreating constraint {constraint['constraint_name']} on {target_schema_name_eval}.{target_table_name_eval}")
+                    add_sql = f'ALTER TABLE "{target_schema_name_eval}"."{target_table_name_eval}" ADD CONSTRAINT "{constraint["constraint_name"]}" {constraint["constraint_def"]}'
+                    try:
+                        target_conn.execute_query(add_sql)
+                        self.migrator_tables.update_mapping_target_constraint_status({'row_id': constraint['id'], 'success': True, 'message': 'migrated OK'})
+                    except Exception as ex:
+                        self.config_parser.print_log_message('ERROR', f"orchestrator: Error recreating constraint {constraint['constraint_name']}: {ex}")
+                        self.migrator_tables.update_mapping_target_constraint_status({'row_id': constraint['id'], 'success': False, 'message': f'ERROR: {ex}'})
+
+        target_conn.disconnect()
+
+    def mapping_check_indexes_and_constraints(self):
+        self.config_parser.print_log_message('INFO', "orchestrator: mapping_check_indexes_and_constraints: Starting global verification of indexes and constraints")
+        target_conn = self.load_connector('target')
+
+        tables = self.migrator_tables.fetch_all_tables(only_unfinished=False)
+
+        total_checked_constraints = 0
+        total_missing_constraints = 0
+        total_checked_indexes = 0
+        total_missing_indexes = 0
+
+        for table_row in tables:
+            table_data = self.migrator_tables.decode_table_row(table_row)
+            target_schema_name_eval = table_data['target_schema_name']
+            target_table_name_eval = self.config_parser.convert_names_case(table_data['target_table_name'])
+
+            expected_constraints = self.migrator_tables.fetch_mapping_target_constraints(target_schema_name_eval, target_table_name_eval)
+            actual_constraints = target_conn.fetch_mapping_target_constraints(target_schema_name_eval, target_table_name_eval)
+            actual_constraint_names = {c['constraint_name'] for c in actual_constraints}
+
+            for expected in expected_constraints:
+                total_checked_constraints += 1
+                if expected['constraint_name'] not in actual_constraint_names:
+                    total_missing_constraints += 1
+                    self.config_parser.print_log_message('WARNING', f"orchestrator: Target database is missing constraint '{expected['constraint_name']}' on {target_schema_name_eval}.{target_table_name_eval}")
+
+            expected_indexes = self.migrator_tables.fetch_mapping_target_indexes(target_schema_name_eval, target_table_name_eval)
+            actual_indexes = target_conn.fetch_mapping_target_indexes(target_schema_name_eval, target_table_name_eval)
+            actual_index_names = {i['index_name'] for i in actual_indexes}
+
+            for expected in expected_indexes:
+                total_checked_indexes += 1
+                if expected['index_name'] not in actual_index_names:
+                    total_missing_indexes += 1
+                    self.config_parser.print_log_message('WARNING', f"orchestrator: Target database is missing index '{expected['index_name']}' on {target_schema_name_eval}.{target_table_name_eval}")
+
+        self.config_parser.print_log_message('INFO', f"orchestrator: mapping_check_indexes_and_constraints: Constraints Summary: {total_checked_constraints} checked, {total_missing_constraints} missing.")
+        self.config_parser.print_log_message('INFO', f"orchestrator: mapping_check_indexes_and_constraints: Indexes Summary: {total_checked_indexes} checked, {total_missing_indexes} missing.")
+
+    def mapping_copy_data(self):
+        self.migrator_tables.insert_main({'task_name': 'Orchestrator', 'subtask_name': 'mapping data copy'})
+        workers_requested = self.config_parser.get_parallel_workers_count()
+
+        self.config_parser.print_log_message('INFO', f"orchestrator: mapping_copy_data: Starting {workers_requested} parallel workers for mapping data copy.")
+
+        raw_tables = self.migrator_tables.fetch_all_tables(only_unfinished=False)
+        migrate_tables = []
+        for table_row in raw_tables:
+            table_data = self.migrator_tables.decode_table_row(table_row)
+            if table_data.get('source_table_rows', 0) > 0 and table_data.get('target_table_rows', -1) == 0:
+                target_columns = table_data.get('target_columns', {})
+                insert_values = []
+                keys_sorted = sorted(target_columns.keys(), key=lambda x: int(x))
+                for col_key in keys_sorted:
+                    col_data_type = target_columns[col_key].get('data_type', '')
+                    if col_data_type:
+                        if col_data_type.lower() in ('boolean', 'bool'):
+                            insert_values.append(f'cast(%s as text)::{col_data_type}')
+                        else:
+                            insert_values.append(f'%s::{col_data_type}')
+                    else:
+                        insert_values.append('%s')
+                table_data['insert_values'] = ', '.join(insert_values)
+                migrate_tables.append(table_data)
+            else:
+                target_rows = table_data.get('target_table_rows', -1)
+                source_rows = table_data.get('source_table_rows', 0)
+                protocol_id = self.migrator_tables.insert_data_migration({
+                    'worker_id': None,
+                    'source_table_id': table_data['source_table_id'],
+                    'source_schema_name': table_data['source_schema_name'],
+                    'source_table_name': table_data['source_table_name'],
+                    'target_schema_name': table_data['target_schema_name'],
+                    'target_table_name': table_data['target_table_name'],
+                    'source_table_rows': source_rows,
+                    'target_table_rows': target_rows if target_rows != -1 else 0,
+                })
+
+                if source_rows == 0:
+                    msg = 'Skipped (0 rows)'
+                    status_msg = 'mapped data OK (0 rows)'
+                else:
+                    msg = f"Skipped (target_rows={target_rows})"
+                    status_msg = f"mapped data skipped (source_rows={source_rows}, target_rows={target_rows})"
+
+                self.migrator_tables.update_data_migration_status({
+                    'row_id': protocol_id,
+                    'success': True,
+                    'message': msg,
+                    'target_table_rows': target_rows if target_rows != -1 else 0,
+                    'batch_count': 0,
+                    'shortest_batch_seconds': 0,
+                    'longest_batch_seconds': 0,
+                    'average_batch_seconds': 0,
+                })
+                self.migrator_tables.update_table_status({'row_id': table_data['id'], 'success': True, 'message': status_msg})
+
+        if len(migrate_tables) > 0:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers_requested) as executor:
+                futures = {}
+                for table_data in migrate_tables:
+                    self.config_parser.print_log_message('DEBUG3', f"orchestrator: mapping_copy_data: futures running count: {len(futures)}")
+                    while len(futures) >= workers_requested:
+                        done, _ = concurrent.futures.wait(futures, return_when=concurrent.futures.FIRST_COMPLETED)
+                        for future in done:
+                            table_done = futures.pop(future)
+                            if future.result() == False:
+                                if self.on_error_action == 'stop':
+                                    self.config_parser.print_log_message('ERROR', "orchestrator: mapping_copy_data: Stopping execution due to error.")
+                                    exit(1)
+                            else:
+                                self.migrator_tables.update_table_status({'row_id': table_done['id'], 'success': True, 'message': 'mapped data OK'})
+
+                    future = executor.submit(self.mapping_data_worker, table_data)
+                    futures[future] = table_data
+
+                self.config_parser.print_log_message('INFO', "orchestrator: mapping_copy_data: Processing remaining futures")
+                for future in concurrent.futures.as_completed(futures):
+                    table_done = futures[future]
+                    if future.result() == False:
+                        if self.on_error_action == 'stop':
+                            self.config_parser.print_log_message('ERROR', "orchestrator: mapping_copy_data: Stopping execution due to error.")
+                            exit(1)
+                    else:
+                        self.migrator_tables.update_table_status({'row_id': table_done['id'], 'success': True, 'message': 'mapped data OK'})
+
+            self.config_parser.print_log_message('INFO', "orchestrator: mapping_copy_data: Tables data copied successfully.")
+        else:
+            self.config_parser.print_log_message('INFO', "orchestrator: mapping_copy_data: No tables met the criteria for data copy.")
+
+        self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': 'mapping data copy', 'success': True, 'message': 'finished OK'})
+
+    def mapping_data_worker(self, table_data):
+        worker_id = uuid.uuid4()
+        part_name = 'start'
+        worker_source_connection = None
+        worker_target_connection = None
+        try:
+            self.config_parser.print_log_message('INFO', f"orchestrator: mapping_data_worker: Worker {worker_id}: Processing table {table_data['target_table_name']}")
+
+            worker_source_connection = self.load_connector('source')
+            worker_target_connection = self.load_connector('target')
+
+            part_name = 'connect source and target'
+            worker_source_connection.connect()
+            worker_target_connection.connect()
+
+            if getattr(worker_source_connection, 'session_settings', None):
+                worker_source_connection.execute_query(worker_source_connection.session_settings)
+
+            if getattr(worker_target_connection, 'session_settings', None):
+                worker_target_connection.execute_query(worker_target_connection.session_settings)
+
+            chunk_size = -1
             try:
-                self.source_connection.disconnect()
-            except Exception as e:
-                pass
-            try:
-                self.target_connection.disconnect()
-            except Exception as e:
+                chunk_size = self.config_parser.get_chunk_size()
+            except Exception:
                 pass
 
+            settings = {
+                'worker_id': worker_id,
+                'source_schema_name': table_data['source_schema_name'],
+                'source_table_name': table_data['source_table_name'],
+                'source_table_id': table_data['source_table_id'],
+                'source_columns': table_data['source_columns'],
+                'target_schema_name': table_data['target_schema_name'],
+                'target_table_name': table_data['target_table_name'],
+                'target_columns': table_data['target_columns'],
+                'insert_values': table_data.get('insert_values'),
+                'primary_key_columns': self.migrator_tables.select_primary_key({'source_schema_name': table_data['source_schema_name'], 'source_table_name': table_data['source_table_name']}),
+                'batch_size': self.config_parser.get_batch_size(),
+                'migrator_tables': self.migrator_tables,
+                'migration_limitation': None,
+                'chunk_size': chunk_size,
+                'chunk_number': 1,
+                'resume_after_crash': False,
+                'drop_unfinished_tables': False
+            }
+
+            part_name = 'migrate_table'
+            rows_migrated = 0
+            while True:
+                if self.config_parser.pause_migration_fired():
+                    self.config_parser.print_log_message('INFO', f"orchestrator: mapping_data_worker: Worker {worker_id}: Migration paused for table {table_data['target_table_name']}.")
+                    self.config_parser.wait_for_resume()
+                    self.config_parser.print_log_message('INFO', f"orchestrator: mapping_data_worker: Worker {worker_id}: Resuming migration for table {table_data['target_table_name']}.")
+
+                migration_stats = worker_source_connection.migrate_table(worker_target_connection, settings)
+
+                rows_migrated += migration_stats.get('rows_migrated', 0)
+                if migration_stats.get('finished', True):
+                    break
+                settings['chunk_number'] += 1
+
+            worker_source_connection.disconnect()
+
+            # sequences setting
+            target_schema_name = table_data['target_schema_name']
+            target_table_name = table_data['target_table_name']
+            part_name = 'sequences'
+            self.config_parser.print_log_message('INFO', f"orchestrator: mapping_data_worker: Worker {worker_id}: Setting sequences for table {target_table_name} in target database.")
+            sequences = worker_target_connection.fetch_table_sequences(target_schema_name, target_table_name)
+            if sequences:
+                for order_num, sequence_details in sequences.items():
+                    sequence_id = sequence_details['id']
+                    sequence_name = sequence_details['name']
+                    column_name = sequence_details['column_name']
+                    sequence_sql = sequence_details['set_sequence_sql']
+                    self.migrator_tables.insert_sequence({
+                        'sequence_id': sequence_id,
+                        'target_schema_name': target_schema_name,
+                        'target_table_name': target_table_name,
+                        'target_column_name': column_name,
+                        'target_sequence_name': sequence_name,
+                        'target_sequence_sql': sequence_sql
+                    })
+                    self.config_parser.print_log_message( 'DEBUG', f"orchestrator: mapping_data_worker: Worker {worker_id}: Setting sequence with SQL: {sequence_sql}")
+                    try:
+                        worker_target_connection.execute_query(sequence_sql)
+                        self.config_parser.print_log_message('INFO', f"orchestrator: mapping_data_worker: Worker {worker_id}: Sequence ({order_num}) {sequence_name} set successfully for table {target_table_name}.")
+                        seq_curr_val = worker_target_connection.get_sequence_current_value(sequence_id)
+                        self.config_parser.print_log_message('INFO', f"orchestrator: mapping_data_worker: Worker {worker_id}: Current value of sequence {sequence_name} is {seq_curr_val}.")
+                        self.migrator_tables.update_sequence_status({'sequence_id': sequence_id, 'success': True, 'message': 'migrated OK'})
+                    except Exception as e:
+                        self.migrator_tables.update_sequence_status({'sequence_id': sequence_id, 'success': False, 'message': f'ERROR: {e}'})
+                        self.migrator_tables.update_table_status({'row_id': table_data['id'], 'success': False, 'message': f'ERROR: {e}'})
+                        self.config_parser.print_log_message('ERROR', f"orchestrator: mapping_data_worker: Worker {worker_id}: Error setting sequence {sequence_name} for table {target_table_name}: {e}")
+            else:
+                self.config_parser.print_log_message('INFO', f"orchestrator: mapping_data_worker: Worker {worker_id}: No sequences found for table {target_table_name}.")
+
+            worker_target_connection.disconnect()
+
+            return True
+
         except Exception as e:
-            self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': '', 'success': False, 'message': f'ERROR: {e}'})
-            self.handle_error(e, 'orchestration')
+            self.config_parser.print_log_message('ERROR', f"orchestrator: mapping_data_worker: Worker {worker_id}: Error during {part_name} -> {e}")
+            return False
 
     def load_connector(self, source_or_target):
         """Dynamically load the database connector."""
@@ -146,7 +493,7 @@ class Orchestrator:
             except Exception as e:
                 self.handle_error(e, 'post-migration script')
 
-    def run_migrate_tables(self):
+    def stdwf_migrate_tables(self):
         self.migrator_tables.insert_main({'task_name': 'Orchestrator', 'subtask_name': 'tables migration'})
         workers_requested = self.config_parser.get_parallel_workers_count()
         settings = {
@@ -217,6 +564,7 @@ class Orchestrator:
         if len(user_defined_types) > 0:
             for type_row in user_defined_types:
                 type_data = self.migrator_tables.decode_user_defined_type_row(type_row)
+                self.migrator_tables.update_protocol_task_started('user_defined_types', type_data['id'])
                 self.config_parser.print_log_message('INFO', f"orchestrator: run_create_user_defined_types: Creating user defined type {type_data['target_type_name']} in target database.")
                 self.config_parser.print_log_message('DEBUG3', f"orchestrator: run_create_user_defined_types: type_data: {type_data['target_type_sql']}")
                 try:
@@ -293,6 +641,7 @@ class Orchestrator:
         if len(domains) > 0:
             for domain_row in domains:
                 domain_data = self.migrator_tables.decode_domain_row(domain_row)
+                self.migrator_tables.update_protocol_task_started('domains', domain_data['id'])
                 self.config_parser.print_log_message('INFO', f"orchestrator: run_create_domains: Creating domain {domain_data['target_domain_name']} in target database using SQL: {domain_data['target_domain_sql']}")
                 try:
                     self.target_connection.connect()
@@ -308,7 +657,7 @@ class Orchestrator:
             self.config_parser.print_log_message('INFO', "orchestrator: run_create_domains: No domains found to migrate.")
         self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': 'domains migration', 'success': True, 'message': 'finished OK'})
 
-    def run_migrate_indexes(self, run_mode='standard'):
+    def stdwf_migrate_indexes(self, run_mode='standard'):
         self.migrator_tables.insert_main({'task_name': 'Orchestrator', 'subtask_name': 'indexes migration'})
         workers_requested = self.config_parser.get_parallel_workers_count()
         target_db_type = self.config_parser.get_target_db_type()
@@ -363,7 +712,7 @@ class Orchestrator:
 
         self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': 'indexes migration', 'success': True, 'message': 'finished OK'})
 
-    def run_migrate_constraints(self):
+    def stdwf_migrate_constraints(self):
         self.migrator_tables.insert_main({'task_name': 'Orchestrator', 'subtask_name': 'constraints migration'})
         workers_requested = self.config_parser.get_parallel_workers_count()
         target_db_type = self.config_parser.get_target_db_type()
@@ -433,6 +782,7 @@ class Orchestrator:
                 self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Table {target_table_name} does not have a CREATE TABLE statement - skipping.")
                 return False
 
+            self.migrator_tables.update_protocol_task_started('tables', table_data['id'])
             self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Creating table {target_table_name} in target database ({settings['source_db_type']}:{settings['target_db_type']}-{settings['drop_tables']}/{settings['truncate_tables']}/{settings['create_tables']}/{settings['migrate_data']}).")
 
             # Each worker uses its own separate connection to the target database
@@ -585,6 +935,7 @@ class Orchestrator:
                                     'average_batch_seconds': 0,
                                 })
                             else:
+                                migrator_tables.update_data_migration_started(protocol_id)
                                 self.config_parser.print_log_message('DEBUG3', f"orchestrator: table_worker: Worker {worker_id}: Data source format is {data_source['format_options']['format'].upper()} - size: {data_source['file_size']} - proceeding with data migration.")
                                 data_import_start_time = time.time()
                                 source_files_to_process = []
@@ -832,6 +1183,18 @@ class Orchestrator:
 
                                         target_table_rows = worker_target_connection.get_rows_count(target_schema_name, target_table_name)
                                         rows_migrated = target_table_rows
+                                        if self.config_parser.get_source_db_type() == 'ibm_db2_zos':
+                                            source_table_rows = target_table_rows
+                                            migrator_tables.update_data_migration_rows({
+                                                "row_id": protocol_id,
+                                                "source_table_rows": source_table_rows,
+                                                "target_table_rows": target_table_rows,
+                                            })
+                                            migrator_tables.update_table_rows_counts({
+                                                "row_id": table_data['id'],
+                                                "source_table_rows": source_table_rows,
+                                                "target_table_rows": target_table_rows,
+                                            })
                                         data_import_end_time = time.time()
                                         data_import_duration = data_import_end_time - data_import_start_time
                                         self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Table {target_table_name}: Data import duration: {data_import_duration:.2f} seconds, rows migrated: {target_table_rows}.")
@@ -1213,6 +1576,7 @@ class Orchestrator:
             index_name = index_data['index_name']
             create_index_sql = index_data['index_sql']
 
+            self.migrator_tables.update_protocol_task_started('indexes', index_data['id'])
             self.config_parser.print_log_message('INFO', f"orchestrator: index_worker: Worker {worker_id}: Creating index {index_name} in target database.")
 
             # Each worker uses its own separate connection to the target database
@@ -1240,6 +1604,7 @@ class Orchestrator:
         worker_id = uuid.uuid4()
         try:
             constraint_name = constraint_data['constraint_name']
+            self.migrator_tables.update_protocol_task_started('constraints', constraint_data['id'])
             self.config_parser.print_log_message('INFO', f"orchestrator: constraint_worker: Worker {worker_id}: Creating constraint {constraint_name} in target database.")
             create_constraint_sql = constraint_data['constraint_sql']
 
@@ -1265,8 +1630,9 @@ class Orchestrator:
                     self.migrator_tables.update_constraint_status({'row_id': constraint_data['id'], 'success': False, 'message': f'ERROR: target table {target_schema_name}.{target_table_name_to_check} does not exist'})
                     return False
 
-                referenced_target_table = self.migrator_tables.select_table_by_source({'source_schema_name': referenced_table_schema, 'source_table_name': referenced_table_name})
-                if constraint_data['constraint_type'] is 'FOREIGN KEY':
+                # if constraint_data['constraint_type'] is 'FOREIGN KEY': ## original version on main, must be tested
+                if referenced_table_name and referenced_table_name.strip():
+                    referenced_target_table = self.migrator_tables.select_table_by_source({'source_schema_name': referenced_table_schema, 'source_table_name': referenced_table_name})
                     if referenced_target_table is None:
                         self.config_parser.print_log_message('INFO', f"orchestrator: type is {constraint_data['constraint_type']}")
                         self.config_parser.print_log_message('ERROR', f"orchestrator: constraint_worker: Worker {worker_id}: Referenced table {referenced_table_schema}.{referenced_table_name} for constraint {constraint_name} not found - skipping constraint creation.")
@@ -1281,6 +1647,7 @@ class Orchestrator:
                         self.config_parser.print_log_message('ERROR', f"orchestrator: constraint_worker: Worker {worker_id}: Referenced table {referenced_target_table['target_schema_name']}.{referenced_target_table_name_to_check} for constraint {constraint_name} does not exist - skipping constraint creation.")
                         self.migrator_tables.update_constraint_status({'row_id': constraint_data['id'], 'success': False, 'message': f"ERROR: referenced table {referenced_target_table['target_schema_name']}.{referenced_target_table_name_to_check} does not exist"})
                         return False
+
 
                 self.config_parser.print_log_message( 'DEBUG', f"orchestrator: constraint_worker: Worker {worker_id}: Creating constraint with SQL: {create_constraint_sql}")
 
@@ -1333,7 +1700,7 @@ class Orchestrator:
             self.handle_error(e, f"constraint_worker {worker_id} {constraint_name}")
             return False
 
-    def run_migrate_funcprocs(self):
+    def stdwf_migrate_funcprocs(self):
         self.migrator_tables.insert_main({'task_name': 'Orchestrator', 'subtask_name': 'functions/procedures migration'})
         include_funcprocs = self.config_parser.get_include_funcprocs()
         exclude_funcprocs = self.config_parser.get_exclude_funcprocs() or []
@@ -1356,6 +1723,7 @@ class Orchestrator:
 
                     funcproc_id = funcproc_data['id']
                     funcproc_type = funcproc_data['type']
+                    self.migrator_tables.update_protocol_task_started('funcprocs', funcproc_data['id'])
                     self.config_parser.print_log_message('INFO', f"orchestrator: run_migrate_funcprocs: Migrating {funcproc_type} {funcproc_data['name']}.")
                     try:
                         funcproc_code = self.source_connection.fetch_funcproc_code(funcproc_id)
@@ -1445,7 +1813,7 @@ class Orchestrator:
 
         self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': 'functions/procedures migration', 'success': True, 'message': 'finished OK'})
 
-    def run_migrate_triggers(self):
+    def stdwf_migrate_triggers(self):
         self.migrator_tables.insert_main({'task_name': 'Orchestrator', 'subtask_name': 'triggers migration'})
         try:
             if self.config_parser.should_migrate_triggers():
@@ -1471,6 +1839,7 @@ class Orchestrator:
 
                             try:
                                 if converted_code is not None and converted_code.strip():
+                                    self.migrator_tables.update_protocol_task_started('triggers', trigger_detail['id'])
                                     self.config_parser.print_log_message('INFO', f"orchestrator: run_migrate_triggers: Creating trigger {trigger_detail['trigger_name']} in target database.")
                                     self.target_connection.connect()
                                     self.target_connection.execute_query(converted_code)
@@ -1520,6 +1889,7 @@ class Orchestrator:
             query = f'''SET SESSION search_path TO {view_detail['target_schema_name']};'''
             worker_target_connection.execute_query(query)
 
+            self.migrator_tables.update_protocol_task_started('views', view_detail['id'])
             self.config_parser.print_log_message( 'DEBUG', f"orchestrator: view_worker: Worker {worker_id}: Creating {view_type_str} {view_detail['source_view_name']} with SQL: {view_detail['target_view_sql']}")
             worker_target_connection.execute_query(view_detail['target_view_sql'])
 
@@ -1530,7 +1900,7 @@ class Orchestrator:
             query = f'''RESET search_path;'''
             worker_target_connection.execute_query(query)
             worker_target_connection.disconnect()
-            return True
+            return True, "migrated OK"
         except Exception as e:
             self.config_parser.print_log_message( 'DEBUG', f"orchestrator: view_worker: Worker {worker_id}: Error creating {view_type_str} {view_detail['source_view_name']}: {e}")
             self.handle_error(e, f"view_worker {worker_id} migrate {view_type_str} {view_detail['source_view_name']}")
@@ -1538,15 +1908,16 @@ class Orchestrator:
                 worker_target_connection.disconnect()
             except:
                 pass
-            return False
+            return False, f"ERROR: {e}"
 
-    def run_migrate_views(self):
+    def stdwf_migrate_views(self):
         self.migrator_tables.insert_main({'task_name': 'Orchestrator', 'subtask_name': 'views migration'})
 
         if self.config_parser.should_migrate_views():
             self.config_parser.print_log_message('INFO', "orchestrator: run_migrate_views: Migrating views.")
 
             all_views = self.migrator_tables.fetch_all_views()
+            self.config_parser.print_log_message('DEBUG', f"orchestrator: run_migrate_views: found views: {len(all_views)}")
             if all_views:
                 normal_views = []
                 alias_views = []
@@ -1567,12 +1938,13 @@ class Orchestrator:
                         for future in concurrent.futures.as_completed(futures):
                             view_detail = futures[future]
                             try:
-                                success = future.result()
+                                success, message = future.result()
                                 if success:
                                     self.migrator_tables.update_view_status({'row_id': view_detail['id'], 'success': True, 'message': 'migrated OK'})
                                     self.config_parser.print_log_message('INFO', f"orchestrator: run_migrate_views: View {view_detail['source_view_name']} migrated successfully.")
                                 else:
                                     self.config_parser.print_log_message('ERROR', f"orchestrator: run_migrate_views: Error migrating view {view_detail['source_view_name']}.")
+                                    self.migrator_tables.update_view_status({'row_id': view_detail['id'], 'success': False, 'message': message})
                             except Exception as e:
                                 self.config_parser.print_log_message('ERROR', f"orchestrator: run_migrate_views: Exception migrating view {view_detail['source_view_name']}: {e}")
                                 self.migrator_tables.update_view_status({'row_id': view_detail['id'], 'success': False, 'message': f'ERROR: {e}'})
@@ -1585,12 +1957,13 @@ class Orchestrator:
                         for future in concurrent.futures.as_completed(futures):
                             view_detail = futures[future]
                             try:
-                                success = future.result()
+                                success, message = future.result()
                                 if success:
                                     self.migrator_tables.update_view_status({'row_id': view_detail['id'], 'success': True, 'message': 'migrated OK'})
                                     self.config_parser.print_log_message('INFO', f"orchestrator: run_migrate_views: Alias view {view_detail['source_view_name']} migrated successfully.")
                                 else:
                                     self.config_parser.print_log_message('ERROR', f"orchestrator: run_migrate_views: Error migrating alias view {view_detail['source_view_name']}.")
+                                    self.migrator_tables.update_view_status({'row_id': view_detail['id'], 'success': False, 'message': message})
                             except Exception as e:
                                 self.config_parser.print_log_message('ERROR', f"orchestrator: run_migrate_views: Exception migrating alias view {view_detail['source_view_name']}: {e}")
                                 self.migrator_tables.update_view_status({'row_id': view_detail['id'], 'success': False, 'message': f'ERROR: {e}'})
@@ -1600,7 +1973,7 @@ class Orchestrator:
             self.config_parser.print_log_message('INFO', "orchestrator: run_migrate_views: Skipping view migration as requested.")
         self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': 'views migration', 'success': True, 'message': 'finished OK'})
 
-    def run_migrate_comments(self):
+    def stdwf_migrate_comments(self):
         self.migrator_tables.insert_main({'task_name': 'Orchestrator', 'subtask_name': 'comments migration'})
         self.config_parser.print_log_message('INFO', "orchestrator: run_migrate_comments: Migrating comments.")
         all_tables = self.migrator_tables.fetch_all_tables()
@@ -1728,7 +2101,7 @@ class Orchestrator:
             self.config_parser.wait_for_resume()
             self.config_parser.print_log_message('INFO', f"orchestrator: check_pausing_resuming: resumed.")
 
-    def run_migrate_sequences(self):
+    def stdwf_migrate_sequences(self):
         self.migrator_tables.insert_main({'task_name': 'Orchestrator', 'subtask_name': 'sequences migration'})
         workers_requested = self.config_parser.get_parallel_workers_count()
         settings = {
@@ -1781,6 +2154,7 @@ class Orchestrator:
         worker_id = uuid.uuid4()
         try:
             target_sequence_name = sequence_data['target_sequence_name']
+            self.migrator_tables.update_protocol_task_started('sequences', sequence_data['sequence_id'])
             self.config_parser.print_log_message('INFO', f"orchestrator: sequence_worker: Worker {worker_id}: Creating sequence {target_sequence_name} in target database.")
 
             worker_target_connection = self.load_connector('target')

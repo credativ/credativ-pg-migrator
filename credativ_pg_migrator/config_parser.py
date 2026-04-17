@@ -248,8 +248,14 @@ class ConfigParser:
     def get_migration_settings(self):
         return self.config['migration']
 
+    def get_workflow(self):
+        return self.get_migration_settings().get('workflow', 'standard')
+
+    def is_standard_workflow(self):
+        return self.get_workflow() == 'standard'
+
     def is_mapping_workflow(self):
-        return self.get_migration_settings().get('workflow', 'standard') == 'mapping'
+        return self.get_workflow() == 'mapping'
 
     def get_suspend_indexes_constraints(self):
         settings = self.get_migration_settings()
@@ -519,6 +525,31 @@ class ConfigParser:
             return include_tables
         else:
             return []
+
+    ## Validator
+    def get_protocol_name_validation(self):
+        return f"{self.get_protocol_name()}_validation"
+
+    def get_validator_config(self):
+        return self.config.get('validator', {})
+
+    def get_validator_workers(self):
+        return int(self.get_validator_config().get('workers', 4))
+
+    def is_validation_row_counts_enabled(self):
+        return self.get_validator_config().get('check_row_counts', True)
+
+    def is_validation_table_checksums_enabled(self):
+        return self.get_validator_config().get('check_table_checksums', False)
+
+    def is_validation_random_sample_enabled(self):
+        return self.get_validator_config().get('check_random_sample', False)
+
+    def is_validation_lob_sizes_enabled(self):
+        return self.get_validator_config().get('check_lob_sizes', False)
+
+    def get_validation_sample_size(self):
+        return int(self.get_validator_config().get('random_sample_size', 1000))
 
     def get_exclude_tables(self):
         return self.config['exclude_tables']
@@ -944,16 +975,16 @@ class ConfigParser:
                     dtype = col.get('data_type', '').upper()
                     if 'source_column_data_type' in col:
                         dtype = col.get('source_column_data_type', '').upper()
-                        
+
                     scale = col.get('numeric_scale')
                     if scale is None:
                         scale = col.get('source_column_numeric_scale')
-                    
+
                     try:
                         scale = int(scale) if scale is not None else None
                     except ValueError:
                         scale = None
-                        
+
                     expected_types.append({'type': dtype, 'scale': scale})
             else:
                 expected_types = []
@@ -969,25 +1000,25 @@ class ConfigParser:
 
                 for row in reader:
                     processed_row = []
-                    
+
                     if csv_delimiter == ',' and expected_types and len(row) > len(expected_types):
                         if counter == 0:
                             self.print_log_message('DEBUG3', f"config_parser: convert_csv_to_utf8: Table {source_table_name}: Row {counter+1} has {len(row)} columns, expected {len(expected_types)}. Attempting to heal decimal splits.")
                         merged_row = []
                         i = 0
                         col_idx = 0
-                        
+
                         while i < len(row):
                             field = row[i]
-                            
+
                             if col_idx < len(expected_types):
                                 expected_type_info = expected_types[col_idx]
                                 expected_type = expected_type_info['type']
                                 expected_scale = expected_type_info['scale']
-                                
+
                                 # Skip merging if scale is explicitly 0 or None (not specified) since no decimal parts exist
                                 has_decimal_scale = expected_scale is not None and expected_scale > 0
-                                
+
                                 if expected_type in ('FLOAT', 'REAL', 'DOUBLE', 'DECIMAL', 'NUMERIC') and has_decimal_scale and len(row) - i > len(expected_types) - col_idx:
                                     if i + 1 < len(row):
                                         next_field = row[i+1]
@@ -998,15 +1029,15 @@ class ConfigParser:
                                                 self.print_log_message('DEBUG3', f"config_parser: convert_csv_to_utf8: Table {source_table_name}: Row {counter+1}, Col {col_idx+1}: Merging split decimal parts '{field}' and '{next_field}' into '{field}.{next_field}'")
                                             field = f"{field}.{next_field}"
                                             i += 1
-                                            
+
                             merged_row.append(field)
                             col_idx += 1
                             i += 1
-                            
+
                         if counter < 5 and len(merged_row) != len(row):
                              self.print_log_message('DEBUG3', f"config_parser: convert_csv_to_utf8: Table {source_table_name}: Row {counter+1} length reduced from {len(row)} to {len(merged_row)} after healing process.")
                         row = merged_row
-                        
+
                     if counter == 0 and source_columns:
                         types_str = ','.join([f"{t['type']}({t['scale']})" for t in expected_types])
                         self.print_log_message('DEBUG3', f"config_parser: convert_csv_to_utf8: Table {source_table_name}: Expected types: {types_str}")

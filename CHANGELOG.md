@@ -1,5 +1,54 @@
 # Changelog
 
+## 0.13.0rc1 - 2026.04.16
+
+- 2026.04.16
+
+  - Fixes - added missing row counts to the protocol tables in IBM DB2 z/OS migration path from CSV files, added missing logging of success when alias is used for table or view, added missing print of TOP 5 successfully migrated tables and TOP 5 tables with row count mismatches in summary output.
+
+- 2026.04.15
+
+  - Significant improvement in summary output, now showing results in better format and without timestamp and other prefixes for better readability.
+  - Fix - IBM DB2 z/OS Connector: Allow "@" as a statement terminator in addition to ";". Added debug messages to trace the DDL parsing process.
+  - Fix - T-SQL Parser: Fixed missing comments in PostgreSQL converted code, fixed conversion of data types in stored procedures, key word "noholdlock" removed from select statements.
+
+- 2026.03.30
+
+  - Fix - Protocol Tables: Resolved an issue where the `task_started` timestamp was null while tasks were running. The Orchestrator now immediately and actively updates the `task_started` column across all protocol tables as soon as migration payload processing begins.
+  - Fix - PostgreSQL Connector: Repaired the creation of User Defined Data Types (UDTs). When migrating from PostgreSQL to PostgreSQL, UDTs utilized within a table's structure now dynamically bind to the designated target schema rather than improperly retaining the original source schema name, preventing 'type does not exist' instantiation failures.
+  - Fix - Global Planner: Addressed a foundational bug in `planner.py` where successfully mapped data types (e.g., Sybase ASE `SMALLDATETIME` to `TIMESTAMP`) were orphaned during generation. The mapping dictionary application logic has been rewritten to explicitly override the live pointer upon confirmation, guaranteeing accurate cross-engine data structures.
+
+- 2026.03.27
+
+  - Feature - T-SQL Parser: Designed and integrated a comprehensive native T-SQL parser matrix natively utilized across both the MS SQL and Sybase ASE connectors. Ensures extensive capability to systematically resolve complex or incomplete legacy syntax structures before target PostgreSQL generation.
+  - Fix - MS SQL Connector: Resolved a critical scope-shadowing bug where procedure variable type mappings silently overwrote global table column architectures, restoring full dynamic type binding and preventing widespread `TEXT` fallbacks.
+  - Fix - MS SQL Connector: Implemented advanced AST-based parsing via `sqlglot` to explicitly cast mathematical view operands to numeric types natively, preventing downstream text-multiplication operator failures in PostgreSQL.
+  - Fix - MS SQL Procedures: Upgraded the T-SQL parser matrix to flawlessly identify missing `END` block markers, safely inject required string-encapsulation layers for aliases, and dynamically translate legacy `SET ROWCOUNT` directives into PostgreSQL-compliant `LIMIT` clauses.
+
+- 2026.03.20
+
+  - Feature - Validator Module: Redesigned the validation module (`--validate`) to support fully transparent cross-engine table and data evaluation. Implemented discrete parallel worker threads encapsulating precise connection lifecycles tailored to active verification blocks.
+  - Feature - Validator Diagnostics: Overhauled validation runtime logs and final summaries to natively quantify and categorize passing and failing results explicitly across Row Counts, Table Checksums, Random Row Hashes, and LOB Size verifications.
+  - Fix - Validation Hashing Limits: Addressed native `ORA-01489` and `ORA-22835` errors during Oracle evaluation by dropping LOB types from raw generalized checksums and relying instead on dedicated size validations evaluating `DBMS_LOB.GETLENGTH()` natively without bridging memory limits.
+  - Fix - Validation Tuple Decoding: Resolved `AttributeError` and `TypeError` exceptions caused by attempting to iterate rows as dictionaries within the validator sequence. Upgraded data column validations to gracefully evaluate JSON dictionary string footprints precisely across architectures.
+
+- 2026.03.19
+
+  - Feature - Orchestrator: Redesigned the sequence of operations for index and constraint mapping to execute a dedicated global `DROP` phase before concurrent data copying starts, and a complete global `CREATE` phase after all tables merge.
+  - Feature - PostgreSQL Connector: Automatically discovers and tracks mapping destination sequences specifically applied to default columns, `IDENTITY` configurations, or internal object triggers.
+  - Fix - Orchestrator: Expands the constraint `DROP` definitions to successfully filter and drop *all* non-primary key constraints (including `UNIQUE`, `CHECK`, and `EXCLUSION`), and specifically skips explicit `CREATE INDEX` duplication collisions for natively mapped `UNIQUE` constraints during recreation.
+  - Feature - Orchestrator: Embedded an explicit end-state mapping verification function `mapping_check_indexes_and_constraints()` that audits strictly against the live PostgreSQL catalog immediately following mapping copy payloads, emitting `WARNING` digests for any unexpectedly missing table objects.
+  - Fix - Connector Casting: Strengthened parallel worker bindings inside the PostgreSQL pipeline by pushing dynamic strict database `::type` castings straight into the `INSERT INTO` construction loops natively inherited from defined target data schemas.
+
+- 2026.03.18
+
+  - Feature - Orchestrator `mapping_copy_data`: Implemented parallel batch data copying capability specifically for the mapping workflow. Automatically clones rows from populated source tables straight into natively mapped, empty target tables securely without standard UNL/CSV files.
+  - Feature - Planner `mapping_match_tables`: Integrated the internal property table/column metric matcher natively into the planner config. This feature computes Jaccard similarity across column fingerprints to systematically match objects and tracks metadata comparisons inside the internal tracking logs.
+  - Fix - Connector Object Schemas: Fixed `KeyError` regressions produced natively inside `match_schemas.py` by forcing all mapped objects to exactly mirror their system catalog casings (uppercase on Oracle) prior to returning matches downstream to strict dictionaries.
+  - Fix - Internal Mappings: Ensured virtual internal properties that don't legally translate to target tables (`nscale_al_ixpropdef` aliases like 'transient') are immediately discarded from mapping candidates to unblock downstream query builders.
+  - Fix - Generic Workers Session Safety: Added `getattr` defenses against `AttributeError` for databases that lack default static `session_settings` declarations (such as the `OracleConnector`) ensuring unhindered `db_to_db` threading.
+  - Fix - Planner Table Configs: Switched mismatched `source_schema_name`/`source_table_name` metadata keys out for standard `table_schema`/`table_name` payload structures for valid structural fetching across generic database adapters.
+
 ## 0.12.0 - 2026.03.17
 
 - 2026.03.17

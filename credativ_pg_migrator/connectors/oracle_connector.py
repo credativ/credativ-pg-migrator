@@ -158,7 +158,7 @@ class OracleConnector(DatabaseConnector):
                     'comment': '',
                 }
 
-                self.config_parser.print_log_message('DEBUG', f"oracle_connector: fetch_table_columns: Checking if default value is a sequence for column {column_name} ({column_default})...")
+                self.config_parser.print_log_message('DEBUG3', f"oracle_connector: fetch_table_columns: Checking if default value is a sequence for column {column_name} ({column_default})...")
                 if (isinstance(column_default, str)
                     and 'nextval' in column_default.lower()):
                     parts = column_default.replace('"', '').split(".")
@@ -166,7 +166,7 @@ class OracleConnector(DatabaseConnector):
                         owner, seq_name, _ = parts
                         sequence_details = self.get_sequence_details(owner, seq_name)
                         if sequence_details:
-                            self.config_parser.print_log_message('DEBUG', f"oracle_connector: fetch_table_columns: Found sequence {sequence_details['name']} for column {column_name}.")
+                            self.config_parser.print_log_message('DEBUG3', f"oracle_connector: fetch_table_columns: Found sequence {sequence_details['name']} for column {column_name}.")
                             result[column_id]['column_default_value'] = ""
                             result[column_id]['is_identity'] = 'YES'
                             # if data_type in ('NUMBER'):
@@ -359,6 +359,7 @@ class OracleConnector(DatabaseConnector):
             else:
 
                 if source_table_rows > target_table_rows:
+                    migrator_tables.update_data_migration_started(protocol_id)
 
                     self.config_parser.print_log_message('INFO', f"oracle_connector: migrate_table: Worker {worker_id}: Source table {source_table_name}: {source_table_rows} rows / Target table {target_table_name}: {target_table_rows} rows - starting data migration.")
 
@@ -377,8 +378,15 @@ class OracleConnector(DatabaseConnector):
                         else:
                             select_columns_list.append(f'''"{col['column_name']}"''')
 
+                        if col['data_type'].lower() not in ('clob', 'nclob', 'blob', 'bfile', 'long', 'long raw', 'xmltype'):
+                            orderby_columns_list.append(f'''"{col['column_name']}"''')
+
+                    for order_num, col in target_columns.items():
                         insert_columns_list.append(f'''"{self.config_parser.convert_names_case(col['column_name'])}"''')
-                        orderby_columns_list.append(f'''"{col['column_name']}"''')
+
+                    if not orderby_columns_list:
+                        first_valid_col = next(iter(source_columns.values()))['column_name']
+                        orderby_columns_list.append(f'''"{first_valid_col}"''')
 
                     select_columns = ', '.join(select_columns_list)
                     orderby_columns = ', '.join(orderby_columns_list)
@@ -461,6 +469,7 @@ class OracleConnector(DatabaseConnector):
                             'worker_id': worker_id,
                             'migrator_tables': migrator_tables,
                             'insert_columns': insert_columns,
+                            'insert_values': settings.get('insert_values'),
                         })
                         total_inserted_rows += inserted_rows
                         inserting_end_time = time.time()
@@ -803,7 +812,7 @@ class OracleConnector(DatabaseConnector):
                 aliased_table_name = row[2].strip() if row[2] else ''
                 alias_owner = row[3].strip() if row[3] else source_schema_name
                 alias_sql = f"CREATE SYNONYM {alias_owner}.{alias_name} FOR {aliased_schema_name}.{aliased_table_name}"
-                
+
                 aliases[order_num] = {
                     'id': order_num,
                     'alias_schema_name': source_schema_name,
@@ -1185,6 +1194,151 @@ class OracleConnector(DatabaseConnector):
     def convert_default_value(self, settings) -> dict:
         extracted_default_value = settings['extracted_default_value']
         return extracted_default_value
+
+    def get_table_checksum(self, schema_name: str, table_name: str, columns: list):
+        hash_parts = []
+        for i, col in enumerate(columns):
+            dtype = col.get('data_type', '').lower()
+            if any(x in dtype for x in ['lob', 'bfile', 'xml', 'json', 'long']):
+                continue
+            hash_parts.append(f"ORA_HASH(COALESCE(TO_CHAR(\"{col['column_name']}\"), ''), 4294967295, {i+1})")
+            
+        if not hash_parts:
+            return None
+            
+        cols_concat = " + ".join(hash_parts)
+        
+        query = f'SELECT sum({cols_concat}) FROM "{schema_name.upper()}"."{table_name.upper()}"'
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            result = cursor.fetchone()[0]
+            cursor.close()
+            self.disconnect()
+            return result
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"oracle_connector: get_table_checksum: Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
+            return None
+
+    def get_random_pks(self, schema_name: str, table_name: str, pk_columns: list, sample_size: int):
+        if not pk_columns:
+            return []
+        cols = ", ".join([f'"{c}"' for c in pk_columns])
+        query = f'SELECT * FROM (SELECT {cols} FROM "{schema_name.upper()}"."{table_name.upper()}" ORDER BY DBMS_RANDOM.VALUE) WHERE ROWNUM <= {sample_size}'
+        pks = []
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            for row in cursor.fetchall():
+                pks.append(dict(zip(pk_columns, row)))
+            cursor.close()
+            self.disconnect()
+            return pks
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"oracle_connector: get_random_pks: Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
+            return []
+
+    def get_row_checksums(self, schema_name: str, table_name: str, pk_columns: list, pk_values_list: list, columns: list):
+        hash_parts = []
+        for i, col in enumerate(columns):
+            dtype = col.get('data_type', '').lower()
+            if any(x in dtype for x in ['lob', 'bfile', 'xml', 'json', 'long']):
+                continue
+            hash_parts.append(f"ORA_HASH(COALESCE(TO_CHAR(\"{col['column_name']}\"), ''), 4294967295, {i+1})")
+            
+        if not hash_parts:
+            return {}
+            
+        cols_concat = " + ".join(hash_parts)
+        
+        pk_cols_str = ", ".join([f'"{c}"' for c in pk_columns])
+        
+        in_values = []
+        for pk_dict in pk_values_list:
+            vals = []
+            for c in pk_columns:
+                val = pk_dict[c]
+                if val is None:
+                    vals.append("NULL")
+                elif isinstance(val, str):
+                    vals.append(f"'{val.replace('\'', '\'\'')}'")
+                else:
+                    vals.append(str(val))
+            in_values.append(f"({', '.join(vals)})")
+        
+        where_clause = f"({pk_cols_str}) IN ({', '.join(in_values)})"
+        if len(pk_columns) == 1:
+            where_clause = f"{pk_cols_str} IN ({', '.join([v.strip('()') for v in in_values])})"
+            
+        query = f'SELECT {pk_cols_str}, ({cols_concat}) FROM "{schema_name.upper()}"."{table_name.upper()}" WHERE {where_clause}'
+        
+        checksums = {}
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            for row in cursor.fetchall():
+                pk_tuple = tuple(row[:len(pk_columns)])
+                pk_key = pk_tuple[0] if len(pk_tuple) == 1 else pk_tuple
+                checksums[pk_key] = row[-1]
+            cursor.close()
+            self.disconnect()
+            return checksums
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"oracle_connector: get_row_checksums: Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
+            return {}
+
+    def get_lob_sizes(self, schema_name: str, table_name: str, pk_columns: list, pk_values_list: list, lob_columns: list):
+        if not lob_columns or not pk_columns or not pk_values_list:
+            return {}
+        
+        size_cols = [f"DBMS_LOB.GETLENGTH(\"{col['column_name']}\")" for col in lob_columns]
+        size_selects = ", ".join(size_cols)
+        pk_cols_str = ", ".join([f'"{c}"' for c in pk_columns])
+        
+        in_values = []
+        for pk_dict in pk_values_list:
+            vals = []
+            for c in pk_columns:
+                val = pk_dict[c]
+                if val is None:
+                    vals.append("NULL")
+                elif isinstance(val, str):
+                    vals.append(f"'{val.replace('\'', '\'\'')}'")
+                else:
+                    vals.append(str(val))
+            in_values.append(f"({', '.join(vals)})")
+        
+        where_clause = f"({pk_cols_str}) IN ({', '.join(in_values)})"
+        if len(pk_columns) == 1:
+            where_clause = f"{pk_cols_str} IN ({', '.join([v.strip('()') for v in in_values])})"
+            
+        query = f'SELECT {pk_cols_str}, {size_selects} FROM "{schema_name.upper()}"."{table_name.upper()}" WHERE {where_clause}'
+        
+        sizes = {}
+        cursor = None
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            for row in cursor.fetchall():
+                pk_tuple = tuple(row[:len(pk_columns)])
+                pk_key = pk_tuple[0] if len(pk_tuple) == 1 else pk_tuple
+                sizes[pk_key] = row[len(pk_columns):]
+            return sizes
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"oracle_connector: get_lob_sizes: Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
+            return {}
+        finally:
+            if cursor is not None:
+                cursor.close()
+            self.disconnect()
 
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

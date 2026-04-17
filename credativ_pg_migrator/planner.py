@@ -57,52 +57,72 @@ class Planner:
 
             self.migrator_tables.update_main_status({'task_name': 'Planner', 'subtask_name': 'Resume after crash', 'success': True, 'message': 'finished OK'})
         else:
-            try:
-                self.pre_planning()
 
-                self.check_pausing_resuming()
+            self.pre_planning()
 
-                self.run_premigration_analysis()
+            self.check_pausing_resuming()
 
-                self.check_pausing_resuming()
+            self.run_premigration_analysis()
 
-                if self.source_db_config['connectivity'] == 'ddl':
-                    self.config_parser.print_log_message('DEBUG3', f"planner: create_plan: starting ddl connectivity")
-                    self.source_connection.parse_ddl_files({ 'migrator_tables': self.migrator_tables})
-                    self.source_schema_name = self.config_parser.get_source_schema()
+            self.check_pausing_resuming()
 
-                self.run_prepare_user_defined_types()
-                self.run_prepare_domains()
-                self.run_prepare_defaults()
-
-                self.check_pausing_resuming()
-
-                self.run_prepare_aliases()
-                self.run_prepare_sequences()
-                self.run_prepare_tables()
-                self.run_prepare_data_sources()
-
-                self.check_pausing_resuming()
-
-                self.run_prepare_views()
-
-                self.check_pausing_resuming()
-
-                self.migrator_tables.update_main_status({'task_name': 'Planner', 'subtask_name': '', 'success': True, 'message': 'finished OK'})
-
+            if self.config_parser.is_standard_workflow():
+                self.migrator_tables.insert_main({'task_name': 'Planner', 'subtask_name': 'Standard workflow'})
                 try:
-                    self.source_connection.disconnect()
-                except Exception as e:
-                    pass
-                try:
-                    self.target_connection.disconnect()
-                except Exception as e:
-                    pass
 
-                self.config_parser.print_log_message('INFO', "planner: create_plan: phase done successfully.")
-            except Exception as e:
-                self.migrator_tables.update_main_status({'task_name': 'Planner', 'subtask_name': '', 'success': False, 'message': f'ERROR: {e}'})
-                self.handle_error(e, "Planner")
+                    if self.source_db_config['connectivity'] == 'ddl':
+                        self.config_parser.print_log_message('DEBUG3', f"planner: create_plan: starting ddl connectivity")
+                        self.source_connection.parse_ddl_files({ 'migrator_tables': self.migrator_tables})
+                        self.source_schema_name = self.config_parser.get_source_schema()
+
+                    self.stdwf_prepare_user_defined_types()
+                    self.stdwf_prepare_domains()
+                    self.stdwf_prepare_defaults()
+
+                    self.check_pausing_resuming()
+
+                    self.stdwf_prepare_aliases()
+                    self.stdwf_prepare_sequences()
+                    self.stdwf_prepare_tables()
+                    self.stdwf_prepare_data_sources()
+
+                    self.check_pausing_resuming()
+
+                    self.stdwf_prepare_views()
+
+                    self.check_pausing_resuming()
+
+                    self.migrator_tables.update_main_status({'task_name': 'Planner', 'subtask_name': '', 'success': True, 'message': 'finished OK'})
+
+                    try:
+                        self.source_connection.disconnect()
+                    except Exception as e:
+                        pass
+                    try:
+                        self.target_connection.disconnect()
+                    except Exception as e:
+                        pass
+
+                    self.config_parser.print_log_message('INFO', "planner: create_plan: phase done successfully.")
+                except Exception as e:
+                    self.migrator_tables.update_main_status({'task_name': 'Planner', 'subtask_name': '', 'success': False, 'message': f'ERROR: {e}'})
+                    self.handle_error(e, "Planner")
+
+            elif self.config_parser.is_mapping_workflow():
+                self.migrator_tables.insert_main({'task_name': 'Planner', 'subtask_name': 'Mapping workflow'})
+                try:
+
+                    self.mapping_match_tables()
+
+                    self.migrator_tables.update_main_status({'task_name': 'Planner', 'subtask_name': '', 'success': True, 'message': 'finished OK'})
+
+                except Exception as e:
+                    self.migrator_tables.update_main_status({'task_name': 'Planner', 'subtask_name': '', 'success': False, 'message': f'ERROR: {e}'})
+                    self.handle_error(e, "Planner")
+
+            else:
+                self.config_parser.print_log_message('ERROR', f"planner: create_plan: Unknown workflow type: {self.config_parser.get_workflow()}")
+                exit(1)
 
     def load_connector(self, source_or_target):
         """Dynamically load the database connector."""
@@ -352,15 +372,15 @@ class Planner:
             self.source_connection.disconnect()
             self.target_connection.disconnect()
 
-    def run_prepare_sequences(self):
-        self.config_parser.print_log_message('INFO', "planner: run_prepare_sequences: Preparing sequences...")
+    def stdwf_prepare_sequences(self):
+        self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_sequences: Preparing sequences...")
         source_sequences = self.source_connection.fetch_sequences(self.source_schema_name)
 
-        self.config_parser.print_log_message('DEBUG', f"planner: run_prepare_sequences: Source schema: {self.source_schema_name}")
-        self.config_parser.print_log_message('DEBUG', f"planner: run_prepare_sequences: Source sequences: {source_sequences}")
+        self.config_parser.print_log_message('DEBUG', f"planner: stdwf_prepare_sequences: Source schema: {self.source_schema_name}")
+        self.config_parser.print_log_message('DEBUG', f"planner: stdwf_prepare_sequences: Source sequences: {source_sequences}")
 
         for order_num, sequence_info in source_sequences.items():
-            self.config_parser.print_log_message('INFO', f"planner: run_prepare_sequences: Processing sequence ({order_num}/{len(source_sequences)}): {sequence_info['sequence_name']}")
+            self.config_parser.print_log_message('INFO', f"planner: stdwf_prepare_sequences: Processing sequence ({order_num}/{len(source_sequences)}): {sequence_info['sequence_name']}")
             target_sequence_name = sequence_info['sequence_name']
             if self.config_parser.get_use_aliases_as_target_names():
                 target_sequence_name = self.config_parser.convert_names_case(sequence_info['sequence_name'])
@@ -391,30 +411,30 @@ class Planner:
             }
             try:
                 self.migrator_tables.insert_sequence(settings)
-                self.config_parser.print_log_message('INFO', f"planner: run_prepare_sequences: Sequence {sequence_info['sequence_name']} prepared successfully.")
+                self.config_parser.print_log_message('INFO', f"planner: stdwf_prepare_sequences: Sequence {sequence_info['sequence_name']} prepared successfully.")
             except Exception as e:
-                self.config_parser.print_log_message('ERROR', f"planner: run_prepare_sequences: Error processing sequence {sequence_info['sequence_name']}: {e}")
+                self.config_parser.print_log_message('ERROR', f"planner: stdwf_prepare_sequences: Error processing sequence {sequence_info['sequence_name']}: {e}")
 
-        self.config_parser.print_log_message('INFO', "planner: run_prepare_sequences: Sequences processed successfully.")
+        self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_sequences: Sequences processed successfully.")
 
-    def run_prepare_tables(self):
-        self.config_parser.print_log_message('INFO', "planner: run_prepare_tables: Preparing tables...")
+    def stdwf_prepare_tables(self):
+        self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_tables: Preparing tables...")
         # if self.source_db_config.get('connectivity') == 'ddl':
-        #     self.config_parser.print_log_message('DEBUG', "planner: run_prepare_tables: skipping source db fetch for tables due to DDL connectivity")
+        #     self.config_parser.print_log_message('DEBUG', "planner: stdwf_prepare_tables: skipping source db fetch for tables due to DDL connectivity")
         #     return
         source_tables = self.source_connection.fetch_table_names(self.source_schema_name)
         include_tables = self.config_parser.get_include_tables()
         exclude_tables = self.config_parser.get_exclude_tables() or []
 
-        self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_tables: Source schema: {self.source_schema_name}")
-        self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_tables: Source tables: {source_tables}")
-        self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_tables: Include tables: {include_tables}")
-        self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_tables: Exclude tables: {exclude_tables}")
+        self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_tables: Source schema: {self.source_schema_name}")
+        self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_tables: Source tables: {source_tables}")
+        self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_tables: Include tables: {include_tables}")
+        self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_tables: Exclude tables: {exclude_tables}")
 
         for order_num, table_info in source_tables.items():
             source_table_rows = 0
             target_table_rows = 0
-            self.config_parser.print_log_message('INFO', f"planner: run_prepare_tables: Processing table ({order_num}/{len(source_tables)}): {table_info['table_name']}")
+            self.config_parser.print_log_message('INFO', f"planner: stdwf_prepare_tables: Processing table ({order_num}/{len(source_tables)}): {table_info['table_name']}")
             target_table_name = table_info['table_name']
             target_alias_name = ''
             if self.config_parser.get_use_aliases_as_target_names():
@@ -423,7 +443,13 @@ class Planner:
                     alias_name = alias_dict.get('target_alias_name')
                     target_table_name = alias_name
                     target_alias_name = alias_name
-                    self.config_parser.print_log_message('INFO', f"planner: run_prepare_tables: Source table {table_info['table_name']} mapped to target alias {target_table_name}")
+                    self.config_parser.print_log_message('INFO', f"planner: stdwf_prepare_tables: Source table {table_info['table_name']} mapped to target alias {target_table_name}")
+                    if 'id' in alias_dict:
+                        self.migrator_tables.update_aliases_status({
+                            'row_id': alias_dict['id'],
+                            'success': True,
+                            'message': f"Alias used as target name for table {table_info['table_name']}"
+                        })
             # If include_tables is empty, include all tables
             # If include_tables is ['.*'] or contains '.*', include all tables
             if include_tables == ['.*'] or '.*' in include_tables:
@@ -431,7 +457,7 @@ class Planner:
             elif include_tables and not any(fnmatch.fnmatch(table_info['table_name'], pattern) for pattern in include_tables):
                 continue
             if any(fnmatch.fnmatch(table_info['table_name'], pattern) for pattern in exclude_tables):
-                self.config_parser.print_log_message('INFO', f"planner: run_prepare_tables: Table {table_info['table_name']} is excluded from migration.")
+                self.config_parser.print_log_message('INFO', f"planner: stdwf_prepare_tables: Table {table_info['table_name']} is excluded from migration.")
                 continue
 
             source_columns = []
@@ -449,21 +475,21 @@ class Planner:
                     'target_db_type': self.config_parser.get_target_db_type(),
                 }
                 table_description = self.source_connection.get_table_description(settings)
-                self.config_parser.print_log_message( 'DEBUG3', f"planner: run_prepare_tables: Table description: {table_description}")
+                self.config_parser.print_log_message( 'DEBUG3', f"planner: stdwf_prepare_tables: Table description: {table_description}")
                 table_description = table_description['table_description'] if 'table_description' in table_description else ''
-                self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_tables: Table description: {table_description}")
+                self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_tables: Table description: {table_description}")
                 source_columns = self.source_connection.fetch_table_columns(settings)
-                self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_tables: Fetched source columns: {source_columns}")
+                self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_tables: Fetched source columns: {source_columns}")
 
                 for _, column_info in source_columns.items():
-                    self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_tables: Checking for data types / default values substitutions for column {column_info}...")
+                    self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_tables: Checking for data types / default values substitutions for column {column_info}...")
                     substitution = self.migrator_tables.check_data_types_substitution({
                                                                 'table_name': table_info['table_name'],
                                                                 'column_name': column_info['column_name'],
                                                                 'check_type': column_info['data_type'],
                                                             })
                     if substitution:
-                        self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_tables: Substitution based on data_type ({column_info['data_type']}): {substitution}")
+                        self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_tables: Substitution based on data_type ({column_info['data_type']}): {substitution}")
                         column_info['column_type_substitution'] = substitution
                     else:
                         substitution = self.migrator_tables.check_data_types_substitution({
@@ -472,7 +498,7 @@ class Planner:
                                                                 'check_type': column_info['column_type'],
                                                             })
                         if substitution:
-                            self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_tables: Substitution based on column_type ({column_info['column_type']}): {substitution}")
+                            self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_tables: Substitution based on column_type ({column_info['column_type']}): {substitution}")
                             column_info['column_type_substitution'] = substitution
                         else:
                             if 'basic_data_type' in column_info and column_info['basic_data_type'] != '':
@@ -482,7 +508,7 @@ class Planner:
                                                                 'check_type': column_info['basic_data_type']
                                                             })
                                 if substitution:
-                                    self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_tables: Substitution based on basic_data_type ({column_info['basic_data_type']}): {substitution}")
+                                    self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_tables: Substitution based on basic_data_type ({column_info['basic_data_type']}): {substitution}")
                                     column_info['column_type_substitution'] = substitution
 
                     # checking for default values substitution with the new data type
@@ -494,9 +520,9 @@ class Planner:
                         })
                         if substitution and substitution != None and column_info['column_default_value'] != substitution:
                             column_info['replaced_column_default_value'] = substitution
-                            self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_tables: Substituted default value: {column_info['column_default_value']} -> {substitution}")
+                            self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_tables: Substituted default value: {column_info['column_default_value']} -> {substitution}")
 
-                self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_tables: Source columns: {source_columns}")
+                self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_tables: Source columns: {source_columns}")
                 settings = {
                     'source_db_type': self.config_parser.get_source_db_type(),
                     'source_schema_name': self.source_schema_name,
@@ -508,14 +534,14 @@ class Planner:
                     'source_columns': source_columns,
                     'migrator_tables': self.migrator_tables,
                 }
-                self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_tables: convert_table_columns - settings: {settings}")
+                self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_tables: convert_table_columns - settings: {settings}")
                 target_columns = self.convert_table_columns(settings)
 
                 settings['target_columns'] = target_columns
-                self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_tables: convert_table_columns - target_columns: {target_columns}")
+                self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_tables: convert_table_columns - target_columns: {target_columns}")
 
                 target_table_sql = self.target_connection.get_create_table_sql(settings)
-                self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_tables: Target table SQL: {target_table_sql}")
+                self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_tables: Target table SQL: {target_table_sql}")
 
                 target_partitioning = self.config_parser.get_target_partitioning()
                 if target_partitioning:
@@ -528,7 +554,7 @@ class Planner:
                             target_table_sql += f" PARTITION BY {partitioning_case['partition_by']} ({table_partitioning_columns})"
                             table_partitioned = True
                             table_partitioned_by = partitioning_case['partition_by']
-                            self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_tables: Adding partitioning to table {table_info['table_name']}: {target_table_sql}")
+                            self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_tables: Adding partitioning to table {table_info['table_name']}: {target_table_sql}")
                             if 'date_range' in partitioning_case:
                                 if partitioning_case['date_range'] in ('year', 'month', 'week', 'day'):
                                     query = f"""
@@ -537,7 +563,7 @@ class Planner:
                                         FROM "{self.source_schema_name}"."{table_info['table_name']}"
                                         """
                                     self.source_connection.connect()
-                                    self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_tables: Query to get min/max values for partitioning: {query}")
+                                    self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_tables: Query to get min/max values for partitioning: {query}")
                                     cursor = self.source_connection.connection.cursor()
                                     cursor.execute(query)
                                     min_max = cursor.fetchall()
@@ -546,7 +572,7 @@ class Planner:
                                     if min_max and len(min_max) > 0:
                                         min_value = min_max[0][0]
                                         max_value = min_max[0][1]
-                                        self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_tables: Min/Max values for partitioning: {min_value}, {max_value}")
+                                        self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_tables: Min/Max values for partitioning: {min_value}, {max_value}")
                                         if partitioning_case['date_range'] in ('year', 'month', 'week'):
                                             query = f"""
                                                 SELECT
@@ -565,7 +591,7 @@ class Planner:
                                                         '1 {partitioning_case['date_range']}'::interval)
                                                 ) gs
                                             """
-                                            self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_tables: Create partitions SQL: {query}")
+                                            self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_tables: Create partitions SQL: {query}")
                                             self.target_connection.connect()
                                             cursor = self.target_connection.connection.cursor()
                                             cursor.execute(query)
@@ -574,16 +600,16 @@ class Planner:
 
                                             create_partitions_sql = json.dumps([row[0] for row in create_partitions_sql])
                                             cursor.close()
-                                            self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_tables: Create partitions SQL: {create_partitions_sql}")
+                                            self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_tables: Create partitions SQL: {create_partitions_sql}")
 
-                self.config_parser.print_log_message( 'INFO', f"planner: run_prepare_tables: Counting rows in source table {table_info['table_name']}...")
+                self.config_parser.print_log_message( 'INFO', f"planner: stdwf_prepare_tables: Counting rows in source table {table_info['table_name']}...")
                 self.source_connection.connect()
                 source_table_rows = self.source_connection.get_rows_count(
                     self.source_schema_name,
                     table_info['table_name'],
                 )
                 self.source_connection.disconnect()
-                self.config_parser.print_log_message( 'INFO', f"planner: run_prepare_tables: Source table {table_info['table_name']} has {source_table_rows} rows.")
+                self.config_parser.print_log_message( 'INFO', f"planner: stdwf_prepare_tables: Source table {table_info['table_name']} has {source_table_rows} rows.")
 
                 self.migrator_tables.insert_tables({
                     'source_schema_name': self.source_schema_name,
@@ -641,7 +667,7 @@ class Planner:
                     'target_table_name': target_table_name,
                     'target_columns': target_columns,
                 })
-                self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_tables: Indexes: {indexes}")
+                self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_tables: Indexes: {indexes}")
                 if indexes:
                     for _, index_details in indexes.items():
                         values = {}
@@ -659,11 +685,11 @@ class Planner:
                         values['index_sql'] = self.target_connection.get_create_index_sql(values)
                         values['is_function_based'] = index_details.get('is_function_based', 'NO')
                         self.migrator_tables.insert_indexes( values )
-                        self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_tables: Processed index: {values}")
+                        self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_tables: Processed index: {values}")
                 else:
-                    self.config_parser.print_log_message( 'INFO', f"planner: run_prepare_tables: No indexes found for table {table_info['table_name']}.")
+                    self.config_parser.print_log_message( 'INFO', f"planner: stdwf_prepare_tables: No indexes found for table {table_info['table_name']}.")
             else:
-                self.config_parser.print_log_message( 'INFO', "planner: run_prepare_tables: Skipping index migration.")
+                self.config_parser.print_log_message( 'INFO', "planner: stdwf_prepare_tables: Skipping index migration.")
 
             if self.config_parser.should_migrate_constraints():
                 constraints = self.source_connection.fetch_constraints({
@@ -671,7 +697,7 @@ class Planner:
                     'source_table_schema': self.source_schema_name,
                     'source_table_name': table_info['table_name'],
                 })
-                self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_tables: Constraints: {constraints}")
+                self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_tables: Constraints: {constraints}")
                 if constraints:
                     for _, constraint_details in constraints.items():
                         constraint_name = constraint_details['constraint_name'] if 'constraint_name' in constraint_details else ''
@@ -685,7 +711,7 @@ class Planner:
                             if alias_dict:
                                 alias_name = alias_dict.get('target_alias_name')
                                 aliased_referenced_table_name = alias_name
-                                self.config_parser.print_log_message('INFO', f"planner: run_prepare_tables: Constraint referenced table {constraint_details['referenced_table_name']} mapped to target alias {aliased_referenced_table_name}")
+                                self.config_parser.print_log_message('INFO', f"planner: stdwf_prepare_tables: Constraint referenced table {constraint_details['referenced_table_name']} mapped to target alias {aliased_referenced_table_name}")
 
                         target_db_constraint_sql = self.target_connection.get_create_constraint_sql({
                             'source_db_type': self.config_parser.get_source_db_type(),
@@ -729,15 +755,15 @@ class Planner:
                             'constraint_status': constraint_details['constraint_status'] if 'constraint_status' in constraint_details else '',
                             }
                         )
-                    self.config_parser.print_log_message('INFO', f"planner: run_prepare_tables: Constraint {constraint_name} for table {target_table_name}")
+                    self.config_parser.print_log_message('INFO', f"planner: stdwf_prepare_tables: Constraint {constraint_name} for table {target_table_name}")
                 else:
-                    self.config_parser.print_log_message('INFO', f"planner: run_prepare_tables: No constraints found for table {table_info['table_name']}.")
+                    self.config_parser.print_log_message('INFO', f"planner: stdwf_prepare_tables: No constraints found for table {table_info['table_name']}.")
             else:
-                self.config_parser.print_log_message('INFO', "planner: run_prepare_tables: Skipping constraint migration.")
+                self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_tables: Skipping constraint migration.")
 
             if self.config_parser.should_migrate_triggers():
                 triggers = self.source_connection.fetch_triggers(table_info['id'], self.source_schema_name, table_info['table_name'])
-                self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_tables: Number of triggers: {len(triggers) if triggers else 0}, Triggers: {triggers}")
+                self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_tables: Number of triggers: {len(triggers) if triggers else 0}, Triggers: {triggers}")
                 if triggers:
                     for _, trigger_details in triggers.items():
                         trigger_name = trigger_details['name']
@@ -753,8 +779,8 @@ class Planner:
                                 'target_db_type': self.config_parser.get_target_db_type(),
                             })
 
-                        self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_tables: Source trigger code: {trigger_details['sql']}")
-                        self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_tables: Converted trigger code: {converted_code}")
+                        self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_tables: Source trigger code: {trigger_details['sql']}")
+                        self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_tables: Converted trigger code: {converted_code}")
 
                         self.migrator_tables.insert_trigger({
                             'source_schema_name': self.source_schema_name,
@@ -771,14 +797,14 @@ class Planner:
                             'trigger_target_sql': converted_code,
                             'trigger_comment': trigger_details['comment']
                         })
-                    self.config_parser.print_log_message('INFO', f"planner: run_prepare_tables: Trigger {trigger_details['name']} for table {table_info['table_name']}")
+                    self.config_parser.print_log_message('INFO', f"planner: stdwf_prepare_tables: Trigger {trigger_details['name']} for table {table_info['table_name']}")
                 else:
-                    self.config_parser.print_log_message('INFO', f"planner: run_prepare_tables: No triggers found for table {table_info['table_name']}.")
+                    self.config_parser.print_log_message('INFO', f"planner: stdwf_prepare_tables: No triggers found for table {table_info['table_name']}.")
             else:
-                self.config_parser.print_log_message('INFO', "planner: run_prepare_tables: Skipping trigger migration.")
+                self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_tables: Skipping trigger migration.")
 
-            self.config_parser.print_log_message('INFO', f"planner: run_prepare_tables: Table {table_info['table_name']} processed successfully.")
-        self.config_parser.print_log_message('INFO', "planner: run_prepare_tables: Tables processed successfully.")
+            self.config_parser.print_log_message('INFO', f"planner: stdwf_prepare_tables: Table {table_info['table_name']} processed successfully.")
+        self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_tables: Tables processed successfully.")
 
     def convert_table_columns(self, settings):
         target_db_type = settings['target_db_type']
@@ -815,6 +841,14 @@ class Planner:
                                         if types_mapping.get(coltype, 'UNKNOWN').startswith('UNKNOWN'):
                                             self.config_parser.print_log_message('INFO', f"planner: convert_table_columns: Column {column_info['column_name']} - unknown basic data type: {column_info['basic_data_type']} - mapping missing, using TEXT...")
                                             coltype = types_mapping.get(coltype, 'TEXT').upper()
+                                        else:
+                                            coltype = types_mapping.get(coltype, 'TEXT').upper()
+                                    else:
+                                        coltype = types_mapping.get(coltype, 'TEXT').upper()
+                                else:
+                                    coltype = types_mapping.get(coltype, 'TEXT').upper()
+                        else:
+                            coltype = types_mapping.get(coltype, coltype).upper()
 
                     if self.config_parser.get_varchar_to_text_length() >= 0 or self.config_parser.get_char_to_text_length() >= 0:
                         if (self.source_connection.is_string_type(coltype)
@@ -863,42 +897,48 @@ class Planner:
 
         return converted
 
-    def run_prepare_views(self):
-        self.config_parser.print_log_message('INFO', "planner: run_prepare_views: Preparing views...")
+    def stdwf_prepare_views(self):
+        self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_views: Preparing views...")
         # if self.source_db_config.get('connectivity') == 'ddl':
-        #     self.config_parser.print_log_message('DEBUG', "planner: run_prepare_views: skipping source db fetch for views due to DDL connectivity")
+        #     self.config_parser.print_log_message('DEBUG', "planner: stdwf_prepare_views: skipping source db fetch for views due to DDL connectivity")
         #     return
         if self.config_parser.should_migrate_views():
-            self.config_parser.print_log_message('INFO', "planner: run_prepare_views: Processing views...")
+            self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_views: Processing views...")
             views = self.source_connection.fetch_views_names(self.source_schema_name)
 
             include_views = self.config_parser.get_include_views()
             exclude_views = self.config_parser.get_exclude_views() or []
 
-            self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_views: Source views: {views}")
-            self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_views: Include views: {include_views}")
-            self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_views: Exclude views: {exclude_views}")
+            self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_views: Source views: {views}")
+            self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_views: Include views: {include_views}")
+            self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_views: Exclude views: {exclude_views}")
 
             for order_num, view_info in views.items():
-                self.config_parser.print_log_message('INFO', f"planner: run_prepare_views: Processing view ({order_num}): {view_info}")
+                self.config_parser.print_log_message('INFO', f"planner: stdwf_prepare_views: Processing view ({order_num}): {view_info}")
                 if include_views == ['.*'] or '.*' in include_views:
                     pass
                 elif not any(fnmatch.fnmatch(view_info['view_name'], pattern) for pattern in include_views):
-                    self.config_parser.print_log_message('INFO', f"planner: run_prepare_views: View {view_info['view_name']} does not match patterns for migration.")
+                    self.config_parser.print_log_message('INFO', f"planner: stdwf_prepare_views: View {view_info['view_name']} does not match patterns for migration.")
                     continue
                 if any(fnmatch.fnmatch(view_info['view_name'], pattern) for pattern in exclude_views):
-                    self.config_parser.print_log_message('INFO', f"planner: run_prepare_views: View {view_info['view_name']} is excluded from migration.")
+                    self.config_parser.print_log_message('INFO', f"planner: stdwf_prepare_views: View {view_info['view_name']} is excluded from migration.")
                     continue
-                self.config_parser.print_log_message('INFO', f"planner: run_prepare_views: View {view_info['view_name']} is included for migration.")
-                target_view_name = view_info['target_view_name']
+                self.config_parser.print_log_message('INFO', f"planner: stdwf_prepare_views: View {view_info['view_name']} is included for migration.")
+                target_view_name = view_info.get('target_view_name', view_info['view_name'])
                 target_alias_name = ''
-                # if self.config_parser.get_use_aliases_as_target_names() and self.config_parser.get_source_db_type() != 'ibm_db2_zos':
-                #     alias_name = self.migrator_tables.get_alias_for_table(self.source_schema_name, view_info['view_name'])
-                #     if alias_name:
-                #         target_alias_name = alias_name
-                #         self.config_parser.print_log_message('INFO', f"planner: run_prepare_views: View {view_info['view_name']} mapped to target alias {target_alias_name}")
-
-                # target_view_name_to_use = target_alias_name if target_alias_name else target_view_name
+                if self.config_parser.get_use_aliases_as_target_names():
+                    alias_dict = self.migrator_tables.get_alias_for_table(self.source_schema_name, view_info['view_name'])
+                    if alias_dict:
+                        alias_name = alias_dict.get('target_alias_name')
+                        target_view_name = alias_name
+                        target_alias_name = alias_name
+                        self.config_parser.print_log_message('INFO', f"planner: stdwf_prepare_views: View {view_info['view_name']} mapped to target alias {target_alias_name}")
+                        if 'id' in alias_dict:
+                            self.migrator_tables.update_aliases_status({
+                                'row_id': alias_dict['id'],
+                                'success': True,
+                                'message': f"Alias used as target name for view {view_info['view_name']}"
+                            })
 
                 view_sql = self.source_connection.fetch_view_code({
                     'view_id': view_info['id'],
@@ -907,8 +947,8 @@ class Planner:
                     'target_schema_name': view_info.get('target_schema_name', ''),
                     'target_view_name': view_info.get('target_view_name', ''),
                 })
-                self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_views: Source view SQL data: {view_info}")
-                self.config_parser.print_log_message( 'DEBUG3', f"planner: run_prepare_views: Source view SQL: {view_sql}")
+                self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_views: Source view SQL data: {view_info}")
+                self.config_parser.print_log_message( 'DEBUG3', f"planner: stdwf_prepare_views: Source view SQL: {view_sql}")
                 converted_view_sql = self.source_connection.convert_view_code({
                     'view_code': view_sql,
                     'source_database': self.config_parser.get_source_db_name(),
@@ -920,16 +960,16 @@ class Planner:
                     'migrator_tables': self.migrator_tables,
                     'alias_view': view_info.get('is_alias', False),
                 })
-                self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_views: Converted view SQL: {converted_view_sql}")
+                self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_views: Converted view SQL: {converted_view_sql}")
 
-                self.config_parser.print_log_message( 'DEBUG', "planner: run_prepare_views: Checking for remote objects substitution in view SQL...")
+                self.config_parser.print_log_message( 'DEBUG', "planner: stdwf_prepare_views: Checking for remote objects substitution in view SQL...")
                 rows = self.migrator_tables.get_records_remote_objects_substitution()
                 if rows:
                     for row in rows:
-                        self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_views: Views - remote objects substituting {row[0]} with {row[1]}")
+                        self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_views: Views - remote objects substituting {row[0]} with {row[1]}")
                         converted_view_sql = re.sub(re.escape(row[0]), row[1], converted_view_sql, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
 
-                self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_views: Converted view SQL: {converted_view_sql}")
+                self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_views: Converted view SQL: {converted_view_sql}")
                 self.migrator_tables.insert_view({
                     'source_schema_name': self.source_schema_name,
                     'source_view_name': view_info['view_name'],
@@ -942,26 +982,26 @@ class Planner:
                     'alias_view': view_info.get('is_alias', False),
                     'view_comment': view_info['comment']
                 })
-                self.config_parser.print_log_message( 'INFO', f"planner: run_prepare_views: View {view_info['view_name']} processed successfully.")
-            self.config_parser.print_log_message( 'INFO', "planner: run_prepare_views: Views processed successfully.")
+                self.config_parser.print_log_message( 'INFO', f"planner: stdwf_prepare_views: View {view_info['view_name']} processed successfully.")
+            self.config_parser.print_log_message( 'INFO', "planner: stdwf_prepare_views: Views processed successfully.")
         else:
-            self.config_parser.print_log_message( 'INFO', "planner: run_prepare_views: Skipping views migration.")
-        self.config_parser.print_log_message( 'INFO', "planner: run_prepare_views: Views processed successfully.")
+            self.config_parser.print_log_message( 'INFO', "planner: stdwf_prepare_views: Skipping views migration.")
+        self.config_parser.print_log_message( 'INFO', "planner: stdwf_prepare_views: Views processed successfully.")
 
-    def run_prepare_aliases(self):
-        self.config_parser.print_log_message('INFO', "planner: run_prepare_aliases: Preparing aliases...")
-        self.config_parser.print_log_message('INFO', "planner: run_prepare_aliases: Processing aliases...")
+    def stdwf_prepare_aliases(self):
+        self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_aliases: Preparing aliases...")
+        self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_aliases: Processing aliases...")
 
         try:
             aliases = self.source_connection.get_aliases({'source_schema_name': self.source_schema_name})
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"planner: run_prepare_aliases: Cannot fetch aliases: {e}")
+            self.config_parser.print_log_message('ERROR', f"planner: stdwf_prepare_aliases: Cannot fetch aliases: {e}")
             aliases = {}
 
         if aliases:
-            self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_aliases: Source aliases count: {len(aliases)}")
+            self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_aliases: Source aliases count: {len(aliases)}")
             for order_num, alias_info in aliases.items():
-                self.config_parser.print_log_message('INFO', f"planner: run_prepare_aliases: Processing alias ({order_num}): {alias_info.get('alias_name')}")
+                self.config_parser.print_log_message('INFO', f"planner: stdwf_prepare_aliases: Processing alias ({order_num}): {alias_info.get('alias_name')}")
 
                 self.migrator_tables.insert_aliases({
                     'source_schema_name': self.source_schema_name,
@@ -980,16 +1020,16 @@ class Planner:
                     'target_referenced_column_name': self.config_parser.convert_names_case(alias_info.get('aliased_column_name', '')),
                     'target_alias_sql': '' # PostgreSQL does not implement pure aliases
                 })
-                self.config_parser.print_log_message( 'INFO', f"planner: run_prepare_aliases: Alias {alias_info.get('alias_name')} processed successfully.")
+                self.config_parser.print_log_message( 'INFO', f"planner: stdwf_prepare_aliases: Alias {alias_info.get('alias_name')} processed successfully.")
         else:
-            self.config_parser.print_log_message( 'INFO', "planner: run_prepare_aliases: No aliases found.")
+            self.config_parser.print_log_message( 'INFO', "planner: stdwf_prepare_aliases: No aliases found.")
 
-        self.config_parser.print_log_message( 'INFO', "planner: run_prepare_aliases: Aliases processing completed.")
+        self.config_parser.print_log_message( 'INFO', "planner: stdwf_prepare_aliases: Aliases processing completed.")
 
-    def run_prepare_user_defined_types(self):
-        self.config_parser.print_log_message('INFO', "planner: run_prepare_user_defined_types: Preparing user defined types...")
+    def stdwf_prepare_user_defined_types(self):
+        self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_user_defined_types: Preparing user defined types...")
         # if self.source_db_config.get('connectivity') == 'ddl':
-        #     self.config_parser.print_log_message('DEBUG', "planner: run_prepare_user_defined_types: skipping source db fetch for user defined types due to DDL connectivity")
+        #     self.config_parser.print_log_message('DEBUG', "planner: stdwf_prepare_user_defined_types: skipping source db fetch for user defined types due to DDL connectivity")
         #     return
         user_defined_types = self.source_connection.fetch_user_defined_types(self.source_schema_name)
 
@@ -999,7 +1039,7 @@ class Planner:
         # Create case-insensitive mapping
         types_mapping = {k.lower(): v for k, v in types_mapping.items()}
 
-        self.config_parser.print_log_message('DEBUG', f"planner: run_prepare_user_defined_types: User defined types: {user_defined_types}")
+        self.config_parser.print_log_message('DEBUG', f"planner: stdwf_prepare_user_defined_types: User defined types: {user_defined_types}")
 
         if user_defined_types:
             for order_num, type_info in user_defined_types.items():
@@ -1010,7 +1050,7 @@ class Planner:
                 scale = type_info.get('scale', '')
                 source_type_sql = type_info['sql']
 
-                self.config_parser.print_log_message('DEBUG', f"planner: run_prepare_user_defined_types: Source type: {type_name}, Base: {base_type}")
+                self.config_parser.print_log_message('DEBUG', f"planner: stdwf_prepare_user_defined_types: Source type: {type_name}, Base: {base_type}")
 
                 # Resolve target type
                 base_lower = base_type.lower()
@@ -1038,7 +1078,7 @@ class Planner:
                 else:
                     target_type_sql = source_type_sql.replace(f'"{type_info.get("schema_name", self.source_schema_name)}".', f'"{self.target_schema_name}".') if source_type_sql else ''
 
-                self.config_parser.print_log_message('DEBUG', f"planner: run_prepare_user_defined_types: Converted type SQL: {target_type_sql}")
+                self.config_parser.print_log_message('DEBUG', f"planner: stdwf_prepare_user_defined_types: Converted type SQL: {target_type_sql}")
 
                 self.migrator_tables.insert_user_defined_type({
                     'source_schema_name': self.source_schema_name,
@@ -1050,28 +1090,28 @@ class Planner:
                     'target_basic_type': target_base_type,
                     'type_comment': type_info['comment'],
                 })
-                self.config_parser.print_log_message('INFO', f"planner: run_prepare_user_defined_types: User defined type {type_name} processed successfully.")
-            self.config_parser.print_log_message('INFO', "planner: run_prepare_user_defined_types: User defined types processed successfully.")
+                self.config_parser.print_log_message('INFO', f"planner: stdwf_prepare_user_defined_types: User defined type {type_name} processed successfully.")
+            self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_user_defined_types: User defined types processed successfully.")
         else:
-            self.config_parser.print_log_message('INFO', "planner: run_prepare_user_defined_types: No user defined types found.")
+            self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_user_defined_types: No user defined types found.")
 
-    def run_prepare_domains(self):
-        self.config_parser.print_log_message('INFO', "planner: run_prepare_domains: Preparing domains...")
+    def stdwf_prepare_domains(self):
+        self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_domains: Preparing domains...")
         # if self.source_db_config.get('connectivity') == 'ddl':
-        #     self.config_parser.print_log_message('DEBUG', "planner: run_prepare_domains: skipping source db fetch for domains due to DDL connectivity")
+        #     self.config_parser.print_log_message('DEBUG', "planner: stdwf_prepare_domains: skipping source db fetch for domains due to DDL connectivity")
         #     return
         migrated_as = 'CHECK CONSTRAINT'
         if self.config_parser.get_target_db_type() == 'postgresql':
             migrated_as = 'DOMAIN'
         domains = self.source_connection.fetch_domains(self.source_schema_name)
-        self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_domains: Domains found in source database: {domains}")
+        self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_domains: Domains found in source database: {domains}")
         if domains:
             for order_num, domain_info in domains.items():
-                self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_domains: Processing domain: {domain_info}")
+                self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_domains: Processing domain: {domain_info}")
                 domain_info['target_schema_name'] = self.target_schema_name
                 domain_info['migrated_as'] = migrated_as
                 converted_domain_sql = self.target_connection.get_create_domain_sql(domain_info)
-                self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_domains: Converted domain SQL: {converted_domain_sql}")
+                self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_domains: Converted domain SQL: {converted_domain_sql}")
 
                 # If the source domain SQL contains 'CREATE RULE', set 'migrated_as' accordingly
                 self.migrator_tables.insert_domain({
@@ -1085,21 +1125,21 @@ class Planner:
                     'migrated_as': migrated_as,
                     'domain_comment':  domain_info['domain_comment'],
                 })
-                self.config_parser.print_log_message('INFO', f"planner: run_prepare_domains: Domain {domain_info['domain_name']} processed successfully.")
-            self.config_parser.print_log_message('INFO', "planner: run_prepare_domains: Domains processed successfully.")
+                self.config_parser.print_log_message('INFO', f"planner: stdwf_prepare_domains: Domain {domain_info['domain_name']} processed successfully.")
+            self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_domains: Domains processed successfully.")
         else:
-            self.config_parser.print_log_message('INFO', "planner: run_prepare_domains: No domains found.")
+            self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_domains: No domains found.")
 
-    def run_prepare_defaults(self):
-        self.config_parser.print_log_message('INFO', "planner: run_prepare_defaults: Preparing defaults...")
+    def stdwf_prepare_defaults(self):
+        self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_defaults: Preparing defaults...")
         # if self.source_db_config.get('connectivity') == 'ddl':
-        #     self.config_parser.print_log_message('DEBUG', "planner: run_prepare_defaults: skipping source db fetch for defaults due to DDL connectivity")
+        #     self.config_parser.print_log_message('DEBUG', "planner: stdwf_prepare_defaults: skipping source db fetch for defaults due to DDL connectivity")
         #     return
         defaults = self.source_connection.fetch_default_values({ 'source_schema_name': self.source_schema_name})
         if defaults:
-            self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_defaults: Defaults found in source database: {defaults}")
+            self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_defaults: Defaults found in source database: {defaults}")
             for order_num, default_info in defaults.items():
-                self.config_parser.print_log_message( 'DEBUG', f"planner: run_prepare_defaults: Processing default: {default_info}")
+                self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_defaults: Processing default: {default_info}")
 
                 self.migrator_tables.insert_default_value({
                     'default_value_schema': default_info['default_value_schema'],
@@ -1109,10 +1149,10 @@ class Planner:
                     'default_value_data_type': default_info['default_value_data_type'] if 'default_value_data_type' in default_info else '',
                     'default_value_comment':  default_info['default_value_comment'] if 'default_value_comment' in default_info else '',
                 })
-                self.config_parser.print_log_message('INFO', f"planner: run_prepare_defaults: Default {default_info['default_value_name']} processed successfully.")
-            self.config_parser.print_log_message('INFO', "planner: run_prepare_defaults: Defaults processed successfully.")
+                self.config_parser.print_log_message('INFO', f"planner: stdwf_prepare_defaults: Default {default_info['default_value_name']} processed successfully.")
+            self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_defaults: Defaults processed successfully.")
         else:
-            self.config_parser.print_log_message('INFO', "planner: run_prepare_defaults: No defaults found.")
+            self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_defaults: No defaults found.")
 
     def run_pre_migration_script(self):
         pre_migration_script = self.config_parser.get_pre_migration_script()
@@ -1191,10 +1231,13 @@ class Planner:
                     data_migration_info = self.migrator_tables.decode_data_migration_row(record)
 
                     part_name = 'check row counts for table ' + data_migration_info['source_table_name']
-                    source_table_rows = self.source_connection.get_rows_count(
-                        data_migration_info['source_schema_name'],
-                        data_migration_info['source_table_name']
-                    )
+                    if self.config_parser.get_source_db_type() == 'ibm_db2_zos':
+                        source_table_rows = data_migration_info.get('source_table_rows', 0)
+                    else:
+                        source_table_rows = self.source_connection.get_rows_count(
+                            data_migration_info['source_schema_name'],
+                            data_migration_info['source_table_name']
+                        )
                     target_table_rows = self.target_connection.get_rows_count(
                         data_migration_info['target_schema_name'],
                         data_migration_info['target_table_name']
@@ -1204,6 +1247,11 @@ class Planner:
                     if source_table_rows != target_table_rows:
                         self.config_parser.print_log_message('INFO', f"planner: run_check_tables_migration_status: Row counts do not match for table {data_migration_info['source_table_name']}: source={source_table_rows}, target={target_table_rows}. Marking as not fully migrated.")
                         self.migrator_tables.update_table_status({'row_id': table_info['id'], 'success': False, 'message': ''})
+                        self.migrator_tables.update_table_rows_counts({
+                            "row_id": table_info['id'],
+                            "source_table_rows": source_table_rows,
+                            "target_table_rows": target_table_rows,
+                        })
                         self.migrator_tables.update_data_migration_rows({
                             "row_id": data_migration_info['id'],
                             "source_table_rows": source_table_rows,
@@ -1218,6 +1266,11 @@ class Planner:
                     else:
                         self.config_parser.print_log_message('DEBUG', f"planner: run_check_tables_migration_status: Row counts match for table {data_migration_info['source_table_name']}: source={source_table_rows}, target={target_table_rows}. Marking as fully migrated.")
                         self.migrator_tables.update_table_status({'row_id': table_info['id'], 'success': True, 'message': 'Fully migrated'})
+                        self.migrator_tables.update_table_rows_counts({
+                            "row_id": table_info['id'],
+                            "source_table_rows": source_table_rows,
+                            "target_table_rows": target_table_rows,
+                        })
                         self.migrator_tables.update_data_migration_rows({
                             "row_id": data_migration_info['id'],
                             "source_table_rows": source_table_rows,
@@ -1243,25 +1296,25 @@ class Planner:
                 self.config_parser.print_log_message('ERROR', "planner: run_check_tables_migration_status: Stopping due to error.")
                 exit(1)
 
-    def run_prepare_data_sources(self):
-        self.config_parser.print_log_message('INFO', "planner: run_prepare_data_sources: Preparing data sources...")
+    def stdwf_prepare_data_sources(self):
+        self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_data_sources: Preparing data sources...")
 
         data_export = self.config_parser.get_source_data_export()
 
         if not data_export:
-            self.config_parser.print_log_message('INFO', "planner: run_prepare_data_sources: No settings for database export found. Migrator will use source tables as data sources.")
+            self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_data_sources: No settings for database export found. Migrator will use source tables as data sources.")
             return
-        self.config_parser.print_log_message('INFO', f"planner: run_prepare_data_sources: Using database export: {data_export}")
+        self.config_parser.print_log_message('INFO', f"planner: stdwf_prepare_data_sources: Using database export: {data_export}")
 
         if data_export['format'] in ('CSV', 'UNL'):
             for table in self.migrator_tables.fetch_all_tables():
-                self.config_parser.print_log_message('DEBUG', f"planner: run_prepare_data_sources: Processing table: {table}")
+                self.config_parser.print_log_message('DEBUG', f"planner: stdwf_prepare_data_sources: Processing table: {table}")
                 settings_source = 'global'
                 table_info = self.migrator_tables.decode_table_row(table)
                 table_data_export = self.config_parser.get_table_data_export(table_info['source_schema_name'], table_info['source_table_name'])
                 if table_data_export:
                     settings_source = 'table_specific'
-                    self.config_parser.print_log_message('DEBUG', f"planner: run_prepare_data_sources: Table {table_info['source_table_name']} has specific database export settings: {table_data_export}")
+                    self.config_parser.print_log_message('DEBUG', f"planner: stdwf_prepare_data_sources: Table {table_info['source_table_name']} has specific database export settings: {table_data_export}")
 
                 file_name = data_export.get('file', None)
                 if table_data_export and 'file' in table_data_export:
@@ -1283,10 +1336,10 @@ class Planner:
                         if re.search(re.escape('{{source_alias_name}}'), table_file_name, flags=re.IGNORECASE):
                             valid_alias_name = table_info['source_table_name']
                             aliases = self.migrator_tables.fetch_all_aliases({'source_schema_name': table_info['source_schema_name']})
-                            # self.config_parser.print_log_message('DEBUG3', f"planner: run_prepare_data_sources: Aliases found: {aliases}")
+                            # self.config_parser.print_log_message('DEBUG3', f"planner: stdwf_prepare_data_sources: Aliases found: {aliases}")
                             for row in aliases:
                                 alias_info = self.migrator_tables.decode_aliases_row(row)
-                                # self.config_parser.print_log_message('DEBUG3', f"planner: run_prepare_data_sources: Processing alias: {alias_info}")
+                                # self.config_parser.print_log_message('DEBUG3', f"planner: stdwf_prepare_data_sources: Processing alias: {alias_info}")
                                 ref_schema = alias_info.get('source_referenced_schema_name') or ''
                                 ref_table = alias_info.get('source_referenced_table_name') or ''
                                 if ref_schema and ref_table:
@@ -1298,15 +1351,15 @@ class Planner:
                                             break
 
                     if os.path.exists(table_file_name):
-                        self.config_parser.print_log_message('INFO', f"planner: run_prepare_data_sources: Testing data source file name - {table_file_name} exists.")
+                        self.config_parser.print_log_message('INFO', f"planner: stdwf_prepare_data_sources: Testing data source file name - {table_file_name} exists.")
                         data_file_found = True
                     else:
-                        self.config_parser.print_log_message('WARNING', f"planner: run_prepare_data_sources: Testing data source file name - {table_file_name} does not exist or is not accessible.")
+                        self.config_parser.print_log_message('WARNING', f"planner: stdwf_prepare_data_sources: Testing data source file name - {table_file_name} does not exist or is not accessible.")
                         if '{{' in table_file_name or '}}' in table_file_name:
-                            self.config_parser.print_log_message('WARNING', f"planner: run_prepare_data_sources: Data source file name {table_file_name} contains placeholder(s) - value was most likely not found for replacement.")
+                            self.config_parser.print_log_message('WARNING', f"planner: stdwf_prepare_data_sources: Data source file name {table_file_name} contains placeholder(s) - value was most likely not found for replacement.")
                         data_file_found = False
                         if self.config_parser.get_source_data_export_on_missing_data_file() == 'error':
-                            self.config_parser.print_log_message('ERROR', f"planner: run_prepare_data_sources: Data source file {table_file_name} does not exist or is not accessible. Stopping execution.")
+                            self.config_parser.print_log_message('ERROR', f"planner: stdwf_prepare_data_sources: Data source file {table_file_name} does not exist or is not accessible. Stopping execution.")
                             exit(1)
 
                     conversion_path = self.config_parser.get_source_data_export_conversion_path()
@@ -1334,7 +1387,7 @@ class Planner:
                     if table_data_export and 'character_set' in table_data_export:
                         character_set = table_data_export['character_set']
 
-                    self.config_parser.print_log_message('DEBUG3',f"planner: run_prepare_data_sources: Table {table_info['source_table_name']} - file_name: {table_file_name}, converted_file_name: {converted_file_name}, data_file_found: {data_file_found}, format: {format}, delimiter: {delimiter}, header: {header}, character_set: {character_set}")
+                    self.config_parser.print_log_message('DEBUG3',f"planner: stdwf_prepare_data_sources: Table {table_info['source_table_name']} - file_name: {table_file_name}, converted_file_name: {converted_file_name}, data_file_found: {data_file_found}, format: {format}, delimiter: {delimiter}, header: {header}, character_set: {character_set}")
                     data_source = {
                         'source_schema_name': table_info['source_schema_name'],
                         'source_table_name': table_info['source_table_name'],
@@ -1354,18 +1407,18 @@ class Planner:
                         }
                     }
                     self.migrator_tables.insert_data_source(data_source)
-                    self.config_parser.print_log_message('DEBUG', f"planner: run_prepare_data_sources: Table {table_info['source_table_name']} - inserted data source: {data_source}")
+                    self.config_parser.print_log_message('DEBUG', f"planner: stdwf_prepare_data_sources: Table {table_info['source_table_name']} - inserted data source: {data_source}")
 
         elif data_export['format'] == 'SQL':
             if self.config_parser.get_source_db_type() not in ('informix',):
-                self.config_parser.print_log_message('ERROR', f"planner: run_prepare_data_sources: SQL data source is NOT supported for source database {self.config_parser.get_source_db_type()}")
+                self.config_parser.print_log_message('ERROR', f"planner: stdwf_prepare_data_sources: SQL data source is NOT supported for source database {self.config_parser.get_source_db_type()}")
                 exit(1)
             sql_file = data_export.get('file', None)
             if not sql_file:
-                self.config_parser.print_log_message('ERROR', f"planner: run_prepare_data_sources: SQL dump file is not specified.")
+                self.config_parser.print_log_message('ERROR', f"planner: stdwf_prepare_data_sources: SQL dump file is not specified.")
                 exit(1)
             if not os.path.exists(sql_file):
-                self.config_parser.print_log_message('ERROR', f"planner: run_prepare_data_sources: SQL dump file {sql_file} does not exist or is not accessible.")
+                self.config_parser.print_log_message('ERROR', f"planner: stdwf_prepare_data_sources: SQL dump file {sql_file} does not exist or is not accessible.")
                 exit(1)
 
             sql_dump_path = os.path.abspath(sql_file)
@@ -1391,7 +1444,7 @@ class Planner:
                             unl_dump_file = os.path.join(os.path.dirname(sql_dump_path), file_name)
                             data_file_found = True
                             if not os.path.exists(unl_dump_file):
-                                self.config_parser.print_log_message('ERROR', f"planner: run_prepare_data_sources: UNL dump file {unl_dump_file} for table {schema}.{table} does not exist or is not accessible.")
+                                self.config_parser.print_log_message('ERROR', f"planner: stdwf_prepare_data_sources: UNL dump file {unl_dump_file} for table {schema}.{table} does not exist or is not accessible.")
                                 data_file_found = False
 
                             converted_file_name = os.path.join(
@@ -1424,7 +1477,7 @@ class Planner:
                                 }
                             }
                             self.migrator_tables.insert_data_source(data_source)
-                            self.config_parser.print_log_message('DEBUG', f"planner: run_prepare_data_sources: Table {schema}.{table} data source: {data_source}")
+                            self.config_parser.print_log_message('DEBUG', f"planner: stdwf_prepare_data_sources: Table {schema}.{table} data source: {data_source}")
 
                             break
                         # Stop if another { TABLE is found before { unload
@@ -1435,7 +1488,227 @@ class Planner:
                 else:
                     i += 1
 
-        self.config_parser.print_log_message('INFO', "planner: run_prepare_data_sources: Data sources prepared successfully.")
+        self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_data_sources: Data sources prepared successfully.")
+
+    def mapping_match_tables(self):
+        self.config_parser.print_log_message('INFO', "planner: mapping_match_tables: Matching tables...")
+        from credativ_pg_migrator.connectors import match_schemas
+        import json
+
+        source_tables_raw = self.source_connection.fetch_table_names(self.source_schema_name)
+        target_tables_raw = self.target_connection.fetch_table_names(self.target_schema_name)
+
+        source_tables = [v['table_name'] for v in source_tables_raw.values()]
+        target_tables = [v['table_name'] for v in target_tables_raw.values()]
+
+        source_columns_map = {}
+        target_columns_map = {}
+        source_cols_raw = {}
+        target_cols_raw = {}
+
+        self.config_parser.print_log_message('INFO', "planner: mapping_match_tables: Fetching source/target metadata...")
+        for _, t in source_tables_raw.items():
+            self.config_parser.print_log_message('DEBUG3', f"planner: mapping_match_tables: Fetching columns for source table: {t['table_name']}")
+            cols = self.source_connection.fetch_table_columns({'table_schema': self.source_schema_name, 'table_name': t['table_name']})
+            source_cols_raw[t['table_name']] = cols
+            source_columns_map[t['table_name']] = [{'name': c['column_name'], **c} for c in cols.values()]
+
+        for _, t in target_tables_raw.items():
+            self.config_parser.print_log_message('DEBUG3', f"planner: mapping_match_tables: Fetching columns for target table: {t['table_name']}")
+            cols = self.target_connection.fetch_table_columns({'table_schema': self.target_schema_name, 'table_name': t['table_name']})
+            target_cols_raw[t['table_name']] = cols
+            target_columns_map[t['table_name']] = [{'name': c['column_name'], **c} for c in cols.values()]
+
+        settings = {
+            'config_parser': self.config_parser,
+            'source_tables': source_tables,
+            'target_tables': target_tables,
+            'source_internal': {},
+            'target_internal': {},
+            'source_columns_map': source_columns_map,
+            'target_columns_map': target_columns_map,
+            'column_prefixes': self.config_parser.get_migration_settings().get('column_prefixes', ["gov_", "log_"]),
+            'table_normalization_rules': self.config_parser.get_migration_settings().get('table_normalization_rules', ['lowercase', 'strip_trailing_numbers']),
+            'column_normalization_rules': self.config_parser.get_migration_settings().get('column_normalization_rules', ['lowercase', 'strip_trailing_numbers']),
+            'normalization_settings': self.config_parser.get_migration_settings().get('normalization_settings', {})
+        }
+
+        try:
+            query = f"SELECT name, table_name, column_name FROM {self.source_schema_name}.nscale_al_ixpropdef"
+            self.config_parser.print_log_message('DEBUG', f"planner: mapping_match_tables: Fetching source internal mappings using query: {query}")
+            self.source_connection.connect()
+            cursor = self.source_connection.connection.cursor()
+            cursor.execute(query)
+            for row in cursor.fetchall():
+                prop_name = row[0].lower() if row[0] else None
+                t_name = row[1].lower() if row[1] else None
+                c_name = row[2].lower() if row[2] else None
+                if prop_name and t_name and c_name:
+                    settings['source_internal'][prop_name] = f"{t_name}.{c_name}"
+            cursor.close()
+            self.source_connection.disconnect()
+            self.config_parser.print_log_message('DEBUG', f"planner: mapping_match_tables: Loaded {len(settings['source_internal'])} source internal mapping properties.")
+        except Exception as e:
+            self.config_parser.print_log_message('DEBUG', f"planner: mapping_match_tables: Failed to fetch source internal mappings: {e}")
+
+        try:
+            query = f"SELECT name, table_name, column_name FROM {self.target_schema_name}.nscale_al_ixpropdef"
+            self.config_parser.print_log_message('DEBUG', f"planner: mapping_match_tables: Fetching target internal mappings using query: {query}")
+            self.target_connection.connect()
+            cursor = self.target_connection.connection.cursor()
+            cursor.execute(query)
+            for row in cursor.fetchall():
+                prop_name = row[0].lower() if row[0] else None
+                t_name = row[1].lower() if row[1] else None
+                c_name = row[2].lower() if row[2] else None
+                if prop_name and t_name and c_name:
+                    settings['target_internal'][prop_name] = f"{t_name}.{c_name}"
+            cursor.close()
+            self.target_connection.disconnect()
+            self.config_parser.print_log_message('DEBUG', f"planner: mapping_match_tables: Loaded {len(settings['target_internal'])} target internal mapping properties.")
+        except Exception as e:
+            self.config_parser.print_log_message('DEBUG', f"planner: mapping_match_tables: Failed to fetch target internal mappings: {e}")
+
+        match_result = match_schemas.match_tables(settings)
+        self.config_parser.print_log_message('INFO', f"planner: mapping_match_tables: Found {len(match_result['matched_pairs'])} matched tables.")
+
+        for pair in match_result['matched_pairs']:
+            source_t = pair['source_table']
+            target_t = pair['target_table']
+            self.config_parser.print_log_message('DEBUG', f"planner: mapping_match_tables: Processing paired tables '{source_t}' -> '{target_t}' (method: {pair['method']})")
+
+            info_json = json.dumps({
+                'details': pair['details'],
+                'evidence': pair.get('evidence', []),
+                'stats': pair.get('stats', {})
+            })
+
+            # Define variables for the new structure
+            source_schema_name = self.source_schema_name
+            target_schema_name = self.target_schema_name
+            mapped_table = pair # Assuming 'pair' itself represents the mapped table info
+
+            self.migrator_tables.insert_mapping_tables({
+                'source_schema_name': source_schema_name,
+                'source_table_name': source_t, # Use source_t from the loop
+                'target_schema_name': target_schema_name,
+                'target_table_name': target_t, # Use target_t from the loop
+                'match_type': mapped_table['method'], # Use 'method' from 'pair'
+                'similarity_score': mapped_table.get('score', 0.0), # Use 'score' from 'pair'
+                'info': info_json # Use the already prepared info_json
+            })
+
+            col_settings = {
+                'config_parser': self.config_parser,
+                'source_columns': source_columns_map[source_t],
+                'target_columns': target_columns_map[target_t],
+                'column_prefixes': settings['column_prefixes'],
+                'column_normalization_rules': settings['column_normalization_rules'],
+                'normalization_settings': settings['normalization_settings']
+            }
+            col_match_res = match_schemas.match_columns(col_settings)
+            self.config_parser.print_log_message('DEBUG', f"planner: mapping_match_tables: Matched {len(col_match_res['matched_columns'])} columns for pair '{source_t}' -> '{target_t}'")
+
+            source_columns_dict = {}
+            target_columns_dict = {}
+
+            for idx, cpair in enumerate(col_match_res['matched_columns']):
+                source_c = cpair['source_column']
+                target_c = cpair['target_column']
+
+                # Define variables for the new structure
+                source_column_name = source_c['name']
+                target_column_name = target_c['name']
+                source_col = source_c
+                target_col = target_c
+                match_type = cpair['method']
+
+                self.migrator_tables.insert_mapping_columns({
+                    'source_schema_name': source_schema_name,
+                    'source_table_name': source_t, # Use source_t from the outer loop
+                    'source_column_name': source_column_name,
+                    'target_schema_name': target_schema_name,
+                    'target_table_name': target_t, # Use target_t from the outer loop
+                    'target_column_name': target_column_name,
+                    'source_ordinal_number': source_col.get('ordinal_position', 0) if source_col else 0,
+                    'target_ordinal_number': target_col.get('ordinal_position', 0) if target_col else 0,
+                    'source_data_type': source_col.get('data_type', '') if source_col else '',
+                    'target_data_type': target_col.get('data_type', '') if target_col else '',
+                    'match_type': match_type
+                })
+
+                source_columns_dict[idx] = source_c
+                target_columns_dict[idx] = target_c
+
+            source_t_info = next((v for v in source_tables_raw.values() if v['table_name'] == source_t), {})
+
+            self.config_parser.print_log_message('DEBUG3', f"planner: mapping_match_tables: Fetching source rows count for '{source_t}'")
+            self.source_connection.connect()
+            source_table_rows = self.source_connection.get_rows_count(self.source_schema_name, source_t)
+            self.source_connection.disconnect()
+
+            self.config_parser.print_log_message('DEBUG3', f"planner: mapping_match_tables: Fetching target rows count for '{target_t}'")
+            self.target_connection.connect()
+            target_table_rows = self.target_connection.get_rows_count(self.target_schema_name, target_t)
+            self.target_connection.disconnect()
+
+            if self.config_parser.get_target_db_type() == 'postgresql':
+                self.config_parser.print_log_message('DEBUG', f"planner: mapping_match_tables: Fetching target indexes, constraints and sequences for PG table '{target_t}'")
+                target_indexes = self.target_connection.fetch_mapping_target_indexes(self.target_schema_name, target_t)
+                for idx_info in target_indexes:
+                    self.migrator_tables.insert_mapping_target_indexes({
+                        'target_schema_name': self.target_schema_name,
+                        'target_table_name': target_t,
+                        'index_name': idx_info['index_name'],
+                        'index_def': idx_info['index_def'],
+                        'is_primary_key': idx_info['is_primary_key'],
+                        'index_type': idx_info.get('index_type', 'UNKNOWN')
+                    })
+
+                target_constraints = self.target_connection.fetch_mapping_target_constraints(self.target_schema_name, target_t)
+                for col_info in target_constraints:
+                    self.migrator_tables.insert_mapping_target_constraints({
+                        'target_schema_name': self.target_schema_name,
+                        'target_table_name': target_t,
+                        'constraint_name': col_info['constraint_name'],
+                        'constraint_type': col_info['constraint_type'],
+                        'constraint_def': col_info['constraint_def']
+                    })
+
+                target_sequences = self.target_connection.fetch_mapping_target_sequences(self.target_schema_name, target_t)
+                for seq_info in target_sequences:
+                    self.migrator_tables.insert_mapping_target_sequences({
+                        'target_schema_name': self.target_schema_name,
+                        'target_table_name': target_t,
+                        'sequence_schema_name': seq_info['sequence_schema_name'],
+                        'sequence_name': seq_info['sequence_name'],
+                        'used_in_default': seq_info['used_in_default'],
+                        'used_in_identity': seq_info['used_in_identity'],
+                        'used_in_trigger': seq_info['used_in_trigger'],
+                        'trigger_name': seq_info['trigger_name'],
+                        'column_name': seq_info['column_name']
+                    })
+
+            self.migrator_tables.insert_tables({
+                'source_schema_name': self.source_schema_name,
+                'source_table_name': source_t,
+                'source_table_id': source_t_info.get('id', source_t),
+                'source_columns': source_columns_dict,
+                'source_table_rows': source_table_rows,
+                'source_table_description': '',
+                'source_table_sql': getattr(source_t_info, 'source_table_sql', ''),
+                'target_schema_name': self.target_schema_name,
+                'target_table_name': target_t,
+                'target_alias_name': '',
+                'target_columns': target_columns_dict,
+                'target_table_rows': target_table_rows,
+                'target_table_sql': '',
+                'table_comment': source_t_info.get('comment', ''),
+                'partitioned': False,
+                'partitioned_by': '',
+                'partitioning_columns': '',
+                'create_partitions_sql': ''
+            })
 
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

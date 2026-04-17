@@ -355,7 +355,8 @@ class PostgreSQLConnector(DatabaseConnector):
             # if column_info['column_type_substitution'] != '':
             #     column_data_type = column_info['column_type_substitution'].upper()
             if column_info['data_type'] == 'USER-DEFINED' and column_info['udt_schema'] != '' and column_info['udt_name'] != '':
-                column_data_type = f'''"{column_info['udt_schema']}"."{column_info['udt_name']}"'''
+                mapped_schema = target_schema_name if column_info['udt_schema'] == source_schema_name else column_info['udt_schema']
+                column_data_type = f'''"{mapped_schema}"."{column_info['udt_name']}"'''
             # elif column_info['basic_data_type'] != '':
             #     column_data_type = column_info['basic_data_type'].upper()
 
@@ -759,6 +760,185 @@ class PostgreSQLConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', e)
             raise
 
+    def fetch_mapping_target_indexes(self, schema_name: str, table_name: str):
+        query = f"""
+            SELECT
+                i.relname as indexname,
+                pg_get_indexdef(i.oid) as indexdef,
+                ix.indisprimary as is_primary_key,
+                am.amname as indextype
+            FROM pg_class t
+            JOIN pg_index ix ON t.oid = ix.indrelid
+            JOIN pg_class i ON i.oid = ix.indexrelid
+            JOIN pg_namespace n ON t.relnamespace = n.oid
+            JOIN pg_am am ON i.relam = am.oid
+            WHERE n.nspname = '{schema_name}' AND t.relname = '{table_name}'
+        """
+        indexes = []
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            for row in cursor.fetchall():
+                indexes.append({
+                    'index_name': row[0],
+                    'index_def': row[1],
+                    'is_primary_key': row[2],
+                    'index_type': row[3].upper() if row[3] else 'UNKNOWN'
+                })
+            cursor.close()
+            self.disconnect()
+            return indexes
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"postgresql_connector: fetch_mapping_target_indexes: Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
+            return []
+
+    def fetch_mapping_target_constraints(self, schema_name: str, table_name: str):
+        query = f"""
+            SELECT
+                c.conname,
+                pg_get_constraintdef(c.oid) as condef,
+                CASE WHEN contype = 'c' THEN 'CHECK'
+                     WHEN contype = 'f' THEN 'FOREIGN KEY'
+                     WHEN contype = 'p' THEN 'PRIMARY KEY'
+                     WHEN contype = 'u' THEN 'UNIQUE'
+                     WHEN contype = 't' THEN 'TRIGGER'
+                     WHEN contype = 'x' THEN 'EXCLUSION'
+                     ELSE contype::text END as type
+            FROM pg_constraint c
+            JOIN pg_class t ON c.conrelid = t.oid
+            JOIN pg_namespace n ON t.relnamespace = n.oid
+            WHERE n.nspname = '{schema_name}' AND t.relname = '{table_name}'
+            AND c.contype NOT IN ('n')
+        """
+        constraints = []
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            for row in cursor.fetchall():
+                constraints.append({
+                    'constraint_name': row[0],
+                    'constraint_def': row[1],
+                    'constraint_type': row[2]
+                })
+            cursor.close()
+            self.disconnect()
+            return constraints
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"postgresql_connector: fetch_mapping_target_constraints: Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
+            return []
+
+    def fetch_mapping_target_sequences(self, schema_name: str, table_name: str):
+        self.config_parser.print_log_message('DEBUG', f"postgresql_connector: fetch_mapping_target_sequences: Fetching sequences for {schema_name}.{table_name}")
+        query_general = f"""
+            SELECT 
+                a.attname as column_name,
+                s.relname as sequence_name,
+                n.nspname as sequence_schema_name,
+                a.attidentity != '' as is_identity,
+                pg_get_expr(ad.adbin, ad.adrelid) as default_expr
+            FROM pg_class t
+            JOIN pg_namespace tn ON t.relnamespace = tn.oid
+            JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum > 0 AND NOT a.attisdropped
+            LEFT JOIN pg_attrdef ad ON ad.adrelid = t.oid AND ad.adnum = a.attnum
+            LEFT JOIN pg_depend d ON d.refobjid = t.oid AND d.refobjsubid = a.attnum AND d.classid = 'pg_class'::regclass AND d.refclassid = 'pg_class'::regclass
+            LEFT JOIN pg_class s ON s.oid = d.objid AND s.relkind = 'S'
+            LEFT JOIN pg_namespace n ON s.relnamespace = n.oid
+            WHERE tn.nspname = '{schema_name}' AND t.relname = '{table_name}'
+            AND (
+                s.oid IS NOT NULL 
+                OR (ad.adbin IS NOT NULL AND pg_get_expr(ad.adbin, ad.adrelid) LIKE '%nextval(%')
+            )
+        """
+
+        sequences = []
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            
+            # Fetch default and identity sequences
+            cursor.execute(query_general)
+            for row in cursor.fetchall():
+                col_name = row[0]
+                seq_name = row[1]
+                seq_schema = row[2]
+                is_identity = row[3]
+                default_expr = row[4]
+                
+                used_in_default = False
+                if default_expr and 'nextval(' in default_expr:
+                    used_in_default = True
+                    if not seq_name:
+                        import re
+                        match = re.search(r"nextval\('([^']+)'", default_expr)
+                        if match:
+                            full_name = match.group(1).replace('"', '').replace("'::regclass", "")
+                            if '.' in full_name:
+                                seq_schema, seq_name = full_name.split('.', 1)
+                            else:
+                                seq_schema = schema_name
+                                seq_name = full_name
+                
+                if seq_name:
+                    sequences.append({
+                        'sequence_schema_name': seq_schema,
+                        'sequence_name': seq_name,
+                        'used_in_default': used_in_default,
+                        'used_in_identity': is_identity,
+                        'used_in_trigger': False,
+                        'trigger_name': None,
+                        'column_name': col_name
+                    })
+
+            # Fetch triggered sequences
+            query_triggers = f"""
+                SELECT tg.tgname, pg_get_triggerdef(tg.oid) as trigger_def
+                FROM pg_trigger tg
+                JOIN pg_class t ON tg.tgrelid = t.oid
+                JOIN pg_namespace n ON t.relnamespace = n.oid
+                WHERE n.nspname = '{schema_name}' AND t.relname = '{table_name}' AND tg.tgname NOT LIKE 'RI_ConstraintTrigger%'
+            """
+            cursor.execute(query_triggers)
+            for row in cursor.fetchall():
+                tgname = row[0]
+                tgdef = row[1]
+                if tgdef and 'nextval(' in tgdef:
+                    import re
+                    matches = re.findall(r"nextval\('([^']+)'", tgdef)
+                    for match in matches:
+                        full_name = match.replace('"', '').replace("'::regclass", "")
+                        if '.' in full_name:
+                            seq_schema, seq_name = full_name.split('.', 1)
+                        else:
+                            seq_schema = schema_name
+                            seq_name = full_name
+                        sequences.append({
+                            'sequence_schema_name': seq_schema,
+                            'sequence_name': seq_name,
+                            'used_in_default': False,
+                            'used_in_identity': False,
+                            'used_in_trigger': True,
+                            'trigger_name': tgname,
+                            'column_name': None
+                        })
+
+            cursor.close()
+            self.disconnect()
+            
+            # Deduplicate
+            unique_seqs = {}
+            for s in sequences:
+                key = (s['sequence_schema_name'], s['sequence_name'], s['column_name'], s['trigger_name'])
+                unique_seqs[key] = s
+            return list(unique_seqs.values())
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"postgresql_connector: fetch_mapping_target_sequences: Error fetching sequences for {schema_name}.{table_name}")
+            self.config_parser.print_log_message('ERROR', e)
+            return []
+
     def get_create_constraint_sql(self, settings):
         create_constraint_query = ''
         source_db_type = settings['source_db_type']
@@ -1017,6 +1197,7 @@ class PostgreSQLConnector(DatabaseConnector):
             else:
 
                 if source_table_rows > target_table_rows:
+                    migrator_tables.update_data_migration_started(protocol_id)
 
                     part_name = 'migrate_table in batches using cursor'
                     self.config_parser.print_log_message('INFO', f"postgresql_connector: migrate_table: Worker {worker_id}: Source table {source_table_name}: {source_table_rows} rows / Target table {target_table_name}: {target_table_rows} rows - starting data migration.")
@@ -1115,6 +1296,7 @@ class PostgreSQLConnector(DatabaseConnector):
                             'worker_id': worker_id,
                             'migrator_tables': migrator_tables,
                             'insert_columns': insert_columns,
+                            'insert_values': settings.get('insert_values'),
                         })
                         total_inserted_rows += inserted_rows
                         inserting_end_time = time.time()
@@ -1235,9 +1417,13 @@ class PostgreSQLConnector(DatabaseConnector):
         insert_columns = settings.get('insert_columns', None)
 
         insert_columns_provided = settings.get('insert_columns', None)
+        insert_values = settings.get('insert_values', None)
 
         if not insert_columns:
-            insert_columns = [f'"{columns[col]["column_name"]}"' for col in sorted(columns.keys())]
+            insert_columns = [f'"{columns[col]["column_name"]}"' for col in sorted(columns.keys(), key=lambda x: int(x))]
+
+        if not insert_values:
+            insert_values = ', '.join(['%s' for _ in columns.keys()])
 
         if isinstance(insert_columns, list):
             insert_columns = ', '.join(insert_columns)
@@ -1253,7 +1439,7 @@ class PostgreSQLConnector(DatabaseConnector):
                 if insert_columns_provided and len(data) > 0:
                     extract_keys = list(data[0].keys())
                 else:
-                    extract_keys = [columns[col]['column_name'] for col in sorted(columns.keys())]
+                    extract_keys = [columns[col]['column_name'] for col in sorted(columns.keys(), key=lambda x: int(x))]
 
                 formatted_data = []
                 for item in data:
@@ -1272,7 +1458,7 @@ class PostgreSQLConnector(DatabaseConnector):
             self.config_parser.print_log_message('DEBUG2', f"postgresql_connector: insert_batch: Worker {worker_id}: insert_batch [2] into {target_schema_name}.{target_table_name} with {len(data)} rows, columns: |{insert_columns}| data type: {type(data)}")
 
             with self.connection.cursor() as cursor:
-                insert_query = sql.SQL(f"""INSERT INTO "{target_schema_name}"."{target_table_name}" ({insert_columns}) VALUES ({', '.join(['%s' for _ in columns.keys()])})""")
+                insert_query = sql.SQL(f"""INSERT INTO "{target_schema_name}"."{target_table_name}" ({insert_columns}) VALUES ({insert_values})""")
                 self.config_parser.print_log_message('DEBUG3', f"postgresql_connector: insert_batch: Worker {worker_id}: Insert query: {insert_query}")
                 self.connection.autocommit = False
                 try:
@@ -2026,6 +2212,136 @@ class PostgreSQLConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', f"postgresql_connector: get_top_n_tables: Error fetching top tables by rows: {e}")
 
         return top_tables
+    
+    def get_table_checksum(self, schema_name: str, table_name: str, columns: list):
+        if not columns:
+            return None
+        # Use hashtext of the concatenated text representations
+        cols_concat = " || ".join([f"COALESCE(\"{col['column_name']}\"::text, '')" for col in columns])
+        query = f'SELECT sum(hashtext({cols_concat})) FROM "{schema_name}"."{table_name}"'
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            result = cursor.fetchone()[0]
+            cursor.close()
+            self.disconnect()
+            return result
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"postgresql_connector: get_table_checksum: Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
+            return None
+
+    def get_random_pks(self, schema_name: str, table_name: str, pk_columns: list, sample_size: int):
+        if not pk_columns:
+            return []
+        cols = ", ".join([f'"{c}"' for c in pk_columns])
+        query = f'SELECT {cols} FROM "{schema_name}"."{table_name}" ORDER BY random() LIMIT {sample_size}'
+        pks = []
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            for row in cursor.fetchall():
+                pks.append(dict(zip(pk_columns, row)))
+            cursor.close()
+            self.disconnect()
+            return pks
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"postgresql_connector: get_random_pks: Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
+            return []
+
+    def get_row_checksums(self, schema_name: str, table_name: str, pk_columns: list, pk_values_list: list, columns: list):
+        if not columns or not pk_columns or not pk_values_list:
+            return {}
+        cols_concat = " || ".join([f"COALESCE(\"{col['column_name']}\"::text, '')" for col in columns])
+        pk_cols_str = ", ".join([f'"{c}"' for c in pk_columns])
+        
+        # Build IN clause properly
+        in_values = []
+        for pk_dict in pk_values_list:
+            vals = []
+            for c in pk_columns:
+                val = pk_dict[c]
+                if val is None:
+                    vals.append("NULL")
+                elif isinstance(val, str):
+                    vals.append(f"'{val.replace('\'', '\'\'')}'")
+                else:
+                    vals.append(str(val))
+            in_values.append(f"({', '.join(vals)})")
+        
+        where_clause = f"({pk_cols_str}) IN ({', '.join(in_values)})"
+        if len(pk_columns) == 1:
+            where_clause = f"{pk_cols_str} IN ({', '.join([v.strip('()') for v in in_values])})"
+            
+        query = f'SELECT {pk_cols_str}, hashtext({cols_concat}) FROM "{schema_name}"."{table_name}" WHERE {where_clause}'
+        
+        checksums = {}
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            for row in cursor.fetchall():
+                pk_tuple = tuple(row[:len(pk_columns)])
+                pk_key = pk_tuple[0] if len(pk_tuple) == 1 else pk_tuple
+                checksums[pk_key] = row[-1]
+            cursor.close()
+            self.disconnect()
+            return checksums
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"postgresql_connector: get_row_checksums: Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
+            return {}
+
+    def get_lob_sizes(self, schema_name: str, table_name: str, pk_columns: list, pk_values_list: list, lob_columns: list):
+        if not lob_columns or not pk_columns or not pk_values_list:
+            return {}
+            
+        size_cols = []
+        for col in lob_columns:
+            if 'bytea' in col['data_type'].lower():
+                size_cols.append(f"octet_length(\"{col['column_name']}\")")
+            else:
+                size_cols.append(f"length(\"{col['column_name']}\")")
+                
+        size_selects = ", ".join(size_cols)
+        pk_cols_str = ", ".join([f'"{c}"' for c in pk_columns])
+        
+        in_values = []
+        for pk_dict in pk_values_list:
+            vals = []
+            for c in pk_columns:
+                val = pk_dict[c]
+                if val is None:
+                    vals.append("NULL")
+                elif isinstance(val, str):
+                    vals.append(f"'{val.replace('\'', '\'\'')}'")
+                else:
+                    vals.append(str(val))
+            in_values.append(f"({', '.join(vals)})")
+        
+        where_clause = f"({pk_cols_str}) IN ({', '.join(in_values)})"
+        if len(pk_columns) == 1:
+            where_clause = f"{pk_cols_str} IN ({', '.join([v.strip('()') for v in in_values])})"
+            
+        query = f'SELECT {pk_cols_str}, {size_selects} FROM "{schema_name}"."{table_name}" WHERE {where_clause}'
+        
+        sizes = {}
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            for row in cursor.fetchall():
+                pk_tuple = tuple(row[:len(pk_columns)])
+                pk_key = pk_tuple[0] if len(pk_tuple) == 1 else pk_tuple
+                sizes[pk_key] = row[len(pk_columns):]
+            cursor.close()
+            return sizes
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"postgresql_connector: get_lob_sizes: Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
+            return {}
 
     def get_top_fk_dependencies(self, settings):
         top_fk_dependencies = {}

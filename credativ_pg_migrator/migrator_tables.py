@@ -3402,9 +3402,9 @@ class MigratorTables:
                         if val: details.append(f"{val}: {c}")
 
                 if obj_name == 'Tables':
-                    cursor.execute(f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_data_migration()}" WHERE source_table_rows = 0 OR source_table_rows IS NULL""")
+                    cursor.execute(f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{table_name}" WHERE source_table_rows = 0 OR source_table_rows IS NULL""")
                     empty_tables = cursor.fetchone()[0]
-                    cursor.execute(f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_data_migration()}" WHERE source_table_rows > 0""")
+                    cursor.execute(f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{table_name}" WHERE source_table_rows > 0""")
                     data_tables = cursor.fetchone()[0]
                     details.append(f"Empty: {empty_tables}, With Data: {data_tables}")
 

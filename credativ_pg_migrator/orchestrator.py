@@ -1630,9 +1630,11 @@ class Orchestrator:
                     self.migrator_tables.update_constraint_status({'row_id': constraint_data['id'], 'success': False, 'message': f'ERROR: target table {target_schema_name}.{target_table_name_to_check} does not exist'})
                     return False
 
+                # if constraint_data['constraint_type'] is 'FOREIGN KEY': ## original version on main - must be tested
                 if referenced_table_name and referenced_table_name.strip():
                     referenced_target_table = self.migrator_tables.select_table_by_source({'source_schema_name': referenced_table_schema, 'source_table_name': referenced_table_name})
                     if referenced_target_table is None:
+                        self.config_parser.print_log_message('INFO', f"orchestrator: type is {constraint_data['constraint_type']}")
                         self.config_parser.print_log_message('ERROR', f"orchestrator: constraint_worker: Worker {worker_id}: Referenced table {referenced_table_schema}.{referenced_table_name} for constraint {constraint_name} not found - skipping constraint creation.")
                         self.migrator_tables.update_constraint_status({'row_id': constraint_data['id'], 'success': False, 'message': f'ERROR: referenced table {referenced_table_schema}.{referenced_table_name} not found'})
                         worker_target_connection.disconnect()

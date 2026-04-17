@@ -1,6 +1,12 @@
 # Changelog
 
-## 0.13.0rc1 - 2026.04.16
+## 0.13.1 - 2026.04.17
+
+- 2026.04.17
+
+  - Fixes - fix in summary, repaired reported count of tables.
+
+## 0.13.0 - 2026.04.16
 
 - 2026.04.16
 

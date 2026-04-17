@@ -3032,7 +3032,15 @@ class MigratorTables:
                 self.config_parser.print_log_message('DEBUG3', f"migrator_tables: update_view_status: ({func_run_id}): Returned row: {view_row}")
                 self.update_protocol({'object_type': 'view', 'object_protocol_id': view_row['id'], 'execution_success': success, 'execution_error_message': message, 'execution_results': None})
                 if view_row.get('alias_view') and self.config_parser.get_source_db_type() == 'ibm_db2_zos':
-                    self.update_aliases_status({'row_id': view_row.get('source_view_id'), 'success': success, 'message': message})
+                    source_alias_id = view_row.get('source_view_id') - 1000000
+                    cursor = self.protocol_connection.connection.cursor()
+                    cursor.execute(f'SELECT id FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_aliases()}" WHERE source_alias_id = %s', (source_alias_id,))
+                    alias_rec = cursor.fetchone()
+                    cursor.close()
+                    if alias_rec:
+                        self.update_aliases_status({'row_id': alias_rec[0], 'success': success, 'message': message})
+                    else:
+                        self.config_parser.print_log_message('ERROR', f"migrator_tables: update_view_status: ({func_run_id}): Could not find alias with source_alias_id {source_alias_id} to update its status.")
 
             else:
                 self.config_parser.print_log_message('ERROR', f"migrator_tables: update_view_status: ({func_run_id}): Error updating status for view {row_id} in {table_name}.")

@@ -4,7 +4,7 @@
 
 - 2026.04.17
 
-  - Fixes - fix in summary, repaired reported count of tables.
+  - Fixes - fix in summary, repaired reported count of tables. Repair in protocol for alias.
 
 ## 0.13.0 - 2026.04.16
 

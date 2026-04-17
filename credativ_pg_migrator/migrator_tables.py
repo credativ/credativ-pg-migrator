@@ -2534,6 +2534,7 @@ class MigratorTables:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
             row = cursor.fetchone()
+            self.protocol_connection.connection.commit()
             cursor.close()
 
             if not row:

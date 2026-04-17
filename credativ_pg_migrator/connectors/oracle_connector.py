@@ -1265,7 +1265,8 @@ class OracleConnector(DatabaseConnector):
                 if val is None:
                     vals.append("NULL")
                 elif isinstance(val, str):
-                    vals.append(f"'{val.replace('\'', '\'\'')}'")
+                    escaped_val = val.replace("'", "''")
+                    vals.append(f"'{escaped_val}'")
                 else:
                     vals.append(str(val))
             in_values.append(f"({', '.join(vals)})")
@@ -1309,7 +1310,8 @@ class OracleConnector(DatabaseConnector):
                 if val is None:
                     vals.append("NULL")
                 elif isinstance(val, str):
-                    vals.append(f"'{val.replace('\'', '\'\'')}'")
+                    escaped_val = val.replace("'", "''")
+                    vals.append(f"'{escaped_val}'")
                 else:
                     vals.append(str(val))
             in_values.append(f"({', '.join(vals)})")

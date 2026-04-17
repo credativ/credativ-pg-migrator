@@ -1321,19 +1321,24 @@ class OracleConnector(DatabaseConnector):
         query = f'SELECT {pk_cols_str}, {size_selects} FROM "{schema_name.upper()}"."{table_name.upper()}" WHERE {where_clause}'
         
         sizes = {}
+        cursor = None
         try:
+            self.connect()
             cursor = self.connection.cursor()
             cursor.execute(query)
             for row in cursor.fetchall():
                 pk_tuple = tuple(row[:len(pk_columns)])
                 pk_key = pk_tuple[0] if len(pk_tuple) == 1 else pk_tuple
                 sizes[pk_key] = row[len(pk_columns):]
-            cursor.close()
             return sizes
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"oracle_connector: get_lob_sizes: Error executing query: {query}")
             self.config_parser.print_log_message('ERROR', e)
             return {}
+        finally:
+            if cursor is not None:
+                cursor.close()
+            self.disconnect()
 
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

@@ -1,6 +1,17 @@
 credativ-pg-migrator Releases
 =============================
 
+0.13.0 - 20.04.2026
+-------------------
+
+* New migration workflow for migrating applications data between installations on different databases
+  Typical use case are ticketing systems or accounting software which supports proprietary database and PostgreSQL
+  Workflow maps tables and columns from original installation to PostgreSQL installation and migrates just data
+* New TSQL parser for MS SQL Server and Sybase ASE
+  Our new custom built parser is able to process even very messy source code of stored procedures and triggers and convert them to PL/pgSQL code for PostgreSQL
+* New migration summary output
+* Multiple fixes in all connectors
+
 0.12.2 - 15.04.2026
 -------------------
 

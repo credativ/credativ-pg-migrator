@@ -35,6 +35,7 @@ class TsqlParser:
         self.inserts = []
         self.update_commands = []
         self.select_commands = []
+        self.exec_commands = []
         self.if_commands = []
         self.delete_commands = []
         self.print_commands = []
@@ -973,7 +974,7 @@ class TsqlParser:
                         is_terminator = False
                         if current_content == "":
                             is_terminator = True
-                        elif re.match(r'^(IF|ELSE\s+IF|ELSE|END|BEGIN|UPDATE|INSERT|RETURN)\b', current_content, re.IGNORECASE):
+                        elif re.match(r'^(IF|ELSE\s+IF|ELSE|END|BEGIN|UPDATE|INSERT|RETURN|SELECT|DELETE|PRINT|SET|EXEC|EXECUTE)\b', current_content, re.IGNORECASE):
                             is_terminator = True
 
                         if is_terminator:
@@ -1025,6 +1026,58 @@ class TsqlParser:
                 self.select_commands.append({
                     "line": start_line,
                     "content": full_select
+                })
+            else:
+                new_body_lines.append(line)
+                i += 1
+
+        self.body_lines = new_body_lines
+
+    def pass_6c_parse_execs(self):
+        """
+        Pass 6c: Parses EXEC / EXECUTE commands.
+        Starts with EXEC or EXECUTE.
+        """
+        self.log("Running Pass 6c: Parse EXECs")
+        new_body_lines = []
+        i = 0
+        while i < len(self.body_lines):
+            line = self.body_lines[i]
+            content = line.content.strip()
+
+            if re.match(r'^(EXEC|EXECUTE)\b', content, re.IGNORECASE):
+                start_line = line.line_number
+                exec_lines = []
+
+                while i < len(self.body_lines):
+                    current_line = self.body_lines[i]
+                    current_content = current_line.content.strip()
+
+                    if len(exec_lines) > 0:
+                        is_terminator = False
+                        if current_content == "":
+                            is_terminator = True
+                        elif re.match(r'^(IF|ELSE\s+IF|ELSE|END|BEGIN|UPDATE|INSERT|RETURN|SELECT|DELETE|PRINT|SET|EXEC|EXECUTE)\b', current_content, re.IGNORECASE):
+                            is_terminator = True
+
+                        if is_terminator:
+                            prev_content = exec_lines[-1].strip()
+                            is_continuation = False
+                            if prev_content.endswith(","):
+                                is_continuation = True
+                            
+                            if not is_continuation:
+                                break
+                    
+                    exec_lines.append(current_line.content)
+                    i += 1
+
+                cleaned_lines = [l.strip() for l in exec_lines]
+                full_exec = " ".join(cleaned_lines)
+
+                self.exec_commands.append({
+                    "line": start_line,
+                    "content": full_exec
                 })
             else:
                 new_body_lines.append(line)
@@ -1270,7 +1323,9 @@ class TsqlParser:
             self.print_commands,
             self.set_commands,
             self.select_commands,
-            self.if_commands
+            self.exec_commands,
+            self.if_commands,
+            self.comments
         ]
 
         for array in targets:
@@ -1317,6 +1372,10 @@ class TsqlParser:
         print(f"--- SELECT COMMANDS ARRAY ({len(self.select_commands)} items) ---")
         for s in self.select_commands:
             print(f"Line {s['line']}: {s['content']}")
+
+        print(f"--- EXEC COMMANDS ARRAY ({len(self.exec_commands)} items) ---")
+        for e in self.exec_commands:
+            print(f"Line {e['line']}: {e['content']}")
 
         print(f"--- IF COMMANDS ARRAY ({len(self.if_commands)} items) ---")
         for f in self.if_commands:
@@ -1452,6 +1511,12 @@ class TsqlParser:
             if not content.strip().endswith(';'):
                 content += ';'
             body_parts.append((s['line'], content, "select_commands"))
+
+        for e in self.exec_commands:
+            content = e['content']
+            if not content.strip().endswith(';'):
+                content += ';'
+            body_parts.append((e['line'], content, "exec_commands"))
 
         for f in self.if_commands:
             content = f['content']
@@ -1705,6 +1770,9 @@ class TsqlParser:
 
         # Pass 6
         self.pass_6_parse_selects()
+
+        # Pass 6c
+        self.pass_6c_parse_execs()
 
         # Pass 7
         self.pass_7_parse_if_commands()

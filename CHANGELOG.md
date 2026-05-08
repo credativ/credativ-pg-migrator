@@ -8,6 +8,9 @@
   - Fix - T-SQL Parser: Added extraction of `PRINT` statements and automatic conversion to PostgreSQL `RAISE WARNING` commands.
   - Fix - T-SQL Parser: Safely encapsulated behavior-modifying `SET` commands (e.g., `SET NOCOUNT ON`) within `/* ... - Sybase Syntax */` comments to avoid syntax errors.
   - Fix - T-SQL Parser: Fixed parsing of single-line inline `IF` statements by introducing a new pre-processing pass that safely splits the condition from the inline command, enabling the generator to natively inject the required `END IF;` terminator.
+  - Fix - T-SQL Parser: Resolved an issue where adjacent `SELECT` statements were incorrectly merged into a single AST node by expanding the pass terminator matrix to include `SELECT`, `DELETE`, `PRINT`, `SET`, `EXEC`, and `EXECUTE`.
+  - Fix - T-SQL Parser: Introduced `pass_6c_parse_execs` to natively extract and process legacy `EXEC` and `EXECUTE` procedure invocations, preventing them from falling through to the generic `TODO: not processed line` syntax trap.
+  - Fix - T-SQL Parser: Expanded `pass_9_rename_variables` to iterate over legacy inline and multi-line comments, successfully rewriting embedded `@var` arguments to their localized `locvar_` variants for complete context accuracy.
 
 - 2026.04.17
 

@@ -689,6 +689,9 @@ class TsqlParser:
                 # Rule: "remove all spaces ... remove new line characters"
                 cleaned_lines = [l.strip() for l in insert_lines]
                 full_insert = " ".join(cleaned_lines)
+                
+                # Sybase ASE allows "INSERT table", PostgreSQL requires "INSERT INTO table"
+                full_insert = re.sub(r'^INSERT\s+(?!INTO\s+)', 'INSERT INTO ', full_insert, flags=re.IGNORECASE)
 
                 self.inserts.append({
                     "line": start_line,
@@ -1345,14 +1348,93 @@ class TsqlParser:
             '140': 'YYYY-MM-DD HH24:MI:SS.US'
         }
 
-        def replacer(match):
-            expr = match.group(1).strip()
-            style = match.group(2).strip()
-            pg_format = style_map.get(style, None)
-            if pg_format:
-                return f"to_char({expr}, '{pg_format}')"
-            else:
-                return match.group(0)
+        def process_converts_in_string(s):
+            result = ""
+            i = 0
+            while i < len(s):
+                # Find next 'convert'
+                next_convert = s.lower().find('convert', i)
+                if next_convert == -1:
+                    result += s[i:]
+                    break
+                
+                # Check if it's a word boundary
+                if next_convert > 0 and (s[next_convert-1].isalnum() or s[next_convert-1] == '_'):
+                    result += s[i:next_convert+7]
+                    i = next_convert + 7
+                    continue
+                    
+                # Match to see if it has '('
+                match = re.match(r'convert\s*\(', s[next_convert:], re.IGNORECASE)
+                if match:
+                    result += s[i:next_convert]
+                    start_idx = next_convert
+                    args_start = next_convert + match.end()
+                    paren_level = 1
+                    in_single_quote = False
+                    in_double_quote = False
+                    args = []
+                    current_arg = ""
+                    
+                    j = args_start
+                    while j < len(s):
+                        char = s[j]
+                        if char == "'" and not in_double_quote:
+                            in_single_quote = not in_single_quote
+                            current_arg += char
+                        elif char == '"' and not in_single_quote:
+                            in_double_quote = not in_double_quote
+                            current_arg += char
+                        elif char == '(' and not in_single_quote and not in_double_quote:
+                            paren_level += 1
+                            current_arg += char
+                        elif char == ')' and not in_single_quote and not in_double_quote:
+                            paren_level -= 1
+                            if paren_level == 0:
+                                args.append(current_arg.strip())
+                                break
+                            current_arg += char
+                        elif char == ',' and paren_level == 1 and not in_single_quote and not in_double_quote:
+                            args.append(current_arg.strip())
+                            current_arg = ""
+                        else:
+                            current_arg += char
+                        j += 1
+                    
+                    if paren_level == 0:
+                        # Successfully parsed a convert(...) block
+                        if len(args) == 2:
+                            # convert(type, expr)
+                            arg_type = args[0]
+                            arg_expr = args[1]
+                            replacement = f"CAST({arg_expr} AS {arg_type})"
+                            result += replacement
+                        elif len(args) == 3:
+                            # convert(type, expr, style)
+                            arg_type = args[0]
+                            arg_expr = args[1]
+                            arg_style = args[2]
+                            
+                            is_char = re.match(r'^(var)?char', arg_type, re.IGNORECASE)
+                            pg_format = style_map.get(arg_style, None)
+                            
+                            if is_char and pg_format:
+                                replacement = f"to_char({arg_expr}, '{pg_format}')"
+                            else:
+                                # Fallback if style isn't mapped or not char, just cast
+                                replacement = f"CAST({arg_expr} AS {arg_type})"
+                            result += replacement
+                        else:
+                            # Unknown format, keep as is
+                            result += s[start_idx:j+1]
+                        
+                        i = j + 1
+                        continue
+                
+                result += s[i]
+                i += 1
+                
+            return result
 
         targets = [
             self.variables,
@@ -1367,18 +1449,15 @@ class TsqlParser:
             self.comments
         ]
 
-        # Use non-greedy match for expr up to the last comma and style
-        regex = r'convert\s*\(\s*(?:var)?char[^,]*\s*,\s*(.*?)\s*,\s*(\d+)\s*\)'
-
         for line_obj in self.header_lines:
-            line_obj.content = re.sub(regex, replacer, line_obj.content, flags=re.IGNORECASE)
+            line_obj.content = process_converts_in_string(line_obj.content)
 
         for line_obj in self.body_lines:
-            line_obj.content = re.sub(regex, replacer, line_obj.content, flags=re.IGNORECASE)
+            line_obj.content = process_converts_in_string(line_obj.content)
 
         for array in targets:
             for item in array:
-                item['content'] = re.sub(regex, replacer, item['content'], flags=re.IGNORECASE)
+                item['content'] = process_converts_in_string(item['content'])
 
     def pass_9_rename_variables(self):
         """

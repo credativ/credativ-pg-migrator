@@ -890,6 +890,14 @@ class TsqlParser:
                 else:
                     full_print = re.sub(r'^PRINT\b', 'RAISE WARNING', full_print, flags=re.IGNORECASE)
 
+                # Convert double quotes to single quotes and escape existing single quotes
+                def replace_double_quotes(match):
+                    inner_text = match.group(1)
+                    inner_text = inner_text.replace("'", "''")
+                    return f"'{inner_text}'"
+                
+                full_print = re.sub(r'"([^"]*)"', replace_double_quotes, full_print)
+
                 self.print_commands.append({
                     "line": start_line,
                     "content": full_print
@@ -1142,6 +1150,9 @@ class TsqlParser:
                                 if content[j:].upper().startswith(kw):
                                     end_idx = j + len(kw)
                                     if end_idx == len(content) or (not content[end_idx].isalnum() and content[end_idx] != '_'):
+                                        # Special check: UPDATE() is a function, not a command.
+                                        if kw == "UPDATE" and content[j:].strip()[len(kw):].strip().startswith("("):
+                                            continue
                                         split_idx = j
                                         break
                             if split_idx != -1:
@@ -1769,88 +1780,72 @@ class TsqlParser:
         """
         Pass 12: Adding levels of IF commands and END IF; commands.
         """
-        self.log("Running Pass 12: Add IF Levels")
-
-        # Rule 145: set special memory variable if_command_level to 0
-        current_if_level = 0
-
-        # Go through each line in output_array
-        # Rule 144: "go through each line ... in the order of line numbers"
-
-        # We need to look ahead? No, logic seems sequential based on "continue with next line".
-        # Actually logic says: "rule-if - when you find...".
-        # "rule-if-content - continue with next line..."
-        # This implies a state machine iterating strictly line by line?
-        # Or does "continue with next line" mean "check the next line in the sequence"?
-        # It seems like a loop over lines.
-
-        i = 0
-        while i < len(output_array):
-            line = output_array[i]
+        self.log("Running Pass 12: Add IF Levels and END IF; commands")
+        new_array = []
+        if_stack = []
+        
+        for i, line in enumerate(output_array):
             content = line.content.strip()
-            source = line.source_array
-
-            # Rule 146: "rule-if" - first line starting with IF
-            # "when you find the first line starting with IF"
-            # Is this global first? Or just "when you encounter a line starting with IF"?
-            # Given "assign current value ... to special item", likely "When you find A line starting with IF".
-
+            
+            # Skip empty lines, top level separators, and comments
+            if content == "" or content == "$$" or content == "$$ LANGUAGE plpgsql;" or content.startswith("/*"):
+                new_array.append(line)
+                continue
+                
+            # If we are expecting a target for the top of the stack...
+            if if_stack and if_stack[-1]["state"] == "EXPECT_TARGET":
+                if re.match(r'^BEGIN\b', content, re.IGNORECASE):
+                    if_stack[-1]["state"] = "INSIDE_BEGIN"
+                else:
+                    # It's a single statement! It completes the target immediately!
+                    if_stack[-1]["state"] = "TARGET_COMPLETED"
+                    
+            # Check what the current line is
             if re.match(r'^IF\b', content, re.IGNORECASE):
-                line.if_command_level = current_if_level
-                i += 1
-                continue
+                # New IF statement starts
+                if_stack.append({"state": "EXPECT_TARGET"})
+                new_array.append(line)
+                
+            elif re.match(r'^(ELSIF|ELSE\s+IF|ELSE)\b', content, re.IGNORECASE):
+                # Extends the current IF statement
+                if if_stack:
+                    if_stack[-1]["state"] = "EXPECT_TARGET"
+                new_array.append(line)
+                
+            elif re.match(r'^END;', content, re.IGNORECASE):
+                new_array.append(line)
+                # This closes a BEGIN block.
+                # Does it complete a target for the current IF?
+                if if_stack and if_stack[-1]["state"] == "INSIDE_BEGIN":
+                    if_stack[-1]["state"] = "TARGET_COMPLETED"
+                    
+            else:
+                # Normal statement. We already handled EXPECT_TARGET above.
+                new_array.append(line)
 
-            # Rule 147: "rule-if-content"
-            # if starts with BEGIN OR is from insert/update/select => assign current level
-            is_content_rule_1 = False
-            if re.match(r'^BEGIN\b', content, re.IGNORECASE):
-                is_content_rule_1 = True
-            if source in ["insert_commands", "update_commands", "select_commands"]:
-                is_content_rule_1 = True
+            # Check if we should close any completed IF statements.
+            # Look ahead to the next non-empty line
+            next_content = ""
+            for j in range(i + 1, len(output_array)):
+                nxt = output_array[j].content.strip()
+                if nxt != "" and not nxt.startswith("/*"):
+                    next_content = nxt
+                    break
+            
+            while if_stack and if_stack[-1]["state"] == "TARGET_COMPLETED":
+                if re.match(r'^(ELSIF|ELSE\s+IF|ELSE)\b', next_content, re.IGNORECASE):
+                    # The IF is extended by an ELSE/ELSIF block, do not close it yet
+                    break
+                else:
+                    # Close the IF!
+                    if_stack.pop()
+                    orig_line = getattr(line, 'original_line_number', getattr(line, 'line_number_approx', 0))
+                    new_line = type(line)(0, 'injected_end_if', orig_line, "END IF;")
+                    new_array.append(new_line)
 
-            if is_content_rule_1:
-                line.if_command_level = current_if_level
-                i += 1
-                continue
-
-            # Rule 148: "rule-if-content"
-            # if starts with END; OR is from insert/update/select => assign current level
-            is_content_rule_2 = False
-            if re.match(r'^END;', content, re.IGNORECASE):
-                is_content_rule_2 = True
-            if source in ["insert_commands", "update_commands", "select_commands"]:
-                is_content_rule_2 = True
-
-            if is_content_rule_2:
-                line.if_command_level = current_if_level
-                i += 1
-                continue
-
-            # Rule 149: empty line -> skip (do not assign?)
-            # "assign ... to special item" is NOT mentioned.
-            # "skip it" usually means do nothing.
-            if content == "":
-                i += 1
-                continue
-
-            # Rule 150: "rule-if-else"
-            # starts with ELSE or ELSE IF or ELSIF -> assign current level
-            if re.match(r'^(ELSE|ELSE\s+IF|ELSIF)\b', content, re.IGNORECASE):
-                line.if_command_level = current_if_level
-                i += 1
-                continue
-
-            # Rule 151: "continue with next line, if it fits to all 'rule-if-content' rules"
-            # This seems redundant or catch-all? "fits to ALL ... rules"?
-            # Or "fits to ANY of the rule-if-content rules"?
-            # Rule 147 and 148 are labeled "rule-if-content".
-            # If it matches logic of 147 OR 148?
-            # Re-eval variables from above.
-
-            # Rule 152: "if you find any other content, skip it"
-
-            # Default behavior
-            i += 1
+        # Update the output array
+        output_array.clear()
+        output_array.extend(new_array)
 
     def print_with_indentation(self, output_file: str, final_lines: List[OutputLine]):
         """

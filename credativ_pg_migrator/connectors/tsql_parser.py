@@ -842,12 +842,20 @@ class TsqlParser:
                 print_lines = []
                 has_rollback_trigger = False
 
+                # Check if the immediately preceding line was a ROLLBACK
+                if len(new_body_lines) > 0:
+                    prev_line_content = new_body_lines[-1].content.strip()
+                    if re.match(r'^ROLLBACK\s+(TRIGGER|TRANSACTION)\b', prev_line_content, re.IGNORECASE):
+                        has_rollback_trigger = True
+                        new_body_lines.pop() # Absorb the rollback line
+
                 while i < len(self.body_lines):
                     current_line = self.body_lines[i]
                     current_content = current_line.content.strip()
 
                     if len(print_lines) > 0:
-                        if re.match(r'^ROLLBACK\s+TRIGGER\b', current_content, re.IGNORECASE):
+                        # Check if the immediately following line is a ROLLBACK
+                        if re.match(r'^ROLLBACK\s+(TRIGGER|TRANSACTION)\b', current_content, re.IGNORECASE):
                             has_rollback_trigger = True
                             i += 1
                             break

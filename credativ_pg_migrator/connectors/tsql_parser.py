@@ -78,9 +78,18 @@ class TsqlParser:
                 from sqlglot import exp
                 try:
                     parsed = sqlglot.parse_one(content, read='tsql')
-                    if isinstance(parsed, exp.Select):
+                    
+                    node = parsed
+                    while isinstance(node, exp.Union):
+                        node = node.this
+                        
+                    expressions = []
+                    if isinstance(node, exp.Select):
+                        expressions = node.expressions
+
+                    if expressions:
                         schema = []
-                        for idx, p in enumerate(parsed.expressions):
+                        for idx, p in enumerate(expressions):
                             alias = ""
                             expr = p
                             if isinstance(p, exp.Alias):
@@ -1115,6 +1124,8 @@ class TsqlParser:
                                 is_continuation = True
                             elif prev_content.endswith(",") or prev_content.endswith("="):
                                 is_continuation = True
+                            elif re.search(r'\bUNION(?:\s+ALL)?$', prev_content, re.IGNORECASE):
+                                is_continuation = True
 
                             # FROM check override
                             # If we decided to terminate (e.g. valid terminator keyword OR empty line),
@@ -1131,6 +1142,8 @@ class TsqlParser:
                                          is_continuation = True
                                      elif next_l_check.startswith(",") or next_l_check.startswith("="):
                                          # Rule 89: "if next line ... starts with ',' or '=' ... also part"
+                                         is_continuation = True
+                                     elif re.match(r'^UNION\b', next_l_check, re.IGNORECASE):
                                          is_continuation = True
 
                             if not is_continuation:

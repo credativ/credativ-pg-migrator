@@ -80,9 +80,14 @@ class TsqlParser:
                     parsed = sqlglot.parse_one(content, read='tsql')
                     if isinstance(parsed, exp.Select):
                         schema = []
-                        for p in parsed.expressions:
-                            alias = p.alias if isinstance(p, exp.Alias) else getattr(p, 'name', 'unknown_col')
-                            expr = p.this if isinstance(p, exp.Alias) else p
+                        for idx, p in enumerate(parsed.expressions):
+                            alias = ""
+                            expr = p
+                            if isinstance(p, exp.Alias):
+                                alias = p.alias
+                                expr = p.this
+                            elif isinstance(p, exp.Column):
+                                alias = p.name
                             
                             inferred_type = "varchar"
                             if isinstance(expr, (exp.Count, exp.Sum, exp.Avg, exp.Max, exp.Min)):
@@ -91,7 +96,10 @@ class TsqlParser:
                                 if expr.is_int: inferred_type = "integer"
                                 elif expr.is_number: inferred_type = "numeric"
                             
-                            schema.append({'name': alias or 'unknown_col', 'system_type_name': inferred_type})
+                            if not alias or alias == 'unknown_col':
+                                alias = f"col{idx}"
+                                
+                            schema.append({'name': alias, 'system_type_name': inferred_type})
                         return schema
                 except Exception as e:
                     self.log(f"SQLGlot parsing failed for implicit return schema: {e}")

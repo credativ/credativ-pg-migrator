@@ -1181,7 +1181,14 @@ class SybaseASEConnector(DatabaseConnector):
 
     def convert_funcproc_code(self, settings):
         try:
-            funcproc_code = settings['funcproc_code']
+            funcproc_code_input = settings['funcproc_code']
+            
+            if isinstance(funcproc_code_input, dict):
+                funcproc_code = funcproc_code_input.get('definition', '')
+                implicit_return_schema = funcproc_code_input.get('return_schema', [])
+            else:
+                funcproc_code = funcproc_code_input
+                implicit_return_schema = []
 
             # Convert double-quoted string literals to single-quoted strings
             # Sybase often allows "string" where PostgreSQL expects 'string' (which would otherwise parse as an identifier)
@@ -1197,7 +1204,15 @@ class SybaseASEConnector(DatabaseConnector):
 
             funcproc_code = self._apply_types_mapping(funcproc_code, types_mapping)
 
-            parser = TsqlParser(funcproc_code, self.config_parser)
+            if not implicit_return_schema:
+                temp_parser = TsqlParser(funcproc_code, self.config_parser)
+                extracted_schema = temp_parser.extract_implicit_return_schema()
+                if extracted_schema:
+                    implicit_return_schema = extracted_schema
+                    self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: convert_funcproc_code: Dynamically inferred return schema: {implicit_return_schema}")
+
+            is_implicit_return = bool(implicit_return_schema)
+            parser = TsqlParser(funcproc_code, self.config_parser, implicit_return=is_implicit_return)
             self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: convert_funcproc_code: Running 12-pass parser for {settings.get('funcproc_name')}")
 
             final_output = parser.run()
@@ -1255,7 +1270,19 @@ class SybaseASEConnector(DatabaseConnector):
                  output_params = re.findall(r'\b(?:INOUT|OUT)\b', pg_params_str, flags=re.IGNORECASE)
 
             returns_clause = "RETURNS void"
-            if output_params:
+            if is_implicit_return:
+                 col_defs = []
+                 for col in implicit_return_schema:
+                      c_name = col['name']
+                      c_type = col.get('system_type_name', 'text')
+                      t_mapped = self._apply_data_type_substitutions(c_type)
+                      t_mapped = self._apply_udt_to_base_type_substitutions(t_mapped, settings)
+                      for syb, pg_tgt in types_mapping.items():
+                           t_mapped = re.sub(rf'\b{re.escape(syb)}\b', pg_tgt, t_mapped, flags=re.IGNORECASE)
+                      col_defs.append(f'"{c_name}" {t_mapped}')
+                 if col_defs:
+                      returns_clause = f"RETURNS TABLE ({', '.join(col_defs)})"
+            elif output_params:
                  if len(output_params) > 1:
                       returns_clause = "RETURNS RECORD"
                  else:

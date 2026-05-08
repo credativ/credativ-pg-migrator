@@ -24,9 +24,10 @@ class OutputLine:
 
 
 class TsqlParser:
-    def __init__(self, code_str: str, config_parser=None):
+    def __init__(self, code_str: str, config_parser=None, implicit_return=False):
         self.code_str = code_str
         self.config_parser = config_parser
+        self.implicit_return = implicit_return
         self.raw_lines = []
         self.body_lines = []
         self.header_lines = []
@@ -46,6 +47,56 @@ class TsqlParser:
             self.config_parser.print_log_message('DEBUG', 'TsqlParser: ' + message)
         else:
             print(f'[LOG] {message}')
+
+    def extract_implicit_return_schema(self) -> List[Dict]:
+        """
+        Parses the code to find the implicit return SELECT statement,
+        then uses SQLGlot to extract column names and infer basic types.
+        """
+        self.read_code()
+        self.parse_header_and_body_boundary()
+        self.pass_1_split_inline_comments()
+        self.pass_2_extract_comments()
+        self.pass_3_parse_variables()
+        self.pass_3b_split_inline_ifs()
+        self.pass_4_parse_inserts()
+        self.pass_5_parse_updates()
+        self.pass_5b_parse_deletes()
+        self.pass_5c_parse_prints()
+        self.pass_5d_parse_sets()
+        self.pass_6_parse_selects()
+
+        for cmd_obj in self.select_commands:
+            content = cmd_obj['content']
+            normalized = re.sub(r'\s+', ' ', content)
+            is_assignment = bool(re.match(r'^SELECT\s+(@[\w@]+|locvar_[\w]+)\s*(:=|=)', normalized, re.IGNORECASE))
+            has_into = bool(re.search(r'\bINTO\b', normalized, re.IGNORECASE))
+
+            if not is_assignment and not has_into:
+                # Parse with SQLGlot
+                import sqlglot
+                from sqlglot import exp
+                try:
+                    parsed = sqlglot.parse_one(content, read='tsql')
+                    if isinstance(parsed, exp.Select):
+                        schema = []
+                        for p in parsed.expressions:
+                            alias = p.alias if isinstance(p, exp.Alias) else getattr(p, 'name', 'unknown_col')
+                            expr = p.this if isinstance(p, exp.Alias) else p
+                            
+                            inferred_type = "varchar"
+                            if isinstance(expr, (exp.Count, exp.Sum, exp.Avg, exp.Max, exp.Min)):
+                                inferred_type = "numeric"
+                            elif isinstance(expr, exp.Literal):
+                                if expr.is_int: inferred_type = "integer"
+                                elif expr.is_number: inferred_type = "numeric"
+                            
+                            schema.append({'name': alias or 'unknown_col', 'system_type_name': inferred_type})
+                        return schema
+                except Exception as e:
+                    self.log(f"SQLGlot parsing failed for implicit return schema: {e}")
+                    
+        return []
 
     def read_code(self):
         lines = self.code_str.splitlines()
@@ -1501,6 +1552,37 @@ class TsqlParser:
             for item in array:
                 item['content'] = process_converts_in_string(item['content'])
 
+    def pass_8c_process_implicit_returns(self):
+        """
+        Pass 8c: Prepend RETURN QUERY to non-assignment SELECT statements if implicit_return is True.
+        """
+        if not getattr(self, 'implicit_return', False):
+            return
+
+        self.log("Running Pass 8c: Process Implicit Returns")
+
+        for cmd_obj in self.select_commands:
+            original_content = cmd_obj['content']
+            normalized = re.sub(r'\s+', ' ', original_content)
+
+            # Do not prepend RETURN QUERY if it's an assignment (e.g. SELECT @var = ...)
+            # We assume Pass 8 already handled pure assignments, but we still check.
+            is_assignment = bool(re.match(r'^SELECT\s+(@[\w@]+|locvar_[\w]+)\s*(:=|=)', normalized, re.IGNORECASE))
+            
+            # Do not prepend RETURN QUERY if it has an INTO clause
+            has_into = bool(re.search(r'\bINTO\b', normalized, re.IGNORECASE))
+
+            if not is_assignment and not has_into:
+                # Prepend RETURN QUERY
+                # Use a regex to replace the first 'SELECT' (case-insensitive) with 'RETURN QUERY SELECT'
+                new_content = re.sub(r'^(SELECT\s+)', r'RETURN QUERY \1', original_content, count=1, flags=re.IGNORECASE)
+                
+                # Rule 110: Add semicolon at end if it doesn't already have one
+                if not new_content.strip().endswith(';'):
+                    new_content += ';'
+
+                cmd_obj['content'] = new_content
+
     def pass_9_rename_variables(self):
         """
         Pass 9: Global replacement of local variable notation.
@@ -1980,6 +2062,9 @@ class TsqlParser:
 
         # Pass 8b
         self.pass_8b_convert_datetime_formats()
+
+        # Pass 8c
+        self.pass_8c_process_implicit_returns()
 
         # Pass 9
         self.pass_9_rename_variables()

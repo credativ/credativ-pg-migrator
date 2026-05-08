@@ -1225,18 +1225,32 @@ class TsqlParser:
 
     def pass_8_process_select_assignments(self):
         """
-        Pass 8: Setting of variables.
-        Check select_commands array.
-        Pattern: "SELECT @variable_name = value" (case insensitive).
-        Can be multiple pairs separated by comma.
+        Pass 8: Processes select assignments.
+        Translates `SELECT @var = 1` into `@var := 1;`
+        If there are multiple like `SELECT @a = 1, @b = 2`, they get split by `;`
         """
-        self.log("Running Pass 8: Process Select Assignments")
+        self.log("Running Pass 8: Process SELECT Assignments")
 
-        # We iterate over select_commands and modify them in place?
-        # "remove the key word SELECT ... replace ',' ... with ';'"
-        # "add semicolon at the end"
-        # "replace all '=' characters with ':='"
-        # "replace possible multiple spaces ... with single space"
+        def replace_commas_outside_parens(s):
+            result = []
+            paren_level = 0
+            in_single_quote = False
+            in_double_quote = False
+            for char in s:
+                if char == "'" and not in_double_quote:
+                    in_single_quote = not in_single_quote
+                elif char == '"' and not in_single_quote:
+                    in_double_quote = not in_double_quote
+                elif char == '(' and not in_single_quote and not in_double_quote:
+                    paren_level += 1
+                elif char == ')' and not in_single_quote and not in_double_quote:
+                    paren_level -= 1
+                
+                if char == ',' and paren_level == 0 and not in_single_quote and not in_double_quote:
+                    result.append(';')
+                else:
+                    result.append(char)
+            return "".join(result)
 
         for cmd_obj in self.select_commands:
             original_content = cmd_obj['content']
@@ -1273,9 +1287,8 @@ class TsqlParser:
                 # Case insensitive replace of first SELECT
                 cleaned = re.sub(r'^SELECT\s+', '', normalized, count=1, flags=re.IGNORECASE)
 
-                # 2. Replace , with ; (Rule 106)
-                # "replace all ',' characters with semicolons"
-                cleaned = cleaned.replace(',', ';')
+                # 2. Replace , with ; outside of parens/quotes
+                cleaned = replace_commas_outside_parens(cleaned)
 
                 # 3. Replace = with := for the assignment exclusively (Rule 112)
                 # Instead of a global .replace(), target only the assignment operator matching the @variable definition!
@@ -1286,6 +1299,86 @@ class TsqlParser:
 
                 # Update content
                 cmd_obj['content'] = cleaned
+
+    def pass_8b_convert_datetime_formats(self):
+        """
+        Pass 8b: Converts Sybase ASE convert() calls with format styles into PostgreSQL to_char().
+        E.g. convert(varchar(28), dest_commit_time, 9) -> to_char(dest_commit_time, 'Mon DD YYYY HH:MI:SS:MSAM')
+        """
+        self.log("Running Pass 8b: Convert Datetime Formats")
+
+        style_map = {
+            '0': 'Mon DD YYYY HH:MIAM',
+            '100': 'Mon DD YYYY HH:MIAM',
+            '1': 'MM/DD/YY',
+            '101': 'MM/DD/YYYY',
+            '2': 'YY.MM.DD',
+            '102': 'YYYY.MM.DD',
+            '3': 'DD/MM/YY',
+            '103': 'DD/MM/YYYY',
+            '4': 'DD.MM.YY',
+            '104': 'DD.MM.YYYY',
+            '5': 'DD-MM-YY',
+            '105': 'DD-MM-YYYY',
+            '6': 'DD Mon YY',
+            '106': 'DD Mon YYYY',
+            '7': 'Mon DD, YY',
+            '107': 'Mon DD, YYYY',
+            '8': 'HH24:MI:SS',
+            '108': 'HH24:MI:SS',
+            '9': 'Mon DD YYYY HH:MI:SS:MSAM',
+            '109': 'Mon DD YYYY HH:MI:SS:MSAM',
+            '10': 'MM-DD-YY',
+            '110': 'MM-DD-YYYY',
+            '11': 'YY/MM/DD',
+            '111': 'YYYY/MM/DD',
+            '12': 'YYMMDD',
+            '112': 'YYYYMMDD',
+            '13': 'DD Mon YYYY HH24:MI:SS:MS',
+            '113': 'DD Mon YYYY HH24:MI:SS:MS',
+            '14': 'HH24:MI:SS',
+            '114': 'HH24:MI:SS',
+            '20': 'YYYY-MM-DD HH24:MI:SS',
+            '120': 'YYYY-MM-DD HH24:MI:SS',
+            '21': 'YYYY-MM-DD HH24:MI:SS.MS',
+            '121': 'YYYY-MM-DD HH24:MI:SS.MS',
+            '140': 'YYYY-MM-DD HH24:MI:SS.US'
+        }
+
+        def replacer(match):
+            expr = match.group(1).strip()
+            style = match.group(2).strip()
+            pg_format = style_map.get(style, None)
+            if pg_format:
+                return f"to_char({expr}, '{pg_format}')"
+            else:
+                return match.group(0)
+
+        targets = [
+            self.variables,
+            self.inserts,
+            self.update_commands,
+            self.delete_commands,
+            self.print_commands,
+            self.set_commands,
+            self.select_commands,
+            self.exec_commands,
+            self.if_commands,
+            self.comments
+        ]
+
+        # Use non-greedy match for expr up to the last comma and style
+        regex = r'convert\s*\(\s*(?:var)?char[^,]*\s*,\s*(.*?)\s*,\s*(\d+)\s*\)'
+
+        for line_obj in self.header_lines:
+            line_obj.content = re.sub(regex, replacer, line_obj.content, flags=re.IGNORECASE)
+
+        for line_obj in self.body_lines:
+            line_obj.content = re.sub(regex, replacer, line_obj.content, flags=re.IGNORECASE)
+
+        for array in targets:
+            for item in array:
+                item['content'] = re.sub(regex, replacer, item['content'], flags=re.IGNORECASE)
 
     def pass_9_rename_variables(self):
         """
@@ -1779,6 +1872,9 @@ class TsqlParser:
 
         # Pass 8
         self.pass_8_process_select_assignments()
+
+        # Pass 8b
+        self.pass_8b_convert_datetime_formats()
 
         # Pass 9
         self.pass_9_rename_variables()

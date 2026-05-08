@@ -11,6 +11,8 @@
   - Fix - T-SQL Parser: Resolved an issue where adjacent `SELECT` statements were incorrectly merged into a single AST node by expanding the pass terminator matrix to include `SELECT`, `DELETE`, `PRINT`, `SET`, `EXEC`, and `EXECUTE`.
   - Fix - T-SQL Parser: Introduced `pass_6c_parse_execs` to natively extract and process legacy `EXEC` and `EXECUTE` procedure invocations, preventing them from falling through to the generic `TODO: not processed line` syntax trap.
   - Fix - T-SQL Parser: Expanded `pass_9_rename_variables` to iterate over legacy inline and multi-line comments, successfully rewriting embedded `@var` arguments to their localized `locvar_` variants for complete context accuracy.
+  - Fix - T-SQL Parser: Re-engineered procedural `SELECT` assignment tracking to utilize a native `replace_commas_outside_parens` depth parser, completely preventing nested commas inside SQL functions (e.g., `convert()`) from being erroneously transformed into variable separation semicolons.
+  - Feature - T-SQL Parser: Implemented `pass_8b_convert_datetime_formats` to natively capture Sybase `CONVERT(CHAR, expr, style)` syntax, dynamically mapping all numeric datetime styles (1 through 140) directly into native PostgreSQL `to_char(expr, format)` equivalents.
 
 - 2026.04.17
 

@@ -131,6 +131,42 @@ class TsqlParser:
 
         return False
 
+    def replace_commas_outside_parens(self, s, stop_word=None):
+        result = []
+        paren_level = 0
+        in_single_quote = False
+        in_double_quote = False
+        
+        stop_word_lower = stop_word.lower() if stop_word else None
+        stopped = False
+
+        i = 0
+        while i < len(s):
+            char = s[i]
+            if char == "'" and not in_double_quote:
+                in_single_quote = not in_single_quote
+            elif char == '"' and not in_single_quote:
+                in_double_quote = not in_double_quote
+            elif char == '(' and not in_single_quote and not in_double_quote:
+                paren_level += 1
+            elif char == ')' and not in_single_quote and not in_double_quote:
+                paren_level -= 1
+            
+            if stop_word_lower and not stopped and paren_level == 0 and not in_single_quote and not in_double_quote:
+                if s[i:].lower().startswith(stop_word_lower):
+                    end_idx = i + len(stop_word_lower)
+                    if (i == 0 or not s[i-1].isalnum() and s[i-1] != '_') and \
+                       (end_idx == len(s) or not s[end_idx].isalnum() and s[end_idx] != '_'):
+                        stopped = True
+            
+            if char == ',' and paren_level == 0 and not in_single_quote and not in_double_quote and not stopped:
+                result.append(';')
+            else:
+                result.append(char)
+            
+            i += 1
+        return "".join(result)
+
     def find_unquoted_marker(self, content: str, markers: List[str]) -> tuple:
         """
         Finds the first occurrence of any marker in 'markers' that is NOT encapsulated.
@@ -570,19 +606,19 @@ class TsqlParser:
                 while i < len(self.body_lines):
                     current_line = self.body_lines[i]
                     current_content = current_line.content.strip()
+
+                    if len(decl_lines) > 0:
+                        is_terminator = re.match(r'^(IF|ELSE\s+IF|ELSE|ELSIF|END|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT|SET|BEGIN|EXEC|EXECUTE|WHILE|COMMIT|ROLLBACK|DECLARE)\b', current_content, re.IGNORECASE)
+                        if is_terminator:
+                            break
+
                     decl_lines.append(current_line.content)
 
                     if current_content.lower() == "declare":
                         i += 1
                         continue
 
-                    if current_content.endswith(","):
-                        i += 1
-                        continue
-                    else:
-                        # Ends
-                        i += 1 # Move past this line
-                        break
+                    i += 1
 
                 # Rule: "remove all spaces ... keep new line characters"
                 # "remove all DECLARE key words ... replace ',' characters at the end of lines with semicolon ';'"
@@ -593,9 +629,8 @@ class TsqlParser:
                 # Remove leading DECLARE (case insensitive)
                 full_decl = re.sub(r'^DECLARE\s+', '', full_decl, flags=re.IGNORECASE)
 
-                # Replace trailing , with ; on EACH line (if it exists at the end)
-                # Using regex with MULTILINE flag to match $ at end of each line
-                full_decl = re.sub(r',\s*$', ';', full_decl, flags=re.MULTILINE)
+                # Replace commas separating variable declarations with semicolons, ignoring commas inside parens (e.g. for NUMERIC(10,2))
+                full_decl = self.replace_commas_outside_parens(full_decl)
 
                 if not full_decl.strip().endswith(';'):
                     full_decl = full_decl.rstrip() + ';'
@@ -1262,27 +1297,6 @@ class TsqlParser:
         """
         self.log("Running Pass 8: Process SELECT Assignments")
 
-        def replace_commas_outside_parens(s):
-            result = []
-            paren_level = 0
-            in_single_quote = False
-            in_double_quote = False
-            for char in s:
-                if char == "'" and not in_double_quote:
-                    in_single_quote = not in_single_quote
-                elif char == '"' and not in_single_quote:
-                    in_double_quote = not in_double_quote
-                elif char == '(' and not in_single_quote and not in_double_quote:
-                    paren_level += 1
-                elif char == ')' and not in_single_quote and not in_double_quote:
-                    paren_level -= 1
-                
-                if char == ',' and paren_level == 0 and not in_single_quote and not in_double_quote:
-                    result.append(';')
-                else:
-                    result.append(char)
-            return "".join(result)
-
         for cmd_obj in self.select_commands:
             original_content = cmd_obj['content']
 
@@ -1318,8 +1332,8 @@ class TsqlParser:
                 # Case insensitive replace of first SELECT
                 cleaned = re.sub(r'^SELECT\s+', '', normalized, count=1, flags=re.IGNORECASE)
 
-                # 2. Replace , with ; outside of parens/quotes
-                cleaned = replace_commas_outside_parens(cleaned)
+                # 2. Replace , with ; outside of parens/quotes, but stop replacing when hitting a FROM clause
+                cleaned = self.replace_commas_outside_parens(cleaned, stop_word="from")
 
                 # 3. Replace = with := for the assignment exclusively (Rule 112)
                 # Instead of a global .replace(), target only the assignment operator matching the @variable definition!

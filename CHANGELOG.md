@@ -4,6 +4,9 @@
 
 - 2026.05.08
 
+  - Fix - T-SQL Parser: Completely rewrote Pass 12 (IF level tracking) to utilize a robust state-stack mechanism, accurately tracking `IF`, `ELSIF`, and `ELSE` targets to dynamically inject missing `END IF;` terminators for both `BEGIN...END` blocks and single-statement conditionals.
+  - Fix - T-SQL Parser: Prevented `UPDATE()` trigger function calls from being erroneously parsed and split as standard `UPDATE` command keywords.
+  - Fix - T-SQL Parser: Improved `PRINT` statement extraction to properly handle and escape embedded single quotes when converting double-quoted strings into PostgreSQL standard formatting.
   - Fix - T-SQL Parser: Added dedicated parsing for `DELETE` statements to correctly extract and append semicolons.
   - Fix - T-SQL Parser: Added extraction of `PRINT` statements and automatic conversion to PostgreSQL `RAISE WARNING` commands.
   - Fix - T-SQL Parser: Safely encapsulated behavior-modifying `SET` commands (e.g., `SET NOCOUNT ON`) within `/* ... - Sybase Syntax */` comments to avoid syntax errors.

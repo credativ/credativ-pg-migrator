@@ -4,6 +4,8 @@
 
 - 2026.05.08
 
+  - Fix - T-SQL Parser: Enhanced `pass_6_parse_selects` to correctly identify and merge `UNION` and `UNION ALL` statements into a single cohesive `SELECT` block, preventing broken multi-part queries during conversion.
+  - Feature - Sybase ASE Connector: Implemented dynamic implicit return schema extraction using `SQLGlot`. Automatically traverses ASTs to infer column aliases and base data types from implicit procedural `SELECT` statements, seamlessly wrapping them in `RETURNS TABLE (...)` definitions.
   - Fix - T-SQL Parser: Completely rewrote Pass 12 (IF level tracking) to utilize a robust state-stack mechanism, accurately tracking `IF`, `ELSIF`, and `ELSE` targets to dynamically inject missing `END IF;` terminators for both `BEGIN...END` blocks and single-statement conditionals.
   - Fix - T-SQL Parser: Prevented `UPDATE()` trigger function calls from being erroneously parsed and split as standard `UPDATE` command keywords.
   - Fix - T-SQL Parser: Improved `PRINT` statement extraction to properly handle and escape embedded single quotes when converting double-quoted strings into PostgreSQL standard formatting.

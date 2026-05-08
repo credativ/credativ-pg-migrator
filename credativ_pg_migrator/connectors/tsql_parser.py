@@ -36,6 +36,7 @@ class TsqlParser:
         self.update_commands = []
         self.select_commands = []
         self.if_commands = []
+        self.delete_commands = []
 
     def log(self, message):
         if self.config_parser:
@@ -76,10 +77,10 @@ class TsqlParser:
                     # Split the line into two SourceLines
                     header_part = line.content[:match.end()]
                     body_part = after_as
-                    
+
                     # Update current line to be just the header part
                     self.raw_lines[i].content = header_part
-                    
+
                     # Insert the rest as the next line (preserve line_number for tracking)
                     self.raw_lines.insert(i + 1, SourceLine(line.line_number, body_part))
                 break
@@ -92,7 +93,7 @@ class TsqlParser:
 
             # Body is everything after 'AS'
             raw_body = self.raw_lines[as_index+1:]
-            
+
             # Rule: "remove all spaces at the beginning and at the end of each line"
             self.body_lines = [SourceLine(l.line_number, l.content.strip()) for l in raw_body]
 
@@ -302,13 +303,13 @@ class TsqlParser:
                     # But Rule 41 implies we don't parse inside comments?
                     # Wait, Pass 1 is "update of inline comments".
                     # Review Rule 33. "if line contains */ ... divided"
-                    
+
                     # If line starts with /* and contains */
                     # e.g. "/* c */ select 1"
                     # Split at */.
                     # Part 1: "/* c */"
                     # Part 2: " select 1"
-                    
+
                     if "*/" in content:
                         idx_end, marker_end = self.find_unquoted_marker(content, ["*/"])
                         if idx_end != -1:
@@ -519,7 +520,7 @@ class TsqlParser:
                 # So I DO NOT remove previous */ here explicitly?
                 # The new rule says: "at the end of this step iterate ... replace '*/ */' ... with single '*/'".
                 # So here I just encapsulate.
-                
+
                 self.comments.append({
                     "line": line.line_number,
                     "content": encapsulated
@@ -532,7 +533,7 @@ class TsqlParser:
         # End of loop.
         # "at the end of this step iterate through all lines of comments array..."
         # Rule: "replace pattern '*/ */' with single '*/'"
-        
+
         for comment in self.comments:
             # Pattern: "*/" followed by ZERO, one or more space(s) followed by "*/"
             # Regex: \*/\s*\*/
@@ -645,7 +646,7 @@ class TsqlParser:
                              # Rule: "if line ... ends with ',' or '=' ... next line is part"
                              # Rule: "if next line ... starts with ',' or '=' ... also part"
                              # Rule: "if next line starts with 'FROM' ... also part"
-                             
+
                              # Does continuation override terminator keyword?
                              # Rule 67/68/69 are specific continuation/inclusion rules.
                              # Rule 65 says "ends by empty line or before next IF..."
@@ -658,20 +659,20 @@ class TsqlParser:
                         # Let's invoke termination check, but respect continuation rules
                         # If current_content starts with terminator keyword (IF/END/UPDATE/RETURN)
                         is_terminator = re.match(r'^(IF|END|UPDATE|RETURN)\b', current_content, re.IGNORECASE) or current_content == ""
-                        
+
                         if is_terminator:
                              # Check if we should CONTINUE anyway
                              prev_content = insert_lines[-1].strip()
                              should_continue = False
-                             
+
                              # Rule 67: prev ends with "," or "="
                              if prev_content.endswith(",") or prev_content.endswith("="):
                                  should_continue = True
-                                 
+
                              # Rule 68: next line (current line) starts with "," or "="
                              if current_content.startswith(",") or current_content.startswith("="):
                                  should_continue = True
-                                 
+
                              # Rule 69: next line (current line) starts with "FROM"
                              if re.match(r'^FROM\b', current_content, re.IGNORECASE):
                                  should_continue = True
@@ -719,23 +720,23 @@ class TsqlParser:
 
                     if len(update_lines) > 0:
                         is_terminator = re.match(r'^(IF|ELSE\s+IF|ELSE|END|UPDATE|RETURN)\b', current_content, re.IGNORECASE)
-                        
+
                         if is_terminator:
                             prev_content = update_lines[-1].strip()
                             should_continue = False
-                            
+
                             # Prev ends with , or =
                             if prev_content.endswith(",") or prev_content.endswith("="):
                                 should_continue = True
-                            
+
                             # Curr starts with , or =
                             if current_content.startswith(",") or current_content.startswith("="):
                                 should_continue = True
-                                
+
                             # Curr starts with FROM
                             if re.match(r'^FROM\b', current_content, re.IGNORECASE):
                                 should_continue = True
-                                
+
                             if not should_continue:
                                 break
 
@@ -749,6 +750,66 @@ class TsqlParser:
                 self.update_commands.append({
                     "line": start_line,
                     "content": full_update
+                })
+            else:
+                new_body_lines.append(line)
+                i += 1
+
+        self.body_lines = new_body_lines
+
+    def pass_5b_parse_deletes(self):
+        """
+        Pass 5b: Parses DELETE commands.
+        Starts with DELETE.
+        Ends before next IF, ELSE IF, ELSE, END, UPDATE, INSERT, DELETE, RETURN, SELECT.
+        """
+        self.log("Running Pass 5b: Parse DELETEs")
+        new_body_lines = []
+        i = 0
+        while i < len(self.body_lines):
+            line = self.body_lines[i]
+            content = line.content.strip()
+
+            if re.match(r'^DELETE\b', content, re.IGNORECASE):
+                start_line = line.line_number
+                delete_lines = []
+
+                while i < len(self.body_lines):
+                    current_line = self.body_lines[i]
+                    current_content = current_line.content.strip()
+
+                    if len(delete_lines) > 0:
+                        is_terminator = re.match(r'^(IF|ELSE\s+IF|ELSE|END|UPDATE|INSERT|DELETE|RETURN|SELECT)\b', current_content, re.IGNORECASE)
+
+                        if is_terminator:
+                            prev_content = delete_lines[-1].strip()
+                            should_continue = False
+
+                            # Prev ends with , or =
+                            if prev_content.endswith(",") or prev_content.endswith("="):
+                                should_continue = True
+
+                            # Curr starts with , or =
+                            if current_content.startswith(",") or current_content.startswith("="):
+                                should_continue = True
+
+                            # Curr starts with FROM
+                            if re.match(r'^FROM\b', current_content, re.IGNORECASE):
+                                should_continue = True
+
+                            if not should_continue:
+                                break
+
+                    delete_lines.append(current_line.content)
+                    i += 1
+
+                # Rule: "remove all spaces ... remove new line characters"
+                cleaned_lines = [l.strip() for l in delete_lines]
+                full_delete = " ".join(cleaned_lines)
+
+                self.delete_commands.append({
+                    "line": start_line,
+                    "content": full_delete
                 })
             else:
                 new_body_lines.append(line)
@@ -913,7 +974,7 @@ class TsqlParser:
                 i += 1
 
         self.body_lines = new_body_lines
-    
+
         # NEW STEP in Pass 7: Extract isolated ELSE lines
         # "find in the remaining lines of body all lines containing just "ELSE"..."
         final_body_lines = []
@@ -926,7 +987,7 @@ class TsqlParser:
                 })
             else:
                 final_body_lines.append(line)
-            
+
         self.body_lines = final_body_lines
 
     def pass_8_process_select_assignments(self):
@@ -937,7 +998,7 @@ class TsqlParser:
         Can be multiple pairs separated by comma.
         """
         self.log("Running Pass 8: Process Select Assignments")
-        
+
         # We iterate over select_commands and modify them in place?
         # "remove the key word SELECT ... replace ',' ... with ';'"
         # "add semicolon at the end"
@@ -946,50 +1007,50 @@ class TsqlParser:
 
         for cmd_obj in self.select_commands:
             original_content = cmd_obj['content']
-            
+
             # Check pattern.
             # Loose check: Starts with SELECT.
             # Needs to contain @variable = value.
             # Regex is tricky for "value" which can be anything.
             # But the rule says "check if it fits pattern SELECT @variable_name = value".
             # "there can be multiple pairs ... separated by ','"
-            
+
             # Let's clean up spaces first to make regex easier?
             # "replace possible multiple spaces between parts of the pattern with single space"
             # Doing this globally might be safe if we assume we aren't inside string literals?
             # The parser flattened lines joining with space.
             # We should probably respect strings... but for this Pattern check?
-            
+
             # Simplistic check:
             # Does it look like an assignment?
             # SELECT @var = ...
             pass_check = False
-            
+
             # Normalize spaces for check
             normalized = re.sub(r'\s+', ' ', original_content)
-            
+
             # Regex: ^SELECT\s+@\w+\s*=\s*
             # Matches SELECT @... = ...
             if re.match(r'^SELECT\s+@[\w@]+\s*=', normalized, re.IGNORECASE):
                 pass_check = True
-            
+
             if pass_check:
                 # Transform
                 # 1. Remove SELECT
                 # Case insensitive replace of first SELECT
                 cleaned = re.sub(r'^SELECT\s+', '', normalized, count=1, flags=re.IGNORECASE)
-                
+
                 # 2. Replace , with ; (Rule 106)
                 # "replace all ',' characters with semicolons"
                 cleaned = cleaned.replace(',', ';')
-                
+
                 # 3. Replace = with := for the assignment exclusively (Rule 112)
                 # Instead of a global .replace(), target only the assignment operator matching the @variable definition!
                 cleaned = re.sub(r'(@[\w@]+)\s*=', r'\1 :=', cleaned, count=1)
-                
+
                 # 4. Add semicolon at end (Rule 110)
                 cleaned = cleaned + ";"
-                
+
                 # Update content
                 cmd_obj['content'] = cleaned
 
@@ -1016,7 +1077,7 @@ class TsqlParser:
         # List[SourceLine] arrays
         for line_obj in self.header_lines:
             line_obj.content = apply_rename(line_obj.content)
-        
+
         for line_obj in self.body_lines:
             line_obj.content = apply_rename(line_obj.content)
 
@@ -1025,10 +1086,11 @@ class TsqlParser:
             self.variables,
             self.inserts,
             self.update_commands,
+            self.delete_commands,
             self.select_commands,
             self.if_commands
         ]
-        
+
         for array in targets:
             for item in array:
                 item['content'] = apply_rename(item['content'])
@@ -1037,35 +1099,39 @@ class TsqlParser:
 
     def print_all_arrays(self, final_output: List[str]):
         print(f"--- START CHECKS FOR {self.filepath} ---")
-        
+
         print(f"--- HEADER ARRAY ({len(self.header_lines)} lines) ---")
         for l in self.header_lines:
             print(f"Line {l.line_number}: {l.content}")
-            
+
         print(f"--- COMMENTS ARRAY ({len(self.comments)} items) ---")
         for c in self.comments:
             print(f"Line {c['line']}: {c['content']}")
-            
+
         print(f"--- VARIABLES DECLARATION ARRAY ({len(self.variables)} items) ---")
         for v in self.variables:
             print(f"Line {v['line']}: {v['content']}")
-            
+
         print(f"--- INSERTS ARRAY ({len(self.inserts)} items) ---")
         for i in self.inserts:
             print(f"Line {i['line']}: {i['content']}")
-            
+
         print(f"--- UPDATE COMMANDS ARRAY ({len(self.update_commands)} items) ---")
         for u in self.update_commands:
             print(f"Line {u['line']}: {u['content']}")
-            
+
+        print(f"--- DELETE COMMANDS ARRAY ({len(self.delete_commands)} items) ---")
+        for d in self.delete_commands:
+            print(f"Line {d['line']}: {d['content']}")
+
         print(f"--- SELECT COMMANDS ARRAY ({len(self.select_commands)} items) ---")
         for s in self.select_commands:
             print(f"Line {s['line']}: {s['content']}")
-            
+
         print(f"--- IF COMMANDS ARRAY ({len(self.if_commands)} items) ---")
         for f in self.if_commands:
             print(f"Line {f['line']}: {f['content']}")
-            
+
         print(f"--- REMAINING BODY LINES ARRAY ({len(self.body_lines)} lines) ---")
         for b in self.body_lines:
             print(f"Line {b.line_number}: {b.content}")
@@ -1083,15 +1149,15 @@ class TsqlParser:
         Mark others as TODO.
         """
         self.log("Running Pass 10: Add Semicolons")
-        
+
         for line in self.body_lines:
             content = line.content.strip()
-            
+
             # Rule: "if line contains only empty line or only spaces, remove all spaces and keep it as totally empty line"
             if not content:
                 line.content = ""
                 continue
-                
+
             # Rule 120: END (without semicolon) -> add semicolon
             if re.match(r'^END\b', content, re.IGNORECASE) and not content.endswith(';'):
                  # Check if it contains ONLY "END" (Rule 120: "if line contains END key word only")
@@ -1099,25 +1165,25 @@ class TsqlParser:
                  if content.upper() == "END":
                      line.content = content + ";"
                      continue
-            
+
             # Rule 121: RETURN (only or with value) -> add semicolon
             if re.match(r'^RETURN\b', content, re.IGNORECASE) and not content.endswith(';'):
                 line.content = content + ";"
                 continue
-                
+
             # Rule 122: BEGIN -> keep unchanged
             if re.match(r'^BEGIN\b', content, re.IGNORECASE) and content.upper() == "BEGIN":
                 continue
-            
+
             # Allow SET ROWCOUNT to pass through cleanly so it can be handled by pass 11
             if re.match(r'^SET\s+ROWCOUNT\b', content, re.IGNORECASE):
                 continue
-            
+
             # Rule 123: Anything else -> add TODO
             # Check if it was modified by above rules?
-            
+
             # If we are here, it's a TODO line.
-            line.content = line.content + " /* TODO: not processed line - check syntax */"
+            line.content = line.content + "; /* TODO: not processed line - check syntax */"
 
     def pass_11_assemble_output(self, pg_header_str=None) -> List[OutputLine]:
         """
@@ -1125,10 +1191,10 @@ class TsqlParser:
         Creates output array of OutputLine objects.
         """
         self.log("Running Pass 11: Assemble Output")
-        
+
         output_array: List[OutputLine] = []
         current_new_line_num = 1
-        
+
         # Helper to add line
         def add_line(source_name, original_num, text):
             nonlocal current_new_line_num
@@ -1142,59 +1208,65 @@ class TsqlParser:
         else:
             for line in self.header_lines:
                 add_line("header", line.line_number, line.content)
-        
+
         add_line("separator", 0, "$$")
-        
+
         # 3. DECLARE
         if self.variables:
             add_line("declare_section", 0, "DECLARE")
-            
+
             # 4. Variables
             for var in self.variables:
                 add_line("variable_declaration", var['line'], var['content'])
-            
+
         # 5. Body Output Array
         # Collect all parts, sort by original line number, then append.
-        
+
         # Structure: (line_number, content, source_name)
         body_parts = []
-        
+
         for l in self.body_lines:
             body_parts.append((l.line_number, l.content, "remaining_body_lines"))
-            
+
         for i in self.inserts:
             content = i['content']
             if not content.strip().endswith(';'):
                 content += ';'
             body_parts.append((i['line'], content, "insert_commands"))
-            
+
         for u in self.update_commands:
             content = u['content']
             if not content.strip().endswith(';'):
                 content += ';'
             body_parts.append((u['line'], content, "update_commands"))
-            
+
+        for d in self.delete_commands:
+            content = d['content']
+            if not content.strip().endswith(';'):
+                content += ';'
+            body_parts.append((d['line'], content, "delete_commands"))
+
         for s in self.select_commands:
             content = s['content']
             if not content.strip().endswith(';'):
                 content += ';'
             body_parts.append((s['line'], content, "select_commands"))
-            
+
         for f in self.if_commands:
             content = f['content']
             # Rule 138: replace "ELSE IF" with "ELSIF"
             content = re.sub(r'ELSE\s+IF', 'ELSIF', content, flags=re.IGNORECASE)
             # Rule 139: "ELSIF(" -> "ELSIF ("
             content = re.sub(r'ELSIF\(', 'ELSIF (', content, flags=re.IGNORECASE)
-            
+
             body_parts.append((f['line'], content, "if_commands"))
-            
+
         for c in self.comments:
             body_parts.append((c['line'], c['content'], "comments"))
-            
+
         # Sort by line number
         body_parts.sort(key=lambda x: x[0])
-        
+
         # Apply SET ROWCOUNT limit to subsequent SELECT commands
         active_rowcount_limit = None
         new_body_parts = []
@@ -1205,7 +1277,7 @@ class TsqlParser:
                 limit_val = m.group(1)
                 active_rowcount_limit = None if limit_val == '0' else limit_val
                 content = re.sub(r'(?i)^\s*SET\s+ROWCOUNT\s+\d+', f'/* SET ROWCOUNT {limit_val} converted to LIMIT */', content)
-            
+
             # Apply LIMIT to SELECT commands
             elif source_name == "select_commands" and active_rowcount_limit:
                 if not re.search(r'\bLIMIT\s+\d+', content, re.IGNORECASE):
@@ -1213,9 +1285,9 @@ class TsqlParser:
                         content = content.strip()[:-1] + f" LIMIT {active_rowcount_limit};"
                     else:
                         content = content.strip() + f" LIMIT {active_rowcount_limit}"
-                        
+
             new_body_parts.append((line_num, content, source_name))
-            
+
         body_parts = new_body_parts
 
         # Inject BEGIN and END if they are missing from the Sybase source
@@ -1223,19 +1295,19 @@ class TsqlParser:
             first_content = next((x[1].strip().upper() for x in body_parts if x[1].strip()), "")
             if first_content != "BEGIN":
                 add_line("injected_begin", 0, "BEGIN")
-                
+
         # Append to output_array
         for item in body_parts:
             add_line(item[2], item[0], item[1])
-            
+
         if body_parts:
             last_content = next((x[1].strip().upper() for x in reversed(body_parts) if x[1].strip()), "")
             if last_content not in ("END", "END;"):
                 add_line("injected_end", 0, "END;")
-            
+
         # 6. Final Separator
         add_line("separator", 0, "$$ LANGUAGE plpgsql;")
-        
+
         return output_array
 
     def pass_12_add_if_levels(self, output_array: List[OutputLine]):
@@ -1243,36 +1315,36 @@ class TsqlParser:
         Pass 12: Adding levels of IF commands and END IF; commands.
         """
         self.log("Running Pass 12: Add IF Levels")
-        
+
         # Rule 145: set special memory variable if_command_level to 0
         current_if_level = 0
-        
+
         # Go through each line in output_array
         # Rule 144: "go through each line ... in the order of line numbers"
-        
+
         # We need to look ahead? No, logic seems sequential based on "continue with next line".
         # Actually logic says: "rule-if - when you find...".
         # "rule-if-content - continue with next line..."
         # This implies a state machine iterating strictly line by line?
         # Or does "continue with next line" mean "check the next line in the sequence"?
         # It seems like a loop over lines.
-        
+
         i = 0
         while i < len(output_array):
             line = output_array[i]
             content = line.content.strip()
             source = line.source_array
-            
+
             # Rule 146: "rule-if" - first line starting with IF
             # "when you find the first line starting with IF"
             # Is this global first? Or just "when you encounter a line starting with IF"?
             # Given "assign current value ... to special item", likely "When you find A line starting with IF".
-            
+
             if re.match(r'^IF\b', content, re.IGNORECASE):
                 line.if_command_level = current_if_level
                 i += 1
                 continue
-                
+
             # Rule 147: "rule-if-content"
             # if starts with BEGIN OR is from insert/update/select => assign current level
             is_content_rule_1 = False
@@ -1280,7 +1352,7 @@ class TsqlParser:
                 is_content_rule_1 = True
             if source in ["insert_commands", "update_commands", "select_commands"]:
                 is_content_rule_1 = True
-            
+
             if is_content_rule_1:
                 line.if_command_level = current_if_level
                 i += 1
@@ -1293,7 +1365,7 @@ class TsqlParser:
                 is_content_rule_2 = True
             if source in ["insert_commands", "update_commands", "select_commands"]:
                 is_content_rule_2 = True
-                
+
             if is_content_rule_2:
                 line.if_command_level = current_if_level
                 i += 1
@@ -1312,16 +1384,16 @@ class TsqlParser:
                 line.if_command_level = current_if_level
                 i += 1
                 continue
-                
+
             # Rule 151: "continue with next line, if it fits to all 'rule-if-content' rules"
             # This seems redundant or catch-all? "fits to ALL ... rules"?
             # Or "fits to ANY of the rule-if-content rules"?
             # Rule 147 and 148 are labeled "rule-if-content".
             # If it matches logic of 147 OR 148?
             # Re-eval variables from above.
-            
+
             # Rule 152: "if you find any other content, skip it"
-            
+
             # Default behavior
             i += 1
 
@@ -1331,17 +1403,17 @@ class TsqlParser:
         """
         with open(output_file, 'w') as f:
             indent_level = 0
-            
+
             in_body = False
             first_begin_found = False
-            
+
             def get_indent(level):
                 return "    " * max(0, level)
 
             for line_obj in final_lines:
                 stripped = line_obj.content.strip()
                 current_indent = indent_level
-                
+
                 # Rule 162: "$$" or "DECLARE" -> level 0
                 if stripped.upper() == "DECLARE":
                     indent_level = 0
@@ -1350,18 +1422,18 @@ class TsqlParser:
                     # Rule 163: between DECLARE and first body line -> level 1
                     indent_level = 1
                     continue
-                
+
                 if stripped == "$$":
                     indent_level = 0
                     f.write(get_indent(0) + line_obj.content + "\n")
                     in_body = True
                     continue
-                    
+
                 if stripped.upper() == "$$ LANGUAGE PLPGSQL;":
                     indent_level = 0
                     f.write(get_indent(0) + line_obj.content + "\n")
                     continue
-                
+
                 # Header lines (before body)
                 if not in_body:
                     current_indent = 0
@@ -1379,20 +1451,20 @@ class TsqlParser:
                          # Subsequent BEGIN
                          current_indent = indent_level
                          indent_level += 1
-                
+
                 # Rule 167: END; -> decreases level
                 elif re.match(r'^END;', stripped, re.IGNORECASE):
                      indent_level -= 1
                      current_indent = indent_level
-                     if indent_level < 0: 
+                     if indent_level < 0:
                          # Rule 168/158 compliance
                          indent_level = 0
                          current_indent = 0
-                
+
                 else:
                     # Rule 166: IF/ELSE... no change
                     pass
-                    
+
                 # Write
                 f.write(get_indent(current_indent) + line_obj.content + "\n")
 
@@ -1418,6 +1490,9 @@ class TsqlParser:
         # Pass 5
         self.pass_5_parse_updates()
 
+        # Pass 5b
+        self.pass_5b_parse_deletes()
+
         # Pass 6
         self.pass_6_parse_selects()
 
@@ -1429,7 +1504,7 @@ class TsqlParser:
 
         # Pass 9
         self.pass_9_rename_variables()
-        
+
         # Pass 10
         self.pass_10_add_semicolons()
 

@@ -840,12 +840,18 @@ class TsqlParser:
             if re.match(r'^PRINT\b', content, re.IGNORECASE):
                 start_line = line.line_number
                 print_lines = []
+                has_rollback_trigger = False
 
                 while i < len(self.body_lines):
                     current_line = self.body_lines[i]
                     current_content = current_line.content.strip()
 
                     if len(print_lines) > 0:
+                        if re.match(r'^ROLLBACK\s+TRIGGER\b', current_content, re.IGNORECASE):
+                            has_rollback_trigger = True
+                            i += 1
+                            break
+
                         is_terminator = re.match(r'^(IF|ELSE\s+IF|ELSE|END|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT)\b', current_content, re.IGNORECASE)
 
                         if is_terminator:
@@ -870,8 +876,11 @@ class TsqlParser:
                 cleaned_lines = [l.strip() for l in print_lines]
                 full_print = " ".join(cleaned_lines)
                 
-                # Transform PRINT into RAISE WARNING
-                full_print = re.sub(r'^PRINT\b', 'RAISE WARNING', full_print, flags=re.IGNORECASE)
+                # Transform PRINT into RAISE WARNING or EXCEPTION
+                if has_rollback_trigger:
+                    full_print = re.sub(r'^PRINT\b', 'RAISE EXCEPTION', full_print, flags=re.IGNORECASE)
+                else:
+                    full_print = re.sub(r'^PRINT\b', 'RAISE WARNING', full_print, flags=re.IGNORECASE)
 
                 self.print_commands.append({
                     "line": start_line,

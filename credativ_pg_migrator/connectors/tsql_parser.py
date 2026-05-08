@@ -37,6 +37,7 @@ class TsqlParser:
         self.select_commands = []
         self.if_commands = []
         self.delete_commands = []
+        self.print_commands = []
 
     def log(self, message):
         if self.config_parser:
@@ -817,6 +818,66 @@ class TsqlParser:
 
         self.body_lines = new_body_lines
 
+    def pass_5c_parse_prints(self):
+        """
+        Pass 5c: Parses PRINT commands.
+        Starts with PRINT.
+        Ends before next IF, ELSE IF, ELSE, END, UPDATE, INSERT, DELETE, RETURN, SELECT, PRINT.
+        Transforms PRINT into RAISE WARNING.
+        """
+        self.log("Running Pass 5c: Parse PRINTs")
+        new_body_lines = []
+        i = 0
+        while i < len(self.body_lines):
+            line = self.body_lines[i]
+            content = line.content.strip()
+
+            if re.match(r'^PRINT\b', content, re.IGNORECASE):
+                start_line = line.line_number
+                print_lines = []
+
+                while i < len(self.body_lines):
+                    current_line = self.body_lines[i]
+                    current_content = current_line.content.strip()
+
+                    if len(print_lines) > 0:
+                        is_terminator = re.match(r'^(IF|ELSE\s+IF|ELSE|END|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT)\b', current_content, re.IGNORECASE)
+
+                        if is_terminator:
+                            prev_content = print_lines[-1].strip()
+                            should_continue = False
+
+                            # Prev ends with , or = or +
+                            if prev_content.endswith(",") or prev_content.endswith("=") or prev_content.endswith("+"):
+                                should_continue = True
+
+                            # Curr starts with , or = or +
+                            if current_content.startswith(",") or current_content.startswith("=") or current_content.startswith("+"):
+                                should_continue = True
+
+                            if not should_continue:
+                                break
+
+                    print_lines.append(current_line.content)
+                    i += 1
+
+                # Rule: "remove all spaces ... remove new line characters"
+                cleaned_lines = [l.strip() for l in print_lines]
+                full_print = " ".join(cleaned_lines)
+                
+                # Transform PRINT into RAISE WARNING
+                full_print = re.sub(r'^PRINT\b', 'RAISE WARNING', full_print, flags=re.IGNORECASE)
+
+                self.print_commands.append({
+                    "line": start_line,
+                    "content": full_print
+                })
+            else:
+                new_body_lines.append(line)
+                i += 1
+
+        self.body_lines = new_body_lines
+
     def pass_6_parse_selects(self):
         """
         Pass 6: Parses SELECT commands.
@@ -1087,6 +1148,7 @@ class TsqlParser:
             self.inserts,
             self.update_commands,
             self.delete_commands,
+            self.print_commands,
             self.select_commands,
             self.if_commands
         ]
@@ -1123,6 +1185,10 @@ class TsqlParser:
         print(f"--- DELETE COMMANDS ARRAY ({len(self.delete_commands)} items) ---")
         for d in self.delete_commands:
             print(f"Line {d['line']}: {d['content']}")
+
+        print(f"--- PRINT COMMANDS ARRAY ({len(self.print_commands)} items) ---")
+        for p in self.print_commands:
+            print(f"Line {p['line']}: {p['content']}")
 
         print(f"--- SELECT COMMANDS ARRAY ({len(self.select_commands)} items) ---")
         for s in self.select_commands:
@@ -1245,6 +1311,12 @@ class TsqlParser:
             if not content.strip().endswith(';'):
                 content += ';'
             body_parts.append((d['line'], content, "delete_commands"))
+
+        for p in self.print_commands:
+            content = p['content']
+            if not content.strip().endswith(';'):
+                content += ';'
+            body_parts.append((p['line'], content, "print_commands"))
 
         for s in self.select_commands:
             content = s['content']
@@ -1492,6 +1564,9 @@ class TsqlParser:
 
         # Pass 5b
         self.pass_5b_parse_deletes()
+
+        # Pass 5c
+        self.pass_5c_parse_prints()
 
         # Pass 6
         self.pass_6_parse_selects()

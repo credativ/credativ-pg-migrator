@@ -38,6 +38,7 @@ class TsqlParser:
         self.if_commands = []
         self.delete_commands = []
         self.print_commands = []
+        self.set_commands = []
 
     def log(self, message):
         if self.config_parser:
@@ -878,6 +879,69 @@ class TsqlParser:
 
         self.body_lines = new_body_lines
 
+    def pass_5d_parse_sets(self):
+        """
+        Pass 5d: Parses SET commands that modify behavior (e.g., SET NOCOUNT ON).
+        Skips SET @var and SET ROWCOUNT.
+        Starts with SET.
+        Encapsulates into /* ... - Sybase Syntax */.
+        """
+        self.log("Running Pass 5d: Parse SETs")
+        new_body_lines = []
+        i = 0
+        while i < len(self.body_lines):
+            line = self.body_lines[i]
+            content = line.content.strip()
+
+            is_set = re.match(r'^SET\b', content, re.IGNORECASE)
+            is_var = re.match(r'^SET\s+@', content, re.IGNORECASE)
+            is_rowcount = re.match(r'^SET\s+ROWCOUNT\b', content, re.IGNORECASE)
+
+            if is_set and not is_var and not is_rowcount:
+                start_line = line.line_number
+                set_lines = []
+
+                while i < len(self.body_lines):
+                    current_line = self.body_lines[i]
+                    current_content = current_line.content.strip()
+
+                    if len(set_lines) > 0:
+                        is_terminator = re.match(r'^(IF|ELSE\s+IF|ELSE|END|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT|SET)\b', current_content, re.IGNORECASE)
+
+                        if is_terminator:
+                            prev_content = set_lines[-1].strip()
+                            should_continue = False
+
+                            # Prev ends with , or =
+                            if prev_content.endswith(",") or prev_content.endswith("="):
+                                should_continue = True
+
+                            # Curr starts with , or =
+                            if current_content.startswith(",") or current_content.startswith("="):
+                                should_continue = True
+
+                            if not should_continue:
+                                break
+
+                    set_lines.append(current_line.content)
+                    i += 1
+
+                cleaned_lines = [l.strip() for l in set_lines]
+                full_set = " ".join(cleaned_lines)
+                
+                # Transform into comment
+                full_set = f"/* {full_set} - Sybase Syntax */"
+
+                self.set_commands.append({
+                    "line": start_line,
+                    "content": full_set
+                })
+            else:
+                new_body_lines.append(line)
+                i += 1
+
+        self.body_lines = new_body_lines
+
     def pass_6_parse_selects(self):
         """
         Pass 6: Parses SELECT commands.
@@ -1149,6 +1213,7 @@ class TsqlParser:
             self.update_commands,
             self.delete_commands,
             self.print_commands,
+            self.set_commands,
             self.select_commands,
             self.if_commands
         ]
@@ -1189,6 +1254,10 @@ class TsqlParser:
         print(f"--- PRINT COMMANDS ARRAY ({len(self.print_commands)} items) ---")
         for p in self.print_commands:
             print(f"Line {p['line']}: {p['content']}")
+
+        print(f"--- SET COMMANDS ARRAY ({len(self.set_commands)} items) ---")
+        for st in self.set_commands:
+            print(f"Line {st['line']}: {st['content']}")
 
         print(f"--- SELECT COMMANDS ARRAY ({len(self.select_commands)} items) ---")
         for s in self.select_commands:
@@ -1317,6 +1386,11 @@ class TsqlParser:
             if not content.strip().endswith(';'):
                 content += ';'
             body_parts.append((p['line'], content, "print_commands"))
+
+        for st in self.set_commands:
+            content = st['content']
+            # It's a comment, so we don't need a semicolon, but it doesn't hurt if we treat it uniformly or just skip adding it.
+            body_parts.append((st['line'], content, "set_commands"))
 
         for s in self.select_commands:
             content = s['content']
@@ -1567,6 +1641,9 @@ class TsqlParser:
 
         # Pass 5c
         self.pass_5c_parse_prints()
+
+        # Pass 5d
+        self.pass_5d_parse_sets()
 
         # Pass 6
         self.pass_6_parse_selects()

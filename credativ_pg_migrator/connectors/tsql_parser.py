@@ -1032,6 +1032,61 @@ class TsqlParser:
 
         self.body_lines = new_body_lines
 
+    def pass_3b_split_inline_ifs(self):
+        """
+        Pass 3b: Splits inline IF statements.
+        Sybase allows `IF condition command`.
+        This pass splits such lines into two: `IF condition` and `command`.
+        """
+        self.log("Running Pass 3b: Split Inline IFs")
+        new_body_lines = []
+        keywords = ["SELECT", "INSERT", "UPDATE", "DELETE", "PRINT", "EXEC", "EXECUTE", "BEGIN", "RETURN", "SET"]
+        
+        for line in self.body_lines:
+            content = line.content.strip()
+            if re.match(r'^(IF|ELSE\s+IF)\b', content, re.IGNORECASE):
+                in_single_quote = False
+                in_double_quote = False
+                paren_level = 0
+                split_idx = -1
+                
+                j = 0
+                while j < len(content):
+                    char = content[j]
+                    
+                    if char == "'" and not in_double_quote:
+                        in_single_quote = not in_single_quote
+                    elif char == '"' and not in_single_quote:
+                        in_double_quote = not in_double_quote
+                    elif char == '(' and not in_single_quote and not in_double_quote:
+                        paren_level += 1
+                    elif char == ')' and not in_single_quote and not in_double_quote:
+                        paren_level -= 1
+                        
+                    if not in_single_quote and not in_double_quote and paren_level == 0:
+                        if j > 0 and content[j-1].isspace():
+                            for kw in keywords:
+                                if content[j:].upper().startswith(kw):
+                                    end_idx = j + len(kw)
+                                    if end_idx == len(content) or (not content[end_idx].isalnum() and content[end_idx] != '_'):
+                                        split_idx = j
+                                        break
+                            if split_idx != -1:
+                                break
+                    j += 1
+                    
+                if split_idx != -1:
+                    part1 = content[:split_idx].strip()
+                    part2 = content[split_idx:].strip()
+                    new_body_lines.append(type(line)(line.line_number, part1))
+                    new_body_lines.append(type(line)(line.line_number + 0.1, part2))
+                else:
+                    new_body_lines.append(line)
+            else:
+                new_body_lines.append(line)
+                
+        self.body_lines = new_body_lines
+
     def pass_7_parse_if_commands(self):
         """
         Pass 7: Parses IF / ELSE IF commands.
@@ -1629,6 +1684,9 @@ class TsqlParser:
 
         # Pass 3
         self.pass_3_parse_variables()
+
+        # Pass 3b
+        self.pass_3b_split_inline_ifs()
 
         # Pass 4
         self.pass_4_parse_inserts()

@@ -1,6 +1,13 @@
 # Changelog
 
-## 0.13.1 - 2026.04.17
+## 0.14.0 - 2026.05.08
+
+- 2026.05.08
+
+  - Fix - T-SQL Parser: Added dedicated parsing for `DELETE` statements to correctly extract and append semicolons.
+  - Fix - T-SQL Parser: Added extraction of `PRINT` statements and automatic conversion to PostgreSQL `RAISE WARNING` commands.
+  - Fix - T-SQL Parser: Safely encapsulated behavior-modifying `SET` commands (e.g., `SET NOCOUNT ON`) within `/* ... - Sybase Syntax */` comments to avoid syntax errors.
+  - Fix - T-SQL Parser: Fixed parsing of single-line inline `IF` statements by introducing a new pre-processing pass that safely splits the condition from the inline command, enabling the generator to natively inject the required `END IF;` terminator.
 
 - 2026.04.17
 

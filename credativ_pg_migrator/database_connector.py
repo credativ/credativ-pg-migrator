@@ -54,6 +54,22 @@ class DatabaseConnector(ABC):
         """
         pass
 
+    def apply_sql_functions_mapping(self, code: str, settings: dict) -> str:
+        """
+        Applies the SQL functions mapping to the provided code string using regular expressions.
+        Uses case-insensitive replacement.
+        """
+        import re
+        if 'target_db_type' not in settings:
+            target_conn = self.config_parser.get_connectivity('target')
+            settings['target_db_type'] = target_conn.get('db_type', 'postgresql') if target_conn else 'postgresql'
+        sql_functions_mapping = self.get_sql_functions_mapping(settings)
+        if sql_functions_mapping:
+            for src_func, tgt_func in sql_functions_mapping.items():
+                escaped_src_func = re.escape(src_func)
+                code = re.sub(rf"(?i){escaped_src_func}", tgt_func, code, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
+        return code
+
     @abstractmethod
     def fetch_table_names(self, table_schema: str):
         """

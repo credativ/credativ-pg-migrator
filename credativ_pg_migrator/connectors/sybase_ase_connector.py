@@ -256,6 +256,19 @@ class SybaseASEConnector(DatabaseConnector):
                 'stuff(': 'overlay(',
                 'dateadd(': "now() + interval '",  # requires more complex logic
                 'datediff(': "age(",  # requires more logic
+                'datepart(yy,': "date_part('year',",
+                'datepart(yyyy,': "date_part('year',",
+                'datepart(year,': "date_part('year',",
+                'datepart(qq,': "date_part('quarter',",
+                'datepart(mm,': "date_part('month',",
+                'datepart(month,': "date_part('month',",
+                'datepart(dy,': "date_part('doy',",
+                'datepart(dd,': "date_part('day',",
+                'datepart(wk,': "date_part('week',",
+                'datepart(hh,': "date_part('hour',",
+                'datepart(mi,': "date_part('minute',",
+                'datepart(ss,': "date_part('second',",
+                'datepart(ms,': "date_part('milliseconds',",
             }
         else:
             self.config_parser.print_log_message('ERROR', f"sybase_ase_connector: get_sql_functions_mapping: Unsupported target database type: {target_db_type}")
@@ -1205,14 +1218,14 @@ class SybaseASEConnector(DatabaseConnector):
             funcproc_code = self._apply_types_mapping(funcproc_code, types_mapping)
 
             if not implicit_return_schema:
-                temp_parser = TsqlParser(funcproc_code, self.config_parser, view_converter=self.convert_view_code, settings=settings)
+                temp_parser = TsqlParser(funcproc_code, self.config_parser, view_converter=self.convert_view_code, settings=settings, functions_mapping_converter=self.apply_sql_functions_mapping)
                 extracted_schema = temp_parser.extract_implicit_return_schema()
                 if extracted_schema:
                     implicit_return_schema = extracted_schema
                     self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: convert_funcproc_code: Dynamically inferred return schema: {implicit_return_schema}")
 
             is_implicit_return = bool(implicit_return_schema)
-            parser = TsqlParser(funcproc_code, self.config_parser, implicit_return=is_implicit_return, view_converter=self.convert_view_code, settings=settings)
+            parser = TsqlParser(funcproc_code, self.config_parser, implicit_return=is_implicit_return, view_converter=self.convert_view_code, settings=settings, functions_mapping_converter=self.apply_sql_functions_mapping)
             self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: convert_funcproc_code: Running 12-pass parser for {settings.get('funcproc_name')}")
 
             final_output = parser.run()
@@ -2012,7 +2025,7 @@ class SybaseASEConnector(DatabaseConnector):
         
         fake_code = self._apply_types_mapping(fake_code, types_mapping)
             
-        parser = TsqlParser(fake_code, self.config_parser, view_converter=self.convert_view_code, settings=settings)
+        parser = TsqlParser(fake_code, self.config_parser, view_converter=self.convert_view_code, settings=settings, functions_mapping_converter=self.apply_sql_functions_mapping)
         final_output = parser.run(pg_header_str=" ") # space prevents default header
 
         final_stmts_clean = []
@@ -2927,13 +2940,7 @@ EXECUTE FUNCTION {target_schema_name}.{trigger_name}_func();
             converted_code = parsed_code.sql()
             converted_code = converted_code.replace("()()", "()")
 
-            sql_functions_mapping = self.get_sql_functions_mapping({ 'target_db_type': settings['target_db_type'] })
-
-            if sql_functions_mapping:
-                for src_func, tgt_func in sql_functions_mapping.items():
-                    escaped_src_func = re.escape(src_func)
-                    converted_code = re.sub(rf"(?i){escaped_src_func}", tgt_func, converted_code, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
-                    self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: convert_string_concatenation: Checking convertion of function {src_func} to {tgt_func} in view code")
+            converted_code = self.apply_sql_functions_mapping(converted_code, settings)
 
             # converted_code = converted_code.replace(f"{settings['source_database']}..", f"{settings['target_schema_name']}.")
             # converted_code = converted_code.replace(f"{settings['source_database']}.{settings['source_schema_name']}.", f"{settings['target_schema_name']}.")
@@ -3285,6 +3292,7 @@ EXECUTE FUNCTION {target_schema_name}.{trigger_name}_func();
 
     def convert_default_value(self, settings) -> dict:
         extracted_default_value = settings['extracted_default_value']
+        extracted_default_value = self.apply_sql_functions_mapping(extracted_default_value, settings)
         return extracted_default_value
 
     def get_table_checksum(self, schema_name: str, table_name: str, columns: list):

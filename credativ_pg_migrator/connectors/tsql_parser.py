@@ -24,12 +24,13 @@ class OutputLine:
 
 
 class TsqlParser:
-    def __init__(self, code_str: str, config_parser=None, implicit_return=False, view_converter=None, settings=None):
+    def __init__(self, code_str: str, config_parser=None, implicit_return=False, view_converter=None, settings=None, functions_mapping_converter=None):
         self.code_str = code_str
         self.config_parser = config_parser
         self.implicit_return = implicit_return
         self.view_converter = view_converter
         self.settings = settings
+        self.functions_mapping_converter = functions_mapping_converter
         self.raw_lines = []
         self.body_lines = []
         self.header_lines = []
@@ -2129,5 +2130,14 @@ class TsqlParser:
 
         # Pass 12
         self.pass_12_add_if_levels(final_output)
+
+        # Apply global SQL functions mapping (e.g., datepart, getdate) across all output lines
+        if self.functions_mapping_converter:
+            target_db_type = 'postgresql'
+            if self.config_parser:
+                target_conn = self.config_parser.get_connectivity('target')
+                target_db_type = target_conn.get('db_type', 'postgresql') if target_conn else 'postgresql'
+            for line in final_output:
+                line.content = self.functions_mapping_converter(line.content, {'target_db_type': target_db_type})
 
         return final_output

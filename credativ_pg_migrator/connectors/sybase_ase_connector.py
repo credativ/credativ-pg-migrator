@@ -238,6 +238,7 @@ class SybaseASEConnector(DatabaseConnector):
                 'getdate()': 'current_timestamp',
                 'getutcdate()': "timezone('UTC', now())",
                 'datetime': 'current_timestamp',
+                'current_timestamp()': 'CURRENT_TIMESTAMP',
                 'year(': 'extract(year from ',
                 'month(': 'extract(month from ',
                 'day(': 'extract(day from ',
@@ -256,6 +257,20 @@ class SybaseASEConnector(DatabaseConnector):
                 'stuff(': 'overlay(',
                 'dateadd(': "now() + interval '",  # requires more complex logic
                 'datediff(': "age(",  # requires more logic
+                'datepart(yy,': "date_part('year',",
+                'datepart(yyyy,': "date_part('year',",
+                'datepart(year,': "date_part('year',",
+                'datepart(qq,': "date_part('quarter',",
+                'datepart(mm,': "date_part('month',",
+                'datepart(month,': "date_part('month',",
+                'datepart(dy,': "date_part('doy',",
+                'datepart(dd,': "date_part('day',",
+                'datepart(wk,': "date_part('week',",
+                'datepart(hh,': "date_part('hour',",
+                'datepart(mi,': "date_part('minute',",
+                'datepart(ss,': "date_part('second',",
+                'datepart(ms,': "date_part('milliseconds',",
+                'try_cast(': 'CAST(',
             }
         else:
             self.config_parser.print_log_message('ERROR', f"sybase_ase_connector: get_sql_functions_mapping: Unsupported target database type: {target_db_type}")
@@ -1181,7 +1196,14 @@ class SybaseASEConnector(DatabaseConnector):
 
     def convert_funcproc_code(self, settings):
         try:
-            funcproc_code = settings['funcproc_code']
+            funcproc_code_input = settings['funcproc_code']
+            
+            if isinstance(funcproc_code_input, dict):
+                funcproc_code = funcproc_code_input.get('definition', '')
+                implicit_return_schema = funcproc_code_input.get('return_schema', [])
+            else:
+                funcproc_code = funcproc_code_input
+                implicit_return_schema = []
 
             # Convert double-quoted string literals to single-quoted strings
             # Sybase often allows "string" where PostgreSQL expects 'string' (which would otherwise parse as an identifier)
@@ -1197,7 +1219,15 @@ class SybaseASEConnector(DatabaseConnector):
 
             funcproc_code = self._apply_types_mapping(funcproc_code, types_mapping)
 
-            parser = TsqlParser(funcproc_code, self.config_parser)
+            if not implicit_return_schema:
+                temp_parser = TsqlParser(funcproc_code, self.config_parser, view_converter=self.convert_view_code, settings=settings, functions_mapping_converter=self.apply_sql_functions_mapping)
+                extracted_schema = temp_parser.extract_implicit_return_schema()
+                if extracted_schema:
+                    implicit_return_schema = extracted_schema
+                    self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: convert_funcproc_code: Dynamically inferred return schema: {implicit_return_schema}")
+
+            is_implicit_return = bool(implicit_return_schema)
+            parser = TsqlParser(funcproc_code, self.config_parser, implicit_return=is_implicit_return, view_converter=self.convert_view_code, settings=settings, functions_mapping_converter=self.apply_sql_functions_mapping)
             self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: convert_funcproc_code: Running 12-pass parser for {settings.get('funcproc_name')}")
 
             final_output = parser.run()
@@ -1255,7 +1285,19 @@ class SybaseASEConnector(DatabaseConnector):
                  output_params = re.findall(r'\b(?:INOUT|OUT)\b', pg_params_str, flags=re.IGNORECASE)
 
             returns_clause = "RETURNS void"
-            if output_params:
+            if is_implicit_return:
+                 col_defs = []
+                 for col in implicit_return_schema:
+                      c_name = col['name']
+                      c_type = col.get('system_type_name', 'text')
+                      t_mapped = self._apply_data_type_substitutions(c_type)
+                      t_mapped = self._apply_udt_to_base_type_substitutions(t_mapped, settings)
+                      for syb, pg_tgt in types_mapping.items():
+                           t_mapped = re.sub(rf'\b{re.escape(syb)}\b', pg_tgt, t_mapped, flags=re.IGNORECASE)
+                      col_defs.append(f'"{c_name}" {t_mapped}')
+                 if col_defs:
+                      returns_clause = f"RETURNS TABLE ({', '.join(col_defs)})"
+            elif output_params:
                  if len(output_params) > 1:
                       returns_clause = "RETURNS RECORD"
                  else:
@@ -1283,28 +1325,13 @@ class SybaseASEConnector(DatabaseConnector):
             indent_level = 0
             in_body = False
             first_begin_found = False
-            if_stack = []
 
             for index, line_obj in enumerate(final_output):
                 stripped = line_obj.content.strip()
                 current_indent = indent_level
 
-                # Contextual block evaluation lookahead
-                next_stripped = final_output[index + 1].content.strip().upper() if index + 1 < len(final_output) else ""
-                is_next_else = bool(re.match(r'^(ELSE|ELSIF)\b', next_stripped))
-
-                is_if = bool(re.match(r'^IF\b', stripped, re.IGNORECASE))
-                is_elsif = bool(re.match(r'^ELSIF\b', stripped, re.IGNORECASE))
-                is_else = bool(re.match(r'^ELSE\b', stripped, re.IGNORECASE))
                 is_begin = bool(re.match(r'^BEGIN\b', stripped, re.IGNORECASE))
                 is_end = bool(re.match(r'^END;', stripped, re.IGNORECASE))
-
-                if is_if:
-                    if_stack.append({'has_begin': False, 'statements': 0, 'expecting_statement': True, 'indent': current_indent})
-                elif is_elsif or is_else:
-                    if if_stack:
-                        if_stack[-1]['statements'] = 0
-                        if_stack[-1]['expecting_statement'] = True
 
                 if stripped.upper() == "DECLARE":
                     indent_level = 0
@@ -1320,9 +1347,6 @@ class SybaseASEConnector(DatabaseConnector):
                     continue
 
                 if stripped.upper() == "$$ LANGUAGE PLPGSQL;":
-                    while if_stack:
-                        top = if_stack.pop()
-                        ddl += get_indent(top['indent']) + "END IF;\n"
                     indent_level = 0
                     ddl += get_indent(0) + line_obj.content + "\n"
                     continue
@@ -1340,10 +1364,6 @@ class SybaseASEConnector(DatabaseConnector):
                     else:
                         current_indent = indent_level
                         indent_level += 1
-
-                    if if_stack and if_stack[-1]['expecting_statement']:
-                        if_stack[-1]['has_begin'] = True
-                        if_stack[-1]['expecting_statement'] = False
                 elif is_end:
                     indent_level -= 1
                     current_indent = indent_level
@@ -1353,35 +1373,11 @@ class SybaseASEConnector(DatabaseConnector):
 
                 ddl += get_indent(current_indent) + line_obj.content + "\n"
 
-                # Check branch completion boundaries
-                if is_end:
-                    if if_stack and if_stack[-1]['has_begin']:
-                        if not is_next_else:
-                            top = if_stack.pop()
-                            ddl += get_indent(top['indent']) + "END IF;\n"
-                    continue
-
-                if is_if or is_elsif or is_else:
-                    continue
-
-                if if_stack:
-                    for level in reversed(if_stack):
-                        if level['expecting_statement'] and not level['has_begin']:
-                            level['statements'] += 1
-                            break
-
-                    while if_stack:
-                        top_if = if_stack[-1]
-                        if top_if['has_begin']:
-                            break
-                        if top_if['statements'] >= 1:
-                            if not is_next_else:
-                                top = if_stack.pop()
-                                ddl += get_indent(top['indent']) + "END IF;\n"
-                            else:
-                                break
-                        else:
-                            break
+            # Double quote user defined types that remained in the DDL
+            udt_map = self._get_udt_codes_mapping(settings)
+            if udt_map:
+                for udt_name in udt_map.keys():
+                    ddl = re.sub(rf'(?<!")\b{re.escape(udt_name)}\b(?!")', f'"{udt_name}"', ddl, flags=re.IGNORECASE)
 
             return ddl
         except Exception as e:
@@ -2037,7 +2033,7 @@ class SybaseASEConnector(DatabaseConnector):
         
         fake_code = self._apply_types_mapping(fake_code, types_mapping)
             
-        parser = TsqlParser(fake_code, self.config_parser)
+        parser = TsqlParser(fake_code, self.config_parser, view_converter=self.convert_view_code, settings=settings, functions_mapping_converter=self.apply_sql_functions_mapping)
         final_output = parser.run(pg_header_str=" ") # space prevents default header
 
         final_stmts_clean = []
@@ -2665,8 +2661,20 @@ EXECUTE FUNCTION {target_schema_name}.{trigger_name}_func();
     def convert_view_code(self, settings: dict):
 
         def quote_column_names(node):
-            if isinstance(node, sqlglot.exp.Column) and node.name:
-                node.set("this", sqlglot.exp.Identifier(this=node.name, quoted=True))
+            if isinstance(node, sqlglot.exp.Column):
+                if node.name:
+                    node.set("this", sqlglot.exp.Identifier(this=node.name, quoted=True))
+                # Quote the table qualifier (alias)
+                if "table" in node.args and isinstance(node.args["table"], sqlglot.exp.Identifier):
+                    table = node.args["table"]
+                    if not table.args.get("quoted"):
+                        table.set("quoted", True)
+                # Quote the db qualifier if present
+                if "db" in node.args and isinstance(node.args["db"], sqlglot.exp.Identifier):
+                    db = node.args["db"]
+                    if not db.args.get("quoted"):
+                        db.set("quoted", True)
+
             if isinstance(node, sqlglot.exp.Alias) and isinstance(node.args.get("alias"), sqlglot.exp.Identifier):
                 alias = node.args["alias"]
                 if not alias.args.get("quoted"):
@@ -2692,6 +2700,12 @@ EXECUTE FUNCTION {target_schema_name}.{trigger_name}_func();
                 table = node.args.get("this")
                 if table and not table.args.get("quoted"):
                     table.set("quoted", True)
+                # Quote table alias if present
+                alias = node.args.get("alias")
+                if alias and isinstance(alias, sqlglot.exp.TableAlias):
+                    alias_id = alias.args.get("this")
+                    if alias_id and isinstance(alias_id, sqlglot.exp.Identifier) and not alias_id.args.get("quoted"):
+                        alias_id.set("quoted", True)
             return node
 
         def replace_functions(node):
@@ -2934,13 +2948,7 @@ EXECUTE FUNCTION {target_schema_name}.{trigger_name}_func();
             converted_code = parsed_code.sql()
             converted_code = converted_code.replace("()()", "()")
 
-            sql_functions_mapping = self.get_sql_functions_mapping({ 'target_db_type': settings['target_db_type'] })
-
-            if sql_functions_mapping:
-                for src_func, tgt_func in sql_functions_mapping.items():
-                    escaped_src_func = re.escape(src_func)
-                    converted_code = re.sub(rf"(?i){escaped_src_func}", tgt_func, converted_code, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
-                    self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: convert_string_concatenation: Checking convertion of function {src_func} to {tgt_func} in view code")
+            converted_code = self.apply_sql_functions_mapping(converted_code, settings)
 
             # converted_code = converted_code.replace(f"{settings['source_database']}..", f"{settings['target_schema_name']}.")
             # converted_code = converted_code.replace(f"{settings['source_database']}.{settings['source_schema_name']}.", f"{settings['target_schema_name']}.")
@@ -3292,6 +3300,7 @@ EXECUTE FUNCTION {target_schema_name}.{trigger_name}_func();
 
     def convert_default_value(self, settings) -> dict:
         extracted_default_value = settings['extracted_default_value']
+        extracted_default_value = self.apply_sql_functions_mapping(extracted_default_value, settings)
         return extracted_default_value
 
     def get_table_checksum(self, schema_name: str, table_name: str, columns: list):

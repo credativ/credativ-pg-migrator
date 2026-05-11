@@ -1,8 +1,33 @@
 # Changelog
 
-## 0.14.0dev - XXXX.XX.XX
+## 0.14.0 - 2026.05.11
 
-## 0.13.0 - 2026.04.20
+- 2026.05.11
+
+  - Feature - Sybase ASE Connector: implemented SQL parser for proper processing of queries in stored procedures. This parser was already used in conversion of views.
+  - Old migration summary removed from the code, mapping workflow now uses the new summary report too.
+  - Fixing different behavior of Sybase ASE built-in functions conversion across conversion of views, procedures and triggers.
+  - Fix in TSQL conversion - returning table structure must have unique column names, user defined data types must be double quoted, proper conversion of raiserror to raise exception, and print statement not connected to rollback or raiserror to raise notice, fixed parsing of multiple selects not properly terminated, fixed parsing of INSERT, UPDATE, SELECT statements which are scattered over multiple lines with empty lines in between them and without proper termination.
+
+- 2026.05.08
+
+  - Fix - T-SQL Parser: Enhanced `pass_6_parse_selects` to correctly identify and merge `UNION` and `UNION ALL` statements into a single cohesive `SELECT` block, preventing broken multi-part queries during conversion.
+  - Feature - Sybase ASE Connector: Implemented dynamic implicit return schema extraction using `SQLGlot`. Automatically traverses ASTs to infer column aliases and base data types from implicit procedural `SELECT` statements, seamlessly wrapping them in `RETURNS TABLE (...)` definitions.
+  - Fix - T-SQL Parser: Completely rewrote Pass 12 (IF level tracking) to utilize a robust state-stack mechanism, accurately tracking `IF`, `ELSIF`, and `ELSE` targets to dynamically inject missing `END IF;` terminators for both `BEGIN...END` blocks and single-statement conditionals.
+  - Fix - T-SQL Parser: Prevented `UPDATE()` trigger function calls from being erroneously parsed and split as standard `UPDATE` command keywords.
+  - Fix - T-SQL Parser: Improved `PRINT` statement extraction to properly handle and escape embedded single quotes when converting double-quoted strings into PostgreSQL standard formatting.
+  - Fix - T-SQL Parser: Added dedicated parsing for `DELETE` statements to correctly extract and append semicolons.
+  - Fix - T-SQL Parser: Added extraction of `PRINT` statements and automatic conversion to PostgreSQL `RAISE WARNING` commands.
+  - Fix - T-SQL Parser: Safely encapsulated behavior-modifying `SET` commands (e.g., `SET NOCOUNT ON`) within `/* ... - Sybase Syntax */` comments to avoid syntax errors.
+  - Fix - T-SQL Parser: Fixed parsing of single-line inline `IF` statements by introducing a new pre-processing pass that safely splits the condition from the inline command, enabling the generator to natively inject the required `END IF;` terminator.
+  - Fix - T-SQL Parser: Resolved an issue where adjacent `SELECT` statements were incorrectly merged into a single AST node by expanding the pass terminator matrix to include `SELECT`, `DELETE`, `PRINT`, `SET`, `EXEC`, and `EXECUTE`.
+  - Fix - T-SQL Parser: Introduced `pass_6c_parse_execs` to natively extract and process legacy `EXEC` and `EXECUTE` procedure invocations, preventing them from falling through to the generic `TODO: not processed line` syntax trap.
+  - Fix - T-SQL Parser: Expanded `pass_9_rename_variables` to iterate over legacy inline and multi-line comments, successfully rewriting embedded `@var` arguments to their localized `locvar_` variants for complete context accuracy.
+  - Fix - T-SQL Parser: Re-engineered procedural `SELECT` assignment tracking to utilize a native `replace_commas_outside_parens` depth parser, completely preventing nested commas inside SQL functions (e.g., `convert()`) from being erroneously transformed into variable separation semicolons.
+  - Feature - T-SQL Parser: Implemented `pass_8b_convert_datetime_formats` to natively capture Sybase `CONVERT(CHAR, expr, style)` syntax, dynamically mapping all numeric datetime styles (1 through 140) directly into native PostgreSQL `to_char(expr, format)` equivalents.
+  - Fix - T-SQL Parser: Enforced `INSERT INTO` syntax on all Sybase ASE `INSERT` commands, preventing syntax errors in PostgreSQL where the `INTO` keyword is strictly mandatory.
+  - Fix - T-SQL Parser: Upgraded `pass_8b_convert_datetime_formats` with a character-by-character paren-depth scanner to support 2-parameter `CONVERT(type, expr)` variants, dynamically transforming them into native PostgreSQL `CAST(expr AS type)` structures regardless of nested commas or internal parentheses.
+  - Feature - T-SQL Parser: Engineered trigger-specific transaction abortion logic; when a `PRINT` statement is immediately preceded or followed by a `ROLLBACK TRIGGER` or `ROLLBACK TRANSACTION` command, the parser now cleanly merges them into a single `RAISE EXCEPTION` block to correctly halt execution in PostgreSQL.
 
 - 2026.04.17
 

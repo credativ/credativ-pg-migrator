@@ -24,9 +24,13 @@ class OutputLine:
 
 
 class TsqlParser:
-    def __init__(self, code_str: str, config_parser=None):
+    def __init__(self, code_str: str, config_parser=None, implicit_return=False, view_converter=None, settings=None, functions_mapping_converter=None):
         self.code_str = code_str
         self.config_parser = config_parser
+        self.implicit_return = implicit_return
+        self.view_converter = view_converter
+        self.settings = settings
+        self.functions_mapping_converter = functions_mapping_converter
         self.raw_lines = []
         self.body_lines = []
         self.header_lines = []
@@ -35,13 +39,93 @@ class TsqlParser:
         self.inserts = []
         self.update_commands = []
         self.select_commands = []
+        self.exec_commands = []
         self.if_commands = []
+        self.delete_commands = []
+        self.print_commands = []
+        self.set_commands = []
+        self.raiserror_commands = []
 
     def log(self, message):
         if self.config_parser:
             self.config_parser.print_log_message('DEBUG', 'TsqlParser: ' + message)
         else:
             print(f'[LOG] {message}')
+
+    def extract_implicit_return_schema(self) -> List[Dict]:
+        """
+        Parses the code to find the implicit return SELECT statement,
+        then uses SQLGlot to extract column names and infer basic types.
+        """
+        self.read_code()
+        self.parse_header_and_body_boundary()
+        self.pass_1_split_inline_comments()
+        self.pass_2_extract_comments()
+        self.pass_3_parse_variables()
+        self.pass_3b_split_inline_ifs()
+        self.pass_4_parse_inserts()
+        self.pass_5_parse_updates()
+        self.pass_5b_parse_deletes()
+        self.pass_5c_parse_prints()
+        self.pass_5d_parse_sets()
+        self.pass_5e_parse_raiserror()
+        self.pass_6_parse_selects()
+
+        for cmd_obj in self.select_commands:
+            content = cmd_obj['content']
+            normalized = re.sub(r'\s+', ' ', content)
+            is_assignment = bool(re.match(r'^SELECT\s+(@[\w@]+|locvar_[\w]+)\s*(:=|=)', normalized, re.IGNORECASE))
+            has_into = bool(re.search(r'\bINTO\b', normalized, re.IGNORECASE))
+
+            if not is_assignment and not has_into:
+                # Parse with SQLGlot
+                import sqlglot
+                from sqlglot import exp
+                try:
+                    parsed = sqlglot.parse_one(content, read='tsql')
+                    
+                    node = parsed
+                    while isinstance(node, exp.Union):
+                        node = node.this
+                        
+                    expressions = []
+                    if isinstance(node, exp.Select):
+                        expressions = node.expressions
+
+                    if expressions:
+                        schema = []
+                        name_counts = {}
+                        for idx, p in enumerate(expressions):
+                            alias = ""
+                            expr = p
+                            if isinstance(p, exp.Alias):
+                                alias = p.alias
+                                expr = p.this
+                            elif isinstance(p, exp.Column):
+                                alias = p.name
+                            
+                            inferred_type = "varchar"
+                            if isinstance(expr, (exp.Count, exp.Sum, exp.Avg, exp.Max, exp.Min)):
+                                inferred_type = "numeric"
+                            elif isinstance(expr, exp.Literal):
+                                if expr.is_int: inferred_type = "integer"
+                                elif expr.is_number: inferred_type = "numeric"
+                            
+                            if not alias or alias == 'unknown_col':
+                                alias = f"col{idx}"
+                            
+                            if alias.lower() in name_counts:
+                                name_counts[alias.lower()] += 1
+                                alias = f"{alias}_{name_counts[alias.lower()]}"
+                            else:
+                                name_counts[alias.lower()] = 0
+                                
+                            schema.append({'name': alias, 'system_type_name': inferred_type})
+                        return schema
+                except Exception as e:
+                    self.log(f"SQLGlot parsing failed for implicit return schema: {e}")
+                    
+        return []
 
     def read_code(self):
         lines = self.code_str.splitlines()
@@ -76,10 +160,10 @@ class TsqlParser:
                     # Split the line into two SourceLines
                     header_part = line.content[:match.end()]
                     body_part = after_as
-                    
+
                     # Update current line to be just the header part
                     self.raw_lines[i].content = header_part
-                    
+
                     # Insert the rest as the next line (preserve line_number for tracking)
                     self.raw_lines.insert(i + 1, SourceLine(line.line_number, body_part))
                 break
@@ -92,7 +176,7 @@ class TsqlParser:
 
             # Body is everything after 'AS'
             raw_body = self.raw_lines[as_index+1:]
-            
+
             # Rule: "remove all spaces at the beginning and at the end of each line"
             self.body_lines = [SourceLine(l.line_number, l.content.strip()) for l in raw_body]
 
@@ -126,6 +210,42 @@ class TsqlParser:
                 in_double_quote = not in_double_quote
 
         return False
+
+    def replace_commas_outside_parens(self, s, stop_word=None):
+        result = []
+        paren_level = 0
+        in_single_quote = False
+        in_double_quote = False
+        
+        stop_word_lower = stop_word.lower() if stop_word else None
+        stopped = False
+
+        i = 0
+        while i < len(s):
+            char = s[i]
+            if char == "'" and not in_double_quote:
+                in_single_quote = not in_single_quote
+            elif char == '"' and not in_single_quote:
+                in_double_quote = not in_double_quote
+            elif char == '(' and not in_single_quote and not in_double_quote:
+                paren_level += 1
+            elif char == ')' and not in_single_quote and not in_double_quote:
+                paren_level -= 1
+            
+            if stop_word_lower and not stopped and paren_level == 0 and not in_single_quote and not in_double_quote:
+                if s[i:].lower().startswith(stop_word_lower):
+                    end_idx = i + len(stop_word_lower)
+                    if (i == 0 or not s[i-1].isalnum() and s[i-1] != '_') and \
+                       (end_idx == len(s) or not s[end_idx].isalnum() and s[end_idx] != '_'):
+                        stopped = True
+            
+            if char == ',' and paren_level == 0 and not in_single_quote and not in_double_quote and not stopped:
+                result.append(';')
+            else:
+                result.append(char)
+            
+            i += 1
+        return "".join(result)
 
     def find_unquoted_marker(self, content: str, markers: List[str]) -> tuple:
         """
@@ -302,13 +422,13 @@ class TsqlParser:
                     # But Rule 41 implies we don't parse inside comments?
                     # Wait, Pass 1 is "update of inline comments".
                     # Review Rule 33. "if line contains */ ... divided"
-                    
+
                     # If line starts with /* and contains */
                     # e.g. "/* c */ select 1"
                     # Split at */.
                     # Part 1: "/* c */"
                     # Part 2: " select 1"
-                    
+
                     if "*/" in content:
                         idx_end, marker_end = self.find_unquoted_marker(content, ["*/"])
                         if idx_end != -1:
@@ -519,7 +639,7 @@ class TsqlParser:
                 # So I DO NOT remove previous */ here explicitly?
                 # The new rule says: "at the end of this step iterate ... replace '*/ */' ... with single '*/'".
                 # So here I just encapsulate.
-                
+
                 self.comments.append({
                     "line": line.line_number,
                     "content": encapsulated
@@ -532,7 +652,7 @@ class TsqlParser:
         # End of loop.
         # "at the end of this step iterate through all lines of comments array..."
         # Rule: "replace pattern '*/ */' with single '*/'"
-        
+
         for comment in self.comments:
             # Pattern: "*/" followed by ZERO, one or more space(s) followed by "*/"
             # Regex: \*/\s*\*/
@@ -566,19 +686,19 @@ class TsqlParser:
                 while i < len(self.body_lines):
                     current_line = self.body_lines[i]
                     current_content = current_line.content.strip()
+
+                    if len(decl_lines) > 0:
+                        is_terminator = re.match(r'^(IF|ELSE\s+IF|ELSE|ELSIF|END|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT|SET|BEGIN|EXEC|EXECUTE|WHILE|COMMIT|ROLLBACK|DECLARE|CREATE|ALTER|DROP|RAISERROR)\b', current_content, re.IGNORECASE)
+                        if is_terminator:
+                            break
+
                     decl_lines.append(current_line.content)
 
                     if current_content.lower() == "declare":
                         i += 1
                         continue
 
-                    if current_content.endswith(","):
-                        i += 1
-                        continue
-                    else:
-                        # Ends
-                        i += 1 # Move past this line
-                        break
+                    i += 1
 
                 # Rule: "remove all spaces ... keep new line characters"
                 # "remove all DECLARE key words ... replace ',' characters at the end of lines with semicolon ';'"
@@ -589,9 +709,8 @@ class TsqlParser:
                 # Remove leading DECLARE (case insensitive)
                 full_decl = re.sub(r'^DECLARE\s+', '', full_decl, flags=re.IGNORECASE)
 
-                # Replace trailing , with ; on EACH line (if it exists at the end)
-                # Using regex with MULTILINE flag to match $ at end of each line
-                full_decl = re.sub(r',\s*$', ';', full_decl, flags=re.MULTILINE)
+                # Replace commas separating variable declarations with semicolons, ignoring commas inside parens (e.g. for NUMERIC(10,2))
+                full_decl = self.replace_commas_outside_parens(full_decl)
 
                 if not full_decl.strip().endswith(';'):
                     full_decl = full_decl.rstrip() + ';'
@@ -639,13 +758,13 @@ class TsqlParser:
 
                     if len(insert_lines) > 0: # Checks for subsequent lines
                         # Check start of line for keywords
-                        if re.match(r'^(IF|END|UPDATE|RETURN)\b', current_content, re.IGNORECASE):
+                        if re.match(r'^(IF|ELSE\s+IF|ELSE|ELSIF|END|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT|SET|BEGIN|EXEC|EXECUTE|WHILE|COMMIT|ROLLBACK|DECLARE|CREATE|ALTER|DROP|RAISERROR)\b', current_content, re.IGNORECASE):
                              # Terminator found.
                              # But verify continuation first?
                              # Rule: "if line ... ends with ',' or '=' ... next line is part"
                              # Rule: "if next line ... starts with ',' or '=' ... also part"
                              # Rule: "if next line starts with 'FROM' ... also part"
-                             
+
                              # Does continuation override terminator keyword?
                              # Rule 67/68/69 are specific continuation/inclusion rules.
                              # Rule 65 says "ends by empty line or before next IF..."
@@ -657,24 +776,47 @@ class TsqlParser:
 
                         # Let's invoke termination check, but respect continuation rules
                         # If current_content starts with terminator keyword (IF/END/UPDATE/RETURN)
-                        is_terminator = re.match(r'^(IF|END|UPDATE|RETURN)\b', current_content, re.IGNORECASE) or current_content == ""
-                        
+                        is_terminator = False
+                        if current_content == "":
+                            next_idx_check = i + 1
+                            next_l_check = ""
+                            while next_idx_check < len(self.body_lines):
+                                next_l_check = self.body_lines[next_idx_check].content.strip()
+                                if next_l_check != "":
+                                    break
+                                next_idx_check += 1
+                            if next_l_check:
+                                terminator_pattern = r'^(IF|ELSE\s+IF|ELSE|ELSIF|END|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT|SET|BEGIN|EXEC|EXECUTE|WHILE|COMMIT|ROLLBACK|DECLARE|CREATE|ALTER|DROP|RAISERROR)\b'
+                                if re.match(terminator_pattern, next_l_check, re.IGNORECASE):
+                                    is_terminator = True
+                            else:
+                                is_terminator = True
+                        elif re.match(r'^(IF|ELSE\s+IF|ELSE|ELSIF|END|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT|SET|BEGIN|EXEC|EXECUTE|WHILE|COMMIT|ROLLBACK|DECLARE|CREATE|ALTER|DROP|RAISERROR)\b', current_content, re.IGNORECASE):
+                            is_terminator = True
+
                         if is_terminator:
                              # Check if we should CONTINUE anyway
                              prev_content = insert_lines[-1].strip()
                              should_continue = False
-                             
+
                              # Rule 67: prev ends with "," or "="
-                             if prev_content.endswith(",") or prev_content.endswith("="):
+                             if prev_content.endswith(",") or prev_content.endswith("=") or prev_content.endswith("("):
                                  should_continue = True
-                                 
+
                              # Rule 68: next line (current line) starts with "," or "="
                              if current_content.startswith(",") or current_content.startswith("="):
                                  should_continue = True
-                                 
+
                              # Rule 69: next line (current line) starts with "FROM"
                              if re.match(r'^FROM\b', current_content, re.IGNORECASE):
                                  should_continue = True
+
+                             # INSERT ... SELECT continuation
+                             if re.match(r'^SELECT\b', current_content, re.IGNORECASE):
+                                 has_values = any(re.search(r'\bVALUES\b', l, re.IGNORECASE) for l in insert_lines)
+                                 has_select = any(re.search(r'\bSELECT\b', l, re.IGNORECASE) for l in insert_lines)
+                                 if not has_values and not has_select:
+                                     should_continue = True
 
                              if not should_continue:
                                  break
@@ -685,6 +827,9 @@ class TsqlParser:
                 # Rule: "remove all spaces ... remove new line characters"
                 cleaned_lines = [l.strip() for l in insert_lines]
                 full_insert = " ".join(cleaned_lines)
+                
+                # Sybase ASE allows "INSERT table", PostgreSQL requires "INSERT INTO table"
+                full_insert = re.sub(r'^INSERT\s+(?!INTO\s+)', 'INSERT INTO ', full_insert, flags=re.IGNORECASE)
 
                 self.inserts.append({
                     "line": start_line,
@@ -718,24 +863,30 @@ class TsqlParser:
                     current_content = current_line.content.strip()
 
                     if len(update_lines) > 0:
-                        is_terminator = re.match(r'^(IF|ELSE\s+IF|ELSE|END|UPDATE|RETURN)\b', current_content, re.IGNORECASE)
-                        
+                        is_terminator = re.match(r'^(IF|ELSE\s+IF|ELSE|ELSIF|END|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT|SET|BEGIN|EXEC|EXECUTE|WHILE|COMMIT|ROLLBACK|DECLARE|CREATE|ALTER|DROP|RAISERROR)\b', current_content, re.IGNORECASE)
+
                         if is_terminator:
                             prev_content = update_lines[-1].strip()
                             should_continue = False
-                            
+
                             # Prev ends with , or =
-                            if prev_content.endswith(",") or prev_content.endswith("="):
+                            if prev_content.endswith(",") or prev_content.endswith("=") or prev_content.endswith("("):
                                 should_continue = True
-                            
+
                             # Curr starts with , or =
                             if current_content.startswith(",") or current_content.startswith("="):
                                 should_continue = True
-                                
+
                             # Curr starts with FROM
                             if re.match(r'^FROM\b', current_content, re.IGNORECASE):
                                 should_continue = True
-                                
+
+                            # UPDATE ... SET continuation
+                            if re.match(r'^SET\b', current_content, re.IGNORECASE):
+                                has_set = any(re.search(r'\bSET\b', l, re.IGNORECASE) for l in update_lines)
+                                if not has_set:
+                                    should_continue = True
+
                             if not should_continue:
                                 break
 
@@ -754,6 +905,333 @@ class TsqlParser:
                 new_body_lines.append(line)
                 i += 1
 
+        self.body_lines = new_body_lines
+
+    def pass_5b_parse_deletes(self):
+        """
+        Pass 5b: Parses DELETE commands.
+        Starts with DELETE.
+        Ends before next IF, ELSE IF, ELSE, END, UPDATE, INSERT, DELETE, RETURN, SELECT.
+        """
+        self.log("Running Pass 5b: Parse DELETEs")
+        new_body_lines = []
+        i = 0
+        while i < len(self.body_lines):
+            line = self.body_lines[i]
+            content = line.content.strip()
+
+            if re.match(r'^DELETE\b', content, re.IGNORECASE):
+                start_line = line.line_number
+                delete_lines = []
+
+                while i < len(self.body_lines):
+                    current_line = self.body_lines[i]
+                    current_content = current_line.content.strip()
+
+                    if len(delete_lines) > 0:
+                        is_terminator = re.match(r'^(IF|ELSE\s+IF|ELSE|ELSIF|END|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT|SET|BEGIN|EXEC|EXECUTE|WHILE|COMMIT|ROLLBACK|DECLARE|CREATE|ALTER|DROP|RAISERROR)\b', current_content, re.IGNORECASE)
+
+                        if is_terminator:
+                            prev_content = delete_lines[-1].strip()
+                            should_continue = False
+
+                            # Prev ends with , or =
+                            if prev_content.endswith(",") or prev_content.endswith("=") or prev_content.endswith("("):
+                                should_continue = True
+
+                            # Curr starts with , or =
+                            if current_content.startswith(",") or current_content.startswith("="):
+                                should_continue = True
+
+                            # Curr starts with FROM
+                            if re.match(r'^FROM\b', current_content, re.IGNORECASE):
+                                should_continue = True
+
+                            if not should_continue:
+                                break
+
+                    delete_lines.append(current_line.content)
+                    i += 1
+
+                # Rule: "remove all spaces ... remove new line characters"
+                cleaned_lines = [l.strip() for l in delete_lines]
+                full_delete = " ".join(cleaned_lines)
+
+                self.delete_commands.append({
+                    "line": start_line,
+                    "content": full_delete
+                })
+            else:
+                new_body_lines.append(line)
+                i += 1
+
+        self.body_lines = new_body_lines
+
+    def pass_5c_parse_prints(self):
+        """
+        Pass 5c: Parses PRINT commands.
+        Starts with PRINT.
+        Ends before next IF, ELSE IF, ELSE, END, UPDATE, INSERT, DELETE, RETURN, SELECT, PRINT.
+        Transforms PRINT into RAISE WARNING.
+        """
+        self.log("Running Pass 5c: Parse PRINTs")
+        new_body_lines = []
+        i = 0
+        while i < len(self.body_lines):
+            line = self.body_lines[i]
+            content = line.content.strip()
+
+            if re.match(r'^PRINT\b', content, re.IGNORECASE):
+                start_line = line.line_number
+                print_lines = []
+                has_rollback_trigger = False
+
+                # Check if the immediately preceding line was a ROLLBACK
+                if len(new_body_lines) > 0:
+                    prev_line_content = new_body_lines[-1].content.strip()
+                    if re.match(r'^ROLLBACK\s+(TRIGGER|TRANSACTION)\b', prev_line_content, re.IGNORECASE):
+                        has_rollback_trigger = True
+                        new_body_lines.pop() # Absorb the rollback line
+
+                while i < len(self.body_lines):
+                    current_line = self.body_lines[i]
+                    current_content = current_line.content.strip()
+
+                    if len(print_lines) > 0:
+                        # Check if the immediately following line is a ROLLBACK
+                        if re.match(r'^ROLLBACK\s+(TRIGGER|TRANSACTION)\b', current_content, re.IGNORECASE):
+                            has_rollback_trigger = True
+                            i += 1
+                            break
+
+                        is_terminator = re.match(r'^(IF|ELSE\s+IF|ELSE|ELSIF|END|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT|SET|BEGIN|EXEC|EXECUTE|WHILE|COMMIT|ROLLBACK|DECLARE|CREATE|ALTER|DROP|RAISERROR)\b', current_content, re.IGNORECASE)
+
+                        if is_terminator:
+                            prev_content = print_lines[-1].strip()
+                            should_continue = False
+
+                            # Prev ends with , or = or +
+                            if prev_content.endswith(",") or prev_content.endswith("=") or prev_content.endswith("+") or prev_content.endswith("("):
+                                should_continue = True
+
+                            # Curr starts with , or = or +
+                            if current_content.startswith(",") or current_content.startswith("=") or current_content.startswith("+"):
+                                should_continue = True
+
+                            if not should_continue:
+                                break
+
+                    print_lines.append(current_line.content)
+                    i += 1
+
+                # Rule: "remove all spaces ... remove new line characters"
+                cleaned_lines = [l.strip() for l in print_lines]
+                full_print = " ".join(cleaned_lines)
+                
+                # Transform PRINT into RAISE NOTICE or EXCEPTION
+                print_args = re.sub(r'^PRINT\b', '', full_print, flags=re.IGNORECASE).strip()
+                
+                if print_args.startswith("'") or print_args.startswith('"'):
+                    match = re.match(r'^((?:\'[^\']*\')|(?:"[^"]*"))(.*)$', print_args, re.IGNORECASE)
+                    if match:
+                        format_str_raw = match.group(1)
+                        args = match.group(2).strip()
+                        
+                        if format_str_raw.startswith('"') and format_str_raw.endswith('"'):
+                            format_str = format_str_raw[1:-1].replace("'", "''")
+                        else:
+                            format_str = format_str_raw[1:-1]
+                            
+                        format_str = re.sub(r'%\d+!', '%', format_str)
+                        
+                        if args:
+                            args = args.lstrip(',').strip()
+                            new_print_args = f"'{format_str}', {args}"
+                        else:
+                            new_print_args = f"'{format_str}'"
+                    else:
+                        new_print_args = print_args
+                else:
+                    new_print_args = f"'%', {print_args}"
+                
+                if has_rollback_trigger:
+                    full_print = f"RAISE EXCEPTION {new_print_args}"
+                else:
+                    full_print = f"RAISE NOTICE {new_print_args}"
+
+                self.print_commands.append({
+                    "line": start_line,
+                    "content": full_print
+                })
+            else:
+                new_body_lines.append(line)
+                i += 1
+
+        self.body_lines = new_body_lines
+
+    def pass_5d_parse_sets(self):
+        """
+        Pass 5d: Parses SET commands that modify behavior (e.g., SET NOCOUNT ON).
+        Skips SET @var and SET ROWCOUNT.
+        Starts with SET.
+        Encapsulates into /* ... - Sybase Syntax */.
+        """
+        self.log("Running Pass 5d: Parse SETs")
+        new_body_lines = []
+        i = 0
+        while i < len(self.body_lines):
+            line = self.body_lines[i]
+            content = line.content.strip()
+
+            is_set = re.match(r'^SET\b', content, re.IGNORECASE)
+            is_var = re.match(r'^SET\s+@', content, re.IGNORECASE)
+            is_rowcount = re.match(r'^SET\s+ROWCOUNT\b', content, re.IGNORECASE)
+
+            if is_set and not is_var and not is_rowcount:
+                start_line = line.line_number
+                set_lines = []
+
+                while i < len(self.body_lines):
+                    current_line = self.body_lines[i]
+                    current_content = current_line.content.strip()
+
+                    if len(set_lines) > 0:
+                        is_terminator = re.match(r'^(IF|ELSE\s+IF|ELSE|ELSIF|END|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT|SET|BEGIN|EXEC|EXECUTE|WHILE|COMMIT|ROLLBACK|DECLARE|CREATE|ALTER|DROP|RAISERROR)\b', current_content, re.IGNORECASE)
+
+                        if is_terminator:
+                            prev_content = set_lines[-1].strip()
+                            should_continue = False
+
+                            # Prev ends with , or =
+                            if prev_content.endswith(",") or prev_content.endswith("=") or prev_content.endswith("("):
+                                should_continue = True
+
+                            # Curr starts with , or =
+                            if current_content.startswith(",") or current_content.startswith("="):
+                                should_continue = True
+
+                            if not should_continue:
+                                break
+
+                    set_lines.append(current_line.content)
+                    i += 1
+
+                cleaned_lines = [l.strip() for l in set_lines]
+                full_set = " ".join(cleaned_lines)
+                
+                # Transform into comment
+                full_set = f"/* {full_set} - Sybase Syntax */"
+
+                self.set_commands.append({
+                    "line": start_line,
+                    "content": full_set
+                })
+            else:
+                new_body_lines.append(line)
+                i += 1
+
+        self.body_lines = new_body_lines
+
+    def pass_5e_parse_raiserror(self):
+        """
+        Pass 5e: Parses RAISERROR commands, handling preceding ROLLBACK.
+        Translates into RAISE EXCEPTION.
+        """
+        self.log("Running Pass 5e: Parse RAISERRORs")
+        new_body_lines = []
+        i = 0
+        while i < len(self.body_lines):
+            line = self.body_lines[i]
+            content = line.content.strip()
+
+            if re.match(r'^ROLLBACK\b', content, re.IGNORECASE):
+                # Check if next statement is RAISERROR
+                next_idx = i + 1
+                is_followed_by_raiserror = False
+                while next_idx < len(self.body_lines):
+                    next_content = self.body_lines[next_idx].content.strip()
+                    if next_content != "":
+                        if re.match(r'^RAISERROR\b', next_content, re.IGNORECASE):
+                            is_followed_by_raiserror = True
+                        break
+                    next_idx += 1
+                
+                if is_followed_by_raiserror:
+                    # Skip the ROLLBACK
+                    i += 1
+                    continue
+                else:
+                    new_body_lines.append(line)
+                    i += 1
+                    continue
+
+            if re.match(r'^RAISERROR\b', content, re.IGNORECASE):
+                start_line = line.line_number
+                raiserror_lines = []
+                while i < len(self.body_lines):
+                    current_line = self.body_lines[i]
+                    current_content = current_line.content.strip()
+
+                    if len(raiserror_lines) > 0:
+                        is_terminator = False
+                        if current_content == "":
+                            next_idx_check = i + 1
+                            next_l_check = ""
+                            while next_idx_check < len(self.body_lines):
+                                next_l_check = self.body_lines[next_idx_check].content.strip()
+                                if next_l_check != "":
+                                    break
+                                next_idx_check += 1
+                            if next_l_check:
+                                terminator_pattern = r'^(IF|ELSE\s+IF|ELSE|ELSIF|END|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT|SET|BEGIN|EXEC|EXECUTE|WHILE|COMMIT|ROLLBACK|DECLARE|CREATE|ALTER|DROP|RAISERROR)\b'
+                                if re.match(terminator_pattern, next_l_check, re.IGNORECASE):
+                                    is_terminator = True
+                            else:
+                                is_terminator = True
+                        elif re.match(r'^(IF|ELSE\s+IF|ELSE|ELSIF|END|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT|SET|BEGIN|EXEC|EXECUTE|WHILE|COMMIT|ROLLBACK|DECLARE|CREATE|ALTER|DROP|RAISERROR)\b', current_content, re.IGNORECASE):
+                            is_terminator = True
+
+                        if is_terminator:
+                            break
+
+                    raiserror_lines.append(current_line.content)
+                    i += 1
+
+                cleaned_lines = [l.strip() for l in raiserror_lines]
+                full_raiserror = " ".join(cleaned_lines)
+
+                # Now parse RAISERROR <number> <string>
+                match = re.match(r'^RAISERROR\s+(\d+)\s+((?:\'[^\']*\')|(?:"[^"]*"))(.*)$', full_raiserror, re.IGNORECASE)
+                if match:
+                    err_num = match.group(1)
+                    err_msg_raw = match.group(2)
+                    args = match.group(3).strip()
+
+                    if (err_msg_raw.startswith('"') and err_msg_raw.endswith('"')) or (err_msg_raw.startswith("'") and err_msg_raw.endswith("'")):
+                        err_msg = err_msg_raw[1:-1]
+                    else:
+                        err_msg = err_msg_raw
+
+                    err_msg = err_msg.replace("'", "''")
+                    err_msg = re.sub(r'%\d+!', '%', err_msg)
+                    
+                    if args:
+                        args = args.lstrip(',').strip()
+                        full_raiserror = f"RAISE EXCEPTION '{err_msg} %', {args}, {err_num}"
+                    else:
+                        full_raiserror = f"RAISE EXCEPTION '{err_msg} %', {err_num}"
+                else:
+                    # fallback
+                    full_raiserror = re.sub(r'^RAISERROR\b', 'RAISE EXCEPTION', full_raiserror, flags=re.IGNORECASE)
+
+                self.raiserror_commands.append({
+                    "line": start_line,
+                    "content": full_raiserror
+                })
+            else:
+                new_body_lines.append(line)
+                i += 1
+        
         self.body_lines = new_body_lines
 
     def pass_6_parse_selects(self):
@@ -787,7 +1265,7 @@ class TsqlParser:
                         is_terminator = False
                         if current_content == "":
                             is_terminator = True
-                        elif re.match(r'^(IF|ELSE\s+IF|ELSE|END|BEGIN|UPDATE|INSERT|RETURN)\b', current_content, re.IGNORECASE):
+                        elif re.match(r'^(IF|ELSE\s+IF|ELSE|ELSIF|END|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT|SET|BEGIN|EXEC|EXECUTE|WHILE|COMMIT|ROLLBACK|DECLARE|CREATE|ALTER|DROP|RAISERROR)\b', current_content, re.IGNORECASE):
                             is_terminator = True
 
                         if is_terminator:
@@ -804,7 +1282,9 @@ class TsqlParser:
                             # Standard continuations
                             if prev_content.upper() == "SELECT":
                                 is_continuation = True
-                            elif prev_content.endswith(",") or prev_content.endswith("="):
+                            elif prev_content.endswith(",") or prev_content.endswith("=") or prev_content.endswith("("):
+                                is_continuation = True
+                            elif re.search(r'\bUNION(?:\s+ALL)?$', prev_content, re.IGNORECASE):
                                 is_continuation = True
 
                             # FROM check override
@@ -816,12 +1296,16 @@ class TsqlParser:
                             # If current is empty, check i+1.
                             if not is_continuation and current_content == "":
                                 next_idx_check = i + 1
-                                if next_idx_check < len(self.body_lines):
+                                next_l_check = ""
+                                while next_idx_check < len(self.body_lines):
                                      next_l_check = self.body_lines[next_idx_check].content.strip()
-                                     if re.match(r'^FROM\b', next_l_check, re.IGNORECASE):
-                                         is_continuation = True
-                                     elif next_l_check.startswith(",") or next_l_check.startswith("="):
-                                         # Rule 89: "if next line ... starts with ',' or '=' ... also part"
+                                     if next_l_check != "":
+                                         break
+                                     next_idx_check += 1
+                                
+                                if next_l_check:
+                                     terminator_pattern = r'^(IF|ELSE\s+IF|ELSE|ELSIF|END|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT|SET|BEGIN|EXEC|EXECUTE|WHILE|COMMIT|ROLLBACK|DECLARE|CREATE|ALTER|DROP|RAISERROR)\b'
+                                     if not re.match(terminator_pattern, next_l_check, re.IGNORECASE):
                                          is_continuation = True
 
                             if not is_continuation:
@@ -844,6 +1328,128 @@ class TsqlParser:
                 new_body_lines.append(line)
                 i += 1
 
+        self.body_lines = new_body_lines
+
+    def pass_6c_parse_execs(self):
+        """
+        Pass 6c: Parses EXEC / EXECUTE commands.
+        Starts with EXEC or EXECUTE.
+        """
+        self.log("Running Pass 6c: Parse EXECs")
+        new_body_lines = []
+        i = 0
+        while i < len(self.body_lines):
+            line = self.body_lines[i]
+            content = line.content.strip()
+
+            if re.match(r'^(EXEC|EXECUTE)\b', content, re.IGNORECASE):
+                start_line = line.line_number
+                exec_lines = []
+
+                while i < len(self.body_lines):
+                    current_line = self.body_lines[i]
+                    current_content = current_line.content.strip()
+
+                    if len(exec_lines) > 0:
+                        is_terminator = False
+                        if current_content == "":
+                            next_idx_check = i + 1
+                            next_l_check = ""
+                            while next_idx_check < len(self.body_lines):
+                                next_l_check = self.body_lines[next_idx_check].content.strip()
+                                if next_l_check != "":
+                                    break
+                                next_idx_check += 1
+                            if next_l_check:
+                                terminator_pattern = r'^(IF|ELSE\s+IF|ELSE|ELSIF|END|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT|SET|BEGIN|EXEC|EXECUTE|WHILE|COMMIT|ROLLBACK|DECLARE|CREATE|ALTER|DROP|RAISERROR)\b'
+                                if re.match(terminator_pattern, next_l_check, re.IGNORECASE):
+                                    is_terminator = True
+                            else:
+                                is_terminator = True
+                        elif re.match(r'^(IF|ELSE\s+IF|ELSE|ELSIF|END|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT|SET|BEGIN|EXEC|EXECUTE|WHILE|COMMIT|ROLLBACK|DECLARE|CREATE|ALTER|DROP|RAISERROR)\b', current_content, re.IGNORECASE):
+                            is_terminator = True
+
+                        if is_terminator:
+                            prev_content = exec_lines[-1].strip()
+                            is_continuation = False
+                            if prev_content.endswith(","):
+                                is_continuation = True
+                            
+                            if not is_continuation:
+                                break
+                    
+                    exec_lines.append(current_line.content)
+                    i += 1
+
+                cleaned_lines = [l.strip() for l in exec_lines]
+                full_exec = " ".join(cleaned_lines)
+
+                self.exec_commands.append({
+                    "line": start_line,
+                    "content": full_exec
+                })
+            else:
+                new_body_lines.append(line)
+                i += 1
+
+        self.body_lines = new_body_lines
+
+    def pass_3b_split_inline_ifs(self):
+        """
+        Pass 3b: Splits inline IF statements.
+        Sybase allows `IF condition command`.
+        This pass splits such lines into two: `IF condition` and `command`.
+        """
+        self.log("Running Pass 3b: Split Inline IFs")
+        new_body_lines = []
+        keywords = ["SELECT", "INSERT", "UPDATE", "DELETE", "PRINT", "EXEC", "EXECUTE", "BEGIN", "RETURN", "SET"]
+        
+        for line in self.body_lines:
+            content = line.content.strip()
+            if re.match(r'^(IF|ELSE\s+IF)\b', content, re.IGNORECASE):
+                in_single_quote = False
+                in_double_quote = False
+                paren_level = 0
+                split_idx = -1
+                
+                j = 0
+                while j < len(content):
+                    char = content[j]
+                    
+                    if char == "'" and not in_double_quote:
+                        in_single_quote = not in_single_quote
+                    elif char == '"' and not in_single_quote:
+                        in_double_quote = not in_double_quote
+                    elif char == '(' and not in_single_quote and not in_double_quote:
+                        paren_level += 1
+                    elif char == ')' and not in_single_quote and not in_double_quote:
+                        paren_level -= 1
+                        
+                    if not in_single_quote and not in_double_quote and paren_level == 0:
+                        if j > 0 and content[j-1].isspace():
+                            for kw in keywords:
+                                if content[j:].upper().startswith(kw):
+                                    end_idx = j + len(kw)
+                                    if end_idx == len(content) or (not content[end_idx].isalnum() and content[end_idx] != '_'):
+                                        # Special check: UPDATE() is a function, not a command.
+                                        if kw == "UPDATE" and content[j:].strip()[len(kw):].strip().startswith("("):
+                                            continue
+                                        split_idx = j
+                                        break
+                            if split_idx != -1:
+                                break
+                    j += 1
+                    
+                if split_idx != -1:
+                    part1 = content[:split_idx].strip()
+                    part2 = content[split_idx:].strip()
+                    new_body_lines.append(type(line)(line.line_number, part1))
+                    new_body_lines.append(type(line)(line.line_number + 0.1, part2))
+                else:
+                    new_body_lines.append(line)
+            else:
+                new_body_lines.append(line)
+                
         self.body_lines = new_body_lines
 
     def pass_7_parse_if_commands(self):
@@ -888,7 +1494,7 @@ class TsqlParser:
                         next_line_content = self.body_lines[next_idx].content.strip()
                         if next_line_content == "":
                             is_terminator = True
-                        elif re.match(r'^(BEGIN|END|ELSE|IF|SELECT|INSERT|UPDATE|RETURN)\b', next_line_content, re.IGNORECASE):
+                        elif re.match(r'^(IF|ELSE\s+IF|ELSE|ELSIF|END|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT|SET|BEGIN|EXEC|EXECUTE|WHILE|COMMIT|ROLLBACK|DECLARE|CREATE|ALTER|DROP|RAISERROR)\b', next_line_content, re.IGNORECASE):
                             is_terminator = True
 
                     if is_terminator:
@@ -913,7 +1519,7 @@ class TsqlParser:
                 i += 1
 
         self.body_lines = new_body_lines
-    
+
         # NEW STEP in Pass 7: Extract isolated ELSE lines
         # "find in the remaining lines of body all lines containing just "ELSE"..."
         final_body_lines = []
@@ -926,72 +1532,277 @@ class TsqlParser:
                 })
             else:
                 final_body_lines.append(line)
-            
+
         self.body_lines = final_body_lines
 
     def pass_8_process_select_assignments(self):
         """
-        Pass 8: Setting of variables.
-        Check select_commands array.
-        Pattern: "SELECT @variable_name = value" (case insensitive).
-        Can be multiple pairs separated by comma.
+        Pass 8: Processes select assignments.
+        Translates `SELECT @var = 1` into `@var := 1;`
+        If there are multiple like `SELECT @a = 1, @b = 2`, they get split by `;`
         """
-        self.log("Running Pass 8: Process Select Assignments")
-        
-        # We iterate over select_commands and modify them in place?
-        # "remove the key word SELECT ... replace ',' ... with ';'"
-        # "add semicolon at the end"
-        # "replace all '=' characters with ':='"
-        # "replace possible multiple spaces ... with single space"
+        self.log("Running Pass 8: Process SELECT Assignments")
 
         for cmd_obj in self.select_commands:
             original_content = cmd_obj['content']
-            
+
             # Check pattern.
             # Loose check: Starts with SELECT.
             # Needs to contain @variable = value.
             # Regex is tricky for "value" which can be anything.
             # But the rule says "check if it fits pattern SELECT @variable_name = value".
             # "there can be multiple pairs ... separated by ','"
-            
+
             # Let's clean up spaces first to make regex easier?
             # "replace possible multiple spaces between parts of the pattern with single space"
             # Doing this globally might be safe if we assume we aren't inside string literals?
             # The parser flattened lines joining with space.
             # We should probably respect strings... but for this Pattern check?
-            
+
             # Simplistic check:
             # Does it look like an assignment?
             # SELECT @var = ...
             pass_check = False
-            
+
             # Normalize spaces for check
             normalized = re.sub(r'\s+', ' ', original_content)
-            
+
             # Regex: ^SELECT\s+@\w+\s*=\s*
             # Matches SELECT @... = ...
             if re.match(r'^SELECT\s+@[\w@]+\s*=', normalized, re.IGNORECASE):
                 pass_check = True
-            
+
             if pass_check:
                 # Transform
                 # 1. Remove SELECT
                 # Case insensitive replace of first SELECT
                 cleaned = re.sub(r'^SELECT\s+', '', normalized, count=1, flags=re.IGNORECASE)
-                
-                # 2. Replace , with ; (Rule 106)
-                # "replace all ',' characters with semicolons"
-                cleaned = cleaned.replace(',', ';')
-                
+
+                # 2. Replace , with ; outside of parens/quotes, but stop replacing when hitting a FROM clause
+                cleaned = self.replace_commas_outside_parens(cleaned, stop_word="from")
+
                 # 3. Replace = with := for the assignment exclusively (Rule 112)
                 # Instead of a global .replace(), target only the assignment operator matching the @variable definition!
                 cleaned = re.sub(r'(@[\w@]+)\s*=', r'\1 :=', cleaned, count=1)
-                
+
                 # 4. Add semicolon at end (Rule 110)
                 cleaned = cleaned + ";"
-                
+
                 # Update content
                 cmd_obj['content'] = cleaned
+
+    def pass_8b_convert_datetime_formats(self):
+        """
+        Pass 8b: Converts Sybase ASE convert() calls with format styles into PostgreSQL to_char().
+        E.g. convert(varchar(28), dest_commit_time, 9) -> to_char(dest_commit_time, 'Mon DD YYYY HH:MI:SS:MSAM')
+        """
+        self.log("Running Pass 8b: Convert Datetime Formats")
+
+        style_map = {
+            '0': 'Mon DD YYYY HH:MIAM',
+            '100': 'Mon DD YYYY HH:MIAM',
+            '1': 'MM/DD/YY',
+            '101': 'MM/DD/YYYY',
+            '2': 'YY.MM.DD',
+            '102': 'YYYY.MM.DD',
+            '3': 'DD/MM/YY',
+            '103': 'DD/MM/YYYY',
+            '4': 'DD.MM.YY',
+            '104': 'DD.MM.YYYY',
+            '5': 'DD-MM-YY',
+            '105': 'DD-MM-YYYY',
+            '6': 'DD Mon YY',
+            '106': 'DD Mon YYYY',
+            '7': 'Mon DD, YY',
+            '107': 'Mon DD, YYYY',
+            '8': 'HH24:MI:SS',
+            '108': 'HH24:MI:SS',
+            '9': 'Mon DD YYYY HH:MI:SS:MSAM',
+            '109': 'Mon DD YYYY HH:MI:SS:MSAM',
+            '10': 'MM-DD-YY',
+            '110': 'MM-DD-YYYY',
+            '11': 'YY/MM/DD',
+            '111': 'YYYY/MM/DD',
+            '12': 'YYMMDD',
+            '112': 'YYYYMMDD',
+            '13': 'DD Mon YYYY HH24:MI:SS:MS',
+            '113': 'DD Mon YYYY HH24:MI:SS:MS',
+            '14': 'HH24:MI:SS',
+            '114': 'HH24:MI:SS',
+            '20': 'YYYY-MM-DD HH24:MI:SS',
+            '120': 'YYYY-MM-DD HH24:MI:SS',
+            '21': 'YYYY-MM-DD HH24:MI:SS.MS',
+            '121': 'YYYY-MM-DD HH24:MI:SS.MS',
+            '140': 'YYYY-MM-DD HH24:MI:SS.US'
+        }
+
+        def process_converts_in_string(s):
+            result = ""
+            i = 0
+            while i < len(s):
+                # Find next 'convert'
+                next_convert = s.lower().find('convert', i)
+                if next_convert == -1:
+                    result += s[i:]
+                    break
+                
+                # Check if it's a word boundary
+                if next_convert > 0 and (s[next_convert-1].isalnum() or s[next_convert-1] == '_'):
+                    result += s[i:next_convert+7]
+                    i = next_convert + 7
+                    continue
+                    
+                # Match to see if it has '('
+                match = re.match(r'convert\s*\(', s[next_convert:], re.IGNORECASE)
+                if match:
+                    result += s[i:next_convert]
+                    start_idx = next_convert
+                    args_start = next_convert + match.end()
+                    paren_level = 1
+                    in_single_quote = False
+                    in_double_quote = False
+                    args = []
+                    current_arg = ""
+                    
+                    j = args_start
+                    while j < len(s):
+                        char = s[j]
+                        if char == "'" and not in_double_quote:
+                            in_single_quote = not in_single_quote
+                            current_arg += char
+                        elif char == '"' and not in_single_quote:
+                            in_double_quote = not in_double_quote
+                            current_arg += char
+                        elif char == '(' and not in_single_quote and not in_double_quote:
+                            paren_level += 1
+                            current_arg += char
+                        elif char == ')' and not in_single_quote and not in_double_quote:
+                            paren_level -= 1
+                            if paren_level == 0:
+                                args.append(current_arg.strip())
+                                break
+                            current_arg += char
+                        elif char == ',' and paren_level == 1 and not in_single_quote and not in_double_quote:
+                            args.append(current_arg.strip())
+                            current_arg = ""
+                        else:
+                            current_arg += char
+                        j += 1
+                    
+                    if paren_level == 0:
+                        # Successfully parsed a convert(...) block
+                        if len(args) == 2:
+                            # convert(type, expr)
+                            arg_type = args[0]
+                            arg_expr = args[1]
+                            replacement = f"CAST({arg_expr} AS {arg_type})"
+                            result += replacement
+                        elif len(args) == 3:
+                            # convert(type, expr, style)
+                            arg_type = args[0]
+                            arg_expr = args[1]
+                            arg_style = args[2]
+                            
+                            is_char = re.match(r'^(var)?char', arg_type, re.IGNORECASE)
+                            pg_format = style_map.get(arg_style, None)
+                            
+                            if is_char and pg_format:
+                                replacement = f"to_char({arg_expr}, '{pg_format}')"
+                            else:
+                                # Fallback if style isn't mapped or not char, just cast
+                                replacement = f"CAST({arg_expr} AS {arg_type})"
+                            result += replacement
+                        else:
+                            # Unknown format, keep as is
+                            result += s[start_idx:j+1]
+                        
+                        i = j + 1
+                        continue
+                
+                result += s[i]
+                i += 1
+                
+            return result
+
+        targets = [
+            self.variables,
+            self.inserts,
+            self.update_commands,
+            self.delete_commands,
+            self.print_commands,
+            self.set_commands,
+            self.select_commands,
+            self.exec_commands,
+            self.if_commands,
+            self.comments
+        ]
+
+        for line_obj in self.header_lines:
+            line_obj.content = process_converts_in_string(line_obj.content)
+
+        for line_obj in self.body_lines:
+            line_obj.content = process_converts_in_string(line_obj.content)
+
+        for array in targets:
+            for item in array:
+                item['content'] = process_converts_in_string(item['content'])
+
+    def pass_8c_process_implicit_returns(self):
+        """
+        Pass 8c: Prepend RETURN QUERY to non-assignment SELECT statements if implicit_return is True.
+        """
+        if not getattr(self, 'implicit_return', False):
+            return
+
+        self.log("Running Pass 8c: Process Implicit Returns")
+
+        for cmd_obj in self.select_commands:
+            original_content = cmd_obj['content']
+            normalized = re.sub(r'\s+', ' ', original_content)
+
+            # Do not prepend RETURN QUERY if it's an assignment (e.g. SELECT @var = ...)
+            # We assume Pass 8 already handled pure assignments, but we still check.
+            is_assignment = bool(re.match(r'^SELECT\s+(@[\w@]+|locvar_[\w]+)\s*(:=|=)', normalized, re.IGNORECASE))
+            
+            # Do not prepend RETURN QUERY if it has an INTO clause
+            has_into = bool(re.search(r'\bINTO\b', normalized, re.IGNORECASE))
+
+            if not is_assignment and not has_into:
+                # Prepend RETURN QUERY
+                # Use a regex to replace the first 'SELECT' (case-insensitive) with 'RETURN QUERY SELECT'
+                new_content = re.sub(r'^(SELECT\s+)', r'RETURN QUERY \1', original_content, count=1, flags=re.IGNORECASE)
+                
+                # Rule 110: Add semicolon at end if it doesn't already have one
+                if not new_content.strip().endswith(';'):
+                    new_content += ';'
+
+                cmd_obj['content'] = new_content
+
+    def pass_8d_convert_selects(self):
+        """
+        Pass 8d: Converts SELECT commands using the view converter if provided.
+        """
+        if not self.view_converter or not self.settings:
+            return
+
+        self.log("Running Pass 8d: Convert SELECTs with view converter")
+
+        for cmd_obj in self.select_commands:
+            original_content = cmd_obj['content']
+            
+            temp_settings = self.settings.copy()
+            temp_settings['view_code'] = original_content
+            
+            try:
+                converted = self.view_converter(temp_settings)
+                
+                if original_content.strip().endswith(';') and not converted.strip().endswith(';'):
+                    converted += ';'
+                
+                cmd_obj['content'] = converted
+            except Exception as e:
+                self.log(f"Failed to convert SELECT command: {e}")
+
 
     def pass_9_rename_variables(self):
         """
@@ -1016,7 +1827,7 @@ class TsqlParser:
         # List[SourceLine] arrays
         for line_obj in self.header_lines:
             line_obj.content = apply_rename(line_obj.content)
-        
+
         for line_obj in self.body_lines:
             line_obj.content = apply_rename(line_obj.content)
 
@@ -1025,10 +1836,15 @@ class TsqlParser:
             self.variables,
             self.inserts,
             self.update_commands,
+            self.delete_commands,
+            self.print_commands,
+            self.set_commands,
             self.select_commands,
-            self.if_commands
+            self.exec_commands,
+            self.if_commands,
+            self.comments
         ]
-        
+
         for array in targets:
             for item in array:
                 item['content'] = apply_rename(item['content'])
@@ -1037,35 +1853,51 @@ class TsqlParser:
 
     def print_all_arrays(self, final_output: List[str]):
         print(f"--- START CHECKS FOR {self.filepath} ---")
-        
+
         print(f"--- HEADER ARRAY ({len(self.header_lines)} lines) ---")
         for l in self.header_lines:
             print(f"Line {l.line_number}: {l.content}")
-            
+
         print(f"--- COMMENTS ARRAY ({len(self.comments)} items) ---")
         for c in self.comments:
             print(f"Line {c['line']}: {c['content']}")
-            
+
         print(f"--- VARIABLES DECLARATION ARRAY ({len(self.variables)} items) ---")
         for v in self.variables:
             print(f"Line {v['line']}: {v['content']}")
-            
+
         print(f"--- INSERTS ARRAY ({len(self.inserts)} items) ---")
         for i in self.inserts:
             print(f"Line {i['line']}: {i['content']}")
-            
+
         print(f"--- UPDATE COMMANDS ARRAY ({len(self.update_commands)} items) ---")
         for u in self.update_commands:
             print(f"Line {u['line']}: {u['content']}")
-            
+
+        print(f"--- DELETE COMMANDS ARRAY ({len(self.delete_commands)} items) ---")
+        for d in self.delete_commands:
+            print(f"Line {d['line']}: {d['content']}")
+
+        print(f"--- PRINT COMMANDS ARRAY ({len(self.print_commands)} items) ---")
+        for p in self.print_commands:
+            print(f"Line {p['line']}: {p['content']}")
+
+        print(f"--- SET COMMANDS ARRAY ({len(self.set_commands)} items) ---")
+        for st in self.set_commands:
+            print(f"Line {st['line']}: {st['content']}")
+
         print(f"--- SELECT COMMANDS ARRAY ({len(self.select_commands)} items) ---")
         for s in self.select_commands:
             print(f"Line {s['line']}: {s['content']}")
-            
+
+        print(f"--- EXEC COMMANDS ARRAY ({len(self.exec_commands)} items) ---")
+        for e in self.exec_commands:
+            print(f"Line {e['line']}: {e['content']}")
+
         print(f"--- IF COMMANDS ARRAY ({len(self.if_commands)} items) ---")
         for f in self.if_commands:
             print(f"Line {f['line']}: {f['content']}")
-            
+
         print(f"--- REMAINING BODY LINES ARRAY ({len(self.body_lines)} lines) ---")
         for b in self.body_lines:
             print(f"Line {b.line_number}: {b.content}")
@@ -1083,15 +1915,15 @@ class TsqlParser:
         Mark others as TODO.
         """
         self.log("Running Pass 10: Add Semicolons")
-        
+
         for line in self.body_lines:
             content = line.content.strip()
-            
+
             # Rule: "if line contains only empty line or only spaces, remove all spaces and keep it as totally empty line"
             if not content:
                 line.content = ""
                 continue
-                
+
             # Rule 120: END (without semicolon) -> add semicolon
             if re.match(r'^END\b', content, re.IGNORECASE) and not content.endswith(';'):
                  # Check if it contains ONLY "END" (Rule 120: "if line contains END key word only")
@@ -1099,25 +1931,25 @@ class TsqlParser:
                  if content.upper() == "END":
                      line.content = content + ";"
                      continue
-            
+
             # Rule 121: RETURN (only or with value) -> add semicolon
             if re.match(r'^RETURN\b', content, re.IGNORECASE) and not content.endswith(';'):
                 line.content = content + ";"
                 continue
-                
+
             # Rule 122: BEGIN -> keep unchanged
             if re.match(r'^BEGIN\b', content, re.IGNORECASE) and content.upper() == "BEGIN":
                 continue
-            
+
             # Allow SET ROWCOUNT to pass through cleanly so it can be handled by pass 11
             if re.match(r'^SET\s+ROWCOUNT\b', content, re.IGNORECASE):
                 continue
-            
+
             # Rule 123: Anything else -> add TODO
             # Check if it was modified by above rules?
-            
+
             # If we are here, it's a TODO line.
-            line.content = line.content + " /* TODO: not processed line - check syntax */"
+            line.content = line.content + "; /* TODO: not processed line - check syntax */"
 
     def pass_11_assemble_output(self, pg_header_str=None) -> List[OutputLine]:
         """
@@ -1125,10 +1957,10 @@ class TsqlParser:
         Creates output array of OutputLine objects.
         """
         self.log("Running Pass 11: Assemble Output")
-        
+
         output_array: List[OutputLine] = []
         current_new_line_num = 1
-        
+
         # Helper to add line
         def add_line(source_name, original_num, text):
             nonlocal current_new_line_num
@@ -1142,59 +1974,88 @@ class TsqlParser:
         else:
             for line in self.header_lines:
                 add_line("header", line.line_number, line.content)
-        
+
         add_line("separator", 0, "$$")
-        
+
         # 3. DECLARE
         if self.variables:
             add_line("declare_section", 0, "DECLARE")
-            
+
             # 4. Variables
             for var in self.variables:
                 add_line("variable_declaration", var['line'], var['content'])
-            
+
         # 5. Body Output Array
         # Collect all parts, sort by original line number, then append.
-        
+
         # Structure: (line_number, content, source_name)
         body_parts = []
-        
+
         for l in self.body_lines:
             body_parts.append((l.line_number, l.content, "remaining_body_lines"))
-            
+
         for i in self.inserts:
             content = i['content']
             if not content.strip().endswith(';'):
                 content += ';'
             body_parts.append((i['line'], content, "insert_commands"))
-            
+
         for u in self.update_commands:
             content = u['content']
             if not content.strip().endswith(';'):
                 content += ';'
             body_parts.append((u['line'], content, "update_commands"))
-            
+
+        for d in self.delete_commands:
+            content = d['content']
+            if not content.strip().endswith(';'):
+                content += ';'
+            body_parts.append((d['line'], content, "delete_commands"))
+
+        for p in self.print_commands:
+            content = p['content']
+            if not content.strip().endswith(';'):
+                content += ';'
+            body_parts.append((p['line'], content, "print_commands"))
+
+        for st in self.set_commands:
+            content = st['content']
+            # It's a comment, so we don't need a semicolon, but it doesn't hurt if we treat it uniformly or just skip adding it.
+            body_parts.append((st['line'], content, "set_commands"))
+
+        for r in self.raiserror_commands:
+            content = r['content']
+            if not content.strip().endswith(';'):
+                content += ';'
+            body_parts.append((r['line'], content, "raiserror_commands"))
+
         for s in self.select_commands:
             content = s['content']
             if not content.strip().endswith(';'):
                 content += ';'
             body_parts.append((s['line'], content, "select_commands"))
-            
+
+        for e in self.exec_commands:
+            content = e['content']
+            if not content.strip().endswith(';'):
+                content += ';'
+            body_parts.append((e['line'], content, "exec_commands"))
+
         for f in self.if_commands:
             content = f['content']
             # Rule 138: replace "ELSE IF" with "ELSIF"
             content = re.sub(r'ELSE\s+IF', 'ELSIF', content, flags=re.IGNORECASE)
             # Rule 139: "ELSIF(" -> "ELSIF ("
             content = re.sub(r'ELSIF\(', 'ELSIF (', content, flags=re.IGNORECASE)
-            
+
             body_parts.append((f['line'], content, "if_commands"))
-            
+
         for c in self.comments:
             body_parts.append((c['line'], c['content'], "comments"))
-            
+
         # Sort by line number
         body_parts.sort(key=lambda x: x[0])
-        
+
         # Apply SET ROWCOUNT limit to subsequent SELECT commands
         active_rowcount_limit = None
         new_body_parts = []
@@ -1205,7 +2066,7 @@ class TsqlParser:
                 limit_val = m.group(1)
                 active_rowcount_limit = None if limit_val == '0' else limit_val
                 content = re.sub(r'(?i)^\s*SET\s+ROWCOUNT\s+\d+', f'/* SET ROWCOUNT {limit_val} converted to LIMIT */', content)
-            
+
             # Apply LIMIT to SELECT commands
             elif source_name == "select_commands" and active_rowcount_limit:
                 if not re.search(r'\bLIMIT\s+\d+', content, re.IGNORECASE):
@@ -1213,117 +2074,103 @@ class TsqlParser:
                         content = content.strip()[:-1] + f" LIMIT {active_rowcount_limit};"
                     else:
                         content = content.strip() + f" LIMIT {active_rowcount_limit}"
-                        
+
             new_body_parts.append((line_num, content, source_name))
-            
+
         body_parts = new_body_parts
 
         # Inject BEGIN and END if they are missing from the Sybase source
+        injected_begin = False
         if body_parts:
             first_content = next((x[1].strip().upper() for x in body_parts if x[1].strip()), "")
             if first_content != "BEGIN":
                 add_line("injected_begin", 0, "BEGIN")
-                
+                injected_begin = True
+
         # Append to output_array
         for item in body_parts:
             add_line(item[2], item[0], item[1])
-            
+
         if body_parts:
             last_content = next((x[1].strip().upper() for x in reversed(body_parts) if x[1].strip()), "")
-            if last_content not in ("END", "END;"):
+            if injected_begin or last_content not in ("END", "END;"):
                 add_line("injected_end", 0, "END;")
-            
+
         # 6. Final Separator
         add_line("separator", 0, "$$ LANGUAGE plpgsql;")
-        
+
         return output_array
 
     def pass_12_add_if_levels(self, output_array: List[OutputLine]):
         """
         Pass 12: Adding levels of IF commands and END IF; commands.
         """
-        self.log("Running Pass 12: Add IF Levels")
+        self.log("Running Pass 12: Add IF Levels and END IF; commands")
+        new_array = []
+        if_stack = []
         
-        # Rule 145: set special memory variable if_command_level to 0
-        current_if_level = 0
-        
-        # Go through each line in output_array
-        # Rule 144: "go through each line ... in the order of line numbers"
-        
-        # We need to look ahead? No, logic seems sequential based on "continue with next line".
-        # Actually logic says: "rule-if - when you find...".
-        # "rule-if-content - continue with next line..."
-        # This implies a state machine iterating strictly line by line?
-        # Or does "continue with next line" mean "check the next line in the sequence"?
-        # It seems like a loop over lines.
-        
-        i = 0
-        while i < len(output_array):
-            line = output_array[i]
+        for i, line in enumerate(output_array):
             content = line.content.strip()
-            source = line.source_array
             
-            # Rule 146: "rule-if" - first line starting with IF
-            # "when you find the first line starting with IF"
-            # Is this global first? Or just "when you encounter a line starting with IF"?
-            # Given "assign current value ... to special item", likely "When you find A line starting with IF".
-            
+            # Skip empty lines, top level separators, and comments
+            if content == "" or content == "$$" or content == "$$ LANGUAGE plpgsql;" or content.startswith("/*"):
+                new_array.append(line)
+                continue
+                
+            # If we are expecting a target for the top of the stack...
+            if if_stack and if_stack[-1]["state"] == "EXPECT_TARGET":
+                if re.match(r'^BEGIN\b', content, re.IGNORECASE):
+                    if_stack[-1]["state"] = "INSIDE_BEGIN"
+                else:
+                    # It's a single statement! It completes the target immediately!
+                    if_stack[-1]["state"] = "TARGET_COMPLETED"
+                    
+            # Check what the current line is
             if re.match(r'^IF\b', content, re.IGNORECASE):
-                line.if_command_level = current_if_level
-                i += 1
-                continue
+                # New IF statement starts
+                if_stack.append({"state": "EXPECT_TARGET"})
+                new_array.append(line)
                 
-            # Rule 147: "rule-if-content"
-            # if starts with BEGIN OR is from insert/update/select => assign current level
-            is_content_rule_1 = False
-            if re.match(r'^BEGIN\b', content, re.IGNORECASE):
-                is_content_rule_1 = True
-            if source in ["insert_commands", "update_commands", "select_commands"]:
-                is_content_rule_1 = True
-            
-            if is_content_rule_1:
-                line.if_command_level = current_if_level
-                i += 1
-                continue
-
-            # Rule 148: "rule-if-content"
-            # if starts with END; OR is from insert/update/select => assign current level
-            is_content_rule_2 = False
-            if re.match(r'^END;', content, re.IGNORECASE):
-                is_content_rule_2 = True
-            if source in ["insert_commands", "update_commands", "select_commands"]:
-                is_content_rule_2 = True
+            elif re.match(r'^(ELSIF|ELSE\s+IF|ELSE)\b', content, re.IGNORECASE):
+                # Extends the current IF statement
+                if if_stack:
+                    if_stack[-1]["state"] = "EXPECT_TARGET"
+                new_array.append(line)
                 
-            if is_content_rule_2:
-                line.if_command_level = current_if_level
-                i += 1
-                continue
+            elif re.match(r'^END;', content, re.IGNORECASE):
+                new_array.append(line)
+                # This closes a BEGIN block.
+                # Does it complete a target for the current IF?
+                if if_stack and if_stack[-1]["state"] == "INSIDE_BEGIN":
+                    if_stack[-1]["state"] = "TARGET_COMPLETED"
+                    
+            else:
+                # Normal statement. We already handled EXPECT_TARGET above.
+                new_array.append(line)
 
-            # Rule 149: empty line -> skip (do not assign?)
-            # "assign ... to special item" is NOT mentioned.
-            # "skip it" usually means do nothing.
-            if content == "":
-                i += 1
-                continue
+            # Check if we should close any completed IF statements.
+            # Look ahead to the next non-empty line
+            next_content = ""
+            for j in range(i + 1, len(output_array)):
+                nxt = output_array[j].content.strip()
+                if nxt != "" and not nxt.startswith("/*"):
+                    next_content = nxt
+                    break
+            
+            while if_stack and if_stack[-1]["state"] == "TARGET_COMPLETED":
+                if re.match(r'^(ELSIF|ELSE\s+IF|ELSE)\b', next_content, re.IGNORECASE):
+                    # The IF is extended by an ELSE/ELSIF block, do not close it yet
+                    break
+                else:
+                    # Close the IF!
+                    if_stack.pop()
+                    orig_line = getattr(line, 'original_line_number', getattr(line, 'line_number_approx', 0))
+                    new_line = type(line)(0, 'injected_end_if', orig_line, "END IF;")
+                    new_array.append(new_line)
 
-            # Rule 150: "rule-if-else"
-            # starts with ELSE or ELSE IF or ELSIF -> assign current level
-            if re.match(r'^(ELSE|ELSE\s+IF|ELSIF)\b', content, re.IGNORECASE):
-                line.if_command_level = current_if_level
-                i += 1
-                continue
-                
-            # Rule 151: "continue with next line, if it fits to all 'rule-if-content' rules"
-            # This seems redundant or catch-all? "fits to ALL ... rules"?
-            # Or "fits to ANY of the rule-if-content rules"?
-            # Rule 147 and 148 are labeled "rule-if-content".
-            # If it matches logic of 147 OR 148?
-            # Re-eval variables from above.
-            
-            # Rule 152: "if you find any other content, skip it"
-            
-            # Default behavior
-            i += 1
+        # Update the output array
+        output_array.clear()
+        output_array.extend(new_array)
 
     def print_with_indentation(self, output_file: str, final_lines: List[OutputLine]):
         """
@@ -1331,17 +2178,17 @@ class TsqlParser:
         """
         with open(output_file, 'w') as f:
             indent_level = 0
-            
+
             in_body = False
             first_begin_found = False
-            
+
             def get_indent(level):
                 return "    " * max(0, level)
 
             for line_obj in final_lines:
                 stripped = line_obj.content.strip()
                 current_indent = indent_level
-                
+
                 # Rule 162: "$$" or "DECLARE" -> level 0
                 if stripped.upper() == "DECLARE":
                     indent_level = 0
@@ -1350,18 +2197,18 @@ class TsqlParser:
                     # Rule 163: between DECLARE and first body line -> level 1
                     indent_level = 1
                     continue
-                
+
                 if stripped == "$$":
                     indent_level = 0
                     f.write(get_indent(0) + line_obj.content + "\n")
                     in_body = True
                     continue
-                    
+
                 if stripped.upper() == "$$ LANGUAGE PLPGSQL;":
                     indent_level = 0
                     f.write(get_indent(0) + line_obj.content + "\n")
                     continue
-                
+
                 # Header lines (before body)
                 if not in_body:
                     current_indent = 0
@@ -1379,20 +2226,20 @@ class TsqlParser:
                          # Subsequent BEGIN
                          current_indent = indent_level
                          indent_level += 1
-                
+
                 # Rule 167: END; -> decreases level
                 elif re.match(r'^END;', stripped, re.IGNORECASE):
                      indent_level -= 1
                      current_indent = indent_level
-                     if indent_level < 0: 
+                     if indent_level < 0:
                          # Rule 168/158 compliance
                          indent_level = 0
                          current_indent = 0
-                
+
                 else:
                     # Rule 166: IF/ELSE... no change
                     pass
-                    
+
                 # Write
                 f.write(get_indent(current_indent) + line_obj.content + "\n")
 
@@ -1412,24 +2259,51 @@ class TsqlParser:
         # Pass 3
         self.pass_3_parse_variables()
 
+        # Pass 3b
+        self.pass_3b_split_inline_ifs()
+
         # Pass 4
         self.pass_4_parse_inserts()
 
         # Pass 5
         self.pass_5_parse_updates()
 
+        # Pass 5b
+        self.pass_5b_parse_deletes()
+
+        # Pass 5c
+        self.pass_5c_parse_prints()
+
+        # Pass 5d
+        self.pass_5d_parse_sets()
+
+        # Pass 5e
+        self.pass_5e_parse_raiserror()
+
         # Pass 6
         self.pass_6_parse_selects()
+
+        # Pass 6c
+        self.pass_6c_parse_execs()
 
         # Pass 7
         self.pass_7_parse_if_commands()
 
+        # Pass 8d
+        self.pass_8d_convert_selects()
+
         # Pass 8
         self.pass_8_process_select_assignments()
 
+        # Pass 8b
+        self.pass_8b_convert_datetime_formats()
+
+        # Pass 8c
+        self.pass_8c_process_implicit_returns()
+
         # Pass 9
         self.pass_9_rename_variables()
-        
+
         # Pass 10
         self.pass_10_add_semicolons()
 
@@ -1438,5 +2312,14 @@ class TsqlParser:
 
         # Pass 12
         self.pass_12_add_if_levels(final_output)
+
+        # Apply global SQL functions mapping (e.g., datepart, getdate) across all output lines
+        if self.functions_mapping_converter:
+            target_db_type = 'postgresql'
+            if self.config_parser:
+                target_conn = self.config_parser.get_connectivity('target')
+                target_db_type = target_conn.get('db_type', 'postgresql') if target_conn else 'postgresql'
+            for line in final_output:
+                line.content = self.functions_mapping_converter(line.content, {'target_db_type': target_db_type})
 
         return final_output

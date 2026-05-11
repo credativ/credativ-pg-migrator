@@ -92,6 +92,7 @@ class TsqlParser:
 
                     if expressions:
                         schema = []
+                        name_counts = {}
                         for idx, p in enumerate(expressions):
                             alias = ""
                             expr = p
@@ -110,6 +111,12 @@ class TsqlParser:
                             
                             if not alias or alias == 'unknown_col':
                                 alias = f"col{idx}"
+                            
+                            if alias.lower() in name_counts:
+                                name_counts[alias.lower()] += 1
+                                alias = f"{alias}_{name_counts[alias.lower()]}"
+                            else:
+                                name_counts[alias.lower()] = 0
                                 
                             schema.append({'name': alias, 'system_type_name': inferred_type})
                         return schema
@@ -767,7 +774,23 @@ class TsqlParser:
 
                         # Let's invoke termination check, but respect continuation rules
                         # If current_content starts with terminator keyword (IF/END/UPDATE/RETURN)
-                        is_terminator = re.match(r'^(IF|END|UPDATE|RETURN)\b', current_content, re.IGNORECASE) or current_content == ""
+                        is_terminator = False
+                        if current_content == "":
+                            next_idx_check = i + 1
+                            next_l_check = ""
+                            while next_idx_check < len(self.body_lines):
+                                next_l_check = self.body_lines[next_idx_check].content.strip()
+                                if next_l_check != "":
+                                    break
+                                next_idx_check += 1
+                            if next_l_check:
+                                terminator_pattern = r'^(IF|ELSE\s+IF|ELSE|END|BEGIN|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT|SET|EXEC|EXECUTE|DECLARE|CREATE|ALTER|DROP)\b'
+                                if re.match(terminator_pattern, next_l_check, re.IGNORECASE):
+                                    is_terminator = True
+                            else:
+                                is_terminator = True
+                        elif re.match(r'^(IF|END|UPDATE|RETURN)\b', current_content, re.IGNORECASE):
+                            is_terminator = True
 
                         if is_terminator:
                              # Check if we should CONTINUE anyway
@@ -1139,14 +1162,16 @@ class TsqlParser:
                             # If current is empty, check i+1.
                             if not is_continuation and current_content == "":
                                 next_idx_check = i + 1
-                                if next_idx_check < len(self.body_lines):
+                                next_l_check = ""
+                                while next_idx_check < len(self.body_lines):
                                      next_l_check = self.body_lines[next_idx_check].content.strip()
-                                     if re.match(r'^FROM\b', next_l_check, re.IGNORECASE):
-                                         is_continuation = True
-                                     elif next_l_check.startswith(",") or next_l_check.startswith("="):
-                                         # Rule 89: "if next line ... starts with ',' or '=' ... also part"
-                                         is_continuation = True
-                                     elif re.match(r'^UNION\b', next_l_check, re.IGNORECASE):
+                                     if next_l_check != "":
+                                         break
+                                     next_idx_check += 1
+                                
+                                if next_l_check:
+                                     terminator_pattern = r'^(IF|ELSE\s+IF|ELSE|END|BEGIN|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT|SET|EXEC|EXECUTE|DECLARE|CREATE|ALTER|DROP)\b'
+                                     if not re.match(terminator_pattern, next_l_check, re.IGNORECASE):
                                          is_continuation = True
 
                             if not is_continuation:
@@ -1194,7 +1219,19 @@ class TsqlParser:
                     if len(exec_lines) > 0:
                         is_terminator = False
                         if current_content == "":
-                            is_terminator = True
+                            next_idx_check = i + 1
+                            next_l_check = ""
+                            while next_idx_check < len(self.body_lines):
+                                next_l_check = self.body_lines[next_idx_check].content.strip()
+                                if next_l_check != "":
+                                    break
+                                next_idx_check += 1
+                            if next_l_check:
+                                terminator_pattern = r'^(IF|ELSE\s+IF|ELSE|END|BEGIN|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT|SET|EXEC|EXECUTE|DECLARE|CREATE|ALTER|DROP)\b'
+                                if re.match(terminator_pattern, next_l_check, re.IGNORECASE):
+                                    is_terminator = True
+                            else:
+                                is_terminator = True
                         elif re.match(r'^(IF|ELSE\s+IF|ELSE|END|BEGIN|UPDATE|INSERT|RETURN|SELECT|DELETE|PRINT|SET|EXEC|EXECUTE)\b', current_content, re.IGNORECASE):
                             is_terminator = True
 

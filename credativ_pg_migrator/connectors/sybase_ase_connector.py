@@ -238,6 +238,7 @@ class SybaseASEConnector(DatabaseConnector):
                 'getdate()': 'current_timestamp',
                 'getutcdate()': "timezone('UTC', now())",
                 'datetime': 'current_timestamp',
+                'current_timestamp()': 'CURRENT_TIMESTAMP',
                 'year(': 'extract(year from ',
                 'month(': 'extract(month from ',
                 'day(': 'extract(day from ',
@@ -269,6 +270,7 @@ class SybaseASEConnector(DatabaseConnector):
                 'datepart(mi,': "date_part('minute',",
                 'datepart(ss,': "date_part('second',",
                 'datepart(ms,': "date_part('milliseconds',",
+                'try_cast(': 'CAST(',
             }
         else:
             self.config_parser.print_log_message('ERROR', f"sybase_ase_connector: get_sql_functions_mapping: Unsupported target database type: {target_db_type}")

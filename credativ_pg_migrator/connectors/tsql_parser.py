@@ -24,10 +24,12 @@ class OutputLine:
 
 
 class TsqlParser:
-    def __init__(self, code_str: str, config_parser=None, implicit_return=False):
+    def __init__(self, code_str: str, config_parser=None, implicit_return=False, view_converter=None, settings=None):
         self.code_str = code_str
         self.config_parser = config_parser
         self.implicit_return = implicit_return
+        self.view_converter = view_converter
+        self.settings = settings
         self.raw_lines = []
         self.body_lines = []
         self.header_lines = []
@@ -1604,6 +1606,38 @@ class TsqlParser:
 
                 cmd_obj['content'] = new_content
 
+    def pass_8d_convert_selects(self):
+        """
+        Pass 8d: Converts SELECT commands using the view converter if provided.
+        Skips assignment queries and INTO clauses.
+        """
+        if not self.view_converter or not self.settings:
+            return
+
+        self.log("Running Pass 8d: Convert SELECTs with view converter")
+
+        for cmd_obj in self.select_commands:
+            original_content = cmd_obj['content']
+            normalized = re.sub(r'\s+', ' ', original_content)
+
+            is_assignment = bool(re.match(r'^SELECT\s+(@[\w@]+|locvar_[\w]+)\s*(:=|=)', normalized, re.IGNORECASE))
+            has_into = bool(re.search(r'\bINTO\b', normalized, re.IGNORECASE))
+
+            if not is_assignment and not has_into:
+                temp_settings = self.settings.copy()
+                temp_settings['view_code'] = original_content
+                
+                try:
+                    converted = self.view_converter(temp_settings)
+                    
+                    if original_content.strip().endswith(';') and not converted.strip().endswith(';'):
+                        converted += ';'
+                    
+                    cmd_obj['content'] = converted
+                except Exception as e:
+                    self.log(f"Failed to convert SELECT command: {e}")
+
+
     def pass_9_rename_variables(self):
         """
         Pass 9: Global replacement of local variable notation.
@@ -2083,6 +2117,9 @@ class TsqlParser:
 
         # Pass 8b
         self.pass_8b_convert_datetime_formats()
+
+        # Pass 8d
+        self.pass_8d_convert_selects()
 
         # Pass 8c
         self.pass_8c_process_implicit_returns()

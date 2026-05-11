@@ -1205,14 +1205,14 @@ class SybaseASEConnector(DatabaseConnector):
             funcproc_code = self._apply_types_mapping(funcproc_code, types_mapping)
 
             if not implicit_return_schema:
-                temp_parser = TsqlParser(funcproc_code, self.config_parser)
+                temp_parser = TsqlParser(funcproc_code, self.config_parser, view_converter=self.convert_view_code, settings=settings)
                 extracted_schema = temp_parser.extract_implicit_return_schema()
                 if extracted_schema:
                     implicit_return_schema = extracted_schema
                     self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: convert_funcproc_code: Dynamically inferred return schema: {implicit_return_schema}")
 
             is_implicit_return = bool(implicit_return_schema)
-            parser = TsqlParser(funcproc_code, self.config_parser, implicit_return=is_implicit_return)
+            parser = TsqlParser(funcproc_code, self.config_parser, implicit_return=is_implicit_return, view_converter=self.convert_view_code, settings=settings)
             self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: convert_funcproc_code: Running 12-pass parser for {settings.get('funcproc_name')}")
 
             final_output = parser.run()
@@ -2012,7 +2012,7 @@ class SybaseASEConnector(DatabaseConnector):
         
         fake_code = self._apply_types_mapping(fake_code, types_mapping)
             
-        parser = TsqlParser(fake_code, self.config_parser)
+        parser = TsqlParser(fake_code, self.config_parser, view_converter=self.convert_view_code, settings=settings)
         final_output = parser.run(pg_header_str=" ") # space prevents default header
 
         final_stmts_clean = []

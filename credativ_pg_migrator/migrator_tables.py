@@ -3185,142 +3185,7 @@ class MigratorTables:
             self.config_parser.print_log_message('ERROR', e)
             raise
 
-    def print_data_migration_summary(self):
-        self.config_parser.print_log_message('INFO', "migrator_tables: print_data_migration_summary: Table rows migration stats:")
-        table_name = self.config_parser.get_protocol_name_data_migration()
-        data_migration_table_name = self.config_parser.get_protocol_name_data_migration()
-        batches_stats_table_name = self.config_parser.get_protocol_name_batches_stats()
-        query = f"""SELECT min(task_created) as min_time, max(task_completed) as max_time FROM "{self.protocol_schema}"."{table_name}" WHERE task_completed IS NOT NULL"""
-        cursor = self.protocol_connection.connection.cursor()
-        cursor.execute(query)
-        row = cursor.fetchone()
-        if row[0] and row[1]:
-            min_time = row[0]
-            max_time = row[1]
-            length = max_time - min_time
-            self.config_parser.print_log_message('INFO', f"migrator_tables: print_data_migration_summary: start: {str(min_time)[:19]} | end: {str(max_time)[:19]} | length: {str(length)[:19]}")
-        else:
-            self.config_parser.print_log_message('INFO', "migrator_tables: print_data_migration_summary: No data migration tasks completed.")
 
-        query = f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{table_name}" """
-        cursor.execute(query)
-        summary = cursor.fetchone()[0]
-        self.config_parser.print_log_message('INFO', f"migrator_tables: print_data_migration_summary: Tables in total: {summary}")
-
-        if not self.config_parser.is_dry_run():
-            query = f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{table_name}" WHERE source_table_rows = 0 OR source_table_rows IS NULL"""
-            cursor.execute(query)
-            summary = cursor.fetchone()[0]
-            self.config_parser.print_log_message('INFO', f"migrator_tables: print_data_migration_summary: Empty tables (0 rows): {summary}")
-
-        if not self.config_parser.is_dry_run():
-            query = f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{table_name}" WHERE source_table_rows > 0"""
-            cursor.execute(query)
-            summary = cursor.fetchone()[0]
-            self.config_parser.print_log_message('INFO', f"migrator_tables: print_data_migration_summary: Tables with data: {summary}")
-
-        if not self.config_parser.is_dry_run():
-            query = f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{table_name}" WHERE source_table_rows > 0 AND source_table_rows = target_table_rows"""
-            cursor.execute(query)
-            summary = cursor.fetchone()[0]
-            self.config_parser.print_log_message('INFO', f"migrator_tables: print_data_migration_summary: Tables with data - fully migrated: {summary}")
-
-            try:
-                query = f"""SELECT target_schema_name, target_table_name, source_table_rows, target_table_rows, task_completed - task_created as migration_time,
-                round(shortest_batch_seconds::numeric, 2) as shortest_batch_seconds,
-                round(longest_batch_seconds::numeric, 2) as longest_batch_seconds,
-                round(average_batch_seconds::numeric, 2) as average_batch_seconds,
-                batch_count
-                FROM "{self.protocol_schema}"."{data_migration_table_name}" WHERE source_table_rows > 0 AND source_table_rows = target_table_rows
-                ORDER BY source_table_rows DESC LIMIT 10"""
-                cursor.execute(query)
-                rows = cursor.fetchall()
-                if rows:
-                    self.config_parser.print_log_message('INFO', "migrator_tables: print_data_migration_summary: Tables with data - fully migrated (top 10):")
-                    max_table_name_length = max(len(row[1]) for row in rows) if rows else 10
-                    for row in rows:
-                        target_schema_name = row[0]
-                        target_table_name = row[1]
-                        source_table_rows = row[2]
-                        target_table_rows = row[3]
-                        migration_time = row[4]
-                        formatted_source_rows = f"{source_table_rows:,}".rjust(15)
-                        formatted_target_rows = f"{target_table_rows:,}".rjust(15)
-
-                        message = f"        {target_schema_name}.{target_table_name[:max_table_name_length].ljust(max_table_name_length)} |"
-                        message += f"{formatted_source_rows} = {formatted_target_rows} | length: {str(migration_time)[:19]:<19}"
-                        if row[8] == 1:
-                            message += " | 1 batch"
-                        else:
-                            message += f" | {row[8]:<6} batches | shortest: {row[5]:<6} | average: {row[7]:<6} | longest: {row[6]:<6}"
-                        self.config_parser.print_log_message('INFO', message)
-            except Exception as e:
-                self.config_parser.print_log_message('ERROR', f"migrator_tables: print_data_migration_summary: Error fetching fully migrated tables.")
-                self.config_parser.print_log_message('ERROR', e)
-
-        if not self.config_parser.is_dry_run():
-            query = f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{table_name}" WHERE source_table_rows > 0 AND source_table_rows <> target_table_rows"""
-            cursor.execute(query)
-            summary = cursor.fetchone()[0]
-            self.config_parser.print_log_message('INFO', f"migrator_tables: print_data_migration_summary: Tables with differences in row counts: {summary}")
-
-            try:
-                query = f"""SELECT target_schema_name, target_table_name, source_table_rows, target_table_rows, task_completed - task_created as migration_time
-                FROM "{self.protocol_schema}"."{data_migration_table_name}" WHERE source_table_rows > 0 AND source_table_rows <> target_table_rows
-                ORDER BY source_table_rows DESC LIMIT 10"""
-                cursor.execute(query)
-                rows = cursor.fetchall()
-                if rows:
-                    self.config_parser.print_log_message('INFO', "migrator_tables: print_data_migration_summary: Tables with different row counts (top 10):")
-                    max_table_name_length = max(len(row[1]) for row in rows) if rows else 0
-                    max_table_name_length += 1
-                    for row in rows:
-                        target_schema_name = row[0]
-                        target_table_name = row[1]
-                        source_table_rows = row[2]
-                        target_table_rows = row[3]
-                        migration_time = row[4]
-                        formatted_source_rows = f"{source_table_rows:,}".rjust(12)
-                        formatted_target_rows = f"{target_table_rows:,}".rjust(12)
-                        self.config_parser.print_log_message('INFO', f"migrator_tables: print_data_migration_summary: {target_schema_name}.{target_table_name[:max_table_name_length].ljust(max_table_name_length)} | {formatted_source_rows} <> {formatted_target_rows} | length: {str(migration_time)[:19]:<19}")
-            except Exception as e:
-                self.config_parser.print_log_message('ERROR', f"migrator_tables: print_data_migration_summary: Error fetching migrated tables with different row counts.")
-                self.config_parser.print_log_message('ERROR', e)
-
-
-        if not self.config_parser.is_dry_run():
-            try:
-                query = f"""SELECT source_schema_name, source_table_name, batch_number,
-                round(batch_seconds::numeric, 2) as batch_seconds,
-                round(reading_seconds::numeric, 2) as reading_seconds,
-                round(transforming_seconds::numeric, 2) as transforming_seconds,
-                round(writing_seconds::numeric, 2) as inserting_seconds
-                FROM "{self.protocol_schema}"."{batches_stats_table_name}"
-                ORDER BY batch_seconds DESC LIMIT 10"""
-                cursor.execute(query)
-                rows = cursor.fetchall()
-                if rows:
-                    self.config_parser.print_log_message('INFO', "migrator_tables: print_data_migration_summary: Longest migration batches (top 10):")
-                    for row in rows:
-                        target_schema_name = row[0]
-                        target_table_name = row[1]
-                        batch_number = row[2]
-                        batch_seconds = row[3]
-                        reading_seconds = row[4]
-                        transforming_seconds = row[5]
-                        inserting_seconds = row[6]
-                        formatted_batch_seconds = f"{batch_seconds:,}".rjust(15)
-                        formatted_reading_seconds = f"{reading_seconds:,}".rjust(15)
-                        formatted_transforming_seconds = f"{transforming_seconds:,}".rjust(15)
-                        formatted_inserting_seconds = f"{inserting_seconds:,}".rjust(15)
-                        self.config_parser.print_log_message('INFO', f"migrator_tables: print_data_migration_summary: {target_schema_name}.{target_table_name[:max_table_name_length].ljust(max_table_name_length)} | "
-                                                            f"batch: {batch_number} | {formatted_batch_seconds} sec | "
-                                                            f"r: {formatted_reading_seconds} | t: {formatted_transforming_seconds} | w: {formatted_inserting_seconds}")
-            except Exception as e:
-                self.config_parser.print_log_message('ERROR', f"migrator_tables: print_data_migration_summary: Error fetching longest migration batch.")
-                self.config_parser.print_log_message('ERROR', e)
-
-        cursor.close()
 
     def print_migration_summary(self):
         lines = []
@@ -3616,7 +3481,7 @@ class MigratorTables:
         self.print_summary({'objects': 'Sequences', 'migrator_table_name': self.config_parser.get_protocol_name_sequences(), 'additional_columns': None})
 
         self.print_summary({'objects': 'Tables', 'migrator_table_name': self.config_parser.get_protocol_name_tables(), 'additional_columns': None})
-        self.print_data_migration_summary()
+        self.print_migration_summary()
 
         if self.config_parser.is_dry_run():
             self.config_parser.print_log_message('INFO', "migrator_tables: print_mapping_migration_summary: ! Dry run mode enabled. No migration performed !")

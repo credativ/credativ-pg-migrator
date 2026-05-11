@@ -44,6 +44,7 @@ class TsqlParser:
         self.delete_commands = []
         self.print_commands = []
         self.set_commands = []
+        self.raiserror_commands = []
 
     def log(self, message):
         if self.config_parser:
@@ -67,6 +68,7 @@ class TsqlParser:
         self.pass_5b_parse_deletes()
         self.pass_5c_parse_prints()
         self.pass_5d_parse_sets()
+        self.pass_5e_parse_raiserror()
         self.pass_6_parse_selects()
 
         for cmd_obj in self.select_commands:
@@ -1100,6 +1102,108 @@ class TsqlParser:
 
         self.body_lines = new_body_lines
 
+    def pass_5e_parse_raiserror(self):
+        """
+        Pass 5e: Parses RAISERROR commands, handling preceding ROLLBACK.
+        Translates into RAISE EXCEPTION.
+        """
+        self.log("Running Pass 5e: Parse RAISERRORs")
+        new_body_lines = []
+        i = 0
+        while i < len(self.body_lines):
+            line = self.body_lines[i]
+            content = line.content.strip()
+
+            if re.match(r'^ROLLBACK\b', content, re.IGNORECASE):
+                # Check if next statement is RAISERROR
+                next_idx = i + 1
+                is_followed_by_raiserror = False
+                while next_idx < len(self.body_lines):
+                    next_content = self.body_lines[next_idx].content.strip()
+                    if next_content != "":
+                        if re.match(r'^RAISERROR\b', next_content, re.IGNORECASE):
+                            is_followed_by_raiserror = True
+                        break
+                    next_idx += 1
+                
+                if is_followed_by_raiserror:
+                    # Skip the ROLLBACK
+                    i += 1
+                    continue
+                else:
+                    new_body_lines.append(line)
+                    i += 1
+                    continue
+
+            if re.match(r'^RAISERROR\b', content, re.IGNORECASE):
+                start_line = line.line_number
+                raiserror_lines = []
+                while i < len(self.body_lines):
+                    current_line = self.body_lines[i]
+                    current_content = current_line.content.strip()
+
+                    if len(raiserror_lines) > 0:
+                        is_terminator = False
+                        if current_content == "":
+                            next_idx_check = i + 1
+                            next_l_check = ""
+                            while next_idx_check < len(self.body_lines):
+                                next_l_check = self.body_lines[next_idx_check].content.strip()
+                                if next_l_check != "":
+                                    break
+                                next_idx_check += 1
+                            if next_l_check:
+                                terminator_pattern = r'^(IF|ELSE\s+IF|ELSE|END|BEGIN|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT|SET|EXEC|EXECUTE|DECLARE|CREATE|ALTER|DROP|ROLLBACK|RAISERROR)\b'
+                                if re.match(terminator_pattern, next_l_check, re.IGNORECASE):
+                                    is_terminator = True
+                            else:
+                                is_terminator = True
+                        elif re.match(r'^(IF|ELSE\s+IF|ELSE|END|BEGIN|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT|SET|EXEC|EXECUTE|DECLARE|CREATE|ALTER|DROP|ROLLBACK|RAISERROR)\b', current_content, re.IGNORECASE):
+                            is_terminator = True
+
+                        if is_terminator:
+                            break
+
+                    raiserror_lines.append(current_line.content)
+                    i += 1
+
+                cleaned_lines = [l.strip() for l in raiserror_lines]
+                full_raiserror = " ".join(cleaned_lines)
+
+                # Now parse RAISERROR <number> <string>
+                match = re.match(r'^RAISERROR\s+(\d+)\s+((?:\'[^\']*\')|(?:"[^"]*"))(.*)$', full_raiserror, re.IGNORECASE)
+                if match:
+                    err_num = match.group(1)
+                    err_msg_raw = match.group(2)
+                    args = match.group(3).strip()
+
+                    if (err_msg_raw.startswith('"') and err_msg_raw.endswith('"')) or (err_msg_raw.startswith("'") and err_msg_raw.endswith("'")):
+                        err_msg = err_msg_raw[1:-1]
+                    else:
+                        err_msg = err_msg_raw
+
+                    err_msg = err_msg.replace("'", "''")
+                    err_msg = re.sub(r'%\d+!', '%', err_msg)
+                    
+                    if args:
+                        args = args.lstrip(',').strip()
+                        full_raiserror = f"RAISE EXCEPTION '{err_msg} %', {args}, {err_num}"
+                    else:
+                        full_raiserror = f"RAISE EXCEPTION '{err_msg} %', {err_num}"
+                else:
+                    # fallback
+                    full_raiserror = re.sub(r'^RAISERROR\b', 'RAISE EXCEPTION', full_raiserror, flags=re.IGNORECASE)
+
+                self.raiserror_commands.append({
+                    "line": start_line,
+                    "content": full_raiserror
+                })
+            else:
+                new_body_lines.append(line)
+                i += 1
+        
+        self.body_lines = new_body_lines
+
     def pass_6_parse_selects(self):
         """
         Pass 6: Parses SELECT commands.
@@ -1889,6 +1993,12 @@ class TsqlParser:
             # It's a comment, so we don't need a semicolon, but it doesn't hurt if we treat it uniformly or just skip adding it.
             body_parts.append((st['line'], content, "set_commands"))
 
+        for r in self.raiserror_commands:
+            content = r['content']
+            if not content.strip().endswith(';'):
+                content += ';'
+            body_parts.append((r['line'], content, "raiserror_commands"))
+
         for s in self.select_commands:
             content = s['content']
             if not content.strip().endswith(';'):
@@ -2134,6 +2244,9 @@ class TsqlParser:
 
         # Pass 5d
         self.pass_5d_parse_sets()
+
+        # Pass 5e
+        self.pass_5e_parse_raiserror()
 
         # Pass 6
         self.pass_6_parse_selects()

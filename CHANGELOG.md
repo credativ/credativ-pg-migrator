@@ -33,8 +33,6 @@
 
   - Fixes - fix in summary, repaired reported count of tables. Repair in protocol for alias.
 
-## 0.13.0 - 2026.04.16
-
 - 2026.04.16
 
   - Fixes - added missing row counts to the protocol tables in IBM DB2 z/OS migration path from CSV files, added missing logging of success when alias is used for table or view, added missing print of TOP 5 successfully migrated tables and TOP 5 tables with row count mismatches in summary output.
@@ -81,6 +79,22 @@
   - Fix - Internal Mappings: Ensured virtual internal properties that don't legally translate to target tables (`nscale_al_ixpropdef` aliases like 'transient') are immediately discarded from mapping candidates to unblock downstream query builders.
   - Fix - Generic Workers Session Safety: Added `getattr` defenses against `AttributeError` for databases that lack default static `session_settings` declarations (such as the `OracleConnector`) ensuring unhindered `db_to_db` threading.
   - Fix - Planner Table Configs: Switched mismatched `source_schema_name`/`source_table_name` metadata keys out for standard `table_schema`/`table_name` payload structures for valid structural fetching across generic database adapters.
+
+## 0.12.2 - 2026.04.15
+
+- 2026.04.15
+
+  - Fix syntax warning
+
+## 0.12.1 - 2026.04.15
+
+- 2026.04.15
+
+  - Fix migration of check constraints (#57)
+  - Fix fetching sequences on Informix, MySQL and Sybase ASE/Anywhere (#63)
+  - Fix migration of views for most connectors (#65)
+  - Fix data type substitution for postgres->postgres migrations (#67)
+  - Add missing validation dummy methods to DB connectors
 
 ## 0.12.0 - 2026.03.17
 

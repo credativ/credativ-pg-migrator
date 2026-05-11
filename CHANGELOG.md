@@ -1,6 +1,10 @@
 # Changelog
 
-## 0.14.0 - 2026.05.08
+## 0.14.0 - 2026.05.11
+
+- 2026.05.11
+
+  - Feature - Sybase ASE Connector: implemented SQL parser for proper processing of queries in stored procedures. This parser was already used in conversion of views.
 
 - 2026.05.08
 

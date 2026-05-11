@@ -2640,8 +2640,20 @@ EXECUTE FUNCTION {target_schema_name}.{trigger_name}_func();
     def convert_view_code(self, settings: dict):
 
         def quote_column_names(node):
-            if isinstance(node, sqlglot.exp.Column) and node.name:
-                node.set("this", sqlglot.exp.Identifier(this=node.name, quoted=True))
+            if isinstance(node, sqlglot.exp.Column):
+                if node.name:
+                    node.set("this", sqlglot.exp.Identifier(this=node.name, quoted=True))
+                # Quote the table qualifier (alias)
+                if "table" in node.args and isinstance(node.args["table"], sqlglot.exp.Identifier):
+                    table = node.args["table"]
+                    if not table.args.get("quoted"):
+                        table.set("quoted", True)
+                # Quote the db qualifier if present
+                if "db" in node.args and isinstance(node.args["db"], sqlglot.exp.Identifier):
+                    db = node.args["db"]
+                    if not db.args.get("quoted"):
+                        db.set("quoted", True)
+
             if isinstance(node, sqlglot.exp.Alias) and isinstance(node.args.get("alias"), sqlglot.exp.Identifier):
                 alias = node.args["alias"]
                 if not alias.args.get("quoted"):
@@ -2667,6 +2679,12 @@ EXECUTE FUNCTION {target_schema_name}.{trigger_name}_func();
                 table = node.args.get("this")
                 if table and not table.args.get("quoted"):
                     table.set("quoted", True)
+                # Quote table alias if present
+                alias = node.args.get("alias")
+                if alias and isinstance(alias, sqlglot.exp.TableAlias):
+                    alias_id = alias.args.get("this")
+                    if alias_id and isinstance(alias_id, sqlglot.exp.Identifier) and not alias_id.args.get("quoted"):
+                        alias_id.set("quoted", True)
             return node
 
         def replace_functions(node):

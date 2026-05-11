@@ -1609,7 +1609,6 @@ class TsqlParser:
     def pass_8d_convert_selects(self):
         """
         Pass 8d: Converts SELECT commands using the view converter if provided.
-        Skips assignment queries and INTO clauses.
         """
         if not self.view_converter or not self.settings:
             return
@@ -1618,24 +1617,19 @@ class TsqlParser:
 
         for cmd_obj in self.select_commands:
             original_content = cmd_obj['content']
-            normalized = re.sub(r'\s+', ' ', original_content)
-
-            is_assignment = bool(re.match(r'^SELECT\s+(@[\w@]+|locvar_[\w]+)\s*(:=|=)', normalized, re.IGNORECASE))
-            has_into = bool(re.search(r'\bINTO\b', normalized, re.IGNORECASE))
-
-            if not is_assignment and not has_into:
-                temp_settings = self.settings.copy()
-                temp_settings['view_code'] = original_content
+            
+            temp_settings = self.settings.copy()
+            temp_settings['view_code'] = original_content
+            
+            try:
+                converted = self.view_converter(temp_settings)
                 
-                try:
-                    converted = self.view_converter(temp_settings)
-                    
-                    if original_content.strip().endswith(';') and not converted.strip().endswith(';'):
-                        converted += ';'
-                    
-                    cmd_obj['content'] = converted
-                except Exception as e:
-                    self.log(f"Failed to convert SELECT command: {e}")
+                if original_content.strip().endswith(';') and not converted.strip().endswith(';'):
+                    converted += ';'
+                
+                cmd_obj['content'] = converted
+            except Exception as e:
+                self.log(f"Failed to convert SELECT command: {e}")
 
 
     def pass_9_rename_variables(self):
@@ -2112,14 +2106,14 @@ class TsqlParser:
         # Pass 7
         self.pass_7_parse_if_commands()
 
+        # Pass 8d
+        self.pass_8d_convert_selects()
+
         # Pass 8
         self.pass_8_process_select_assignments()
 
         # Pass 8b
         self.pass_8b_convert_datetime_formats()
-
-        # Pass 8d
-        self.pass_8d_convert_selects()
 
         # Pass 8c
         self.pass_8c_process_implicit_returns()

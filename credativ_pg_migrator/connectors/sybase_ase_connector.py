@@ -1373,6 +1373,12 @@ class SybaseASEConnector(DatabaseConnector):
 
                 ddl += get_indent(current_indent) + line_obj.content + "\n"
 
+            # Double quote user defined types that remained in the DDL
+            udt_map = self._get_udt_codes_mapping(settings)
+            if udt_map:
+                for udt_name in udt_map.keys():
+                    ddl = re.sub(rf'(?<!")\b{re.escape(udt_name)}\b(?!")', f'"{udt_name}"', ddl, flags=re.IGNORECASE)
+
             return ddl
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"sybase_ase_connector: convert_funcproc_code: Critical Failure: {e}")

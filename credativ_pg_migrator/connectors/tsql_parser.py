@@ -1015,19 +1015,36 @@ class TsqlParser:
                 cleaned_lines = [l.strip() for l in print_lines]
                 full_print = " ".join(cleaned_lines)
                 
-                # Transform PRINT into RAISE WARNING or EXCEPTION
-                if has_rollback_trigger:
-                    full_print = re.sub(r'^PRINT\b', 'RAISE EXCEPTION', full_print, flags=re.IGNORECASE)
-                else:
-                    full_print = re.sub(r'^PRINT\b', 'RAISE WARNING', full_print, flags=re.IGNORECASE)
-
-                # Convert double quotes to single quotes and escape existing single quotes
-                def replace_double_quotes(match):
-                    inner_text = match.group(1)
-                    inner_text = inner_text.replace("'", "''")
-                    return f"'{inner_text}'"
+                # Transform PRINT into RAISE NOTICE or EXCEPTION
+                print_args = re.sub(r'^PRINT\b', '', full_print, flags=re.IGNORECASE).strip()
                 
-                full_print = re.sub(r'"([^"]*)"', replace_double_quotes, full_print)
+                if print_args.startswith("'") or print_args.startswith('"'):
+                    match = re.match(r'^((?:\'[^\']*\')|(?:"[^"]*"))(.*)$', print_args, re.IGNORECASE)
+                    if match:
+                        format_str_raw = match.group(1)
+                        args = match.group(2).strip()
+                        
+                        if format_str_raw.startswith('"') and format_str_raw.endswith('"'):
+                            format_str = format_str_raw[1:-1].replace("'", "''")
+                        else:
+                            format_str = format_str_raw[1:-1]
+                            
+                        format_str = re.sub(r'%\d+!', '%', format_str)
+                        
+                        if args:
+                            args = args.lstrip(',').strip()
+                            new_print_args = f"'{format_str}', {args}"
+                        else:
+                            new_print_args = f"'{format_str}'"
+                    else:
+                        new_print_args = print_args
+                else:
+                    new_print_args = f"'%', {print_args}"
+                
+                if has_rollback_trigger:
+                    full_print = f"RAISE EXCEPTION {new_print_args}"
+                else:
+                    full_print = f"RAISE NOTICE {new_print_args}"
 
                 self.print_commands.append({
                     "line": start_line,

@@ -7,7 +7,7 @@
   - Feature - Sybase ASE Connector: implemented SQL parser for proper processing of queries in stored procedures. This parser was already used in conversion of views.
   - Old migration summary removed from the code, mapping workflow now uses the new summary report too.
   - Fixing different behavior of Sybase ASE built-in functions conversion across conversion of views, procedures and triggers.
-  - Fix in TSQL conversion - returning table structure must have unique column names, user defined data types must be double quoted, proper conversion of raiserror to raise exception.
+  - Fix in TSQL conversion - returning table structure must have unique column names, user defined data types must be double quoted, proper conversion of raiserror to raise exception, and print statement not connected to rollback or raiserror to raise notice.
 
 - 2026.05.08
 

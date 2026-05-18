@@ -1457,9 +1457,33 @@ class PostgreSQLConnector(DatabaseConnector):
 
             self.config_parser.print_log_message('DEBUG2', f"postgresql_connector: insert_batch: Worker {worker_id}: insert_batch [2] into {target_schema_name}.{target_table_name} with {len(data)} rows, columns: |{insert_columns}| data type: {type(data)}")
 
+            conflict_action = settings.get('data_conflict_action')
+            conflict_clause = ""
+            if conflict_action == 'merge_keep_target':
+                conflict_clause = " ON CONFLICT DO NOTHING"
+            elif conflict_action == 'merge_keep_source':
+                primary_key_columns = settings.get('primary_key_columns')
+                if primary_key_columns:
+                    col_names = [c.strip().strip('"') for c in insert_columns.split(',')]
+                    pk_names = [c.strip().strip('"') for c in primary_key_columns.split(',')]
+                    update_parts = []
+                    for col in col_names:
+                        if col not in pk_names:
+                            update_parts.append(f'"{col}" = EXCLUDED."{col}"')
+                    
+                    if update_parts:
+                        conflict_clause = f" ON CONFLICT ({primary_key_columns}) DO UPDATE SET " + ", ".join(update_parts)
+                    else:
+                        conflict_clause = f" ON CONFLICT ({primary_key_columns}) DO NOTHING"
+                else:
+                    self.config_parser.print_log_message('ERROR', f"postgresql_connector: insert_batch: Worker {worker_id}: Cannot use 'merge_keep_source' for table {target_table_name} without a primary key.")
+                    raise ValueError(f"Table {target_table_name} lacks a primary key required for 'merge_keep_source'.")
+
+            insert_query_str = f"""INSERT INTO "{target_schema_name}"."{target_table_name}" ({insert_columns}) VALUES ({insert_values}){conflict_clause}"""
+            
             with self.connection.cursor() as cursor:
-                insert_query = sql.SQL(f"""INSERT INTO "{target_schema_name}"."{target_table_name}" ({insert_columns}) VALUES ({insert_values})""")
-                self.config_parser.print_log_message('DEBUG3', f"postgresql_connector: insert_batch: Worker {worker_id}: Insert query: {insert_query}")
+                insert_query = sql.SQL(insert_query_str)
+                self.config_parser.print_log_message('DEBUG3', f"postgresql_connector: insert_batch: Worker {worker_id}: Insert query: {insert_query_str}")
                 self.connection.autocommit = False
                 try:
                     if self.session_settings:

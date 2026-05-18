@@ -380,6 +380,16 @@ class ConfigParser:
         return self.config.get('remote_objects_substitution', {})
 
     ## Migration settings
+    def _match_table_name(self, table_name, pattern):
+        if not pattern:
+            return False
+        if isinstance(pattern, list):
+            for p in pattern:
+                if re.fullmatch(p, table_name, re.IGNORECASE):
+                    return True
+            return False
+        return bool(re.fullmatch(pattern, table_name, re.IGNORECASE))
+
     def should_drop_schema(self):
         return self.config.get('migration', {}).get('drop_schema', False)
 
@@ -400,7 +410,7 @@ class ConfigParser:
                 for entry in table_settings:
                     pattern = entry.get('table_name')
                     # self.print_log_message('DEBUG3', f"config_parser: should_migrate_data: checking table {table_name} with pattern {pattern}, setting is {entry.get('migrate_data', False)}")
-                    if pattern and re.fullmatch(pattern, table_name, re.IGNORECASE):
+                    if self._match_table_name(table_name, pattern):
                         # self.print_log_message('DEBUG3', f"config_parser: should_migrate_data: table {table_name} matched pattern {pattern}, setting is {entry.get('migrate_data', False)}")
                         return entry.get('migrate_data', False)
         # self.print_log_message('DEBUG3', f"config_parser: should_migrate_data: table {table_name} returned default setting {self.config.get('migration', {}).get('migrate_data', False)}")
@@ -412,7 +422,7 @@ class ConfigParser:
             if isinstance(table_settings, list):
                 for entry in table_settings:
                     pattern = entry.get('table_name')
-                    if pattern and re.fullmatch(pattern, table_name, re.IGNORECASE):
+                    if self._match_table_name(table_name, pattern):
                         return entry.get('migrate_indexes', False)
         return self.config.get('migration', {}).get('migrate_indexes', False)
 
@@ -423,7 +433,7 @@ class ConfigParser:
             if isinstance(table_settings, list):
                 for entry in table_settings:
                     pattern = entry.get('table_name')
-                    if pattern and re.fullmatch(pattern, table_name, re.IGNORECASE):
+                    if self._match_table_name(table_name, pattern):
                         return entry.get('migrate_constraints', False)
         return self.config.get('migration', {}).get('migrate_constraints', False)
 
@@ -440,7 +450,7 @@ class ConfigParser:
             if isinstance(table_settings, list):
                 for entry in table_settings:
                     pattern = entry.get('table_name')
-                    if pattern and re.fullmatch(pattern, table_name, re.IGNORECASE):
+                    if self._match_table_name(table_name, pattern):
                         return entry.get('migrate_triggers', False)
         return self.config.get('migration', {}).get('migrate_triggers', False)
 
@@ -754,7 +764,7 @@ class ConfigParser:
             if isinstance(table_settings, list):
                 for entry in table_settings:
                     pattern = entry.get('table_name')
-                    if pattern and re.fullmatch(pattern, table_name, re.IGNORECASE):
+                    if self._match_table_name(table_name, pattern):
                         return entry.get('batch_size', self.get_batch_size())
         return self.get_batch_size()
 
@@ -765,7 +775,7 @@ class ConfigParser:
             if isinstance(table_settings, list):
                 for entry in table_settings:
                     pattern = entry.get('table_name')
-                    if pattern and re.fullmatch(pattern, table_name, re.IGNORECASE):
+                    if self._match_table_name(table_name, pattern):
                         chunk_size = entry.get('chunk_size', self.get_chunk_size())
                         if chunk_size == -1:
                             self.print_log_message('DEBUG', f"config_parser: get_table_chunk_size: Chunk size for table {table_name} is set to -1, which means no chunking will be done.")
@@ -781,9 +791,23 @@ class ConfigParser:
                 for entry in table_settings:
                     pattern = entry.get('table_name')
                     table_schema = entry.get('table_schema', schema_name)
-                    if pattern and re.fullmatch(pattern, table_name, re.IGNORECASE) and table_schema.lower() == schema_name.lower():
+                    if self._match_table_name(table_name, pattern) and table_schema.lower() == schema_name.lower():
                         return entry.get('data_export', None)
         return None
+
+    def get_mapping_data_resolution(self, table_name):
+        # First check specific table overrides
+        if table_name:
+            table_settings = self.config.get('table_settings', [])
+            if isinstance(table_settings, list):
+                for entry in table_settings:
+                    pattern = entry.get('table_name')
+                    if self._match_table_name(table_name, pattern):
+                        action = entry.get('data_conflict_action')
+                        if action:
+                            return action
+        # Fallback to global migration setting or 'skip'
+        return self.get_migration_settings().get('data_conflict_action', 'skip')
 
     def get_table_data_export_format(self, schema_name, table_name):
         return self.get_table_data_export(schema_name, table_name).get('format', None)

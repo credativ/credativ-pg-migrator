@@ -245,6 +245,19 @@ table_settings:
   # - migrate_indexes: true/false - if indexes should be migrated, default is true
   # - migrate_constraints: true/false - if constraints should be migrated, default is true
   # - migrate_triggers: true/false - if triggers should be migrated, default is true
+  # - data_conflict_action: action when data exists in both source and target tables (skip, replace, merge_keep_target, merge_keep_source)
+  - table_name: ["log_.*", "tmp_.*"]
+    # Overwrite specified tables with source data
+    data_conflict_action: "replace"
+
+  - table_name: "users"
+    # Merge data in specified table, but prioritize target content
+    data_conflict_action: "merge_keep_target"
+
+  - table_name: "settings_.*"
+    # Merge data in specified tables, but prioritize source content
+    data_conflict_action: "merge_keep_source"
+
   - table_name: "table1"
     table_schema: "dbo"  # source schema for the table, if not specified, default is the source schema from the source database connection
     batch_size: 50000

@@ -272,7 +272,16 @@ class Orchestrator:
         migrate_tables = []
         for table_row in raw_tables:
             table_data = self.migrator_tables.decode_table_row(table_row)
-            if table_data.get('source_table_rows', 0) > 0 and table_data.get('target_table_rows', -1) == 0:
+            source_rows = table_data.get('source_table_rows', 0)
+            target_rows = table_data.get('target_table_rows', -1)
+            
+            conflict_action = 'skip'
+            if source_rows > 0 and target_rows > 0:
+                conflict_action = self.config_parser.get_mapping_data_resolution(table_data['target_table_name'])
+                table_data['data_conflict_action'] = conflict_action
+                self.config_parser.print_log_message('INFO', f"orchestrator: mapping_copy_data: Table {table_data['target_table_name']} has conflict action: {conflict_action}")
+
+            if source_rows > 0 and (target_rows == 0 or conflict_action in ('replace', 'merge_keep_target', 'merge_keep_source')):
                 target_columns = table_data.get('target_columns', {})
                 insert_values = []
                 keys_sorted = sorted(target_columns.keys(), key=lambda x: int(x))
@@ -288,8 +297,6 @@ class Orchestrator:
                 table_data['insert_values'] = ', '.join(insert_values)
                 migrate_tables.append(table_data)
             else:
-                target_rows = table_data.get('target_table_rows', -1)
-                source_rows = table_data.get('source_table_rows', 0)
                 protocol_id = self.migrator_tables.insert_data_migration({
                     'worker_id': None,
                     'source_table_id': table_data['source_table_id'],
@@ -305,8 +312,8 @@ class Orchestrator:
                     msg = 'Skipped (0 rows)'
                     status_msg = 'mapped data OK (0 rows)'
                 else:
-                    msg = f"Skipped (target_rows={target_rows})"
-                    status_msg = f"mapped data skipped (source_rows={source_rows}, target_rows={target_rows})"
+                    msg = f"Skipped (target_rows={target_rows}, action={conflict_action})"
+                    status_msg = f"mapped data skipped (source_rows={source_rows}, target_rows={target_rows}, action={conflict_action})"
 
                 self.migrator_tables.update_data_migration_status({
                     'row_id': protocol_id,
@@ -399,8 +406,14 @@ class Orchestrator:
                 'chunk_size': chunk_size,
                 'chunk_number': 1,
                 'resume_after_crash': False,
-                'drop_unfinished_tables': False
+                'drop_unfinished_tables': False,
+                'data_conflict_action': table_data.get('data_conflict_action')
             }
+
+            if settings.get('data_conflict_action') == 'replace':
+                self.config_parser.print_log_message('INFO', f"orchestrator: mapping_data_worker: Worker {worker_id}: Truncating table {table_data['target_table_name']} due to 'replace' conflict action.")
+                worker_target_connection.execute_query(f'TRUNCATE TABLE "{table_data["target_schema_name"]}"."{table_data["target_table_name"]}"')
+                settings['target_table_rows'] = 0
 
             part_name = 'migrate_table'
             rows_migrated = 0

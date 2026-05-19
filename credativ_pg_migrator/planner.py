@@ -1588,6 +1588,20 @@ class Planner:
             target_schema_name = self.target_schema_name
             mapped_table = pair # Assuming 'pair' itself represents the mapped table info
 
+            self.source_connection.connect()
+            source_table_rows = self.source_connection.get_rows_count(
+                source_schema_name,
+                source_t
+            )
+            self.source_connection.disconnect()
+
+            self.target_connection.connect()
+            target_table_rows = self.target_connection.get_rows_count(
+                target_schema_name,
+                target_t
+            )
+            self.target_connection.disconnect()
+
             self.migrator_tables.insert_mapping_tables({
                 'source_schema_name': source_schema_name,
                 'source_table_name': source_t, # Use source_t from the loop
@@ -1595,6 +1609,8 @@ class Planner:
                 'target_table_name': target_t, # Use target_t from the loop
                 'match_type': mapped_table['method'], # Use 'method' from 'pair'
                 'similarity_score': mapped_table.get('score', 0.0), # Use 'score' from 'pair'
+                'source_table_rows': source_table_rows,
+                'target_table_rows': target_table_rows,
                 'info': info_json # Use the already prepared info_json
             })
 

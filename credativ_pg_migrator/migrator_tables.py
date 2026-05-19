@@ -404,6 +404,8 @@ class MigratorTables:
                 target_table_name TEXT,
                 match_type TEXT NOT NULL,
                 similarity_score FLOAT,
+                source_table_rows INTEGER,
+                target_table_rows INTEGER,
                 info TEXT
             );
         """)
@@ -476,15 +478,17 @@ class MigratorTables:
         target_table_name = settings.get('target_table_name')
         match_type = settings.get('match_type')
         similarity_score = settings.get('similarity_score')
+        source_table_rows = settings.get('source_table_rows')
+        target_table_rows = settings.get('target_table_rows')
         info = settings.get('info')
 
         query = f"""
             INSERT INTO "{self.protocol_schema}"."mapping_tables"
-            (source_schema_name, source_table_name, target_schema_name, target_table_name, match_type, similarity_score, info)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            (source_schema_name, source_table_name, target_schema_name, target_table_name, match_type, similarity_score, source_table_rows, target_table_rows, info)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
         """
-        params = (source_schema_name, source_table_name, target_schema_name, target_table_name, match_type, similarity_score, info)
+        params = (source_schema_name, source_table_name, target_schema_name, target_table_name, match_type, similarity_score, source_table_rows, target_table_rows, info)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)

@@ -1,13 +1,12 @@
 # Changelog
 
-## 0.14.1 - 2026.05.18
+## 0.14.0 - 2026.05.18
 
 - 2026.05.18
 
   - Feature - Configuration: Enhanced `table_settings` to natively accept a list of strings or regular expressions for the `table_name` property, streamlining configuration for multiple tables at once.
-  - Feature - Mapping Workflow: Added `data_conflict_action` parameter to `table_settings` to allow explicit configuration (`replace`, `merge_keep_target`, `merge_keep_source`, or `skip`) of conflict resolution behavior when data is present in both source and target tables.
+  - Feature - Mapping Workflow: Added `data_conflict_action` parameter to `table_settings` to allow explicit configuration (`replace`, `merge_keep_target`, `merge_keep_source`, or `skip`) of conflict resolution behavior when data is present in both source and target tables. Implemented into all connectors.
   - Fix - Config Parser: Refactored internal configuration matching logic to natively support array-based table pattern lists uniformly across all table-specific directives (e.g. batch size overrides, chunking, and selective migration toggles).
-## 0.14.0 - 2026.05.11
 
 - 2026.05.11
 

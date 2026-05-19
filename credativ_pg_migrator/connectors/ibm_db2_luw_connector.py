@@ -329,7 +329,8 @@ class IbmDb2LuwConnector(DatabaseConnector):
                 part_name = 'migrate_table in batches using cursor'
                 self.config_parser.print_log_message('INFO', f"ibm_db2_luw_connector: migrate_table: Worker {worker_id}: Table {source_table_name} has {source_table_rows} rows - starting data migration.")
 
-                if source_table_rows > target_table_rows:
+                data_conflict_action = settings.get('data_conflict_action')
+                if source_table_rows > target_table_rows or data_conflict_action in ('merge_keep_target', 'merge_keep_source', 'replace'):
                     migrator_tables.update_data_migration_started(protocol_id)
 
                     part_name = 'migrate_table in batches using cursor'
@@ -487,7 +488,7 @@ class IbmDb2LuwConnector(DatabaseConnector):
                                                             f"Average batch: {average_batch_seconds:.2f} seconds")
                     cursor.close()
 
-                elif source_table_rows <= target_table_rows:
+                elif source_table_rows <= target_table_rows and data_conflict_action not in ('merge_keep_target', 'merge_keep_source', 'replace'):
                     self.config_parser.print_log_message('INFO', f"ibm_db2_luw_connector: migrate_table: Worker {worker_id}: Source table {source_table_name} has {source_table_rows} rows, which is less than or equal to target table {target_table_name} with {target_table_rows} rows. No data migration needed.")
 
                 migration_stats = {

@@ -307,7 +307,8 @@ class MySQLConnector(DatabaseConnector):
 
             else:
 
-                if source_table_rows > target_table_rows:
+                data_conflict_action = settings.get('data_conflict_action')
+                if source_table_rows > target_table_rows or data_conflict_action in ('merge_keep_target', 'merge_keep_source', 'replace'):
                     migrator_tables.update_data_migration_started(protocol_id)
 
                     self.config_parser.print_log_message('INFO', f"mysql_connector: migrate_table: Worker {worker_id}: Source table {source_table_name}: {source_table_rows} rows / Target table {target_table_name}: {target_table_rows} rows - starting data migration.")
@@ -501,7 +502,7 @@ class MySQLConnector(DatabaseConnector):
 
                     cursor.close()
 
-                elif source_table_rows <= target_table_rows:
+                elif source_table_rows <= target_table_rows and data_conflict_action not in ('merge_keep_target', 'merge_keep_source', 'replace'):
                     self.config_parser.print_log_message('INFO', f"mysql_connector: migrate_table: Worker {worker_id}: Source table {source_table_name} has {source_table_rows} rows, which is less than or equal to target table {target_table_name} with {target_table_rows} rows. No data migration needed.")
 
                 migration_stats = {

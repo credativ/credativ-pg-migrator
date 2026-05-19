@@ -1196,7 +1196,8 @@ class PostgreSQLConnector(DatabaseConnector):
 
             else:
 
-                if source_table_rows > target_table_rows:
+                data_conflict_action = settings.get('data_conflict_action')
+                if source_table_rows > target_table_rows or data_conflict_action in ('merge_keep_target', 'merge_keep_source', 'replace'):
                     migrator_tables.update_data_migration_started(protocol_id)
 
                     part_name = 'migrate_table in batches using cursor'
@@ -1352,7 +1353,7 @@ class PostgreSQLConnector(DatabaseConnector):
 
                     cursor.close()
 
-                elif source_table_rows <= target_table_rows:
+                elif source_table_rows <= target_table_rows and data_conflict_action not in ('merge_keep_target', 'merge_keep_source', 'replace'):
                     self.config_parser.print_log_message('INFO', f"postgresql_connector: migrate_table: Worker {worker_id}: Source table {source_table_name} has {source_table_rows} rows, which is less than or equal to target table {target_table_name} with {target_table_rows} rows. No data migration needed.")
 
                 migration_stats = {
@@ -1472,7 +1473,15 @@ class PostgreSQLConnector(DatabaseConnector):
                             update_parts.append(f'"{col}" = EXCLUDED."{col}"')
                     
                     if update_parts:
-                        conflict_clause = f" ON CONFLICT ({primary_key_columns}) DO UPDATE SET " + ", ".join(update_parts)
+                        where_parts = []
+                        for col in col_names:
+                            if col not in pk_names:
+                                where_parts.append(f'"{target_table_name}"."{col}" IS DISTINCT FROM EXCLUDED."{col}"')
+                        
+                        where_clause = ""
+                        if where_parts:
+                            where_clause = " WHERE " + " OR ".join(where_parts)
+                        conflict_clause = f" ON CONFLICT ({primary_key_columns}) DO UPDATE SET " + ", ".join(update_parts) + where_clause
                     else:
                         conflict_clause = f" ON CONFLICT ({primary_key_columns}) DO NOTHING"
                 else:

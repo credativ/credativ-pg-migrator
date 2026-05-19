@@ -120,6 +120,18 @@ class Planner:
                     self.migrator_tables.update_main_status({'task_name': 'Planner', 'subtask_name': '', 'success': False, 'message': f'ERROR: {e}'})
                     self.handle_error(e, "Planner")
 
+            elif self.config_parser.is_anonymization_workflow():
+                self.migrator_tables.insert_main({'task_name': 'Planner', 'subtask_name': 'Anonymization workflow'})
+                try:
+
+                    self.mapping_match_tables()
+
+                    self.migrator_tables.update_main_status({'task_name': 'Planner', 'subtask_name': '', 'success': True, 'message': 'finished OK'})
+
+                except Exception as e:
+                    self.migrator_tables.update_main_status({'task_name': 'Planner', 'subtask_name': '', 'success': False, 'message': f'ERROR: {e}'})
+                    self.handle_error(e, "Planner")
+
             else:
                 self.config_parser.print_log_message('ERROR', f"planner: create_plan: Unknown workflow type: {self.config_parser.get_workflow()}")
                 exit(1)
@@ -1500,6 +1512,9 @@ class Planner:
 
         source_tables = [v['table_name'] for v in source_tables_raw.values()]
         target_tables = [v['table_name'] for v in target_tables_raw.values()]
+
+        self.config_parser.print_log_message('INFO', f"planner: mapping_match_tables: source_tables: {source_tables}")
+        self.config_parser.print_log_message('INFO', f"planner: mapping_match_tables: target_tables: {target_tables}")
 
         source_columns_map = {}
         target_columns_map = {}

@@ -245,6 +245,9 @@ class ConfigParser:
     def get_migrator_schema(self):
         return self.get_migrator_config().get('schema', MigratorConstants.get_default_schema())
 
+    def get_anonymization_config(self):
+        return self.config.get('anonymization', {})
+
     def get_migration_settings(self):
         return self.config['migration']
 
@@ -256,6 +259,9 @@ class ConfigParser:
 
     def is_mapping_workflow(self):
         return self.get_workflow() == 'mapping'
+
+    def is_anonymization_workflow(self):
+        return self.get_workflow() == 'anonymization'
 
     def get_suspend_indexes_constraints(self):
         settings = self.get_migration_settings()

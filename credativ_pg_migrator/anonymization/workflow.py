@@ -88,6 +88,9 @@ class AnonymizationWorkflow:
             
             source_conn.connect()
             target_conn.connect()
+            
+            # Named cursors require a transaction (no autocommit)
+            source_conn.connection.autocommit = False
 
             batch_size = self.config_parser.get_batch_size()
             
@@ -101,9 +104,8 @@ class AnonymizationWorkflow:
             src_cursor = source_conn.connection.cursor(name=f"cursor_{worker_id}")
             src_cursor.execute(select_sql)
             
-            conflict_action = self.config_parser.get_mapping_data_resolution(target_table)
-            if conflict_action == 'replace':
-                target_conn.execute_query(f'TRUNCATE TABLE "{target_schema}"."{target_table}"')
+            if self.config_parser.should_truncate_tables():
+                target_conn.execute_query(f'TRUNCATE TABLE "{target_schema}"."{target_table}" CASCADE')
 
             while True:
                 rows = src_cursor.fetchmany(batch_size)

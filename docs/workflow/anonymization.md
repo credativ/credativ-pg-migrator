@@ -99,5 +99,143 @@ The following methods are pre-registered and ready for use in your configuration
     - **Description:** Bypasses Python-side generation by intercepting the transformation and passing a raw SQL function call down to PostgreSQL. Useful for integrating with server-side extensions like `postgresql_anonymizer`.
     - **Parameters:**
       - `func_name` (optional): The SQL function to call. Default is `anon.fake_city`.
-      - `args` (optional): Explicit string of arguments to pass to the function.
       - `pass_original` (optional): If `true`, injects the original column value into the function call via string formatting (`%s`). Default is `false`.
+
+## Example Summary Output
+
+If the `show_anonymization_examples` configuration limit is greater than 0, the final migrator summary will display random cross-database validation examples:
+
+```text
+================================================================================
+                       CREDATIV PG-MIGRATOR SUMMARY                             
+================================================================================
+
+[ DATABASE CONTEXT ]
+Source: omdb, schema: public (postgresql)
+Target: omdb, schema: public (postgresql)
+Workflow: anonymization
+
+[ TIMING & EXECUTION PROFILES ]
+--------------------------------------------------------------------------------
+Phase / Step                                 | Duration       | Start Time
+--------------------------------------------------------------------------------
+Planner                                      | 0:00:03.46     | 11:25:30
+  Anonymization workflow                     | -              | 11:25:30
+Orchestrator                                 | -              | 11:25:33
+  anonymization data copy                    | 0:02:47.87     | 11:25:33
+
+[ OBJECTS MIGRATION RESULTS ]
+--------------------------------------------------------------------------------
+Object Type              | Source | Success | Failed | Details
+--------------------------------------------------------------------------------
+User Defined Types       |      0 |       0 |      0 | 
+Domains                  |      0 |       0 |      0 | 
+Sequences                |      0 |       0 |      0 | 
+Tables                   |     24 |      24 |      0 | Empty: 1, With Data: 23
+Table Partitions         |      0 |       0 |      0 | 
+Columns                  |      0 |       0 |      0 | 
+Altered Columns          |      0 |       - |      - | 
+Indexes                  |      0 |       0 |      0 | 
+Constraints              |      0 |       0 |      0 | 
+Functions / Procedures   |      0 |       0 |      0 | 
+Triggers                 |      0 |       0 |      0 | 
+Views                    |      0 |       0 |      0 | 
+Aliases                  |      0 |       0 |      0 | 
+
+[ DATA MIGRATION RESULTS ]
+--------------------------------------------------------------------------------
+Total Tables Processed   : 23
+Empty Tables (0 rows)    : 0
+Tables with Data         : 23
+Fully Migrated (Matched) : 23
+Row Count Mismatches     : 0
+
+Biggest Successfully Migrated Tables (Top 10):
+Table Name                          |       Row Count |  Time Spent (s)
+--------------------------------------------------------------------------------
+public.casts                        |       1,253,498 |           45.80
+public.movie_keywords               |         408,524 |           15.12
+public.movie_links                  |         349,858 |           17.24
+public.movie_aliases_iso            |         304,077 |           15.48
+public.people                       |         294,184 |          161.88
+public.movies                       |         277,249 |           22.54
+public.movie_categories             |         227,189 |            8.70
+public.people_links                 |         213,028 |           10.02
+public.movie_languages              |         144,560 |            4.74
+public.movie_countries              |         103,011 |            2.94
+
+[ ANONYMIZATION WORKFLOW RESULTS ]
+--------------------------------------------------------------------------------
+Anonymized 6 columns in 3 tables.
+
+Top Tables with Most Anonymized Columns:
+1. public.movies (4 columns anonymized)
+   Column Name | Data Type | Method
+   ------------+-----------+---------------------
+   budget      | numeric   | numeric_noise
+   homepage    | text      | partial_mask
+   name        | text      | deterministic_hash_mask
+   revenue     | numeric   | consistent_integer_mask
+
+   Examples (Original => Anonymized):
+   Row 1:
+     - budget: 'None' => 'None'
+     - homepage: 'None' => 'None'
+     - name: 'Homme de peu de foi' => '3f68fbf8ee5ced2a1a725a1c37a803...'
+     - revenue: 'None' => 'None'
+   Row 2:
+     - budget: 'None' => 'None'
+     - homepage: 'None' => 'None'
+     - name: 'The Name' => 'f6317bf7fecdf94296466d1c5d7798...'
+     - revenue: 'None' => 'None'
+   Row 3:
+     - budget: 'None' => 'None'
+     - homepage: 'None' => 'None'
+     - name: 'The Labrador' => 'a5695bb0c3a99c6f353ac2aeed86e4...'
+     - revenue: 'None' => 'None'
+   Row 4:
+     - budget: 'None' => 'None'
+     - homepage: 'None' => 'None'
+     - name: 'All Dressed Up and Nowhere to ...' => '005146aa88460049863d49732daa6a...'
+     - revenue: 'None' => 'None'
+   Row 5:
+     - budget: 'None' => 'None'
+     - homepage: 'None' => 'None'
+     - name: 'Smoking in the Girls' Room' => '8722945cea77f7e2216b2376dbb793...'
+     - revenue: 'None' => 'None'
+
+2. public.people (1 columns anonymized)
+   Column Name | Data Type | Method
+   ------------+-----------+---------------------
+   name        | text      | faker_name
+
+   Examples (Original => Anonymized):
+   Row 1:
+     - name: 'Maximum Indifference' => 'Dr. Luka Winkler'
+   Row 2:
+     - name: 'Amanda Knapic' => 'Abraham Striebitz'
+   Row 3:
+     - name: 'Mark Clare' => 'Marija Gierschner B.Eng.'
+   Row 4:
+     - name: 'Meryl Swartz' => 'Hans-Martin Anders'
+   Row 5:
+     - name: 'Tamara Smart' => 'Anna Lorch'
+
+3. public.trailers (1 columns anonymized)
+   Column Name | Data Type | Method
+   ------------+-----------+---------------------
+   key         | text      | static_mask
+
+   Examples (Original => Anonymized):
+   Row 1:
+     - key: 'ZOhSbNJ7MqI' => 'YYYYYYYYYYY'
+   Row 2:
+     - key: 'q34GSXHvJvI' => 'YYYYYYYYYYY'
+   Row 3:
+     - key: 'Mc4sz6neHDs' => 'YYYYYYYYYYY'
+   Row 4:
+     - key: 'FQRgJTEw_OA' => 'YYYYYYYYYYY'
+   Row 5:
+     - key: 'atbuBxDO1Go' => 'YYYYYYYYYYY'
+================================================================================
+```

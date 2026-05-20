@@ -254,6 +254,9 @@ class ConfigParser:
     def get_summary_top_anonymized_columns(self):
         return self.get_summary_config().get('top_anonymized_columns', 5)
 
+    def get_summary_show_anonymization_examples(self):
+        return self.get_summary_config().get('show_anonymization_examples', 0)
+
     ## Migrator
     def get_migrator_config(self):
         return self.config.get('migrator', {})

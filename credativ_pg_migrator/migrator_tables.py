@@ -3449,12 +3449,110 @@ class MigratorTables:
                             
                         if col_count > top_anonymized_columns_limit:
                             lines.append(f"   - ... and {col_count - top_anonymized_columns_limit} more")
+                            
+                        show_examples = self.config_parser.get_summary_show_anonymization_examples()
+                        if show_examples > 0:
+                            self._append_anonymization_examples(lines, t_data['table_name'], display_cols, show_examples)
             except Exception as e:
                 lines.append(f"Error computing anonymization stats: {e}")
 
         lines.append("=" * 80)
         final_summary = "\n" + "\n".join(lines)
         self.config_parser.print_log_message('INFO', final_summary)
+
+    def _append_anonymization_examples(self, lines, table_fqn, display_cols, limit):
+        if self.config_parser.get_source_db_type() != 'postgresql' or self.config_parser.get_target_db_type() != 'postgresql':
+            return
+            
+        try:
+            import psycopg2
+            import psycopg2.extras
+            
+            src_cfg = self.config_parser.get_source_config()
+            tgt_cfg = self.config_parser.get_target_config()
+            
+            if not src_cfg or not tgt_cfg:
+                return
+
+            schema_parts = table_fqn.split('.', 1)
+            if len(schema_parts) != 2:
+                return
+            schema_name, table_name = schema_parts
+
+            src_dbname = self.config_parser.get_source_db_name()
+            tgt_dbname = self.config_parser.get_target_db_name()
+
+            src_conn = psycopg2.connect(
+                host=src_cfg.get('host', 'localhost'),
+                port=src_cfg.get('port', 5432),
+                dbname=src_dbname,
+                user=src_cfg.get('username'),
+                password=src_cfg.get('password')
+            )
+            
+            tgt_conn = psycopg2.connect(
+                host=tgt_cfg.get('host', 'localhost'),
+                port=tgt_cfg.get('port', 5432),
+                dbname=tgt_dbname,
+                user=tgt_cfg.get('username'),
+                password=tgt_cfg.get('password')
+            )
+            
+            src_cur = src_conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+            tgt_cur = tgt_conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+            
+            # Find primary keys
+            src_cur.execute("""
+                SELECT a.attname
+                FROM   pg_index i
+                JOIN   pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+                JOIN   pg_class c ON c.oid = i.indrelid
+                JOIN   pg_namespace n ON n.oid = c.relnamespace
+                WHERE  n.nspname = %s AND c.relname = %s
+                AND    i.indisprimary
+            """, (schema_name, table_name))
+            
+            pks = [row[0] for row in src_cur.fetchall()]
+            if not pks:
+                src_cur.close()
+                tgt_cur.close()
+                src_conn.close()
+                tgt_conn.close()
+                lines.append(f"   [!] Examples skipped: No primary key found for {table_fqn}.")
+                return
+                
+            pk_cols_str = ", ".join([f'"{pk}"' for pk in pks])
+            anon_cols = [c['name'] for c in display_cols]
+            fetch_cols_str = ", ".join([f'"{col}"' for col in anon_cols])
+            
+            src_cur.execute(f'SELECT {pk_cols_str}, {fetch_cols_str} FROM "{schema_name}"."{table_name}" ORDER BY random() LIMIT {limit}')
+            src_rows = src_cur.fetchall()
+            
+            if src_rows:
+                lines.append("")
+                lines.append(f"   Examples (Original => Anonymized):")
+                for row_idx, row in enumerate(src_rows, 1):
+                    lines.append(f"   Row {row_idx}:")
+                    where_clauses = " AND ".join([f'"{pk}" = %s' for pk in pks])
+                    where_values = [row[pk] for pk in pks]
+                    tgt_cur.execute(f'SELECT {fetch_cols_str} FROM "{schema_name}"."{table_name}" WHERE {where_clauses}', where_values)
+                    tgt_row = tgt_cur.fetchone()
+                    
+                    if tgt_row:
+                        for col in anon_cols:
+                            orig_val = str(row[col])[:30] + ('...' if len(str(row[col])) > 30 else '')
+                            anon_val = str(tgt_row[col])[:30] + ('...' if len(str(tgt_row[col])) > 30 else '')
+                            lines.append(f"     - {col}: '{orig_val}' => '{anon_val}'")
+                    else:
+                        lines.append(f"     [!] Row missing in target database.")
+            
+            src_cur.close()
+            tgt_cur.close()
+            src_conn.close()
+            tgt_conn.close()
+            
+        except Exception as e:
+            lines.append(f"   [!] Could not fetch examples: {e}")
 
     def __print_mapping_metric_summary(self, object_name, table_name, is_index=False):
         try:

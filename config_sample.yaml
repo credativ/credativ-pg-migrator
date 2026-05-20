@@ -417,3 +417,4 @@ summary:
   top_longest_batches: 10
   top_anonymized_tables: 5
   top_anonymized_columns: 5
+  show_anonymization_examples: 0

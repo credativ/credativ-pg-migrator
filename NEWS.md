@@ -1,7 +1,7 @@
 credativ-pg-migrator Releases
 =============================
 
-0.14.0 - 18.05.2026
+0.14.0 - 20.05.2026
 -------------------
 
 * Extensive upgrades to the native T-SQL parser for Sybase ASE migrations

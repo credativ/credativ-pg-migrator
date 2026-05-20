@@ -178,27 +178,27 @@ Top Tables with Most Anonymized Columns:
    revenue     | numeric   | consistent_integer_mask
 
    Examples (Original => Anonymized):
-   Row 1:
+   Row 1 (PK: id=5):
      - budget: 'None' => 'None'
      - homepage: 'None' => 'None'
      - name: 'Homme de peu de foi' => '3f68fbf8ee5ced2a1a725a1c37a803...'
      - revenue: 'None' => 'None'
-   Row 2:
+   Row 2 (PK: id=10):
      - budget: 'None' => 'None'
      - homepage: 'None' => 'None'
      - name: 'The Name' => 'f6317bf7fecdf94296466d1c5d7798...'
      - revenue: 'None' => 'None'
-   Row 3:
+   Row 3 (PK: id=12):
      - budget: 'None' => 'None'
      - homepage: 'None' => 'None'
      - name: 'The Labrador' => 'a5695bb0c3a99c6f353ac2aeed86e4...'
      - revenue: 'None' => 'None'
-   Row 4:
+   Row 4 (PK: id=20):
      - budget: 'None' => 'None'
      - homepage: 'None' => 'None'
      - name: 'All Dressed Up and Nowhere to ...' => '005146aa88460049863d49732daa6a...'
      - revenue: 'None' => 'None'
-   Row 5:
+   Row 5 (PK: id=21):
      - budget: 'None' => 'None'
      - homepage: 'None' => 'None'
      - name: 'Smoking in the Girls' Room' => '8722945cea77f7e2216b2376dbb793...'
@@ -210,15 +210,15 @@ Top Tables with Most Anonymized Columns:
    name        | text      | faker_name
 
    Examples (Original => Anonymized):
-   Row 1:
+   Row 1 (PK: id=1):
      - name: 'Maximum Indifference' => 'Dr. Luka Winkler'
-   Row 2:
+   Row 2 (PK: id=3):
      - name: 'Amanda Knapic' => 'Abraham Striebitz'
-   Row 3:
+   Row 3 (PK: id=7):
      - name: 'Mark Clare' => 'Marija Gierschner B.Eng.'
-   Row 4:
+   Row 4 (PK: id=15):
      - name: 'Meryl Swartz' => 'Hans-Martin Anders'
-   Row 5:
+   Row 5 (PK: id=16):
      - name: 'Tamara Smart' => 'Anna Lorch'
 
 3. public.trailers (1 columns anonymized)
@@ -227,15 +227,15 @@ Top Tables with Most Anonymized Columns:
    key         | text      | static_mask
 
    Examples (Original => Anonymized):
-   Row 1:
+   Row 1 (PK: id=400):
      - key: 'ZOhSbNJ7MqI' => 'YYYYYYYYYYY'
-   Row 2:
+   Row 2 (PK: id=401):
      - key: 'q34GSXHvJvI' => 'YYYYYYYYYYY'
-   Row 3:
+   Row 3 (PK: id=403):
      - key: 'Mc4sz6neHDs' => 'YYYYYYYYYYY'
-   Row 4:
+   Row 4 (PK: id=405):
      - key: 'FQRgJTEw_OA' => 'YYYYYYYYYYY'
-   Row 5:
+   Row 5 (PK: id=406):
      - key: 'atbuBxDO1Go' => 'YYYYYYYYYYY'
 ================================================================================
 ```

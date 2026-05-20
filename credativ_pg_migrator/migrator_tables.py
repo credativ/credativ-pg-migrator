@@ -3532,7 +3532,8 @@ class MigratorTables:
                 lines.append("")
                 lines.append(f"   Examples (Original => Anonymized):")
                 for row_idx, row in enumerate(src_rows, 1):
-                    lines.append(f"   Row {row_idx}:")
+                    pk_vals_str = ", ".join([f"{pk}={row[pk]}" for pk in pks])
+                    lines.append(f"   Row {row_idx} (PK: {pk_vals_str}):")
                     where_clauses = " AND ".join([f'"{pk}" = %s' for pk in pks])
                     where_values = [row[pk] for pk in pks]
                     tgt_cur.execute(f'SELECT {fetch_cols_str} FROM "{schema_name}"."{table_name}" WHERE {where_clauses}', where_values)

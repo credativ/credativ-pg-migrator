@@ -3200,6 +3200,7 @@ class MigratorTables:
         lines.append("[ DATABASE CONTEXT ]")
         lines.append(f"Source: {self.config_parser.get_source_db_name()}, schema: {self.config_parser.get_source_owner()} ({self.config_parser.get_source_db_type()})")
         lines.append(f"Target: {self.config_parser.get_target_db_name()}, schema: {self.config_parser.get_target_schema()} ({self.config_parser.get_target_db_type()})")
+        lines.append(f"Workflow: {self.config_parser.get_workflow()}")
         lines.append("")
         
         if self.config_parser.is_dry_run():
@@ -3378,6 +3379,73 @@ class MigratorTables:
             self.protocol_connection.connection.rollback()
         except Exception:
             self.protocol_connection.connection.rollback()
+
+        if self.config_parser.is_anonymization_workflow():
+            lines.append("")
+            lines.append("[ ANONYMIZATION WORKFLOW RESULTS ]")
+            lines.append("-" * 80)
+            anon_tables_data = []
+            anon_tables = 0
+            anon_columns = 0
+            try:
+                from credativ_pg_migrator.anonymization.routing import MigratorAnonymizer
+                anonymizer = MigratorAnonymizer(self.config_parser.config)
+                if anonymizer.is_active():
+                    raw_tables = self.fetch_all_tables()
+                    for t_row in raw_tables:
+                        table_data = self.decode_table_row(t_row)
+                        if table_data.get('source_table_rows', 0) > 0:
+                            target_schema_name = table_data.get('target_schema_name', '')
+                            target_table_name = table_data['target_table_name']
+                            full_table_name = f"{target_schema_name}.{target_table_name}" if target_schema_name else target_table_name
+                            
+                            target_columns = table_data.get('target_columns', {})
+                            table_matched = False
+                            table_anon_cols = []
+                            for col_val in target_columns.values():
+                                col_name = col_val.get('column_name') if isinstance(col_val, dict) else col_val
+                                data_type = col_val.get('data_type', 'unknown') if isinstance(col_val, dict) else 'unknown'
+                                method, _ = anonymizer.get_method_for_column(target_table_name, col_name)
+                                if method:
+                                    anon_columns += 1
+                                    table_matched = True
+                                    table_anon_cols.append({'name': col_name, 'data_type': data_type, 'method': method})
+                            if table_matched:
+                                anon_tables += 1
+                                anon_tables_data.append({
+                                    'table_name': full_table_name,
+                                    'columns': table_anon_cols
+                                })
+                
+                lines.append(f"Anonymized {anon_columns} columns in {anon_tables} tables.")
+                
+                if anon_tables_data:
+                    anon_tables_data.sort(key=lambda x: (-len(x['columns']), x['table_name']))
+                    top_tables = anon_tables_data[:5]
+                    lines.append("")
+                    lines.append("Top Tables with Most Anonymized Columns:")
+                    for idx, t_data in enumerate(top_tables, 1):
+                        if idx > 1:
+                            lines.append("")
+                        col_count = len(t_data['columns'])
+                        lines.append(f"{idx}. {t_data['table_name']} ({col_count} columns anonymized)")
+                        
+                        sorted_cols = sorted(t_data['columns'], key=lambda x: x['name'])
+                        display_cols = sorted_cols[:5]
+                        
+                        if display_cols:
+                            col_len = max([len(c['name']) for c in display_cols] + [11])
+                            type_len = max([len(c['data_type']) for c in display_cols] + [9])
+                            lines.append(f"   { 'Column Name'.ljust(col_len) } | { 'Data Type'.ljust(type_len) } | Method")
+                            lines.append(f"   { '-' * col_len }-+-{ '-' * type_len }-+-{ '-' * 20 }")
+                            
+                            for col_info in display_cols:
+                                lines.append(f"   { col_info['name'].ljust(col_len) } | { col_info['data_type'].ljust(type_len) } | { col_info['method'] }")
+                            
+                        if col_count > 5:
+                            lines.append(f"   - ... and {col_count - 5} more")
+            except Exception as e:
+                lines.append(f"Error computing anonymization stats: {e}")
 
         lines.append("=" * 80)
         final_summary = "\n" + "\n".join(lines)

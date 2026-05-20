@@ -1,6 +1,10 @@
 # Changelog
 
-## 0.15.0 - 2026.05.19
+## 0.15.0 - 2026.05.20
+
+- 2026.05.20
+
+  - Anonymization Workflow: updated summary output to show workflow type
 
 - 2026.05.19
 

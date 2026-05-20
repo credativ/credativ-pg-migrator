@@ -77,11 +77,26 @@ class AnonymizationWorkflow:
         worker_id = uuid.uuid4()
         source_schema = table_data['source_schema_name']
         source_table = table_data['source_table_name']
+        source_table_id = table_data.get('source_table_id', 0)
+        source_table_rows = table_data.get('source_table_rows', 0)
         target_schema = table_data['target_schema_name']
         target_table = table_data['target_table_name']
+        target_table_rows = table_data.get('target_table_rows', 0)
         
         try:
             self.config_parser.print_log_message('INFO', f"anonymization_workflow: Worker {worker_id}: Processing {target_table}")
+
+            protocol_id = self.migrator_tables.insert_data_migration({
+                'worker_id': worker_id,
+                'source_table_id': source_table_id,
+                'source_schema_name': source_schema,
+                'source_table_name': source_table,
+                'target_schema_name': target_schema,
+                'target_table_name': target_table,
+                'source_table_rows': source_table_rows,
+                'target_table_rows': target_table_rows,
+            })
+            self.migrator_tables.update_data_migration_started(protocol_id)
 
             source_conn = self.orchestrator.load_connector('source')
             target_conn = self.orchestrator.load_connector('target')
@@ -107,10 +122,22 @@ class AnonymizationWorkflow:
             if self.config_parser.should_truncate_tables():
                 target_conn.execute_query(f'TRUNCATE TABLE "{target_schema}"."{target_table}" CASCADE')
 
+            import time
+            total_inserted_rows = 0
+            batch_number = 0
+            batch_durations = []
+
             while True:
+                batch_start_time = time.time()
+                reading_start_time = batch_start_time
                 rows = src_cursor.fetchmany(batch_size)
                 if not rows:
                     break
+                
+                batch_number += 1
+                reading_duration = time.time() - reading_start_time
+                
+                transforming_start_time = time.time()
                 
                 # Convert rows to dicts for anonymizer
                 formatted_data = []
@@ -119,6 +146,8 @@ class AnonymizationWorkflow:
                     if self.anonymizer.is_active():
                         row_dict = self.anonymizer.anonymize_row(target_table, row_dict)
                     formatted_data.append([row_dict[col] for col in col_names])
+                
+                transforming_duration = time.time() - transforming_start_time
                 
                 # Determine __RAW_SQL__ injection
                 if formatted_data:
@@ -146,16 +175,70 @@ class AnonymizationWorkflow:
                         formatted_data = cleaned_data
                     
                     # Execute batch
+                    writing_start_time = time.time()
                     tgt_cursor = target_conn.connection.cursor()
                     psycopg2.extras.execute_batch(tgt_cursor, insert_query, formatted_data, page_size=batch_size)
                     target_conn.connection.commit()
                     tgt_cursor.close()
+                    writing_duration = time.time() - writing_start_time
+                    
+                total_inserted_rows += len(formatted_data)
+                batch_end_time = time.time()
+                batch_duration = batch_end_time - batch_start_time
+                batch_durations.append(batch_duration)
+
+                import datetime
+                batch_start_dt = datetime.datetime.fromtimestamp(batch_start_time)
+                batch_end_dt = datetime.datetime.fromtimestamp(batch_end_time)
+                
+                self.migrator_tables.insert_batches_stats({
+                    'source_schema_name': source_schema,
+                    'source_table_name': source_table,
+                    'source_table_id': source_table_id,
+                    'chunk_number': 1,
+                    'batch_number': batch_number,
+                    'batch_start': batch_start_dt.strftime('%Y-%m-%d %H:%M:%S.%f'),
+                    'batch_end': batch_end_dt.strftime('%Y-%m-%d %H:%M:%S.%f'),
+                    'batch_rows': len(formatted_data),
+                    'batch_seconds': batch_duration,
+                    'worker_id': worker_id,
+                    'reading_seconds': reading_duration,
+                    'transforming_seconds': transforming_duration,
+                    'writing_seconds': writing_duration if 'writing_duration' in locals() else 0,
+                })
 
             src_cursor.close()
             source_conn.disconnect()
             target_conn.disconnect()
+            
+            shortest_batch_seconds = min(batch_durations) if batch_durations else 0
+            longest_batch_seconds = max(batch_durations) if batch_durations else 0
+            average_batch_seconds = sum(batch_durations) / len(batch_durations) if batch_durations else 0
+            
+            self.migrator_tables.update_data_migration_status({
+                'row_id': protocol_id,
+                'success': True,
+                'message': 'anonymized data OK',
+                'target_table_rows': total_inserted_rows,
+                'batch_count': batch_number,
+                'shortest_batch_seconds': shortest_batch_seconds,
+                'longest_batch_seconds': longest_batch_seconds,
+                'average_batch_seconds': average_batch_seconds,
+            })
+            
             return True
 
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"anonymization_workflow: Worker {worker_id}: Error processing {target_table} -> {e}")
+            if 'protocol_id' in locals():
+                self.migrator_tables.update_data_migration_status({
+                    'row_id': protocol_id,
+                    'success': False,
+                    'message': str(e),
+                    'target_table_rows': total_inserted_rows if 'total_inserted_rows' in locals() else 0,
+                    'batch_count': batch_number if 'batch_number' in locals() else 0,
+                    'shortest_batch_seconds': 0,
+                    'longest_batch_seconds': 0,
+                    'average_batch_seconds': 0,
+                })
             return False

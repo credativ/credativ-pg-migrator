@@ -58,7 +58,7 @@ Architecture:
 
 Configuration is done via the YAML config file and the command line.
 
-For a deep dive into the technical execution and process mapping of these components, see the [Standard Migration Workflow](workflow/standard/migration_workflow.md).
+For a deep dive into the technical execution and process mapping of these components, see the [Standard Migration Workflow](workflow/standard/migration_workflow.md) and the [Data Anonymization Workflow](workflow/anonymization.md).
 
 ### 2.3 Databases involved
 
@@ -418,7 +418,12 @@ The tool integrates a comprehensive Mapping Workflow managed by the central orch
 - Systematic orchestration of data loads that intelligently drops and recreates target indexes, primary keys, and constraints to maximize transfer performance and mapping integrity.
 - Detailed tracking of mapped objects into the migration protocols.
 
-### 8.5 Roadmap
+### 8.5 Data Anonymization Workflow
+
+The tool includes a pluggable anonymization engine designed to obscure sensitive data during migration without modifying core ETL pipelines. It natively supports Python in-memory transformations and can offload logic directly to the PostgreSQL engine.
+For full details on the available transformation methods, see the [Data Anonymization Workflow](workflow/anonymization.md) documentation.
+
+### 8.6 Roadmap
 
 Planned features:
 - Partitioning support for target tables.

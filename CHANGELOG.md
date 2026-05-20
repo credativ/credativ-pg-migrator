@@ -7,6 +7,7 @@
   - Anonymization Workflow: updated summary output to show workflow type
   - Feature - Configuration: Added a `summary` configuration block to `config_sample.yaml` and the migrator logic, introducing dynamic, configurable limits for all printed statistics (e.g., top migrated tables, longest batches). Defaults to backward-compatible limits if absent.
   - Feature - Reporting: Enhanced the anonymization summary report to extract and display the source data type and anonymization method alongside each column name, formatted into a clean, aligned text table.
+  - Updated documentation for anonymization workflow
 
 - 2026.05.19
 

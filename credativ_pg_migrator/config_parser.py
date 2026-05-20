@@ -235,6 +235,25 @@ class ConfigParser:
     def get_system_catalog(self):
         return self.config['source'].get('system_catalog', 'NONE').upper()
 
+    ## Summary
+    def get_summary_config(self):
+        return self.config.get('summary', {})
+
+    def get_summary_top_migrated_tables(self):
+        return self.get_summary_config().get('top_migrated_tables', 5)
+
+    def get_summary_top_mismatched_tables(self):
+        return self.get_summary_config().get('top_mismatched_tables', 5)
+
+    def get_summary_top_longest_batches(self):
+        return self.get_summary_config().get('top_longest_batches', 10)
+
+    def get_summary_top_anonymized_tables(self):
+        return self.get_summary_config().get('top_anonymized_tables', 5)
+
+    def get_summary_top_anonymized_columns(self):
+        return self.get_summary_config().get('top_anonymized_columns', 5)
+
     ## Migrator
     def get_migrator_config(self):
         return self.config.get('migrator', {})

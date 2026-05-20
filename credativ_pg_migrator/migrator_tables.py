@@ -3323,23 +3323,25 @@ class MigratorTables:
                 lines.append(f"Row Count Mismatches     : {diff_dm}")
                 
                 if full_dm > 0:
+                    top_migrated_limit = self.config_parser.get_summary_top_migrated_tables()
                     lines.append("")
-                    lines.append("Biggest Successfully Migrated Tables (Top 5):")
+                    lines.append(f"Biggest Successfully Migrated Tables (Top {top_migrated_limit}):")
                     lines.append(f"{'Table Name':<35} | {'Row Count':>15} | {'Time Spent (s)':>15}")
                     lines.append("-" * 80)
                     cursor.execute(f"""SELECT target_schema_name, target_table_name, target_table_rows, 
                                        EXTRACT(EPOCH FROM (task_completed - task_started))
                                        FROM "{self.protocol_schema}"."{dm_table}" 
                                        WHERE source_table_rows > 0 AND source_table_rows = target_table_rows AND success = TRUE
-                                       ORDER BY source_table_rows DESC LIMIT 5""")
+                                       ORDER BY source_table_rows DESC LIMIT {top_migrated_limit}""")
                     for sch, tbl, t_rows, duration in cursor.fetchall():
                         t_fmt = f"{t_rows:,}"
                         d_fmt = f"{round(duration, 2) if duration else 0.0}"
                         lines.append(f"{sch + '.' + tbl:<35} | {t_fmt:>15} | {d_fmt:>15}")
 
                 if diff_dm > 0:
+                    top_mismatched_limit = self.config_parser.get_summary_top_mismatched_tables()
                     lines.append("")
-                    lines.append("Tables with row count mismatches (Top 5 by Source Rows):")
+                    lines.append(f"Tables with row count mismatches (Top {top_mismatched_limit} by Source Rows):")
                     lines.append(f"{'Table Name':<28} | {'Src Rows':>11} | {'Tgt Rows':>11} | {'Diff':>8} | {'Time(s)':>8}")
                     lines.append("-" * 80)
                     cursor.execute(f"""SELECT target_schema_name, target_table_name, source_table_rows, target_table_rows,
@@ -3347,7 +3349,7 @@ class MigratorTables:
                                        EXTRACT(EPOCH FROM (task_completed - task_started))
                                        FROM "{self.protocol_schema}"."{dm_table}" 
                                        WHERE source_table_rows > 0 AND source_table_rows <> target_table_rows 
-                                       ORDER BY source_table_rows DESC LIMIT 5""")
+                                       ORDER BY source_table_rows DESC LIMIT {top_mismatched_limit}""")
                     for sch, tbl, s_rows, t_rows, diff, duration in cursor.fetchall():
                         s_fmt = f"{s_rows:,}"
                         t_fmt = f"{t_rows:,}"
@@ -3355,15 +3357,16 @@ class MigratorTables:
                         d_fmt = f"{round(duration, 2) if duration else 0.0}"
                         lines.append(f"{sch + '.' + tbl:<28} | {s_fmt:>11} | {t_fmt:>11} | {diff_fmt:>8} | {d_fmt:>8}")
 
+                top_longest_batches_limit = self.config_parser.get_summary_top_longest_batches()
                 cursor.execute(f"""SELECT target_schema_name, target_table_name, batch_number, 
                                    round(batch_seconds::numeric, 2), round(reading_seconds::numeric, 2), 
                                    round(transforming_seconds::numeric, 2), round(writing_seconds::numeric, 2)
                                    FROM "{self.protocol_schema}"."{stats_table}"
-                                   ORDER BY batch_seconds DESC LIMIT 10""")
+                                   ORDER BY batch_seconds DESC LIMIT {top_longest_batches_limit}""")
                 batches = cursor.fetchall()
                 if batches:
                     lines.append("")
-                    lines.append("Longest Data Batches (Top 10):")
+                    lines.append(f"Longest Data Batches (Top {top_longest_batches_limit}):")
                     lines.append(f"{'Table Name':<30} | {'Batch':>5} | {'Total(s)':>8} | {'Read(s)':>8} | {'Trans(s)':>8} | {'Write(s)':>8}")
                     lines.append("-" * 80)
                     for sch, tbl, b_num, b_sec, r_sec, t_sec, w_sec in batches:
@@ -3420,8 +3423,10 @@ class MigratorTables:
                 lines.append(f"Anonymized {anon_columns} columns in {anon_tables} tables.")
                 
                 if anon_tables_data:
+                    top_anonymized_tables_limit = self.config_parser.get_summary_top_anonymized_tables()
+                    top_anonymized_columns_limit = self.config_parser.get_summary_top_anonymized_columns()
                     anon_tables_data.sort(key=lambda x: (-len(x['columns']), x['table_name']))
-                    top_tables = anon_tables_data[:5]
+                    top_tables = anon_tables_data[:top_anonymized_tables_limit]
                     lines.append("")
                     lines.append("Top Tables with Most Anonymized Columns:")
                     for idx, t_data in enumerate(top_tables, 1):
@@ -3431,7 +3436,7 @@ class MigratorTables:
                         lines.append(f"{idx}. {t_data['table_name']} ({col_count} columns anonymized)")
                         
                         sorted_cols = sorted(t_data['columns'], key=lambda x: x['name'])
-                        display_cols = sorted_cols[:5]
+                        display_cols = sorted_cols[:top_anonymized_columns_limit]
                         
                         if display_cols:
                             col_len = max([len(c['name']) for c in display_cols] + [11])
@@ -3442,8 +3447,8 @@ class MigratorTables:
                             for col_info in display_cols:
                                 lines.append(f"   { col_info['name'].ljust(col_len) } | { col_info['data_type'].ljust(type_len) } | { col_info['method'] }")
                             
-                        if col_count > 5:
-                            lines.append(f"   - ... and {col_count - 5} more")
+                        if col_count > top_anonymized_columns_limit:
+                            lines.append(f"   - ... and {col_count - top_anonymized_columns_limit} more")
             except Exception as e:
                 lines.append(f"Error computing anonymization stats: {e}")
 

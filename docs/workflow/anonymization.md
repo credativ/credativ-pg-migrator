@@ -4,6 +4,14 @@ The `credativ-pg-migrator` features a standalone, pluggable anonymization module
 
 It natively supports Python in-memory transformations (leveraging optional libraries like `Faker` and `Mimesis`) and can also offload logic directly to the PostgreSQL engine using `__RAW_SQL__` tokens.
 
+## Current Limitations & Architecture
+
+Currently, the anonymization workflow only supports **PostgreSQL-to-PostgreSQL migrations**. 
+
+This is because the anonymizer is built as a standalone extraction and loading pipeline that explicitly bypasses the heavy ETL data transformation pipelines (like data type casting, date formatting, and LOB extraction) required for legacy databases like Informix, Oracle, or Sybase. It utilizes PostgreSQL-specific server-side cursors for efficient data extraction and directly injects raw PostgreSQL functions into the target database. 
+
+To support all source databases in the future, the anonymizer logic would need to be refactored from an isolated workflow into a "middleware transformation step" embedded within each database connector's core `migrate_table` data pipeline.
+
 ## Configuration
 To enable the anonymization workflow, set the workflow type in your configuration file:
 ```yaml

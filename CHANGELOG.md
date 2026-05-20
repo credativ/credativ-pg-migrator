@@ -32,9 +32,13 @@
   - Fix - T-SQL Parser: Enforced `INSERT INTO` syntax on all Sybase ASE `INSERT` commands, preventing syntax errors in PostgreSQL where the `INTO` keyword is strictly mandatory.
   - Fix - T-SQL Parser: Upgraded `pass_8b_convert_datetime_formats` with a character-by-character paren-depth scanner to support 2-parameter `CONVERT(type, expr)` variants, dynamically transforming them into native PostgreSQL `CAST(expr AS type)` structures regardless of nested commas or internal parentheses.
   - Feature - T-SQL Parser: Engineered trigger-specific transaction abortion logic; when a `PRINT` statement is immediately preceded or followed by a `ROLLBACK TRIGGER` or `ROLLBACK TRANSACTION` command, the parser now cleanly merges them into a single `RAISE EXCEPTION` block to correctly halt execution in PostgreSQL.
+
 - 2026.04.17
 
   - Fixes - fix in summary, repaired reported count of tables. Repair in protocol for alias.
+
+## 0.13.0 - 2026.04.16
+
 - 2026.04.16
 
   - Fixes - added missing row counts to the protocol tables in IBM DB2 z/OS migration path from CSV files, added missing logging of success when alias is used for table or view, added missing print of TOP 5 successfully migrated tables and TOP 5 tables with row count mismatches in summary output.

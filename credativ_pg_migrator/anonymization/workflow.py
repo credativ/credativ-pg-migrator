@@ -139,9 +139,6 @@ class AnonymizationWorkflow:
             
             src_cursor = source_conn.connection.cursor(name=f"cursor_{worker_id}")
             src_cursor.execute(select_sql)
-            
-            if self.config_parser.should_truncate_tables():
-                target_conn.execute_query(f'TRUNCATE TABLE "{target_schema}"."{target_table}" CASCADE')
 
             import time
             total_inserted_rows = 0
@@ -171,7 +168,7 @@ class AnonymizationWorkflow:
 
                 # Convert rows to dicts for anonymizer
                 formatted_data = []
-                for row in rows:
+                for idx, row in enumerate(rows):
                     row_dict = dict(zip(col_names, row))
                     if self.anonymizer.is_active():
                         row_dict = self.anonymizer.anonymize_row(target_table, row_dict)
@@ -183,6 +180,9 @@ class AnonymizationWorkflow:
                                 row_dict[col_name] = row_dict[col_name][:max_len]
                                 
                     formatted_data.append([row_dict[col] for col in col_names])
+
+                    if idx > 0 and idx % 10000 == 0:
+                        self.config_parser.print_log_message('INFO', f"anonymization_workflow: Worker {worker_id}: Anonymized {idx} rows of {target_table} in current batch...")
                 
                 transforming_duration = time.time() - transforming_start_time
                 

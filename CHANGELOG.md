@@ -1,6 +1,12 @@
 # Changelog
 
-## 0.15.0 - 2026.05.20
+## 0.15.0 - 2026.05.27
+
+- 2026.05.27
+
+  - Fix - Anonymization Workflow: Updated `routing.py` to preserve source database `NULL` values instead of replacing them with newly generated values.
+  - Fix - Anonymization Methods: Updated `faker_name` method to correctly utilize `part` configuration parameters (`first_name` and `last_name`).
+  - Feature - Reporting: Enhanced anonymization summary output to include method parameters (e.g., `part: first_name`) dynamically in the log output.
 
 - 2026.05.20
 
@@ -8,7 +14,6 @@
   - Feature - Configuration: Added a `summary` configuration block to `config_sample.yaml` and the migrator logic, introducing dynamic, configurable limits for all printed statistics (e.g., top migrated tables, longest batches). Defaults to backward-compatible limits if absent.
   - Feature - Reporting: Enhanced the anonymization summary report to extract and display the source data type and anonymization method alongside each column name, formatted into a clean, aligned text table.
   - Updated documentation for anonymization workflow
-
 - 2026.05.19
 
   - Feature - Anonymization: Introduced a standalone pluggable data anonymization module. Configured via the `anonymization` workflow, this executes a dedicated PostgreSQL to PostgreSQL migration pipeline. It natively supports Python in-memory transformation (lazy-loading optional libraries like Faker and Mimesis) and intercepts `__RAW_SQL__` tokens to directly offload functions to PostgreSQL extensions like `postgresql_anonymizer`.
@@ -20,14 +25,12 @@
   - Feature - Configuration: Enhanced `table_settings` to natively accept a list of strings or regular expressions for the `table_name` property, streamlining configuration for multiple tables at once.
   - Feature - Mapping Workflow: Added `data_conflict_action` parameter to `table_settings` to allow explicit configuration (`replace`, `merge_keep_target`, `merge_keep_source`, or `skip`) of conflict resolution behavior when data is present in both source and target tables. Implemented into all connectors.
   - Fix - Config Parser: Refactored internal configuration matching logic to natively support array-based table pattern lists uniformly across all table-specific directives (e.g. batch size overrides, chunking, and selective migration toggles).
-
 - 2026.05.11
 
   - Feature - Sybase ASE Connector: implemented SQL parser for proper processing of queries in stored procedures. This parser was already used in conversion of views.
   - Old migration summary removed from the code, mapping workflow now uses the new summary report too.
   - Fixing different behavior of Sybase ASE built-in functions conversion across conversion of views, procedures and triggers.
   - Fix in TSQL conversion - returning table structure must have unique column names, user defined data types must be double quoted, proper conversion of raiserror to raise exception, and print statement not connected to rollback or raiserror to raise notice, fixed parsing of multiple selects not properly terminated, fixed parsing of INSERT, UPDATE, SELECT statements which are scattered over multiple lines with empty lines in between them and without proper termination.
-
 - 2026.05.08
 
   - Fix - T-SQL Parser: Enhanced `pass_6_parse_selects` to correctly identify and merge `UNION` and `UNION ALL` statements into a single cohesive `SELECT` block, preventing broken multi-part queries during conversion.
@@ -47,41 +50,34 @@
   - Fix - T-SQL Parser: Enforced `INSERT INTO` syntax on all Sybase ASE `INSERT` commands, preventing syntax errors in PostgreSQL where the `INTO` keyword is strictly mandatory.
   - Fix - T-SQL Parser: Upgraded `pass_8b_convert_datetime_formats` with a character-by-character paren-depth scanner to support 2-parameter `CONVERT(type, expr)` variants, dynamically transforming them into native PostgreSQL `CAST(expr AS type)` structures regardless of nested commas or internal parentheses.
   - Feature - T-SQL Parser: Engineered trigger-specific transaction abortion logic; when a `PRINT` statement is immediately preceded or followed by a `ROLLBACK TRIGGER` or `ROLLBACK TRANSACTION` command, the parser now cleanly merges them into a single `RAISE EXCEPTION` block to correctly halt execution in PostgreSQL.
-
 - 2026.04.17
 
   - Fixes - fix in summary, repaired reported count of tables. Repair in protocol for alias.
-
 - 2026.04.16
 
   - Fixes - added missing row counts to the protocol tables in IBM DB2 z/OS migration path from CSV files, added missing logging of success when alias is used for table or view, added missing print of TOP 5 successfully migrated tables and TOP 5 tables with row count mismatches in summary output.
-
 - 2026.04.15
 
   - Significant improvement in summary output, now showing results in better format and without timestamp and other prefixes for better readability.
   - Fix - IBM DB2 z/OS Connector: Allow "@" as a statement terminator in addition to ";". Added debug messages to trace the DDL parsing process.
   - Fix - T-SQL Parser: Fixed missing comments in PostgreSQL converted code, fixed conversion of data types in stored procedures, key word "noholdlock" removed from select statements.
-
 - 2026.03.30
 
   - Fix - Protocol Tables: Resolved an issue where the `task_started` timestamp was null while tasks were running. The Orchestrator now immediately and actively updates the `task_started` column across all protocol tables as soon as migration payload processing begins.
   - Fix - PostgreSQL Connector: Repaired the creation of User Defined Data Types (UDTs). When migrating from PostgreSQL to PostgreSQL, UDTs utilized within a table's structure now dynamically bind to the designated target schema rather than improperly retaining the original source schema name, preventing 'type does not exist' instantiation failures.
   - Fix - Global Planner: Addressed a foundational bug in `planner.py` where successfully mapped data types (e.g., Sybase ASE `SMALLDATETIME` to `TIMESTAMP`) were orphaned during generation. The mapping dictionary application logic has been rewritten to explicitly override the live pointer upon confirmation, guaranteeing accurate cross-engine data structures.
-
 - 2026.03.27
 
   - Feature - T-SQL Parser: Designed and integrated a comprehensive native T-SQL parser matrix natively utilized across both the MS SQL and Sybase ASE connectors. Ensures extensive capability to systematically resolve complex or incomplete legacy syntax structures before target PostgreSQL generation.
   - Fix - MS SQL Connector: Resolved a critical scope-shadowing bug where procedure variable type mappings silently overwrote global table column architectures, restoring full dynamic type binding and preventing widespread `TEXT` fallbacks.
   - Fix - MS SQL Connector: Implemented advanced AST-based parsing via `sqlglot` to explicitly cast mathematical view operands to numeric types natively, preventing downstream text-multiplication operator failures in PostgreSQL.
   - Fix - MS SQL Procedures: Upgraded the T-SQL parser matrix to flawlessly identify missing `END` block markers, safely inject required string-encapsulation layers for aliases, and dynamically translate legacy `SET ROWCOUNT` directives into PostgreSQL-compliant `LIMIT` clauses.
-
 - 2026.03.20
 
   - Feature - Validator Module: Redesigned the validation module (`--validate`) to support fully transparent cross-engine table and data evaluation. Implemented discrete parallel worker threads encapsulating precise connection lifecycles tailored to active verification blocks.
   - Feature - Validator Diagnostics: Overhauled validation runtime logs and final summaries to natively quantify and categorize passing and failing results explicitly across Row Counts, Table Checksums, Random Row Hashes, and LOB Size verifications.
   - Fix - Validation Hashing Limits: Addressed native `ORA-01489` and `ORA-22835` errors during Oracle evaluation by dropping LOB types from raw generalized checksums and relying instead on dedicated size validations evaluating `DBMS_LOB.GETLENGTH()` natively without bridging memory limits.
   - Fix - Validation Tuple Decoding: Resolved `AttributeError` and `TypeError` exceptions caused by attempting to iterate rows as dictionaries within the validator sequence. Upgraded data column validations to gracefully evaluate JSON dictionary string footprints precisely across architectures.
-
 - 2026.03.19
 
   - Feature - Orchestrator: Redesigned the sequence of operations for index and constraint mapping to execute a dedicated global `DROP` phase before concurrent data copying starts, and a complete global `CREATE` phase after all tables merge.
@@ -89,7 +85,6 @@
   - Fix - Orchestrator: Expands the constraint `DROP` definitions to successfully filter and drop *all* non-primary key constraints (including `UNIQUE`, `CHECK`, and `EXCLUSION`), and specifically skips explicit `CREATE INDEX` duplication collisions for natively mapped `UNIQUE` constraints during recreation.
   - Feature - Orchestrator: Embedded an explicit end-state mapping verification function `mapping_check_indexes_and_constraints()` that audits strictly against the live PostgreSQL catalog immediately following mapping copy payloads, emitting `WARNING` digests for any unexpectedly missing table objects.
   - Fix - Connector Casting: Strengthened parallel worker bindings inside the PostgreSQL pipeline by pushing dynamic strict database `::type` castings straight into the `INSERT INTO` construction loops natively inherited from defined target data schemas.
-
 - 2026.03.18
 
   - Feature - Orchestrator `mapping_copy_data`: Implemented parallel batch data copying capability specifically for the mapping workflow. Automatically clones rows from populated source tables straight into natively mapped, empty target tables securely without standard UNL/CSV files.
@@ -122,12 +117,10 @@
   - Fix in Orchestrator - refactored `run_migrate_views` to operate via `concurrent.futures.ThreadPoolExecutor` for parallel execution of standard database views. Alias views are now only processed concurrently after all primary standard views finish, avoiding missing view dependency collisions.
   - Fix in IBM DB2 z/OS connector - modified `convert_view_code` to skip alias generation against referenced table substrings if that specific alias is mapped to another valid View instead of a Table inside the database catalog.
   - Fix in DB2 Alias resolution - implemented dynamic `LEFT JOIN` resolution inside `ibm_db2_zos_connector.py` fetching queries to accurately label the target pointer for Database Aliases as either `'TABLE'` or `'VIEW'`. This `alias_target_type` property is now explicitly handled mapping through `migrator_tables.py` into both `ddl_aliases` and `protocol_aliases` allowing the planner to securely prevent view-to-alias circular dependencies.
-
 - 2026.03.16
 
   - Fix in CSV data conversion - repaired CSV to UTF-8 parsing to dynamically merge fields where commas were incorrectly acting as decimal separators; securely validates the column definitions to ensure merging only triggers for `NUMERIC`/`DECIMAL`/`FLOAT` target columns possessing a strict >0 scale specification, ignoring explicitly unscaled integers.
   - Improvements in Sequence migration - restructured sequence extraction to efficiently fetch and migrate via the `ddl_sequences` system instead of standard code conversion; refined reset assignments utilizing `fetch_table_sequences` parallel execution handlers after dataset migrations.
-
 - 2026.03.13
 
   - Fix in IBM DB2 z/OS connector - improved parsing of `CREATE VIEW` statements, explicitly handling view column lists so that `names_case_handling` applies correctly.
@@ -165,7 +158,6 @@
     - implemented proper conversion of native SQL functions from MSSQL to PostgreSQL syntax
     - implemented conversion of user defined data types
     - implemented rudimentary conversion of triggers / functions / procedures - alpha version for further development - but already usable for not complicated use cases
-
 - 2026.01.10
 
   - Fixes in PostgreSQL connector
@@ -177,36 +169,29 @@
     - repaired conversion of constraints to PostgreSQL constraints - fixed filtering of constraints to exclude internal NOT NULL constraints (contype='n') - NOT NULL constraints are part of column definition and are not converted as separate constraints
     - multiple small fixes
 
-
 ## 0.11.0 - 2026.01.09
 
 - 2026.01.09
 
   - Fix in Sybase ASE connector - repaired fetch of triggers source code from Sybase ASE system tables, fixes in trigger code conversion, added conversion of user defined data types and SQL functions in code
-
 - 2026.01.08
 
   - Fix in Sybase ASE connector - rewrite of convert_funcproc_code and convert_trigger_code functions - implemented sql parser to better distinguish and convert control flow statements, cursors, data types and other features. Successrate of conversion is now significantly better than before.
-
 - 2026.01.06
 
   - Fix in Sybase ASE connector - repaired convert_funcproc_code function - fixed issue where missing schema in source function definition resulted in invalid PostgreSQL function name (e.g. .funcname) - now uses target schema as fallback
   - Fix in Sybase ASE connector - repaired convert_view_code function - implemented support for legacy Sybase outer join syntax (*= and =*) - these are now correctly parsed and converted to ANSI standard LEFT OUTER JOINs
   - Features in Sybase ASE connector - implemented fetching of User Defined Types (UDTs) and their substitution with base types or custom defined types from config file
   - Improvements in Sybase ASE connector - enhanced conversion of stored procedures and functions - Converted OUTPUT parameters to INOUT parameters, implemented conversion of BREAK statement to EXIT, implemented conversion of RAISERROR to RAISE EXCEPTION, added handling of @@rowcount using GET DIAGNOSTICS, improved parsing and conversion of cursors
-
 - 2025.12.11
 
   - Improvements in Informix part - import of table with multiple LOB columns from UNL files - speed improvements
-
 - 2025.12.03
 
   - First version of user documentation added into docs/ directory
-
 - 2025.11.20:
 
   - Fix in Sybase ASE connector - repaired fetch of triggers source code from Sybase ASE system tables, fixes in trigger code conversion, added conversion of data types and SQL functions in code
-
 - 2025.11.19:
 
   - Improvements in Sybase ASE connector - implemented conversion of functions/procedures from Sybase ASE to PostgreSQL - added basic conversion of control flow statements, cursors, data types and some built-in functions
@@ -221,11 +206,9 @@
   - Fix in Informix connector - repaired import of LOB values from clob*/blob* files - allow multiple LOB columns in one table - previous implementation allowed only single LOB column per table
   - Fix in data sources - updated handling of lob_columns parameter in source database export config - now it passes list of [table_name, column_name] pairs for LOB columns to be treated as LOBs during data import
     - function now uses primary key column for INSERT ... ON CONFLICT statement if available, otherwise it uses all non-LOB columns for building the MERGE statement (which is less efficient and slower)
-
 - 2025.11.03:
 
   - Fix in default values substitution - repaired case insensitive matching of default values
-
 - 2025.10.31:
 
   - Improvements in MySQL connector - added support for ODBC / JDBC connection, current implementation moved under "native" connectivity type
@@ -233,11 +216,9 @@
   - Fix in Orchestrator - repair in creation of comments in the target database for all objects - proper handling of names casing based on migration.names_case_handling setting in the config file
   - Fix in all connectors - target schema name must be used as it is defined in the config file, not converted based on migration.names_case_handling setting - this setting applies only for object names taken from the source database
   - Fix in PostgreSQL connector - lists of columns in indexes and constraints must be properly double quoted to preserve case as defined in the config file
-
 - 2025.10.29:
 
   - Fix in Orchestrator - repaired check of existence of referenced table before creating the constraint - when creating foreign key constraints, referenced table must be checked based on target database schema and target table name
-
 - 2025.10.28:
 
   - Change in Planner and Migrator tables - count of rows in source table is now part of planning phase and value is stored in the protocol table - this allows to have information about source table row counts even in case of data import from CSV/UNL files when source database can be inaccessible during data import
@@ -247,14 +228,12 @@
 - 2025.10.09:
 
   - Fix in Informix connector - repaired import of LOB values from clob*/blob* files - NULL values indicated by placeholder 0,0,0 in UNL export were not handled properly, causing errors during import; added catch of reading error for clob/blob files - if file cannot be read, LOB value is set to NULL and error is logged; intermediate import table for UNL import with LOBs is now dropped only if data export clean objects is set to True in config file, otherwise it is kept for further analysis
-
 - 2025.10.07:
 
   - Fix in UNL to CSV conversion - repair for the cases when text value ends with backslash - these cases are exported as escaped backslash followed by delimiter, e.g. `\\|` - after yesterday's fix this was mistakenly interpreted as escaped delimiter, now it is properly handled; repair in handling data with Windows \r\n or just \r characters - these cases were breaking UNL to CSV conversion
   - Added new script in tests directory for manual testing of UNL to CSV conversion - see details in tests/README.md
     - This code can be used also for manual conversion of UNL files into CSV files for further processing outside of the migrator
   - Fix in planner and config parser - if header presence is not specified in the config file for data exports, set default to False
-
 - 2025.10.06:
 
   - Fix in Orchestrator - in case of data import from CSV/UNL files, row counts were not checked because source database can be inaccessible - initial row counts simply set to 0. When migrating using batch inserts, row counts are still checked because source database must be accessible and parity of row counts must be verified.
@@ -267,13 +246,11 @@
   - Fix in check_data_types_substitution function - repaired construction of select query, it now covers all cases of defining table name and/or column name including global replacements (empty table name and/or column name)
   - Skip creation of foreign key constraint if either target table or referenced table do not exist in the target database - migrator now tests existence of both tables before attempting to create the constraint
   - Fixes in Informix data import from UNL files - repaired misplaced else statement in the block handling splitting of big UNL files into smaller parts for parallel processing; repaired processing of LOB columns, improved debug and error messages
-
 - 2025.08.14:
 
   - Implemented parallel import of LOB values in Informix connector - table worker now starts in config file defined number of parallel workers to import LOB data in parallel. This option is necessary mainly for tables with several hundreds of clob* / blob* export files.
     - Rationale: Informix UNLOAD / backup exports CLOB / BLOB values into separate files, each max 2 GB of size, and their names puts into pointers in the main UNL export data file. Simple sequential processing of these files is doable up to 10 distinct files. With higher counts, parallel processing is necessary to avoid long delays in the migration process and better use available resources.
   - Split of big UNL files into multiple parts was tested on real live data and its effectiveness is questionable especially if client uses slow disks or all is processed on single disk with limited I/O bandwidth. So, although option is implemented, it may not provide the expected performance improvements in all cases.
-
 - 2025.08.06:
 
   - Significant improvements in UNL to CSV conversion - added check for expected target data types for better validation of processed data
@@ -281,7 +258,6 @@
   - added missing option "table_schema" into individual table_settings in the config file
   - added setting data_export.on_missing_data_file to define globally action on missing data files if data_export is specified in the config file
     - Possible values: "error", "skip", "source_table_name" - use source table from the source database instead of the data file
-
 - 2025.07.31:
 
   - Fix in "resume" functionality - planner must check row counts of fully migrated tables to ensure they were not mistakenly marked as fully migrated
@@ -292,16 +268,13 @@
     - Includes conversion of UNL format into proper PostgreSQL readable CSV format, compensates for NULL values vs empty strings, and multiline text values
     - Includes import of LOB values from secondary text/binary files referenced in the UNL file
     - Includes splitting of UNL files into smaller chunks for parallel processing
-
 - 2025.07.22:
 
   - Trim CHAR and NCHAR columns in Informix connector - these columns are fixed-length, so we need to trim them to avoid issues with trailing spaces
-
 - 2025.07.18 - bugfixing party:
 
   - Config parameter migration.data_chunk_size renamed to migration.chunk_size - this is more obvious intuitive name. Renaming also all internal variables and functions.
   - Properly implemented option chunk_size = -1 to disable chunking - this means that all data will be migrated in one chunk, i.e. chunk as big as the table
-
 - 2025.07.15:
 
   - Repaired issue #11 - exiting with 0 when error is caught in the main function - now it exits with 1 as expected
@@ -309,7 +282,6 @@
   - Repair in logging data migration - if database did not expose internal table ID like MySQL, logging created duplicates
   - Improvements in error messages in the migrate table function
   - Unfortunately, we cannot fully implement "resume after crash" functionality for Sybase ASE, because it does not support LIMIT with OFFSET in older versions. Therefore partially migrated tables must be always dropped and restarted. I.e. Sybase ASE in the "--resume" mode will always set "--drop-unfinished-tables" option to True.
-
 - 2025.07.14:
 
   - Implemented "optimistic variant" of resuming migration of partially copied tables - code now resumes migration based on row count in the target table, does not check if data in the source table changed
@@ -318,21 +290,18 @@
     - This sorting of course slows down the migration a bit, but gives us the advantage to pause and resume migration or continue migration after crash
     - Using sorting by all columns is similar to the PostgreSQL idea of "replica identity full" - it is reasonable to presume that combination of values in the all columns is unique - if not, then having some additional duplicates would most likely not cause any issues and such cases can be fixed later
     - Explicit Warning: this "optimistic variant" of "resume" is usable only when data in the source table did not change since the crash
-
 - 2025.07.13
 
   - Implemented very basic "resume after crash" functionality - if a migration crashes, is killed, instance was restarted or similar, then it can be resumed with command line option "--resume"
     - How it works: currently migrator implements only "optimistic" approach - it assumes that all important protocol tables already exist and migrator was interrupted during migration of data
     - Fully migrated tables are skipped, partially migrated tables are truncated and re-migrated - this can be repeated multiple times
     - After the data migration is finished, migrator will continue as usual with migration of indexes, constraints, triggers, views and functions/procedures
-
 - 2025.07.12
 
   - Improvements in pausing and canceling actions - migration can now be paused or canceled on demand by creating a file "pause_migration" or "cancel_migration" in the working directory
     - This makes pausing and canceling more flexible, allows to react to unexpected situations
     - Migration can be resumed by creating a file "resume_migration" in the working directory
   - Improvements in logging - log empty tables as successfully migrated with message "Skipped"
-
 - 2025.07.11
 
   - Added migration parameter migration.char_to_text_length, similar to migration.varchar_to_text_length - allows to set the length of CHAR columns which should be migrated as TEXT
@@ -356,7 +325,6 @@
     - Orchestrator checks before running migration of next data chunk if there is a scheduled action to pause the migration, and if so, it waits until the pause is removed
     - Migrator will continue with migration of the next data chunk only after work is resumed - this is done by creating file "resume_migration" in the working directory - info message about pausing the migration contains the whole path and name of the file, so simle "touch" command with this full name will resume the migration
     - Migrator immediately deletes the file "resume_migration" after resuming the migration, so it can later pause again based on other pause actions
-
 - 2025.07.10
 
   - Added config file part for configuring pre-migration analysis of the source database, added section for TOP N tables - user can define how many TOP N tables should be listed in the output based on row count, total size, column count, index count and constraint count
@@ -369,14 +337,12 @@
   - Added listing of FK and PK columns in the output of the Informix pre-migration analysis - this is useful for further analysis / setting migration limitations
   - Added check if table contains ROWID column in the pre-migration analysis of Informix
   - Migration limitations in config file now allow placeholders {source_schema} and {source_table_name} - referencing current table to which the limitation applies
-
 - 2025.07.06:
 
   - Adjusted setting of cursor.arraysize in all connectors based on the batch size defined in the config file
     - Rationale: According to documentation, this should allow to better control the performance of data migration, influence in local tests was small, but measurable
     - Only Oracle needs special handling, performance degrades significantly with too high arraysize, so we set it to 1000 for larger batch sizes
   - Started to add simple wiki pages describing how to set up connectivity
-
 - 2025.07.03:
 
   - Added db_locale setting into config file for source database - currently used only for Informix
@@ -391,14 +357,13 @@
   - Implemented possibility to set individual batch size for a table in the config file
     - Rationale: Some tables might benefit from different batch size than the default one, either smaller or larger, depending on the size of the table and performance of the source database
     - Usual use case is to set smaller batch size for tables with LOBs or other special data types, but user can also set larger batch size for large tables with simple data types and very small rows
-
 - 2025.07.01:
 
   - Added detection of errors (including deadlocks) into Orchestrator - creation of constraints; If creation of constraints fails, worker re-tries the action after a short delay
     - Rationale: When only data model without data is migrated, deadlock can happen if multiple workers try to create at the same time constraints referencing the same table
     - This happens only on some testing databases like Sakila, where data model heavily relies on constraints, but was seen repeatedly during tests
-
 - 2025.06.30:
+
   - Time stats for migration of tables and data added into all connectors, results are also stored in the protocol tables
     - Rationale: This will allow to better understand performance of the migration process and identify bottlenecks or situations when migration literally hangs because of some issues on the source database
     - Migrator now stores detailed time stats for each batch in the new protocol table, and reports basic batch stats at the end of the migration, shortest, longest and average batch time is stored and reported for every table
@@ -409,8 +374,8 @@
 - 2025.06.24:
 
   - Add project logo and architecture diagram to PyPI page (@mbanck)
-
 - 2025.06.19:
+
   - Implemented better conversion of views in Sybase ASE connector - added parsing of view code using sqlglot library - change significantly improves success rate of views migration
     - Remaining issue: conversion of special operators \*= and =\* in conditions which in Sybase ASE mean LEFT OUTER JOIN and RIGHT OUTER JOIN respectively - parser fails on these operators
   - Library sqlglot added to requirements and setup.py - will be used for parsing of SQL code / view code in other connectors too
@@ -422,7 +387,6 @@
 - 2025.06.18:
 
   - Add support for PyPi distribution via pyproject.toml (@mbanck-cd)
-
 - 2025.06.17:
 
   - Constants transformed into a class with static methods - this allows to use constants in the code without importing them, just using the class name
@@ -431,7 +395,6 @@
     - Rationale: MigratorTables class cannot depend on PostgreSQL connector, it breaks dependencies
   - Library 'importlib' removed from requirements and setup.py - it is an implicit python package, when pip tries to explicitly install it, it fails with a misleading error in setuptools library
   - Fix in constants - added missing path to connectors in modules
-
 - 2025.06.16:
 
   - Improvements in Informix connector - improved handling of default values for columns, fix in is_nullable flag, updates in data migration for special data types, fix in interpretation of numeric precision and scale, implemented proper handling of function based indexes
@@ -440,7 +403,6 @@
   - Change in all connectors - data are now selected using explicitly defined list of columns in the SELECT statement, not using SELECT \* - this allows to use casting or other transformations for some specific data types in the SELECT statement
     - Rationale: Some special data types like geometry, set, some types of LOBs, user defined data types, complex data types etc. are hard to handle in the python code, but can be easily manipulated in the SQL SELECT statement in the source database
   - Fix in SQL Anywhere connector - added handling of duplicated foreign key names in the source database (duplicates are possible due to different scope of uniqueness in the source database)
-
 - 2025.06.15
 
   - Fixes in MySQL data model migration - added missing migration of comments for columns, tables, indexes, repairs in migration of special data types, fixed migration of geometry data type and set data type
@@ -450,7 +412,6 @@
   - Refactoring of exception handling in connectors - too specific exceptions masked some errors, generic "Exception" is now used in most cases
   - Refactoring of log levels for different messages in the migrator - added deeper DEBUG levels DEBUG2 and DEBUG3 for better granularity, old calls replaced with new function
     - Refactoring of all calls to print log messages in the whole code
-
 - 2025.06.13:
 
   - Sybase ASE connector - added new functions into SQL functions mapping (solves issues in migration of views like replacement of isNull etc)
@@ -459,7 +420,6 @@
     - Truncation now works, but migration of data into existing data model might fail due to foreign key constraints
   - Fixed automatic boolean cast of integer source default values like 0::boolean or 1::boolean - replaced with proper TRUE or FALSE
   - Improvements in Oracle connector - added missing data types, added conversion of different special variants of NUMBER to BOOLEAN, INTEGER, BIGINT, DOUBLE PRECISION, improvements in handling altered data types
-
 - 2025.06.12:
 
   - Created fully automated test for MS SQL Server connector (dev repository)
@@ -467,7 +427,6 @@
   - Proper implementation of handling of names casing - parameter migration.names_case_handling (lower, upper, preserve) is now used when CREATE DDL statements are generated
     - Rationale: legacy and proprietary databases have different rules for names casing, users might want to preserve original casing or convert names to lower or upper case based on their use cases
   - Fix in Oracle connector - migration of indexes - function based indexes contain in system tables hidden columns SYS_N% which must be replaced with their values in the DDL statements
-
 - 2025.06.11:
 
   - Created automated test for IBM DB2 LUW connector (dev repository)
@@ -488,7 +447,6 @@
   - Fix in the migration of VARCHAR columns - added new parameter migration.varchar_to_text_length to the config file
     - Rationale: different use cases might require different handling on how to migrate VARCHAR columns, either as TEXT or as VARCHAR based on length or always or never
     - Usage - see config file example
-
 - 2025.06.08:
 
   - Started implementation of get_table_description function - description of table structure and eventually other properties, using native source database functions
@@ -504,7 +462,6 @@
   - Fixes in SQL Anywhere connector after previous refactoring changes in 0.7.x releases, fix in primary key migration, fix in foreign key migration
     - Remaining issue: Some Foreign keys fail because of missing primary key / unique indexes - requires further investigation
   - Created fully automated test for SQL Anywhere connector (dev repository)
-
 - 2025.06.07:
 
   - Fixed size of UNIVARCHAR/UNICHAR and NVARCHAR/NCHAR columns in Sybase ASE connector - added proper usage of global variables @@unicharsize, @@ncharsize for calculation of sizes
@@ -536,7 +493,6 @@
   - Fix in casting of default values for type TEXT
   - Fix in Planner - added execution of session settings before attempting to create schema in the target database
   - Implemented SQL function replacement for Sybase ASE views - takes mapping from the function mentioned above
-
 - 2025.05.21
 
   - Adjustments for providing credativ-pg-migrator as executable in a package
@@ -548,7 +504,6 @@
 ## 0.7.5 - 2025.05.21
 
 - cumulative release of changes from 0.7.1 to 0.7.4
-
 - 2025.05.20:
 
   - Implemented proper handling of Sybase ASE named default values created explicitly using CREATE DEFAULT command vs custom defined replacements for default values on columns.
@@ -557,18 +512,15 @@
     - Remaining issues: adjustments of functional indexes which use computed hidden columns
   - Fix in data type alterations for IDENTITY columns, NUMERIC must be changed to BIGINT for PostgreSQL to allow IDENTITY attribute - if altered column is used in FK, migrator must change also dependent columns for FKs to work properly
     - Remaining issue: improved reporting of altered columns in the summary
-
 - 2025.05.19:
 
   - Updates in Sybase ASE testing databases
   - Added migration of check rules/domains in Sybase ASE. Definitions are read from Sybase rules and are migrated as additional check constraints to PostgreSQL.
     - These constraints are created only after data are migrated, because in some cases they need manual adjustments in syntax and could block migration of data.
-
 - 2025.05.18:
 
   - Added new testing databases for Sybase ASE, improved descriptions for Sybase ASE
   - Properly implemented migration of CHECK constraints for Sybase ASE
-
 - 2025.05.17:
 
   - Refactored function fetch_indexes in all connectors
@@ -579,7 +531,6 @@
     - Rationale: The same as for indexes
   - Created corresponding functions in PostgreSQL connector for creation of indexes and constraints DDL statements
   - Started feature matrix file as overview of supported features in all connectors
-
 - 2025.05.16:
 
   - Serial and Serial8 data types in Informix migration are now replaced with INTEGER / BIGINT IDENTITY
@@ -593,17 +544,17 @@
     - Reason: code was redundant in all connectors, there were issues with custom replacements and IDENTITY columns
     - Rationale: previous solution was repeating the same code in all connectors and complicated custom replacements and handling of IDENTITY columns
     - This change will also simplify the replacement of data types for Foreign Key columns
-
 - 2025.05.15:
 
   - Added experimental support for target table partitioning by range for date/timestamp columns
     - Remaining issue: PRIMARY KEY on PostgreSQL must contain partitioning column
   - Replacement of NUMBER primary keys with sequence as default value with BIGINT IDENTITY column
   - Updates in Oracle connector - implemented migration of the full data model
-
 - 2025.05.14:
+
   - Fixed issues with running Oracle in container, added testing databases for Oracle
 - 2025.05.12:
+
   - Fixed issue in the config parser logic when both include and exclude tables patterns are defined
 
 ## 0.7.1 - 2025.05.07

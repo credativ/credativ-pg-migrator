@@ -56,6 +56,8 @@ class MigratorAnonymizer:
 
     def anonymize_row(self, table_name, row_dict):
         for col_name, value in row_dict.items():
+            if value is None:
+                continue
             method_name, params = self.get_method_for_column(table_name, col_name)
             if method_name:
                 func = anonymization_registry.get(method_name)

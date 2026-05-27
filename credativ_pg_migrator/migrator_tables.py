@@ -3408,11 +3408,11 @@ class MigratorTables:
                             for col_val in target_columns.values():
                                 col_name = col_val.get('column_name') if isinstance(col_val, dict) else col_val
                                 data_type = col_val.get('data_type', 'unknown') if isinstance(col_val, dict) else 'unknown'
-                                method, _ = anonymizer.get_method_for_column(target_table_name, col_name)
+                                method, params = anonymizer.get_method_for_column(target_table_name, col_name)
                                 if method:
                                     anon_columns += 1
                                     table_matched = True
-                                    table_anon_cols.append({'name': col_name, 'data_type': data_type, 'method': method})
+                                    table_anon_cols.append({'name': col_name, 'data_type': data_type, 'method': method, 'params': params})
                             if table_matched:
                                 anon_tables += 1
                                 anon_tables_data.append({
@@ -3445,7 +3445,13 @@ class MigratorTables:
                             lines.append(f"   { '-' * col_len }-+-{ '-' * type_len }-+-{ '-' * 20 }")
                             
                             for col_info in display_cols:
-                                lines.append(f"   { col_info['name'].ljust(col_len) } | { col_info['data_type'].ljust(type_len) } | { col_info['method'] }")
+                                method_str = col_info['method']
+                                if col_info.get('params') and 'part' in col_info['params']:
+                                    method_str += f" (part: {col_info['params']['part']})"
+                                elif col_info.get('params'):
+                                    param_str = ", ".join(f"{k}: {v}" for k, v in col_info['params'].items())
+                                    method_str += f" ({param_str})"
+                                lines.append(f"   { col_info['name'].ljust(col_len) } | { col_info['data_type'].ljust(type_len) } | { method_str }")
                             
                         if col_count > top_anonymized_columns_limit:
                             lines.append(f"   - ... and {col_count - top_anonymized_columns_limit} more")

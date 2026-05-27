@@ -160,12 +160,28 @@ class AnonymizationWorkflow:
                 
                 transforming_start_time = time.time()
                 
+                col_max_lengths = {}
+                for col in target_columns:
+                    max_len = col.get('character_maximum_length')
+                    if max_len is not None and max_len != '':
+                        try:
+                            col_max_lengths[col['column_name']] = int(max_len)
+                        except ValueError:
+                            pass
+
                 # Convert rows to dicts for anonymizer
                 formatted_data = []
                 for row in rows:
                     row_dict = dict(zip(col_names, row))
                     if self.anonymizer.is_active():
                         row_dict = self.anonymizer.anonymize_row(target_table, row_dict)
+                    
+                    # Truncate string values that exceed column limits
+                    for col_name, max_len in col_max_lengths.items():
+                        if isinstance(row_dict.get(col_name), str):
+                            if len(row_dict[col_name]) > max_len:
+                                row_dict[col_name] = row_dict[col_name][:max_len]
+                                
                     formatted_data.append([row_dict[col] for col in col_names])
                 
                 transforming_duration = time.time() - transforming_start_time

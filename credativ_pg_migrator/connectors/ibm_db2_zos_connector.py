@@ -769,18 +769,48 @@ class IbmDb2ZosConnector(DatabaseConnector):
         table_name = settings.get('source_table_name')
         indexes = {}
         if self.connectivity == self.config_parser.const_connectivity_ddl():
+            # Find Primary Key columns
+            pk_query = f"""SELECT source_column_name FROM "{self.protocol_schema}"."ddl_columns"
+                           WHERE source_schema_name = %s AND source_table_name = %s AND source_pk_indicator = TRUE ORDER BY id"""
+            cursor = self.migrator_tables.protocol_connection.connection.cursor()
+            cursor.execute(pk_query, (table_schema, table_name))
+            pk_cols = [row[0] for row in cursor.fetchall()]
+
+            order_num = 1
+            pk_cols_set = set()
+            if pk_cols:
+                pk_cols_str = ', '.join(pk_cols)
+                pk_name = f"{table_name}_PK" # Synthetic name for the primary key
+                indexes[order_num] = {
+                    'index_name': pk_name,
+                    'index_type': 'PRIMARY KEY',
+                    'index_owner': table_schema,
+                    'index_columns': pk_cols_str,
+                    'index_comment': None,
+                    'index_sql': None,
+                    'is_function_based': 'NO'
+                }
+                order_num += 1
+                pk_cols_set = set(c.upper() for c in pk_cols)
+
             query = f"""SELECT source_index_name, source_is_unique, source_columns_list
                         FROM "{self.protocol_schema}"."ddl_indexes"
                         WHERE source_schema_name = %s AND source_table_name = %s ORDER BY id"""
-            cursor = self.migrator_tables.protocol_connection.connection.cursor()
             cursor.execute(query, (table_schema, table_name))
             rows = cursor.fetchall()
             self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: fetch_indexes: ({table_schema}.{table_name}): {rows}")
-            for i, row in enumerate(rows, 1):
+            for row in rows:
                 idx_name = row[0]
                 is_unique = row[1]
                 cols = row[2]
-                indexes[i] = {
+                
+                # Check if this unique index is effectively the primary key backing index
+                idx_cols_set = set(c.strip().upper() for c in cols.split(',')) if cols else set()
+                if pk_cols_set and is_unique and pk_cols_set == idx_cols_set:
+                    self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: fetch_indexes: Skipping index {idx_name} as it matches primary key columns.")
+                    continue
+
+                indexes[order_num] = {
                     'index_name': idx_name,
                     'index_type': 'UNIQUE' if is_unique else 'INDEX',
                     'index_owner': table_schema,
@@ -789,6 +819,7 @@ class IbmDb2ZosConnector(DatabaseConnector):
                     'index_sql': None,
                     'is_function_based': 'NO'
                 }
+                order_num += 1
             cursor.close()
         return indexes
 

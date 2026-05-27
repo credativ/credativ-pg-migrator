@@ -44,13 +44,20 @@ def mimesis_address(value, params):
         return f"{address.street_name()} {address.street_number()}"
     elif part == 'street_name':
         return address.street_name()
-    elif part == 'house_number':
-        return address.street_number()
+    elif part in ('house_number', 'street_number'):
+        # Some schemas use numeric fields for house numbers (e.g. numeric(5,0))
+        # Ensure we only return digits if mimesis appends letters
+        num_str = address.street_number()
+        digits = ''.join(filter(str.isdigit, str(num_str)))
+        return digits if digits else "1"
     elif part == 'postal_code':
         return address.postal_code()
     elif part == 'city':
         return address.city()
-    return address.address()
+    elif part == 'full':
+        return f"{address.street_name()} {address.street_number()}, {address.postal_code()} {address.city()}"
+    else:
+        raise ValueError(f"Unknown part '{part}' for mimesis_address")
 
 @anonymization_registry.register('custom_iban')
 def custom_iban(value, params):

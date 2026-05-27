@@ -124,10 +124,40 @@ class Planner:
                 self.migrator_tables.insert_main({'task_name': 'Planner', 'subtask_name': 'Anonymization workflow'})
                 try:
 
-                    self.mapping_match_tables()
+                    if self.source_db_config['connectivity'] == 'ddl':
+                        self.config_parser.print_log_message('DEBUG3', f"planner: create_plan: starting ddl connectivity")
+                        self.source_connection.parse_ddl_files({ 'migrator_tables': self.migrator_tables})
+                        self.source_schema_name = self.config_parser.get_source_schema()
+
+                    self.stdwf_prepare_user_defined_types()
+                    self.stdwf_prepare_domains()
+                    self.stdwf_prepare_defaults()
+
+                    self.check_pausing_resuming()
+
+                    self.stdwf_prepare_aliases()
+                    self.stdwf_prepare_sequences()
+                    self.stdwf_prepare_tables()
+                    self.stdwf_prepare_data_sources()
+
+                    self.check_pausing_resuming()
+
+                    self.stdwf_prepare_views()
+
+                    self.check_pausing_resuming()
 
                     self.migrator_tables.update_main_status({'task_name': 'Planner', 'subtask_name': '', 'success': True, 'message': 'finished OK'})
 
+                    try:
+                        self.source_connection.disconnect()
+                    except Exception as e:
+                        pass
+                    try:
+                        self.target_connection.disconnect()
+                    except Exception as e:
+                        pass
+
+                    self.config_parser.print_log_message('INFO', "planner: create_plan: phase done successfully.")
                 except Exception as e:
                     self.migrator_tables.update_main_status({'task_name': 'Planner', 'subtask_name': '', 'success': False, 'message': f'ERROR: {e}'})
                     self.handle_error(e, "Planner")
@@ -1548,41 +1578,45 @@ class Planner:
             'normalization_settings': self.config_parser.get_migration_settings().get('normalization_settings', {})
         }
 
-        try:
-            query = f"SELECT name, table_name, column_name FROM {self.source_schema_name}.nscale_al_ixpropdef"
-            self.config_parser.print_log_message('DEBUG', f"planner: mapping_match_tables: Fetching source internal mappings using query: {query}")
-            self.source_connection.connect()
-            cursor = self.source_connection.connection.cursor()
-            cursor.execute(query)
-            for row in cursor.fetchall():
-                prop_name = row[0].lower() if row[0] else None
-                t_name = row[1].lower() if row[1] else None
-                c_name = row[2].lower() if row[2] else None
-                if prop_name and t_name and c_name:
-                    settings['source_internal'][prop_name] = f"{t_name}.{c_name}"
-            cursor.close()
-            self.source_connection.disconnect()
-            self.config_parser.print_log_message('DEBUG', f"planner: mapping_match_tables: Loaded {len(settings['source_internal'])} source internal mapping properties.")
-        except Exception as e:
-            self.config_parser.print_log_message('DEBUG', f"planner: mapping_match_tables: Failed to fetch source internal mappings: {e}")
+        internal_mappings_table = self.config_parser.get_migration_settings().get('internal_mappings_table')
 
-        try:
-            query = f"SELECT name, table_name, column_name FROM {self.target_schema_name}.nscale_al_ixpropdef"
-            self.config_parser.print_log_message('DEBUG', f"planner: mapping_match_tables: Fetching target internal mappings using query: {query}")
-            self.target_connection.connect()
-            cursor = self.target_connection.connection.cursor()
-            cursor.execute(query)
-            for row in cursor.fetchall():
-                prop_name = row[0].lower() if row[0] else None
-                t_name = row[1].lower() if row[1] else None
-                c_name = row[2].lower() if row[2] else None
-                if prop_name and t_name and c_name:
-                    settings['target_internal'][prop_name] = f"{t_name}.{c_name}"
-            cursor.close()
-            self.target_connection.disconnect()
-            self.config_parser.print_log_message('DEBUG', f"planner: mapping_match_tables: Loaded {len(settings['target_internal'])} target internal mapping properties.")
-        except Exception as e:
-            self.config_parser.print_log_message('DEBUG', f"planner: mapping_match_tables: Failed to fetch target internal mappings: {e}")
+        if internal_mappings_table:
+            try:
+                query = f"SELECT name, table_name, column_name FROM {self.source_schema_name}.{internal_mappings_table}"
+                self.config_parser.print_log_message('DEBUG', f"planner: mapping_match_tables: Fetching source internal mappings using query: {query}")
+                self.source_connection.connect()
+                cursor = self.source_connection.connection.cursor()
+                cursor.execute(query)
+                for row in cursor.fetchall():
+                    prop_name = row[0].lower() if row[0] else None
+                    t_name = row[1].lower() if row[1] else None
+                    c_name = row[2].lower() if row[2] else None
+                    if prop_name and t_name and c_name:
+                        settings['source_internal'][prop_name] = f"{t_name}.{c_name}"
+                cursor.close()
+                self.source_connection.disconnect()
+                self.config_parser.print_log_message('DEBUG', f"planner: mapping_match_tables: Loaded {len(settings['source_internal'])} source internal mapping properties.")
+            except Exception as e:
+                self.config_parser.print_log_message('DEBUG', f"planner: mapping_match_tables: Failed to fetch source internal mappings: {e}")
+
+        if internal_mappings_table:
+            try:
+                query = f"SELECT name, table_name, column_name FROM {self.target_schema_name}.{internal_mappings_table}"
+                self.config_parser.print_log_message('DEBUG', f"planner: mapping_match_tables: Fetching target internal mappings using query: {query}")
+                self.target_connection.connect()
+                cursor = self.target_connection.connection.cursor()
+                cursor.execute(query)
+                for row in cursor.fetchall():
+                    prop_name = row[0].lower() if row[0] else None
+                    t_name = row[1].lower() if row[1] else None
+                    c_name = row[2].lower() if row[2] else None
+                    if prop_name and t_name and c_name:
+                        settings['target_internal'][prop_name] = f"{t_name}.{c_name}"
+                cursor.close()
+                self.target_connection.disconnect()
+                self.config_parser.print_log_message('DEBUG', f"planner: mapping_match_tables: Loaded {len(settings['target_internal'])} target internal mapping properties.")
+            except Exception as e:
+                self.config_parser.print_log_message('DEBUG', f"planner: mapping_match_tables: Failed to fetch target internal mappings: {e}")
 
         match_result = match_schemas.match_tables(settings)
         self.config_parser.print_log_message('INFO', f"planner: mapping_match_tables: Found {len(match_result['matched_pairs'])} matched tables.")

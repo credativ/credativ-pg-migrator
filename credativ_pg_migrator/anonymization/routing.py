@@ -2,6 +2,21 @@ import re
 from credativ_pg_migrator.anonymization.registry import anonymization_registry
 import credativ_pg_migrator.anonymization.methods  # Ensure methods are registered
 
+def _compile_regex_robust(pattern):
+    """
+    Helper to compile regular expressions in a way that is robust to Python 3.11+
+    strictness about global flags like (?i) not being at the start of the string.
+    """
+    flags_pattern = re.compile(r'\(\?([aiLmsxu]+)\)')
+    flags_found = ''.join(flags_pattern.findall(pattern))
+    clean_pattern = flags_pattern.sub('', pattern)
+    
+    if flags_found:
+        flags_found = "".join(set(flags_found))
+        clean_pattern = f"(?{flags_found}){clean_pattern}"
+        
+    return re.compile(clean_pattern)
+
 class MigratorAnonymizer:
     def __init__(self, config):
         self.config = config
@@ -15,8 +30,8 @@ class MigratorAnonymizer:
             table_pattern = mapping.get('table_pattern', '.*')
             column_pattern = mapping.get('column_pattern', '.*')
             self.compiled_regexes.append({
-                'table_re': re.compile(table_pattern),
-                'column_re': re.compile(column_pattern),
+                'table_re': _compile_regex_robust(table_pattern),
+                'column_re': _compile_regex_robust(column_pattern),
                 'method': mapping.get('method'),
                 'params': mapping.get('params', {})
             })

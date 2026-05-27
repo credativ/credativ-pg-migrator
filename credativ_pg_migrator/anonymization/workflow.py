@@ -23,10 +23,31 @@ class AnonymizationWorkflow:
         if not self.anonymizer.is_active():
             self.config_parser.print_log_message('WARNING', "anonymization_workflow: No anonymization rules found. Acting as standard PG-to-PG copy.")
 
-        self.orchestrator.mapping_drop_indexes_and_constraints()
-        self.anonymization_copy_data()
-        self.orchestrator.mapping_create_indexes_and_constraints()
-        self.orchestrator.mapping_check_indexes_and_constraints()
+        # Temporarily disable standard data migration to let standard table worker create tables without copying data
+        original_migrate_data = self.config_parser.config['migration'].get('migrate_data', True)
+        self.config_parser.config['migration']['migrate_data'] = False
+        
+        self.orchestrator.run_create_user_defined_types()
+        self.orchestrator.run_create_domains()
+        self.orchestrator.stdwf_migrate_sequences()
+
+        self.orchestrator.stdwf_migrate_tables()
+
+        # Restore original migrate_data flag
+        self.config_parser.config['migration']['migrate_data'] = original_migrate_data
+
+        # If data migration was requested, run our anonymization copy
+        if original_migrate_data:
+            self.anonymization_copy_data()
+
+        self.orchestrator.stdwf_migrate_indexes('standard')
+        self.orchestrator.stdwf_migrate_constraints()
+        self.orchestrator.stdwf_migrate_views()
+        self.orchestrator.stdwf_migrate_funcprocs()
+        self.orchestrator.stdwf_migrate_triggers()
+        self.orchestrator.stdwf_migrate_indexes('function_based')
+        self.orchestrator.stdwf_migrate_comments()
+        self.orchestrator.run_post_migration_script()
 
     def anonymization_copy_data(self):
         self.migrator_tables.insert_main({'task_name': 'Orchestrator', 'subtask_name': 'anonymization data copy'})

@@ -24,7 +24,14 @@ def get_mimesis_address(locale='de'):
 @anonymization_registry.register('faker_name')
 def faker_name(value, params):
     fake = get_faker('de_DE')
-    return fake.name()
+    part = params.get('part', 'full')
+    
+    if part == 'first_name':
+        return fake.first_name()
+    elif part == 'last_name':
+        return fake.last_name()
+    else:
+        return fake.name()
 
 @anonymization_registry.register('faker_email')
 def faker_email(value, params):

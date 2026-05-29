@@ -757,12 +757,108 @@ class IbmDb2LuwConnector(DatabaseConnector):
         return converted_code
 
     def fetch_sequences(self, schema_name: str):
-        # Placeholder for fetching sequences
-        return {}
+        sequences = {}
+        order_num = 1
+        try:
+            if self.config_parser.get_system_catalog() in ('SYSCAT', 'NONE'):
+                query_standalone = f"""
+                    SELECT
+                        SEQNAME,
+                        NULL AS TABNAME,
+                        NULL AS COLNAME,
+                        START,
+                        INCREMENT,
+                        MINVALUE,
+                        MAXVALUE,
+                        CACHE,
+                        CYCLE
+                    FROM SYSCAT.SEQUENCES
+                    WHERE SEQSCHEMA = upper('{schema_name}') AND SEQTYPE = 'S'
+                """
+                query_identity = f"""
+                    SELECT
+                        TABNAME || '_' || COLNAME || '_SEQ' AS SEQNAME,
+                        TABNAME,
+                        COLNAME,
+                        START,
+                        INCREMENT,
+                        MINVALUE,
+                        MAXVALUE,
+                        CACHE,
+                        CYCLE
+                    FROM SYSCAT.COLIDENTATTRIBUTES
+                    WHERE TABSCHEMA = upper('{schema_name}')
+                """
+                
+                self.connect()
+                cursor = self.connection.cursor()
+                
+                for query in [query_standalone, query_identity]:
+                    cursor.execute(query)
+                    for row in cursor.fetchall():
+                        sequences[order_num] = {
+                            'sequence_name': row[0].strip() if row[0] else row[0],
+                            'table_name': row[1].strip() if row[1] else row[1],
+                            'column_name': row[2].strip() if row[2] else row[2],
+                            'source_start_value': int(row[3]) if row[3] is not None else None,
+                            'source_increment_by': int(row[4]) if row[4] is not None else None,
+                            'source_minvalue': int(row[5]) if row[5] is not None else None,
+                            'source_maxvalue': int(row[6]) if row[6] is not None else None,
+                            'source_cache': int(row[7]) if row[7] is not None else None,
+                            'source_is_cycled': row[8].strip() if row[8] else row[8],
+                            'source_sequence_sql': ''
+                        }
+                        order_num += 1
+                cursor.close()
+                self.disconnect()
+            return sequences
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"ibm_db2_luw_connector: fetch_sequences: Error executing query: {e}")
+            raise
 
     def get_sequence_details(self, sequence_owner, sequence_name):
-        # Placeholder for fetching sequence details
         return {}
+
+    def migrate_sequences(self, target_connector, settings):
+        target_schema_name = settings.get('target_schema_name', '')
+        target_sequence_name = settings.get('target_sequence_name', '')
+        source_table_name = settings.get('source_table_name', None)
+        source_start_value = settings.get('source_start_value')
+        source_increment_by = settings.get('source_increment_by')
+        source_minvalue = settings.get('source_minvalue')
+        source_maxvalue = settings.get('source_maxvalue')
+        source_cache = settings.get('source_cache')
+        source_is_cycled = settings.get('source_is_cycled')
+
+        if not target_sequence_name:
+            return True
+
+        # Do not explicitly create sequences for identity columns
+        if source_table_name:
+            return True
+
+        try:
+            sql_parts = [f'CREATE SEQUENCE "{target_schema_name}"."{target_sequence_name}"']
+            if source_increment_by is not None:
+                sql_parts.append(f"INCREMENT BY {source_increment_by}")
+            if source_minvalue is not None:
+                sql_parts.append(f"MINVALUE {source_minvalue}")
+            if source_maxvalue is not None:
+                sql_parts.append(f"MAXVALUE {source_maxvalue}")
+            if source_start_value is not None:
+                sql_parts.append(f"START WITH {source_start_value}")
+            if source_cache is not None and source_cache > 1:
+                sql_parts.append(f"CACHE {source_cache}")
+            if source_is_cycled == 'Y':
+                sql_parts.append("CYCLE")
+            
+            sequence_sql = " ".join(sql_parts)
+            self.config_parser.print_log_message('DEBUG', f"ibm_db2_luw_connector: migrate_sequences: SQL: {sequence_sql}")
+            target_connector.execute_query(sequence_sql)
+            return True
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"ibm_db2_luw_connector: migrate_sequences: Error creating sequence {target_sequence_name}: {e}")
+            return False
 
     def get_aliases(self, settings):
         source_schema_name = settings.get('source_schema_name')
@@ -830,12 +926,13 @@ class IbmDb2LuwConnector(DatabaseConnector):
         order_num = 1
         query = f"""
             SELECT
-                VIEWNAME,
-                VIEWSCHEMA,
-                REMARKS
-            FROM SYSCAT.VIEWS
-            WHERE VIEWSCHEMA = upper('{source_schema_name}') AND VALID = 'Y'
-            ORDER BY VIEWNAME
+                V.VIEWNAME,
+                V.VIEWSCHEMA,
+                T.REMARKS
+            FROM SYSCAT.VIEWS V
+            LEFT JOIN SYSCAT.TABLES T ON V.VIEWSCHEMA = T.TABSCHEMA AND V.VIEWNAME = T.TABNAME
+            WHERE V.VIEWSCHEMA = upper('{source_schema_name}') AND V.VALID = 'Y'
+            ORDER BY V.VIEWNAME
         """
         try:
             self.connect()

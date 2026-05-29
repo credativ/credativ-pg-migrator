@@ -9,6 +9,9 @@
 
   - Feature - IBM Db2 LUW Connector: Implemented `fetch_views_names`, `fetch_view_code`, and `convert_view_code` to properly extract and parse views leveraging `sqlglot`, including native schema mapping, dialect conversion, and automated alias resolution.
   - Fix - IBM Db2 LUW Connector: Added strict `TYPE = 'T'` filters to `fetch_table_names` and `target_table_exists` to prevent views and aliases from being mistakenly processed as standard tables.
+  - Fix - IBM Db2 LUW Connector: Resolved view translation type mismatches (`operator does not exist: text = integer`) by dynamically coercing numeric literals to strings in AST binary and decode expressions.
+  - Fix - IBM Db2 LUW Connector: Corrected the `fetch_views_names` query to retrieve the `REMARKS` column from `SYSCAT.VIEWS` instead of defaulting to an empty string.
+  - Feature - Reporting: Added a dedicated `Comments` statistic row to the `[ OBJECTS MIGRATION RESULTS ]` summary table, accurately tallying comments migrated across all tables, columns, indexes, constraints, views, and functions.
 
 - 2026.05.27
 

@@ -832,7 +832,7 @@ class IbmDb2LuwConnector(DatabaseConnector):
             SELECT
                 VIEWNAME,
                 VIEWSCHEMA,
-                '' AS REMARKS
+                REMARKS
             FROM SYSCAT.VIEWS
             WHERE VIEWSCHEMA = upper('{source_schema_name}') AND VALID = 'Y'
             ORDER BY VIEWNAME
@@ -1039,6 +1039,20 @@ class IbmDb2LuwConnector(DatabaseConnector):
                     return sqlglot.exp.DPipe(this=new_left, expression=new_right)
             return node
 
+        def convert_numeric_literals_to_strings(node):
+            if isinstance(node, sqlglot.exp.Binary):
+                left, right = node.left, node.right
+                if isinstance(left, sqlglot.exp.Column) and isinstance(right, sqlglot.exp.Literal) and not right.args.get("is_string"):
+                    right.args["is_string"] = True
+                elif isinstance(right, sqlglot.exp.Column) and isinstance(left, sqlglot.exp.Literal) and not left.args.get("is_string"):
+                    left.args["is_string"] = True
+            elif isinstance(node, sqlglot.exp.DecodeCase):
+                for i in range(1, len(node.expressions) - 1, 2):
+                    search_val = node.expressions[i]
+                    if isinstance(search_val, sqlglot.exp.Literal) and not search_val.args.get("is_string"):
+                        search_val.args["is_string"] = True
+            return node
+
         view_code = settings['view_code']
         converted_code = view_code
 
@@ -1072,6 +1086,7 @@ class IbmDb2LuwConnector(DatabaseConnector):
             parsed_code = parsed_code.transform(quote_schema_and_table_names)
             parsed_code = parsed_code.transform(replace_schema_names)
             parsed_code = parsed_code.transform(replace_functions)
+            parsed_code = parsed_code.transform(convert_numeric_literals_to_strings)
 
             converted_code = parsed_code.sql(dialect="postgres")
             converted_code = converted_code.replace("()()", "()")

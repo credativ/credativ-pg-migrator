@@ -3297,6 +3297,41 @@ class MigratorTables:
             except Exception:
                 self.protocol_connection.connection.rollback()
 
+        # Add Comments summary
+        try:
+            comments_total = 0
+            for tbl, col in [
+                (self.config_parser.get_protocol_name_tables(), 'table_comment'),
+                (self.config_parser.get_protocol_name_indexes(), 'index_comment'),
+                (self.config_parser.get_protocol_name_views(), 'view_comment'),
+                (self.config_parser.get_protocol_name_constraints(), 'constraint_comment'),
+                (self.config_parser.get_protocol_name_funcprocs(), 'funcproc_comment'),
+                (self.config_parser.get_protocol_name_triggers(), 'trigger_comment'),
+                (self.config_parser.get_protocol_name_user_defined_types(), 'type_comment')
+            ]:
+                try:
+                    cursor.execute(f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{tbl}" WHERE {col} IS NOT NULL AND {col} != ''""")
+                    comments_total += cursor.fetchone()[0]
+                except Exception:
+                    self.protocol_connection.connection.rollback()
+
+            try:
+                cursor.execute(f"""
+                    SELECT count(*)
+                    FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_tables()}" t,
+                         json_each(t.target_columns::json) c
+                    WHERE c.value->>'column_comment' IS NOT NULL AND c.value->>'column_comment' != ''
+                """)
+                comments_total += cursor.fetchone()[0]
+            except Exception:
+                self.protocol_connection.connection.rollback()
+
+            success_str = str(comments_total) if not self.config_parser.is_dry_run() else '-'
+            failed_str = '0' if not self.config_parser.is_dry_run() else '-'
+            lines.append(f"{'Comments':<24} | {comments_total:>6} | {success_str:>7} | {failed_str:>6} | ")
+        except Exception:
+            self.protocol_connection.connection.rollback()
+
         lines.append("")
         lines.append("[ DATA MIGRATION RESULTS ]")
         lines.append("-" * 80)

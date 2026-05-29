@@ -118,6 +118,16 @@ class Orchestrator:
                 self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': '', 'success': False, 'message': f'ERROR: {e}'})
                 self.handle_error(e, 'orchestration')
 
+        elif self.config_parser.is_anonymization_workflow():
+            self.config_parser.print_log_message('INFO', "orchestrator: run: Anonymization workflow")
+            try:
+                from credativ_pg_migrator.anonymization.workflow import AnonymizationWorkflow
+                workflow = AnonymizationWorkflow(self)
+                workflow.run()
+            except Exception as e:
+                self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': '', 'success': False, 'message': f'ERROR: {e}'})
+                self.handle_error(e, 'orchestration')
+
         if self.config_parser.is_mapping_workflow():
             self.migrator_tables.print_mapping_migration_summary()
         else:

@@ -3200,6 +3200,7 @@ class MigratorTables:
         lines.append("[ DATABASE CONTEXT ]")
         lines.append(f"Source: {self.config_parser.get_source_db_name()}, schema: {self.config_parser.get_source_owner()} ({self.config_parser.get_source_db_type()})")
         lines.append(f"Target: {self.config_parser.get_target_db_name()}, schema: {self.config_parser.get_target_schema()} ({self.config_parser.get_target_db_type()})")
+        lines.append(f"Workflow: {self.config_parser.get_workflow()}")
         lines.append("")
         
         if self.config_parser.is_dry_run():
@@ -3322,23 +3323,25 @@ class MigratorTables:
                 lines.append(f"Row Count Mismatches     : {diff_dm}")
                 
                 if full_dm > 0:
+                    top_migrated_limit = self.config_parser.get_summary_top_migrated_tables()
                     lines.append("")
-                    lines.append("Biggest Successfully Migrated Tables (Top 5):")
+                    lines.append(f"Biggest Successfully Migrated Tables (Top {top_migrated_limit}):")
                     lines.append(f"{'Table Name':<35} | {'Row Count':>15} | {'Time Spent (s)':>15}")
                     lines.append("-" * 80)
                     cursor.execute(f"""SELECT target_schema_name, target_table_name, target_table_rows, 
                                        EXTRACT(EPOCH FROM (task_completed - task_started))
                                        FROM "{self.protocol_schema}"."{dm_table}" 
                                        WHERE source_table_rows > 0 AND source_table_rows = target_table_rows AND success = TRUE
-                                       ORDER BY source_table_rows DESC LIMIT 5""")
+                                       ORDER BY source_table_rows DESC LIMIT {top_migrated_limit}""")
                     for sch, tbl, t_rows, duration in cursor.fetchall():
                         t_fmt = f"{t_rows:,}"
                         d_fmt = f"{round(duration, 2) if duration else 0.0}"
                         lines.append(f"{sch + '.' + tbl:<35} | {t_fmt:>15} | {d_fmt:>15}")
 
                 if diff_dm > 0:
+                    top_mismatched_limit = self.config_parser.get_summary_top_mismatched_tables()
                     lines.append("")
-                    lines.append("Tables with row count mismatches (Top 5 by Source Rows):")
+                    lines.append(f"Tables with row count mismatches (Top {top_mismatched_limit} by Source Rows):")
                     lines.append(f"{'Table Name':<28} | {'Src Rows':>11} | {'Tgt Rows':>11} | {'Diff':>8} | {'Time(s)':>8}")
                     lines.append("-" * 80)
                     cursor.execute(f"""SELECT target_schema_name, target_table_name, source_table_rows, target_table_rows,
@@ -3346,7 +3349,7 @@ class MigratorTables:
                                        EXTRACT(EPOCH FROM (task_completed - task_started))
                                        FROM "{self.protocol_schema}"."{dm_table}" 
                                        WHERE source_table_rows > 0 AND source_table_rows <> target_table_rows 
-                                       ORDER BY source_table_rows DESC LIMIT 5""")
+                                       ORDER BY source_table_rows DESC LIMIT {top_mismatched_limit}""")
                     for sch, tbl, s_rows, t_rows, diff, duration in cursor.fetchall():
                         s_fmt = f"{s_rows:,}"
                         t_fmt = f"{t_rows:,}"
@@ -3354,15 +3357,16 @@ class MigratorTables:
                         d_fmt = f"{round(duration, 2) if duration else 0.0}"
                         lines.append(f"{sch + '.' + tbl:<28} | {s_fmt:>11} | {t_fmt:>11} | {diff_fmt:>8} | {d_fmt:>8}")
 
+                top_longest_batches_limit = self.config_parser.get_summary_top_longest_batches()
                 cursor.execute(f"""SELECT target_schema_name, target_table_name, batch_number, 
                                    round(batch_seconds::numeric, 2), round(reading_seconds::numeric, 2), 
                                    round(transforming_seconds::numeric, 2), round(writing_seconds::numeric, 2)
                                    FROM "{self.protocol_schema}"."{stats_table}"
-                                   ORDER BY batch_seconds DESC LIMIT 10""")
+                                   ORDER BY batch_seconds DESC LIMIT {top_longest_batches_limit}""")
                 batches = cursor.fetchall()
                 if batches:
                     lines.append("")
-                    lines.append("Longest Data Batches (Top 10):")
+                    lines.append(f"Longest Data Batches (Top {top_longest_batches_limit}):")
                     lines.append(f"{'Table Name':<30} | {'Batch':>5} | {'Total(s)':>8} | {'Read(s)':>8} | {'Trans(s)':>8} | {'Write(s)':>8}")
                     lines.append("-" * 80)
                     for sch, tbl, b_num, b_sec, r_sec, t_sec, w_sec in batches:
@@ -3379,9 +3383,183 @@ class MigratorTables:
         except Exception:
             self.protocol_connection.connection.rollback()
 
+        if self.config_parser.is_anonymization_workflow():
+            lines.append("")
+            lines.append("[ ANONYMIZATION WORKFLOW RESULTS ]")
+            lines.append("-" * 80)
+            anon_tables_data = []
+            anon_tables = 0
+            anon_columns = 0
+            try:
+                from credativ_pg_migrator.anonymization.routing import MigratorAnonymizer
+                anonymizer = MigratorAnonymizer(self.config_parser.config)
+                if anonymizer.is_active():
+                    raw_tables = self.fetch_all_tables()
+                    for t_row in raw_tables:
+                        table_data = self.decode_table_row(t_row)
+                        if table_data.get('source_table_rows', 0) > 0:
+                            target_schema_name = table_data.get('target_schema_name', '')
+                            target_table_name = table_data['target_table_name']
+                            full_table_name = f"{target_schema_name}.{target_table_name}" if target_schema_name else target_table_name
+                            
+                            target_columns = table_data.get('target_columns', {})
+                            table_matched = False
+                            table_anon_cols = []
+                            for col_val in target_columns.values():
+                                col_name = col_val.get('column_name') if isinstance(col_val, dict) else col_val
+                                data_type = col_val.get('data_type', 'unknown') if isinstance(col_val, dict) else 'unknown'
+                                method, params = anonymizer.get_method_for_column(target_table_name, col_name)
+                                if method:
+                                    anon_columns += 1
+                                    table_matched = True
+                                    table_anon_cols.append({'name': col_name, 'data_type': data_type, 'method': method, 'params': params})
+                            if table_matched:
+                                anon_tables += 1
+                                anon_tables_data.append({
+                                    'table_name': full_table_name,
+                                    'columns': table_anon_cols
+                                })
+                
+                lines.append(f"Anonymized {anon_columns} columns in {anon_tables} tables.")
+                
+                if anon_tables_data:
+                    top_anonymized_tables_limit = self.config_parser.get_summary_top_anonymized_tables()
+                    top_anonymized_columns_limit = self.config_parser.get_summary_top_anonymized_columns()
+                    anon_tables_data.sort(key=lambda x: (-len(x['columns']), x['table_name']))
+                    top_tables = anon_tables_data[:top_anonymized_tables_limit]
+                    lines.append("")
+                    lines.append("Top Tables with Most Anonymized Columns:")
+                    for idx, t_data in enumerate(top_tables, 1):
+                        if idx > 1:
+                            lines.append("")
+                        col_count = len(t_data['columns'])
+                        lines.append(f"{idx}. {t_data['table_name']} ({col_count} columns anonymized)")
+                        
+                        sorted_cols = sorted(t_data['columns'], key=lambda x: x['name'])
+                        display_cols = sorted_cols[:top_anonymized_columns_limit]
+                        
+                        if display_cols:
+                            col_len = max([len(c['name']) for c in display_cols] + [11])
+                            type_len = max([len(c['data_type']) for c in display_cols] + [9])
+                            lines.append(f"   { 'Column Name'.ljust(col_len) } | { 'Data Type'.ljust(type_len) } | Method")
+                            lines.append(f"   { '-' * col_len }-+-{ '-' * type_len }-+-{ '-' * 20 }")
+                            
+                            for col_info in display_cols:
+                                method_str = col_info['method']
+                                if col_info.get('params') and 'part' in col_info['params']:
+                                    method_str += f" (part: {col_info['params']['part']})"
+                                elif col_info.get('params'):
+                                    param_str = ", ".join(f"{k}: {v}" for k, v in col_info['params'].items())
+                                    method_str += f" ({param_str})"
+                                lines.append(f"   { col_info['name'].ljust(col_len) } | { col_info['data_type'].ljust(type_len) } | { method_str }")
+                            
+                        if col_count > top_anonymized_columns_limit:
+                            lines.append(f"   - ... and {col_count - top_anonymized_columns_limit} more")
+                            
+                        show_examples = self.config_parser.get_summary_show_anonymization_examples()
+                        if show_examples > 0:
+                            self._append_anonymization_examples(lines, t_data['table_name'], display_cols, show_examples)
+            except Exception as e:
+                lines.append(f"Error computing anonymization stats: {e}")
+
         lines.append("=" * 80)
         final_summary = "\n" + "\n".join(lines)
         self.config_parser.print_log_message('INFO', final_summary)
+
+    def _append_anonymization_examples(self, lines, table_fqn, display_cols, limit):
+        if self.config_parser.get_source_db_type() != 'postgresql' or self.config_parser.get_target_db_type() != 'postgresql':
+            return
+            
+        try:
+            import psycopg2
+            import psycopg2.extras
+            
+            src_cfg = self.config_parser.get_source_config()
+            tgt_cfg = self.config_parser.get_target_config()
+            
+            if not src_cfg or not tgt_cfg:
+                return
+
+            schema_parts = table_fqn.split('.', 1)
+            if len(schema_parts) != 2:
+                return
+            schema_name, table_name = schema_parts
+
+            src_dbname = self.config_parser.get_source_db_name()
+            tgt_dbname = self.config_parser.get_target_db_name()
+
+            src_conn = psycopg2.connect(
+                host=src_cfg.get('host', 'localhost'),
+                port=src_cfg.get('port', 5432),
+                dbname=src_dbname,
+                user=src_cfg.get('username'),
+                password=src_cfg.get('password')
+            )
+            
+            tgt_conn = psycopg2.connect(
+                host=tgt_cfg.get('host', 'localhost'),
+                port=tgt_cfg.get('port', 5432),
+                dbname=tgt_dbname,
+                user=tgt_cfg.get('username'),
+                password=tgt_cfg.get('password')
+            )
+            
+            src_cur = src_conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+            tgt_cur = tgt_conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+            
+            # Find primary keys
+            src_cur.execute("""
+                SELECT a.attname
+                FROM   pg_index i
+                JOIN   pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+                JOIN   pg_class c ON c.oid = i.indrelid
+                JOIN   pg_namespace n ON n.oid = c.relnamespace
+                WHERE  n.nspname = %s AND c.relname = %s
+                AND    i.indisprimary
+            """, (schema_name, table_name))
+            
+            pks = [row[0] for row in src_cur.fetchall()]
+            if not pks:
+                src_cur.close()
+                tgt_cur.close()
+                src_conn.close()
+                tgt_conn.close()
+                lines.append(f"   [!] Examples skipped: No primary key found for {table_fqn}.")
+                return
+                
+            pk_cols_str = ", ".join([f'"{pk}"' for pk in pks])
+            anon_cols = [c['name'] for c in display_cols]
+            fetch_cols_str = ", ".join([f'"{col}"' for col in anon_cols])
+            
+            src_cur.execute(f'SELECT {pk_cols_str}, {fetch_cols_str} FROM "{schema_name}"."{table_name}" ORDER BY random() LIMIT {limit}')
+            src_rows = src_cur.fetchall()
+            
+            if src_rows:
+                lines.append("")
+                lines.append(f"   Examples (Original => Anonymized):")
+                for row_idx, row in enumerate(src_rows, 1):
+                    pk_vals_str = ", ".join([f"{pk}={row[pk]}" for pk in pks])
+                    lines.append(f"   Row {row_idx} (PK: {pk_vals_str}):")
+                    where_clauses = " AND ".join([f'"{pk}" = %s' for pk in pks])
+                    where_values = [row[pk] for pk in pks]
+                    tgt_cur.execute(f'SELECT {fetch_cols_str} FROM "{schema_name}"."{table_name}" WHERE {where_clauses}', where_values)
+                    tgt_row = tgt_cur.fetchone()
+                    
+                    if tgt_row:
+                        for col in anon_cols:
+                            orig_val = str(row[col])[:30] + ('...' if len(str(row[col])) > 30 else '')
+                            anon_val = str(tgt_row[col])[:30] + ('...' if len(str(tgt_row[col])) > 30 else '')
+                            lines.append(f"     - {col}: '{orig_val}' => '{anon_val}'")
+                    else:
+                        lines.append(f"     [!] Row missing in target database.")
+            
+            src_cur.close()
+            tgt_cur.close()
+            src_conn.close()
+            tgt_conn.close()
+            
+        except Exception as e:
+            lines.append(f"   [!] Could not fetch examples: {e}")
 
     def __print_mapping_metric_summary(self, object_name, table_name, is_index=False):
         try:

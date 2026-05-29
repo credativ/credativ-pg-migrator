@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.15.0rc1 - 2026.05.27
+
+- 2026.05.27
+
+  - Fix - Anonymization Workflow: Updated `routing.py` to preserve source database `NULL` values instead of replacing them with newly generated values.
+  - Fix - Anonymization Methods: Updated `faker_name` method to correctly utilize `part` configuration parameters (`first_name` and `last_name`).
+  - Feature - Reporting: Enhanced anonymization summary output to include method parameters (e.g., `part: first_name`) dynamically in the log output.
+
+- 2026.05.20
+
+  - Anonymization Workflow: updated summary output to show workflow type
+  - Feature - Configuration: Added a `summary` configuration block to `config_sample.yaml` and the migrator logic, introducing dynamic, configurable limits for all printed statistics (e.g., top migrated tables, longest batches). Defaults to backward-compatible limits if absent.
+  - Feature - Reporting: Enhanced the anonymization summary report to extract and display the source data type and anonymization method alongside each column name, formatted into a clean, aligned text table.
+  - Updated documentation for anonymization workflow
+- 2026.05.19
+
+  - Feature - Anonymization: Introduced a standalone pluggable data anonymization module. Configured via the `anonymization` workflow, this executes a dedicated PostgreSQL to PostgreSQL migration pipeline. It natively supports Python in-memory transformation (lazy-loading optional libraries like Faker and Mimesis) and intercepts `__RAW_SQL__` tokens to directly offload functions to PostgreSQL extensions like `postgresql_anonymizer`.
+
 ## 0.14.0 - 2026.05.20
 
 - 2026.05.18
@@ -32,13 +50,9 @@
   - Fix - T-SQL Parser: Enforced `INSERT INTO` syntax on all Sybase ASE `INSERT` commands, preventing syntax errors in PostgreSQL where the `INTO` keyword is strictly mandatory.
   - Fix - T-SQL Parser: Upgraded `pass_8b_convert_datetime_formats` with a character-by-character paren-depth scanner to support 2-parameter `CONVERT(type, expr)` variants, dynamically transforming them into native PostgreSQL `CAST(expr AS type)` structures regardless of nested commas or internal parentheses.
   - Feature - T-SQL Parser: Engineered trigger-specific transaction abortion logic; when a `PRINT` statement is immediately preceded or followed by a `ROLLBACK TRIGGER` or `ROLLBACK TRANSACTION` command, the parser now cleanly merges them into a single `RAISE EXCEPTION` block to correctly halt execution in PostgreSQL.
-
-## 0.13.0 - 2026.04.16
-
 - 2026.04.17
 
   - Fixes - fix in summary, repaired reported count of tables. Repair in protocol for alias.
-
 - 2026.04.16
 
   - Fixes - added missing row counts to the protocol tables in IBM DB2 z/OS migration path from CSV files, added missing logging of success when alias is used for table or view, added missing print of TOP 5 successfully migrated tables and TOP 5 tables with row count mismatches in summary output.

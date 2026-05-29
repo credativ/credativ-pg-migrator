@@ -37,7 +37,7 @@ This document provides a simplified overview and hierarchy of the configuration 
 - `settings`: Target database session configuration parameters (e.g., `work_mem`, `maintenance_work_mem`, `role`, `search_path`).
 
 ## 4. Migration Recipe (`migration`)
-- `workflow`: Type of migration (`standard` or `mapping`).
+- `workflow`: Type of migration (`standard`, `mapping`, or `anonymization`).
 - `suspend_indexes_constraints`: Analyze and recreate indexes/constraints (specific to `mapping` workflow).
 - `drop_schema`: If true, drops schema utilizing `CASCADE` before migration.
 - **Operations toggles**: `drop_tables`, `truncate_tables`, `create_tables`, `migrate_data`, `migrate_indexes`, `migrate_constraints`, `migrate_funcprocs`, `migrate_triggers`, `migrate_views`, `set_sequences`.
@@ -69,3 +69,16 @@ This document provides a simplified overview and hierarchy of the configuration 
 - `default_values_substitution`: Rules for replacing specific default values or legacy DB functions in column constraints (e.g. `%getdate()%` to `statement_timestamp()`).
 - `remote_objects_substitution`: Mappings for cross-database linked object references used in views/functions.
 - `data_migration_limitation`: Targetable arbitrary SQL `WHERE` conditions to limit dataset rows migrated from tables on the fly.
+
+## 8. Anonymization (`anonymization`)
+- `tables`: Explicit per-table, per-column assignment of anonymization methods (e.g. `faker_name`, `deterministic_hash_mask`).
+- `regex_mappings`: Broad regex-based assignments connecting matching table/column combinations to anonymization methods.
+- *See the [Data Anonymization Workflow](workflow/anonymization.md) for full method details.*
+
+## 9. Summary Settings (`summary`)
+- Controls the limits used in the final summary output.
+  - `top_migrated_tables`: Limit for biggest successfully migrated tables.
+  - `top_mismatched_tables`: Limit for tables with row count mismatches.
+  - `top_longest_batches`: Limit for longest data batches.
+  - `top_anonymized_tables`: Limit for top tables with most anonymized columns.
+  - `top_anonymized_columns`: Limit for displayed anonymized columns per table.

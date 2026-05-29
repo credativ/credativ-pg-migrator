@@ -408,3 +408,13 @@ validator:
   check_random_sample: true                # Validates individual random row arrays querying mapped precise primary keys bridging origin to destination
   check_lob_sizes: true                    # Validates exact byte size allocations for migrated LOB (BLOB/CLOB) instances on the sampled rows
   random_sample_size: 1000                 # Determine the maximum amount of randomized samples queried exclusively when check_random_sample or check_lob_sizes is True
+
+# Summary settings
+# Controls the limits used in the final summary output
+summary:
+  top_migrated_tables: 5
+  top_mismatched_tables: 5
+  top_longest_batches: 10
+  top_anonymized_tables: 5
+  top_anonymized_columns: 5
+  show_anonymization_examples: 0

@@ -5,6 +5,7 @@
 - 2026.05.29
 
   - Fix - IBM Db2 LUW Connector: Resolved an `UnboundLocalError` in `fetch_indexes` that caused the migration to crash when attempting to log details for tables with zero indexes.
+  - Feature - IBM Db2 LUW Connector: Implemented `get_sql_functions_mapping` to natively translate DB2-specific built-in functions to their PostgreSQL equivalents, successfully applying this mapping logic across both view (`convert_view_code`) and procedure/function (`convert_funcproc_code`) translation pipelines.
 
 - 2026.05.27
 

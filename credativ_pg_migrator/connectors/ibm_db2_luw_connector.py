@@ -54,9 +54,59 @@ class IbmDb2LuwConnector(DatabaseConnector):
         """ Returns a dictionary of SQL functions mapping for the target database """
         target_db_type = settings['target_db_type']
         if target_db_type == 'postgresql':
-            return {}
+            return {
+                # --- Special Registers (Session Variables) ---
+                "CURRENT SQLID": "CURRENT_USER",
+                "CURRENT USER": "CURRENT_USER",
+                "USER": "SESSION_USER",          # SESSION_USER tracks the original login role
+                "CURRENT DATE": "CURRENT_DATE",
+                "CURRENT TIME": "CURRENT_TIME",
+                "CURRENT TIMESTAMP": "CURRENT_TIMESTAMP",
+                "CURRENT SCHEMA": "CURRENT_SCHEMA",
+                "CURRENT SERVER": "current_database()",
+
+                # --- Null Handling & Control Flow ---
+                "VALUE(": "COALESCE(",
+                "IFNULL(": "COALESCE(",
+                "NVL(": "COALESCE(",
+                ## "DECODE(expr, search, result, default)": "CASE expr WHEN search THEN result ELSE default END",
+
+                # --- String Functions ---
+                "SUBSTR(": "SUBSTRING(",
+                "POSSTR(": "STRPOS(",       # DB2's POSSTR takes (source, search)
+                "LOCATE(": "POSITION(", # DB2's LOCATE takes (search, source)
+                "UCASE(": "UPPER(",
+                "LCASE(": "LOWER(",
+                "STRIP(": "TRIM(",
+                "LENGTH(": "LENGTH(",
+                "CONCAT(": "CONCAT(",                 # Or simply use the str1 || str2 operator
+
+                # --- Date and Time Functions ---
+                "YEAR(": "EXTRACT(YEAR FROM ",
+                "MONTH(": "EXTRACT(MONTH FROM ",
+                "DAY(": "EXTRACT(DAY FROM ",
+                "HOUR(": "EXTRACT(HOUR FROM ",
+                "MINUTE(": "EXTRACT(MINUTE FROM ",
+                "SECOND(": "EXTRACT(SECOND FROM ",
+
+                # Db2 DAYS() returns the integer number of days since Jan 1, 0001.
+                # To replicate this exact integer in Postgres, you subtract that date from your column.
+                ## "DAYS(date_col)": "(date_col::DATE - '0001-01-01'::DATE)",
+
+                # "DATE(expr)": "expr::DATE",                                 # Or CAST(expr AS DATE)
+                # "TIMESTAMP(expr)": "expr::TIMESTAMP",                       # Or CAST(expr AS TIMESTAMP)
+                # "ADD_DAYS(date_col, n)": "date_col + (n || ' days')::INTERVAL",
+                # "ADD_MONTHS(date_col, n)": "date_col + (n || ' months')::INTERVAL",
+
+                # --- Math & Numeric Functions ---
+                "CEILING(": "CEIL(",
+                "TRUNCATE(": "TRUNC(",
+                "RAND()": "RANDOM()",
+                "DECFLOAT(": "num::NUMERIC",                            # PostgreSQL uses NUMERIC for arbitrary precision
+            }
         else:
             self.config_parser.print_log_message('ERROR', f"ibm_db2_luw_connector: get_sql_functions_mapping: Unsupported target database type: {target_db_type}")
+            return {}
 
     def migrate_sequences(self, target_connector, settings):
         return True
@@ -690,8 +740,18 @@ class IbmDb2LuwConnector(DatabaseConnector):
         target_schema_name = settings['target_schema_name']
         table_list = settings['table_list']
         view_list = settings['view_list']
-        converted_code = ''
-        # placeholder for actual conversion logic
+        converted_code = funcproc_code
+        
+        if target_db_type == 'postgresql':
+            sql_functions_mapping = self.get_sql_functions_mapping({ 'target_db_type': target_db_type })
+            if sql_functions_mapping:
+                for src_func, tgt_func in sql_functions_mapping.items():
+                    escaped_src_func = re.escape(src_func)
+                    if escaped_src_func.endswith(r'\(') or escaped_src_func.endswith(r'\)'):
+                        converted_code = re.sub(rf"(?i)\b{escaped_src_func}", tgt_func, converted_code, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
+                    else:
+                        converted_code = re.sub(rf"(?i)\b{escaped_src_func}\b", tgt_func, converted_code, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
+
         return converted_code
 
     def fetch_sequences(self, schema_name: str):
@@ -778,8 +838,19 @@ class IbmDb2LuwConnector(DatabaseConnector):
 
     def convert_view_code(self, settings: dict):
         view_code = settings['view_code']
-        # Placeholder for view conversion
-        return view_code
+        converted_code = view_code
+
+        if settings.get('target_db_type') == 'postgresql':
+            sql_functions_mapping = self.get_sql_functions_mapping({ 'target_db_type': settings['target_db_type'] })
+            if sql_functions_mapping:
+                for src_func, tgt_func in sql_functions_mapping.items():
+                    escaped_src_func = re.escape(src_func)
+                    if escaped_src_func.endswith(r'\(') or escaped_src_func.endswith(r'\)'):
+                        converted_code = re.sub(rf"(?i)\b{escaped_src_func}", tgt_func, converted_code, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
+                    else:
+                        converted_code = re.sub(rf"(?i)\b{escaped_src_func}\b", tgt_func, converted_code, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
+
+        return converted_code
 
     def get_sequence_current_value(self, sequence_id: int):
         # Placeholder for fetching sequence current value

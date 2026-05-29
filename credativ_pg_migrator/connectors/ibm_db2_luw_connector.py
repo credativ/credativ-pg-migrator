@@ -168,18 +168,19 @@ class IbmDb2LuwConnector(DatabaseConnector):
             elif self.config_parser.get_system_catalog() in ('SYSIBM'):
                 query = f"""
                     SELECT
-                        ORDINAL_POSITION,
-                        COLUMN_NAME,
-                        DATA_TYPE,
-                        CHARACTER_MAXIMUM_LENGTH,
-                        NUMERIC_PRECISION,
-                        NUMERIC_SCALE,
-                        IS_NULLABLE,
-                        COLUMN_DEFAULT,
+                        C.ORDINAL_POSITION,
+                        C.COLUMN_NAME,
+                        C.DATA_TYPE,
+                        C.CHARACTER_MAXIMUM_LENGTH,
+                        C.NUMERIC_PRECISION,
+                        C.NUMERIC_SCALE,
+                        C.IS_NULLABLE,
+                        C.COLUMN_DEFAULT,
                         '' AS REMARKS,
-                        'N' AS IDENTITY
-                    FROM SYSIBM.COLUMNS
-                    WHERE TABLE_NAME = '{table_name}' AND TABLE_SCHEMA = upper('{table_schema}') ORDER BY ORDINAL_POSITION
+                        S.IDENTITY
+                    FROM SYSIBM.COLUMNS C
+                    LEFT JOIN SYSIBM.SYSCOLUMNS S ON C.TABLE_NAME = S.TBNAME AND C.TABLE_SCHEMA = S.TBCREATOR AND C.COLUMN_NAME = S.NAME
+                    WHERE C.TABLE_NAME = '{table_name}' AND C.TABLE_SCHEMA = upper('{table_schema}') ORDER BY C.ORDINAL_POSITION
                 """
             else:
                 raise ValueError(f"Unsupported system catalog: {self.config_parser.get_system_catalog()}")
@@ -707,6 +708,31 @@ class IbmDb2LuwConnector(DatabaseConnector):
                         'constraint_comment': '',
                     }
                     order_num += 1
+                elif constraint_type == 'K':
+                    constraint_type = 'CHECK'
+                    query_chk = f"""
+                        SELECT TEXT
+                        FROM SYSCAT.CHECKS
+                        WHERE TABSCHEMA = '{source_table_schema.upper()}'
+                        AND TABNAME = '{source_table_name}'
+                        AND CONSTNAME = '{constraint_name}'
+                    """
+                    cursor.execute(query_chk)
+                    chk_row = cursor.fetchone()
+                    constraint_sql = chk_row[0].strip() if chk_row else ''
+
+                    table_constraints[order_num] = {
+                        'constraint_name': constraint_name,
+                        'constraint_type': constraint_type,
+                        'constraint_owner': source_table_schema,
+                        'constraint_columns': '',
+                        'referenced_table_schema': '',
+                        'referenced_table_name': '',
+                        'referenced_columns': '',
+                        'constraint_sql': constraint_sql,
+                        'constraint_comment': '',
+                    }
+                    order_num += 1
 
             cursor.close()
             self.disconnect()
@@ -720,12 +746,177 @@ class IbmDb2LuwConnector(DatabaseConnector):
         return ""
 
     def fetch_triggers(self, table_id: int, table_schema: str, table_name: str):
-        # Placeholder for fetching triggers
-        return {}
+        triggers = {}
+        order_num = 1
+        try:
+            query = f"""
+                SELECT TRIGNAME, TRIGEVENT, TEXT, REMARKS
+                FROM SYSCAT.TRIGGERS
+                WHERE TABSCHEMA = upper('{table_schema}') AND TABNAME = '{table_name}'
+            """
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            for row in cursor.fetchall():
+                triggers[order_num] = {
+                    'id': order_num,
+                    'name': row[0].strip() if row[0] else row[0],
+                    'event': 'UPDATE', # dummy, parsed in convert_trigger
+                    'new': '',
+                    'old': '',
+                    'sql': row[2],
+                    'comment': row[3].strip() if row[3] else None
+                }
+                order_num += 1
+            cursor.close()
+            self.disconnect()
+            return triggers
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"ibm_db2_luw_connector: fetch_triggers: Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
+            raise
 
-    def convert_trigger(self, trig: str, settings: dict):
-        # Placeholder for trigger conversion
-        pass
+    def convert_trigger(self, settings: dict):
+        trigger_sql = settings.get('trigger_sql', '')
+        trigger_name = settings.get('trigger_name', '')
+        target_schema_name = settings.get('target_schema_name', '')
+        target_table_name = settings.get('target_table_name', '')
+
+        # Basic cleanup
+        trigger_sql = re.sub(r'--([^\n]*)', r'/*\1*/', trigger_sql)
+
+        # 1. Timing (BEFORE, AFTER, INSTEAD OF)
+        timing_match = re.search(r'\b(BEFORE|AFTER|INSTEAD\s+OF)\b', trigger_sql, re.IGNORECASE)
+        timing = timing_match.group(1).upper() if timing_match else 'BEFORE'
+
+        # 2. Event
+        event_match = re.search(r'\b(INSERT|UPDATE|DELETE)(?:\s+OF\s+([a-zA-Z0-9_,\s]+))?\b', trigger_sql[timing_match.end():] if timing_match else trigger_sql, re.IGNORECASE)
+        event = event_match.group(1).upper() if event_match else 'UPDATE'
+        of_cols = event_match.group(2) if event_match and event_match.group(2) else None
+
+        pg_event = event
+        if of_cols and event == 'UPDATE':
+            cols = [c.strip() for c in of_cols.split(',')]
+            # Discard any matches that leaked to 'ON'
+            cols = [c for c in cols if c and c.upper() != 'ON']
+            # Reconstruct list safely
+            actual_cols = []
+            for c in cols:
+                if ' ON ' in c.upper():
+                    c = c.upper().split(' ON ')[0].strip()
+                if c.upper().endswith(' ON'):
+                    c = c[:-3].strip()
+                if c:
+                    actual_cols.append(c)
+            if actual_cols:
+                pg_event += f" OF {', '.join(actual_cols)}"
+
+        # 3. Referencing Aliases
+        old_alias, new_alias = 'OLD', 'NEW'
+        old_match = re.search(r'\bOLD\s+AS\s+([a-zA-Z0-9_]+)\b', trigger_sql, re.IGNORECASE)
+        if old_match: old_alias = old_match.group(1)
+
+        new_match = re.search(r'\bNEW\s+AS\s+([a-zA-Z0-9_]+)\b', trigger_sql, re.IGNORECASE)
+        if new_match: new_alias = new_match.group(1)
+
+        # 4. Extract WHEN and Body
+        mode_match = re.search(r'\bMODE\s+DB2SQL\b', trigger_sql, re.IGNORECASE)
+        for_each_match = re.search(r'\bFOR\s+EACH\s+(ROW|STATEMENT)\b', trigger_sql, re.IGNORECASE)
+
+        start_pos = 0
+        if mode_match:
+            start_pos = mode_match.end()
+        elif for_each_match:
+            start_pos = for_each_match.end()
+
+        remainder = trigger_sql[start_pos:].strip()
+        remainder = re.sub(r'(?i)^(NOT\s+)?SECURED\s+', '', remainder).strip()
+
+        when_clause = ""
+        body = ""
+
+        if remainder.upper().startswith('WHEN'):
+            when_text = remainder[4:].lstrip()
+            if when_text.startswith('('):
+                depth = 0
+                for i, char in enumerate(when_text):
+                    if char == '(': depth += 1
+                    elif char == ')': depth -= 1
+                    if depth == 0:
+                        when_clause = when_text[1:i].strip()
+                        body = when_text[i+1:].strip()
+                        break
+        else:
+            body = remainder
+
+        # Strip BEGIN ATOMIC / BEGIN / END
+        body = re.sub(r'(?i)^BEGIN\s+ATOMIC\s+', '', body).strip()
+        body = re.sub(r'(?i)^BEGIN\s+', '', body).strip()
+        body = re.sub(r'(?i)END;?\s*$', '', body).strip()
+
+        # 5. Replacements
+        def replace_aliases(text):
+            if not text: return text
+            if old_alias.upper() != 'OLD':
+                text = re.sub(rf'\b{re.escape(old_alias)}\.', 'OLD.', text, flags=re.IGNORECASE)
+            if new_alias.upper() != 'NEW':
+                text = re.sub(rf'\b{re.escape(new_alias)}\.', 'NEW.', text, flags=re.IGNORECASE)
+            return text
+
+        when_clause = replace_aliases(when_clause)
+        body = replace_aliases(body)
+
+        # Replace CURRENT DATE / TIMESTAMP
+        body = re.sub(r'\bCURRENT\s+DATE\b', 'CURRENT_DATE', body, flags=re.IGNORECASE)
+        body = re.sub(r'\bCURRENT\s+TIMESTAMP\b', 'CURRENT_TIMESTAMP', body, flags=re.IGNORECASE)
+        when_clause = re.sub(r'\bCURRENT\s+DATE\b', 'CURRENT_DATE', when_clause, flags=re.IGNORECASE)
+        when_clause = re.sub(r'\bCURRENT\s+TIMESTAMP\b', 'CURRENT_TIMESTAMP', when_clause, flags=re.IGNORECASE)
+
+        # Handle SIGNAL SQLSTATE and RAISE_ERROR
+        body = re.sub(r"(?i)SIGNAL\s+SQLSTATE\s+'([^']+)'\s*\(\s*('[^']+')\s*\);?", r"RAISE EXCEPTION \2 USING ERRCODE = '\1';", body)
+        body = re.sub(r"(?i)RAISE_ERROR\s*\(\s*'([^']+)'\s*,\s*('[^']+')\s*\)", r"RAISE EXCEPTION \2 USING ERRCODE = '\1';", body)
+
+        # Handle assignments: SET a = b or SET (a,b) = (c,d)
+        if body.upper().startswith('SET'):
+            body = re.sub(r'(?i)^SET\s*', '', body)
+            tuple_match = re.match(r'^\(\s*([^)]+)\s*\)\s*=\s*\(\s*(.+)\s*\);?$', body, re.IGNORECASE | re.DOTALL)
+            if tuple_match:
+                cols = [c.strip() for c in tuple_match.group(1).split(',')]
+                vals = [c.strip() for c in tuple_match.group(2).split(',')]
+                if len(cols) == 1:
+                    body = f"{cols[0]} := {tuple_match.group(2)};"
+                elif len(cols) == len(vals):
+                    # Multi-assignment
+                    body = "\n".join([f"{c} := {v};" for c, v in zip(cols, vals)])
+            else:
+                body = re.sub(r'(?i)^([A-Za-z0-9_.]+)\s*=', r'\1 := ', body)
+            if not body.strip().endswith(';'):
+                body += ';'
+
+        # Handle plain updates
+        if not body.strip().endswith(';'):
+            body += ';'
+
+        # Target Generation
+        func_name = f"{trigger_name}_func"
+
+        pg_func = f"""CREATE OR REPLACE FUNCTION "{target_schema_name}"."{func_name}"()
+RETURNS TRIGGER AS $$
+BEGIN
+{body}
+RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+"""
+        when_sql = f"\nWHEN ({when_clause})" if when_clause else ""
+        pg_trigger = f"""CREATE TRIGGER "{trigger_name}"
+{timing} {pg_event} ON "{target_schema_name}"."{target_table_name}"
+FOR EACH ROW{when_sql}
+EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
+"""
+
+        self.config_parser.print_log_message('DEBUG', f"ibm_db2_luw_connector: convert_trigger: Converted {trigger_name}")
+        return pg_func + '\n' + pg_trigger
 
     def fetch_funcproc_names(self, schema: str):
         # Placeholder for fetching function/procedure names
@@ -760,57 +951,56 @@ class IbmDb2LuwConnector(DatabaseConnector):
         sequences = {}
         order_num = 1
         try:
-            if self.config_parser.get_system_catalog() in ('SYSCAT', 'NONE'):
-                query_standalone = f"""
-                    SELECT
-                        SEQNAME,
-                        NULL AS TABNAME,
-                        NULL AS COLNAME,
-                        START,
-                        INCREMENT,
-                        MINVALUE,
-                        MAXVALUE,
-                        CACHE,
-                        CYCLE
-                    FROM SYSCAT.SEQUENCES
-                    WHERE SEQSCHEMA = upper('{schema_name}') AND SEQTYPE = 'S'
-                """
-                query_identity = f"""
-                    SELECT
-                        TABNAME || '_' || COLNAME || '_SEQ' AS SEQNAME,
-                        TABNAME,
-                        COLNAME,
-                        START,
-                        INCREMENT,
-                        MINVALUE,
-                        MAXVALUE,
-                        CACHE,
-                        CYCLE
-                    FROM SYSCAT.COLIDENTATTRIBUTES
-                    WHERE TABSCHEMA = upper('{schema_name}')
-                """
-                
-                self.connect()
-                cursor = self.connection.cursor()
-                
-                for query in [query_standalone, query_identity]:
-                    cursor.execute(query)
-                    for row in cursor.fetchall():
-                        sequences[order_num] = {
-                            'sequence_name': row[0].strip() if row[0] else row[0],
-                            'table_name': row[1].strip() if row[1] else row[1],
-                            'column_name': row[2].strip() if row[2] else row[2],
-                            'source_start_value': int(row[3]) if row[3] is not None else None,
-                            'source_increment_by': int(row[4]) if row[4] is not None else None,
-                            'source_minvalue': int(row[5]) if row[5] is not None else None,
-                            'source_maxvalue': int(row[6]) if row[6] is not None else None,
-                            'source_cache': int(row[7]) if row[7] is not None else None,
-                            'source_is_cycled': row[8].strip() if row[8] else row[8],
-                            'source_sequence_sql': ''
-                        }
-                        order_num += 1
-                cursor.close()
-                self.disconnect()
+            query_standalone = f"""
+                SELECT
+                    SEQNAME,
+                    NULL AS TABNAME,
+                    NULL AS COLNAME,
+                    START,
+                    INCREMENT,
+                    MINVALUE,
+                    MAXVALUE,
+                    CACHE,
+                    CYCLE
+                FROM SYSCAT.SEQUENCES
+                WHERE SEQSCHEMA = upper('{schema_name}') AND SEQTYPE = 'S'
+            """
+            query_identity = f"""
+                SELECT
+                    TABNAME || '_' || COLNAME || '_SEQ' AS SEQNAME,
+                    TABNAME,
+                    COLNAME,
+                    START,
+                    INCREMENT,
+                    MINVALUE,
+                    MAXVALUE,
+                    CACHE,
+                    CYCLE
+                FROM SYSCAT.COLIDENTATTRIBUTES
+                WHERE TABSCHEMA = upper('{schema_name}')
+            """
+            
+            self.connect()
+            cursor = self.connection.cursor()
+            
+            for query in [query_standalone, query_identity]:
+                cursor.execute(query)
+                for row in cursor.fetchall():
+                    sequences[order_num] = {
+                        'sequence_name': row[0].strip() if row[0] else row[0],
+                        'table_name': row[1].strip() if row[1] else row[1],
+                        'column_name': row[2].strip() if row[2] else row[2],
+                        'source_start_value': int(row[3]) if row[3] is not None else None,
+                        'source_increment_by': int(row[4]) if row[4] is not None else None,
+                        'source_minvalue': int(row[5]) if row[5] is not None else None,
+                        'source_maxvalue': int(row[6]) if row[6] is not None else None,
+                        'source_cache': int(row[7]) if row[7] is not None else None,
+                        'source_is_cycled': row[8].strip() if row[8] else row[8],
+                        'source_sequence_sql': ''
+                    }
+                    order_num += 1
+            cursor.close()
+            self.disconnect()
             return sequences
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"ibm_db2_luw_connector: fetch_sequences: Error executing query: {e}")

@@ -18,7 +18,7 @@
 
   - Feature - Anonymization: Introduced a standalone pluggable data anonymization module. Configured via the `anonymization` workflow, this executes a dedicated PostgreSQL to PostgreSQL migration pipeline. It natively supports Python in-memory transformation (lazy-loading optional libraries like Faker and Mimesis) and intercepts `__RAW_SQL__` tokens to directly offload functions to PostgreSQL extensions like `postgresql_anonymizer`.
 
-## 0.14.0 - 2026.05.18
+## 0.14.0 - 2026.05.20
 
 - 2026.05.18
 

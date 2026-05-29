@@ -1,6 +1,10 @@
 # Changelog
 
-## 0.15.0rc1 - 2026.05.27
+## 0.15.0rc1 - 2026.05.29
+
+- 2026.05.29
+
+  - Fix - IBM Db2 LUW Connector: Resolved an `UnboundLocalError` in `fetch_indexes` that caused the migration to crash when attempting to log details for tables with zero indexes.
 
 - 2026.05.27
 

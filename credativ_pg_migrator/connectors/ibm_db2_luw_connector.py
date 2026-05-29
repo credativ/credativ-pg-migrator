@@ -583,7 +583,7 @@ class IbmDb2LuwConnector(DatabaseConnector):
 
             cursor.close()
             self.disconnect()
-            self.config_parser.print_log_message( 'DEBUG2', f"ibm_db2_luw_connector: fetch_indexes: Indexes for table {source_table_name} ({source_table_schema}): {index_columns}")
+            self.config_parser.print_log_message( 'DEBUG2', f"ibm_db2_luw_connector: fetch_indexes: Indexes for table {source_table_name} ({source_table_schema}): {table_indexes}")
             return table_indexes
         except Exception as e:
             self.config_parser.print_log_message( 'ERROR', f"ibm_db2_luw_connector: fetch_indexes: Error executing query: {query}")

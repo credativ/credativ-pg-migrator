@@ -18,6 +18,8 @@ from credativ_pg_migrator.database_connector import DatabaseConnector
 from credativ_pg_migrator.migrator_logging import MigratorLogger
 import ibm_db_dbi  ## install ibm_db package to use this connector
 import traceback
+import re
+import sqlglot
 import time
 import datetime
 
@@ -118,7 +120,7 @@ class IbmDb2LuwConnector(DatabaseConnector):
                 TABNAME,
                 REMARKS
             FROM SYSCAT.TABLES
-            WHERE TABSCHEMA = upper('{table_schema}')
+            WHERE TABSCHEMA = upper('{table_schema}') AND TYPE = 'T'
             ORDER BY TABNAME"""
         try:
             tables = {}
@@ -824,23 +826,230 @@ class IbmDb2LuwConnector(DatabaseConnector):
             raise
 
     def fetch_views_names(self, source_schema_name: str):
-        # Placeholder for fetching view names
-        return {}
+        views = {}
+        order_num = 1
+        query = f"""
+            SELECT
+                VIEWNAME,
+                VIEWSCHEMA,
+                '' AS REMARKS
+            FROM SYSCAT.VIEWS
+            WHERE VIEWSCHEMA = upper('{source_schema_name}') AND VALID = 'Y'
+            ORDER BY VIEWNAME
+        """
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            for row in cursor.fetchall():
+                view_name = row[0].strip() if row[0] else row[0]
+                view_schema = row[1].strip() if row[1] else row[1]
+                comment = row[2]
+                views[order_num] = {
+                    'id': order_num,
+                    'schema_name': view_schema,
+                    'view_name': view_name,
+                    'target_schema_name': '',
+                    'target_view_name': '',
+                    'comment': comment,
+                    'is_alias': False
+                }
+                order_num += 1
+
+            cursor.close()
+            self.disconnect()
+            self.config_parser.print_log_message('DEBUG3', f"ibm_db2_luw_connector: fetch_views_names: ({source_schema_name}): {views}")
+            return views
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"ibm_db2_luw_connector: fetch_views_names: Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
+            raise
 
     def fetch_view_code(self, settings):
-        view_id = settings['view_id']
         source_schema_name = settings['source_schema_name']
         source_view_name = settings['source_view_name']
-        target_schema_name = settings['target_schema_name']
-        target_view_name = settings['target_view_name']
-        # Placeholder for fetching view code
-        return ""
+        query = f"""
+            SELECT
+                TEXT
+            FROM SYSCAT.VIEWS
+            WHERE VIEWSCHEMA = upper('{source_schema_name}') AND VIEWNAME = '{source_view_name}'
+        """
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            row = cursor.fetchone()
+            view_sql = row[0] if row else ""
+            cursor.close()
+            self.disconnect()
+            self.config_parser.print_log_message('DEBUG3', f"ibm_db2_luw_connector: fetch_view_code: ({source_schema_name}.{source_view_name}): {view_sql}")
+            return view_sql
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"ibm_db2_luw_connector: fetch_view_code: Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
+            raise
 
     def convert_view_code(self, settings: dict):
+
+        def quote_column_names(node):
+            if isinstance(node, sqlglot.exp.Column):
+                if node.name:
+                    base_name = node.name.upper() if not node.args.get("this").args.get("quoted") else node.name
+                    converted_name = self.config_parser.convert_names_case(base_name)
+                    node.set("this", sqlglot.exp.Identifier(this=converted_name, quoted=True))
+                
+                table_id = node.args.get("table")
+                if isinstance(table_id, sqlglot.exp.Identifier):
+                    base_table = table_id.name.upper() if not table_id.args.get("quoted") else table_id.name
+                    converted_table = self.config_parser.convert_names_case(base_table)
+                    table_id.set("this", converted_table)
+                    if not table_id.args.get("quoted"):
+                        table_id.set("quoted", True)
+                        
+                db_id = node.args.get("db")
+                if isinstance(db_id, sqlglot.exp.Identifier):
+                    base_db = db_id.name.upper() if not db_id.args.get("quoted") else db_id.name
+                    converted_db = self.config_parser.convert_names_case(base_db)
+                    db_id.set("this", converted_db)
+                    if not db_id.args.get("quoted"):
+                        db_id.set("quoted", True)
+            if isinstance(node, sqlglot.exp.Alias) and isinstance(node.args.get("alias"), sqlglot.exp.Identifier):
+                alias = node.args["alias"]
+                base_name = alias.name.upper() if not alias.args.get("quoted") else alias.name
+                converted_alias = self.config_parser.convert_names_case(base_name)
+                alias.set("this", converted_alias)
+                if not alias.args.get("quoted"):
+                    alias.set("quoted", True)
+            if isinstance(node, sqlglot.exp.Schema):
+                for expr in node.expressions:
+                    if isinstance(expr, sqlglot.exp.Identifier):
+                        base_name = expr.name.upper() if not expr.args.get("quoted") else expr.name
+                        converted_name = self.config_parser.convert_names_case(base_name)
+                        expr.set("this", converted_name)
+                        if not expr.args.get("quoted"):
+                            expr.set("quoted", True)
+            return node
+
+        def replace_schema_names(node):
+            if isinstance(node, sqlglot.exp.Table):
+                schema = node.args.get("db")
+                if schema and schema.name.upper() == settings['source_schema_name'].upper():
+                    node.set("db", sqlglot.exp.Identifier(this=settings['target_schema_name'], quoted=False))
+            return node
+
+        def quote_schema_and_table_names(node):
+            if isinstance(node, sqlglot.exp.TableAlias):
+                alias_id = node.args.get("this")
+                if isinstance(alias_id, sqlglot.exp.Identifier):
+                    base_alias = alias_id.name.upper() if not alias_id.args.get("quoted") else alias_id.name
+                    converted_alias = self.config_parser.convert_names_case(base_alias)
+                    alias_id.set("this", converted_alias)
+                    if not alias_id.args.get("quoted"):
+                        alias_id.set("quoted", True)
+            if isinstance(node, sqlglot.exp.Table):
+                schema = node.args.get("db")
+                schema_name_for_lookup = schema.name if schema else settings['source_schema_name']
+                if schema:
+                    base_schema = schema.name.upper() if not schema.args.get("quoted") else schema.name
+                    converted_schema = self.config_parser.convert_names_case(base_schema)
+                    schema.set("this", converted_schema)
+                    if not schema.args.get("quoted"):
+                        schema.set("quoted", True)
+                table = node.args.get("this")
+                if table:
+                    # Lookup alias if enabled
+                    table_name_to_use = table.name.upper() if not table.args.get("quoted") else table.name
+                    if not isinstance(node.parent, sqlglot.exp.Create):
+                        if self.config_parser.get_use_aliases_as_target_names() and settings.get('migrator_tables'):
+                            alias_dict = settings['migrator_tables'].get_alias_for_table(schema_name_for_lookup, table_name_to_use)
+                            if alias_dict and not settings.get('alias_view'):
+                                alias_name = alias_dict.get('target_alias_name')
+                                alias_target_type = alias_dict.get('alias_target_type', 'UNKNOWN')
+
+                                if alias_target_type == 'TABLE':
+                                    if alias_name.lower() == settings.get('target_view_name', '').lower() or alias_name.lower() == settings.get('source_view_name', '').lower():
+                                        self.config_parser.print_log_message('INFO', f"ibm_db2_luw_connector: convert_view_code: Skipped replacing referenced table '{table_name_to_use}' with alias '{alias_name}' to avoid circular reference. Settings: {settings}")
+                                    else:
+                                        self.config_parser.print_log_message('INFO', f"ibm_db2_luw_connector: convert_view_code: Replaced referenced table '{table_name_to_use}' with alias '{alias_name}' inside view generation. Settings: {settings}")
+                                        table_name_to_use = alias_name
+                                else:
+                                    self.config_parser.print_log_message('DEBUG', f"ibm_db2_luw_connector: convert_view_code: Skipped replacing '{table_name_to_use}' with alias '{alias_name}' because alias points to a {alias_target_type}, not a TABLE.")
+
+                    converted_table = self.config_parser.convert_names_case(table_name_to_use)
+                    table.set("this", converted_table)
+                    if not table.args.get("quoted"):
+                        table.set("quoted", True)
+            return node
+
+        def replace_functions(node):
+            mapping = self.get_sql_functions_mapping({ 'target_db_type': settings['target_db_type'] })
+            func_name_map = {}
+            for k, v in mapping.items():
+                if k.endswith('('):
+                    func_name_map[k[:-1].lower()] = v[:-1] if v.endswith('(') else v
+                elif k.endswith('()'):
+                    func_name_map[k[:-2].lower()] = v
+                else:
+                    func_name_map[k.lower()] = v
+
+            if isinstance(node, sqlglot.exp.Anonymous):
+                func_name = node.name.lower()
+                if func_name in func_name_map:
+                    mapped = func_name_map[func_name]
+                    if '(' not in mapped:
+                        node.set("this", sqlglot.exp.Identifier(this=mapped, quoted=False))
+                    else:
+                        if mapped.startswith('extract('):
+                            arg = node.args.get("expressions")
+                            if arg and len(arg) == 1:
+                                return sqlglot.exp.Extract(
+                                    this=sqlglot.exp.Identifier(this=func_name, quoted=False),
+                                    expression=arg[0]
+                                )
+                        else:
+                            for orig, repl in mapping.items():
+                                if orig.endswith('(') and func_name == orig[:-1].lower():
+                                    if repl.endswith('('):
+                                        node.set("this", sqlglot.exp.Identifier(this=repl[:-1], quoted=False))
+                                    else:
+                                        node.set("this", sqlglot.exp.Identifier(this=repl, quoted=False))
+                                    break
+                                elif orig.endswith('()') and func_name == orig[:-2].lower():
+                                    node.set("this", sqlglot.exp.Identifier(this=repl, quoted=False))
+                                    break
+                elif func_name + "()" in func_name_map:
+                    mapped = func_name_map[func_name + "()"]
+                    return sqlglot.exp.Anonymous(this=mapped)
+            return node
+
+        def convert_string_concatenation(node):
+            if isinstance(node, sqlglot.exp.Add):
+                left = node.left
+                right = node.right
+                is_left_string = left.is_string or (isinstance(left, sqlglot.exp.Cast) and left.to.this.name.upper() in ('VARCHAR', 'CHAR', 'TEXT', 'NVARCHAR', 'NCHAR', 'UNIVARCHAR', 'UNICHAR'))
+                is_right_string = right.is_string or (isinstance(right, sqlglot.exp.Cast) and right.to.this.name.upper() in ('VARCHAR', 'CHAR', 'TEXT', 'NVARCHAR', 'NCHAR', 'UNIVARCHAR', 'UNICHAR'))
+
+                if is_left_string or is_right_string:
+                    new_left = left
+                    new_right = right
+                    if not is_left_string:
+                         new_left = sqlglot.exp.Cast(this=left, to=sqlglot.exp.DataType.build('text'))
+                    if not is_right_string:
+                         new_right = sqlglot.exp.Cast(this=right, to=sqlglot.exp.DataType.build('text'))
+                    return sqlglot.exp.DPipe(this=new_left, expression=new_right)
+            return node
+
         view_code = settings['view_code']
         converted_code = view_code
 
-        if settings.get('target_db_type') == 'postgresql':
+        remote_subs = self.config_parser.get_remote_objects_substitution()
+        if remote_subs:
+            iterator = remote_subs.items() if isinstance(remote_subs, dict) else remote_subs
+            for source_obj, target_obj in iterator:
+                if source_obj and target_obj:
+                    converted_code = re.sub(re.escape(source_obj), target_obj, converted_code, flags=re.IGNORECASE)
+
+        if settings['target_db_type'] == 'postgresql':
             sql_functions_mapping = self.get_sql_functions_mapping({ 'target_db_type': settings['target_db_type'] })
             if sql_functions_mapping:
                 for src_func, tgt_func in sql_functions_mapping.items():
@@ -849,6 +1058,27 @@ class IbmDb2LuwConnector(DatabaseConnector):
                         converted_code = re.sub(rf"(?i)\b{escaped_src_func}", tgt_func, converted_code, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
                     else:
                         converted_code = re.sub(rf"(?i)\b{escaped_src_func}\b", tgt_func, converted_code, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
+
+            try:
+                # Use default sqlglot dialect because 'db2' dialect is not supported
+                parsed_code = sqlglot.parse_one(converted_code)
+            except Exception as e:
+                self.config_parser.print_log_message('ERROR', f"ibm_db2_luw_connector: convert_view_code: Error parsing View code: {e}")
+                # Fallback to the unparsed converted_code instead of empty string to avoid crashes
+                return converted_code
+
+            parsed_code = parsed_code.transform(quote_column_names)
+            parsed_code = parsed_code.transform(convert_string_concatenation)
+            parsed_code = parsed_code.transform(quote_schema_and_table_names)
+            parsed_code = parsed_code.transform(replace_schema_names)
+            parsed_code = parsed_code.transform(replace_functions)
+
+            converted_code = parsed_code.sql(dialect="postgres")
+            converted_code = converted_code.replace("()()", "()")
+
+            self.config_parser.print_log_message('DEBUG', f"ibm_db2_luw_connector: convert_view_code: Converted view: {converted_code}")
+        else:
+            self.config_parser.print_log_message('ERROR', f"ibm_db2_luw_connector: convert_view_code: Unsupported target database type: {settings['target_db_type']}")
 
         return converted_code
 
@@ -1011,7 +1241,7 @@ class IbmDb2LuwConnector(DatabaseConnector):
         query = f"""
             SELECT COUNT(*)
             FROM SYSCAT.TABLES
-            WHERE TABSCHEMA = upper('{target_schema_name}') AND TABNAME = '{target_table_name}'
+            WHERE TABSCHEMA = upper('{target_schema_name}') AND TABNAME = '{target_table_name}' AND TYPE = 'T'
         """
         try:
             self.connect()

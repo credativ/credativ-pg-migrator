@@ -7,6 +7,9 @@
   - Fix - IBM Db2 LUW Connector: Resolved an `UnboundLocalError` in `fetch_indexes` that caused the migration to crash when attempting to log details for tables with zero indexes.
   - Feature - IBM Db2 LUW Connector: Implemented `get_sql_functions_mapping` to natively translate DB2-specific built-in functions to their PostgreSQL equivalents, successfully applying this mapping logic across both view (`convert_view_code`) and procedure/function (`convert_funcproc_code`) translation pipelines.
 
+  - Feature - IBM Db2 LUW Connector: Implemented `fetch_views_names`, `fetch_view_code`, and `convert_view_code` to properly extract and parse views leveraging `sqlglot`, including native schema mapping, dialect conversion, and automated alias resolution.
+  - Fix - IBM Db2 LUW Connector: Added strict `TYPE = 'T'` filters to `fetch_table_names` and `target_table_exists` to prevent views and aliases from being mistakenly processed as standard tables.
+
 - 2026.05.27
 
   - Fix - Anonymization Workflow: Updated `routing.py` to preserve source database `NULL` values instead of replacing them with newly generated values.

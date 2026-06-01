@@ -3240,6 +3240,7 @@ class MigratorTables:
         lines.append(f"{'Object Type':<24} | {'Source':>6} | {'Success':>7} | {'Failed':>6} | Details")
         lines.append("-" * 80)
         
+        total_errors = 0
         objects_to_check = [
             ('User Defined Types', self.config_parser.get_protocol_name_user_defined_types(), None),
             ('Domains', self.config_parser.get_protocol_name_domains(), 'migrated_as'),
@@ -3267,7 +3268,9 @@ class MigratorTables:
                     cursor.execute(f"""SELECT success, COUNT(*) FROM "{self.protocol_schema}"."{table_name}" GROUP BY 1""")
                     for s, c in cursor.fetchall():
                         if s is True: success_count = c
-                        elif s is False: error_count = c
+                        elif s is False:
+                            error_count = c
+                            total_errors += c
 
                 details = []
                 if add_cols and not self.config_parser.is_dry_run():
@@ -3350,6 +3353,10 @@ class MigratorTables:
                 full_dm = cursor.fetchone()[0]
                 cursor.execute(f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{dm_table}" WHERE source_table_rows > 0 AND source_table_rows <> target_table_rows""")
                 diff_dm = cursor.fetchone()[0]
+                
+                cursor.execute(f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{dm_table}" WHERE success = FALSE""")
+                dm_errors = cursor.fetchone()[0]
+                total_errors += dm_errors
                 
                 lines.append(f"Total Tables Processed   : {total_dm}")
                 lines.append(f"Empty Tables (0 rows)    : {empty_dm}")
@@ -3497,6 +3504,8 @@ class MigratorTables:
             except Exception as e:
                 lines.append(f"Error computing anonymization stats: {e}")
 
+        lines.append("")
+        lines.append(f"TOTAL ERRORS IN MIGRATION: {total_errors}")
         lines.append("=" * 80)
         final_summary = "\n" + "\n".join(lines)
         self.config_parser.print_log_message('INFO', final_summary)

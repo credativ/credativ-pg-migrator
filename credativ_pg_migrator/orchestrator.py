@@ -2117,6 +2117,8 @@ class Orchestrator:
         if self.on_error_action == 'stop':
             self.config_parser.print_log_message('ERROR', "orchestrator: handle_error: Stopping due to error.")
             exit(1)
+        else:
+            self.config_parser.print_log_message('WARNING', f"orchestrator: handle_error: Error caught, but continuing as requested by configuration (on_error_action='{self.on_error_action}').")
 
     def check_pausing_resuming(self):
         if self.config_parser.pause_migration_fired():

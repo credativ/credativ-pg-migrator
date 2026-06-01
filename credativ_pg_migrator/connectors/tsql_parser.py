@@ -1228,6 +1228,19 @@ class TsqlParser:
                     "line": start_line,
                     "content": full_raiserror
                 })
+
+                # Check if next statement is RETURN and comment it out
+                next_idx = i
+                while next_idx < len(self.body_lines):
+                    next_line_obj = self.body_lines[next_idx]
+                    next_content = next_line_obj.content.strip()
+                    if next_content == "":
+                        next_idx += 1
+                        continue
+                    if re.match(r'^RETURN\b', next_content, re.IGNORECASE):
+                        self.body_lines[next_idx] = type(next_line_obj)(next_line_obj.line_number, f"/* {next_content} - Sybase syntax */")
+                    break
+
             else:
                 new_body_lines.append(line)
                 i += 1

@@ -2,6 +2,12 @@
 
 ## 0.15.0rc1 - 2026.05.29
 
+- 2026.06.01
+
+  - Feature - Sybase ASE Connector: Used `ROW_COUNT` instead of `COUNT(*)` for initial row count fetch if no migration limitation is defined to improve performance.
+  - Feature - TSQL Parser: Implemented logic to automatically comment out `RETURN` statements following `RAISERROR` in Sybase ASE procedures to ensure PostgreSQL compatibility.
+  - Feature - Core Migrator: Enhanced `handle_error` logging across all connectors and the orchestrator to explicitly output a warning message when errors are bypassed due to the `on_error_action=continue` configuration setting.
+
 - 2026.05.29
 
   - Fix - IBM Db2 LUW Connector: Resolved an `UnboundLocalError` in `fetch_indexes` that caused the migration to crash when attempting to log details for tables with zero indexes.

@@ -1813,8 +1813,13 @@ EXECUTE FUNCTION "{func_schema}"."{func_name}"();
         pass
 
     def handle_error(self, e, description=None):
-        # ...existing code from SybaseASEConnector.handle_error...
-        pass
+        self.config_parser.print_log_message('ERROR', f"ms_sql_connector: handle_error: An error in {self.__class__.__name__} ({description}): {e}")
+        self.config_parser.print_log_message('ERROR', traceback.format_exc())
+        if self.on_error_action == 'stop':
+            self.config_parser.print_log_message('ERROR', "ms_sql_connector: handle_error: Stopping due to error.")
+            exit(1)
+        else:
+            self.config_parser.print_log_message('WARNING', f"ms_sql_connector: handle_error: Error caught, but continuing as requested by configuration (on_error_action='{self.on_error_action}').")
 
     def get_rows_count(self, table_schema: str, table_name: str, migration_limitation: str = None):
         query = f"""SELECT COUNT(*) FROM [{table_schema}].[{table_name}]"""
@@ -1877,9 +1882,7 @@ EXECUTE FUNCTION "{func_schema}"."{func_name}"();
             self.disconnect()
             return sequences
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"ms_sql_connector: fetch_sequences: Error executing query: {query}")
-            self.config_parser.print_log_message('ERROR', e)
-            raise
+            self.handle_error(e, f"fetching sequences for schema {schema_name}")
 
     def get_sequence_details(self, sequence_owner, sequence_name):
         # Placeholder for fetching sequence details

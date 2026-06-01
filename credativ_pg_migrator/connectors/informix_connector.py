@@ -1799,7 +1799,7 @@ class InformixConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', "informix_connector: handle_error: Stopping due to error.")
             exit(1)
         else:
-            pass
+            self.config_parser.print_log_message('WARNING', f"informix_connector: handle_error: Error caught, but continuing as requested by configuration (on_error_action='{self.on_error_action}').")
 
     def get_rows_count(self, table_schema: str, table_name: str, migration_limitation: str = None):
         query = f"""SELECT COUNT(*) FROM "{table_schema}".{table_name} """

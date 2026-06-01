@@ -1426,12 +1426,13 @@ class SybaseASEConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', "sybase_ase_connector: handle_error: Stopping due to error.")
             exit(1)
         else:
-            pass
+            self.config_parser.print_log_message('WARNING', f"sybase_ase_connector: handle_error: Error caught, but continuing as requested by configuration (on_error_action='{self.on_error_action}').")
 
     def get_rows_count(self, table_schema: str, table_name: str, migration_limitation: str = None):
-        query = f"""SELECT COUNT(*) FROM {table_schema}.{table_name} """
         if migration_limitation:
-            query += f" WHERE {migration_limitation} "
+            query = f"""SELECT COUNT(*) FROM {table_schema}.{table_name} WHERE {migration_limitation} """
+        else:
+            query = f"""SELECT ROW_COUNT(db_id(), object_id('{table_name}')) """
         self.config_parser.print_log_message('DEBUG3',f"sybase_ase_connector: get_rows_count: query: {query}")
         cursor = self.connection.cursor()
         cursor.execute(query)

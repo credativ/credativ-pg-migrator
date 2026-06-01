@@ -2157,6 +2157,9 @@ class PostgreSQLConnector(DatabaseConnector):
                 sql_parts.append("NOT NULL")
 
             if domain_check_sql:
+                # Ensure PostgreSQL standalone domain constraints rely on VALUE instead of column names
+                domain_check_sql = re.sub(r'(?i)(CHECK\s*\(\s*)([a-zA-Z_]\w*)(\s+|[<>=!])', r'\g<1>VALUE\g<3>', domain_check_sql)
+                
                 # pg_get_constraintdef already allows CHECK (...).
                 # If multiple constraints were aggregated, they might look like CHECK (...) CHECK (...)
                 # We just append them.

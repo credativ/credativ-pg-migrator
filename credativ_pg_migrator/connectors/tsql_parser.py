@@ -1032,7 +1032,7 @@ class TsqlParser:
                 print_args = re.sub(r'^PRINT\b', '', full_print, flags=re.IGNORECASE).strip()
                 
                 if print_args.startswith("'") or print_args.startswith('"'):
-                    match = re.match(r'^((?:\'[^\']*\')|(?:"[^"]*"))(.*)$', print_args, re.IGNORECASE)
+                    match = re.match(r'^((?:\'(?:[^\']|\'\')*\')|(?:"(?:[^"]|"")*"))(.*)$', print_args, re.IGNORECASE)
                     if match:
                         format_str_raw = match.group(1)
                         args = match.group(2).strip()
@@ -1040,6 +1040,9 @@ class TsqlParser:
                         if format_str_raw.startswith('"') and format_str_raw.endswith('"'):
                             # User requested to remove single quotes completely before replacing main double quotes
                             format_str = format_str_raw[1:-1].replace("'", "")
+                        elif format_str_raw.startswith("'") and format_str_raw.endswith("'"):
+                            # If it was converted by an earlier pass, remove the escaped single quotes
+                            format_str = format_str_raw[1:-1].replace("''", "")
                         else:
                             format_str = format_str_raw[1:-1]
                             
@@ -1202,7 +1205,7 @@ class TsqlParser:
                 full_raiserror = " ".join(cleaned_lines)
 
                 # Now parse RAISERROR <number> <string>
-                match = re.match(r'^RAISERROR\s+(\d+)\s+((?:\'[^\']*\')|(?:"[^"]*"))(.*)$', full_raiserror, re.IGNORECASE)
+                match = re.match(r'^RAISERROR\s+(\d+)\s+((?:\'(?:[^\']|\'\')*\')|(?:"(?:[^"]|"")*"))(.*)$', full_raiserror, re.IGNORECASE)
                 if match:
                     err_num = match.group(1)
                     err_msg_raw = match.group(2)

@@ -20,6 +20,7 @@ import psycopg2.extras
 from psycopg2 import sql
 from credativ_pg_migrator.database_connector import DatabaseConnector
 from credativ_pg_migrator.migrator_logging import MigratorLogger
+from credativ_pg_migrator.constants import MigratorConstants
 import traceback
 import re
 import datetime
@@ -34,7 +35,7 @@ class PostgreSQLConnector(DatabaseConnector):
 
     def connect(self):
         connection_string = self.config_parser.get_connect_string(self.source_or_target)
-        self.connection = psycopg2.connect(connection_string)
+        self.connection = psycopg2.connect(connection_string, application_name=MigratorConstants.get_application_name())
         self.connection.autocommit = True
 
     def disconnect(self):

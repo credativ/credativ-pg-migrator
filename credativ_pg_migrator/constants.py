@@ -24,6 +24,10 @@ class MigratorConstants:
         return 'Database Migration Tool credativ-pg-migrator'
 
     @staticmethod
+    def get_application_name():
+        return 'credativ-pg-migrator'
+
+    @staticmethod
     def get_message_levels():
         return ['INFO', 'WARNING', 'ERROR', 'DEBUG', 'DEBUG2', 'DEBUG3']
 

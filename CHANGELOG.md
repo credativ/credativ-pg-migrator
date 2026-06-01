@@ -8,6 +8,8 @@
   - Feature - TSQL Parser: Implemented logic to automatically comment out `RETURN` statements following `RAISERROR` in Sybase ASE procedures to ensure PostgreSQL compatibility.
   - Feature - Core Migrator: Enhanced `handle_error` logging across all connectors and the orchestrator to explicitly output a warning message when errors are bypassed due to the `on_error_action=continue` configuration setting.
   - Feature - Core Migrator: Enhanced migration summary report to calculate and display the total count of errors encountered across all objects and data migration phases.
+  - Feature - PostgreSQL Connector: Set `application_name` to `credativ-pg-migrator` (defined in `constants.py`) for all PostgreSQL connections to improve database monitoring and connection visibility.
+  - Feature - TSQL Parser: Implemented logic to automatically convert `EXEC`/`EXECUTE` procedure calls to `PERFORM` statements in PostgreSQL PL/pgSQL, properly enclosing arguments in parentheses.
 
 - 2026.05.29
 

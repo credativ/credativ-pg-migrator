@@ -1038,7 +1038,8 @@ class TsqlParser:
                         args = match.group(2).strip()
                         
                         if format_str_raw.startswith('"') and format_str_raw.endswith('"'):
-                            format_str = format_str_raw[1:-1].replace("'", "''")
+                            # User requested to remove single quotes completely before replacing main double quotes
+                            format_str = format_str_raw[1:-1].replace("'", "")
                         else:
                             format_str = format_str_raw[1:-1]
                             
@@ -1958,6 +1959,10 @@ class TsqlParser:
             if re.match(r'^SET\s+ROWCOUNT\b', content, re.IGNORECASE):
                 continue
 
+            # Skip lines that are already comments
+            if content.startswith('--') or content.startswith('/*'):
+                continue
+
             # Rule 123: Anything else -> add TODO
             # Check if it was modified by above rules?
 
@@ -2050,6 +2055,23 @@ class TsqlParser:
 
         for e in self.exec_commands:
             content = e['content']
+            
+            # Convert EXEC procedure_name [args] to PERFORM procedure_name(args)
+            exec_match = re.match(r'^(EXECUTE|EXEC)\s+(.+)$', content, re.IGNORECASE)
+            if exec_match:
+                remainder = exec_match.group(2).strip()
+                
+                # Exclude dynamic SQL like EXECUTE ('...') or EXECUTE (locvar_...)
+                if not remainder.startswith('(') and not remainder.startswith('\''):
+                    # Split into procedure name and arguments
+                    parts = re.split(r'\s+', remainder, 1)
+                    proc_name = parts[0]
+                    args = parts[1].strip() if len(parts) > 1 else ""
+                    content = f"PERFORM {proc_name}({args})"
+                else:
+                    # Keep as EXECUTE for dynamic SQL
+                    content = f"EXECUTE {remainder}"
+
             if not content.strip().endswith(';'):
                 content += ';'
             body_parts.append((e['line'], content, "exec_commands"))

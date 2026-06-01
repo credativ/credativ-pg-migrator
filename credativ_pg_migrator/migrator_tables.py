@@ -38,7 +38,8 @@ class ProtocolPostgresConnection:
             user=cfg['username'],
             password=cfg['password'],
             host=cfg.get('host', 'localhost'),
-            port=cfg.get('port', 5432)
+            port=cfg.get('port', 5432),
+            application_name=MigratorConstants.get_application_name()
         )
         self.connection.autocommit = True
 
@@ -3537,7 +3538,8 @@ class MigratorTables:
                 port=src_cfg.get('port', 5432),
                 dbname=src_dbname,
                 user=src_cfg.get('username'),
-                password=src_cfg.get('password')
+                password=src_cfg.get('password'),
+                application_name=MigratorConstants.get_application_name()
             )
             
             tgt_conn = psycopg2.connect(
@@ -3545,7 +3547,8 @@ class MigratorTables:
                 port=tgt_cfg.get('port', 5432),
                 dbname=tgt_dbname,
                 user=tgt_cfg.get('username'),
-                password=tgt_cfg.get('password')
+                password=tgt_cfg.get('password'),
+                application_name=MigratorConstants.get_application_name()
             )
             
             src_cur = src_conn.cursor(cursor_factory=psycopg2.extras.DictCursor)

@@ -590,7 +590,7 @@ class DatabaseConnector(ABC):
         pass
 
     @abstractmethod
-    def get_rows_count(self, table_schema: str, table_name: str):
+    def get_rows_count(self, table_schema: str, table_name: str, migration_limitation: str = None):
         """
         Returns a number of rows in a table
         """

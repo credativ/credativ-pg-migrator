@@ -1684,7 +1684,7 @@ class SybaseASEConnector(DatabaseConnector):
             target_columns = settings['target_columns']
             batch_size = settings['batch_size']
             migrator_tables = settings['migrator_tables']
-            source_table_rows = self.get_rows_count(source_schema_name, source_table_name)
+
             migration_limitation = settings['migration_limitation']
             chunk_size = settings['chunk_size']
             chunk_number = settings['chunk_number']

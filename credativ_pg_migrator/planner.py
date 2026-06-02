@@ -646,9 +646,15 @@ class Planner:
 
                 self.config_parser.print_log_message( 'INFO', f"planner: stdwf_prepare_tables: Counting rows in source table {table_info['table_name']}...")
                 self.source_connection.connect()
+                migration_limitation = None
+                limitations = self.migrator_tables.get_records_data_migration_limitation(table_info['table_name'])
+                if limitations:
+                    migration_limitation = limitations[0][0]
+                
                 source_table_rows = self.source_connection.get_rows_count(
                     self.source_schema_name,
                     table_info['table_name'],
+                    migration_limitation
                 )
                 self.source_connection.disconnect()
                 self.config_parser.print_log_message( 'INFO', f"planner: stdwf_prepare_tables: Source table {table_info['table_name']} has {source_table_rows} rows.")
@@ -1278,9 +1284,14 @@ class Planner:
                     if self.config_parser.get_source_db_type() == 'ibm_db2_zos':
                         source_table_rows = data_migration_info.get('source_table_rows', 0)
                     else:
+                        migration_limitation = None
+                        limitations = self.migrator_tables.get_records_data_migration_limitation(data_migration_info['source_table_name'])
+                        if limitations:
+                            migration_limitation = limitations[0][0]
                         source_table_rows = self.source_connection.get_rows_count(
                             data_migration_info['source_schema_name'],
-                            data_migration_info['source_table_name']
+                            data_migration_info['source_table_name'],
+                            migration_limitation
                         )
                     target_table_rows = self.target_connection.get_rows_count(
                         data_migration_info['target_schema_name'],
@@ -1639,10 +1650,16 @@ class Planner:
             target_schema_name = self.target_schema_name
             mapped_table = pair # Assuming 'pair' itself represents the mapped table info
 
+            migration_limitation = None
+            limitations = self.migrator_tables.get_records_data_migration_limitation(source_t)
+            if limitations:
+                migration_limitation = limitations[0][0]
+
             self.source_connection.connect()
             source_table_rows = self.source_connection.get_rows_count(
                 source_schema_name,
-                source_t
+                source_t,
+                migration_limitation
             )
             self.source_connection.disconnect()
 
@@ -1711,7 +1728,13 @@ class Planner:
 
             self.config_parser.print_log_message('DEBUG3', f"planner: mapping_match_tables: Fetching source rows count for '{source_t}'")
             self.source_connection.connect()
-            source_table_rows = self.source_connection.get_rows_count(self.source_schema_name, source_t)
+            migration_limitation = None
+            limitations = self.migrator_tables.get_records_data_migration_limitation(source_t)
+            if limitations:
+                migration_limitation = limitations[0][0]
+            
+            self.source_connection.connect()
+            source_table_rows = self.source_connection.get_rows_count(self.source_schema_name, source_t, migration_limitation)
             self.source_connection.disconnect()
 
             self.config_parser.print_log_message('DEBUG3', f"planner: mapping_match_tables: Fetching target rows count for '{target_t}'")

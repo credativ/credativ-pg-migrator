@@ -2,6 +2,10 @@
 
 ## 0.15.0rc1 - 2026.05.29
 
+- 2026.06.02
+
+  - Feature - Core Migrator: Standardized diagnostic row counting across all database connectors to natively apply the `migration_limitation` configuration parameter. Ensures reported source table diagnostics exactly match the subsets defined for partial migrations. Removed redundant un-filtered row counting queries from `sybase_ase_connector.py` and `sql_anywhere_connector.py`.
+
 - 2026.06.01
 
   - Feature - Sybase ASE Connector: Used `ROW_COUNT` instead of `COUNT(*)` for initial row count fetch if no migration limitation is defined to improve performance.

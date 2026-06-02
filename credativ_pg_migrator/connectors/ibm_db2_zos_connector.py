@@ -1437,8 +1437,20 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
     def rollback_transaction(self):
         pass
 
-    def get_rows_count(self, table_schema: str, table_name: str):
-        return 0
+    def get_rows_count(self, table_schema: str, table_name: str, migration_limitation: str = None):
+        query = f"""SELECT COUNT(*) FROM {table_schema.upper()}."{table_name}" """
+        if migration_limitation:
+            query += f" WHERE {migration_limitation}"
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            count = cursor.fetchone()[0]
+            cursor.close()
+            return count
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"ibm_db2_zos_connector: get_rows_count: Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
+            raise
 
     def get_table_size(self, table_schema: str, table_name: str):
         return 0

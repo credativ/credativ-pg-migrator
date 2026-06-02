@@ -134,7 +134,12 @@ class Validator:
 
         try:
             if check_counts:
-                s_count = source_conn.get_rows_count(source_schema, source_table)
+                migration_limitation = None
+                limitations = self.migrator_tables.get_records_data_migration_limitation(source_table)
+                if limitations:
+                    migration_limitation = limitations[0][0]
+                
+                s_count = source_conn.get_rows_count(source_schema, source_table, migration_limitation)
                 t_count = target_conn.get_rows_count(target_schema, target_table)
                 res['row_logic'] = (s_count == t_count)
                 if not res['row_logic']:

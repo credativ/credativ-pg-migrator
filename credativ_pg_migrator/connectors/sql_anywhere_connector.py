@@ -789,6 +789,43 @@ class SQLAnywhereConnector(DatabaseConnector):
     def get_table_size(self, table_schema: str, table_name: str):
         raise NotImplementedError("Fetching table size is not yet implemented for SQL Anywhere")
 
+    def get_table_next_identity(self, table_schema: str, table_name: str):
+        try:
+            # SQL Anywhere does not expose sequence counters easily.
+            # We first find the identity column (default = 'autoincrement')
+            col_query = f"""
+                SELECT c.column_name
+                FROM sys.syscolumn c
+                WHERE c.table_id = (
+                    SELECT t.table_id FROM sys.systable t
+                    WHERE t.creator in (
+                        SELECT DISTINCT user_id
+                        FROM sys.SYSUSERPERM where user_name = '{table_schema}'
+                    )
+                    AND table_name = '{table_name}'
+                ) AND UPPER(c."default") = 'AUTOINCREMENT'
+            """
+            cursor = self.connection.cursor()
+            cursor.execute(col_query)
+            col_row = cursor.fetchone()
+            if not col_row:
+                cursor.close()
+                return None
+            identity_col = col_row[0]
+
+            # Then query the max value
+            max_query = f'SELECT MAX("{identity_col}") FROM "{table_schema}"."{table_name}"'
+            cursor.execute(max_query)
+            max_row = cursor.fetchone()
+            cursor.close()
+
+            if max_row and max_row[0] is not None:
+                return int(max_row[0]) + 1
+            return 1
+        except Exception as e:
+            self.config_parser.print_log_message('WARNING', f"sql_anywhere_connector: get_table_next_identity: Error fetching next identity for {table_schema}.{table_name}: {e}")
+            return None
+
     def fetch_user_defined_types(self, schema: str):
         pass
 

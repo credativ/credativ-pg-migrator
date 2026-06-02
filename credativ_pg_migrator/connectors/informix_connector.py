@@ -1828,6 +1828,38 @@ class InformixConnector(DatabaseConnector):
         """
         pass
 
+    def get_table_next_identity(self, table_schema: str, table_name: str):
+        try:
+            # Informix does not expose sequence counters easily.
+            # We first find the identity column (SERIAL, SERIAL8, BIGSERIAL)
+            col_query = f"""
+                SELECT c.colname
+                FROM syscolumns c
+                JOIN systables t ON c.tabid = t.tabid
+                WHERE t.tabname = '{table_name}' AND t.owner = '{table_schema}'
+                  AND (MOD(c.coltype, 256) IN (6, 18, 53))
+            """
+            cursor = self.connection.cursor()
+            cursor.execute(col_query)
+            col_row = cursor.fetchone()
+            if not col_row:
+                cursor.close()
+                return None
+            identity_col = col_row[0]
+
+            # Then query the max value
+            max_query = f'SELECT MAX("{identity_col}") FROM "{table_schema}"."{table_name}"'
+            cursor.execute(max_query)
+            max_row = cursor.fetchone()
+            cursor.close()
+
+            if max_row and max_row[0] is not None:
+                return int(max_row[0]) + 1
+            return 1
+        except Exception as e:
+            self.config_parser.print_log_message('WARNING', f"informix_connector: get_table_next_identity: Error fetching next identity for {table_schema}.{table_name}: {e}")
+            return None
+
     def get_sequence_current_value(self, sequence_id: int):
         pass
 

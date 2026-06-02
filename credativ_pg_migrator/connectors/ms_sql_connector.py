@@ -1848,6 +1848,24 @@ EXECUTE FUNCTION "{func_schema}"."{func_name}"();
         """
         pass
 
+    def get_table_next_identity(self, table_schema: str, table_name: str):
+        try:
+            query = f"""
+                SELECT ISNULL(CAST(last_value AS BIGINT) + CAST(increment_value AS BIGINT), CAST(seed_value AS BIGINT))
+                FROM sys.identity_columns
+                WHERE object_id = OBJECT_ID('[{table_schema}].[{table_name}]')
+            """
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            row = cursor.fetchone()
+            cursor.close()
+            if row and row[0] is not None:
+                return int(row[0])
+            return None
+        except Exception as e:
+            self.config_parser.print_log_message('WARNING', f"ms_sql_connector: get_table_next_identity: Error fetching next identity for {table_schema}.{table_name}: {e}")
+            return None
+
     def fetch_sequences(self, schema_name: str):
         sequences = {}
         order_num = 1

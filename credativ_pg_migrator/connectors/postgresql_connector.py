@@ -1628,10 +1628,7 @@ class PostgreSQLConnector(DatabaseConnector):
                     c.relname::text AS sequence_name,
                     c.oid AS sequence_id,
                     a.attname AS column_name,
-                    'SELECT SETVAL( (SELECT oid from pg_class s where s.relname = ''' || c.relname ||
-                    ''' and s.relkind = ''S'' AND s.relnamespace::regnamespace::text = ''' ||
-                    c.relnamespace::regnamespace::text || '''), (SELECT MAX(' || quote_ident(a.attname) || ') /*+ 1*/ FROM ' ||
-                    quote_ident(t.relnamespace::regnamespace::text)||'.'|| quote_ident(t.relname) || '));' as sequence_sql
+                    '' as sequence_sql
                 FROM
                     pg_depend d
                     JOIN pg_class c ON d.objid = c.oid
@@ -1662,8 +1659,44 @@ class PostgreSQLConnector(DatabaseConnector):
             # self.disconnect()
             return sequence_data
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"postgresql_connector: fetch_sequences: Error executing sequence query: {query}")
+            self.config_parser.print_log_message('ERROR', f"postgresql_connector: fetch_table_sequences: Error executing sequence query: {query}")
             self.config_parser.print_log_message('ERROR', e)
+            return {}
+
+    def get_table_next_identity(self, table_schema: str, table_name: str):
+        try:
+            # First find the sequence for the table. Since get_table_next_identity doesn't receive column_name,
+            # we query pg_class and pg_depend to find an attached sequence, similar to fetch_table_sequences.
+            query = f"""
+                SELECT c.relname::text AS sequence_name
+                FROM pg_depend d
+                JOIN pg_class c ON d.objid = c.oid
+                JOIN pg_class t ON t.oid = d.refobjid
+                WHERE c.relkind = 'S'
+                AND t.relname = '{table_name}'
+                AND t.relkind = 'r'
+                AND d.refobjsubid > 0
+                AND c.relnamespace = '{table_schema}'::regnamespace
+                LIMIT 1
+            """
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            row = cursor.fetchone()
+            if not row:
+                cursor.close()
+                return None
+            
+            sequence_name = row[0]
+            cursor.execute(f'SELECT last_value FROM "{table_schema}"."{sequence_name}"')
+            val_row = cursor.fetchone()
+            cursor.close()
+            
+            if val_row and val_row[0] is not None:
+                return int(val_row[0])
+            return None
+        except Exception as e:
+            self.config_parser.print_log_message('WARNING', f"postgresql_connector: get_table_next_identity: Error fetching next identity for {table_schema}.{table_name}: {e}")
+            return None
 
     def get_sequence_details(self, sequence_owner, sequence_name):
         query = f"""

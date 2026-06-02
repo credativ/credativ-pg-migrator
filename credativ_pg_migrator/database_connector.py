@@ -603,6 +603,7 @@ class DatabaseConnector(ABC):
         """
         pass
 
+    @abstractmethod
     def get_table_next_identity(self, table_schema: str, table_name: str):
         """
         Returns the next sequence value for the table's IDENTITY column, if applicable.

@@ -1035,6 +1035,26 @@ class OracleConnector(DatabaseConnector):
         # Placeholder for fetching table size
         return None
 
+    def get_table_next_identity(self, table_schema: str, table_name: str):
+        try:
+            # Check for Oracle 12c+ identity columns
+            query = f"""
+                SELECT s.LAST_NUMBER
+                FROM ALL_TAB_IDENTITY_COLS i
+                JOIN ALL_SEQUENCES s ON i.sequence_name = s.sequence_name AND i.owner = s.sequence_owner
+                WHERE i.owner = '{table_schema}' AND i.table_name = '{table_name}'
+            """
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            row = cursor.fetchone()
+            cursor.close()
+            if row and row[0] is not None:
+                return int(row[0])
+            return None
+        except Exception as e:
+            # Table or view doesn't exist (e.g. Oracle < 12c)
+            return None
+
     def fetch_user_defined_types(self, schema: str):
         # Placeholder for fetching user-defined types
         return {}

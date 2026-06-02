@@ -1452,6 +1452,24 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
         # Placeholder for fetching table size
         return 0
 
+    def get_table_next_identity(self, table_schema: str, table_name: str):
+        try:
+            query = f"""
+                SELECT NEXTCACHEFIRSTVALUE
+                FROM SYSCAT.COLIDENTATTRIBUTES
+                WHERE TABSCHEMA = upper('{table_schema}') AND TABNAME = '{table_name}'
+            """
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            row = cursor.fetchone()
+            cursor.close()
+            if row and row[0] is not None:
+                return int(row[0])
+            return None
+        except Exception as e:
+            self.config_parser.print_log_message('WARNING', f"ibm_db2_luw_connector: get_table_next_identity: Error fetching next identity for {table_schema}.{table_name}: {e}")
+            return None
+
     def fetch_user_defined_types(self, schema: str):
         # Placeholder for fetching user-defined types
         return {}

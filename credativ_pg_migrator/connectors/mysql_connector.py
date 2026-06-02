@@ -885,6 +885,24 @@ class MySQLConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', f"mysql_connector: get_table_size: Error fetching table size: {e}")
             raise
 
+    def get_table_next_identity(self, table_schema: str, table_name: str):
+        try:
+            query = f"""
+                SELECT AUTO_INCREMENT
+                FROM information_schema.tables
+                WHERE table_schema = '{table_schema}' AND table_name = '{table_name}'
+            """
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            row = cursor.fetchone()
+            cursor.close()
+            if row and row[0] is not None:
+                return int(row[0])
+            return None
+        except Exception as e:
+            self.config_parser.print_log_message('WARNING', f"mysql_connector: get_table_next_identity: Error fetching next identity for {table_schema}.{table_name}: {e}")
+            return None
+
     def fetch_user_defined_types(self, schema: str):
         # Implement user-defined type fetching logic
         pass

@@ -405,7 +405,8 @@ class MigratorTables:
                 target_table_name TEXT,
                 match_type TEXT NOT NULL,
                 similarity_score FLOAT,
-                source_table_rows INTEGER,
+                source_table_rows_all INTEGER,
+                source_table_rows_limited INTEGER,
                 target_table_rows INTEGER,
                 info TEXT
             );
@@ -479,17 +480,18 @@ class MigratorTables:
         target_table_name = settings.get('target_table_name')
         match_type = settings.get('match_type')
         similarity_score = settings.get('similarity_score')
-        source_table_rows = settings.get('source_table_rows')
+        source_table_rows_all = settings.get('source_table_rows_all')
+        source_table_rows_limited = settings.get('source_table_rows_limited')
         target_table_rows = settings.get('target_table_rows')
         info = settings.get('info')
 
         query = f"""
             INSERT INTO "{self.protocol_schema}"."mapping_tables"
-            (source_schema_name, source_table_name, target_schema_name, target_table_name, match_type, similarity_score, source_table_rows, target_table_rows, info)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (source_schema_name, source_table_name, target_schema_name, target_table_name, match_type, similarity_score, source_table_rows_all, source_table_rows_limited, target_table_rows, info)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
         """
-        params = (source_schema_name, source_table_name, target_schema_name, target_table_name, match_type, similarity_score, source_table_rows, target_table_rows, info)
+        params = (source_schema_name, source_table_name, target_schema_name, target_table_name, match_type, similarity_score, source_table_rows_all, source_table_rows_limited, target_table_rows, info)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -1355,7 +1357,8 @@ class MigratorTables:
             source_schema_name TEXT,
             source_table_name TEXT,
             source_table_id INTEGER,
-            source_table_rows INTEGER,
+            source_table_rows_all INTEGER,
+            source_table_rows_limited INTEGER,
             worker_id TEXT,
             target_schema_name TEXT,
             target_table_name TEXT,
@@ -1417,7 +1420,8 @@ class MigratorTables:
                     source_table_name TEXT,
                     target_schema_name TEXT,
                     target_table_name TEXT,
-                    source_table_rows BIGINT,
+                    source_table_rows_all BIGINT,
+                    source_table_rows_limited BIGINT,
                     target_table_rows BIGINT,
                     chunk_number INTEGER,
                     chunk_size BIGINT,
@@ -1448,7 +1452,8 @@ class MigratorTables:
         source_table_name = settings['source_table_name']
         target_schema_name = settings['target_schema_name']
         target_table_name = settings['target_table_name']
-        source_table_rows = settings['source_table_rows']
+        source_table_rows_all = settings['source_table_rows_all']
+        source_table_rows_limited = settings['source_table_rows_limited']
         target_table_rows = settings['target_table_rows']
         chunk_number = settings['chunk_number']
         chunk_size = settings['chunk_size']
@@ -1466,7 +1471,7 @@ class MigratorTables:
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
             (worker_id, source_table_id, source_schema_name, source_table_name,
-            target_schema_name, target_table_name, source_table_rows, target_table_rows,
+            target_schema_name, target_table_name, source_table_rows_all, source_table_rows_limited, target_table_rows,
             chunk_number, chunk_size, migration_limitation,
             chunk_start, chunk_end, order_by_clause, inserted_rows, batch_size, total_batches,
             task_started, task_completed)
@@ -1478,7 +1483,8 @@ class MigratorTables:
         params = (str(worker_id), source_table_id, source_schema_name,
                   source_table_name, target_schema_name,
                   target_table_name,
-                  source_table_rows,
+                  source_table_rows_all,
+                  source_table_rows_limited,
                   target_table_rows,
                   chunk_number,
                   chunk_size,
@@ -1515,19 +1521,20 @@ class MigratorTables:
             'source_table_name': row[4],
             'target_schema_name': row[5],
             'target_table_name': row[6],
-            'source_table_rows': row[7],
-            'target_table_rows': row[8],
-            'chunk_number': row[9],
+            'source_table_rows_all': row[7],
+            'source_table_rows_limited': row[8],
+            'target_table_rows': row[9],
+            'chunk_number': row[10],
             'chunk_size': row[10],
             'migration_limitation': row[11],
             'chunk_start': row[12],
             'chunk_end': row[13],
             'order_by_clause': row[14],
             'inserted_rows': row[15],
-            'batch_size': row[16],
-            'total_batches': row[17],
-            'task_started': row[18],
-            'task_completed': row[19]
+            'batch_size': row[17],
+            'total_batches': row[18],
+            'task_started': row[19],
+            'task_completed': row[20]
         }
 
     def insert_batches_stats(self, settings):
@@ -1578,7 +1585,8 @@ class MigratorTables:
         source_schema_name = settings['source_schema_name']
         source_table_name = settings['source_table_name']
         source_table_id = settings['source_table_id']
-        source_table_rows = settings['source_table_rows']
+        source_table_rows_all = settings['source_table_rows_all']
+        source_table_rows_limited = settings['source_table_rows_limited']
         worker_id = settings['worker_id']
         target_schema_name = settings['target_schema_name']
         target_table_name = settings['target_table_name']
@@ -1587,10 +1595,11 @@ class MigratorTables:
         table_name = self.config_parser.get_protocol_name_data_migration()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
-            (source_schema_name, source_table_name, source_table_id, source_table_rows, worker_id, target_schema_name, target_table_name, target_table_rows)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            (source_schema_name, source_table_name, source_table_id, source_table_rows_all, source_table_rows_limited, worker_id, target_schema_name, target_table_name, target_table_rows)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (source_schema_name, source_table_name, target_schema_name, target_table_name)
-            DO UPDATE SET source_table_rows = EXCLUDED.source_table_rows,
+            DO UPDATE SET source_table_rows_all = EXCLUDED.source_table_rows_all,
+            source_table_rows_limited = EXCLUDED.source_table_rows_limited,
             target_table_rows = EXCLUDED.target_table_rows,
             task_created = clock_timestamp(),
             worker_id = EXCLUDED.worker_id,
@@ -1598,7 +1607,7 @@ class MigratorTables:
             message = NULL
             RETURNING *
         """
-        params = (source_schema_name, source_table_name, source_table_id, source_table_rows, str(worker_id), target_schema_name, target_table_name, target_table_rows)
+        params = (source_schema_name, source_table_name, source_table_id, source_table_rows_all, source_table_rows_limited, str(worker_id), target_schema_name, target_table_name, target_table_rows)
         self.config_parser.print_log_message('DEBUG3', f"migrator_tables: insert_data_migration: ({func_run_id}): Inserting data migration record for table {target_table_name} with params: {params}")
         try:
             cursor = self.protocol_connection.connection.cursor()
@@ -1684,7 +1693,7 @@ class MigratorTables:
             if row:
                 data_migration_row = self.decode_data_migration_row(row)
                 self.config_parser.print_log_message('DEBUG3', f"migrator_tables: update_data_migration_status: ({func_run_id}): Returned row: {data_migration_row}")
-                self.update_protocol({'object_type': 'data_migration', 'object_protocol_id': data_migration_row['id'], 'execution_success': success, 'execution_error_message': message, 'execution_results': 'source rows: ' + str(data_migration_row['source_table_rows']) + ', target rows: ' + str(target_table_rows)})
+                self.update_protocol({'object_type': 'data_migration', 'object_protocol_id': data_migration_row['id'], 'execution_success': success, 'execution_error_message': message, 'execution_results': 'source rows: ' + str(data_migration_row['source_table_rows_limited']) + ', target rows: ' + str(target_table_rows)})
             else:
                 self.config_parser.print_log_message('ERROR', f"migrator_tables: update_data_migration_status: ({func_run_id}): Error updating status for data migration {row_id} in {table_name}.")
                 self.config_parser.print_log_message('ERROR', f"migrator_tables: update_data_migration_status: ({func_run_id}): Error: No protocol row returned.")
@@ -1697,17 +1706,19 @@ class MigratorTables:
     def update_data_migration_rows(self, settings):
         func_run_id = uuid.uuid4()
         row_id = settings['row_id']
-        source_table_rows = settings['source_table_rows']
+        source_table_rows_all = settings.get('source_table_rows_all')
+        source_table_rows_limited = settings['source_table_rows_limited']
         target_table_rows = settings['target_table_rows']
         table_name = self.config_parser.get_protocol_name_data_migration()
         query = f"""
             UPDATE "{self.protocol_schema}"."{table_name}"
-            SET source_table_rows = %s,
+            SET source_table_rows_all = COALESCE(%s, source_table_rows_all),
+            source_table_rows_limited = %s,
             target_table_rows = %s
             WHERE id = %s
             RETURNING *
         """
-        params = (source_table_rows, target_table_rows, row_id)
+        params = (source_table_rows_all, source_table_rows_limited, target_table_rows, row_id)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -1733,20 +1744,21 @@ class MigratorTables:
             'source_schema_name': row[1],
             'source_table_name': row[2],
             'source_table_id': row[3],
-            'source_table_rows': row[4],
-            'worker_id': row[5],
-            'target_schema_name': row[6],
-            'target_table_name': row[7],
-            'target_table_rows': row[8],
-            'task_created': row[9],
-            'task_started': row[10],
-            'task_completed': row[11],
-            'success': row[12],
-            'message': row[13],
-            'batch_count': row[14],
-            'shortest_batch_seconds': row[15],
-            'longest_batch_seconds': row[16],
-            'average_batch_seconds': row[17],
+            'source_table_rows_all': row[4],
+            'source_table_rows_limited': row[5],
+            'worker_id': row[6],
+            'target_schema_name': row[7],
+            'target_table_name': row[8],
+            'target_table_rows': row[9],
+            'task_created': row[10],
+            'task_started': row[11],
+            'task_completed': row[12],
+            'success': row[13],
+            'message': row[14],
+            'batch_count': row[15],
+            'shortest_batch_seconds': row[16],
+            'longest_batch_seconds': row[17],
+            'average_batch_seconds': row[18],
         }
 
     def create_table_for_pk_ranges(self):
@@ -1842,7 +1854,8 @@ class MigratorTables:
             source_table_name TEXT,
             source_table_id INTEGER,
             source_columns TEXT,
-            source_table_rows BIGINT,
+            source_table_rows_all BIGINT,
+            source_table_rows_limited BIGINT,
             source_table_description TEXT,
             source_table_sql TEXT,
             target_schema_name TEXT,
@@ -2286,17 +2299,18 @@ class MigratorTables:
             'source_table_name': row[2],
             'source_table_id': row[3],
             'source_columns': json.loads(row[4]),
-            'source_table_rows': row[5],
-            'source_table_description': row[6],
-            'source_table_sql': row[7],
-            'target_schema_name': row[8],
-            'target_table_name': row[9],
-            'target_alias_name': row[10],
-            'target_columns': json.loads(row[11]),
-            'target_table_rows': row[12],
-            'target_table_sql': row[13],
-            'table_comment': row[14],
-            'create_partitions_sql': row[15],
+            'source_table_rows_all': row[5],
+            'source_table_rows_limited': row[6],
+            'source_table_description': row[7],
+            'source_table_sql': row[8],
+            'target_schema_name': row[9],
+            'target_table_name': row[10],
+            'target_alias_name': row[11],
+            'target_columns': json.loads(row[12]),
+            'target_table_rows': row[13],
+            'target_table_sql': row[14],
+            'table_comment': row[15],
+            'create_partitions_sql': row[16],
         }
 
     def decode_index_row(self, row):
@@ -2444,7 +2458,8 @@ class MigratorTables:
         source_table_name = settings['source_table_name']
         source_table_id = settings['source_table_id']
         source_columns = settings['source_columns']
-        source_table_rows = settings['source_table_rows']
+        source_table_rows_all = settings['source_table_rows_all']
+        source_table_rows_limited = settings['source_table_rows_limited']
         source_table_description = settings['source_table_description']
         source_table_sql = settings['source_table_sql']
         target_schema_name = settings['target_schema_name']
@@ -2461,13 +2476,13 @@ class MigratorTables:
         target_columns_str = json.dumps(target_columns)
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
-            (source_schema_name, source_table_name, source_table_id, source_columns, source_table_rows, source_table_description, source_table_sql,
+            (source_schema_name, source_table_name, source_table_id, source_columns, source_table_rows_all, source_table_rows_limited, source_table_description, source_table_sql,
             target_schema_name, target_table_name, target_alias_name, target_columns, target_table_rows, target_table_sql, table_comment,
             create_partitions_sql)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (source_schema_name, source_table_name, source_table_id, source_columns_str, source_table_rows, source_table_description, source_table_sql,
+        params = (source_schema_name, source_table_name, source_table_id, source_columns_str, source_table_rows_all, source_table_rows_limited, source_table_description, source_table_sql,
                   target_schema_name, target_table_name, target_alias_name, target_columns_str, target_table_rows, target_table_sql, table_comment,
                   create_partitions_sql)
         try:
@@ -2522,18 +2537,20 @@ class MigratorTables:
 
     def update_table_rows_counts(self, settings):
         row_id = settings.get('row_id')
-        source_table_rows = settings.get('source_table_rows')
+        source_table_rows_all = settings.get('source_table_rows_all')
+        source_table_rows_limited = settings.get('source_table_rows_limited')
         target_table_rows = settings.get('target_table_rows')
         func_run_id = uuid.uuid4()
         table_name = self.config_parser.get_protocol_name_tables()
         query = f"""
             UPDATE "{self.protocol_schema}"."{table_name}"
-            SET source_table_rows = %s,
-            target_table_rows = %s
+            SET source_table_rows_all = COALESCE(%s, source_table_rows_all),
+            source_table_rows_limited = COALESCE(%s, source_table_rows_limited),
+            target_table_rows = COALESCE(%s, target_table_rows)
             WHERE id = %s
             RETURNING *
         """
-        params = (source_table_rows, target_table_rows, row_id)
+        params = (source_table_rows_all, source_table_rows_limited, target_table_rows, row_id)
         self.config_parser.print_log_message('DEBUG3', f"migrator_tables: update_table_rows_counts: ({func_run_id}): Executing query with params: {params}")
         try:
             cursor = self.protocol_connection.connection.cursor()
@@ -3284,9 +3301,9 @@ class MigratorTables:
                         if val: details.append(f"{val}: {c}")
 
                 if obj_name == 'Tables':
-                    cursor.execute(f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{table_name}" WHERE source_table_rows = 0 OR source_table_rows IS NULL""")
+                    cursor.execute(f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{table_name}" WHERE source_table_rows_limited = 0 OR source_table_rows_limited IS NULL""")
                     empty_tables = cursor.fetchone()[0]
-                    cursor.execute(f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{table_name}" WHERE source_table_rows > 0""")
+                    cursor.execute(f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{table_name}" WHERE source_table_rows_limited > 0""")
                     data_tables = cursor.fetchone()[0]
                     details.append(f"Empty: {empty_tables}, With Data: {data_tables}")
 
@@ -3346,13 +3363,13 @@ class MigratorTables:
             cursor.execute(f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{dm_table}" """)
             total_dm = cursor.fetchone()[0]
             if total_dm > 0:
-                cursor.execute(f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{dm_table}" WHERE source_table_rows = 0 OR source_table_rows IS NULL""")
+                cursor.execute(f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{dm_table}" WHERE source_table_rows_limited = 0 OR source_table_rows_limited IS NULL""")
                 empty_dm = cursor.fetchone()[0]
-                cursor.execute(f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{dm_table}" WHERE source_table_rows > 0""")
+                cursor.execute(f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{dm_table}" WHERE source_table_rows_limited > 0""")
                 data_dm = cursor.fetchone()[0]
-                cursor.execute(f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{dm_table}" WHERE source_table_rows > 0 AND source_table_rows = target_table_rows""")
+                cursor.execute(f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{dm_table}" WHERE source_table_rows_limited > 0 AND source_table_rows_limited = target_table_rows""")
                 full_dm = cursor.fetchone()[0]
-                cursor.execute(f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{dm_table}" WHERE source_table_rows > 0 AND source_table_rows <> target_table_rows""")
+                cursor.execute(f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{dm_table}" WHERE source_table_rows_limited > 0 AND source_table_rows_limited <> target_table_rows""")
                 diff_dm = cursor.fetchone()[0]
                 
                 cursor.execute(f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{dm_table}" WHERE success = FALSE""")
@@ -3374,8 +3391,8 @@ class MigratorTables:
                     cursor.execute(f"""SELECT target_schema_name, target_table_name, target_table_rows, 
                                        EXTRACT(EPOCH FROM (task_completed - task_started))
                                        FROM "{self.protocol_schema}"."{dm_table}" 
-                                       WHERE source_table_rows > 0 AND source_table_rows = target_table_rows AND success = TRUE
-                                       ORDER BY source_table_rows DESC LIMIT {top_migrated_limit}""")
+                                       WHERE source_table_rows_limited > 0 AND source_table_rows_limited = target_table_rows AND success = TRUE
+                                       ORDER BY source_table_rows_limited DESC LIMIT {top_migrated_limit}""")
                     for sch, tbl, t_rows, duration in cursor.fetchall():
                         t_fmt = f"{t_rows:,}"
                         d_fmt = f"{round(duration, 2) if duration else 0.0}"
@@ -3387,12 +3404,12 @@ class MigratorTables:
                     lines.append(f"Tables with row count mismatches (Top {top_mismatched_limit} by Source Rows):")
                     lines.append(f"{'Table Name':<28} | {'Src Rows':>11} | {'Tgt Rows':>11} | {'Diff':>8} | {'Time(s)':>8}")
                     lines.append("-" * 80)
-                    cursor.execute(f"""SELECT target_schema_name, target_table_name, source_table_rows, target_table_rows,
-                                       ABS(source_table_rows - target_table_rows),
+                    cursor.execute(f"""SELECT target_schema_name, target_table_name, source_table_rows_limited, target_table_rows,
+                                       ABS(source_table_rows_limited - target_table_rows),
                                        EXTRACT(EPOCH FROM (task_completed - task_started))
                                        FROM "{self.protocol_schema}"."{dm_table}" 
-                                       WHERE source_table_rows > 0 AND source_table_rows <> target_table_rows 
-                                       ORDER BY source_table_rows DESC LIMIT {top_mismatched_limit}""")
+                                       WHERE source_table_rows_limited > 0 AND source_table_rows_limited <> target_table_rows 
+                                       ORDER BY source_table_rows_limited DESC LIMIT {top_mismatched_limit}""")
                     for sch, tbl, s_rows, t_rows, diff, duration in cursor.fetchall():
                         s_fmt = f"{s_rows:,}"
                         t_fmt = f"{t_rows:,}"
@@ -3440,7 +3457,7 @@ class MigratorTables:
                     raw_tables = self.fetch_all_tables()
                     for t_row in raw_tables:
                         table_data = self.decode_table_row(t_row)
-                        if table_data.get('source_table_rows', 0) > 0:
+                        if table_data.get('source_table_rows_limited', 0) > 0:
                             target_schema_name = table_data.get('target_schema_name', '')
                             target_table_name = table_data['target_table_name']
                             full_table_name = f"{target_schema_name}.{target_table_name}" if target_schema_name else target_table_name

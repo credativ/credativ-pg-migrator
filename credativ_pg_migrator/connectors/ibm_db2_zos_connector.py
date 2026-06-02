@@ -762,7 +762,7 @@ class IbmDb2ZosConnector(DatabaseConnector):
         pass
 
     def migrate_table(self, migrate_target_connection, settings):
-        return {'finished': True, 'rows_migrated': 0, 'source_table_rows': 0, 'target_table_rows': 0, 'chunk_number': 1, 'total_chunks': 1}
+        return {'finished': True, 'rows_migrated': 0, 'source_table_rows_limited': 0, 'target_table_rows': 0, 'chunk_number': 1, 'total_chunks': 1}
 
     def fetch_indexes(self, settings):
         table_schema = settings.get('source_table_schema')

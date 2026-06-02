@@ -5,6 +5,8 @@
 - 2026.06.02
 
   - Feature - Core Migrator: Standardized diagnostic row counting across all database connectors to natively apply the `migration_limitation` configuration parameter. Ensures reported source table diagnostics exactly match the subsets defined for partial migrations. Removed redundant un-filtered row counting queries from `sybase_ase_connector.py` and `sql_anywhere_connector.py`.
+  - Feature - Protocol: Improved transparency of the migration process by replacing `source_table_rows` with `source_table_rows_all` and `source_table_rows_limited` in protocol tables (`data_migration`, `data_chunks`, and `tables_info`) to differentiate total table size from filtered subsets when migration limitations are active. All connectors and validation logic are updated to track and compare against the `limited` metric for accurate parity checks.
+  - Fix - Sybase ASE Connector: Resolved a critical issue causing data duplication (2-3x multiplier) during migrations. Unconditionally set `migration_stats['finished'] = True` to prevent the orchestrator from infinitely looping on tables where target row counts fell short of expected source row counts (e.g. due to data validation rejections or missing `migration_limitation` filters).
 
 - 2026.06.01
 

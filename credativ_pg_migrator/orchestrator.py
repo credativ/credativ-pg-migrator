@@ -282,16 +282,17 @@ class Orchestrator:
         migrate_tables = []
         for table_row in raw_tables:
             table_data = self.migrator_tables.decode_table_row(table_row)
-            source_rows = table_data.get('source_table_rows', 0)
+            source_rows_all = table_data.get('source_table_rows_all', 0)
+            source_rows_limited = table_data.get('source_table_rows_limited', 0)
             target_rows = table_data.get('target_table_rows', -1)
             
             conflict_action = 'skip'
-            if source_rows > 0 and target_rows > 0:
+            if source_rows_limited > 0 and target_rows > 0:
                 conflict_action = self.config_parser.get_mapping_data_resolution(table_data['target_table_name'])
                 table_data['data_conflict_action'] = conflict_action
                 self.config_parser.print_log_message('INFO', f"orchestrator: mapping_copy_data: Table {table_data['target_table_name']} has conflict action: {conflict_action}")
 
-            if source_rows > 0 and (target_rows == 0 or conflict_action in ('replace', 'merge_keep_target', 'merge_keep_source')):
+            if source_rows_limited > 0 and (target_rows == 0 or conflict_action in ('replace', 'merge_keep_target', 'merge_keep_source')):
                 target_columns = table_data.get('target_columns', {})
                 insert_values = []
                 keys_sorted = sorted(target_columns.keys(), key=lambda x: int(x))
@@ -314,16 +315,17 @@ class Orchestrator:
                     'source_table_name': table_data['source_table_name'],
                     'target_schema_name': table_data['target_schema_name'],
                     'target_table_name': table_data['target_table_name'],
-                    'source_table_rows': source_rows,
+                    'source_table_rows_all': source_rows_all,
+                    'source_table_rows_limited': source_rows_limited,
                     'target_table_rows': target_rows if target_rows != -1 else 0,
                 })
 
-                if source_rows == 0:
+                if source_rows_limited == 0:
                     msg = 'Skipped (0 rows)'
                     status_msg = 'mapped data OK (0 rows)'
                 else:
                     msg = f"Skipped (target_rows={target_rows}, action={conflict_action})"
-                    status_msg = f"mapped data skipped (source_rows={source_rows}, target_rows={target_rows}, action={conflict_action})"
+                    status_msg = f"mapped data skipped (source_rows_limited={source_rows_limited}, target_rows={target_rows}, action={conflict_action})"
 
                 self.migrator_tables.update_data_migration_status({
                     'row_id': protocol_id,
@@ -798,7 +800,8 @@ class Orchestrator:
             create_table_sql = table_data['target_table_sql']
             migrator_tables = settings['migrator_tables']
 
-            source_table_rows = table_data.get('source_table_rows', 0)
+            source_table_rows_all = table_data.get('source_table_rows_all', 0)
+            source_table_rows_limited = table_data.get('source_table_rows_limited', 0)
             target_table_rows = 0
 
             if create_table_sql is None:
@@ -939,7 +942,8 @@ class Orchestrator:
                                 'source_table_name': table_data['source_table_name'],
                                 'target_schema_name': table_data['target_schema_name'],
                                 'target_table_name': table_data['target_table_name'],
-                                'source_table_rows': source_table_rows,
+                                'source_table_rows_all': source_table_rows_all,
+                                'source_table_rows_limited': source_table_rows_limited,
                                 'target_table_rows': target_table_rows,
                                 })
 
@@ -1207,15 +1211,18 @@ class Orchestrator:
                                         target_table_rows = worker_target_connection.get_rows_count(target_schema_name, target_table_name)
                                         rows_migrated = target_table_rows
                                         if self.config_parser.get_source_db_type() == 'ibm_db2_zos':
-                                            source_table_rows = target_table_rows
+                                            source_table_rows_all = target_table_rows
+                                            source_table_rows_limited = target_table_rows
                                             migrator_tables.update_data_migration_rows({
                                                 "row_id": protocol_id,
-                                                "source_table_rows": source_table_rows,
+                                                "source_table_rows_all": source_table_rows_all,
+                                                "source_table_rows_limited": source_table_rows_limited,
                                                 "target_table_rows": target_table_rows,
                                             })
                                             migrator_tables.update_table_rows_counts({
                                                 "row_id": table_data['id'],
-                                                "source_table_rows": source_table_rows,
+                                                "source_table_rows_all": source_table_rows_all,
+                                                "source_table_rows_limited": source_table_rows_limited,
                                                 "target_table_rows": target_table_rows,
                                             })
                                         data_import_end_time = time.time()
@@ -1287,6 +1294,7 @@ class Orchestrator:
                         'chunk_number': 1,
                         'resume_after_crash': settings['resume_after_crash'],
                         'drop_unfinished_tables': settings['drop_unfinished_tables'],
+                        'source_table_rows_all': table_data.get('source_table_rows_all', 0)
                     }
 
                     rows_migration_limitations = settings['migrator_tables'].get_records_data_migration_limitation(table_data['source_table_name'])

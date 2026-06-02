@@ -1660,7 +1660,7 @@ class SybaseASEConnector(DatabaseConnector):
 
     def migrate_table(self, migrate_target_connection, settings):
         part_name = 'initialize'
-        source_table_rows = 0
+        source_table_rows_limited = 0
         target_table_rows = 0
         total_inserted_rows = 0
         migration_stats = {}
@@ -1691,20 +1691,24 @@ class SybaseASEConnector(DatabaseConnector):
             resume_after_crash = settings['resume_after_crash']
             drop_unfinished_tables = settings['drop_unfinished_tables']
 
-            source_table_rows = self.get_rows_count(source_schema_name, source_table_name, migration_limitation)
+            source_table_rows_all = settings.get('source_table_rows_all', 0)
+
+            source_table_rows_limited = self.get_rows_count(source_schema_name, source_table_name, migration_limitation)
             target_table_rows = migrate_target_connection.get_rows_count(target_schema_name, target_table_name)
 
-            total_chunks = self.config_parser.get_total_chunks(source_table_rows, chunk_size)
+            total_chunks = self.config_parser.get_total_chunks(source_table_rows_limited, chunk_size)
             if chunk_size == -1:
-                chunk_size = source_table_rows + 1
+                chunk_size = source_table_rows_limited + 1
 
             migration_stats = {
                 'rows_migrated': target_table_rows,
                 'chunk_number': chunk_number,
                 'total_chunks': total_chunks,
-                'source_table_rows': source_table_rows,
+                'source_table_rows_all': source_table_rows_all,
+
+                'source_table_rows_limited': source_table_rows_limited,
                 'target_table_rows': target_table_rows,
-                'finished': True if source_table_rows == 0 else False,
+                'finished': True if source_table_rows_limited == 0 else False,
             }
 
             protocol_id = migrator_tables.insert_data_migration({
@@ -1714,11 +1718,13 @@ class SybaseASEConnector(DatabaseConnector):
                 'source_table_name': source_table_name,
                 'target_schema_name': target_schema_name,
                 'target_table_name': target_table_name,
-                'source_table_rows': source_table_rows,
+                'source_table_rows_all': source_table_rows_all,
+
+                'source_table_rows_limited': source_table_rows_limited,
                 'target_table_rows': target_table_rows,
             })
 
-            if source_table_rows == 0:
+            if source_table_rows_limited == 0:
                 self.config_parser.print_log_message('INFO', f"sybase_ase_connector: migrate_table: Worker {worker_id}: Table {source_table_name} is empty - skipping data migration.")
                 migrator_tables.update_data_migration_status({
                         'row_id': protocol_id,
@@ -1736,10 +1742,10 @@ class SybaseASEConnector(DatabaseConnector):
             else:
 
                 data_conflict_action = settings.get('data_conflict_action')
-                if source_table_rows > target_table_rows or data_conflict_action in ('merge_keep_target', 'merge_keep_source', 'replace'):
+                if source_table_rows_limited > target_table_rows or data_conflict_action in ('merge_keep_target', 'merge_keep_source', 'replace'):
                     migrator_tables.update_data_migration_started(protocol_id)
 
-                    self.config_parser.print_log_message('INFO', f"sybase_ase_connector: migrate_table: Worker {worker_id}: Source table {source_table_name}: {source_table_rows} rows / Target table {target_table_name}: {target_table_rows} rows - starting data migration.")
+                    self.config_parser.print_log_message('INFO', f"sybase_ase_connector: migrate_table: Worker {worker_id}: Source table {source_table_name}: {source_table_rows_limited} rows / Target table {target_table_name}: {target_table_rows} rows - starting data migration.")
 
                     select_columns_list = []
                     orderby_columns_list = []
@@ -1778,7 +1784,7 @@ class SybaseASEConnector(DatabaseConnector):
                     chunk_start_row_number = chunk_offset + 1
                     chunk_end_row_number = chunk_offset + chunk_size
 
-                    self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: migrate_table: Worker {worker_id}: Migrating table {source_schema_name}.{source_table_name}: chunk {chunk_number}, data chunk size {chunk_size}, batch size {batch_size}, chunk offset {chunk_offset}, chunk end row number {chunk_end_row_number}, source table rows {source_table_rows}")
+                    self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: migrate_table: Worker {worker_id}: Migrating table {source_schema_name}.{source_table_name}: chunk {chunk_number}, data chunk size {chunk_size}, batch size {batch_size}, chunk offset {chunk_offset}, chunk end row number {chunk_end_row_number}, source table rows {source_table_rows_limited}")
                     order_by_clause = ''
 
                     ## Sybase ASE does not support LIMIT with OFFSET, in older versions,
@@ -1856,7 +1862,7 @@ class SybaseASEConnector(DatabaseConnector):
                         batch_end_time = time.time()
                         batch_duration = batch_end_time - batch_start_time
                         batch_durations.append(batch_duration)
-                        percent_done = round(total_inserted_rows / source_table_rows * 100, 2)
+                        percent_done = round(total_inserted_rows / source_table_rows_limited * 100, 2)
 
                         batch_start_dt = datetime.datetime.fromtimestamp(batch_start_time)
                         batch_end_dt = datetime.datetime.fromtimestamp(batch_end_time)
@@ -1880,7 +1886,7 @@ class SybaseASEConnector(DatabaseConnector):
 
                         msg = (
                             f"Worker {worker_id}: Inserted {inserted_rows} "
-                            f"(total: {total_inserted_rows} from: {source_table_rows} "
+                            f"(total: {total_inserted_rows} from: {source_table_rows_limited} "
                             f"({percent_done}%)) rows into target table '{target_table_name}': "
                             f"Batch {batch_number} duration: {batch_duration:.2f} seconds "
                             f"(r: {reading_duration:.2f}, t: {transforming_duration:.2f}, w: {inserting_duration:.2f})"
@@ -1904,22 +1910,26 @@ class SybaseASEConnector(DatabaseConnector):
 
                     cursor.close()
 
-                elif source_table_rows <= target_table_rows and data_conflict_action not in ('merge_keep_target', 'merge_keep_source', 'replace'):
-                    self.config_parser.print_log_message('INFO', f"sybase_ase_connector: migrate_table: Worker {worker_id}: Source table {source_table_name} has {source_table_rows} rows, which is less than or equal to target table {target_table_name} with {target_table_rows} rows. No data migration needed.")
+                elif source_table_rows_limited <= target_table_rows and data_conflict_action not in ('merge_keep_target', 'merge_keep_source', 'replace'):
+                    self.config_parser.print_log_message('INFO', f"sybase_ase_connector: migrate_table: Worker {worker_id}: Source table {source_table_name} has {source_table_rows_limited} rows, which is less than or equal to target table {target_table_name} with {target_table_rows} rows. No data migration needed.")
 
                 migration_stats = {
                     'rows_migrated': total_inserted_rows,
                     'chunk_number': chunk_number,
                     'total_chunks': total_chunks,
-                    'source_table_rows': source_table_rows,
+                    'source_table_rows_all': source_table_rows_all,
+
+                    'source_table_rows_limited': source_table_rows_limited,
                     'target_table_rows': target_table_rows,
                     'finished': False,
                 }
 
                 self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: migrate_table: Worker {worker_id}: Migration stats: {migration_stats}")
-                # we currently do not implement chunking for Sybase ASE
-                # if source_table_rows <= target_table_rows or chunk_number >= total_chunks:
-                if source_table_rows <= target_table_rows:
+                # Sybase ASE does not support query chunking (LIMIT/OFFSET).
+                # Therefore, the query fetches all matching rows in a single pass.
+                # We must unconditionally mark the migration as finished to prevent the 
+                # orchestrator from looping and duplicating the entire dataset.
+                if True:
                     self.config_parser.print_log_message('DEBUG3', f"sybase_ase_connector: migrate_table: Worker {worker_id}: Setting migration status to finished for table {source_table_name} (chunk {chunk_number}/{total_chunks})")
                     migration_stats['finished'] = True
                     migrator_tables.update_data_migration_status({
@@ -1940,7 +1950,9 @@ class SybaseASEConnector(DatabaseConnector):
                     'source_table_name': source_table_name,
                     'target_schema_name': target_schema_name,
                     'target_table_name': target_table_name,
-                    'source_table_rows': source_table_rows,
+                    'source_table_rows_all': source_table_rows_all,
+
+                    'source_table_rows_limited': source_table_rows_limited,
                     'target_table_rows': target_table_rows,
                     'chunk_number': chunk_number,
                     'chunk_size': chunk_size,

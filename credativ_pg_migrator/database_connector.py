@@ -603,6 +603,14 @@ class DatabaseConnector(ABC):
         """
         pass
 
+    def get_table_next_identity(self, table_schema: str, table_name: str):
+        """
+        Returns the next sequence value for the table's IDENTITY column, if applicable.
+        Used primarily for databases like Sybase ASE that don't expose sequences directly.
+        Returns an integer if an identity is found, or None otherwise.
+        """
+        return None
+
     @abstractmethod
     def fetch_user_defined_types(self, schema: str):
         """

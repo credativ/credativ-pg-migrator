@@ -1327,6 +1327,7 @@ class Orchestrator:
                             break
                         table_settings['chunk_number'] += 1
 
+                next_identity = worker_source_connection.get_table_next_identity(source_schema_name, source_table_name)
                 worker_source_connection.disconnect()
 
                 if rows_migrated > 0:
@@ -1340,6 +1341,9 @@ class Orchestrator:
                             sequence_name = sequence_details['name']
                             column_name = sequence_details['column_name']
                             sequence_sql = sequence_details['set_sequence_sql']
+                            if next_identity is not None:
+                                sequence_sql = f"SELECT setval('\"{target_schema_name}\".\"{sequence_name}\"', {next_identity}, false);"
+
                             self.migrator_tables.insert_sequence({
                                 'sequence_id': sequence_id,
                                 'target_schema_name': target_schema_name,

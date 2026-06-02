@@ -3064,6 +3064,23 @@ EXECUTE FUNCTION {target_schema_name}.{trigger_name}_func();
         # self.disconnect()
         return row[0]
 
+    def get_table_next_identity(self, table_schema: str, table_name: str):
+        try:
+            # According to Sybase ASE documentation, next_identity returns the next value.
+            # Using just table_name, but may use owner.table_name if necessary.
+            full_table_name = f"{table_schema}.{table_name}" if table_schema else table_name
+            query = f"SELECT next_identity('{full_table_name}')"
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            row = cursor.fetchone()
+            cursor.close()
+            if row and row[0] is not None:
+                return int(row[0])
+            return None
+        except Exception as e:
+            self.config_parser.print_log_message('WARNING', f"sybase_ase_connector: get_table_next_identity: Error fetching next identity for {full_table_name}: {e}")
+            return None
+
     def fetch_domains(self, schema: str):
         order_num = 1
         domains = {}

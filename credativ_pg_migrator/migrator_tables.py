@@ -3386,36 +3386,39 @@ class MigratorTables:
                     top_migrated_limit = self.config_parser.get_summary_top_migrated_tables()
                     lines.append("")
                     lines.append(f"Biggest Successfully Migrated Tables (Top {top_migrated_limit}):")
-                    lines.append(f"{'Table Name':<35} | {'Row Count':>15} | {'Time Spent (s)':>15}")
+                    lines.append(f"{'Table Name':<28} | {'Src All':>11} | {'Src Lim':>11} | {'Tgt Rows':>11} | {'Time(s)':>8}")
                     lines.append("-" * 80)
-                    cursor.execute(f"""SELECT target_schema_name, target_table_name, target_table_rows, 
+                    cursor.execute(f"""SELECT target_schema_name, target_table_name, source_table_rows_all, source_table_rows_limited, target_table_rows, 
                                        EXTRACT(EPOCH FROM (task_completed - task_started))
                                        FROM "{self.protocol_schema}"."{dm_table}" 
                                        WHERE source_table_rows_limited > 0 AND source_table_rows_limited = target_table_rows AND success = TRUE
                                        ORDER BY source_table_rows_limited DESC LIMIT {top_migrated_limit}""")
-                    for sch, tbl, t_rows, duration in cursor.fetchall():
+                    for sch, tbl, s_all, s_lim, t_rows, duration in cursor.fetchall():
+                        s_all_fmt = f"{s_all:,}" if s_all is not None else "-"
+                        s_lim_fmt = f"{s_lim:,}"
                         t_fmt = f"{t_rows:,}"
                         d_fmt = f"{round(duration, 2) if duration else 0.0}"
-                        lines.append(f"{sch + '.' + tbl:<35} | {t_fmt:>15} | {d_fmt:>15}")
+                        lines.append(f"{sch + '.' + tbl:<28} | {s_all_fmt:>11} | {s_lim_fmt:>11} | {t_fmt:>11} | {d_fmt:>8}")
 
                 if diff_dm > 0:
                     top_mismatched_limit = self.config_parser.get_summary_top_mismatched_tables()
                     lines.append("")
                     lines.append(f"Tables with row count mismatches (Top {top_mismatched_limit} by Source Rows):")
-                    lines.append(f"{'Table Name':<28} | {'Src Rows':>11} | {'Tgt Rows':>11} | {'Diff':>8} | {'Time(s)':>8}")
+                    lines.append(f"{'Table Name':<22} | {'Src All':>10} | {'Src Lim':>10} | {'Tgt Rows':>10} | {'Diff':>7} | {'Time':>6}")
                     lines.append("-" * 80)
-                    cursor.execute(f"""SELECT target_schema_name, target_table_name, source_table_rows_limited, target_table_rows,
+                    cursor.execute(f"""SELECT target_schema_name, target_table_name, source_table_rows_all, source_table_rows_limited, target_table_rows,
                                        ABS(source_table_rows_limited - target_table_rows),
                                        EXTRACT(EPOCH FROM (task_completed - task_started))
                                        FROM "{self.protocol_schema}"."{dm_table}" 
                                        WHERE source_table_rows_limited > 0 AND source_table_rows_limited <> target_table_rows 
                                        ORDER BY source_table_rows_limited DESC LIMIT {top_mismatched_limit}""")
-                    for sch, tbl, s_rows, t_rows, diff, duration in cursor.fetchall():
-                        s_fmt = f"{s_rows:,}"
+                    for sch, tbl, s_all, s_lim, t_rows, diff, duration in cursor.fetchall():
+                        s_all_fmt = f"{s_all:,}" if s_all is not None else "-"
+                        s_lim_fmt = f"{s_lim:,}"
                         t_fmt = f"{t_rows:,}"
                         diff_fmt = f"{diff:,}"
                         d_fmt = f"{round(duration, 2) if duration else 0.0}"
-                        lines.append(f"{sch + '.' + tbl:<28} | {s_fmt:>11} | {t_fmt:>11} | {diff_fmt:>8} | {d_fmt:>8}")
+                        lines.append(f"{sch + '.' + tbl:<22} | {s_all_fmt:>10} | {s_lim_fmt:>10} | {t_fmt:>10} | {diff_fmt:>7} | {d_fmt:>6}")
 
                 top_longest_batches_limit = self.config_parser.get_summary_top_longest_batches()
                 cursor.execute(f"""SELECT target_schema_name, target_table_name, batch_number, 

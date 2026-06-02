@@ -1475,9 +1475,9 @@ class MigratorTables:
             chunk_number, chunk_size, migration_limitation,
             chunk_start, chunk_end, order_by_clause, inserted_rows, batch_size, total_batches,
             task_started, task_completed)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
         params = (str(worker_id), source_table_id, source_schema_name,

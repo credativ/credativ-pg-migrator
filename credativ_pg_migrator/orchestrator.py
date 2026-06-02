@@ -1327,7 +1327,7 @@ class Orchestrator:
                             break
                         table_settings['chunk_number'] += 1
 
-                next_identity = worker_source_connection.get_table_next_identity(source_schema_name, source_table_name)
+                next_identity = worker_source_connection.get_table_next_identity(table_data['source_schema_name'], table_data['source_table_name'])
                 worker_source_connection.disconnect()
 
                 if rows_migrated > 0:

@@ -590,7 +590,7 @@ class DatabaseConnector(ABC):
         pass
 
     @abstractmethod
-    def get_rows_count(self, table_schema: str, table_name: str):
+    def get_rows_count(self, table_schema: str, table_name: str, migration_limitation: str = None):
         """
         Returns a number of rows in a table
         """
@@ -602,6 +602,15 @@ class DatabaseConnector(ABC):
         Returns a size of the table in bytes
         """
         pass
+
+    @abstractmethod
+    def get_table_next_identity(self, table_schema: str, table_name: str):
+        """
+        Returns the next sequence value for the table's IDENTITY column, if applicable.
+        Used primarily for databases like Sybase ASE that don't expose sequences directly.
+        Returns an integer if an identity is found, or None otherwise.
+        """
+        return None
 
     @abstractmethod
     def fetch_user_defined_types(self, schema: str):

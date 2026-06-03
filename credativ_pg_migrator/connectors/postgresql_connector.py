@@ -20,6 +20,7 @@ import psycopg2.extras
 from psycopg2 import sql
 from credativ_pg_migrator.database_connector import DatabaseConnector
 from credativ_pg_migrator.migrator_logging import MigratorLogger
+from credativ_pg_migrator.constants import MigratorConstants
 import traceback
 import re
 import datetime
@@ -34,7 +35,7 @@ class PostgreSQLConnector(DatabaseConnector):
 
     def connect(self):
         connection_string = self.config_parser.get_connect_string(self.source_or_target)
-        self.connection = psycopg2.connect(connection_string)
+        self.connection = psycopg2.connect(connection_string, application_name=MigratorConstants.get_application_name())
         self.connection.autocommit = True
 
     def disconnect(self):
@@ -1121,7 +1122,7 @@ class PostgreSQLConnector(DatabaseConnector):
 
     def migrate_table(self, migrate_target_connection, settings):
         part_name = 'initialize'
-        source_table_rows = 0
+        source_table_rows_limited = 0
         target_table_rows = 0
         total_inserted_rows = 0
         migration_stats = {}
@@ -1152,22 +1153,26 @@ class PostgreSQLConnector(DatabaseConnector):
             resume_after_crash = settings['resume_after_crash']
             drop_unfinished_tables = settings['drop_unfinished_tables']
 
-            source_table_rows = self.get_rows_count(source_schema_name, source_table_name, migration_limitation)
+            source_table_rows_all = settings.get('source_table_rows_all', 0)
+
+            source_table_rows_limited = self.get_rows_count(source_schema_name, source_table_name, migration_limitation)
             target_table_rows = migrate_target_connection.get_rows_count(target_schema_name, target_table_name)
 
-            total_chunks = self.config_parser.get_total_chunks(source_table_rows, chunk_size)
+            total_chunks = self.config_parser.get_total_chunks(source_table_rows_limited, chunk_size)
             if chunk_size == -1:
-                chunk_size = source_table_rows + 1
+                chunk_size = source_table_rows_limited + 1
 
             migration_stats = {
                 'rows_migrated': target_table_rows,
                 'chunk_number': chunk_number,
                 'total_chunks': total_chunks,
-                'source_table_rows': source_table_rows,
+                'source_table_rows_all': source_table_rows_all,
+
+                'source_table_rows_limited': source_table_rows_limited,
                 'target_table_rows': target_table_rows,
-                'finished': True if source_table_rows == 0 else False,
+                'finished': True if source_table_rows_limited == 0 else False,
             }
-            ## source_schema_name, source_table_name, source_table_id, source_table_rows, worker_id, target_schema_name, target_table_name, target_table_rows
+            ## source_schema_name, source_table_name, source_table_id, source_table_rows_limited, worker_id, target_schema_name, target_table_name, target_table_rows
             protocol_id = migrator_tables.insert_data_migration({
                 'worker_id': worker_id,
                 'source_table_id': source_table_id,
@@ -1175,11 +1180,13 @@ class PostgreSQLConnector(DatabaseConnector):
                 'source_table_name': source_table_name,
                 'target_schema_name': target_schema_name,
                 'target_table_name': target_table_name,
-                'source_table_rows': source_table_rows,
+                'source_table_rows_all': source_table_rows_all,
+
+                'source_table_rows_limited': source_table_rows_limited,
                 'target_table_rows': target_table_rows,
             })
 
-            if source_table_rows == 0:
+            if source_table_rows_limited == 0:
                 self.config_parser.print_log_message('INFO', f"postgresql_connector: migrate_table: Worker {worker_id}: Table {source_table_name} is empty - skipping data migration.")
                 migrator_tables.update_data_migration_status({
                         'row_id': protocol_id,
@@ -1197,11 +1204,11 @@ class PostgreSQLConnector(DatabaseConnector):
             else:
 
                 data_conflict_action = settings.get('data_conflict_action')
-                if source_table_rows > target_table_rows or data_conflict_action in ('merge_keep_target', 'merge_keep_source', 'replace'):
+                if source_table_rows_limited > target_table_rows or data_conflict_action in ('merge_keep_target', 'merge_keep_source', 'replace'):
                     migrator_tables.update_data_migration_started(protocol_id)
 
                     part_name = 'migrate_table in batches using cursor'
-                    self.config_parser.print_log_message('INFO', f"postgresql_connector: migrate_table: Worker {worker_id}: Source table {source_table_name}: {source_table_rows} rows / Target table {target_table_name}: {target_table_rows} rows - starting data migration.")
+                    self.config_parser.print_log_message('INFO', f"postgresql_connector: migrate_table: Worker {worker_id}: Source table {source_table_name}: {source_table_rows_limited} rows / Target table {target_table_name}: {target_table_rows} rows - starting data migration.")
 
                     select_columns_list = []
                     orderby_columns_list = []
@@ -1235,7 +1242,7 @@ class PostgreSQLConnector(DatabaseConnector):
                     chunk_start_row_number = chunk_offset + 1
                     chunk_end_row_number = chunk_offset + chunk_size
 
-                    self.config_parser.print_log_message('DEBUG', f"postgresql_connector: migrate_table: Worker {worker_id}: Migrating table {source_schema_name}.{source_table_name}: chunk {chunk_number}, data chunk size {chunk_size}, batch size {batch_size}, chunk offset {chunk_offset}, chunk end row number {chunk_end_row_number}, source table rows {source_table_rows}")
+                    self.config_parser.print_log_message('DEBUG', f"postgresql_connector: migrate_table: Worker {worker_id}: Migrating table {source_schema_name}.{source_table_name}: chunk {chunk_number}, data chunk size {chunk_size}, batch size {batch_size}, chunk offset {chunk_offset}, chunk end row number {chunk_end_row_number}, source table rows {source_table_rows_limited}")
                     order_by_clause = ''
 
                     query = f'''SELECT {select_columns} FROM "{source_schema_name}"."{source_table_name}" '''
@@ -1306,7 +1313,7 @@ class PostgreSQLConnector(DatabaseConnector):
                         batch_end_time = time.time()
                         batch_duration = batch_end_time - batch_start_time
                         batch_durations.append(batch_duration)
-                        percent_done = round(total_inserted_rows / source_table_rows * 100, 2)
+                        percent_done = round(total_inserted_rows / source_table_rows_limited * 100, 2)
 
                         batch_start_dt = datetime.datetime.fromtimestamp(batch_start_time)
                         batch_end_dt = datetime.datetime.fromtimestamp(batch_end_time)
@@ -1330,7 +1337,7 @@ class PostgreSQLConnector(DatabaseConnector):
 
                         msg = (
                             f"Worker {worker_id}: Inserted {inserted_rows} "
-                            f"(total: {total_inserted_rows} from: {source_table_rows} "
+                            f"(total: {total_inserted_rows} from: {source_table_rows_limited} "
                             f"({percent_done}%)) rows into target table '{target_table_name}': "
                             f"Batch {batch_number} duration: {batch_duration:.2f} seconds "
                             f"(r: {reading_duration:.2f}, t: {transforming_duration:.2f}, w: {inserting_duration:.2f})"
@@ -1353,20 +1360,22 @@ class PostgreSQLConnector(DatabaseConnector):
 
                     cursor.close()
 
-                elif source_table_rows <= target_table_rows and data_conflict_action not in ('merge_keep_target', 'merge_keep_source', 'replace'):
-                    self.config_parser.print_log_message('INFO', f"postgresql_connector: migrate_table: Worker {worker_id}: Source table {source_table_name} has {source_table_rows} rows, which is less than or equal to target table {target_table_name} with {target_table_rows} rows. No data migration needed.")
+                elif source_table_rows_limited <= target_table_rows and data_conflict_action not in ('merge_keep_target', 'merge_keep_source', 'replace'):
+                    self.config_parser.print_log_message('INFO', f"postgresql_connector: migrate_table: Worker {worker_id}: Source table {source_table_name} has {source_table_rows_limited} rows, which is less than or equal to target table {target_table_name} with {target_table_rows} rows. No data migration needed.")
 
                 migration_stats = {
                     'rows_migrated': total_inserted_rows,
                     'chunk_number': chunk_number,
                     'total_chunks': total_chunks,
-                    'source_table_rows': source_table_rows,
+                    'source_table_rows_all': source_table_rows_all,
+
+                    'source_table_rows_limited': source_table_rows_limited,
                     'target_table_rows': target_table_rows,
                     'finished': False,
                 }
 
                 self.config_parser.print_log_message('DEBUG', f"postgresql_connector: migrate_table: Worker {worker_id}: Migration stats: {migration_stats}")
-                if source_table_rows <= target_table_rows or chunk_number >= total_chunks:
+                if source_table_rows_limited <= target_table_rows or chunk_number >= total_chunks:
                     self.config_parser.print_log_message('DEBUG3', f"postgresql_connector: migrate_table: Worker {worker_id}: Setting migration status to finished for table {source_table_name} (chunk {chunk_number}/{total_chunks})")
                     migration_stats['finished'] = True
                     migrator_tables.update_data_migration_status({
@@ -1387,7 +1396,9 @@ class PostgreSQLConnector(DatabaseConnector):
                     'source_table_name': source_table_name,
                     'target_schema_name': target_schema_name,
                     'target_table_name': target_table_name,
-                    'source_table_rows': source_table_rows,
+                    'source_table_rows_all': source_table_rows_all,
+
+                    'source_table_rows_limited': source_table_rows_limited,
                     'target_table_rows': target_table_rows,
                     'chunk_number': chunk_number,
                     'chunk_size': chunk_size,
@@ -1602,6 +1613,8 @@ class PostgreSQLConnector(DatabaseConnector):
         if self.on_error_action == 'stop':
             self.config_parser.print_log_message('ERROR', "postgresql_connector: handle_error: Stopping due to error.")
             exit(1)
+        else:
+            self.config_parser.print_log_message('WARNING', f"postgresql_connector: handle_error: Error caught, but continuing as requested by configuration (on_error_action='{self.on_error_action}').")
 
     def fetch_sequences(self, schema_name: str):
         return {}
@@ -1615,10 +1628,7 @@ class PostgreSQLConnector(DatabaseConnector):
                     c.relname::text AS sequence_name,
                     c.oid AS sequence_id,
                     a.attname AS column_name,
-                    'SELECT SETVAL( (SELECT oid from pg_class s where s.relname = ''' || c.relname ||
-                    ''' and s.relkind = ''S'' AND s.relnamespace::regnamespace::text = ''' ||
-                    c.relnamespace::regnamespace::text || '''), (SELECT MAX(' || quote_ident(a.attname) || ') /*+ 1*/ FROM ' ||
-                    quote_ident(t.relnamespace::regnamespace::text)||'.'|| quote_ident(t.relname) || '));' as sequence_sql
+                    '' as sequence_sql
                 FROM
                     pg_depend d
                     JOIN pg_class c ON d.objid = c.oid
@@ -1649,8 +1659,44 @@ class PostgreSQLConnector(DatabaseConnector):
             # self.disconnect()
             return sequence_data
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"postgresql_connector: fetch_sequences: Error executing sequence query: {query}")
+            self.config_parser.print_log_message('ERROR', f"postgresql_connector: fetch_table_sequences: Error executing sequence query: {query}")
             self.config_parser.print_log_message('ERROR', e)
+            return {}
+
+    def get_table_next_identity(self, table_schema: str, table_name: str):
+        try:
+            # First find the sequence for the table. Since get_table_next_identity doesn't receive column_name,
+            # we query pg_class and pg_depend to find an attached sequence, similar to fetch_table_sequences.
+            query = f"""
+                SELECT c.relname::text AS sequence_name
+                FROM pg_depend d
+                JOIN pg_class c ON d.objid = c.oid
+                JOIN pg_class t ON t.oid = d.refobjid
+                WHERE c.relkind = 'S'
+                AND t.relname = '{table_name}'
+                AND t.relkind = 'r'
+                AND d.refobjsubid > 0
+                AND c.relnamespace = '{table_schema}'::regnamespace
+                LIMIT 1
+            """
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            row = cursor.fetchone()
+            if not row:
+                cursor.close()
+                return None
+            
+            sequence_name = row[0]
+            cursor.execute(f'SELECT last_value FROM "{table_schema}"."{sequence_name}"')
+            val_row = cursor.fetchone()
+            cursor.close()
+            
+            if val_row and val_row[0] is not None:
+                return int(val_row[0])
+            return None
+        except Exception as e:
+            self.config_parser.print_log_message('WARNING', f"postgresql_connector: get_table_next_identity: Error fetching next identity for {table_schema}.{table_name}: {e}")
+            return None
 
     def get_sequence_details(self, sequence_owner, sequence_name):
         query = f"""
@@ -2154,6 +2200,9 @@ class PostgreSQLConnector(DatabaseConnector):
                 sql_parts.append("NOT NULL")
 
             if domain_check_sql:
+                # Ensure PostgreSQL standalone domain constraints rely on VALUE instead of column names
+                domain_check_sql = re.sub(r'(?i)(CHECK\s*\(\s*)([a-zA-Z_]\w*)(\s+|[<>=!])', r'\g<1>VALUE\g<3>', domain_check_sql)
+                
                 # pg_get_constraintdef already allows CHECK (...).
                 # If multiple constraints were aggregated, they might look like CHECK (...) CHECK (...)
                 # We just append them.

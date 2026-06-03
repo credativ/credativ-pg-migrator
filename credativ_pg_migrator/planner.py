@@ -646,19 +646,35 @@ class Planner:
 
                 self.config_parser.print_log_message( 'INFO', f"planner: stdwf_prepare_tables: Counting rows in source table {table_info['table_name']}...")
                 self.source_connection.connect()
-                source_table_rows = self.source_connection.get_rows_count(
+                migration_limitation = None
+                limitations = self.migrator_tables.get_records_data_migration_limitation(table_info['table_name'])
+                if limitations:
+                    migration_limitation = limitations[0][0]
+                
+                source_table_rows_all = self.source_connection.get_rows_count(
                     self.source_schema_name,
                     table_info['table_name'],
+                    None
                 )
+                
+                source_table_rows_limited = source_table_rows_all
+                if migration_limitation:
+                    source_table_rows_limited = self.source_connection.get_rows_count(
+                        self.source_schema_name,
+                        table_info['table_name'],
+                        migration_limitation
+                    )
+                    
                 self.source_connection.disconnect()
-                self.config_parser.print_log_message( 'INFO', f"planner: stdwf_prepare_tables: Source table {table_info['table_name']} has {source_table_rows} rows.")
+                self.config_parser.print_log_message( 'INFO', f"planner: stdwf_prepare_tables: Source table {table_info['table_name']} has {source_table_rows_all} total rows ({source_table_rows_limited} limited).")
 
                 self.migrator_tables.insert_tables({
                     'source_schema_name': self.source_schema_name,
                     'source_table_name': table_info['table_name'],
                     'source_table_id': table_info['id'],
                     'source_columns': source_columns,
-                    'source_table_rows': source_table_rows,
+                    'source_table_rows_all': source_table_rows_all,
+                    'source_table_rows_limited': source_table_rows_limited,
                     'source_table_description': table_description,
                     'source_table_sql': table_info.get('source_table_sql', ''),
                     'target_schema_name': self.target_schema_name,
@@ -680,7 +696,8 @@ class Planner:
                     'source_table_name': table_info['table_name'],
                     'source_table_id': table_info['id'],
                     'source_columns': source_columns,
-                    'source_table_rows': source_table_rows,
+                    'source_table_rows_all': source_table_rows_all if 'source_table_rows_all' in locals() else 0,
+                    'source_table_rows_limited': source_table_rows_limited if 'source_table_rows_limited' in locals() else 0,
                     'source_table_description': table_description,
                     'source_table_sql': table_info.get('source_table_sql', ''),
                     'target_schema_name': self.target_schema_name,
@@ -1247,6 +1264,8 @@ class Planner:
         if self.on_error_action == 'stop':
             self.config_parser.print_log_message('ERROR', "planner: handle_error: Stopping due to error.")
             exit(1)
+        else:
+            self.config_parser.print_log_message('WARNING', f"planner: handle_error: Error caught, but continuing as requested by configuration (on_error_action='{self.on_error_action}').")
 
     def check_pausing_resuming(self):
         if self.config_parser.pause_migration_fired():
@@ -1274,29 +1293,44 @@ class Planner:
 
                     part_name = 'check row counts for table ' + data_migration_info['source_table_name']
                     if self.config_parser.get_source_db_type() == 'ibm_db2_zos':
-                        source_table_rows = data_migration_info.get('source_table_rows', 0)
+                        source_table_rows_all = data_migration_info.get('source_table_rows_all', 0)
+                        source_table_rows_limited = data_migration_info.get('source_table_rows_limited', 0)
                     else:
-                        source_table_rows = self.source_connection.get_rows_count(
+                        migration_limitation = None
+                        limitations = self.migrator_tables.get_records_data_migration_limitation(data_migration_info['source_table_name'])
+                        if limitations:
+                            migration_limitation = limitations[0][0]
+                        source_table_rows_all = self.source_connection.get_rows_count(
                             data_migration_info['source_schema_name'],
-                            data_migration_info['source_table_name']
+                            data_migration_info['source_table_name'],
+                            None
                         )
+                        source_table_rows_limited = source_table_rows_all
+                        if migration_limitation:
+                            source_table_rows_limited = self.source_connection.get_rows_count(
+                                data_migration_info['source_schema_name'],
+                                data_migration_info['source_table_name'],
+                                migration_limitation
+                            )
                     target_table_rows = self.target_connection.get_rows_count(
                         data_migration_info['target_schema_name'],
                         data_migration_info['target_table_name']
                     )
-                    self.config_parser.print_log_message('DEBUG', f"planner: run_check_tables_migration_status: Row counts for table {data_migration_info['source_table_name']}: source={source_table_rows}, target={target_table_rows}")
+                    self.config_parser.print_log_message('DEBUG', f"planner: run_check_tables_migration_status: Row counts for table {data_migration_info['source_table_name']}: source={source_table_rows_limited}, target={target_table_rows}")
 
-                    if source_table_rows != target_table_rows:
-                        self.config_parser.print_log_message('INFO', f"planner: run_check_tables_migration_status: Row counts do not match for table {data_migration_info['source_table_name']}: source={source_table_rows}, target={target_table_rows}. Marking as not fully migrated.")
+                    if source_table_rows_limited != target_table_rows:
+                        self.config_parser.print_log_message('INFO', f"planner: run_check_tables_migration_status: Row counts do not match for table {data_migration_info['source_table_name']}: source={source_table_rows_limited}, target={target_table_rows}. Marking as not fully migrated.")
                         self.migrator_tables.update_table_status({'row_id': table_info['id'], 'success': False, 'message': ''})
                         self.migrator_tables.update_table_rows_counts({
                             "row_id": table_info['id'],
-                            "source_table_rows": source_table_rows,
+                            "source_table_rows_all": source_table_rows_all,
+                            "source_table_rows_limited": source_table_rows_limited,
                             "target_table_rows": target_table_rows,
                         })
                         self.migrator_tables.update_data_migration_rows({
                             "row_id": data_migration_info['id'],
-                            "source_table_rows": source_table_rows,
+                            "source_table_rows_all": source_table_rows_all,
+                            "source_table_rows_limited": source_table_rows_limited,
                             "target_table_rows": target_table_rows,
                         } )
                         self.migrator_tables.update_data_migration_status({
@@ -1306,16 +1340,18 @@ class Planner:
                             'target_table_rows': target_table_rows,
                         })
                     else:
-                        self.config_parser.print_log_message('DEBUG', f"planner: run_check_tables_migration_status: Row counts match for table {data_migration_info['source_table_name']}: source={source_table_rows}, target={target_table_rows}. Marking as fully migrated.")
+                        self.config_parser.print_log_message('DEBUG', f"planner: run_check_tables_migration_status: Row counts match for table {data_migration_info['source_table_name']}: source={source_table_rows_limited}, target={target_table_rows}. Marking as fully migrated.")
                         self.migrator_tables.update_table_status({'row_id': table_info['id'], 'success': True, 'message': 'Fully migrated'})
                         self.migrator_tables.update_table_rows_counts({
                             "row_id": table_info['id'],
-                            "source_table_rows": source_table_rows,
+                            "source_table_rows_all": source_table_rows_all,
+                            "source_table_rows_limited": source_table_rows_limited,
                             "target_table_rows": target_table_rows,
                         })
                         self.migrator_tables.update_data_migration_rows({
                             "row_id": data_migration_info['id'],
-                            "source_table_rows": source_table_rows,
+                            "source_table_rows_all": source_table_rows_all,
+                            "source_table_rows_limited": source_table_rows_limited,
                             "target_table_rows": target_table_rows,
                         } )
                         self.migrator_tables.update_data_migration_status({
@@ -1637,11 +1673,25 @@ class Planner:
             target_schema_name = self.target_schema_name
             mapped_table = pair # Assuming 'pair' itself represents the mapped table info
 
+            migration_limitation = None
+            limitations = self.migrator_tables.get_records_data_migration_limitation(source_t)
+            if limitations:
+                migration_limitation = limitations[0][0]
+
             self.source_connection.connect()
-            source_table_rows = self.source_connection.get_rows_count(
+            source_table_rows_all = self.source_connection.get_rows_count(
                 source_schema_name,
-                source_t
+                source_t,
+                None
             )
+            
+            source_table_rows_limited = source_table_rows_all
+            if migration_limitation:
+                source_table_rows_limited = self.source_connection.get_rows_count(
+                    source_schema_name,
+                    source_t,
+                    migration_limitation
+                )
             self.source_connection.disconnect()
 
             self.target_connection.connect()
@@ -1658,7 +1708,8 @@ class Planner:
                 'target_table_name': target_t, # Use target_t from the loop
                 'match_type': mapped_table['method'], # Use 'method' from 'pair'
                 'similarity_score': mapped_table.get('score', 0.0), # Use 'score' from 'pair'
-                'source_table_rows': source_table_rows,
+                'source_table_rows_all': source_table_rows_all,
+                'source_table_rows_limited': source_table_rows_limited,
                 'target_table_rows': target_table_rows,
                 'info': info_json # Use the already prepared info_json
             })
@@ -1709,7 +1760,15 @@ class Planner:
 
             self.config_parser.print_log_message('DEBUG3', f"planner: mapping_match_tables: Fetching source rows count for '{source_t}'")
             self.source_connection.connect()
-            source_table_rows = self.source_connection.get_rows_count(self.source_schema_name, source_t)
+            self.source_connection.connect()
+            migration_limitation = None
+            limitations = self.migrator_tables.get_records_data_migration_limitation(source_t)
+            if limitations:
+                migration_limitation = limitations[0][0]
+            
+            # Since this section only seems to be re-fetching or is redundant for the log message,
+            # we'll fetch just limited for the message or rely on what's available
+            source_table_rows_limited = self.source_connection.get_rows_count(self.source_schema_name, source_t, migration_limitation)
             self.source_connection.disconnect()
 
             self.config_parser.print_log_message('DEBUG3', f"planner: mapping_match_tables: Fetching target rows count for '{target_t}'")

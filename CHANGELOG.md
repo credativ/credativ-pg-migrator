@@ -2,6 +2,26 @@
 
 ## 0.15.0rc1 - 2026.05.29
 
+- 2026.06.03
+
+  - Fix - PostgreSQL Connector: Resolved an issue where non-standard Unix socket directories (e.g., `/tmp`) could not be used in the `host` configuration parameter. The connection string builder now properly URL-encodes the `host` parameter and utilizes the standard `postgresql://` URI schema, ensuring flawless connection resolution for both standard network hosts and Unix domain sockets via psycopg2.
+
+- 2026.06.02
+
+  - Feature - Core Migrator: Standardized diagnostic row counting across all database connectors to natively apply the `migration_limitation` configuration parameter. Ensures reported source table diagnostics exactly match the subsets defined for partial migrations. Removed redundant un-filtered row counting queries from `sybase_ase_connector.py` and `sql_anywhere_connector.py`.
+  - Feature - Protocol: Improved transparency of the migration process by replacing `source_table_rows` with `source_table_rows_all` and `source_table_rows_limited` in protocol tables (`data_migration`, `data_chunks`, and `tables_info`) to differentiate total table size from filtered subsets when migration limitations are active. All connectors and validation logic are updated to track and compare against the `limited` metric for accurate parity checks.
+  - Fix - Sybase ASE Connector: Resolved a critical issue causing data duplication (2-3x multiplier) during migrations. Unconditionally set `migration_stats['finished'] = True` to prevent the orchestrator from infinitely looping on tables where target row counts fell short of expected source row counts (e.g. due to data validation rejections or missing `migration_limitation` filters).
+  - Feature - Core Migrator: Completely eliminated the target-side `MAX(column)` aggregation abstraction for synchronizing identity sequences, shifting responsibility strictly to source database engine catalog extraction. Natively implemented the unified `get_table_next_identity()` interface across all legacy connectors (PostgreSQL, MySQL, MS SQL Server, Oracle, IBM Db2 LUW, IBM Db2 z/OS, Sybase ASE, Informix, and SQL Anywhere) to systematically extract pure sequence cache states. Orchestrator implicitly formats valid `setval()` payloads allowing perfectly accurate sequence replication irrespective of non-contiguous database row gaps.
+
+- 2026.06.01
+
+  - Feature - Sybase ASE Connector: Used `ROW_COUNT` instead of `COUNT(*)` for initial row count fetch if no migration limitation is defined to improve performance.
+  - Feature - TSQL Parser: Implemented logic to automatically comment out `RETURN` statements following `RAISERROR` in Sybase ASE procedures to ensure PostgreSQL compatibility.
+  - Feature - Core Migrator: Enhanced `handle_error` logging across all connectors and the orchestrator to explicitly output a warning message when errors are bypassed due to the `on_error_action=continue` configuration setting.
+  - Feature - Core Migrator: Enhanced migration summary report to calculate and display the total count of errors encountered across all objects and data migration phases.
+  - Feature - PostgreSQL Connector: Set `application_name` to `credativ-pg-migrator` (defined in `constants.py`) for all PostgreSQL connections to improve database monitoring and connection visibility.
+  - Feature - TSQL Parser: Implemented logic to automatically convert `EXEC`/`EXECUTE` procedure calls to `PERFORM` statements in PostgreSQL PL/pgSQL, properly enclosing arguments in parentheses.
+
 - 2026.05.29
 
   - Fix - IBM Db2 LUW Connector: Resolved an `UnboundLocalError` in `fetch_indexes` that caused the migration to crash when attempting to log details for tables with zero indexes.

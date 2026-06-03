@@ -59,10 +59,11 @@ class AnonymizationWorkflow:
         migrate_tables = []
         for table_row in raw_tables:
             table_data = self.migrator_tables.decode_table_row(table_row)
-            source_rows = table_data.get('source_table_rows', 0)
+            source_rows_all = table_data.get('source_table_rows_all', 0)
+            source_rows_limited = table_data.get('source_table_rows_limited', 0)
             
             # Simplified logic for example: just process tables with rows
-            if source_rows > 0:
+            if source_rows_limited > 0:
                 migrate_tables.append(table_data)
             else:
                 self.migrator_tables.update_table_status({'row_id': table_data['id'], 'success': True, 'message': 'anonymized data OK (0 rows)'})
@@ -99,7 +100,8 @@ class AnonymizationWorkflow:
         source_schema = table_data['source_schema_name']
         source_table = table_data['source_table_name']
         source_table_id = table_data.get('source_table_id', 0)
-        source_table_rows = table_data.get('source_table_rows', 0)
+        source_table_rows_all = table_data.get('source_table_rows_all', 0)
+        source_table_rows_limited = table_data.get('source_table_rows_limited', 0)
         target_schema = table_data['target_schema_name']
         target_table = table_data['target_table_name']
         target_table_rows = table_data.get('target_table_rows', 0)
@@ -114,7 +116,8 @@ class AnonymizationWorkflow:
                 'source_table_name': source_table,
                 'target_schema_name': target_schema,
                 'target_table_name': target_table,
-                'source_table_rows': source_table_rows,
+                'source_table_rows_all': source_table_rows_all,
+                'source_table_rows_limited': source_table_rows_limited,
                 'target_table_rows': target_table_rows,
             })
             self.migrator_tables.update_data_migration_started(protocol_id)

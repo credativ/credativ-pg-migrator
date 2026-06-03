@@ -762,7 +762,7 @@ class IbmDb2ZosConnector(DatabaseConnector):
         pass
 
     def migrate_table(self, migrate_target_connection, settings):
-        return {'finished': True, 'rows_migrated': 0, 'source_table_rows': 0, 'target_table_rows': 0, 'chunk_number': 1, 'total_chunks': 1}
+        return {'finished': True, 'rows_migrated': 0, 'source_table_rows_limited': 0, 'target_table_rows': 0, 'chunk_number': 1, 'total_chunks': 1}
 
     def fetch_indexes(self, settings):
         table_schema = settings.get('source_table_schema')
@@ -1437,11 +1437,41 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
     def rollback_transaction(self):
         pass
 
-    def get_rows_count(self, table_schema: str, table_name: str):
-        return 0
+    def get_rows_count(self, table_schema: str, table_name: str, migration_limitation: str = None):
+        query = f"""SELECT COUNT(*) FROM {table_schema.upper()}."{table_name}" """
+        if migration_limitation:
+            query += f" WHERE {migration_limitation}"
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            count = cursor.fetchone()[0]
+            cursor.close()
+            return count
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"ibm_db2_zos_connector: get_rows_count: Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
+            raise
 
     def get_table_size(self, table_schema: str, table_name: str):
         return 0
+
+    def get_table_next_identity(self, table_schema: str, table_name: str):
+        try:
+            query = f"""
+                SELECT MAXASSIGNEDVAL + 1
+                FROM SYSIBM.SYSSEQUENCES
+                WHERE SEQTYPE = 'I' AND SCHEMA = '{table_schema}' AND TBNAME = '{table_name}'
+            """
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            row = cursor.fetchone()
+            cursor.close()
+            if row and row[0] is not None:
+                return int(row[0])
+            return None
+        except Exception as e:
+            self.config_parser.print_log_message('WARNING', f"ibm_db2_zos_connector: get_table_next_identity: Error fetching next identity for {table_schema}.{table_name}: {e}")
+            return None
 
     def fetch_user_defined_types(self, schema: str):
         return {}

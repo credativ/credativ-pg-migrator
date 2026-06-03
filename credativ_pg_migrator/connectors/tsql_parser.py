@@ -1032,13 +1032,17 @@ class TsqlParser:
                 print_args = re.sub(r'^PRINT\b', '', full_print, flags=re.IGNORECASE).strip()
                 
                 if print_args.startswith("'") or print_args.startswith('"'):
-                    match = re.match(r'^((?:\'[^\']*\')|(?:"[^"]*"))(.*)$', print_args, re.IGNORECASE)
+                    match = re.match(r'^((?:\'(?:[^\']|\'\')*\')|(?:"(?:[^"]|"")*"))(.*)$', print_args, re.IGNORECASE)
                     if match:
                         format_str_raw = match.group(1)
                         args = match.group(2).strip()
                         
                         if format_str_raw.startswith('"') and format_str_raw.endswith('"'):
-                            format_str = format_str_raw[1:-1].replace("'", "''")
+                            # User requested to remove single quotes completely before replacing main double quotes
+                            format_str = format_str_raw[1:-1].replace("'", "")
+                        elif format_str_raw.startswith("'") and format_str_raw.endswith("'"):
+                            # If it was converted by an earlier pass, remove the escaped single quotes
+                            format_str = format_str_raw[1:-1].replace("''", "")
                         else:
                             format_str = format_str_raw[1:-1]
                             
@@ -1201,7 +1205,7 @@ class TsqlParser:
                 full_raiserror = " ".join(cleaned_lines)
 
                 # Now parse RAISERROR <number> <string>
-                match = re.match(r'^RAISERROR\s+(\d+)\s+((?:\'[^\']*\')|(?:"[^"]*"))(.*)$', full_raiserror, re.IGNORECASE)
+                match = re.match(r'^RAISERROR\s+(\d+)\s+((?:\'(?:[^\']|\'\')*\')|(?:"(?:[^"]|"")*"))(.*)$', full_raiserror, re.IGNORECASE)
                 if match:
                     err_num = match.group(1)
                     err_msg_raw = match.group(2)
@@ -1228,6 +1232,19 @@ class TsqlParser:
                     "line": start_line,
                     "content": full_raiserror
                 })
+
+                # Check if next statement is RETURN and comment it out
+                next_idx = i
+                while next_idx < len(self.body_lines):
+                    next_line_obj = self.body_lines[next_idx]
+                    next_content = next_line_obj.content.strip()
+                    if next_content == "":
+                        next_idx += 1
+                        continue
+                    if re.match(r'^RETURN\b', next_content, re.IGNORECASE):
+                        self.body_lines[next_idx] = type(next_line_obj)(next_line_obj.line_number, f"/* {next_content} - Sybase syntax */")
+                    break
+
             else:
                 new_body_lines.append(line)
                 i += 1
@@ -1945,6 +1962,10 @@ class TsqlParser:
             if re.match(r'^SET\s+ROWCOUNT\b', content, re.IGNORECASE):
                 continue
 
+            # Skip lines that are already comments
+            if content.startswith('--') or content.startswith('/*'):
+                continue
+
             # Rule 123: Anything else -> add TODO
             # Check if it was modified by above rules?
 
@@ -2037,6 +2058,23 @@ class TsqlParser:
 
         for e in self.exec_commands:
             content = e['content']
+            
+            # Convert EXEC procedure_name [args] to PERFORM procedure_name(args)
+            exec_match = re.match(r'^(EXECUTE|EXEC)\s+(.+)$', content, re.IGNORECASE)
+            if exec_match:
+                remainder = exec_match.group(2).strip()
+                
+                # Exclude dynamic SQL like EXECUTE ('...') or EXECUTE (locvar_...)
+                if not remainder.startswith('(') and not remainder.startswith('\''):
+                    # Split into procedure name and arguments
+                    parts = re.split(r'\s+', remainder, 1)
+                    proc_name = parts[0]
+                    args = parts[1].strip() if len(parts) > 1 else ""
+                    content = f"PERFORM {proc_name}({args})"
+                else:
+                    # Keep as EXECUTE for dynamic SQL
+                    content = f"EXECUTE {remainder}"
+
             if not content.strip().endswith(';'):
                 content += ';'
             body_parts.append((e['line'], content, "exec_commands"))

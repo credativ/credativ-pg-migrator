@@ -4,6 +4,7 @@
 
 - 2026.06.03
 
+  - Fix - Orchestrator: Moved table dropping logic out of parallel workers into a sequential execution block before data migration begins. This prevents potential deadlocks on the target database when multiple parallel workers attempt to drop tables concurrently.
   - Fix - PostgreSQL Connector: Resolved an issue where non-standard Unix socket directories (e.g., `/tmp`) could not be used in the `host` configuration parameter. The connection string builder now properly URL-encodes the `host` parameter and utilizes the standard `postgresql://` URI schema, ensuring flawless connection resolution for both standard network hosts and Unix domain sockets via psycopg2.
 
 - 2026.06.02

@@ -540,6 +540,53 @@ class Orchestrator:
         migrate_tables = self.migrator_tables.fetch_all_tables(self.config_parser.is_resume_after_crash())
 
         if len(migrate_tables) > 0:
+            target_connection = self.load_connector('target')
+            target_connection.connect()
+
+            failed_tables = set()
+            for table_row in migrate_tables:
+                table_data = self.migrator_tables.decode_table_row(table_row)
+                target_schema_name = table_data['target_schema_name']
+                target_table_name = self.config_parser.convert_names_case(table_data['target_table_name'])
+
+                if ((settings['drop_tables'] and not settings['resume_after_crash'])
+                    or (settings['resume_after_crash'] and settings['drop_unfinished_tables'])
+                    or (settings['resume_after_crash'] and not target_connection.target_table_exists(target_schema_name, target_table_name))):
+
+                    repeat_count = 0
+                    drop_query = f'DROP TABLE IF EXISTS "{target_schema_name}"."{target_table_name}" CASCADE'
+                    self.config_parser.print_log_message('DEBUG', f"orchestrator: run_migrate_tables: Dropping table {target_table_name} - Query: {drop_query}")
+                    drop_success = False
+                    while True:
+                        try:
+                            target_connection.execute_query(drop_query)
+                            drop_success = True
+                            break
+                        except Exception as e:
+                            if repeat_count > 5:
+                                self.config_parser.print_log_message('ERROR', f"orchestrator: run_migrate_tables: Error dropping table {target_table_name}: {e}")
+                                self.migrator_tables.update_table_status({'row_id': table_data['id'], 'success': False, 'message': f'ERROR: {e}'})
+                                failed_tables.add(table_data['id'])
+                                break
+                            else:
+                                repeat_count += 1
+                                self.config_parser.print_log_message('INFO', f"orchestrator: run_migrate_tables: Retrying to drop table {target_table_name} ({repeat_count})...")
+                                time.sleep(10)
+                    if drop_success:
+                        self.config_parser.print_log_message('INFO', f"orchestrator: run_migrate_tables: Table '{target_table_name}' dropped successfully.")
+
+            try:
+                target_connection.disconnect()
+            except Exception:
+                pass
+
+            migrate_tables = [t for t in migrate_tables if self.migrator_tables.decode_table_row(t)['id'] not in failed_tables]
+
+            if len(migrate_tables) == 0 and failed_tables and self.on_error_action == 'stop':
+                self.config_parser.print_log_message('ERROR', "orchestrator: run_migrate_tables: Stopping execution due to error during table drops.")
+                exit(1)
+
+        if len(migrate_tables) > 0:
             with concurrent.futures.ThreadPoolExecutor(max_workers=workers_requested) as executor:
                 futures = {}
                 for table_row in migrate_tables:
@@ -823,30 +870,6 @@ class Orchestrator:
             if worker_target_connection.session_settings:
                 self.config_parser.print_log_message( 'DEBUG', f"orchestrator: table_worker: Worker {worker_id}: Executing session settings: {worker_target_connection.session_settings}")
                 worker_target_connection.execute_query(worker_target_connection.session_settings)
-
-            if ((settings['drop_tables'] and not settings['resume_after_crash'])
-                or (settings['resume_after_crash'] and settings['drop_unfinished_tables'])
-                or (settings['resume_after_crash'] and not worker_target_connection.target_table_exists(target_schema_name, target_table_name))):
-                part_name = 'drop table'
-                repeat_count = 0
-                drop_query = f'DROP TABLE IF EXISTS "{target_schema_name}"."{target_table_name}" CASCADE'
-                self.config_parser.print_log_message( 'DEBUG', f"orchestrator: table_worker: Worker {worker_id}: Dropping table {target_table_name} - Query: {drop_query}")
-                ## Retry dropping the table if it fails due to locks or other issues
-                while True:
-                    try:
-                        worker_target_connection.execute_query(drop_query)
-                        break
-                    except Exception as e:
-                        if repeat_count > 5:
-                            self.config_parser.print_log_message('ERROR', f"orchestrator: table_worker: Worker {worker_id}: Error dropping table {target_table_name}: {e}")
-                            self.migrator_tables.update_table_status({'row_id': table_data['id'], 'success': False, 'message': f'ERROR: {e}'})
-                            return False
-                        else:
-                            repeat_count += 1
-                            self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Retrying to drop table {target_table_name} ({repeat_count})...")
-                            part_name = f'retry drop table ({repeat_count})'
-                            time.sleep(10)
-                self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Table '{target_table_name}' dropped successfully.")
 
             if ((settings['create_tables'] and not settings['resume_after_crash'])
                 or (settings['resume_after_crash'] and settings['drop_unfinished_tables'])

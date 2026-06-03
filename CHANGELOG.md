@@ -2,6 +2,10 @@
 
 ## 0.15.0rc1 - 2026.05.29
 
+- 2026.06.03
+
+  - Fix - PostgreSQL Connector: Resolved an issue where non-standard Unix socket directories (e.g., `/tmp`) could not be used in the `host` configuration parameter. The connection string builder now properly URL-encodes the `host` parameter and utilizes the standard `postgresql://` URI schema, ensuring flawless connection resolution for both standard network hosts and Unix domain sockets via psycopg2.
+
 - 2026.06.02
 
   - Feature - Core Migrator: Standardized diagnostic row counting across all database connectors to natively apply the `migration_limitation` configuration parameter. Ensures reported source table diagnostics exactly match the subsets defined for partial migrations. Removed redundant un-filtered row counting queries from `sybase_ase_connector.py` and `sql_anywhere_connector.py`.

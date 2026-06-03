@@ -22,6 +22,7 @@ from datetime import datetime
 import os
 import time
 from collections import Counter
+import urllib.parse
 
 class ConfigParser:
     def __init__(self, args, logger):
@@ -160,7 +161,9 @@ class ConfigParser:
         # client_locale = self.get_source_client_locale() if source_or_target == 'source' else None
         if db_config['type'] == 'postgresql':
             if connectivity == 'native' or connectivity is None:
-                return f"""postgres://{db_config['username']}:{db_config['password']}@{db_config.get('host', 'localhost')}:{db_config['port']}/{db_config['database']}?sslmode={db_config.get('sslmode', 'prefer')}"""
+                host = db_config.get('host', 'localhost')
+                encoded_host = urllib.parse.quote(host, safe='')
+                return f"""postgresql://{db_config['username']}:{db_config['password']}@{encoded_host}:{db_config['port']}/{db_config['database']}?sslmode={db_config.get('sslmode', 'prefer')}"""
                 # return f"""dbname="{db_config['database']}" user="{db_config['username']}" password="{db_config['password']}" host="{db_config.get('host', 'localhost')}" port="{db_config['port']}" sslmode={db_config.get('sslmode', 'prefer')}"""
             else:
                 raise ValueError(f"Unsupported Postgres connectivity: {connectivity}")

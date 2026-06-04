@@ -301,6 +301,8 @@ class Orchestrator:
                     if col_data_type:
                         if col_data_type.lower() in ('boolean', 'bool'):
                             insert_values.append(f'cast(%s as text)::{col_data_type}')
+                        elif col_data_type.lower() == 'oid':
+                            insert_values.append('lo_from_bytea(0, %s::bytea)')
                         else:
                             insert_values.append(f'%s::{col_data_type}')
                     else:
@@ -1485,7 +1487,12 @@ class Orchestrator:
                 for _, col_info in target_columns.items():
                     col_name = col_info["column_name"]
                     data_type = col_info["data_type"]
-                    cast_expressions.append(f'%s::{data_type} AS "{col_name}"')
+                    if data_type.lower() == 'oid':
+                        cast_expressions.append(f'lo_from_bytea(0, %s::bytea) AS "{col_name}"')
+                    else:
+                        cast_expressions.append(f'%s::{data_type} AS "{col_name}"')
+
+                lob_val_expr = 'lo_from_bytea(0, %s::bytea)' if lob_col_type.lower() == 'oid' else f'%s::{lob_col_type}'
 
                 repeat_insert_sql = f'''
                     WITH source_data AS (
@@ -1495,7 +1502,7 @@ class Orchestrator:
                     USING source_data AS source
                     ON {merge_match_conditions}
                     WHEN MATCHED THEN
-                        UPDATE SET {lob_column} = %s::{lob_col_type}
+                        UPDATE SET {lob_column} = {lob_val_expr}
                     WHEN NOT MATCHED THEN
                         INSERT ({insert_columns})
                         VALUES ({insert_values})
@@ -1505,7 +1512,8 @@ class Orchestrator:
 
                 part_name = 'build insert statement with primary key'
                 # we have primary key defined - use it for INSERT ... ON CONFLICT
-                repeat_insert_sql = f'''INSERT INTO "{target_schema_name}"."{target_table_name}" ({col_list}) VALUES ({placeholders}) ON CONFLICT ({primary_key_columns}) DO UPDATE SET {lob_column} = %s::{lob_col_type}'''
+                lob_val_expr = 'lo_from_bytea(0, %s::bytea)' if lob_col_type.lower() == 'oid' else f'%s::{lob_col_type}'
+                repeat_insert_sql = f'''INSERT INTO "{target_schema_name}"."{target_table_name}" ({col_list}) VALUES ({placeholders}) ON CONFLICT ({primary_key_columns}) DO UPDATE SET {lob_column} = {lob_val_expr}'''
 
                 # pk_columns_list = [col.strip().strip('"') for col in primary_key_columns.split(',')]
                 # merge_match_conditions = ' AND '.join([f'target."{pk_col}" = source."{pk_col}"' for pk_col in pk_columns_list])

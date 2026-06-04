@@ -1674,7 +1674,17 @@ class Planner:
                 ratio = difflib.SequenceMatcher(None, t.lower(), target_t.lower()).ratio()
                 similarities.append((ratio, target_t))
             similarities.sort(reverse=True)
-            top_5 = [f"{name} ({ratio*100:.1f}%)" for ratio, name in similarities[:5]]
+            
+            top_5 = []
+            for ratio, target_t in similarities[:5]:
+                col_sim = match_schemas.calculate_jaccard_similarity(
+                    source_columns_map.get(t, []), 
+                    target_columns_map.get(target_t, []),
+                    settings.get('column_normalization_rules'), 
+                    settings.get('normalization_settings')
+                )
+                top_5.append(f"{target_t} (name: {ratio*100:.1f}%, cols: {col_sim*100:.1f}%)")
+                
             info_json = json.dumps({'top_5_suggestions': top_5})
             
             unmatched_objs.append({'object_type': 'table', 'side': 'source', 'object_name': t, 'row_count': rows, 'info': info_json})
@@ -1693,7 +1703,17 @@ class Planner:
                 ratio = difflib.SequenceMatcher(None, t.lower(), source_t.lower()).ratio()
                 similarities.append((ratio, source_t))
             similarities.sort(reverse=True)
-            top_5 = [f"{name} ({ratio*100:.1f}%)" for ratio, name in similarities[:5]]
+            
+            top_5 = []
+            for ratio, source_t in similarities[:5]:
+                col_sim = match_schemas.calculate_jaccard_similarity(
+                    target_columns_map.get(t, []), 
+                    source_columns_map.get(source_t, []),
+                    settings.get('column_normalization_rules'), 
+                    settings.get('normalization_settings')
+                )
+                top_5.append(f"{source_t} (name: {ratio*100:.1f}%, cols: {col_sim*100:.1f}%)")
+                
             info_json = json.dumps({'top_5_suggestions': top_5})
                 
             unmatched_objs.append({'object_type': 'table', 'side': 'target', 'object_name': t, 'row_count': rows, 'info': info_json})

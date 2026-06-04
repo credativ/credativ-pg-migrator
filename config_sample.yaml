@@ -164,9 +164,6 @@ migration:
   # standard (default) = read source objects from source DB or DDL files, convert them to target objects, create target objects, copy data
   # objects_mapping = map existing objects in target db to existing objects in source database, copy data
   workflow: "standard" # "mapping"
-  # analyzes target indexes and constraints, stores them, drops them, migrates data, recreates them (mapping workflow only)
-  suspend_indexes_constraints: true
-  mapping_report_filename: "mapping_report.csv" # only for mapping workflow - filename for the mapping report - if not specified, report will not be created
 
   # drop schema if exists - uses DROP CASCADE if true
   drop_schema: true
@@ -293,16 +290,6 @@ table_settings:
       #   chunk_size: '2GB'
       #   workers: 4  # number of workers to use for parallel processing of the chunks, default is 4
 
-      ## mapping rules for the mapping workflow.
-      # mapping_rules:
-      #  - target_schema: "new_target_schema"
-      #    target_table: "new_table_name"
-      #    column_mapping:
-      #      - source_column: "old_column"
-      #        target_column: "new_column"
-      #      - source_column: "old_column"
-      #        target_column: "new_column"
-
     ## currently not implemented, just a preparation for the future
     # individual target LOB storage settings for the table
     # for example global settings can be set to database, but for this table we want to store LOB values in files
@@ -408,6 +395,46 @@ validator:
   check_row_counts: true                   # Simply compares total row counts between corresponding source and target tables
   check_table_checksums: true              # Computes explicit hashes containing aggregates of string-casted structures across the entire tables
   check_random_sample: true                # Validates individual random row arrays querying mapped precise primary keys bridging origin to destination
+
+# -----------------------------------------------------------------------------
+# SCHEMA AND OBJECT MAPPING CONFIGURATION
+# -----------------------------------------------------------------------------
+# This block handles all settings related to the 'mapping' workflow and schema translation.
+mapping_workflow:
+  # 1. General Mapping Workflow Settings
+  workflow_settings:
+    report_filename: "mapping_report.csv"
+    suspend_indexes_constraints: true
+    
+  # 2. Automated Mapping Heuristics
+  heuristics:
+    table_normalization_rules:
+      - "lowercase"
+      - "strip_trailing_numbers"
+    column_normalization_rules:
+      - "lowercase"
+    column_prefixes_to_strip: ["gov_", "log_"]
+
+  # 3. Forced Table Mappings
+  # Allows overriding the heuristic engine with explicit rules
+  forced_table_mappings:
+    # Example exact mapping
+    # - source: "sys_config"
+    #   target: "app_config"
+    # Example regex mapping
+    # - source_regex: "^legacy_(.*)$"
+    #   target: "new_\\1"
+
+  # 4. Forced Column Mappings
+  forced_column_mappings:
+    # Example global column rule
+    # - table_regex: ".*"
+    #   source_column: "old_global_id"
+    #   target_column: "new_global_id"
+    # Example specific table rule
+    # - table: "users"
+    #   source_column: "first_name"
+    #   target_column: "given_name"
   check_lob_sizes: true                    # Validates exact byte size allocations for migrated LOB (BLOB/CLOB) instances on the sampled rows
   random_sample_size: 1000                 # Determine the maximum amount of randomized samples queried exclusively when check_random_sample or check_lob_sizes is True
 

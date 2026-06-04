@@ -1600,6 +1600,9 @@ class Planner:
             target_cols_raw[t['table_name']] = cols
             target_columns_map[t['table_name']] = [{'name': c['column_name'], **c} for c in cols.values()]
 
+        heuristics = self.config_parser.get_mapping_workflow_heuristics()
+        migration_settings = self.config_parser.get_migration_settings()
+        
         settings = {
             'config_parser': self.config_parser,
             'source_tables': source_tables,
@@ -1608,10 +1611,10 @@ class Planner:
             'target_internal': {},
             'source_columns_map': source_columns_map,
             'target_columns_map': target_columns_map,
-            'column_prefixes': self.config_parser.get_migration_settings().get('column_prefixes', ["gov_", "log_"]),
-            'table_normalization_rules': self.config_parser.get_migration_settings().get('table_normalization_rules', ['lowercase', 'strip_trailing_numbers']),
-            'column_normalization_rules': self.config_parser.get_migration_settings().get('column_normalization_rules', ['lowercase', 'strip_trailing_numbers']),
-            'normalization_settings': self.config_parser.get_migration_settings().get('normalization_settings', {})
+            'column_prefixes': heuristics.get('column_prefixes_to_strip', migration_settings.get('column_prefixes', ["gov_", "log_"])),
+            'table_normalization_rules': heuristics.get('table_normalization_rules', migration_settings.get('table_normalization_rules', ['lowercase', 'strip_trailing_numbers'])),
+            'column_normalization_rules': heuristics.get('column_normalization_rules', migration_settings.get('column_normalization_rules', ['lowercase', 'strip_trailing_numbers'])),
+            'normalization_settings': heuristics.get('normalization_settings', migration_settings.get('normalization_settings', {}))
         }
 
         internal_mappings_table = self.config_parser.get_migration_settings().get('internal_mappings_table')
@@ -1654,8 +1657,38 @@ class Planner:
             except Exception as e:
                 self.config_parser.print_log_message('DEBUG', f"planner: mapping_match_tables: Failed to fetch target internal mappings: {e}")
 
+        forced_mappings = self.config_parser.get_forced_table_mappings()
+        forced_pairs = []
+        
+        if forced_mappings:
+            import re
+            for f in forced_mappings:
+                if 'source' in f and 'target' in f:
+                    src = f['source']
+                    tgt = f['target']
+                    if src in source_tables and tgt in target_tables:
+                        forced_pairs.append({'source_table': src, 'target_table': tgt, 'method': 'Forced Exact', 'details': f"Mapped explicitly to {tgt}", 'stats': {}})
+                elif 'source_regex' in f and 'target' in f:
+                    src_re = re.compile(f['source_regex'])
+                    for src in list(source_tables):
+                        if src_re.match(src):
+                            tgt = src_re.sub(f['target'], src)
+                            if tgt in target_tables:
+                                forced_pairs.append({'source_table': src, 'target_table': tgt, 'method': 'Forced Regex Sub', 'details': f"Mapped via regex {f['source_regex']}", 'stats': {}})
+
+        for pair in forced_pairs:
+            if pair['source_table'] in source_tables:
+                source_tables.remove(pair['source_table'])
+            if pair['target_table'] in target_tables:
+                target_tables.remove(pair['target_table'])
+                
+        settings['source_tables'] = source_tables
+        settings['target_tables'] = target_tables
+
         match_result = match_schemas.match_tables(settings)
-        self.config_parser.print_log_message('INFO', f"planner: mapping_match_tables: Found {len(match_result['matched_pairs'])} matched tables.")
+        match_result['matched_pairs'] = forced_pairs + match_result.get('matched_pairs', [])
+        
+        self.config_parser.print_log_message('INFO', f"planner: mapping_match_tables: Found {len(match_result['matched_pairs'])} matched tables ({len(forced_pairs)} forced).")
 
         import difflib
         

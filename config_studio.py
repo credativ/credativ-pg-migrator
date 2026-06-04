@@ -504,7 +504,10 @@ class ConfigStudio(QMainWindow):
 
             QMessageBox.information(self, "Connection Success", f"Successfully connected to the {db_side} database!")
         except Exception as e:
-            QMessageBox.critical(self, "Connection Failed", f"Could not connect to the {db_side} database:\n{str(e)}")
+            if isinstance(e, ImportError):
+                QMessageBox.critical(self, "Driver Missing", f"Could not load the database driver for '{db_type}'.\nError: {str(e)}\n\nPlease ensure you have activated your virtual environment (e.g., 'source venv/bin/activate') or installed the required packages.")
+            else:
+                QMessageBox.critical(self, "Connection Failed", f"Could not connect to the {db_side} database:\n{str(e)}")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

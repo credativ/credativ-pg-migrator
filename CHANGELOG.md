@@ -4,6 +4,7 @@
 
 - 2026.06.04
 
+  - Fix - Connectors: Resolved an issue where the `merge_keep_target` and `merge_keep_source` data conflict actions failed with unique constraint violations by ensuring `data_conflict_action` and `primary_key_columns` are properly propagated into the `insert_batch` routine across all database connectors.
   - Fix - Planner: Resolved a `NameError` crash in `mapping_match_tables` by correctly passing `source_table_rows_all` and `source_table_rows_limited` instead of an undefined variable.
   - Feature - Reporting: Improved the end-of-migration summary to dynamically align output tables based on the longest table name, preventing layout breaks for extremely long names.
 

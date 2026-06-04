@@ -1305,6 +1305,8 @@ class PostgreSQLConnector(DatabaseConnector):
                             'migrator_tables': migrator_tables,
                             'insert_columns': insert_columns,
                             'insert_values': settings.get('insert_values'),
+                            'data_conflict_action': data_conflict_action,
+                            'primary_key_columns': primary_key_columns,
                         })
                         total_inserted_rows += inserted_rows
                         inserting_end_time = time.time()

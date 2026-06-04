@@ -1659,6 +1659,13 @@ class Planner:
 
         import difflib
         
+        def get_col_match_stats(cols1, cols2):
+            rules = settings.get('column_normalization_rules')
+            norm_settings = settings.get('normalization_settings')
+            names1 = set(match_schemas.normalize_name(c.get('name', ''), rules, norm_settings) for c in cols1)
+            names2 = set(match_schemas.normalize_name(c.get('name', ''), rules, norm_settings) for c in cols2)
+            return len(names1), len(names2), len(names1.intersection(names2))
+
         unmatched_objs = []
         for t in match_result.get('unmatched_source', []):
             try:
@@ -1677,13 +1684,11 @@ class Planner:
             
             top_5 = []
             for ratio, target_t in similarities[:5]:
-                col_sim = match_schemas.calculate_jaccard_similarity(
+                len_src, len_tgt, intersection = get_col_match_stats(
                     source_columns_map.get(t, []), 
-                    target_columns_map.get(target_t, []),
-                    settings.get('column_normalization_rules'), 
-                    settings.get('normalization_settings')
+                    target_columns_map.get(target_t, [])
                 )
-                top_5.append(f"{target_t} (name: {ratio*100:.1f}%, cols: {col_sim*100:.1f}%)")
+                top_5.append(f"{target_t} (name match: {ratio*100:.1f}%, cols match: {intersection} [src: {len_src}, tgt: {len_tgt}])")
                 
             info_json = json.dumps({'top_5_suggestions': top_5})
             
@@ -1706,13 +1711,11 @@ class Planner:
             
             top_5 = []
             for ratio, source_t in similarities[:5]:
-                col_sim = match_schemas.calculate_jaccard_similarity(
+                len_tgt, len_src, intersection = get_col_match_stats(
                     target_columns_map.get(t, []), 
-                    source_columns_map.get(source_t, []),
-                    settings.get('column_normalization_rules'), 
-                    settings.get('normalization_settings')
+                    source_columns_map.get(source_t, [])
                 )
-                top_5.append(f"{source_t} (name: {ratio*100:.1f}%, cols: {col_sim*100:.1f}%)")
+                top_5.append(f"{source_t} (name match: {ratio*100:.1f}%, cols match: {intersection} [src: {len_src}, tgt: {len_tgt}])")
                 
             info_json = json.dumps({'top_5_suggestions': top_5})
                 

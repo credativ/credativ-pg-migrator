@@ -469,13 +469,15 @@ class MigratorTables:
             );
         """)
         self.protocol_connection.execute_query(f"""
-            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."mapping_unmatched_objects" (
+            DROP TABLE IF EXISTS "{self.protocol_schema}"."mapping_unmatched_objects";
+            CREATE TABLE "{self.protocol_schema}"."mapping_unmatched_objects" (
                 id SERIAL PRIMARY KEY,
                 object_type TEXT,
                 side TEXT,
                 parent_object TEXT,
                 object_name TEXT,
-                row_count INTEGER
+                row_count INTEGER,
+                info TEXT
             );
         """)
         self.config_parser.print_log_message('DEBUG3', f"migrator_tables: create_table_for_mapping: Mapping tables created in schema {self.protocol_schema}")
@@ -549,7 +551,7 @@ class MigratorTables:
         func_run_id = uuid.uuid4()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."mapping_unmatched_objects"
-            (object_type, side, parent_object, object_name, row_count)
+            (object_type, side, parent_object, object_name, row_count, info)
             VALUES %s
         """
         values = [(
@@ -557,7 +559,8 @@ class MigratorTables:
             obj['side'],
             obj.get('parent_object', ''),
             obj['object_name'],
-            obj.get('row_count', None)
+            obj.get('row_count', None),
+            obj.get('info', None)
         ) for obj in unmatched_list]
         
         try:
@@ -3299,7 +3302,7 @@ class MigratorTables:
         
         # Fetch unmatched objects
         query_unmatched = f"""
-            SELECT object_type, side, parent_object, object_name, row_count
+            SELECT object_type, side, parent_object, object_name, row_count, info
             FROM "{self.protocol_schema}"."mapping_unmatched_objects"
         """
         cursor.execute(query_unmatched)
@@ -3379,11 +3382,21 @@ class MigratorTables:
         lines.append("## Unmapped Source Tables")
         lines.append("")
         if unmatched_source_tables:
-            lines.append("| Source Table | Row Count |")
-            lines.append("|---|---|")
+            lines.append("| Source Table | Row Count | Top 5 Suggestions |")
+            lines.append("|---|---|---|")
             for ut in unmatched_source_tables:
                 rc = ut[4] if ut[4] is not None else -1
-                lines.append(f"| {ut[3]} | {rc} |")
+                info_str = ut[5]
+                suggestions_str = ""
+                if info_str:
+                    try:
+                        import json
+                        info_obj = json.loads(info_str)
+                        if 'top_5_suggestions' in info_obj:
+                            suggestions_str = "<br>".join(info_obj['top_5_suggestions'])
+                    except Exception:
+                        pass
+                lines.append(f"| {ut[3]} | {rc} | {suggestions_str} |")
         else:
             lines.append("*None*")
         lines.append("")
@@ -3391,11 +3404,21 @@ class MigratorTables:
         lines.append("## Unmapped Target Tables")
         lines.append("")
         if unmatched_target_tables:
-            lines.append("| Target Table | Row Count |")
-            lines.append("|---|---|")
+            lines.append("| Target Table | Row Count | Top 5 Suggestions |")
+            lines.append("|---|---|---|")
             for ut in unmatched_target_tables:
                 rc = ut[4] if ut[4] is not None else -1
-                lines.append(f"| {ut[3]} | {rc} |")
+                info_str = ut[5]
+                suggestions_str = ""
+                if info_str:
+                    try:
+                        import json
+                        info_obj = json.loads(info_str)
+                        if 'top_5_suggestions' in info_obj:
+                            suggestions_str = "<br>".join(info_obj['top_5_suggestions'])
+                    except Exception:
+                        pass
+                lines.append(f"| {ut[3]} | {rc} | {suggestions_str} |")
         else:
             lines.append("*None*")
         lines.append("")
@@ -3403,7 +3426,7 @@ class MigratorTables:
         try:
             cursor.close()
             with open(filename, 'w') as f:
-                f.write("\\n".join(lines))
+                f.write("\n".join(lines))
             self.config_parser.print_log_message('INFO', f"migrator_tables: generate_mapping_report: Successfully wrote report to {filename}")
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"migrator_tables: generate_mapping_report: Failed to write report to {filename}: {e}")

@@ -1657,6 +1657,8 @@ class Planner:
         match_result = match_schemas.match_tables(settings)
         self.config_parser.print_log_message('INFO', f"planner: mapping_match_tables: Found {len(match_result['matched_pairs'])} matched tables.")
 
+        import difflib
+        
         unmatched_objs = []
         for t in match_result.get('unmatched_source', []):
             try:
@@ -1666,7 +1668,16 @@ class Planner:
             except Exception as e:
                 self.config_parser.print_log_message('ERROR', f"planner: mapping_match_tables: Failed to fetch row count for unmapped source table {t}: {e}")
                 rows = -1
-            unmatched_objs.append({'object_type': 'table', 'side': 'source', 'object_name': t, 'row_count': rows})
+                
+            similarities = []
+            for target_t in target_tables:
+                ratio = difflib.SequenceMatcher(None, t.lower(), target_t.lower()).ratio()
+                similarities.append((ratio, target_t))
+            similarities.sort(reverse=True)
+            top_5 = [f"{name} ({ratio*100:.1f}%)" for ratio, name in similarities[:5]]
+            info_json = json.dumps({'top_5_suggestions': top_5})
+            
+            unmatched_objs.append({'object_type': 'table', 'side': 'source', 'object_name': t, 'row_count': rows, 'info': info_json})
             
         for t in match_result.get('unmatched_target', []):
             try:
@@ -1676,7 +1687,16 @@ class Planner:
             except Exception as e:
                 self.config_parser.print_log_message('ERROR', f"planner: mapping_match_tables: Failed to fetch row count for unmapped target table {t}: {e}")
                 rows = -1
-            unmatched_objs.append({'object_type': 'table', 'side': 'target', 'object_name': t, 'row_count': rows})
+                
+            similarities = []
+            for source_t in source_tables:
+                ratio = difflib.SequenceMatcher(None, t.lower(), source_t.lower()).ratio()
+                similarities.append((ratio, source_t))
+            similarities.sort(reverse=True)
+            top_5 = [f"{name} ({ratio*100:.1f}%)" for ratio, name in similarities[:5]]
+            info_json = json.dumps({'top_5_suggestions': top_5})
+                
+            unmatched_objs.append({'object_type': 'table', 'side': 'target', 'object_name': t, 'row_count': rows, 'info': info_json})
 
         for pair in match_result['matched_pairs']:
             source_t = pair['source_table']

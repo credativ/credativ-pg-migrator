@@ -3384,41 +3384,49 @@ class MigratorTables:
                 
                 if full_dm > 0:
                     top_migrated_limit = self.config_parser.get_summary_top_migrated_tables()
-                    lines.append("")
-                    lines.append(f"Biggest Successfully Migrated Tables (Top {top_migrated_limit}):")
-                    lines.append(f"{'Table Name':<28} | {'Src All':>11} | {'Src Lim':>11} | {'Tgt Rows':>11} | {'Time(s)':>8}")
-                    lines.append("-" * 80)
                     cursor.execute(f"""SELECT target_schema_name, target_table_name, source_table_rows_all, source_table_rows_limited, target_table_rows, 
                                        EXTRACT(EPOCH FROM (task_completed - task_started))
                                        FROM "{self.protocol_schema}"."{dm_table}" 
                                        WHERE source_table_rows_limited > 0 AND source_table_rows_limited = target_table_rows AND success = TRUE
                                        ORDER BY source_table_rows_limited DESC LIMIT {top_migrated_limit}""")
-                    for sch, tbl, s_all, s_lim, t_rows, duration in cursor.fetchall():
-                        s_all_fmt = f"{s_all:,}" if s_all is not None else "-"
-                        s_lim_fmt = f"{s_lim:,}"
-                        t_fmt = f"{t_rows:,}"
-                        d_fmt = f"{round(duration, 2) if duration else 0.0}"
-                        lines.append(f"{sch + '.' + tbl:<28} | {s_all_fmt:>11} | {s_lim_fmt:>11} | {t_fmt:>11} | {d_fmt:>8}")
+                    rows = cursor.fetchall()
+                    if rows:
+                        max_name_len = max(len(sch + '.' + tbl) for sch, tbl, *_ in rows)
+                        max_name_len = max(max_name_len, 28)
+                        lines.append("")
+                        lines.append(f"Biggest Successfully Migrated Tables (Top {top_migrated_limit}):")
+                        lines.append(f"{'Table Name':<{max_name_len}} | {'Src All':>11} | {'Src Lim':>11} | {'Tgt Rows':>11} | {'Time(s)':>8}")
+                        lines.append("-" * (max_name_len + 53))
+                        for sch, tbl, s_all, s_lim, t_rows, duration in rows:
+                            s_all_fmt = f"{s_all:,}" if s_all is not None else "-"
+                            s_lim_fmt = f"{s_lim:,}"
+                            t_fmt = f"{t_rows:,}"
+                            d_fmt = f"{round(duration, 2) if duration else 0.0}"
+                            lines.append(f"{sch + '.' + tbl:<{max_name_len}} | {s_all_fmt:>11} | {s_lim_fmt:>11} | {t_fmt:>11} | {d_fmt:>8}")
 
                 if diff_dm > 0:
                     top_mismatched_limit = self.config_parser.get_summary_top_mismatched_tables()
-                    lines.append("")
-                    lines.append(f"Tables with row count mismatches (Top {top_mismatched_limit} by Source Rows):")
-                    lines.append(f"{'Table Name':<22} | {'Src All':>10} | {'Src Lim':>10} | {'Tgt Rows':>10} | {'Diff':>7} | {'Time':>6}")
-                    lines.append("-" * 80)
                     cursor.execute(f"""SELECT target_schema_name, target_table_name, source_table_rows_all, source_table_rows_limited, target_table_rows,
                                        ABS(source_table_rows_limited - target_table_rows),
                                        EXTRACT(EPOCH FROM (task_completed - task_started))
                                        FROM "{self.protocol_schema}"."{dm_table}" 
                                        WHERE source_table_rows_limited > 0 AND source_table_rows_limited <> target_table_rows 
                                        ORDER BY source_table_rows_limited DESC LIMIT {top_mismatched_limit}""")
-                    for sch, tbl, s_all, s_lim, t_rows, diff, duration in cursor.fetchall():
-                        s_all_fmt = f"{s_all:,}" if s_all is not None else "-"
-                        s_lim_fmt = f"{s_lim:,}"
-                        t_fmt = f"{t_rows:,}"
-                        diff_fmt = f"{diff:,}"
-                        d_fmt = f"{round(duration, 2) if duration else 0.0}"
-                        lines.append(f"{sch + '.' + tbl:<22} | {s_all_fmt:>10} | {s_lim_fmt:>10} | {t_fmt:>10} | {diff_fmt:>7} | {d_fmt:>6}")
+                    rows = cursor.fetchall()
+                    if rows:
+                        max_name_len = max(len(sch + '.' + tbl) for sch, tbl, *_ in rows)
+                        max_name_len = max(max_name_len, 22)
+                        lines.append("")
+                        lines.append(f"Tables with row count mismatches (Top {top_mismatched_limit} by Source Rows):")
+                        lines.append(f"{'Table Name':<{max_name_len}} | {'Src All':>10} | {'Src Lim':>10} | {'Tgt Rows':>10} | {'Diff':>7} | {'Time':>6}")
+                        lines.append("-" * (max_name_len + 58))
+                        for sch, tbl, s_all, s_lim, t_rows, diff, duration in rows:
+                            s_all_fmt = f"{s_all:,}" if s_all is not None else "-"
+                            s_lim_fmt = f"{s_lim:,}"
+                            t_fmt = f"{t_rows:,}"
+                            diff_fmt = f"{diff:,}"
+                            d_fmt = f"{round(duration, 2) if duration else 0.0}"
+                            lines.append(f"{sch + '.' + tbl:<{max_name_len}} | {s_all_fmt:>10} | {s_lim_fmt:>10} | {t_fmt:>10} | {diff_fmt:>7} | {d_fmt:>6}")
 
                 top_longest_batches_limit = self.config_parser.get_summary_top_longest_batches()
                 cursor.execute(f"""SELECT target_schema_name, target_table_name, batch_number, 
@@ -3428,16 +3436,18 @@ class MigratorTables:
                                    ORDER BY batch_seconds DESC LIMIT {top_longest_batches_limit}""")
                 batches = cursor.fetchall()
                 if batches:
+                    max_name_len = max(len(sch + '.' + tbl) for sch, tbl, *_ in batches)
+                    max_name_len = max(max_name_len, 30)
                     lines.append("")
                     lines.append(f"Longest Data Batches (Top {top_longest_batches_limit}):")
-                    lines.append(f"{'Table Name':<30} | {'Batch':>5} | {'Total(s)':>8} | {'Read(s)':>8} | {'Trans(s)':>8} | {'Write(s)':>8}")
-                    lines.append("-" * 80)
+                    lines.append(f"{'Table Name':<{max_name_len}} | {'Batch':>5} | {'Total(s)':>8} | {'Read(s)':>8} | {'Trans(s)':>8} | {'Write(s)':>8}")
+                    lines.append("-" * (max_name_len + 52))
                     for sch, tbl, b_num, b_sec, r_sec, t_sec, w_sec in batches:
                         b_fmt = f"{b_sec:,}"
                         r_fmt = f"{r_sec:,}"
                         t_fmt = f"{t_sec:,}"
                         w_fmt = f"{w_sec:,}"
-                        lines.append(f"{sch + '.' + tbl:<30} | {b_num:>5} | {b_fmt:>8} | {r_fmt:>8} | {t_fmt:>8} | {w_fmt:>8}")
+                        lines.append(f"{sch + '.' + tbl:<{max_name_len}} | {b_num:>5} | {b_fmt:>8} | {r_fmt:>8} | {t_fmt:>8} | {w_fmt:>8}")
             else:
                 lines.append("No data migration executed in this run.")
 

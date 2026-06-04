@@ -2,6 +2,11 @@
 
 ## 0.15.0rc1 - 2026.05.29
 
+- 2026.06.04
+
+  - Fix - Planner: Resolved a `NameError` crash in `mapping_match_tables` by correctly passing `source_table_rows_all` and `source_table_rows_limited` instead of an undefined variable.
+  - Feature - Reporting: Improved the end-of-migration summary to dynamically align output tables based on the longest table name, preventing layout breaks for extremely long names.
+
 - 2026.06.03
 
   - Fix - Orchestrator: Moved table dropping logic out of parallel workers into a sequential execution block before data migration begins. This prevents potential deadlocks on the target database when multiple parallel workers attempt to drop tables concurrently.

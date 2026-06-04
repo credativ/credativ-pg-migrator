@@ -1463,7 +1463,12 @@ class PostgreSQLConnector(DatabaseConnector):
                     formatted_data.append(tuple(row))
                 self.config_parser.print_log_message('DEBUG3', f"postgresql_connector: insert_batch: INSERT COLUMNS: {insert_columns}")
                 self.config_parser.print_log_message('DEBUG3', f"postgresql_connector: insert_batch: EXTRACT KEYS: {extract_keys}")
-                self.config_parser.print_log_message('DEBUG3', f"postgresql_connector: insert_batch: FORMATTED DATA[0]: {formatted_data[0]}")
+                
+                formatted_data_str = str(formatted_data[0])
+                if len(formatted_data_str) > 500:
+                    formatted_data_str = formatted_data_str[:500] + "... (truncated)"
+                self.config_parser.print_log_message('DEBUG3', f"postgresql_connector: insert_batch: FORMATTED DATA[0]: {formatted_data_str}")
+                
                 data = formatted_data
             else:
                 self.config_parser.print_log_message('ERROR', f"postgresql_connector: insert_batch: Worker {worker_id}: Data for insert_batch must be a list of dictionaries, got {type(data)}")
@@ -1516,7 +1521,10 @@ class PostgreSQLConnector(DatabaseConnector):
                     inserted_rows = len(data)
                     self.connection.commit()
                 except Exception as e:
-                    self.config_parser.print_log_message('ERROR', f"postgresql_connector: insert_batch: Worker {worker_id}: Error inserting batch data into {target_table_name}: {e}")
+                    e_str = str(e)
+                    if len(e_str) > 1000:
+                        e_str = e_str[:1000] + "... (error message truncated)"
+                    self.config_parser.print_log_message('ERROR', f"postgresql_connector: insert_batch: Worker {worker_id}: Error inserting batch data into {target_table_name}: {e_str}")
                     self.config_parser.print_log_message('ERROR', f"postgresql_connector: insert_batch: Worker {worker_id}: Trying to insert row by row.")
                     self.connection.rollback()
                     for row in data:
@@ -1526,8 +1534,15 @@ class PostgreSQLConnector(DatabaseConnector):
                             self.connection.commit()
                         except Exception as e:
                             self.connection.rollback()
-                            self.config_parser.print_log_message('ERROR', f"postgresql_connector: insert_batch: Worker {worker_id}: Error inserting row into {target_table_name}: {row}")
-                            self.config_parser.print_log_message('ERROR', e)
+                            row_str = str(row)
+                            if len(row_str) > 500:
+                                row_str = row_str[:500] + "... (truncated)"
+                            self.config_parser.print_log_message('ERROR', f"postgresql_connector: insert_batch: Worker {worker_id}: Error inserting row into {target_table_name}: {row_str}")
+                            
+                            e_str = str(e)
+                            if len(e_str) > 1000:
+                                e_str = e_str[:1000] + "... (error message truncated)"
+                            self.config_parser.print_log_message('ERROR', e_str)
 
                 self.connection.autocommit = True
 

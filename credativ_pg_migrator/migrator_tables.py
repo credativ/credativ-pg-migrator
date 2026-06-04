@@ -468,8 +468,16 @@ class MigratorTables:
                 column_name TEXT
             );
         """)
+        self.protocol_connection.execute_query(f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."mapping_unmatched_objects" (
+                id SERIAL PRIMARY KEY,
+                object_type TEXT,
+                side TEXT,
+                parent_object TEXT,
+                object_name TEXT
+            );
+        """)
         self.config_parser.print_log_message('DEBUG3', f"migrator_tables: create_table_for_mapping: Mapping tables created in schema {self.protocol_schema}")
-
 
 
     def insert_mapping_tables(self, settings):
@@ -531,6 +539,31 @@ class MigratorTables:
             return row[0] if row else None
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_mapping_columns: ({func_run_id}): Error: {e}")
+            raise
+
+    def insert_mapping_unmatched_objects(self, unmatched_list):
+        if not unmatched_list:
+            return
+            
+        func_run_id = uuid.uuid4()
+        query = f"""
+            INSERT INTO "{self.protocol_schema}"."mapping_unmatched_objects"
+            (object_type, side, parent_object, object_name)
+            VALUES %s
+        """
+        values = [(
+            obj['object_type'],
+            obj['side'],
+            obj.get('parent_object', ''),
+            obj['object_name']
+        ) for obj in unmatched_list]
+        
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            psycopg2.extras.execute_values(cursor, query, values)
+            cursor.close()
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_mapping_unmatched_objects: ({func_run_id}): Error: {e}")
             raise
 
     def insert_mapping_target_indexes(self, settings):
@@ -3513,6 +3546,20 @@ class MigratorTables:
                 cursor.execute(f'SELECT count(*) FROM "{self.protocol_schema}"."mapping_target_sequences"')
                 sequences_count = cursor.fetchone()[0]
                 lines.append(f"Mapped Sequences: {sequences_count}")
+                
+                cursor.execute(f'SELECT side, count(*) FROM "{self.protocol_schema}"."mapping_unmatched_objects" WHERE object_type = \'table\' GROUP BY 1 ORDER BY 1')
+                unmapped_tables = {row[0]: row[1] for row in cursor.fetchall()}
+                cursor.execute(f'SELECT side, count(*) FROM "{self.protocol_schema}"."mapping_unmatched_objects" WHERE object_type = \'column\' GROUP BY 1 ORDER BY 1')
+                unmapped_columns = {row[0]: row[1] for row in cursor.fetchall()}
+                
+                if unmapped_tables or unmapped_columns:
+                    lines.append("")
+                    lines.append("Unmapped Objects:")
+                    if 'source' in unmapped_tables: lines.append(f"    Source Tables: {unmapped_tables['source']}")
+                    if 'target' in unmapped_tables: lines.append(f"    Target Tables: {unmapped_tables['target']}")
+                    if 'source' in unmapped_columns: lines.append(f"    Source Columns: {unmapped_columns['source']}")
+                    if 'target' in unmapped_columns: lines.append(f"    Target Columns: {unmapped_columns['target']}")
+                lines.append("")
                 
                 for obj_name, tbl_name, is_index in [('Indexes', 'mapping_target_indexes', True), ('Constraints', 'mapping_target_constraints', False)]:
                     cursor.execute(f'SELECT count(*) FROM "{self.protocol_schema}"."{tbl_name}"')

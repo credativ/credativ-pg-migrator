@@ -1657,6 +1657,12 @@ class Planner:
         match_result = match_schemas.match_tables(settings)
         self.config_parser.print_log_message('INFO', f"planner: mapping_match_tables: Found {len(match_result['matched_pairs'])} matched tables.")
 
+        unmatched_objs = []
+        for t in match_result.get('unmatched_source', []):
+            unmatched_objs.append({'object_type': 'table', 'side': 'source', 'object_name': t})
+        for t in match_result.get('unmatched_target', []):
+            unmatched_objs.append({'object_type': 'table', 'side': 'target', 'object_name': t})
+
         for pair in match_result['matched_pairs']:
             source_t = pair['source_table']
             target_t = pair['target_table']
@@ -1724,6 +1730,11 @@ class Planner:
             }
             col_match_res = match_schemas.match_columns(col_settings)
             self.config_parser.print_log_message('DEBUG', f"planner: mapping_match_tables: Matched {len(col_match_res['matched_columns'])} columns for pair '{source_t}' -> '{target_t}'")
+
+            for c in col_match_res.get('unmatched_source', []):
+                unmatched_objs.append({'object_type': 'column', 'side': 'source', 'parent_object': source_t, 'object_name': c.get('name', '')})
+            for c in col_match_res.get('unmatched_target', []):
+                unmatched_objs.append({'object_type': 'column', 'side': 'target', 'parent_object': target_t, 'object_name': c.get('name', '')})
 
             source_columns_dict = {}
             target_columns_dict = {}
@@ -1799,6 +1810,8 @@ class Planner:
                 'partitioning_columns': '',
                 'create_partitions_sql': ''
             })
+
+        self.migrator_tables.insert_mapping_unmatched_objects(unmatched_objs)
 
         if self.config_parser.get_target_db_type() == 'postgresql':
             self.config_parser.print_log_message('INFO', "planner: mapping_match_tables: Fetching target indexes, constraints and sequences for all target tables")

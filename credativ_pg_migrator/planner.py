@@ -1776,7 +1776,35 @@ class Planner:
             target_table_rows = self.target_connection.get_rows_count(self.target_schema_name, target_t)
             self.target_connection.disconnect()
 
-            if self.config_parser.get_target_db_type() == 'postgresql':
+
+
+            self.migrator_tables.insert_tables({
+                'source_schema_name': self.source_schema_name,
+                'source_table_name': source_t,
+                'source_table_id': source_t_info.get('id', source_t),
+                'source_columns': source_columns_dict,
+                'source_table_rows_all': source_table_rows_all,
+                'source_table_rows_limited': source_table_rows_limited,
+                'source_table_description': '',
+                'source_table_sql': getattr(source_t_info, 'source_table_sql', ''),
+                'target_schema_name': self.target_schema_name,
+                'target_table_name': target_t,
+                'target_alias_name': '',
+                'target_columns': target_columns_dict,
+                'target_table_rows': target_table_rows,
+                'target_table_sql': '',
+                'table_comment': source_t_info.get('comment', ''),
+                'partitioned': False,
+                'partitioned_by': '',
+                'partitioning_columns': '',
+                'create_partitions_sql': ''
+            })
+
+        if self.config_parser.get_target_db_type() == 'postgresql':
+            self.config_parser.print_log_message('INFO', "planner: mapping_match_tables: Fetching target indexes, constraints and sequences for all target tables")
+            self.target_connection.connect()
+            for _, target_table_info in target_tables_raw.items():
+                target_t = target_table_info['table_name']
                 self.config_parser.print_log_message('DEBUG', f"planner: mapping_match_tables: Fetching target indexes, constraints and sequences for PG table '{target_t}'")
                 target_indexes = self.target_connection.fetch_mapping_target_indexes(self.target_schema_name, target_t)
                 for idx_info in target_indexes:
@@ -1812,28 +1840,7 @@ class Planner:
                         'trigger_name': seq_info['trigger_name'],
                         'column_name': seq_info['column_name']
                     })
-
-            self.migrator_tables.insert_tables({
-                'source_schema_name': self.source_schema_name,
-                'source_table_name': source_t,
-                'source_table_id': source_t_info.get('id', source_t),
-                'source_columns': source_columns_dict,
-                'source_table_rows_all': source_table_rows_all,
-                'source_table_rows_limited': source_table_rows_limited,
-                'source_table_description': '',
-                'source_table_sql': getattr(source_t_info, 'source_table_sql', ''),
-                'target_schema_name': self.target_schema_name,
-                'target_table_name': target_t,
-                'target_alias_name': '',
-                'target_columns': target_columns_dict,
-                'target_table_rows': target_table_rows,
-                'target_table_sql': '',
-                'table_comment': source_t_info.get('comment', ''),
-                'partitioned': False,
-                'partitioned_by': '',
-                'partitioning_columns': '',
-                'create_partitions_sql': ''
-            })
+            self.target_connection.disconnect()
 
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

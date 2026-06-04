@@ -630,6 +630,22 @@ class MigratorTables:
             self.config_parser.print_log_message('ERROR', e)
             return []
 
+    def fetch_all_mapping_target_indexes(self):
+        query = f"""
+            SELECT id, target_schema_name, target_table_name, index_name, index_def, is_primary_key, index_type
+            FROM "{self.protocol_schema}"."mapping_target_indexes"
+        """
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            cursor.close()
+            return [{'id': row[0], 'target_schema_name': row[1], 'target_table_name': row[2], 'index_name': row[3], 'index_def': row[4], 'is_primary_key': row[5], 'index_type': row[6]} for row in rows]
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', "migrator_tables: fetch_all_mapping_target_indexes: Error fetching all mapping target indexes")
+            self.config_parser.print_log_message('ERROR', e)
+            return []
+
     def fetch_mapping_target_sequences(self, target_schema_name, target_table_name):
         query = f"""
             SELECT sequence_schema_name, sequence_name, used_in_default, used_in_identity, used_in_trigger, trigger_name, column_name
@@ -669,6 +685,22 @@ class MigratorTables:
             return [{'id': row[0], 'constraint_name': row[1], 'constraint_type': row[2], 'constraint_def': row[3]} for row in rows]
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"migrator_tables: fetch_mapping_target_constraints: Error fetching for {target_schema_name}.{target_table_name}")
+            self.config_parser.print_log_message('ERROR', e)
+            return []
+
+    def fetch_all_mapping_target_constraints(self):
+        query = f"""
+            SELECT id, target_schema_name, target_table_name, constraint_name, constraint_type, constraint_def
+            FROM "{self.protocol_schema}"."mapping_target_constraints"
+        """
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            cursor.close()
+            return [{'id': row[0], 'target_schema_name': row[1], 'target_table_name': row[2], 'constraint_name': row[3], 'constraint_type': row[4], 'constraint_def': row[5]} for row in rows]
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', "migrator_tables: fetch_all_mapping_target_constraints: Error fetching all mapping target constraints")
             self.config_parser.print_log_message('ERROR', e)
             return []
 

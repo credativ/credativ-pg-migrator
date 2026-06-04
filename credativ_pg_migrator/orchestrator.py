@@ -110,10 +110,12 @@ class Orchestrator:
             self.config_parser.print_log_message('INFO', "orchestrator: run: Mapping workflow")
 
             try:
-                self.mapping_drop_indexes_and_constraints()
+                if self.config_parser.get_suspend_indexes_constraints():
+                    self.mapping_drop_indexes_and_constraints()
                 self.mapping_copy_data()
-                self.mapping_create_indexes_and_constraints()
-                self.mapping_check_indexes_and_constraints()
+                if self.config_parser.get_suspend_indexes_constraints():
+                    self.mapping_create_indexes_and_constraints()
+                    self.mapping_check_indexes_and_constraints()
             except Exception as e:
                 self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': '', 'success': False, 'message': f'ERROR: {e}'})
                 self.handle_error(e, 'orchestration')
@@ -148,41 +150,31 @@ class Orchestrator:
         target_conn = self.load_connector('target')
         target_conn.connect()
 
-        tables = self.migrator_tables.fetch_all_tables(only_unfinished=False)
-
         # 1. Drop constraints
         self.config_parser.print_log_message('INFO', "orchestrator: mapping_drop_indexes_and_constraints: Dropping non-primary key constraints")
-        for table_row in tables:
-            table_data = self.migrator_tables.decode_table_row(table_row)
-            target_schema_name_eval = table_data['target_schema_name']
-            target_table_name_eval = self.config_parser.convert_names_case(table_data['target_table_name'])
-            target_constraints = self.migrator_tables.fetch_mapping_target_constraints(target_schema_name_eval, target_table_name_eval)
-            for constraint in target_constraints:
-                if constraint['constraint_type'] != 'PRIMARY KEY':
-                    self.config_parser.print_log_message('DEBUG', f"orchestrator: Dropping constraint {constraint['constraint_name']} on {target_schema_name_eval}.{target_table_name_eval}")
-                    drop_sql = f'ALTER TABLE "{target_schema_name_eval}"."{target_table_name_eval}" DROP CONSTRAINT IF EXISTS "{constraint["constraint_name"]}"'
-                    try:
-                        target_conn.execute_query(drop_sql)
-                        self.migrator_tables.update_mapping_target_constraint_drop_status({'row_id': constraint['id'], 'dropped': True, 'message': 'dropped OK'})
-                    except Exception as ex:
-                        self.migrator_tables.update_mapping_target_constraint_drop_status({'row_id': constraint['id'], 'dropped': False, 'message': f'ERROR: {ex}'})
+        target_constraints = self.migrator_tables.fetch_all_mapping_target_constraints()
+        for constraint in target_constraints:
+            if constraint['constraint_type'] != 'PRIMARY KEY':
+                self.config_parser.print_log_message('DEBUG', f"orchestrator: Dropping constraint {constraint['constraint_name']} on {constraint['target_schema_name']}.{constraint['target_table_name']}")
+                drop_sql = f'ALTER TABLE "{constraint["target_schema_name"]}"."{constraint["target_table_name"]}" DROP CONSTRAINT IF EXISTS "{constraint["constraint_name"]}"'
+                try:
+                    target_conn.execute_query(drop_sql)
+                    self.migrator_tables.update_mapping_target_constraint_drop_status({'row_id': constraint['id'], 'dropped': True, 'message': 'dropped OK'})
+                except Exception as ex:
+                    self.migrator_tables.update_mapping_target_constraint_drop_status({'row_id': constraint['id'], 'dropped': False, 'message': f'ERROR: {ex}'})
 
         # 2. Drop indexes
         self.config_parser.print_log_message('INFO', "orchestrator: mapping_drop_indexes_and_constraints: Dropping non-primary key indexes")
-        for table_row in tables:
-            table_data = self.migrator_tables.decode_table_row(table_row)
-            target_schema_name_eval = table_data['target_schema_name']
-            target_table_name_eval = self.config_parser.convert_names_case(table_data['target_table_name'])
-            target_indexes = self.migrator_tables.fetch_mapping_target_indexes(target_schema_name_eval, target_table_name_eval)
-            for index in target_indexes:
-                if not index.get('is_primary_key', False):
-                    self.config_parser.print_log_message('DEBUG', f"orchestrator: Dropping index {index['index_name']} on {target_schema_name_eval}.{target_table_name_eval}")
-                    drop_sql = f'DROP INDEX IF EXISTS "{target_schema_name_eval}"."{index["index_name"]}"'
-                    try:
-                        target_conn.execute_query(drop_sql)
-                        self.migrator_tables.update_mapping_target_index_drop_status({'row_id': index['id'], 'dropped': True, 'message': 'dropped OK'})
-                    except Exception as ex:
-                        self.migrator_tables.update_mapping_target_index_drop_status({'row_id': index['id'], 'dropped': False, 'message': f'ERROR: {ex}'})
+        target_indexes = self.migrator_tables.fetch_all_mapping_target_indexes()
+        for index in target_indexes:
+            if not index.get('is_primary_key', False):
+                self.config_parser.print_log_message('DEBUG', f"orchestrator: Dropping index {index['index_name']} on {index['target_schema_name']}.{index['target_table_name']}")
+                drop_sql = f'DROP INDEX IF EXISTS "{index["target_schema_name"]}"."{index["index_name"]}"'
+                try:
+                    target_conn.execute_query(drop_sql)
+                    self.migrator_tables.update_mapping_target_index_drop_status({'row_id': index['id'], 'dropped': True, 'message': 'dropped OK'})
+                except Exception as ex:
+                    self.migrator_tables.update_mapping_target_index_drop_status({'row_id': index['id'], 'dropped': False, 'message': f'ERROR: {ex}'})
 
         target_conn.disconnect()
 
@@ -191,45 +183,34 @@ class Orchestrator:
         target_conn = self.load_connector('target')
         target_conn.connect()
 
-        tables = self.migrator_tables.fetch_all_tables(only_unfinished=False)
+        target_constraints = self.migrator_tables.fetch_all_mapping_target_constraints()
+        target_indexes = self.migrator_tables.fetch_all_mapping_target_indexes()
+        constraint_index_names = {c['constraint_name'] for c in target_constraints if c['constraint_type'] in ('UNIQUE', 'EXCLUSION')}
 
         # 1. Recreate indexes
         self.config_parser.print_log_message('INFO', "orchestrator: mapping_create_indexes_and_constraints: Recreating non-primary key indexes")
-        for table_row in tables:
-            table_data = self.migrator_tables.decode_table_row(table_row)
-            target_schema_name_eval = table_data['target_schema_name']
-            target_table_name_eval = self.config_parser.convert_names_case(table_data['target_table_name'])
-            target_constraints = self.migrator_tables.fetch_mapping_target_constraints(target_schema_name_eval, target_table_name_eval)
-            constraint_index_names = {c['constraint_name'] for c in target_constraints if c['constraint_type'] in ('UNIQUE', 'EXCLUSION')}
-
-            target_indexes = self.migrator_tables.fetch_mapping_target_indexes(target_schema_name_eval, target_table_name_eval)
-            for index in target_indexes:
-                if not index.get('is_primary_key', False) and index['index_name'] not in constraint_index_names:
-                    self.config_parser.print_log_message('DEBUG', f"orchestrator: Recreating index {index['index_name']} on {target_schema_name_eval}.{target_table_name_eval}")
-                    try:
-                        target_conn.execute_query(index['index_def'])
-                        self.migrator_tables.update_mapping_target_index_status({'row_id': index['id'], 'success': True, 'message': 'migrated OK'})
-                    except Exception as ex:
-                        self.config_parser.print_log_message('ERROR', f"orchestrator: Error recreating index {index['index_name']}: {ex}")
-                        self.migrator_tables.update_mapping_target_index_status({'row_id': index['id'], 'success': False, 'message': f'ERROR: {ex}'})
+        for index in target_indexes:
+            if not index.get('is_primary_key', False) and index['index_name'] not in constraint_index_names:
+                self.config_parser.print_log_message('DEBUG', f"orchestrator: Recreating index {index['index_name']} on {index['target_schema_name']}.{index['target_table_name']}")
+                try:
+                    target_conn.execute_query(index['index_def'])
+                    self.migrator_tables.update_mapping_target_index_status({'row_id': index['id'], 'success': True, 'message': 'migrated OK'})
+                except Exception as ex:
+                    self.config_parser.print_log_message('ERROR', f"orchestrator: Error recreating index {index['index_name']}: {ex}")
+                    self.migrator_tables.update_mapping_target_index_status({'row_id': index['id'], 'success': False, 'message': f'ERROR: {ex}'})
 
         # 2. Recreate constraints
         self.config_parser.print_log_message('INFO', "orchestrator: mapping_create_indexes_and_constraints: Recreating non-primary key constraints")
-        for table_row in tables:
-            table_data = self.migrator_tables.decode_table_row(table_row)
-            target_schema_name_eval = table_data['target_schema_name']
-            target_table_name_eval = self.config_parser.convert_names_case(table_data['target_table_name'])
-            target_constraints = self.migrator_tables.fetch_mapping_target_constraints(target_schema_name_eval, target_table_name_eval)
-            for constraint in target_constraints:
-                if constraint['constraint_type'] != 'PRIMARY KEY':
-                    self.config_parser.print_log_message('DEBUG', f"orchestrator: Recreating constraint {constraint['constraint_name']} on {target_schema_name_eval}.{target_table_name_eval}")
-                    add_sql = f'ALTER TABLE "{target_schema_name_eval}"."{target_table_name_eval}" ADD CONSTRAINT "{constraint["constraint_name"]}" {constraint["constraint_def"]}'
-                    try:
-                        target_conn.execute_query(add_sql)
-                        self.migrator_tables.update_mapping_target_constraint_status({'row_id': constraint['id'], 'success': True, 'message': 'migrated OK'})
-                    except Exception as ex:
-                        self.config_parser.print_log_message('ERROR', f"orchestrator: Error recreating constraint {constraint['constraint_name']}: {ex}")
-                        self.migrator_tables.update_mapping_target_constraint_status({'row_id': constraint['id'], 'success': False, 'message': f'ERROR: {ex}'})
+        for constraint in target_constraints:
+            if constraint['constraint_type'] != 'PRIMARY KEY':
+                self.config_parser.print_log_message('DEBUG', f"orchestrator: Recreating constraint {constraint['constraint_name']} on {constraint['target_schema_name']}.{constraint['target_table_name']}")
+                add_sql = f'ALTER TABLE "{constraint["target_schema_name"]}"."{constraint["target_table_name"]}" ADD CONSTRAINT "{constraint["constraint_name"]}" {constraint["constraint_def"]}'
+                try:
+                    target_conn.execute_query(add_sql)
+                    self.migrator_tables.update_mapping_target_constraint_status({'row_id': constraint['id'], 'success': True, 'message': 'migrated OK'})
+                except Exception as ex:
+                    self.config_parser.print_log_message('ERROR', f"orchestrator: Error recreating constraint {constraint['constraint_name']}: {ex}")
+                    self.migrator_tables.update_mapping_target_constraint_status({'row_id': constraint['id'], 'success': False, 'message': f'ERROR: {ex}'})
 
         target_conn.disconnect()
 
@@ -237,37 +218,40 @@ class Orchestrator:
         self.config_parser.print_log_message('INFO', "orchestrator: mapping_check_indexes_and_constraints: Starting global verification of indexes and constraints")
         target_conn = self.load_connector('target')
 
-        tables = self.migrator_tables.fetch_all_tables(only_unfinished=False)
-
         total_checked_constraints = 0
         total_missing_constraints = 0
         total_checked_indexes = 0
         total_missing_indexes = 0
 
-        for table_row in tables:
-            table_data = self.migrator_tables.decode_table_row(table_row)
-            target_schema_name_eval = table_data['target_schema_name']
-            target_table_name_eval = self.config_parser.convert_names_case(table_data['target_table_name'])
+        target_constraints = self.migrator_tables.fetch_all_mapping_target_constraints()
+        target_indexes = self.migrator_tables.fetch_all_mapping_target_indexes()
+        
+        tables_to_check = set()
+        for c in target_constraints:
+            tables_to_check.add((c['target_schema_name'], c['target_table_name']))
+        for i in target_indexes:
+            tables_to_check.add((i['target_schema_name'], i['target_table_name']))
 
-            expected_constraints = self.migrator_tables.fetch_mapping_target_constraints(target_schema_name_eval, target_table_name_eval)
-            actual_constraints = target_conn.fetch_mapping_target_constraints(target_schema_name_eval, target_table_name_eval)
+        for schema_name, table_name in tables_to_check:
+            expected_constraints = [c for c in target_constraints if c['target_schema_name'] == schema_name and c['target_table_name'] == table_name]
+            actual_constraints = target_conn.fetch_mapping_target_constraints(schema_name, table_name)
             actual_constraint_names = {c['constraint_name'] for c in actual_constraints}
 
             for expected in expected_constraints:
                 total_checked_constraints += 1
                 if expected['constraint_name'] not in actual_constraint_names:
                     total_missing_constraints += 1
-                    self.config_parser.print_log_message('WARNING', f"orchestrator: Target database is missing constraint '{expected['constraint_name']}' on {target_schema_name_eval}.{target_table_name_eval}")
+                    self.config_parser.print_log_message('WARNING', f"orchestrator: Target database is missing constraint '{expected['constraint_name']}' on {schema_name}.{table_name}")
 
-            expected_indexes = self.migrator_tables.fetch_mapping_target_indexes(target_schema_name_eval, target_table_name_eval)
-            actual_indexes = target_conn.fetch_mapping_target_indexes(target_schema_name_eval, target_table_name_eval)
+            expected_indexes = [i for i in target_indexes if i['target_schema_name'] == schema_name and i['target_table_name'] == table_name]
+            actual_indexes = target_conn.fetch_mapping_target_indexes(schema_name, table_name)
             actual_index_names = {i['index_name'] for i in actual_indexes}
 
             for expected in expected_indexes:
                 total_checked_indexes += 1
                 if expected['index_name'] not in actual_index_names:
                     total_missing_indexes += 1
-                    self.config_parser.print_log_message('WARNING', f"orchestrator: Target database is missing index '{expected['index_name']}' on {target_schema_name_eval}.{target_table_name_eval}")
+                    self.config_parser.print_log_message('WARNING', f"orchestrator: Target database is missing index '{expected['index_name']}' on {schema_name}.{table_name}")
 
         self.config_parser.print_log_message('INFO', f"orchestrator: mapping_check_indexes_and_constraints: Constraints Summary: {total_checked_constraints} checked, {total_missing_constraints} missing.")
         self.config_parser.print_log_message('INFO', f"orchestrator: mapping_check_indexes_and_constraints: Indexes Summary: {total_checked_indexes} checked, {total_missing_indexes} missing.")

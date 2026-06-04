@@ -166,6 +166,8 @@ migration:
   workflow: "standard" # "mapping"
   # analyzes target indexes and constraints, stores them, drops them, migrates data, recreates them (mapping workflow only)
   suspend_indexes_constraints: true
+  mapping_report_filename: "mapping_report.csv" # only for mapping workflow - filename for the mapping report - if not specified, report will not be created
+
   # drop schema if exists - uses DROP CASCADE if true
   drop_schema: true
   drop_tables: true

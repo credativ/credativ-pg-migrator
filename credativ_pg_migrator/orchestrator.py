@@ -120,6 +120,11 @@ class Orchestrator:
                 self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': '', 'success': False, 'message': f'ERROR: {e}'})
                 self.handle_error(e, 'orchestration')
 
+            report_filename = self.config_parser.get_mapping_report_filename()
+            if report_filename:
+                self.config_parser.print_log_message('INFO', f"orchestrator: run: Generating mapping report to {report_filename}")
+                self.migrator_tables.generate_mapping_report(report_filename)
+
         elif self.config_parser.is_anonymization_workflow():
             self.config_parser.print_log_message('INFO', "orchestrator: run: Anonymization workflow")
             try:

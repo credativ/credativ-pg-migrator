@@ -254,6 +254,9 @@ class ConfigParser:
     def get_summary_top_anonymized_tables(self):
         return self.get_summary_config().get('top_anonymized_tables', 5)
 
+    def get_mapping_report_filename(self):
+        return self.config.get('migration', {}).get('mapping_report_filename')
+
     def get_summary_top_anonymized_columns(self):
         return self.get_summary_config().get('top_anonymized_columns', 5)
 

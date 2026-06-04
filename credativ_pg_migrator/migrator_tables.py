@@ -474,7 +474,8 @@ class MigratorTables:
                 object_type TEXT,
                 side TEXT,
                 parent_object TEXT,
-                object_name TEXT
+                object_name TEXT,
+                row_count INTEGER
             );
         """)
         self.config_parser.print_log_message('DEBUG3', f"migrator_tables: create_table_for_mapping: Mapping tables created in schema {self.protocol_schema}")
@@ -548,14 +549,15 @@ class MigratorTables:
         func_run_id = uuid.uuid4()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."mapping_unmatched_objects"
-            (object_type, side, parent_object, object_name)
+            (object_type, side, parent_object, object_name, row_count)
             VALUES %s
         """
         values = [(
             obj['object_type'],
             obj['side'],
             obj.get('parent_object', ''),
-            obj['object_name']
+            obj['object_name'],
+            obj.get('row_count', None)
         ) for obj in unmatched_list]
         
         try:
@@ -3274,6 +3276,138 @@ class MigratorTables:
 
 
 
+    def generate_mapping_report(self, filename):
+        import os
+        
+        # Ensure it saves as markdown if not explicitly specified as csv, or just output markdown to the given filename.
+        # User requested markdown format despite `.csv` extension in sample config.
+        # If it ends with .csv, we will write markdown inside it anyway to respect the filename config but fulfill the format requirement.
+        
+        lines = []
+        lines.append("# Mapping Workflow Detailed Report")
+        lines.append("")
+        
+        # Fetch mapped tables
+        query_mapped = f"""
+            SELECT source_table_name, target_table_name, source_table_rows_all, target_table_rows
+            FROM "{self.protocol_schema}"."mapping_tables"
+            ORDER BY source_table_name
+        """
+        cursor = self.protocol_connection.connection.cursor()
+        cursor.execute(query_mapped)
+        mapped_tables = cursor.fetchall()
+        
+        # Fetch unmatched objects
+        query_unmatched = f"""
+            SELECT object_type, side, parent_object, object_name, row_count
+            FROM "{self.protocol_schema}"."mapping_unmatched_objects"
+        """
+        cursor.execute(query_unmatched)
+        unmatched_raw = cursor.fetchall()
+        
+        unmatched_source_tables = [row for row in unmatched_raw if row[0] == 'table' and row[1] == 'source']
+        unmatched_target_tables = [row for row in unmatched_raw if row[0] == 'table' and row[1] == 'target']
+        unmatched_columns = [row for row in unmatched_raw if row[0] == 'column']
+        
+        unmatched_cols_by_table = {}
+        for row in unmatched_columns:
+            side = row[1]
+            parent = row[2]
+            col_name = row[3]
+            key = (side, parent)
+            if key not in unmatched_cols_by_table:
+                unmatched_cols_by_table[key] = []
+            unmatched_cols_by_table[key].append(col_name)
+            
+        # Generate Table of Contents
+        lines.append("## Table of Contents")
+        lines.append("")
+        lines.append("- [Mapped Tables](#mapped-tables)")
+        for tbl in mapped_tables:
+            anchor = f"{tbl[0]}-mapped-to-{tbl[1]}".replace('_', '-').lower()
+            lines.append(f"  - [{tbl[0]} -> {tbl[1]}](#{anchor})")
+        lines.append("- [Unmapped Source Tables](#unmapped-source-tables)")
+        lines.append("- [Unmapped Target Tables](#unmapped-target-tables)")
+        lines.append("")
+        
+        # Generate Mapped Tables Section
+        lines.append("## Mapped Tables")
+        lines.append("")
+        for tbl in mapped_tables:
+            src_tbl = tbl[0]
+            tgt_tbl = tbl[1]
+            src_rows = tbl[2] if tbl[2] is not None else 0
+            tgt_rows = tbl[3] if tbl[3] is not None else 0
+            
+            anchor_text = f"{src_tbl} mapped to {tgt_tbl}"
+            lines.append(f"### {anchor_text}")
+            lines.append(f"**Source Rows:** {src_rows} | **Target Rows:** {tgt_rows}")
+            lines.append("")
+            
+            # Fetch mapped columns
+            query_cols = f"""
+                SELECT source_column_name, target_column_name 
+                FROM "{self.protocol_schema}"."mapping_columns"
+                WHERE source_table_name = %s AND target_table_name = %s
+                ORDER BY source_column_name
+            """
+            cursor.execute(query_cols, (src_tbl, tgt_tbl))
+            mapped_cols = cursor.fetchall()
+            
+            if mapped_cols:
+                lines.append("| Source Column | Target Column |")
+                lines.append("|---|---|")
+                for c in mapped_cols:
+                    lines.append(f"| {c[0]} | {c[1]} |")
+                lines.append("")
+            else:
+                lines.append("*No mapped columns found.*")
+                lines.append("")
+                
+            # Unmapped columns for this table
+            src_unmapped_cols = unmatched_cols_by_table.get(('source', src_tbl), [])
+            if src_unmapped_cols:
+                lines.append(f"**Unmapped Source Columns:** {', '.join(src_unmapped_cols)}")
+                lines.append("")
+                
+            tgt_unmapped_cols = unmatched_cols_by_table.get(('target', tgt_tbl), [])
+            if tgt_unmapped_cols:
+                lines.append(f"**Unmapped Target Columns:** {', '.join(tgt_unmapped_cols)}")
+                lines.append("")
+        
+        # Generate Unmapped Tables Section
+        lines.append("## Unmapped Source Tables")
+        lines.append("")
+        if unmatched_source_tables:
+            lines.append("| Source Table | Row Count |")
+            lines.append("|---|---|")
+            for ut in unmatched_source_tables:
+                rc = ut[4] if ut[4] is not None else -1
+                lines.append(f"| {ut[3]} | {rc} |")
+        else:
+            lines.append("*None*")
+        lines.append("")
+            
+        lines.append("## Unmapped Target Tables")
+        lines.append("")
+        if unmatched_target_tables:
+            lines.append("| Target Table | Row Count |")
+            lines.append("|---|---|")
+            for ut in unmatched_target_tables:
+                rc = ut[4] if ut[4] is not None else -1
+                lines.append(f"| {ut[3]} | {rc} |")
+        else:
+            lines.append("*None*")
+        lines.append("")
+        
+        try:
+            cursor.close()
+            with open(filename, 'w') as f:
+                f.write("\\n".join(lines))
+            self.config_parser.print_log_message('INFO', f"migrator_tables: generate_mapping_report: Successfully wrote report to {filename}")
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: generate_mapping_report: Failed to write report to {filename}: {e}")
+
     def print_migration_summary(self):
         lines = []
         lines.append("=" * 80)
@@ -3559,6 +3693,12 @@ class MigratorTables:
                     if 'target' in unmapped_tables: lines.append(f"    Target Tables: {unmapped_tables['target']}")
                     if 'source' in unmapped_columns: lines.append(f"    Source Columns: {unmapped_columns['source']}")
                     if 'target' in unmapped_columns: lines.append(f"    Target Columns: {unmapped_columns['target']}")
+
+                report_filename = self.config_parser.get_mapping_report_filename()
+                if report_filename:
+                    import os
+                    lines.append("")
+                    lines.append(f"Detailed Mapping Report generated at: {os.path.abspath(report_filename)}")
                 lines.append("")
                 
                 for obj_name, tbl_name, is_index in [('Indexes', 'mapping_target_indexes', True), ('Constraints', 'mapping_target_constraints', False)]:

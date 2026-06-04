@@ -1659,9 +1659,24 @@ class Planner:
 
         unmatched_objs = []
         for t in match_result.get('unmatched_source', []):
-            unmatched_objs.append({'object_type': 'table', 'side': 'source', 'object_name': t})
+            try:
+                self.source_connection.connect()
+                rows = self.source_connection.get_rows_count(self.source_schema_name, t, None)
+                self.source_connection.disconnect()
+            except Exception as e:
+                self.config_parser.print_log_message('ERROR', f"planner: mapping_match_tables: Failed to fetch row count for unmapped source table {t}: {e}")
+                rows = -1
+            unmatched_objs.append({'object_type': 'table', 'side': 'source', 'object_name': t, 'row_count': rows})
+            
         for t in match_result.get('unmatched_target', []):
-            unmatched_objs.append({'object_type': 'table', 'side': 'target', 'object_name': t})
+            try:
+                self.target_connection.connect()
+                rows = self.target_connection.get_rows_count(self.target_schema_name, t, None)
+                self.target_connection.disconnect()
+            except Exception as e:
+                self.config_parser.print_log_message('ERROR', f"planner: mapping_match_tables: Failed to fetch row count for unmapped target table {t}: {e}")
+                rows = -1
+            unmatched_objs.append({'object_type': 'table', 'side': 'target', 'object_name': t, 'row_count': rows})
 
         for pair in match_result['matched_pairs']:
             source_t = pair['source_table']

@@ -9,6 +9,7 @@
   - Feature - Reporting: Improved the end-of-migration summary to dynamically align output tables based on the longest table name, preventing layout breaks for extremely long names.
   - Fix - PostgreSQL Connector: Fixed "cannot cast type bytea to oid" error during data copying for OID target types by conditionally applying the `lo_from_bytea` function in dynamic `INSERT` values strings within the Orchestrator.
   - Fix - Orchestrator & Planner: Resolved foreign key constraint violations during the `mapping` workflow. Extended target metadata extraction (`mapping_match_tables`) to fetch constraints and indexes for the entire target schema rather than just matched tables, and refactored the orchestrator to globally drop and recreate all target constraints when `suspend_indexes_constraints` is enabled.
+  - Feature - Reporting: Refactored the `mapping` workflow's statistics output to integrate seamlessly into the final unified `[ CREDATIV PG-MIGRATOR SUMMARY ]` UI block, consolidating mapped tables, columns, indexes, constraints, and sequences under a distinct `[ MAPPING WORKFLOW RESULTS ]` section instead of raw unstructured log dumps.
 
 - 2026.06.03
 

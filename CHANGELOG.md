@@ -6,7 +6,7 @@
 
   - Feature - Mapping Workflow: Added `is_forced_mapping` column to `mapping_tables` to explicitly identify forced table mappings. Refactored the planner to accurately compute and preserve the underlying similarity percentages (e.g., enhanced Jaccard score) for forced mappings rather than defaulting them to 0.0.
   - Feature - Reporting: Enhanced `mapping_report.md` to prominently display a `(FORCED)` badge and explicit match type/similarity data for forced mappings. Updated the terminal summary output to include a distinct count of explicitly forced mappings.
-  - Fix - Orchestrator: Added explicit logging when the mapping workflow skips recreating or dropping an index because it is already handled by a constraint, aligning the operational execution logs with the final migration summary tallies.
+  - Fix - Orchestrator: Added explicit logging when the mapping workflow skips recreating or dropping an index because it is already handled by a constraint. The log messages now explicitly state the type (e.g., UNIQUE, EXCLUSION) and the specific name of the constraint handling the index.
 
 - 2026.06.04
 

@@ -271,6 +271,86 @@ HELP_TEXTS = {
         'short': 'List of functions to exclude.',
         'full': 'Specify functions/procedures to exclude from the migration.'
     },
+    'use_validator': {
+        'short': 'Enable Validator Block.',
+        'full': 'If checked, the Validator section will be generated and used during migration.'
+    },
+    'use_premigration': {
+        'short': 'Enable Pre-Migration Analysis.',
+        'full': 'If checked, the Pre-Migration Analysis block will be executed.'
+    },
+    'pma_by_rows': {
+        'short': 'List TOP N tables by row count.',
+        'full': 'Number of TOP N tables from the source database to list, sorted by the total number of rows. Set to 0 to skip.'
+    },
+    'pma_by_size': {
+        'short': 'List TOP N tables by disk size.',
+        'full': 'Number of TOP N tables from the source database to list, sorted by their total size on disk. Set to 0 to skip.'
+    },
+    'pma_by_columns': {
+        'short': 'List TOP N tables by column count.',
+        'full': 'Number of TOP N tables from the source database to list, sorted by the number of columns. Set to 0 to skip.'
+    },
+    'pma_by_indexes': {
+        'short': 'List TOP N tables by index count.',
+        'full': 'Number of TOP N tables from the source database to list, sorted by the number of indexes attached. Set to 0 to skip.'
+    },
+    'pma_by_constraints': {
+        'short': 'List TOP N tables by constraint count.',
+        'full': 'Number of TOP N tables from the source database to list, sorted by the number of constraints (PK, FK, Unique). Set to 0 to skip.'
+    },
+    'de_use_data_export': {
+        'short': 'Enable Data Export Migration.',
+        'full': 'If checked, data will be migrated from export files instead of querying the source database directly.'
+    },
+    'de_on_missing': {
+        'short': 'Action on missing data file.',
+        'full': '"error" to stop, "skip" to skip table, "source_table_name" to query source database instead.'
+    },
+    'de_format': {
+        'short': 'Data files format.',
+        'full': '"CSV", "UNL" (Informix unload), or "SQL" (dump files).'
+    },
+    'de_file': {
+        'short': 'Path pattern for data files.',
+        'full': 'Path to data files. Can contain {{source_schema_name}} and {{source_table_name}} placeholders.'
+    },
+    'de_delimiter': {
+        'short': 'Data file delimiter.',
+        'full': 'Character used to separate columns in the data file (e.g., "," or "|").'
+    },
+    'de_header': {
+        'short': 'File contains header.',
+        'full': 'Check if the CSV/data file contains a header row with column names.'
+    },
+    'de_charset': {
+        'short': 'Character set of data files.',
+        'full': 'Character encoding of the files (e.g., "ISO-8859-1" or "UTF-8").'
+    },
+    'de_conv_path': {
+        'short': 'Conversion path for UNL/SQL files.',
+        'full': 'Directory where converted CSV files will be temporarily stored.'
+    },
+    'de_clean': {
+        'short': 'Clean up converted files.',
+        'full': 'If checked, removes converted CSV files after migration completes.'
+    },
+    'de_use_split': {
+        'short': 'Enable Big Files Split.',
+        'full': 'If checked, large export files will be split into smaller chunks for parallel processing.'
+    },
+    'de_threshold': {
+        'short': 'File split threshold.',
+        'full': 'Threshold size above which a file is split (e.g., "5GB").'
+    },
+    'de_chunk': {
+        'short': 'Chunk size.',
+        'full': 'Size of the resulting split chunks (e.g., "2GB").'
+    },
+    'de_workers': {
+        'short': 'Parallel workers for chunks.',
+        'full': 'Number of workers used to process split chunks in parallel.'
+    },
     'adv_yaml': {
         'short': 'Advanced configuration properties in YAML.',
         'full': 'Text-based YAML editor for complex configurations such as pre_migration_analysis, mapping_workflow, data_types_substitution, default_values_substitution, data_migration_limitation, remote_objects_substitution, and anonymization scripts.'

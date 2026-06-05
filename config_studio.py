@@ -1,28 +1,111 @@
 import sys
 import os
 import io
+import json
 import ruamel.yaml
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTabWidget, QGroupBox, QFormLayout, QLineEdit, QComboBox,
     QCheckBox, QPushButton, QFileDialog, QMessageBox, QLabel, QSpinBox,
-    QPlainTextEdit
+    QPlainTextEdit, QDialog, QFontComboBox, QDialogButtonBox, QSizePolicy
 )
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QCursor
+from PyQt6.QtCore import Qt, QByteArray
+from PyQt6.QtGui import QCursor, QFont
 import config_help
+import config_studio_themes
 
 class HelpPopup(QLabel):
     def __init__(self, text, parent=None):
         super().__init__(text, parent)
         self.setWindowFlags(Qt.WindowType.Popup)
-        self.setStyleSheet("background-color: #f0f0f0; border: 1px solid gray; padding: 10px; font-size: 12px; color: black;")
+        self.setObjectName("HelpPopup")
         self.setWordWrap(True)
         self.setMinimumWidth(300)
         self.setMaximumWidth(500)
 
     def mousePressEvent(self, event):
         self.hide()
+
+class SettingsManager:
+    def __init__(self, filename="config_studio_settings.json"):
+        self.filename = filename
+        self.settings = {
+            "font_family": "",
+            "font_size": 10,
+            "theme": "VS Code Dark+",
+            "window_geometry": ""
+        }
+        self.load()
+
+    def load(self):
+        if os.path.exists(self.filename):
+            try:
+                with open(self.filename, 'r') as f:
+                    data = json.load(f)
+                    self.settings.update(data)
+            except Exception:
+                pass
+
+    def save(self):
+        try:
+            with open(self.filename, 'w') as f:
+                json.dump(self.settings, f, indent=4)
+        except Exception as e:
+            print(f"Failed to save settings: {e}")
+
+class SettingsDialog(QDialog):
+    def __init__(self, settings_manager, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Studio Settings")
+        self.settings_manager = settings_manager
+        
+        self.original_settings = self.settings_manager.settings.copy()
+        
+        layout = QFormLayout(self)
+        
+        self.font_cb = QFontComboBox()
+        if settings_manager.settings["font_family"]:
+            self.font_cb.setCurrentFont(QFont(settings_manager.settings["font_family"]))
+        self.font_cb.currentFontChanged.connect(self.preview_settings)
+            
+        self.size_sb = QSpinBox()
+        self.size_sb.setRange(8, 36)
+        self.size_sb.setValue(settings_manager.settings["font_size"])
+        self.size_sb.valueChanged.connect(self.preview_settings)
+        
+        self.theme_cb = QComboBox()
+        self.theme_cb.addItems(list(config_studio_themes.THEMES.keys()))
+        self.theme_cb.setCurrentText(settings_manager.settings["theme"])
+        self.theme_cb.currentTextChanged.connect(self.preview_settings)
+        
+        layout.addRow("Font Family:", self.font_cb)
+        layout.addRow("Font Size:", self.size_sb)
+        layout.addRow("Color Theme:", self.theme_cb)
+        
+        btn_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        btn_box.accepted.connect(self.accept)
+        btn_box.rejected.connect(self.reject)
+        layout.addRow("", btn_box)
+
+    def preview_settings(self):
+        self.settings_manager.settings["font_family"] = self.font_cb.currentFont().family()
+        self.settings_manager.settings["font_size"] = self.size_sb.value()
+        self.settings_manager.settings["theme"] = self.theme_cb.currentText()
+        if self.parent():
+            self.parent().apply_settings()
+
+    def reject(self):
+        self.settings_manager.settings = self.original_settings.copy()
+        if self.parent():
+            self.parent().apply_settings()
+        super().reject()
+
+    def accept(self):
+        self.settings_manager.settings["font_family"] = self.font_cb.currentFont().family()
+        self.settings_manager.settings["font_size"] = self.size_sb.value()
+        self.settings_manager.settings["theme"] = self.theme_cb.currentText()
+        self.settings_manager.save()
+        super().accept()
 
 class ConfigStudio(QMainWindow):
     def __init__(self):
@@ -34,7 +117,13 @@ class ConfigStudio(QMainWindow):
         self.config_data = {}
         self.current_file = None
 
+        self.settings_manager = SettingsManager()
         self.init_ui()
+        self.apply_settings()
+        
+        geom_hex = self.settings_manager.settings.get("window_geometry")
+        if geom_hex:
+            self.restoreGeometry(QByteArray.fromHex(geom_hex.encode('utf-8')))
 
     def init_ui(self):
         main_widget = QWidget()
@@ -44,7 +133,10 @@ class ConfigStudio(QMainWindow):
         self.tabs = QTabWidget()
         self.tabs.addTab(self.create_connections_tab(), "Database Connections")
         self.tabs.addTab(self.create_environment_tab(), "Environment & Drivers")
-        self.tabs.addTab(self.create_settings_tab(), "Settings & Validators")
+        self.tabs.addTab(self.create_settings_tab(), "Workflow settings")
+        self.tabs.addTab(self.create_validator_tab(), "Validator")
+        self.tabs.addTab(self.create_premigration_tab(), "Premigration Analysis")
+        self.tabs.addTab(self.create_data_export_tab(), "Data Export")
         self.tabs.addTab(self.create_table_filters_tab(), "Table Filtering")
         self.tabs.addTab(self.create_advanced_tab(), "Advanced Configuration")
         
@@ -62,18 +154,53 @@ class ConfigStudio(QMainWindow):
         action_layout = QHBoxLayout()
         self.btn_load = QPushButton("Load Config")
         self.btn_load.clicked.connect(self.load_config)
+        self.btn_settings = QPushButton("Studio Settings")
         self.btn_save = QPushButton("Save Config")
         self.btn_save.clicked.connect(self.save_config)
+        self.btn_settings.clicked.connect(self.open_settings)
+        self.btn_close = QPushButton("Close")
+        self.btn_close.clicked.connect(self.close)
         
         self.status_label = QLabel("No configuration loaded.")
         
+        action_layout.addWidget(self.btn_settings)
+        action_layout.addStretch()
         action_layout.addWidget(self.btn_load)
         action_layout.addWidget(self.btn_save)
+        action_layout.addWidget(self.btn_close)
         action_layout.addStretch()
         action_layout.addWidget(self.status_label)
 
         main_layout.addLayout(action_layout)
         self.setCentralWidget(main_widget)
+
+    def closeEvent(self, event):
+        self.settings_manager.settings["window_geometry"] = self.saveGeometry().toHex().data().decode('utf-8')
+        self.settings_manager.save()
+        super().closeEvent(event)
+
+    def apply_settings(self):
+        font_family = self.settings_manager.settings.get("font_family", "")
+        font_size = self.settings_manager.settings.get("font_size", 10)
+        font = QFont(font_family, font_size) if font_family else QFont()
+        if not font_family:
+            font.setPointSize(font_size)
+        QApplication.instance().setFont(font)
+        
+        theme_name = self.settings_manager.settings.get("theme", "VS Code Dark+")
+        qss = config_studio_themes.THEMES.get(theme_name, "")
+        
+        # Add HelpPopup specific styles dependent on theme lightness
+        if 'Dark' in theme_name or 'Monokai' in theme_name:
+            qss += "\n#HelpPopup { background-color: #333333; color: #FFFFFF; border: 1px solid #555555; padding: 10px; }"
+        else:
+            qss += "\n#HelpPopup { background-color: #F0F0F0; color: #000000; border: 1px solid #CCCCCC; padding: 10px; }"
+            
+        QApplication.instance().setStyleSheet(qss)
+
+    def open_settings(self):
+        dlg = SettingsDialog(self.settings_manager, self)
+        dlg.exec()
 
     def show_help_popup(self, text):
         self.popup = HelpPopup(text, self)
@@ -98,10 +225,18 @@ class ConfigStudio(QMainWindow):
         if help_data['short'] and hasattr(widget, 'setToolTip'):
             widget.setToolTip(help_data['short'])
             
+        if isinstance(widget, QSpinBox):
+            widget.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+            
+        if isinstance(widget, QComboBox):
+            widget.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+            widget.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+            
         if is_checkbox:
             h_layout.addWidget(widget)
             
-        btn = QPushButton("(i)")
+        btn = QPushButton("i")
+        btn.setObjectName("HelpButton")
         btn.setFixedSize(20, 20)
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
         if help_data['full']:
@@ -171,6 +306,7 @@ class ConfigStudio(QMainWindow):
         s_layout = QFormLayout(source_group)
         self.s_type = QComboBox()
         self.s_type.addItems(["informix", "sybase_ase", "mssql", "ibm_db2_luw", "ibm_db2_zos", "mysql", "sql_anywhere", "postgresql", "oracle"])
+        self.s_type.currentTextChanged.connect(self.update_system_catalog_items)
         self.s_conn = QComboBox()
         self.s_conn.addItems(["native", "jdbc", "odbc", "ddl"])
         self.s_host = QLineEdit()
@@ -181,7 +317,8 @@ class ConfigStudio(QMainWindow):
         self.s_user = QLineEdit()
         self.s_pass = QLineEdit()
         self.s_pass.setEchoMode(QLineEdit.EchoMode.Password)
-        self.s_system_catalog = QLineEdit()
+        self.s_system_catalog = QComboBox()
+        self.update_system_catalog_items(self.s_type.currentText())
         self.s_db_locale = QLineEdit()
         self.s_conn_opts = QLineEdit()
         
@@ -348,9 +485,23 @@ class ConfigStudio(QMainWindow):
         self.add_help_row(a_layout, 'm_use_aliases', "", self.m_use_aliases)
         self.add_help_row(a_layout, 'm_migrate_lob', "", self.m_migrate_lob)
 
-        # Validation Settings
+        layout.addWidget(mig_group)
+        layout.addWidget(actions_group)
+        layout.addStretch()
+        return tab
+
+    def create_validator_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        
         val_group = QGroupBox("Validator")
         v_layout = QFormLayout(val_group)
+        
+        self.use_validator = QCheckBox("Enable Configuration")
+        self.use_validator.setStyleSheet("font-weight: bold;")
+        self.use_validator.toggled.connect(self.toggle_validator)
+        self.add_help_row(v_layout, 'use_validator', "Use Validator:", self.use_validator)
+        
         self.v_row_counts = QCheckBox("Check Row Counts")
         self.v_table_checksums = QCheckBox("Check Table Checksums")
         self.v_random_sample = QCheckBox("Check Random Sample")
@@ -367,9 +518,103 @@ class ConfigStudio(QMainWindow):
         self.add_help_row(v_layout, 'v_workers', "Validator Workers:", self.v_workers)
         self.add_help_row(v_layout, 'v_sample_size', "Random Sample Size:", self.v_sample_size)
 
-        layout.addWidget(mig_group)
-        layout.addWidget(actions_group)
         layout.addWidget(val_group)
+        layout.addStretch()
+        return tab
+
+    def create_premigration_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        
+        info_label = QLabel("Configure Pre-Migration Analysis (Source Database):")
+        info_label.setStyleSheet("font-weight: bold;")
+        layout.addWidget(info_label)
+        
+        pma_group = QGroupBox("Top N Tables Listing")
+        pma_layout = QFormLayout(pma_group)
+        
+        self.use_premigration = QCheckBox("Enable Configuration")
+        self.use_premigration.setStyleSheet("font-weight: bold;")
+        self.use_premigration.toggled.connect(self.toggle_premigration)
+        self.add_help_row(pma_layout, 'use_premigration', "Use Analysis:", self.use_premigration)
+        
+        self.pma_by_rows = QSpinBox()
+        self.pma_by_rows.setRange(0, 9999999)
+        self.pma_by_size = QSpinBox()
+        self.pma_by_size.setRange(0, 9999999)
+        self.pma_by_columns = QSpinBox()
+        self.pma_by_columns.setRange(0, 9999999)
+        self.pma_by_indexes = QSpinBox()
+        self.pma_by_indexes.setRange(0, 9999999)
+        self.pma_by_constraints = QSpinBox()
+        self.pma_by_constraints.setRange(0, 9999999)
+        
+        self.add_help_row(pma_layout, 'pma_by_rows', "By Rows:", self.pma_by_rows)
+        self.add_help_row(pma_layout, 'pma_by_size', "By Size:", self.pma_by_size)
+        self.add_help_row(pma_layout, 'pma_by_columns', "By Columns:", self.pma_by_columns)
+        self.add_help_row(pma_layout, 'pma_by_indexes', "By Indexes:", self.pma_by_indexes)
+        self.add_help_row(pma_layout, 'pma_by_constraints', "By Constraints:", self.pma_by_constraints)
+        
+        layout.addWidget(pma_group)
+        layout.addStretch()
+        return tab
+
+    def create_data_export_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        info_label = QLabel("Configure Source Data Export Files Migration (Informix Only):")
+        info_label.setStyleSheet("font-weight: bold;")
+        layout.addWidget(info_label)
+
+        de_group = QGroupBox("Data Export File Settings")
+        de_layout = QFormLayout(de_group)
+        
+        self.de_use_data_export = QCheckBox("Enable Configuration")
+        self.de_use_data_export.setStyleSheet("font-weight: bold;")
+        self.de_use_data_export.toggled.connect(self.toggle_data_export)
+        self.add_help_row(de_layout, 'de_use_data_export', "Use Data Export:", self.de_use_data_export)
+
+        self.de_on_missing = QComboBox()
+        self.de_on_missing.addItems(["error", "skip", "source_table_name"])
+        self.de_format = QComboBox()
+        self.de_format.addItems(["CSV", "UNL", "SQL"])
+        self.de_file = QLineEdit()
+        self.de_delimiter = QLineEdit()
+        self.de_header = QCheckBox("File contains header")
+        self.de_charset = QLineEdit()
+        self.de_conv_path = QLineEdit()
+        self.de_clean = QCheckBox("Clean up converted files")
+
+        self.add_help_row(de_layout, 'de_on_missing', "On Missing File:", self.de_on_missing)
+        self.add_help_row(de_layout, 'de_format', "Format:", self.de_format)
+        self.add_help_row(de_layout, 'de_file', "File Pattern:", self.de_file)
+        self.add_help_row(de_layout, 'de_delimiter', "Delimiter:", self.de_delimiter)
+        self.add_help_row(de_layout, 'de_header', "Header:", self.de_header)
+        self.add_help_row(de_layout, 'de_charset', "Character Set:", self.de_charset)
+        self.add_help_row(de_layout, 'de_conv_path', "Conversion Path:", self.de_conv_path)
+        self.add_help_row(de_layout, 'de_clean', "Clean Up:", self.de_clean)
+        
+        layout.addWidget(de_group)
+        
+        split_group = QGroupBox("Big Files Split")
+        split_layout = QFormLayout(split_group)
+        
+        self.de_use_split = QCheckBox("Enable Split")
+        self.de_use_split.setStyleSheet("font-weight: bold;")
+        self.de_use_split.toggled.connect(self.toggle_split)
+        self.add_help_row(split_layout, 'de_use_split', "Use Split:", self.de_use_split)
+
+        self.de_threshold = QLineEdit()
+        self.de_chunk = QLineEdit()
+        self.de_workers = QSpinBox()
+        self.de_workers.setRange(1, 128)
+        
+        self.add_help_row(split_layout, 'de_threshold', "Threshold:", self.de_threshold)
+        self.add_help_row(split_layout, 'de_chunk', "Chunk Size:", self.de_chunk)
+        self.add_help_row(split_layout, 'de_workers', "Workers:", self.de_workers)
+
+        layout.addWidget(split_group)
         layout.addStretch()
         return tab
 
@@ -438,6 +683,57 @@ class ConfigStudio(QMainWindow):
         layout.addWidget(adv_group)
         return tab
 
+    def toggle_validator(self, checked):
+        self.v_row_counts.setEnabled(checked)
+        self.v_table_checksums.setEnabled(checked)
+        self.v_random_sample.setEnabled(checked)
+        self.v_lob_sizes.setEnabled(checked)
+        self.v_sample_size.setEnabled(checked)
+        self.v_workers.setEnabled(checked)
+
+    def update_system_catalog_items(self, db_type):
+        current = self.s_system_catalog.currentText()
+        self.s_system_catalog.blockSignals(True)
+        self.s_system_catalog.clear()
+        
+        if db_type == "ibm_db2_luw":
+            items = ["SYSCAT", "SYSIBM"]
+        elif db_type == "mssql":
+            items = ["SYS", "INFORMATION_SCHEMA"]
+        else:
+            items = [""]
+            
+        self.s_system_catalog.addItems(items)
+        if current in items:
+            self.s_system_catalog.setCurrentText(current)
+        self.s_system_catalog.blockSignals(False)
+
+    def toggle_premigration(self, checked):
+        self.pma_by_rows.setEnabled(checked)
+        self.pma_by_size.setEnabled(checked)
+        self.pma_by_columns.setEnabled(checked)
+        self.pma_by_indexes.setEnabled(checked)
+        self.pma_by_constraints.setEnabled(checked)
+
+    def toggle_data_export(self, checked):
+        self.de_on_missing.setEnabled(checked)
+        self.de_format.setEnabled(checked)
+        self.de_file.setEnabled(checked)
+        self.de_delimiter.setEnabled(checked)
+        self.de_header.setEnabled(checked)
+        self.de_charset.setEnabled(checked)
+        self.de_conv_path.setEnabled(checked)
+        self.de_clean.setEnabled(checked)
+        self.de_use_split.setEnabled(checked)
+        self.toggle_split(checked and self.de_use_split.isChecked())
+
+    def toggle_split(self, checked):
+        parent_checked = self.de_use_data_export.isChecked()
+        state = checked and parent_checked
+        self.de_threshold.setEnabled(state)
+        self.de_chunk.setEnabled(state)
+        self.de_workers.setEnabled(state)
+
     def load_config(self):
         file_name, _ = QFileDialog.getOpenFileName(self, "Open Config File", "", "YAML Files (*.yaml *.yml);;All Files (*)")
         if file_name:
@@ -473,7 +769,7 @@ class ConfigStudio(QMainWindow):
         self.s_user.setText(src.get('username', ''))
         self.s_pass.setText(src.get('password', ''))
         self.s_conn_opts.setText(src.get('connection_string_options', ''))
-        self.s_system_catalog.setText(src.get('system_catalog', ''))
+        self.s_system_catalog.setCurrentText(src.get('system_catalog', ''))
         self.s_db_locale.setText(src.get('db_locale', ''))
 
         # Target
@@ -507,6 +803,28 @@ class ConfigStudio(QMainWindow):
         env_str = "\n".join([f"{e.get('name', '')}={e.get('value', '')}" for e in env_vars])
         self.env_vars.setPlainText(env_str)
 
+        # Data Export
+        has_de = 'data_export' in src
+        self.de_use_data_export.setChecked(has_de)
+        de = src.get('data_export', {})
+        self.de_on_missing.setCurrentText(de.get('on_missing_data_file', 'source_table_name'))
+        self.de_format.setCurrentText(de.get('format', 'CSV'))
+        self.de_file.setText(de.get('file', ''))
+        self.de_delimiter.setText(de.get('delimiter', ','))
+        self.de_header.setChecked(de.get('header', False))
+        self.de_charset.setText(de.get('character_set', 'UTF-8'))
+        self.de_conv_path.setText(de.get('conversion_path', ''))
+        self.de_clean.setChecked(de.get('clean', False))
+
+        bf_split = de.get('big_files_split', {})
+        has_split = bf_split.get('enabled', False)
+        self.de_use_split.setChecked(has_split)
+        self.de_threshold.setText(bf_split.get('threshold', '5GB'))
+        self.de_chunk.setText(bf_split.get('chunk_size', '2GB'))
+        self.de_workers.setValue(bf_split.get('workers', 4))
+        
+        self.toggle_data_export(has_de)
+
         # Migration Settings
         mig = self.config_data.get('migration', {})
         self.m_workflow.setCurrentText(mig.get('workflow', 'standard'))
@@ -534,6 +852,9 @@ class ConfigStudio(QMainWindow):
         self.m_migrate_lob.setChecked(mig.get('migrate_lob_values', True))
 
         # Validator
+        has_val = 'validator' in self.config_data
+        self.use_validator.setChecked(has_val)
+        self.toggle_validator(has_val)
         val = self.config_data.get('validator', {})
         self.v_row_counts.setChecked(val.get('check_row_counts', False))
         self.v_table_checksums.setChecked(val.get('check_table_checksums', False))
@@ -541,6 +862,17 @@ class ConfigStudio(QMainWindow):
         self.v_lob_sizes.setChecked(val.get('check_lob_sizes', False))
         self.v_workers.setValue(val.get('workers', 4))
         self.v_sample_size.setValue(val.get('random_sample_size', 1000))
+
+        # Premigration Analysis
+        has_pma = 'pre_migration_analysis' in self.config_data
+        self.use_premigration.setChecked(has_pma)
+        self.toggle_premigration(has_pma)
+        pma = self.config_data.get('pre_migration_analysis', {}).get('top_n_tables', {})
+        self.pma_by_rows.setValue(pma.get('by_rows', 10))
+        self.pma_by_size.setValue(pma.get('by_size', 10))
+        self.pma_by_columns.setValue(pma.get('by_columns', 10))
+        self.pma_by_indexes.setValue(pma.get('by_indexes', 10))
+        self.pma_by_constraints.setValue(pma.get('by_constraints', 10))
 
         # Include/Exclude Tables
         inc = self.config_data.get('include_tables', [])
@@ -589,13 +921,9 @@ class ConfigStudio(QMainWindow):
 
         # Advanced YAML Editor
         adv_dict = {}
-        for key in ['pre_migration_analysis', 'table_settings', 'mapping_workflow', 'anonymization', 'scheduled_actions', 'data_types_substitution', 'default_values_substitution', 'remote_objects_substitution', 'data_migration_limitation', 'summary']:
+        for key in ['table_settings', 'mapping_workflow', 'anonymization', 'scheduled_actions', 'data_types_substitution', 'default_values_substitution', 'remote_objects_substitution', 'data_migration_limitation', 'summary']:
             if key in self.config_data:
                 adv_dict[key] = self.config_data[key]
-        
-        # also capture data_export if it's in source
-        if 'data_export' in src:
-            adv_dict['source:data_export'] = src['data_export']
         
         if adv_dict:
             stream = io.StringIO()
@@ -609,7 +937,7 @@ class ConfigStudio(QMainWindow):
             self.config_data = {}
             
         # Ensure core blocks exist
-        for block in ['migrator', 'source', 'target', 'migration', 'validator']:
+        for block in ['migrator', 'source', 'target', 'migration']:
             if block not in self.config_data:
                 self.config_data[block] = {}
 
@@ -631,7 +959,7 @@ class ConfigStudio(QMainWindow):
         src['username'] = self.s_user.text()
         src['password'] = self.s_pass.text()
         if self.s_conn_opts.text(): src['connection_string_options'] = self.s_conn_opts.text()
-        if self.s_system_catalog.text(): src['system_catalog'] = self.s_system_catalog.text()
+        if self.s_system_catalog.currentText(): src['system_catalog'] = self.s_system_catalog.currentText()
         if self.s_db_locale.text(): src['db_locale'] = self.s_db_locale.text()
 
         tgt = self.config_data['target']
@@ -667,6 +995,30 @@ class ConfigStudio(QMainWindow):
         if env_list:
             self.config_data['env_variables'] = env_list
 
+        if self.de_use_data_export.isChecked():
+            de = {
+                'on_missing_data_file': self.de_on_missing.currentText(),
+                'format': self.de_format.currentText(),
+            }
+            if self.de_file.text(): de['file'] = self.de_file.text()
+            if self.de_delimiter.text(): de['delimiter'] = self.de_delimiter.text()
+            de['header'] = self.de_header.isChecked()
+            if self.de_charset.text(): de['character_set'] = self.de_charset.text()
+            if self.de_conv_path.text(): de['conversion_path'] = self.de_conv_path.text()
+            de['clean'] = self.de_clean.isChecked()
+
+            if self.de_use_split.isChecked():
+                de['big_files_split'] = {
+                    'enabled': True,
+                    'threshold': self.de_threshold.text(),
+                    'chunk_size': self.de_chunk.text(),
+                    'workers': self.de_workers.value()
+                }
+            src['data_export'] = de
+        else:
+            if 'data_export' in src:
+                del src['data_export']
+
         mig = self.config_data['migration']
         mig['workflow'] = self.m_workflow.currentText()
         mig['on_error'] = self.m_on_error.currentText()
@@ -694,13 +1046,32 @@ class ConfigStudio(QMainWindow):
         mig['use_aliases_as_target_names'] = self.m_use_aliases.isChecked()
         mig['migrate_lob_values'] = self.m_migrate_lob.isChecked()
 
-        val = self.config_data['validator']
-        val['check_row_counts'] = self.v_row_counts.isChecked()
-        val['check_table_checksums'] = self.v_table_checksums.isChecked()
-        val['check_random_sample'] = self.v_random_sample.isChecked()
-        val['check_lob_sizes'] = self.v_lob_sizes.isChecked()
-        val['workers'] = self.v_workers.value()
-        val['random_sample_size'] = self.v_sample_size.value()
+        if self.use_validator.isChecked():
+            val = self.config_data.get('validator', {})
+            val['check_row_counts'] = self.v_row_counts.isChecked()
+            val['check_table_checksums'] = self.v_table_checksums.isChecked()
+            val['check_random_sample'] = self.v_random_sample.isChecked()
+            val['check_lob_sizes'] = self.v_lob_sizes.isChecked()
+            val['workers'] = self.v_workers.value()
+            val['random_sample_size'] = self.v_sample_size.value()
+            self.config_data['validator'] = val
+        else:
+            if 'validator' in self.config_data:
+                del self.config_data['validator']
+
+        # Premigration Analysis
+        if self.use_premigration.isChecked():
+            pma_block = {
+                'by_rows': self.pma_by_rows.value(),
+                'by_size': self.pma_by_size.value(),
+                'by_columns': self.pma_by_columns.value(),
+                'by_indexes': self.pma_by_indexes.value(),
+                'by_constraints': self.pma_by_constraints.value(),
+            }
+            self.config_data['pre_migration_analysis'] = {'top_n_tables': pma_block}
+        else:
+            if 'pre_migration_analysis' in self.config_data:
+                del self.config_data['pre_migration_analysis']
 
         # Filters
         inc_txt = self.inc_tables.toPlainText().strip()

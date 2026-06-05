@@ -4,6 +4,10 @@
 
 - 2026.06.05
 
+  - Feature - Tools: Fully expanded **Migrator Config Studio** (`config_studio.py`) to encompass all configuration parameters defined in `config_sample.yaml`, including detailed migration phases, target environment limits, validator switches, and advanced text-editor mapping workflows.
+  - Feature - Tools: Integrated an interactive help system into **Migrator Config Studio** by extracting comprehensive YAML documentation into `config_help.py`, providing dual-layer assistance natively via non-intrusive field tooltips and interactive `(i)` popups.
+  - Feature - Tools: Added active configuration integrity validation in **Migrator Config Studio** when saving, intelligently preventing conflicting settings such as incompatible chunking constraints (`chunk_size` <= `batch_size`) and redundant schema/owner declarations.
+  - Fix - Tools: Resolved a PyQt6 layout crash (`TypeError: arguments did not match any overloaded call`) in `config_studio.py` when dynamically injecting custom horizontal help layouts into `QFormLayout` rows.
   - Feature - Mapping Workflow: Added `is_forced_mapping` column to `mapping_tables` to explicitly identify forced table mappings. Refactored the planner to accurately compute and preserve the underlying similarity percentages (e.g., enhanced Jaccard score) for forced mappings rather than defaulting them to 0.0.
   - Feature - Reporting: Enhanced `mapping_report.md` to prominently display a `(FORCED)` badge and explicit match type/similarity data for forced mappings. Updated the terminal summary output to include a distinct count of explicitly forced mappings.
   - Fix - Orchestrator: Added explicit logging when the mapping workflow skips recreating or dropping an index because it is already handled by a constraint. The log messages now explicitly state the type (e.g., UNIQUE, EXCLUSION) and the specific name of the constraint handling the index.

@@ -9,6 +9,20 @@ from PyQt6.QtWidgets import (
     QPlainTextEdit
 )
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QCursor
+import config_help
+
+class HelpPopup(QLabel):
+    def __init__(self, text, parent=None):
+        super().__init__(text, parent)
+        self.setWindowFlags(Qt.WindowType.Popup)
+        self.setStyleSheet("background-color: #f0f0f0; border: 1px solid gray; padding: 10px; font-size: 12px; color: black;")
+        self.setWordWrap(True)
+        self.setMinimumWidth(300)
+        self.setMaximumWidth(500)
+
+    def mousePressEvent(self, event):
+        self.hide()
 
 class ConfigStudio(QMainWindow):
     def __init__(self):
@@ -35,6 +49,14 @@ class ConfigStudio(QMainWindow):
         self.tabs.addTab(self.create_advanced_tab(), "Advanced Configuration")
         
         main_layout.addWidget(self.tabs)
+        
+        # Sync the two connectivity combo boxes
+        self.s_conn.currentTextChanged.connect(self.s_conn_env.setCurrentText)
+        self.s_conn_env.currentTextChanged.connect(self.s_conn.setCurrentText)
+        
+        # Ensure mutually exclusive driver inputs
+        self.s_conn_env.currentTextChanged.connect(self.on_connectivity_changed)
+        self.on_connectivity_changed(self.s_conn_env.currentText())
 
         # Bottom Action Bar
         action_layout = QHBoxLayout()
@@ -53,6 +75,75 @@ class ConfigStudio(QMainWindow):
         main_layout.addLayout(action_layout)
         self.setCentralWidget(main_widget)
 
+    def show_help_popup(self, text):
+        self.popup = HelpPopup(text, self)
+        self.popup.move(QCursor.pos())
+        self.popup.show()
+
+    def add_help_row(self, layout, key, label_text, widget):
+        help_data = config_help.HELP_TEXTS.get(key, {'short': '', 'full': ''})
+        
+        is_checkbox = isinstance(widget, QCheckBox) and label_text == ""
+        
+        h_layout = QHBoxLayout()
+        h_layout.setContentsMargins(0, 0, 0, 0)
+        
+        lbl = None
+        if not is_checkbox:
+            lbl = QLabel(label_text)
+            if help_data['short']:
+                lbl.setToolTip(help_data['short'])
+            h_layout.addWidget(lbl)
+            
+        if help_data['short'] and hasattr(widget, 'setToolTip'):
+            widget.setToolTip(help_data['short'])
+            
+        if is_checkbox:
+            h_layout.addWidget(widget)
+            
+        btn = QPushButton("(i)")
+        btn.setFixedSize(20, 20)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        if help_data['full']:
+            btn.clicked.connect(lambda _, txt=help_data['full']: self.show_help_popup(txt))
+        else:
+            btn.setVisible(False)
+            
+        h_layout.addWidget(btn)
+        h_layout.addStretch()
+        
+        if isinstance(layout, QFormLayout):
+            if is_checkbox:
+                layout.addRow("", h_layout)
+            else:
+                label_container = QWidget()
+                label_container.setLayout(h_layout)
+                layout.addRow(label_container, widget)
+        else:
+            row_layout = QHBoxLayout()
+            if not is_checkbox:
+                row_layout.addLayout(h_layout)
+                row_layout.addWidget(widget)
+            else:
+                row_layout.addLayout(h_layout)
+            layout.addLayout(row_layout)
+        
+        return lbl
+
+    def on_connectivity_changed(self, text):
+        self.j_driver.setEnabled(text == 'jdbc')
+        self.j_libs.setEnabled(text == 'jdbc')
+        self.lbl_j_driver.setEnabled(text == 'jdbc')
+        self.lbl_j_libs.setEnabled(text == 'jdbc')
+        
+        self.o_driver.setEnabled(text == 'odbc')
+        self.o_libs.setEnabled(text == 'odbc')
+        self.lbl_o_driver.setEnabled(text == 'odbc')
+        self.lbl_o_libs.setEnabled(text == 'odbc')
+        
+        self.d_path.setEnabled(text == 'ddl')
+        self.lbl_d_path.setEnabled(text == 'ddl')
+
     def create_connections_tab(self):
         tab = QWidget()
         layout = QVBoxLayout(tab)
@@ -68,18 +159,18 @@ class ConfigStudio(QMainWindow):
         self.mig_user = QLineEdit()
         self.mig_pass = QLineEdit()
         self.mig_pass.setEchoMode(QLineEdit.EchoMode.Password)
-        mig_layout.addRow("Host:", self.mig_host)
-        mig_layout.addRow("Port:", self.mig_port)
-        mig_layout.addRow("Database:", self.mig_db)
-        mig_layout.addRow("Schema:", self.mig_schema)
-        mig_layout.addRow("Username:", self.mig_user)
-        mig_layout.addRow("Password:", self.mig_pass)
+        self.add_help_row(mig_layout, 'mig_host', "Host:", self.mig_host)
+        self.add_help_row(mig_layout, 'mig_port', "Port:", self.mig_port)
+        self.add_help_row(mig_layout, 'mig_db', "Database:", self.mig_db)
+        self.add_help_row(mig_layout, 'mig_schema', "Schema:", self.mig_schema)
+        self.add_help_row(mig_layout, 'mig_user', "Username:", self.mig_user)
+        self.add_help_row(mig_layout, 'mig_pass', "Password:", self.mig_pass)
 
         # Source Connection
         source_group = QGroupBox("Source Database")
         s_layout = QFormLayout(source_group)
         self.s_type = QComboBox()
-        self.s_type.addItems(["postgresql", "oracle", "mssql", "informix", "sybase_ase", "ibm_db2_luw", "ibm_db2_zos", "mysql", "sql_anywhere"])
+        self.s_type.addItems(["informix", "sybase_ase", "mssql", "ibm_db2_luw", "ibm_db2_zos", "mysql", "sql_anywhere", "postgresql", "oracle"])
         self.s_conn = QComboBox()
         self.s_conn.addItems(["native", "jdbc", "odbc", "ddl"])
         self.s_host = QLineEdit()
@@ -92,20 +183,22 @@ class ConfigStudio(QMainWindow):
         self.s_pass.setEchoMode(QLineEdit.EchoMode.Password)
         self.s_system_catalog = QLineEdit()
         self.s_db_locale = QLineEdit()
+        self.s_conn_opts = QLineEdit()
         
         s_btn_test = QPushButton("Test Source Connection")
         s_btn_test.clicked.connect(lambda: self.test_connection('source'))
 
-        s_layout.addRow("Database Type:", self.s_type)
-        s_layout.addRow("Connectivity:", self.s_conn)
-        s_layout.addRow("Host:", self.s_host)
-        s_layout.addRow("Port:", self.s_port)
-        s_layout.addRow("Database/Service:", self.s_db)
-        s_layout.addRow("Schema:", self.s_schema)
-        s_layout.addRow("Username:", self.s_user)
-        s_layout.addRow("Password:", self.s_pass)
-        s_layout.addRow("System Catalog:", self.s_system_catalog)
-        s_layout.addRow("DB Locale:", self.s_db_locale)
+        self.add_help_row(s_layout, 's_type', "Database Type:", self.s_type)
+        self.add_help_row(s_layout, 's_conn', "Connectivity:", self.s_conn)
+        self.add_help_row(s_layout, 's_host', "Host:", self.s_host)
+        self.add_help_row(s_layout, 's_port', "Port:", self.s_port)
+        self.add_help_row(s_layout, 's_db', "Database/Service:", self.s_db)
+        self.add_help_row(s_layout, 's_schema', "Schema:", self.s_schema)
+        self.add_help_row(s_layout, 's_user', "Username:", self.s_user)
+        self.add_help_row(s_layout, 's_pass', "Password:", self.s_pass)
+        self.add_help_row(s_layout, 's_conn_opts', "Connection String Options:", self.s_conn_opts)
+        self.add_help_row(s_layout, 's_system_catalog', "System Catalog:", self.s_system_catalog)
+        self.add_help_row(s_layout, 's_db_locale', "DB Locale:", self.s_db_locale)
         s_layout.addRow("", s_btn_test)
 
         # Target Connection
@@ -122,16 +215,25 @@ class ConfigStudio(QMainWindow):
         self.t_pass = QLineEdit()
         self.t_pass.setEchoMode(QLineEdit.EchoMode.Password)
         
+        self.t_work_mem = QLineEdit()
+        self.t_maint_work_mem = QLineEdit()
+        self.t_role = QLineEdit()
+        self.t_search_path = QLineEdit()
+
         t_btn_test = QPushButton("Test Target Connection")
         t_btn_test.clicked.connect(lambda: self.test_connection('target'))
 
-        t_layout.addRow("Database Type:", self.t_type)
-        t_layout.addRow("Host:", self.t_host)
-        t_layout.addRow("Port:", self.t_port)
-        t_layout.addRow("Database:", self.t_db)
-        t_layout.addRow("Schema:", self.t_schema)
-        t_layout.addRow("Username:", self.t_user)
-        t_layout.addRow("Password:", self.t_pass)
+        self.add_help_row(t_layout, 't_type', "Database Type:", self.t_type)
+        self.add_help_row(t_layout, 't_host', "Host:", self.t_host)
+        self.add_help_row(t_layout, 't_port', "Port:", self.t_port)
+        self.add_help_row(t_layout, 't_db', "Database:", self.t_db)
+        self.add_help_row(t_layout, 't_schema', "Schema:", self.t_schema)
+        self.add_help_row(t_layout, 't_user', "Username:", self.t_user)
+        self.add_help_row(t_layout, 't_pass', "Password:", self.t_pass)
+        self.add_help_row(t_layout, 't_work_mem', "Work Mem:", self.t_work_mem)
+        self.add_help_row(t_layout, 't_maint_work_mem', "Maintenance Work Mem:", self.t_maint_work_mem)
+        self.add_help_row(t_layout, 't_role', "Role:", self.t_role)
+        self.add_help_row(t_layout, 't_search_path', "Search Path:", self.t_search_path)
         t_layout.addRow("", t_btn_test)
 
         layout.addWidget(mig_group)
@@ -145,25 +247,30 @@ class ConfigStudio(QMainWindow):
         layout = QVBoxLayout(tab)
 
         # Drivers
-        drv_group = QGroupBox("Driver Libraries")
+        drv_group = QGroupBox("Source Database Driver Libraries")
         d_layout = QFormLayout(drv_group)
+        
+        self.s_conn_env = QComboBox()
+        self.s_conn_env.addItems(["native", "jdbc", "odbc", "ddl"])
+        
         self.j_driver = QLineEdit()
         self.j_libs = QLineEdit()
         self.o_driver = QLineEdit()
         self.o_libs = QLineEdit()
         self.d_path = QLineEdit()
 
-        d_layout.addRow("JDBC Driver:", self.j_driver)
-        d_layout.addRow("JDBC Libraries:", self.j_libs)
-        d_layout.addRow("ODBC Driver:", self.o_driver)
-        d_layout.addRow("ODBC Libraries:", self.o_libs)
-        d_layout.addRow("DDL Path:", self.d_path)
+        self.add_help_row(d_layout, 's_conn', "Connectivity:", self.s_conn_env)
+        self.lbl_j_driver = self.add_help_row(d_layout, 'j_driver', "JDBC Driver:", self.j_driver)
+        self.lbl_j_libs = self.add_help_row(d_layout, 'j_libs', "JDBC Libraries:", self.j_libs)
+        self.lbl_o_driver = self.add_help_row(d_layout, 'o_driver', "ODBC Driver:", self.o_driver)
+        self.lbl_o_libs = self.add_help_row(d_layout, 'o_libs', "ODBC Libraries:", self.o_libs)
+        self.lbl_d_path = self.add_help_row(d_layout, 'd_path', "DDL Path:", self.d_path)
 
         # Environment Variables
         env_group = QGroupBox("Environment Variables (format: NAME=VALUE, one per line)")
         env_layout = QVBoxLayout(env_group)
         self.env_vars = QPlainTextEdit()
-        env_layout.addWidget(self.env_vars)
+        self.add_help_row(env_layout, 'env_vars', "", self.env_vars)
 
         layout.addWidget(drv_group)
         layout.addWidget(env_group)
@@ -179,9 +286,12 @@ class ConfigStudio(QMainWindow):
         m_layout = QFormLayout(mig_group)
         self.m_workflow = QComboBox()
         self.m_workflow.addItems(["standard", "mapping", "anonymization"])
-        self.m_drop_schema = QCheckBox("Drop schema if exists")
-        self.m_recreate_schema = QCheckBox("Recreate schema")
         
+        self.m_on_error = QComboBox()
+        self.m_on_error.addItems(["continue", "stop"])
+        self.m_names_case = QComboBox()
+        self.m_names_case.addItems(["lower", "upper", "keep"])
+
         self.m_batch_size = QSpinBox()
         self.m_batch_size.setRange(1, 10000000)
         self.m_chunk_size = QSpinBox()
@@ -189,13 +299,54 @@ class ConfigStudio(QMainWindow):
         self.m_chunk_size.setSpecialValueText("Disabled (-1)")
         self.m_workers = QSpinBox()
         self.m_workers.setRange(1, 128)
+        
+        self.m_varchar_len = QSpinBox()
+        self.m_varchar_len.setRange(-1, 1000000)
+        self.m_varchar_len.setSpecialValueText("Never convert (-1)")
+        self.m_char_len = QSpinBox()
+        self.m_char_len.setRange(-1, 1000000)
+        self.m_char_len.setSpecialValueText("Never convert (-1)")
 
-        m_layout.addRow("Workflow:", self.m_workflow)
-        m_layout.addRow("Batch Size:", self.m_batch_size)
-        m_layout.addRow("Chunk Size:", self.m_chunk_size)
-        m_layout.addRow("Parallel Workers:", self.m_workers)
-        m_layout.addRow("", self.m_drop_schema)
-        m_layout.addRow("", self.m_recreate_schema)
+        self.add_help_row(m_layout, 'm_workflow', "Workflow:", self.m_workflow)
+        self.add_help_row(m_layout, 'm_on_error', "On Error:", self.m_on_error)
+        self.add_help_row(m_layout, 'm_names_case', "Names Case Handling:", self.m_names_case)
+        self.add_help_row(m_layout, 'm_batch_size', "Batch Size:", self.m_batch_size)
+        self.add_help_row(m_layout, 'm_chunk_size', "Chunk Size:", self.m_chunk_size)
+        self.add_help_row(m_layout, 'm_workers', "Parallel Workers:", self.m_workers)
+        self.add_help_row(m_layout, 'm_varchar_len', "Varchar to Text Length:", self.m_varchar_len)
+        self.add_help_row(m_layout, 'm_char_len', "Char to Text Length:", self.m_char_len)
+
+        actions_group = QGroupBox("Migration Phases")
+        a_layout = QVBoxLayout(actions_group)
+        self.m_drop_schema = QCheckBox("Drop schema if exists")
+        self.m_recreate_schema = QCheckBox("Recreate schema")
+        self.m_drop_tables = QCheckBox("Drop tables")
+        self.m_truncate_tables = QCheckBox("Truncate tables")
+        self.m_create_tables = QCheckBox("Create tables")
+        self.m_migrate_data = QCheckBox("Migrate data")
+        self.m_migrate_indexes = QCheckBox("Migrate indexes")
+        self.m_migrate_constraints = QCheckBox("Migrate constraints")
+        self.m_migrate_funcprocs = QCheckBox("Migrate functions/procedures")
+        self.m_migrate_triggers = QCheckBox("Migrate triggers")
+        self.m_migrate_views = QCheckBox("Migrate views")
+        self.m_set_sequences = QCheckBox("Set sequences")
+        self.m_use_aliases = QCheckBox("Use aliases as target names")
+        self.m_migrate_lob = QCheckBox("Migrate LOB values")
+        
+        self.add_help_row(a_layout, 'm_drop_schema', "", self.m_drop_schema)
+        self.add_help_row(a_layout, 'm_recreate_schema', "", self.m_recreate_schema)
+        self.add_help_row(a_layout, 'm_drop_tables', "", self.m_drop_tables)
+        self.add_help_row(a_layout, 'm_truncate_tables', "", self.m_truncate_tables)
+        self.add_help_row(a_layout, 'm_create_tables', "", self.m_create_tables)
+        self.add_help_row(a_layout, 'm_migrate_data', "", self.m_migrate_data)
+        self.add_help_row(a_layout, 'm_migrate_indexes', "", self.m_migrate_indexes)
+        self.add_help_row(a_layout, 'm_migrate_constraints', "", self.m_migrate_constraints)
+        self.add_help_row(a_layout, 'm_migrate_funcprocs', "", self.m_migrate_funcprocs)
+        self.add_help_row(a_layout, 'm_migrate_triggers', "", self.m_migrate_triggers)
+        self.add_help_row(a_layout, 'm_migrate_views', "", self.m_migrate_views)
+        self.add_help_row(a_layout, 'm_set_sequences', "", self.m_set_sequences)
+        self.add_help_row(a_layout, 'm_use_aliases', "", self.m_use_aliases)
+        self.add_help_row(a_layout, 'm_migrate_lob', "", self.m_migrate_lob)
 
         # Validation Settings
         val_group = QGroupBox("Validator")
@@ -209,14 +360,15 @@ class ConfigStudio(QMainWindow):
         self.v_workers = QSpinBox()
         self.v_workers.setRange(1, 128)
 
-        v_layout.addRow("", self.v_row_counts)
-        v_layout.addRow("", self.v_table_checksums)
-        v_layout.addRow("", self.v_random_sample)
-        v_layout.addRow("", self.v_lob_sizes)
-        v_layout.addRow("Validator Workers:", self.v_workers)
-        v_layout.addRow("Random Sample Size:", self.v_sample_size)
+        self.add_help_row(v_layout, 'v_row_counts', "", self.v_row_counts)
+        self.add_help_row(v_layout, 'v_table_checksums', "", self.v_table_checksums)
+        self.add_help_row(v_layout, 'v_random_sample', "", self.v_random_sample)
+        self.add_help_row(v_layout, 'v_lob_sizes', "", self.v_lob_sizes)
+        self.add_help_row(v_layout, 'v_workers', "Validator Workers:", self.v_workers)
+        self.add_help_row(v_layout, 'v_sample_size', "Random Sample Size:", self.v_sample_size)
 
         layout.addWidget(mig_group)
+        layout.addWidget(actions_group)
         layout.addWidget(val_group)
         layout.addStretch()
         return tab
@@ -225,25 +377,55 @@ class ConfigStudio(QMainWindow):
         tab = QWidget()
         layout = QVBoxLayout(tab)
         
-        inc_group = QGroupBox("Include Tables (One regex per line, or 'all')")
+        row1 = QHBoxLayout()
+        inc_group = QGroupBox("Include Tables")
         inc_layout = QVBoxLayout(inc_group)
         self.inc_tables = QPlainTextEdit()
-        inc_layout.addWidget(self.inc_tables)
+        self.add_help_row(inc_layout, 'inc_tables', "", self.inc_tables)
 
-        exc_group = QGroupBox("Exclude Tables (One regex per line)")
+        exc_group = QGroupBox("Exclude Tables")
         exc_layout = QVBoxLayout(exc_group)
         self.exc_tables = QPlainTextEdit()
-        exc_layout.addWidget(self.exc_tables)
+        self.add_help_row(exc_layout, 'exc_tables', "", self.exc_tables)
+        row1.addWidget(inc_group)
+        row1.addWidget(exc_group)
 
-        layout.addWidget(inc_group)
-        layout.addWidget(exc_group)
+        row2 = QHBoxLayout()
+        inc_v_group = QGroupBox("Include Views")
+        inc_v_layout = QVBoxLayout(inc_v_group)
+        self.inc_views = QPlainTextEdit()
+        self.add_help_row(inc_v_layout, 'inc_views', "", self.inc_views)
+
+        exc_v_group = QGroupBox("Exclude Views")
+        exc_v_layout = QVBoxLayout(exc_v_group)
+        self.exc_views = QPlainTextEdit()
+        self.add_help_row(exc_v_layout, 'exc_views', "", self.exc_views)
+        row2.addWidget(inc_v_group)
+        row2.addWidget(exc_v_group)
+
+        row3 = QHBoxLayout()
+        inc_f_group = QGroupBox("Include Func/Procs")
+        inc_f_layout = QVBoxLayout(inc_f_group)
+        self.inc_funcprocs = QPlainTextEdit()
+        self.add_help_row(inc_f_layout, 'inc_funcprocs', "", self.inc_funcprocs)
+
+        exc_f_group = QGroupBox("Exclude Func/Procs")
+        exc_f_layout = QVBoxLayout(exc_f_group)
+        self.exc_funcprocs = QPlainTextEdit()
+        self.add_help_row(exc_f_layout, 'exc_funcprocs', "", self.exc_funcprocs)
+        row3.addWidget(inc_f_group)
+        row3.addWidget(exc_f_group)
+
+        layout.addLayout(row1)
+        layout.addLayout(row2)
+        layout.addLayout(row3)
         return tab
 
     def create_advanced_tab(self):
         tab = QWidget()
         layout = QVBoxLayout(tab)
         
-        adv_group = QGroupBox("Advanced YAML Editor (table_settings, mapping_workflow, anonymization)")
+        adv_group = QGroupBox("Advanced YAML Editor")
         adv_layout = QVBoxLayout(adv_group)
         self.adv_yaml = QPlainTextEdit()
         
@@ -251,7 +433,7 @@ class ConfigStudio(QMainWindow):
         font.setFamily("Monospace")
         self.adv_yaml.setFont(font)
         
-        adv_layout.addWidget(self.adv_yaml)
+        self.add_help_row(adv_layout, 'adv_yaml', "", self.adv_yaml)
 
         layout.addWidget(adv_group)
         return tab
@@ -290,6 +472,7 @@ class ConfigStudio(QMainWindow):
         self.s_schema.setText(src.get('schema', ''))
         self.s_user.setText(src.get('username', ''))
         self.s_pass.setText(src.get('password', ''))
+        self.s_conn_opts.setText(src.get('connection_string_options', ''))
         self.s_system_catalog.setText(src.get('system_catalog', ''))
         self.s_db_locale.setText(src.get('db_locale', ''))
 
@@ -302,6 +485,12 @@ class ConfigStudio(QMainWindow):
         self.t_schema.setText(tgt.get('schema', ''))
         self.t_user.setText(tgt.get('username', ''))
         self.t_pass.setText(tgt.get('password', ''))
+        
+        tgt_settings = tgt.get('settings', {})
+        self.t_work_mem.setText(tgt_settings.get('work_mem', ''))
+        self.t_maint_work_mem.setText(tgt_settings.get('maintenance_work_mem', ''))
+        self.t_role.setText(tgt_settings.get('role', ''))
+        self.t_search_path.setText(tgt_settings.get('search_path', ''))
 
         # Env & Drivers
         jdbc = src.get('jdbc', {})
@@ -321,11 +510,28 @@ class ConfigStudio(QMainWindow):
         # Migration Settings
         mig = self.config_data.get('migration', {})
         self.m_workflow.setCurrentText(mig.get('workflow', 'standard'))
-        self.m_drop_schema.setChecked(mig.get('drop_schema', False))
-        self.m_recreate_schema.setChecked(mig.get('recreate_schema', False))
+        self.m_on_error.setCurrentText(mig.get('on_error', 'continue'))
+        self.m_names_case.setCurrentText(mig.get('names_case_handling', 'lower'))
         self.m_batch_size.setValue(mig.get('batch_size', 100000))
         self.m_chunk_size.setValue(mig.get('chunk_size', -1))
         self.m_workers.setValue(mig.get('parallel_workers', 4))
+        self.m_varchar_len.setValue(mig.get('varchar_to_text_length', -1))
+        self.m_char_len.setValue(mig.get('char_to_text_length', -1))
+        
+        self.m_drop_schema.setChecked(mig.get('drop_schema', False))
+        self.m_recreate_schema.setChecked(mig.get('recreate_schema', False))
+        self.m_drop_tables.setChecked(mig.get('drop_tables', True))
+        self.m_truncate_tables.setChecked(mig.get('truncate_tables', True))
+        self.m_create_tables.setChecked(mig.get('create_tables', True))
+        self.m_migrate_data.setChecked(mig.get('migrate_data', True))
+        self.m_migrate_indexes.setChecked(mig.get('migrate_indexes', True))
+        self.m_migrate_constraints.setChecked(mig.get('migrate_constraints', True))
+        self.m_migrate_funcprocs.setChecked(mig.get('migrate_funcprocs', True))
+        self.m_migrate_triggers.setChecked(mig.get('migrate_triggers', True))
+        self.m_migrate_views.setChecked(mig.get('migrate_views', True))
+        self.m_set_sequences.setChecked(mig.get('set_sequences', True))
+        self.m_use_aliases.setChecked(mig.get('use_aliases_as_target_names', False))
+        self.m_migrate_lob.setChecked(mig.get('migrate_lob_values', True))
 
         # Validator
         val = self.config_data.get('validator', {})
@@ -336,7 +542,7 @@ class ConfigStudio(QMainWindow):
         self.v_workers.setValue(val.get('workers', 4))
         self.v_sample_size.setValue(val.get('random_sample_size', 1000))
 
-        # Include/Exclude
+        # Include/Exclude Tables
         inc = self.config_data.get('include_tables', [])
         if inc is None: inc = []
         if isinstance(inc, str):
@@ -351,11 +557,45 @@ class ConfigStudio(QMainWindow):
         else:
             self.exc_tables.setPlainText("\n".join(exc))
 
+        # Include/Exclude Views
+        inc_v = self.config_data.get('include_views', [])
+        if inc_v is None: inc_v = []
+        if isinstance(inc_v, str):
+            self.inc_views.setPlainText(inc_v)
+        else:
+            self.inc_views.setPlainText("\n".join(inc_v))
+
+        exc_v = self.config_data.get('exclude_views', [])
+        if exc_v is None: exc_v = []
+        if isinstance(exc_v, str):
+            self.exc_views.setPlainText(exc_v)
+        else:
+            self.exc_views.setPlainText("\n".join(exc_v))
+
+        # Include/Exclude Func/Procs
+        inc_f = self.config_data.get('include_funcprocs', [])
+        if inc_f is None: inc_f = []
+        if isinstance(inc_f, str):
+            self.inc_funcprocs.setPlainText(inc_f)
+        else:
+            self.inc_funcprocs.setPlainText("\n".join(inc_f))
+
+        exc_f = self.config_data.get('exclude_funcprocs', [])
+        if exc_f is None: exc_f = []
+        if isinstance(exc_f, str):
+            self.exc_funcprocs.setPlainText(exc_f)
+        else:
+            self.exc_funcprocs.setPlainText("\n".join(exc_f))
+
         # Advanced YAML Editor
         adv_dict = {}
-        for key in ['table_settings', 'mapping_workflow', 'anonymization', 'scheduled_actions']:
+        for key in ['pre_migration_analysis', 'table_settings', 'mapping_workflow', 'anonymization', 'scheduled_actions', 'data_types_substitution', 'default_values_substitution', 'remote_objects_substitution', 'data_migration_limitation', 'summary']:
             if key in self.config_data:
                 adv_dict[key] = self.config_data[key]
+        
+        # also capture data_export if it's in source
+        if 'data_export' in src:
+            adv_dict['source:data_export'] = src['data_export']
         
         if adv_dict:
             stream = io.StringIO()
@@ -390,6 +630,7 @@ class ConfigStudio(QMainWindow):
         src['schema'] = self.s_schema.text()
         src['username'] = self.s_user.text()
         src['password'] = self.s_pass.text()
+        if self.s_conn_opts.text(): src['connection_string_options'] = self.s_conn_opts.text()
         if self.s_system_catalog.text(): src['system_catalog'] = self.s_system_catalog.text()
         if self.s_db_locale.text(): src['db_locale'] = self.s_db_locale.text()
 
@@ -401,6 +642,13 @@ class ConfigStudio(QMainWindow):
         tgt['schema'] = self.t_schema.text()
         tgt['username'] = self.t_user.text()
         tgt['password'] = self.t_pass.text()
+        
+        tgt_settings = {}
+        if self.t_work_mem.text(): tgt_settings['work_mem'] = self.t_work_mem.text()
+        if self.t_maint_work_mem.text(): tgt_settings['maintenance_work_mem'] = self.t_maint_work_mem.text()
+        if self.t_role.text(): tgt_settings['role'] = self.t_role.text()
+        if self.t_search_path.text(): tgt_settings['search_path'] = self.t_search_path.text()
+        if tgt_settings: tgt['settings'] = tgt_settings
 
         # Env & Drivers
         if self.j_driver.text() or self.j_libs.text():
@@ -421,11 +669,30 @@ class ConfigStudio(QMainWindow):
 
         mig = self.config_data['migration']
         mig['workflow'] = self.m_workflow.currentText()
-        mig['drop_schema'] = self.m_drop_schema.isChecked()
-        mig['recreate_schema'] = self.m_recreate_schema.isChecked()
+        mig['on_error'] = self.m_on_error.currentText()
+        mig['names_case_handling'] = self.m_names_case.currentText()
         mig['batch_size'] = self.m_batch_size.value()
         mig['chunk_size'] = self.m_chunk_size.value()
         mig['parallel_workers'] = self.m_workers.value()
+        if self.m_varchar_len.value() != -1:
+            mig['varchar_to_text_length'] = self.m_varchar_len.value()
+        if self.m_char_len.value() != -1:
+            mig['char_to_text_length'] = self.m_char_len.value()
+            
+        mig['drop_schema'] = self.m_drop_schema.isChecked()
+        mig['recreate_schema'] = self.m_recreate_schema.isChecked()
+        mig['drop_tables'] = self.m_drop_tables.isChecked()
+        mig['truncate_tables'] = self.m_truncate_tables.isChecked()
+        mig['create_tables'] = self.m_create_tables.isChecked()
+        mig['migrate_data'] = self.m_migrate_data.isChecked()
+        mig['migrate_indexes'] = self.m_migrate_indexes.isChecked()
+        mig['migrate_constraints'] = self.m_migrate_constraints.isChecked()
+        mig['migrate_funcprocs'] = self.m_migrate_funcprocs.isChecked()
+        mig['migrate_triggers'] = self.m_migrate_triggers.isChecked()
+        mig['migrate_views'] = self.m_migrate_views.isChecked()
+        mig['set_sequences'] = self.m_set_sequences.isChecked()
+        mig['use_aliases_as_target_names'] = self.m_use_aliases.isChecked()
+        mig['migrate_lob_values'] = self.m_migrate_lob.isChecked()
 
         val = self.config_data['validator']
         val['check_row_counts'] = self.v_row_counts.isChecked()
@@ -446,6 +713,26 @@ class ConfigStudio(QMainWindow):
         if exc_txt:
             self.config_data['exclude_tables'] = [l.strip() for l in exc_txt.split('\n') if l.strip()]
 
+        inc_v_txt = self.inc_views.toPlainText().strip()
+        if inc_v_txt == 'all':
+            self.config_data['include_views'] = 'all'
+        elif inc_v_txt:
+            self.config_data['include_views'] = [l.strip() for l in inc_v_txt.split('\n') if l.strip()]
+
+        exc_v_txt = self.exc_views.toPlainText().strip()
+        if exc_v_txt:
+            self.config_data['exclude_views'] = [l.strip() for l in exc_v_txt.split('\n') if l.strip()]
+
+        inc_f_txt = self.inc_funcprocs.toPlainText().strip()
+        if inc_f_txt == 'all':
+            self.config_data['include_funcprocs'] = 'all'
+        elif inc_f_txt:
+            self.config_data['include_funcprocs'] = [l.strip() for l in inc_f_txt.split('\n') if l.strip()]
+
+        exc_f_txt = self.exc_funcprocs.toPlainText().strip()
+        if exc_f_txt:
+            self.config_data['exclude_funcprocs'] = [l.strip() for l in exc_f_txt.split('\n') if l.strip()]
+
         # Advanced
         adv_txt = self.adv_yaml.toPlainText().strip()
         if adv_txt:
@@ -453,9 +740,25 @@ class ConfigStudio(QMainWindow):
                 parsed_adv = self.yaml.load(adv_txt)
                 if parsed_adv and isinstance(parsed_adv, dict):
                     for k, v in parsed_adv.items():
-                        self.config_data[k] = v
+                        if k == 'source:data_export':
+                            self.config_data['source']['data_export'] = v
+                        else:
+                            self.config_data[k] = v
             except Exception as e:
                 raise Exception(f"Failed to parse Advanced YAML section: {str(e)}")
+
+    def validate_configuration(self):
+        # Validate chunk_size vs batch_size
+        mig = self.config_data.get('migration', {})
+        chunk_size = mig.get('chunk_size', -1)
+        batch_size = mig.get('batch_size', 100000)
+        if chunk_size != -1 and chunk_size <= batch_size:
+            raise Exception("Contradictory settings: migration 'chunk_size' must be greater than 'batch_size', or set to -1 to disable chunking.")
+            
+        # Validate schema vs owner
+        src = self.config_data.get('source', {})
+        if src.get('schema') and src.get('owner'):
+            raise Exception("Contradictory settings: Source configuration cannot define both 'schema' and 'owner'. They are synonyms, use only one.")
 
     def save_config(self):
         if not self.current_file:
@@ -464,6 +767,7 @@ class ConfigStudio(QMainWindow):
 
         try:
             self.update_data_from_ui()
+            self.validate_configuration()
             
             with open(self.current_file, 'w') as f:
                 self.yaml.dump(self.config_data, f)
@@ -511,6 +815,7 @@ class ConfigStudio(QMainWindow):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    app.setStyleSheet("QPushButton { background-color: blue; color: white; }")
     window = ConfigStudio()
     window.show()
     sys.exit(app.exec())

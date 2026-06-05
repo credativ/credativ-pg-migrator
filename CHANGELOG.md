@@ -2,6 +2,12 @@
 
 ## 0.15.0rc1 - 2026.05.29
 
+- 2026.06.05
+
+  - Feature - Mapping Workflow: Added `is_forced_mapping` column to `mapping_tables` to explicitly identify forced table mappings. Refactored the planner to accurately compute and preserve the underlying similarity percentages (e.g., enhanced Jaccard score) for forced mappings rather than defaulting them to 0.0.
+  - Feature - Reporting: Enhanced `mapping_report.md` to prominently display a `(FORCED)` badge and explicit match type/similarity data for forced mappings. Updated the terminal summary output to include a distinct count of explicitly forced mappings.
+  - Fix - Orchestrator: Added explicit logging when the mapping workflow skips recreating or dropping an index because it is already handled by a constraint, aligning the operational execution logs with the final migration summary tallies.
+
 - 2026.06.04
 
   - Fix - Connectors: Resolved an issue where the `merge_keep_target` and `merge_keep_source` data conflict actions failed with unique constraint violations by ensuring `data_conflict_action` and `primary_key_columns` are properly propagated into the `insert_batch` routine across all database connectors.

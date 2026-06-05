@@ -168,15 +168,20 @@ class Orchestrator:
         # 2. Drop indexes
         self.config_parser.print_log_message('INFO', "orchestrator: mapping_drop_indexes_and_constraints: Dropping non-primary key indexes")
         target_indexes = self.migrator_tables.fetch_all_mapping_target_indexes()
+        constraint_index_names = {c['constraint_name'] for c in target_constraints if c['constraint_type'] in ('UNIQUE', 'EXCLUSION')}
+
         for index in target_indexes:
             if not index.get('is_primary_key', False):
-                self.config_parser.print_log_message('DEBUG', f"orchestrator: Dropping index {index['index_name']} on {index['target_schema_name']}.{index['target_table_name']}")
-                drop_sql = f'DROP INDEX IF EXISTS "{index["target_schema_name"]}"."{index["index_name"]}"'
-                try:
-                    target_conn.execute_query(drop_sql)
-                    self.migrator_tables.update_mapping_target_index_drop_status({'row_id': index['id'], 'dropped': True, 'message': 'dropped OK'})
-                except Exception as ex:
-                    self.migrator_tables.update_mapping_target_index_drop_status({'row_id': index['id'], 'dropped': False, 'message': f'ERROR: {ex}'})
+                if index['index_name'] not in constraint_index_names:
+                    self.config_parser.print_log_message('DEBUG', f"orchestrator: Dropping index {index['index_name']} on {index['target_schema_name']}.{index['target_table_name']}")
+                    drop_sql = f'DROP INDEX IF EXISTS "{index["target_schema_name"]}"."{index["index_name"]}"'
+                    try:
+                        target_conn.execute_query(drop_sql)
+                        self.migrator_tables.update_mapping_target_index_drop_status({'row_id': index['id'], 'dropped': True, 'message': 'dropped OK'})
+                    except Exception as ex:
+                        self.migrator_tables.update_mapping_target_index_drop_status({'row_id': index['id'], 'dropped': False, 'message': f'ERROR: {ex}'})
+                else:
+                    self.config_parser.print_log_message('DEBUG', f"orchestrator: Skipping index drop {index['index_name']} on {index['target_schema_name']}.{index['target_table_name']} (handled by constraint)")
 
         target_conn.disconnect()
 
@@ -192,14 +197,17 @@ class Orchestrator:
         # 1. Recreate indexes
         self.config_parser.print_log_message('INFO', "orchestrator: mapping_create_indexes_and_constraints: Recreating non-primary key indexes")
         for index in target_indexes:
-            if not index.get('is_primary_key', False) and index['index_name'] not in constraint_index_names:
-                self.config_parser.print_log_message('DEBUG', f"orchestrator: Recreating index {index['index_name']} on {index['target_schema_name']}.{index['target_table_name']}")
-                try:
-                    target_conn.execute_query(index['index_def'])
-                    self.migrator_tables.update_mapping_target_index_status({'row_id': index['id'], 'success': True, 'message': 'migrated OK'})
-                except Exception as ex:
-                    self.config_parser.print_log_message('ERROR', f"orchestrator: Error recreating index {index['index_name']}: {ex}")
-                    self.migrator_tables.update_mapping_target_index_status({'row_id': index['id'], 'success': False, 'message': f'ERROR: {ex}'})
+            if not index.get('is_primary_key', False):
+                if index['index_name'] not in constraint_index_names:
+                    self.config_parser.print_log_message('DEBUG', f"orchestrator: Recreating index {index['index_name']} on {index['target_schema_name']}.{index['target_table_name']}")
+                    try:
+                        target_conn.execute_query(index['index_def'])
+                        self.migrator_tables.update_mapping_target_index_status({'row_id': index['id'], 'success': True, 'message': 'migrated OK'})
+                    except Exception as ex:
+                        self.config_parser.print_log_message('ERROR', f"orchestrator: Error recreating index {index['index_name']}: {ex}")
+                        self.migrator_tables.update_mapping_target_index_status({'row_id': index['id'], 'success': False, 'message': f'ERROR: {ex}'})
+                else:
+                    self.config_parser.print_log_message('DEBUG', f"orchestrator: Skipping index recreation {index['index_name']} on {index['target_schema_name']}.{index['target_table_name']} (handled by constraint)")
 
         # 2. Recreate constraints
         self.config_parser.print_log_message('INFO', "orchestrator: mapping_create_indexes_and_constraints: Recreating non-primary key constraints")

@@ -408,7 +408,8 @@ class MigratorTables:
                 source_table_rows_all INTEGER,
                 source_table_rows_limited INTEGER,
                 target_table_rows INTEGER,
-                info TEXT
+                info TEXT,
+                is_forced_mapping BOOLEAN DEFAULT FALSE
             );
         """)
         self.protocol_connection.execute_query(f"""
@@ -495,14 +496,15 @@ class MigratorTables:
         source_table_rows_limited = settings.get('source_table_rows_limited')
         target_table_rows = settings.get('target_table_rows')
         info = settings.get('info')
+        is_forced_mapping = settings.get('is_forced_mapping', False)
 
         query = f"""
             INSERT INTO "{self.protocol_schema}"."mapping_tables"
-            (source_schema_name, source_table_name, target_schema_name, target_table_name, match_type, similarity_score, source_table_rows_all, source_table_rows_limited, target_table_rows, info)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (source_schema_name, source_table_name, target_schema_name, target_table_name, match_type, similarity_score, source_table_rows_all, source_table_rows_limited, target_table_rows, info, is_forced_mapping)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
         """
-        params = (source_schema_name, source_table_name, target_schema_name, target_table_name, match_type, similarity_score, source_table_rows_all, source_table_rows_limited, target_table_rows, info)
+        params = (source_schema_name, source_table_name, target_schema_name, target_table_name, match_type, similarity_score, source_table_rows_all, source_table_rows_limited, target_table_rows, info, is_forced_mapping)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -3292,7 +3294,7 @@ class MigratorTables:
         
         # Fetch mapped tables
         query_mapped = f"""
-            SELECT source_table_name, target_table_name, source_table_rows_all, target_table_rows
+            SELECT source_table_name, target_table_name, source_table_rows_all, target_table_rows, is_forced_mapping, match_type, similarity_score
             FROM "{self.protocol_schema}"."mapping_tables"
             ORDER BY source_table_name
         """
@@ -3341,10 +3343,16 @@ class MigratorTables:
             tgt_tbl = tbl[1]
             src_rows = tbl[2] if tbl[2] is not None else 0
             tgt_rows = tbl[3] if tbl[3] is not None else 0
+            is_forced = tbl[4] if tbl[4] is not None else False
+            match_type = tbl[5] if tbl[5] is not None else "Unknown"
+            similarity = tbl[6] if tbl[6] is not None else 0.0
             
             anchor_text = f"{src_tbl} mapped to {tgt_tbl}"
+            if is_forced:
+                anchor_text += " (FORCED)"
+                
             lines.append(f"### {anchor_text}")
-            lines.append(f"**Source Rows:** {src_rows} | **Target Rows:** {tgt_rows}")
+            lines.append(f"**Source Rows:** {src_rows} | **Target Rows:** {tgt_rows} | **Match Type:** {match_type} | **Similarity:** {similarity}%")
             lines.append("")
             
             # Fetch mapped columns
@@ -3689,6 +3697,10 @@ class MigratorTables:
                 cursor.execute(f'SELECT count(*) FROM "{self.protocol_schema}"."mapping_tables"')
                 tables_count = cursor.fetchone()[0]
                 lines.append(f"Mapped Tables: {tables_count}")
+                cursor.execute(f'SELECT count(*) FROM "{self.protocol_schema}"."mapping_tables" WHERE is_forced_mapping = TRUE')
+                forced_count = cursor.fetchone()[0]
+                if forced_count > 0:
+                    lines.append(f"    Explicitly Forced: {forced_count}")
                 cursor.execute(f'SELECT match_type, count(*) FROM "{self.protocol_schema}"."mapping_tables" GROUP BY match_type ORDER BY count(*) DESC')
                 for row in cursor.fetchall():
                     lines.append(f"    Found via {row[0]}: {row[1]}")

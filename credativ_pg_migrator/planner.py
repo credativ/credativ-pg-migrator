@@ -1667,14 +1667,22 @@ class Planner:
                     src = f['source']
                     tgt = f['target']
                     if src in source_tables and tgt in target_tables:
-                        forced_pairs.append({'source_table': src, 'target_table': tgt, 'method': 'Forced Exact', 'details': f"Mapped explicitly to {tgt}", 'stats': {}})
+                        source_cols = source_columns_map.get(src, [])
+                        target_cols = target_columns_map.get(tgt, [])
+                        jaccard = match_schemas.calculate_enhanced_jaccard(source_cols, target_cols, heuristics.get('column_prefixes_to_strip', migration_settings.get('column_prefixes', ["gov_", "log_"])), heuristics.get('column_normalization_rules', migration_settings.get('column_normalization_rules', ['lowercase', 'strip_trailing_numbers'])), heuristics.get('normalization_settings', migration_settings.get('normalization_settings', {})))
+                        score = int(jaccard * 100)
+                        forced_pairs.append({'source_table': src, 'target_table': tgt, 'method': 'Forced Exact', 'details': f"Mapped explicitly to {tgt}", 'stats': {'jaccard': jaccard}, 'score': score, 'is_forced_mapping': True})
                 elif 'source_regex' in f and 'target' in f:
                     src_re = re.compile(f['source_regex'])
                     for src in list(source_tables):
                         if src_re.match(src):
                             tgt = src_re.sub(f['target'], src)
                             if tgt in target_tables:
-                                forced_pairs.append({'source_table': src, 'target_table': tgt, 'method': 'Forced Regex Sub', 'details': f"Mapped via regex {f['source_regex']}", 'stats': {}})
+                                source_cols = source_columns_map.get(src, [])
+                                target_cols = target_columns_map.get(tgt, [])
+                                jaccard = match_schemas.calculate_enhanced_jaccard(source_cols, target_cols, heuristics.get('column_prefixes_to_strip', migration_settings.get('column_prefixes', ["gov_", "log_"])), heuristics.get('column_normalization_rules', migration_settings.get('column_normalization_rules', ['lowercase', 'strip_trailing_numbers'])), heuristics.get('normalization_settings', migration_settings.get('normalization_settings', {})))
+                                score = int(jaccard * 100)
+                                forced_pairs.append({'source_table': src, 'target_table': tgt, 'method': 'Forced Regex Sub', 'details': f"Mapped via regex {f['source_regex']}", 'stats': {'jaccard': jaccard}, 'score': score, 'is_forced_mapping': True})
 
         for pair in forced_pairs:
             if pair['source_table'] in source_tables:
@@ -1808,7 +1816,8 @@ class Planner:
                 'source_table_rows_all': source_table_rows_all,
                 'source_table_rows_limited': source_table_rows_limited,
                 'target_table_rows': target_table_rows,
-                'info': info_json # Use the already prepared info_json
+                'info': info_json, # Use the already prepared info_json
+                'is_forced_mapping': mapped_table.get('is_forced_mapping', False)
             })
 
             col_settings = {

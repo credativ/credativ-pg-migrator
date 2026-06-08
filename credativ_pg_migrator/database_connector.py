@@ -771,9 +771,65 @@ class DatabaseConnector(ABC):
     def get_row_checksums(self, schema_name: str, table_name: str, pk_columns: list, pk_values_list: list, columns: list):
         """
         Returns corresponding row-level hashes matched directly against the provided PK filter sets.
-        Returns a dictionary or list mapping PKs to Row Checksums.
+        Returns a dictionary mapping PKs to Row Checksums.
         """
         pass
+
+    def _compute_python_table_checksum(self, query: str):
+        """
+        Helper method to compute a deterministic, order-independent table checksum
+        by fetching rows in chunks and summing their CRC32 integer hashes.
+        """
+        import zlib
+        total_hash = 0
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            while True:
+                rows = cursor.fetchmany(10000)
+                if not rows:
+                    break
+                for row in rows:
+                    row_str = "|".join([str(val) if val is not None else "" for val in row])
+                    row_hash = zlib.crc32(row_str.encode('utf-8'))
+                    total_hash += row_hash
+            cursor.close()
+            self.disconnect()
+            return total_hash
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"database_connector: _compute_python_table_checksum: Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
+            return None
+
+    def _compute_python_row_checksums(self, query: str, num_pk_cols: int):
+        """
+        Helper method to compute row-level checksums for validation sampling.
+        Returns a dictionary of PKs to their CRC32 integer hashes.
+        """
+        import zlib
+        checksums = {}
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            for row in cursor.fetchall():
+                pk_tuple = tuple(row[:num_pk_cols])
+                pk_key = pk_tuple[0] if num_pk_cols == 1 else pk_tuple
+                
+                # Compute hash on the non-PK columns (the rest of the row)
+                data_row = row[num_pk_cols:]
+                row_str = "|".join([str(val) if val is not None else "" for val in data_row])
+                row_hash = zlib.crc32(row_str.encode('utf-8'))
+                
+                checksums[pk_key] = row_hash
+            cursor.close()
+            self.disconnect()
+            return checksums
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"database_connector: _compute_python_row_checksums: Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
+            return {}
 
     @abstractmethod
     def get_lob_sizes(self, schema_name: str, table_name: str, pk_columns: list, pk_values_list: list, lob_columns: list):

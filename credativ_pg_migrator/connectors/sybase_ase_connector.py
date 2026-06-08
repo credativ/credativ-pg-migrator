@@ -3337,13 +3337,63 @@ EXECUTE FUNCTION {target_schema_name}.{trigger_name}_func();
         return extracted_default_value
 
     def get_table_checksum(self, schema_name: str, table_name: str, columns: list):
-        return None
+        if not columns:
+            return None
+            
+        cols_list = []
+        for col in columns:
+            dtype = col.get('data_type', '').lower()
+            if any(x in dtype for x in ['lob', 'bytea', 'xml', 'json', 'text', 'image', 'unitext']):
+                continue
+            cols_list.append(f'"{col["column_name"]}"')
+            
+        if not cols_list:
+            return None
+            
+        cols_str = ", ".join(cols_list)
+        query = f'SELECT {cols_str} FROM "{schema_name}"."{table_name}"'
+        return self._compute_python_table_checksum(query)
 
     def get_random_pks(self, schema_name: str, table_name: str, pk_columns: list, sample_size: int):
         return []
 
     def get_row_checksums(self, schema_name: str, table_name: str, pk_columns: list, pk_values_list: list, columns: list):
-        return {}
+        if not columns or not pk_columns or not pk_values_list:
+            return {}
+            
+        cols_list = []
+        for col in columns:
+            dtype = col.get('data_type', '').lower()
+            if any(x in dtype for x in ['lob', 'bytea', 'xml', 'json', 'text', 'image', 'unitext']):
+                continue
+            cols_list.append(f'"{col["column_name"]}"')
+            
+        if not cols_list:
+            return {}
+            
+        cols_str = ", ".join(cols_list)
+        pk_cols_str = ", ".join([f'"{c}"' for c in pk_columns])
+        
+        in_values = []
+        for pk_dict in pk_values_list:
+            vals = []
+            for c in pk_columns:
+                val = pk_dict[c]
+                if val is None:
+                    vals.append("NULL")
+                elif isinstance(val, str):
+                    escaped_val = val.replace("'", "''")
+                    vals.append(f"'{escaped_val}'")
+                else:
+                    vals.append(str(val))
+            in_values.append(f"({', '.join(vals)})")
+        
+        where_clause = f"({pk_cols_str}) IN ({', '.join(in_values)})"
+        if len(pk_columns) == 1:
+            where_clause = f"{pk_cols_str} IN ({', '.join([v.strip('()') for v in in_values])})"
+            
+        query = f'SELECT {pk_cols_str}, {cols_str} FROM "{schema_name}"."{table_name}" WHERE {where_clause}'
+        return self._compute_python_row_checksums(query, len(pk_columns))
 
     def get_lob_sizes(self, schema_name: str, table_name: str, pk_columns: list, pk_values_list: list, lob_columns: list):
         return {}

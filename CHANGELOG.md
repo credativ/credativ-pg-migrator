@@ -6,6 +6,7 @@
 
   - Feature - Mapping Workflow: Implemented automated mapping of sequences for identity columns. The migrator now extracts identity sequences from both source and target databases, matches them, and securely records their dependencies alongside the `source_is_identity` and `target_is_identity` flags within the protocol mapping tables.
   - Feature - Reporting: Enhanced the `mapping` workflow's summary output to include detailed statistics on target sequence extraction. It now breaks down the total mapped target sequences into explicit sub-categories (e.g. Identity Sequences, and those successfully matched back to their Source database counterparts).
+  - Feature - Reporting: Completely redesigned the `validation` workflow's end-of-run summary to match the tabular, high-visibility format used by the main migrator workflow. The new `[ CREDATIV PG-MIGRATOR VALIDATOR SUMMARY ]` features a dedicated totals matrix (Total/Passed/Failed) for all test categories, and a comprehensive `[ VALIDATION DETAILS ]` table that parses out source and target row counts into dedicated columns alongside individual PASS/FAIL metrics for Row Checksums, Table Checksums, and LOB sizes. It also introduces dynamic column scaling to ensure full, untruncated display of both Source and Target table names, and includes an auto-sizing sequential row number index for easier tracking.
 
 - 2026.06.05
 

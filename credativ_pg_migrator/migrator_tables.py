@@ -4898,16 +4898,14 @@ class MigratorTables:
             raise
 
     def print_validation_summary(self, val_logger=None):
-        def log_info(msg):
-            if val_logger:
-                val_logger.info(msg)
-            else:
-                self.config_parser.print_log_message('INFO', msg)
-
+        protocol_tables = self.config_parser.get_protocol_name_tables()
         query = f"""
-            SELECT target_schema_name, target_table_name, row_logic, row_msg, table_hash_logic, table_msg, row_hash_logic, row_hash_msg, lob_size_logic, lob_size_msg, passed
-            FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_validation()}"
-            ORDER BY target_schema_name, target_table_name
+            SELECT v.target_schema_name, v.target_table_name, v.row_logic, v.row_msg, v.table_hash_logic, v.table_msg, v.row_hash_logic, v.row_hash_msg, v.lob_size_logic, v.lob_size_msg, v.passed, MAX(t.source_schema_name), MAX(t.source_table_name)
+            FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_validation()}" v
+            LEFT JOIN "{self.protocol_schema}"."{protocol_tables}" t
+            ON v.target_schema_name = t.target_schema_name AND v.target_table_name = t.target_table_name
+            GROUP BY v.target_schema_name, v.target_table_name, v.row_logic, v.row_msg, v.table_hash_logic, v.table_msg, v.row_hash_logic, v.row_hash_msg, v.lob_size_logic, v.lob_size_msg, v.passed
+            ORDER BY v.target_schema_name, v.target_table_name
         """
         try:
             cursor = self.protocol_connection.connection.cursor()
@@ -4915,9 +4913,17 @@ class MigratorTables:
             results = cursor.fetchall()
             cursor.close()
 
-            log_info("=========================================")
-            log_info("       Data Validation Summary           ")
-            log_info("=========================================")
+            lines = []
+
+            lines.append("=" * 80)
+            lines.append("                     CREDATIV PG-MIGRATOR VALIDATOR SUMMARY                     ")
+            lines.append("=" * 80)
+            lines.append("")
+            lines.append("[ DATABASE CONTEXT ]")
+            lines.append(f"Source: {self.config_parser.get_source_db_name()}, schema: {self.config_parser.get_source_owner()} ({self.config_parser.get_source_db_type()})")
+            lines.append(f"Target: {self.config_parser.get_target_db_name()}, schema: {self.config_parser.get_target_schema()} ({self.config_parser.get_target_db_type()})")
+            lines.append(f"Workflow: {self.config_parser.get_workflow()}")
+            lines.append("")
 
             total = len(results)
             passed_count = sum(1 for r in results if r[10])
@@ -4939,33 +4945,65 @@ class MigratorTables:
             lob_size_pass = sum(1 for r in results if r[8] is True)
             lob_size_fail = sum(1 for r in results if r[8] is False)
 
-            log_info(f"Total Tables Validated: {total}")
-            log_info(f"Tables Passed: {passed_count}")
-            log_info(f"Tables Failed: {failed_count}")
-
-            log_info("--- Test Category Totals ---")
-            if row_count_tests > 0:
-                log_info(f"Row Counts   : {row_count_pass} Passed, {row_count_fail} Failed (Total: {row_count_tests})")
-            if table_hash_tests > 0:
-                log_info(f"Table Hashes : {table_hash_pass} Passed, {table_hash_fail} Failed (Total: {table_hash_tests})")
-            if row_hash_tests > 0:
-                log_info(f"Row Hashes   : {row_hash_pass} Passed, {row_hash_fail} Failed (Total: {row_hash_tests})")
-            if lob_size_tests > 0:
-                log_info(f"LOB Sizes    : {lob_size_pass} Passed, {lob_size_fail} Failed (Total: {lob_size_tests})")
-
             if total > 0:
-                log_info("--- Validation Details ---")
-                for r in results:
+                lines.append("")
+                lines.append("[ VALIDATION DETAILS ]")
+                max_source_len = max([len(f"{r[11]}.{r[12]}") if r[11] and r[12] else 12 for r in results] + [12])
+                max_target_len = max([len(f"{r[0]}.{r[1]}") for r in results] + [12])
+                max_num_len = max(3, len(str(len(results))))
+                header = f"{'No.':>{max_num_len}} | {'Source Table':<{max_source_len}} | {'Target Table':<{max_target_len}} | {'Status':<6} | {'RowCnt':<6} | {'SrcRows':>10} | {'TgtRows':>10} | {'TblHash':<7} | {'RowHash':<7} | {'LobSize':<7}"
+                lines.append("-" * len(header))
+                lines.append(header)
+                lines.append("-" * len(header))
+                import re
+                for idx, r in enumerate(results, 1):
                     status = "PASS" if r[10] else "FAIL"
-                    log_info(f"[{status}] Table: {r[0]}.{r[1]}")
+                    target_table = f"{r[0]}.{r[1]}"
+                    source_table = f"{r[11]}.{r[12]}" if r[11] and r[12] else "-"
+                        
+                    src_rows = "-"
+                    tgt_rows = "-"
+                    row_cnt_res = "-"
                     if r[2] is not None:
-                        log_info(f"  Row Counts: {'[PASS]' if r[2] else '[FAIL]'} {r[3].strip()}")
-                    if r[4] is not None:
-                        log_info(f"  Table Checksum: {'[PASS]' if r[4] else '[FAIL]'} {r[5].strip()}")
-                    if r[6] is not None:
-                        log_info(f"  Row Checksums: {'[PASS]' if r[6] else '[FAIL]'} {r[7].strip()}")
-                    if r[8] is not None:
-                        log_info(f"  LOB Sizes: {'[PASS]' if r[8] else '[FAIL]'} {r[9].strip()}")
+                        row_cnt_res = "PASS" if r[2] else "FAIL"
+                        msg = r[3].strip() if r[3] else ""
+                        if r[2] is True and msg.lower().startswith("pass: "):
+                            parts = msg.split()
+                            if len(parts) >= 2:
+                                src_rows = parts[1]
+                                tgt_rows = parts[1]
+                        elif r[2] is False and msg.lower().startswith("fail: "):
+                            m = re.search(r"Src=(\d+),\s*Tgt=(\d+)", msg, re.IGNORECASE)
+                            if m:
+                                src_rows = m.group(1)
+                                tgt_rows = m.group(2)
+                                
+                    tbl_hash_res = "-" if r[4] is None else ("PASS" if r[4] else "FAIL")
+                    row_hash_res = "-" if r[6] is None else ("PASS" if r[6] else "FAIL")
+                    lob_size_res = "-" if r[8] is None else ("PASS" if r[8] else "FAIL")
+                    
+                    lines.append(f"{idx:>{max_num_len}} | {source_table:<{max_source_len}} | {target_table:<{max_target_len}} | {status:<6} | {row_cnt_res:<6} | {src_rows:>10} | {tgt_rows:>10} | {tbl_hash_res:<7} | {row_hash_res:<7} | {lob_size_res:<7}")
+
+            lines.append("")
+            lines.append("[ VALIDATION TOTALS ]")
+            lines.append("-" * 80)
+            lines.append(f"{'Test Category':<24} | {'Total':>7} | {'Passed':>7} | {'Failed':>6}")
+            lines.append("-" * 80)
+            lines.append(f"{'All Evaluated Tables':<24} | {total:>7} | {passed_count:>7} | {failed_count:>6}")
+            if row_count_tests > 0:
+                lines.append(f"{'Row Counts':<24} | {row_count_tests:>7} | {row_count_pass:>7} | {row_count_fail:>6}")
+            if table_hash_tests > 0:
+                lines.append(f"{'Table Hashes':<24} | {table_hash_tests:>7} | {table_hash_pass:>7} | {table_hash_fail:>6}")
+            if row_hash_tests > 0:
+                lines.append(f"{'Row Level Hashes':<24} | {row_hash_tests:>7} | {row_hash_pass:>7} | {row_hash_fail:>6}")
+            if lob_size_tests > 0:
+                lines.append(f"{'LOB Sizes':<24} | {lob_size_tests:>7} | {lob_size_pass:>7} | {lob_size_fail:>6}")
+            
+            final_summary = "\n" + "\n".join(lines)
+            if val_logger:
+                val_logger.info(final_summary)
+            else:
+                self.config_parser.print_log_message('INFO', final_summary)
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"migrator_tables: print_validation_summary: Error: {e}")
 

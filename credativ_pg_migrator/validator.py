@@ -112,6 +112,12 @@ class Validator:
 
         res = {
             'target_table': f"{target_schema}.{target_table}",
+            'source_schema_name': source_schema,
+            'source_table_name': source_table,
+            'target_schema_name': target_schema,
+            'target_table_name': target_table,
+            'source_row_count': None,
+            'target_row_count': None,
             'row_logic': None,
             'row_msg': '',
             'table_hash_logic': None,
@@ -146,6 +152,8 @@ class Validator:
                 
                 s_count = source_conn.get_rows_count(source_schema, source_table, migration_limitation)
                 t_count = target_conn.get_rows_count(target_schema, target_table)
+                res['source_row_count'] = s_count
+                res['target_row_count'] = t_count
                 res['row_logic'] = (s_count == t_count)
                 if not res['row_logic']:
                     res['passed'] = False
@@ -172,7 +180,9 @@ class Validator:
                             col_passed = (s_col_sum == t_col_sum)
                             try:
                                 self.migrator_tables.insert_validation_column_result(
-                                    target_schema, target_table, source_cols[i]['column_name'], s_col_sum, t_col_sum, col_passed
+                                    source_schema, source_table, source_cols[i]['column_name'],
+                                    target_schema, target_table, target_cols[i]['column_name'],
+                                    s_col_sum, t_col_sum, col_passed
                                 )
                             except Exception as e:
                                 self.val_logger.logger.error(f"Error persisting column validation protocol for {target_table}.{source_cols[i]['column_name']}: {e}")
@@ -262,19 +272,7 @@ class Validator:
             self.val_logger.logger.warning(f"FAIL: {res['target_table']} failed validation against source {source_schema}.{source_table}. Details: {fail_str}")
 
         try:
-            self.migrator_tables.insert_validation_table_result({
-                'target_schema_name': target_schema,
-                'target_table_name': target_table,
-                'row_logic': res['row_logic'],
-                'row_msg': res['row_msg'],
-                'table_hash_logic': res['table_hash_logic'],
-                'table_msg': res['table_msg'],
-                'row_hash_logic': res['row_hash_logic'],
-                'row_hash_msg': res['row_hash_msg'],
-                'lob_size_logic': res['lob_size_logic'],
-                'lob_size_msg': res['lob_size_msg'],
-                'passed': res['passed']
-            })
+            self.migrator_tables.insert_validation_table_result(res)
         except Exception as e:
             self.val_logger.logger.error(f"Error persisting validation protocol for {res['target_table']}: {e}")
             self.val_logger.logger.error(traceback.format_exc())

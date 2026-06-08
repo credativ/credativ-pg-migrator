@@ -4851,8 +4851,12 @@ class MigratorTables:
         create_tables_query = f"""
             CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."{self.config_parser.get_validation_tables_name()}" (
                 id SERIAL PRIMARY KEY,
+                source_schema_name text,
+                source_table_name text,
+                source_row_count bigint,
                 target_schema_name text,
                 target_table_name text,
+                target_row_count bigint,
                 row_logic boolean,
                 row_msg text,
                 table_hash_logic boolean,
@@ -4869,9 +4873,12 @@ class MigratorTables:
         create_columns_query = f"""
             CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."{self.config_parser.get_validation_columns_name()}" (
                 id SERIAL PRIMARY KEY,
+                source_schema_name text,
+                source_table_name text,
+                source_column_name text,
                 target_schema_name text,
                 target_table_name text,
-                column_name text,
+                target_column_name text,
                 source_hash text,
                 target_hash text,
                 passed boolean,
@@ -4895,8 +4902,12 @@ class MigratorTables:
             raise
 
     def insert_validation_table_result(self, settings):
+        source_schema_name = settings.get('source_schema_name')
+        source_table_name = settings.get('source_table_name')
+        source_row_count = settings.get('source_row_count')
         target_schema_name = settings.get('target_schema_name')
         target_table_name = settings.get('target_table_name')
+        target_row_count = settings.get('target_row_count')
         row_logic = settings.get('row_logic')
         row_msg = settings.get('row_msg')
         table_hash_logic = settings.get('table_hash_logic')
@@ -4909,10 +4920,10 @@ class MigratorTables:
 
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{self.config_parser.get_validation_tables_name()}"
-            (target_schema_name, target_table_name, row_logic, row_msg, table_hash_logic, table_msg, row_hash_logic, row_hash_msg, lob_size_logic, lob_size_msg, passed)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (source_schema_name, source_table_name, source_row_count, target_schema_name, target_table_name, target_row_count, row_logic, row_msg, table_hash_logic, table_msg, row_hash_logic, row_hash_msg, lob_size_logic, lob_size_msg, passed)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
-        params = (target_schema_name, target_table_name, row_logic, row_msg, table_hash_logic, table_msg, row_hash_logic, row_hash_msg, lob_size_logic, lob_size_msg, passed)
+        params = (source_schema_name, source_table_name, source_row_count, target_schema_name, target_table_name, target_row_count, row_logic, row_msg, table_hash_logic, table_msg, row_hash_logic, row_hash_msg, lob_size_logic, lob_size_msg, passed)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -4922,13 +4933,13 @@ class MigratorTables:
             self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_validation_table_result: Error: {e}")
             raise
 
-    def insert_validation_column_result(self, target_schema_name, target_table_name, column_name, source_hash, target_hash, passed):
+    def insert_validation_column_result(self, source_schema_name, source_table_name, source_column_name, target_schema_name, target_table_name, target_column_name, source_hash, target_hash, passed):
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{self.config_parser.get_validation_columns_name()}"
-            (target_schema_name, target_table_name, column_name, source_hash, target_hash, passed)
-            VALUES (%s, %s, %s, %s, %s, %s)
+            (source_schema_name, source_table_name, source_column_name, target_schema_name, target_table_name, target_column_name, source_hash, target_hash, passed)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
-        params = (target_schema_name, target_table_name, column_name, str(source_hash) if source_hash is not None else None, str(target_hash) if target_hash is not None else None, passed)
+        params = (source_schema_name, source_table_name, source_column_name, target_schema_name, target_table_name, target_column_name, str(source_hash) if source_hash is not None else None, str(target_hash) if target_hash is not None else None, passed)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)

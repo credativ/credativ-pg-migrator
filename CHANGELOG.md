@@ -5,6 +5,7 @@
 - 2026.06.08
 
   - Feature - Mapping Workflow: Implemented automated mapping of sequences for identity columns. The migrator now extracts identity sequences from both source and target databases, matches them, and securely records their dependencies alongside the `source_is_identity` and `target_is_identity` flags within the protocol mapping tables.
+  - Feature - Reporting: Enhanced the `mapping` workflow's summary output to include detailed statistics on target sequence extraction. It now breaks down the total mapped target sequences into explicit sub-categories (e.g. Identity Sequences, and those successfully matched back to their Source database counterparts).
 
 - 2026.06.05
 

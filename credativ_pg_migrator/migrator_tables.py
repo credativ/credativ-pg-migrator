@@ -3724,7 +3724,15 @@ class MigratorTables:
                     
                 cursor.execute(f'SELECT count(*) FROM "{self.protocol_schema}"."mapping_target_sequences"')
                 sequences_count = cursor.fetchone()[0]
-                lines.append(f"Mapped Sequences: {sequences_count}")
+                lines.append(f"Target Sequences: {sequences_count}")
+                if sequences_count > 0:
+                    cursor.execute(f'SELECT count(*) FROM "{self.protocol_schema}"."mapping_target_sequences" WHERE used_in_identity = TRUE')
+                    identity_count = cursor.fetchone()[0]
+                    if identity_count > 0:
+                        lines.append(f"    Identity Sequences: {identity_count}")
+                        cursor.execute(f'SELECT count(*) FROM "{self.protocol_schema}"."mapping_target_sequences" WHERE used_in_identity = TRUE AND source_sequence_name IS NOT NULL')
+                        mapped_identity = cursor.fetchone()[0]
+                        lines.append(f"        Mapped to Source: {mapped_identity}")
                 
                 cursor.execute(f'SELECT side, count(*) FROM "{self.protocol_schema}"."mapping_unmatched_objects" WHERE object_type = \'table\' GROUP BY 1 ORDER BY 1')
                 unmapped_tables = {row[0]: row[1] for row in cursor.fetchall()}

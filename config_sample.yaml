@@ -395,7 +395,9 @@ validator:
   check_row_counts: true                   # Simply compares total row counts between corresponding source and target tables
   check_table_checksums: true              # Computes explicit hashes containing aggregates of string-casted structures across the entire tables
   check_random_sample: true                # Validates individual random row arrays querying mapped precise primary keys bridging origin to destination
-
+  check_lob_sizes: true                    # Validates exact byte size allocations for migrated LOB (BLOB/CLOB) instances on the sampled rows
+  random_sample_size: 1000                 # Determine the maximum amount of randomized samples queried exclusively when check_random_sample or check_lob_sizes is True
+  report_filename: "validator_report.txt"  # Optional file to write detailed tabular report. If set, console only shows summary.
 # -----------------------------------------------------------------------------
 # SCHEMA AND OBJECT MAPPING CONFIGURATION
 # -----------------------------------------------------------------------------
@@ -435,8 +437,6 @@ mapping_workflow:
     # - table: "users"
     #   source_column: "first_name"
     #   target_column: "given_name"
-  check_lob_sizes: true                    # Validates exact byte size allocations for migrated LOB (BLOB/CLOB) instances on the sampled rows
-  random_sample_size: 1000                 # Determine the maximum amount of randomized samples queried exclusively when check_random_sample or check_lob_sizes is True
 
 # Summary settings
 # Controls the limits used in the final summary output

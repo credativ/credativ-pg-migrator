@@ -595,6 +595,9 @@ class ConfigParser:
     def get_validator_workers(self):
         return int(self.get_validator_config().get('workers', 4))
 
+    def get_validator_report_filename(self):
+        return self.get_validator_config().get('report_filename', None)
+
     def is_validation_row_counts_enabled(self):
         return self.get_validator_config().get('check_row_counts', True)
 

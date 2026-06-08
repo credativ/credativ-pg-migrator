@@ -156,6 +156,15 @@ class Validator:
                     if not res['table_hash_logic']:
                         res['passed'] = False
                         res['table_msg'] = f"Fail: Src={s_sum}, Tgt={t_sum}"
+                        
+                        self.val_logger.logger.warning(f"Validator: Table {source_table} hash mismatch. Inspecting columns...")
+                        for i in range(min(len(source_cols), len(target_cols))):
+                            s_col = [source_cols[i]]
+                            t_col = [target_cols[i]]
+                            s_col_sum = source_conn.get_table_checksum(source_schema, source_table, s_col)
+                            t_col_sum = target_conn.get_table_checksum(target_schema, target_table, t_col)
+                            if s_col_sum != t_col_sum:
+                                self.val_logger.logger.warning(f"Validator: Table {source_table} column {source_cols[i]['column_name']} hash mismatch: Src={s_col_sum}, Tgt={t_col_sum}")
                     else:
                         res['table_msg'] = f"Pass: {s_sum}"
                 else:

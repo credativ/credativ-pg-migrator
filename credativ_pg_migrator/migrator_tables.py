@@ -4945,16 +4945,17 @@ class MigratorTables:
             lob_size_pass = sum(1 for r in results if r[8] is True)
             lob_size_fail = sum(1 for r in results if r[8] is False)
 
+            details_lines = []
             if total > 0:
-                lines.append("")
-                lines.append("[ VALIDATION DETAILS ]")
+                details_lines.append("")
+                details_lines.append("[ VALIDATION DETAILS ]")
                 max_source_len = max([len(f"{r[11]}.{r[12]}") if r[11] and r[12] else 12 for r in results] + [12])
                 max_target_len = max([len(f"{r[0]}.{r[1]}") for r in results] + [12])
                 max_num_len = max(3, len(str(len(results))))
                 header = f"{'No.':>{max_num_len}} | {'Source Table':<{max_source_len}} | {'Target Table':<{max_target_len}} | {'Status':<6} | {'RowCnt':<6} | {'SrcRows':>10} | {'TgtRows':>10} | {'TblHash':<7} | {'RowHash':<7} | {'LobSize':<7}"
-                lines.append("-" * len(header))
-                lines.append(header)
-                lines.append("-" * len(header))
+                details_lines.append("-" * len(header))
+                details_lines.append(header)
+                details_lines.append("-" * len(header))
                 import re
                 for idx, r in enumerate(results, 1):
                     status = "PASS" if r[10] else "FAIL"
@@ -4982,8 +4983,23 @@ class MigratorTables:
                     row_hash_res = "-" if r[6] is None else ("PASS" if r[6] else "FAIL")
                     lob_size_res = "-" if r[8] is None else ("PASS" if r[8] else "FAIL")
                     
-                    lines.append(f"{idx:>{max_num_len}} | {source_table:<{max_source_len}} | {target_table:<{max_target_len}} | {status:<6} | {row_cnt_res:<6} | {src_rows:>10} | {tgt_rows:>10} | {tbl_hash_res:<7} | {row_hash_res:<7} | {lob_size_res:<7}")
+                    details_lines.append(f"{idx:>{max_num_len}} | {source_table:<{max_source_len}} | {target_table:<{max_target_len}} | {status:<6} | {row_cnt_res:<6} | {src_rows:>10} | {tgt_rows:>10} | {tbl_hash_res:<7} | {row_hash_res:<7} | {lob_size_res:<7}")
 
+            report_filename = self.config_parser.get_validator_report_filename()
+            if report_filename:
+                try:
+                    with open(report_filename, 'w', encoding='utf-8') as f:
+                        f.write("\n".join(details_lines))
+                    lines.append("")
+                    lines.append(f"[ INFO: Detailed validation report was created in {report_filename} ]")
+                except Exception as e:
+                    lines.append("")
+                    lines.append(f"[ ERROR: Failed to save detailed report to {report_filename}: {e} ]")
+            else:
+                lines.extend(details_lines)
+                lines.append("")
+                lines.append("[ INFO: Detailed report to file was not requested in config (report_filename is not set) ]")
+                
             lines.append("")
             lines.append("[ VALIDATION TOTALS ]")
             lines.append("-" * 80)

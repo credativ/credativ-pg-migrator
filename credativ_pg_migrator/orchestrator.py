@@ -237,7 +237,7 @@ class Orchestrator:
 
         target_constraints = self.migrator_tables.fetch_all_mapping_target_constraints()
         target_indexes = self.migrator_tables.fetch_all_mapping_target_indexes()
-        
+
         tables_to_check = set()
         for c in target_constraints:
             tables_to_check.add((c['target_schema_name'], c['target_table_name']))
@@ -281,7 +281,7 @@ class Orchestrator:
             source_rows_all = table_data.get('source_table_rows_all', 0)
             source_rows_limited = table_data.get('source_table_rows_limited', 0)
             target_rows = table_data.get('target_table_rows', -1)
-            
+
             conflict_action = 'skip'
             if source_rows_limited > 0 and target_rows > 0:
                 conflict_action = self.config_parser.get_mapping_data_resolution(table_data['target_table_name'])

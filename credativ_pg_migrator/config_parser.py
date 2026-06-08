@@ -586,8 +586,11 @@ class ConfigParser:
             return []
 
     ## Validator
-    def get_protocol_name_validation(self):
-        return f"{self.get_protocol_name()}_validation"
+    def get_validation_tables_name(self):
+        return "validation_tables"
+
+    def get_validation_columns_name(self):
+        return "validation_columns"
 
     def get_validator_config(self):
         return self.config.get('validator', {})

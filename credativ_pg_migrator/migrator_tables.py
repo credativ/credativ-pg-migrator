@@ -4843,8 +4843,13 @@ class MigratorTables:
             self.config_parser.print_log_message('ERROR', f"migrator_tables: update_ddl_comment: Exception: {e}")
             raise
     def create_table_for_validation(self):
-        query = f"""
-            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."{self.config_parser.get_protocol_name_validation()}" (
+        old_table_name = f"{self.config_parser.get_protocol_name()}_validation"
+        drop_old_query = f"""
+            DROP TABLE IF EXISTS "{self.protocol_schema}"."{old_table_name}"
+        """
+        
+        create_tables_query = f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."{self.config_parser.get_validation_tables_name()}" (
                 id SERIAL PRIMARY KEY,
                 target_schema_name text,
                 target_table_name text,
@@ -4860,16 +4865,36 @@ class MigratorTables:
                 validated_at timestamp default current_timestamp
             )
         """
+        
+        create_columns_query = f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."{self.config_parser.get_validation_columns_name()}" (
+                id SERIAL PRIMARY KEY,
+                target_schema_name text,
+                target_table_name text,
+                column_name text,
+                source_hash text,
+                target_hash text,
+                passed boolean,
+                validated_at timestamp default current_timestamp
+            )
+        """
+        drop_new_tables_query = f"""
+            DROP TABLE IF EXISTS "{self.protocol_schema}"."{self.config_parser.get_validation_tables_name()}";
+            DROP TABLE IF EXISTS "{self.protocol_schema}"."{self.config_parser.get_validation_columns_name()}";
+        """
         try:
             cursor = self.protocol_connection.connection.cursor()
-            cursor.execute(query)
+            cursor.execute(drop_old_query)
+            cursor.execute(drop_new_tables_query)
+            cursor.execute(create_tables_query)
+            cursor.execute(create_columns_query)
             cursor.close()
             self.protocol_connection.connection.commit()
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"migrator_tables: create_table_for_validation: Error: {e}")
             raise
 
-    def insert_validation_result(self, settings):
+    def insert_validation_table_result(self, settings):
         target_schema_name = settings.get('target_schema_name')
         target_table_name = settings.get('target_table_name')
         row_logic = settings.get('row_logic')
@@ -4883,7 +4908,7 @@ class MigratorTables:
         passed = settings.get('passed')
 
         query = f"""
-            INSERT INTO "{self.protocol_schema}"."{self.config_parser.get_protocol_name_validation()}"
+            INSERT INTO "{self.protocol_schema}"."{self.config_parser.get_validation_tables_name()}"
             (target_schema_name, target_table_name, row_logic, row_msg, table_hash_logic, table_msg, row_hash_logic, row_hash_msg, lob_size_logic, lob_size_msg, passed)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
@@ -4894,14 +4919,30 @@ class MigratorTables:
             cursor.close()
             self.protocol_connection.connection.commit()
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_validation_result: Error: {e}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_validation_table_result: Error: {e}")
+            raise
+
+    def insert_validation_column_result(self, target_schema_name, target_table_name, column_name, source_hash, target_hash, passed):
+        query = f"""
+            INSERT INTO "{self.protocol_schema}"."{self.config_parser.get_validation_columns_name()}"
+            (target_schema_name, target_table_name, column_name, source_hash, target_hash, passed)
+            VALUES (%s, %s, %s, %s, %s, %s)
+        """
+        params = (target_schema_name, target_table_name, column_name, str(source_hash) if source_hash is not None else None, str(target_hash) if target_hash is not None else None, passed)
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            cursor.close()
+            self.protocol_connection.connection.commit()
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_validation_column_result: Error: {e}")
             raise
 
     def print_validation_summary(self, val_logger=None):
         protocol_tables = self.config_parser.get_protocol_name_tables()
         query = f"""
             SELECT v.target_schema_name, v.target_table_name, v.row_logic, v.row_msg, v.table_hash_logic, v.table_msg, v.row_hash_logic, v.row_hash_msg, v.lob_size_logic, v.lob_size_msg, v.passed, MAX(t.source_schema_name), MAX(t.source_table_name)
-            FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_validation()}" v
+            FROM "{self.protocol_schema}"."{self.config_parser.get_validation_tables_name()}" v
             LEFT JOIN "{self.protocol_schema}"."{protocol_tables}" t
             ON v.target_schema_name = t.target_schema_name AND v.target_table_name = t.target_table_name
             GROUP BY v.target_schema_name, v.target_table_name, v.row_logic, v.row_msg, v.table_hash_logic, v.table_msg, v.row_hash_logic, v.row_hash_msg, v.lob_size_logic, v.lob_size_msg, v.passed

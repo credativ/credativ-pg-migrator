@@ -397,7 +397,7 @@ validator:
   check_random_sample: true                # Validates individual random row arrays querying mapped precise primary keys bridging origin to destination
   check_lob_sizes: true                    # Validates exact byte size allocations for migrated LOB (BLOB/CLOB) instances on the sampled rows
   random_sample_size: 1000                 # Determine the maximum amount of randomized samples queried exclusively when check_random_sample or check_lob_sizes is True
-  report_filename: "validator_report.txt"  # Optional file to write detailed tabular report. If set, console only shows summary.
+  report_filename: "validator_report.txt"  # Mandatory file to write detailed tabular report. Console only shows summary.
 # -----------------------------------------------------------------------------
 # SCHEMA AND OBJECT MAPPING CONFIGURATION
 # -----------------------------------------------------------------------------
@@ -405,7 +405,7 @@ validator:
 mapping_workflow:
   # 1. General Mapping Workflow Settings
   workflow_settings:
-    report_filename: "mapping_report.csv"
+    report_filename: "mapping_report.csv" # Mandatory file to write detailed tabular mapping report
     suspend_indexes_constraints: true
     
   # 2. Automated Mapping Heuristics

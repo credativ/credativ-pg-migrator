@@ -36,6 +36,11 @@ class Validator:
         self.val_logger.logger.info("      Starting Data Validator Module     ")
         self.val_logger.logger.info("=========================================")
         
+        report_filename = self.config_parser.get_validator_report_filename()
+        if not report_filename:
+            self.val_logger.logger.error("FATAL: 'report_filename' is missing in validator config. A detailed report file is mandatory.")
+            return
+        
         try:
             self.migrator_tables.create_table_for_validation()
     
@@ -163,7 +168,16 @@ class Validator:
                             t_col = [target_cols[i]]
                             s_col_sum = source_conn.get_table_checksum(source_schema, source_table, s_col)
                             t_col_sum = target_conn.get_table_checksum(target_schema, target_table, t_col)
-                            if s_col_sum != t_col_sum:
+                            
+                            col_passed = (s_col_sum == t_col_sum)
+                            try:
+                                self.migrator_tables.insert_validation_column_result(
+                                    target_schema, target_table, source_cols[i]['column_name'], s_col_sum, t_col_sum, col_passed
+                                )
+                            except Exception as e:
+                                self.val_logger.logger.error(f"Error persisting column validation protocol for {target_table}.{source_cols[i]['column_name']}: {e}")
+                                
+                            if not col_passed:
                                 self.val_logger.logger.warning(f"Validator: Table {source_table} column {source_cols[i]['column_name']} hash mismatch: Src={s_col_sum}, Tgt={t_col_sum}")
                     else:
                         res['table_msg'] = f"Pass: {s_sum}"
@@ -248,7 +262,7 @@ class Validator:
             self.val_logger.logger.warning(f"FAIL: {res['target_table']} failed validation against source {source_schema}.{source_table}. Details: {fail_str}")
 
         try:
-            self.migrator_tables.insert_validation_result({
+            self.migrator_tables.insert_validation_table_result({
                 'target_schema_name': target_schema,
                 'target_table_name': target_table,
                 'row_logic': res['row_logic'],

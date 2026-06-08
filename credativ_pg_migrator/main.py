@@ -82,6 +82,12 @@ def main():
             logger.logger.info("Validation Done")
 
         else:
+            if config_parser.is_mapping_workflow():
+                report_filename = config_parser.get_mapping_report_filename()
+                if not report_filename:
+                    logger.logger.error("FATAL: 'report_filename' is missing in mapping_workflow config. A detailed report file is mandatory.")
+                    sys.exit(1)
+
             logger.logger.info('Starting planner...')
             planner = Planner(config_parser)
             planner.create_plan()

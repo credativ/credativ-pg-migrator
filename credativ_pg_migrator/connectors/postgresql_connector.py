@@ -2322,9 +2322,15 @@ class PostgreSQLConnector(DatabaseConnector):
             dtype = col.get('data_type', '').lower()
             if any(x in dtype for x in ['lob', 'bytea', 'xml', 'json', 'text']):
                 # Skip LOBs / massive text blocks for table checksums to save bandwidth
-                # Wait, postgres bytea/text might be skipped, but earlier we didn't skip text in PG. 
                 pass
-            cols_list.append(f'"{col["column_name"]}"')
+            elif 'time' in dtype or 'date' in dtype:
+                cols_list.append(f"TO_CHAR(\"{col['column_name']}\", 'YYYY-MM-DD HH24:MI:SS.US')")
+            elif 'bool' in dtype or 'boolean' in dtype:
+                cols_list.append(f"CAST(\"{col['column_name']}\" AS INT)")
+            elif col.get('_force_round_0'):
+                cols_list.append(f"ROUND(\"{col['column_name']}\", 0)")
+            else:
+                cols_list.append(f'"{col["column_name"]}"')
             
         if not cols_list:
             return None
@@ -2359,7 +2365,17 @@ class PostgreSQLConnector(DatabaseConnector):
             
         cols_list = []
         for col in columns:
-            cols_list.append(f'"{col["column_name"]}"')
+            dtype = col.get('data_type', '').lower()
+            if any(x in dtype for x in ['lob', 'bytea', 'xml', 'json', 'text']):
+                pass
+            elif 'time' in dtype or 'date' in dtype:
+                cols_list.append(f"TO_CHAR(\"{col['column_name']}\", 'YYYY-MM-DD HH24:MI:SS.US')")
+            elif 'bool' in dtype or 'boolean' in dtype:
+                cols_list.append(f"CAST(\"{col['column_name']}\" AS INT)")
+            elif col.get('_force_round_0'):
+                cols_list.append(f"ROUND(\"{col['column_name']}\", 0)")
+            else:
+                cols_list.append(f'"{col["column_name"]}"')
             
         if not cols_list:
             return {}

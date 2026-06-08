@@ -839,7 +839,7 @@ class DatabaseConnector(ABC):
         """
         pass
 
-    def get_column_statistics(self, schema_name: str, table_name: str, column_name: str, data_type: str):
+    def get_column_statistics(self, schema_name: str, table_name: str, column_name: str, data_type: str, force_round_0: bool = False):
         """
         Retrieves advanced column statistics for mismatched columns during validation.
         Determines the stats to retrieve based on the data_type category.
@@ -858,6 +858,7 @@ class DatabaseConnector(ABC):
         is_numeric = any(t in dt_lower for t in ['int', 'number', 'numeric', 'decimal', 'float', 'double', 'real', 'serial'])
         is_date = any(t in dt_lower for t in ['date', 'time'])
         is_lob = any(t in dt_lower for t in ['lob', 'bytea', 'image', 'xml', 'json', 'raw'])
+        is_boolean = any(t in dt_lower for t in ['bool', 'boolean'])
         
         null_sql = f"COUNT(CASE WHEN \"{column_name}\" IS NULL THEN 1 END)"
         
@@ -870,10 +871,19 @@ class DatabaseConnector(ABC):
         avg_sql = "NULL"
         
         if not is_lob:
-            min_sql = f"MIN(\"{column_name}\")"
-            max_sql = f"MAX(\"{column_name}\")"
+            if is_boolean:
+                min_sql = f"MIN(CAST(\"{column_name}\" AS INT))"
+                max_sql = f"MAX(CAST(\"{column_name}\" AS INT))"
+                avg_sql = f"AVG(CAST(\"{column_name}\" AS INT))"
+            else:
+                if is_numeric and force_round_0:
+                    min_sql = f"ROUND(MIN(\"{column_name}\"), 0)"
+                    max_sql = f"ROUND(MAX(\"{column_name}\"), 0)"
+                else:
+                    min_sql = f"MIN(\"{column_name}\")"
+                    max_sql = f"MAX(\"{column_name}\")"
             
-        if is_numeric:
+        if is_numeric and not is_boolean:
             avg_sql = f"AVG(CAST(\"{column_name}\" AS FLOAT))"
             
         query = f"SELECT {null_sql}, {empty_sql}, {min_sql}, {max_sql}, {avg_sql} FROM \"{schema_name}\".\"{table_name}\""

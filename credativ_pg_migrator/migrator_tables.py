@@ -4879,6 +4879,10 @@ class MigratorTables:
                 target_schema_name text,
                 target_table_name text,
                 target_column_name text,
+                source_data_type text,
+                target_data_type text,
+                source_precision bigint,
+                target_precision bigint,
                 source_hash text,
                 target_hash text,
                 source_null_count bigint,
@@ -4891,6 +4895,8 @@ class MigratorTables:
                 target_max_value text,
                 source_avg_value text,
                 target_avg_value text,
+                source_row_count bigint,
+                target_row_count bigint,
                 passed boolean,
                 validated_at timestamp default current_timestamp
             )
@@ -4946,20 +4952,23 @@ class MigratorTables:
     def insert_validation_column_result(self, settings):
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{self.config_parser.get_validation_columns_name()}"
-            (source_schema_name, source_table_name, source_column_name, target_schema_name, target_table_name, target_column_name, source_hash, target_hash, source_null_count, target_null_count, source_empty_string_count, target_empty_string_count, source_min_value, target_min_value, source_max_value, target_max_value, source_avg_value, target_avg_value, passed)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (source_schema_name, source_table_name, source_column_name, target_schema_name, target_table_name, target_column_name, source_data_type, target_data_type, source_precision, target_precision, source_hash, target_hash, source_null_count, target_null_count, source_empty_string_count, target_empty_string_count, source_min_value, target_min_value, source_max_value, target_max_value, source_avg_value, target_avg_value, source_row_count, target_row_count, passed)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
         source_hash = settings.get('source_hash')
         target_hash = settings.get('target_hash')
         params = (
             settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_column_name'),
             settings.get('target_schema_name'), settings.get('target_table_name'), settings.get('target_column_name'),
+            settings.get('source_data_type'), settings.get('target_data_type'),
+            settings.get('source_precision'), settings.get('target_precision'),
             str(source_hash) if source_hash is not None else None, str(target_hash) if target_hash is not None else None,
             settings.get('source_null_count'), settings.get('target_null_count'),
             settings.get('source_empty_string_count'), settings.get('target_empty_string_count'),
             settings.get('source_min_value'), settings.get('target_min_value'),
             settings.get('source_max_value'), settings.get('target_max_value'),
             settings.get('source_avg_value'), settings.get('target_avg_value'),
+            settings.get('source_row_count'), settings.get('target_row_count'),
             settings.get('passed')
         )
         try:
@@ -4985,7 +4994,6 @@ class MigratorTables:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query)
             results = cursor.fetchall()
-            cursor.close()
 
             lines = []
 
@@ -5032,7 +5040,7 @@ class MigratorTables:
                 details_lines.append("-" * len(header))
                 import re
                 for idx, r in enumerate(results, 1):
-                    status = "PASS" if r[10] else "FAIL"
+                    status = "PASS" if r[10] else "X"
                     target_table = f"{r[0]}.{r[1]}"
                     source_table = f"{r[11]}.{r[12]}" if r[11] and r[12] else "-"
                         
@@ -5040,7 +5048,7 @@ class MigratorTables:
                     tgt_rows = "-"
                     row_cnt_res = "-"
                     if r[2] is not None:
-                        row_cnt_res = "PASS" if r[2] else "FAIL"
+                        row_cnt_res = "PASS" if r[2] else "X"
                         msg = r[3].strip() if r[3] else ""
                         if r[2] is True and msg.lower().startswith("pass: "):
                             parts = msg.split()
@@ -5053,59 +5061,82 @@ class MigratorTables:
                                 src_rows = m.group(1)
                                 tgt_rows = m.group(2)
                                 
-                    tbl_hash_res = "-" if r[4] is None else ("PASS" if r[4] else "FAIL")
-                    row_hash_res = "-" if r[6] is None else ("PASS" if r[6] else "FAIL")
-                    lob_size_res = "-" if r[8] is None else ("PASS" if r[8] else "FAIL")
+                    tbl_hash_res = "-" if r[4] is None else ("PASS" if r[4] else "X")
+                    row_hash_res = "-" if r[6] is None else ("PASS" if r[6] else "X")
+                    lob_size_res = "-" if r[8] is None else ("PASS" if r[8] else "X")
                     
                     details_lines.append(f"{idx:>{max_num_len}} | {source_table:<{max_source_len}} | {target_table:<{max_target_len}} | {status:<6} | {row_cnt_res:<6} | {src_rows:>10} | {tgt_rows:>10} | {tbl_hash_res:<7} | {row_hash_res:<7} | {lob_size_res:<7}")
             
             # Append column validation details
             col_query = f"""
-                SELECT target_table_name, target_column_name, source_column_name, source_hash, target_hash, 
+                SELECT source_table_name, target_table_name, source_column_name, target_column_name,
+                source_data_type, target_data_type, passed, 
                 source_null_count, target_null_count, source_empty_string_count, target_empty_string_count, 
-                source_min_value, target_min_value, source_max_value, target_max_value, source_avg_value, target_avg_value, passed
+                source_min_value, target_min_value, source_max_value, target_max_value, source_avg_value, target_avg_value,
+                source_row_count, target_row_count, source_precision, target_precision
                 FROM "{self.protocol_schema}"."{self.config_parser.get_validation_columns_name()}"
-                ORDER BY target_table_name, target_column_name
+                ORDER BY source_table_name, target_table_name, target_column_name
             """
             cursor.execute(col_query)
             col_results = cursor.fetchall()
+            cursor.close()
             
             if col_results:
                 details_lines.append("")
                 details_lines.append("")
                 details_lines.append("[ COLUMN VALIDATION DETAILS ]")
                 
-                max_tbl_len = max([len(str(r[0])) for r in col_results] + [15])
-                max_col_len = max([len(str(r[1])) for r in col_results] + [15])
+                max_stbl_len = max([len(str(r[0])) for r in col_results if r[0]] + [12])
+                max_ttbl_len = max([len(str(r[1])) for r in col_results if r[1]] + [12])
+                max_scol_len = max([len(str(r[2])) for r in col_results if r[2]] + [13])
+                max_tcol_len = max([len(str(r[3])) for r in col_results if r[3]] + [13])
+                max_styp_len = max([len(str(r[4])) for r in col_results if r[4]] + [11])
+                max_ttyp_len = max([len(str(r[5])) for r in col_results if r[5]] + [11])
                 
-                col_header = f"{'Table':<{max_tbl_len}} | {'Column':<{max_col_len}} | {'Status':<6} | {'Null Cnt (S/T)':<15} | {'Empty Cnt (S/T)':<15} | {'Min Val (S/T)':<20} | {'Max Val (S/T)':<20} | {'Avg Val (S/T)':<20}"
+                col_header = f"{'Source Table':<{max_stbl_len}} | {'Target Table':<{max_ttbl_len}} | {'Source Column':<{max_scol_len}} | {'Target Column':<{max_tcol_len}} | {'Source Type':<{max_styp_len}} | {'Target Type':<{max_ttyp_len}} | {'Status':<6} | {'Row Cnt (S/T)':<15} | {'Null Cnt (S/T)':<15} | {'Empty Cnt (S/T)':<15} | {'Min Val (S/T)':<20} | {'Max Val (S/T)':<20} | {'Avg Val (S/T)':<20}"
                 details_lines.append("-" * len(col_header))
                 details_lines.append(col_header)
                 details_lines.append("-" * len(col_header))
                 
                 for r in col_results:
-                    tbl = r[0]
-                    col = r[1]
-                    status = "PASS" if r[15] else "FAIL"
+                    s_tbl = r[0] or "-"
+                    t_tbl = r[1] or "-"
+                    s_col = r[2] or "-"
+                    t_col = r[3] or "-"
+                    s_typ = r[4] or "-"
+                    t_typ = r[5] or "-"
                     
+                    if r[19] is not None:
+                        s_typ += f"({r[19]})"
+                    if r[20] is not None:
+                        t_typ += f"({r[20]})"
+                    status = "PASS" if r[6] else "X"
+                    
+                    def clean_val(val):
+                        if val is None:
+                            return "-"
+                        s = str(val).replace('\n', ' ').replace('\r', ' ').replace('|', '/').replace('\t', ' ')
+                        return s
+
                     def fmt_stat(s, t):
-                        s_str = str(s) if s is not None else "-"
-                        t_str = str(t) if t is not None else "-"
+                        s_str = clean_val(s)
+                        t_str = clean_val(t)
                         if s_str == "-" and t_str == "-":
                             return "-"
                         return f"{s_str}/{t_str}"
                         
-                    nulls = fmt_stat(r[5], r[6])
-                    empties = fmt_stat(r[7], r[8])
-                    mins = fmt_stat(r[9], r[10])
-                    maxs = fmt_stat(r[11], r[12])
-                    avgs = fmt_stat(r[13], r[14])
+                    rows = fmt_stat(r[17], r[18])
+                    nulls = fmt_stat(r[7], r[8])
+                    empties = fmt_stat(r[9], r[10])
+                    mins = fmt_stat(r[11], r[12])
+                    maxs = fmt_stat(r[13], r[14])
+                    avgs = fmt_stat(r[15], r[16])
                     
                     mins = (mins[:17] + '...') if len(mins) > 20 else mins
                     maxs = (maxs[:17] + '...') if len(maxs) > 20 else maxs
                     avgs = (avgs[:17] + '...') if len(avgs) > 20 else avgs
                     
-                    details_lines.append(f"{tbl:<{max_tbl_len}} | {col:<{max_col_len}} | {status:<6} | {nulls:<15} | {empties:<15} | {mins:<20} | {maxs:<20} | {avgs:<20}")
+                    details_lines.append(f"{s_tbl:<{max_stbl_len}} | {t_tbl:<{max_ttbl_len}} | {s_col:<{max_scol_len}} | {t_col:<{max_tcol_len}} | {s_typ:<{max_styp_len}} | {t_typ:<{max_ttyp_len}} | {status:<6} | {rows:<15} | {nulls:<15} | {empties:<15} | {mins:<20} | {maxs:<20} | {avgs:<20}")
 
             report_filename = self.config_parser.get_validator_report_filename()
             if report_filename:

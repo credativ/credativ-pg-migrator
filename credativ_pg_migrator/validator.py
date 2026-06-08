@@ -144,6 +144,13 @@ class Validator:
             pk_cols_list = []
 
         try:
+            for s_col, t_col in zip(source_cols, target_cols):
+                s_type = s_col.get('data_type', '').lower()
+                is_num = any(t in s_type for t in ['int', 'number', 'numeric', 'decimal', 'float', 'double', 'real', 'serial'])
+                if is_num and s_col.get('numeric_precision') == 0:
+                    s_col['_force_round_0'] = True
+                    t_col['_force_round_0'] = True
+                    
             if check_counts:
                 migration_limitation = None
                 limitations = self.migrator_tables.get_records_data_migration_limitation(source_table)
@@ -178,9 +185,15 @@ class Validator:
                             t_col_sum = target_conn.get_table_checksum(target_schema, target_table, t_col)
                             
                             col_passed = (s_col_sum == t_col_sum)
+                            if (s_count == 0 and t_count != 0) or (t_count == 0 and s_count != 0):
+                                col_passed = False
                             
-                            s_stats = source_conn.get_column_statistics(source_schema, source_table, source_cols[i]['column_name'], source_cols[i].get('data_type', ''))
-                            t_stats = target_conn.get_column_statistics(target_schema, target_table, target_cols[i]['column_name'], target_cols[i].get('data_type', ''))
+                            s_prec = source_cols[i].get('numeric_precision')
+                            t_prec = target_cols[i].get('numeric_precision')
+                            force_round = source_cols[i].get('_force_round_0', False)
+                            
+                            s_stats = source_conn.get_column_statistics(source_schema, source_table, source_cols[i]['column_name'], source_cols[i].get('data_type', ''), force_round_0=force_round)
+                            t_stats = target_conn.get_column_statistics(target_schema, target_table, target_cols[i]['column_name'], target_cols[i].get('data_type', ''), force_round_0=force_round)
                             
                             col_res = {
                                 'source_schema_name': source_schema,
@@ -189,6 +202,10 @@ class Validator:
                                 'target_schema_name': target_schema,
                                 'target_table_name': target_table,
                                 'target_column_name': target_cols[i]['column_name'],
+                                'source_data_type': source_cols[i].get('data_type', ''),
+                                'target_data_type': target_cols[i].get('data_type', ''),
+                                'source_precision': s_prec,
+                                'target_precision': t_prec,
                                 'source_hash': s_col_sum,
                                 'target_hash': t_col_sum,
                                 'source_null_count': s_stats.get('null_count'),
@@ -201,6 +218,8 @@ class Validator:
                                 'target_max_value': t_stats.get('max_value'),
                                 'source_avg_value': s_stats.get('avg_value'),
                                 'target_avg_value': t_stats.get('avg_value'),
+                                'source_row_count': s_count,
+                                'target_row_count': t_count,
                                 'passed': col_passed
                             }
                             
@@ -210,7 +229,10 @@ class Validator:
                                 self.val_logger.logger.error(f"Error persisting column validation protocol for {target_table}.{source_cols[i]['column_name']}: {e}")
                                 
                             if not col_passed:
-                                self.val_logger.logger.warning(f"Validator: Table {source_table} column {source_cols[i]['column_name']} hash mismatch: Src={s_col_sum}, Tgt={t_col_sum}")
+                                if s_col_sum != t_col_sum:
+                                    self.val_logger.logger.warning(f"Validator: Table {source_table} column {source_cols[i]['column_name']} hash mismatch: Src={s_col_sum}, Tgt={t_col_sum}")
+                                else:
+                                    self.val_logger.logger.warning(f"Validator: Table {source_table} column {source_cols[i]['column_name']} row count mismatch: Src={s_count}, Tgt={t_count}")
                     else:
                         res['table_msg'] = f"Pass: {s_sum}"
                 else:

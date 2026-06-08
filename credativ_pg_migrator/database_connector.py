@@ -857,7 +857,7 @@ class DatabaseConnector(ABC):
         is_string = any(t in dt_lower for t in ['char', 'text', 'clob', 'string'])
         is_numeric = any(t in dt_lower for t in ['int', 'number', 'numeric', 'decimal', 'float', 'double', 'real', 'serial'])
         is_date = any(t in dt_lower for t in ['date', 'time'])
-        is_lob = any(t in dt_lower for t in ['lob', 'bytea', 'image', 'xml', 'json', 'raw'])
+        is_lob = any(t in dt_lower for t in ['lob', 'bytea', 'image', 'xml', 'json', 'raw', 'oid', 'long'])
         is_boolean = any(t in dt_lower for t in ['bool', 'boolean'])
         
         null_sql = f"COUNT(CASE WHEN \"{column_name}\" IS NULL THEN 1 END)"

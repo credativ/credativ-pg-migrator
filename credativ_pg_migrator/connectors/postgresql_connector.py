@@ -2320,7 +2320,7 @@ class PostgreSQLConnector(DatabaseConnector):
         cols_list = []
         for col in columns:
             dtype = col.get('data_type', '').lower()
-            if any(x in dtype for x in ['lob', 'bytea', 'xml', 'json', 'text']):
+            if any(x in dtype for x in ['lob', 'bytea', 'xml', 'json', 'text', 'oid']):
                 # Skip LOBs / massive text blocks for table checksums to save bandwidth
                 pass
             elif 'time' in dtype or 'date' in dtype:
@@ -2366,7 +2366,7 @@ class PostgreSQLConnector(DatabaseConnector):
         cols_list = []
         for col in columns:
             dtype = col.get('data_type', '').lower()
-            if any(x in dtype for x in ['lob', 'bytea', 'xml', 'json', 'text']):
+            if any(x in dtype for x in ['lob', 'bytea', 'xml', 'json', 'text', 'oid']):
                 pass
             elif 'time' in dtype or 'date' in dtype:
                 cols_list.append(f"TO_CHAR(\"{col['column_name']}\", 'YYYY-MM-DD HH24:MI:SS.US')")

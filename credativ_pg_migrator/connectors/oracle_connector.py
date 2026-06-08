@@ -1238,7 +1238,7 @@ class OracleConnector(DatabaseConnector):
             if any(x in dtype for x in ['lob', 'bfile', 'xml', 'json', 'long']):
                 continue
             if dtype == 'date':
-                cols_list.append(f"TO_CHAR(\"{col['column_name']}\", 'YYYY-MM-DD HH24:MI:SS') || '.000000'")
+                cols_list.append(f"CASE WHEN \"{col['column_name']}\" IS NOT NULL THEN TO_CHAR(\"{col['column_name']}\", 'YYYY-MM-DD HH24:MI:SS') || '.000000' ELSE NULL END")
             elif 'time' in dtype:
                 cols_list.append(f"TO_CHAR(\"{col['column_name']}\", 'YYYY-MM-DD HH24:MI:SS.FF6')")
             elif col.get('_force_round_0'):
@@ -1283,7 +1283,7 @@ class OracleConnector(DatabaseConnector):
             if any(x in dtype for x in ['lob', 'bfile', 'xml', 'json', 'long']):
                 continue
             if dtype == 'date':
-                cols_list.append(f"TO_CHAR(\"{col['column_name']}\", 'YYYY-MM-DD HH24:MI:SS') || '.000000'")
+                cols_list.append(f"CASE WHEN \"{col['column_name']}\" IS NOT NULL THEN TO_CHAR(\"{col['column_name']}\", 'YYYY-MM-DD HH24:MI:SS') || '.000000' ELSE NULL END")
             elif 'time' in dtype:
                 cols_list.append(f"TO_CHAR(\"{col['column_name']}\", 'YYYY-MM-DD HH24:MI:SS.FF6')")
             elif col.get('_force_round_0'):

@@ -178,12 +178,34 @@ class Validator:
                             t_col_sum = target_conn.get_table_checksum(target_schema, target_table, t_col)
                             
                             col_passed = (s_col_sum == t_col_sum)
+                            
+                            s_stats = source_conn.get_column_statistics(source_schema, source_table, source_cols[i]['column_name'], source_cols[i].get('data_type', ''))
+                            t_stats = target_conn.get_column_statistics(target_schema, target_table, target_cols[i]['column_name'], target_cols[i].get('data_type', ''))
+                            
+                            col_res = {
+                                'source_schema_name': source_schema,
+                                'source_table_name': source_table,
+                                'source_column_name': source_cols[i]['column_name'],
+                                'target_schema_name': target_schema,
+                                'target_table_name': target_table,
+                                'target_column_name': target_cols[i]['column_name'],
+                                'source_hash': s_col_sum,
+                                'target_hash': t_col_sum,
+                                'source_null_count': s_stats.get('null_count'),
+                                'target_null_count': t_stats.get('null_count'),
+                                'source_empty_string_count': s_stats.get('empty_string_count'),
+                                'target_empty_string_count': t_stats.get('empty_string_count'),
+                                'source_min_value': s_stats.get('min_value'),
+                                'target_min_value': t_stats.get('min_value'),
+                                'source_max_value': s_stats.get('max_value'),
+                                'target_max_value': t_stats.get('max_value'),
+                                'source_avg_value': s_stats.get('avg_value'),
+                                'target_avg_value': t_stats.get('avg_value'),
+                                'passed': col_passed
+                            }
+                            
                             try:
-                                self.migrator_tables.insert_validation_column_result(
-                                    source_schema, source_table, source_cols[i]['column_name'],
-                                    target_schema, target_table, target_cols[i]['column_name'],
-                                    s_col_sum, t_col_sum, col_passed
-                                )
+                                self.migrator_tables.insert_validation_column_result(col_res)
                             except Exception as e:
                                 self.val_logger.logger.error(f"Error persisting column validation protocol for {target_table}.{source_cols[i]['column_name']}: {e}")
                                 

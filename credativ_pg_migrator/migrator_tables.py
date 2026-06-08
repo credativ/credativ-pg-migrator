@@ -4881,6 +4881,16 @@ class MigratorTables:
                 target_column_name text,
                 source_hash text,
                 target_hash text,
+                source_null_count bigint,
+                target_null_count bigint,
+                source_empty_string_count bigint,
+                target_empty_string_count bigint,
+                source_min_value text,
+                target_min_value text,
+                source_max_value text,
+                target_max_value text,
+                source_avg_value text,
+                target_avg_value text,
                 passed boolean,
                 validated_at timestamp default current_timestamp
             )
@@ -4933,13 +4943,25 @@ class MigratorTables:
             self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_validation_table_result: Error: {e}")
             raise
 
-    def insert_validation_column_result(self, source_schema_name, source_table_name, source_column_name, target_schema_name, target_table_name, target_column_name, source_hash, target_hash, passed):
+    def insert_validation_column_result(self, settings):
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{self.config_parser.get_validation_columns_name()}"
-            (source_schema_name, source_table_name, source_column_name, target_schema_name, target_table_name, target_column_name, source_hash, target_hash, passed)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (source_schema_name, source_table_name, source_column_name, target_schema_name, target_table_name, target_column_name, source_hash, target_hash, source_null_count, target_null_count, source_empty_string_count, target_empty_string_count, source_min_value, target_min_value, source_max_value, target_max_value, source_avg_value, target_avg_value, passed)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
-        params = (source_schema_name, source_table_name, source_column_name, target_schema_name, target_table_name, target_column_name, str(source_hash) if source_hash is not None else None, str(target_hash) if target_hash is not None else None, passed)
+        source_hash = settings.get('source_hash')
+        target_hash = settings.get('target_hash')
+        params = (
+            settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_column_name'),
+            settings.get('target_schema_name'), settings.get('target_table_name'), settings.get('target_column_name'),
+            str(source_hash) if source_hash is not None else None, str(target_hash) if target_hash is not None else None,
+            settings.get('source_null_count'), settings.get('target_null_count'),
+            settings.get('source_empty_string_count'), settings.get('target_empty_string_count'),
+            settings.get('source_min_value'), settings.get('target_min_value'),
+            settings.get('source_max_value'), settings.get('target_max_value'),
+            settings.get('source_avg_value'), settings.get('target_avg_value'),
+            settings.get('passed')
+        )
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -5036,6 +5058,54 @@ class MigratorTables:
                     lob_size_res = "-" if r[8] is None else ("PASS" if r[8] else "FAIL")
                     
                     details_lines.append(f"{idx:>{max_num_len}} | {source_table:<{max_source_len}} | {target_table:<{max_target_len}} | {status:<6} | {row_cnt_res:<6} | {src_rows:>10} | {tgt_rows:>10} | {tbl_hash_res:<7} | {row_hash_res:<7} | {lob_size_res:<7}")
+            
+            # Append column validation details
+            col_query = f"""
+                SELECT target_table_name, target_column_name, source_column_name, source_hash, target_hash, 
+                source_null_count, target_null_count, source_empty_string_count, target_empty_string_count, 
+                source_min_value, target_min_value, source_max_value, target_max_value, source_avg_value, target_avg_value, passed
+                FROM "{self.protocol_schema}"."{self.config_parser.get_validation_columns_name()}"
+                ORDER BY target_table_name, target_column_name
+            """
+            cursor.execute(col_query)
+            col_results = cursor.fetchall()
+            
+            if col_results:
+                details_lines.append("")
+                details_lines.append("")
+                details_lines.append("[ COLUMN VALIDATION DETAILS ]")
+                
+                max_tbl_len = max([len(str(r[0])) for r in col_results] + [15])
+                max_col_len = max([len(str(r[1])) for r in col_results] + [15])
+                
+                col_header = f"{'Table':<{max_tbl_len}} | {'Column':<{max_col_len}} | {'Status':<6} | {'Null Cnt (S/T)':<15} | {'Empty Cnt (S/T)':<15} | {'Min Val (S/T)':<20} | {'Max Val (S/T)':<20} | {'Avg Val (S/T)':<20}"
+                details_lines.append("-" * len(col_header))
+                details_lines.append(col_header)
+                details_lines.append("-" * len(col_header))
+                
+                for r in col_results:
+                    tbl = r[0]
+                    col = r[1]
+                    status = "PASS" if r[15] else "FAIL"
+                    
+                    def fmt_stat(s, t):
+                        s_str = str(s) if s is not None else "-"
+                        t_str = str(t) if t is not None else "-"
+                        if s_str == "-" and t_str == "-":
+                            return "-"
+                        return f"{s_str}/{t_str}"
+                        
+                    nulls = fmt_stat(r[5], r[6])
+                    empties = fmt_stat(r[7], r[8])
+                    mins = fmt_stat(r[9], r[10])
+                    maxs = fmt_stat(r[11], r[12])
+                    avgs = fmt_stat(r[13], r[14])
+                    
+                    mins = (mins[:17] + '...') if len(mins) > 20 else mins
+                    maxs = (maxs[:17] + '...') if len(maxs) > 20 else maxs
+                    avgs = (avgs[:17] + '...') if len(avgs) > 20 else avgs
+                    
+                    details_lines.append(f"{tbl:<{max_tbl_len}} | {col:<{max_col_len}} | {status:<6} | {nulls:<15} | {empties:<15} | {mins:<20} | {maxs:<20} | {avgs:<20}")
 
             report_filename = self.config_parser.get_validator_report_filename()
             if report_filename:

@@ -839,5 +839,70 @@ class DatabaseConnector(ABC):
         """
         pass
 
+    def get_column_statistics(self, schema_name: str, table_name: str, column_name: str, data_type: str):
+        """
+        Retrieves advanced column statistics for mismatched columns during validation.
+        Determines the stats to retrieve based on the data_type category.
+        Returns a dict:
+        {
+            'null_count': int,
+            'empty_string_count': int,
+            'min_value': str,
+            'max_value': str,
+            'avg_value': str
+        }
+        """
+        dt_lower = data_type.lower()
+        
+        is_string = any(t in dt_lower for t in ['char', 'text', 'clob', 'string'])
+        is_numeric = any(t in dt_lower for t in ['int', 'number', 'numeric', 'decimal', 'float', 'double', 'real', 'serial'])
+        is_date = any(t in dt_lower for t in ['date', 'time'])
+        is_lob = any(t in dt_lower for t in ['lob', 'bytea', 'image', 'xml', 'json', 'raw'])
+        
+        null_sql = f"COUNT(CASE WHEN \"{column_name}\" IS NULL THEN 1 END)"
+        
+        empty_sql = "NULL"
+        if is_string and not is_lob:
+            empty_sql = f"COUNT(CASE WHEN \"{column_name}\" = '' THEN 1 END)"
+            
+        min_sql = "NULL"
+        max_sql = "NULL"
+        avg_sql = "NULL"
+        
+        if not is_lob:
+            min_sql = f"MIN(\"{column_name}\")"
+            max_sql = f"MAX(\"{column_name}\")"
+            
+        if is_numeric:
+            avg_sql = f"AVG(CAST(\"{column_name}\" AS FLOAT))"
+            
+        query = f"SELECT {null_sql}, {empty_sql}, {min_sql}, {max_sql}, {avg_sql} FROM \"{schema_name}\".\"{table_name}\""
+        
+        stats = {
+            'null_count': None,
+            'empty_string_count': None,
+            'min_value': None,
+            'max_value': None,
+            'avg_value': None
+        }
+        
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            row = cursor.fetchone()
+            if row:
+                stats['null_count'] = int(row[0]) if row[0] is not None else None
+                stats['empty_string_count'] = int(row[1]) if row[1] is not None else None
+                stats['min_value'] = str(row[2]) if row[2] is not None else None
+                stats['max_value'] = str(row[3]) if row[3] is not None else None
+                stats['avg_value'] = str(row[4]) if row[4] is not None else None
+            cursor.close()
+            self.disconnect()
+        except Exception as e:
+            self.config_parser.print_log_message('DEBUG3', f"database_connector: get_column_statistics: Failed to gather stats for {schema_name}.{table_name}.{column_name}: {e}")
+            
+        return stats
+
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

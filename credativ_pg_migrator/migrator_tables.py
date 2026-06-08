@@ -425,7 +425,9 @@ class MigratorTables:
                 target_ordinal_number INTEGER,
                 source_data_type TEXT,
                 target_data_type TEXT,
-                match_type TEXT NOT NULL
+                match_type TEXT NOT NULL,
+                source_is_identity BOOLEAN DEFAULT FALSE,
+                target_is_identity BOOLEAN DEFAULT FALSE
             );
         """)
         self.protocol_connection.execute_query(f"""
@@ -466,7 +468,9 @@ class MigratorTables:
                 used_in_identity BOOLEAN DEFAULT FALSE,
                 used_in_trigger BOOLEAN DEFAULT FALSE,
                 trigger_name TEXT,
-                column_name TEXT
+                column_name TEXT,
+                source_sequence_schema_name TEXT,
+                source_sequence_name TEXT
             );
         """)
         self.protocol_connection.execute_query(f"""
@@ -528,14 +532,16 @@ class MigratorTables:
         source_data_type = settings.get('source_data_type')
         target_data_type = settings.get('target_data_type')
         match_type = settings.get('match_type')
+        source_is_identity = settings.get('source_is_identity', False)
+        target_is_identity = settings.get('target_is_identity', False)
 
         query = f"""
             INSERT INTO "{self.protocol_schema}"."mapping_columns"
-            (source_schema_name, source_table_name, source_column_name, target_schema_name, target_table_name, target_column_name, source_ordinal_number, target_ordinal_number, source_data_type, target_data_type, match_type)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (source_schema_name, source_table_name, source_column_name, target_schema_name, target_table_name, target_column_name, source_ordinal_number, target_ordinal_number, source_data_type, target_data_type, match_type, source_is_identity, target_is_identity)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
         """
-        params = (source_schema_name, source_table_name, source_column_name, target_schema_name, target_table_name, target_column_name, source_ordinal_number, target_ordinal_number, source_data_type, target_data_type, match_type)
+        params = (source_schema_name, source_table_name, source_column_name, target_schema_name, target_table_name, target_column_name, source_ordinal_number, target_ordinal_number, source_data_type, target_data_type, match_type, source_is_identity, target_is_identity)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -635,14 +641,16 @@ class MigratorTables:
         used_in_trigger = settings.get('used_in_trigger', False)
         trigger_name = settings.get('trigger_name')
         column_name = settings.get('column_name')
+        source_sequence_schema_name = settings.get('source_sequence_schema_name')
+        source_sequence_name = settings.get('source_sequence_name')
 
         query = f"""
             INSERT INTO "{self.protocol_schema}"."mapping_target_sequences"
-            (target_schema_name, target_table_name, sequence_schema_name, sequence_name, used_in_default, used_in_identity, used_in_trigger, trigger_name, column_name)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (target_schema_name, target_table_name, sequence_schema_name, sequence_name, used_in_default, used_in_identity, used_in_trigger, trigger_name, column_name, source_sequence_schema_name, source_sequence_name)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
         """
-        params = (target_schema_name, target_table_name, sequence_schema_name, sequence_name, used_in_default, used_in_identity, used_in_trigger, trigger_name, column_name)
+        params = (target_schema_name, target_table_name, sequence_schema_name, sequence_name, used_in_default, used_in_identity, used_in_trigger, trigger_name, column_name, source_sequence_schema_name, source_sequence_name)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -688,7 +696,7 @@ class MigratorTables:
 
     def fetch_mapping_target_sequences(self, target_schema_name, target_table_name):
         query = f"""
-            SELECT sequence_schema_name, sequence_name, used_in_default, used_in_identity, used_in_trigger, trigger_name, column_name
+            SELECT sequence_schema_name, sequence_name, used_in_default, used_in_identity, used_in_trigger, trigger_name, column_name, source_sequence_schema_name, source_sequence_name
             FROM "{self.protocol_schema}"."mapping_target_sequences"
             WHERE target_schema_name = %s AND target_table_name = %s
         """
@@ -704,7 +712,9 @@ class MigratorTables:
                 'used_in_identity': row[3],
                 'used_in_trigger': row[4],
                 'trigger_name': row[5],
-                'column_name': row[6]
+                'column_name': row[6],
+                'source_sequence_schema_name': row[7],
+                'source_sequence_name': row[8]
             } for row in rows]
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"migrator_tables: fetch_mapping_target_sequences: Error fetching for {target_schema_name}.{target_table_name}")

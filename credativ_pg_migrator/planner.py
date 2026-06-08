@@ -1761,6 +1761,8 @@ class Planner:
             info_json = json.dumps({'top_5_suggestions': top_5})
                 
             unmatched_objs.append({'object_type': 'table', 'side': 'target', 'object_name': t, 'row_count': rows, 'info': info_json})
+        target_to_source_table = {pair['target_table']: pair['source_table'] for pair in match_result['matched_pairs']}
+        target_col_to_source_col = {}
 
         for pair in match_result['matched_pairs']:
             source_t = pair['source_table']
@@ -1850,6 +1852,8 @@ class Planner:
                 target_col = target_c
                 match_type = cpair['method']
 
+                target_col_to_source_col[(target_t, target_column_name)] = source_column_name
+
                 self.migrator_tables.insert_mapping_columns({
                     'source_schema_name': source_schema_name,
                     'source_table_name': source_t, # Use source_t from the outer loop
@@ -1861,7 +1865,9 @@ class Planner:
                     'target_ordinal_number': target_col.get('ordinal_position', 0) if target_col else 0,
                     'source_data_type': source_col.get('data_type', '') if source_col else '',
                     'target_data_type': target_col.get('data_type', '') if target_col else '',
-                    'match_type': match_type
+                    'match_type': match_type,
+                    'source_is_identity': source_col.get('is_identity') in ('YES', True) if source_col else False,
+                    'target_is_identity': target_col.get('is_identity') in ('YES', True) if target_col else False
                 })
 
                 source_columns_dict[idx] = source_c
@@ -1916,6 +1922,9 @@ class Planner:
         if self.config_parser.get_target_db_type() == 'postgresql':
             self.config_parser.print_log_message('INFO', "planner: mapping_match_tables: Fetching target indexes, constraints and sequences for all target tables")
             self.target_connection.connect()
+            if self.config_parser.get_source_db_type() == 'postgresql':
+                self.source_connection.connect()
+
             for _, target_table_info in target_tables_raw.items():
                 target_t = target_table_info['table_name']
                 self.config_parser.print_log_message('DEBUG', f"planner: mapping_match_tables: Fetching target indexes, constraints and sequences for PG table '{target_t}'")
@@ -1940,8 +1949,26 @@ class Planner:
                         'constraint_def': col_info['constraint_def']
                     })
 
+                source_t = target_to_source_table.get(target_t)
+                source_sequences = []
+                if source_t and self.config_parser.get_source_db_type() == 'postgresql':
+                    source_sequences = self.source_connection.fetch_mapping_target_sequences(self.source_schema_name, source_t)
+
                 target_sequences = self.target_connection.fetch_mapping_target_sequences(self.target_schema_name, target_t)
                 for seq_info in target_sequences:
+                    source_sequence_schema_name = None
+                    source_sequence_name = None
+
+                    if seq_info.get('used_in_identity') and seq_info.get('column_name'):
+                        target_col = seq_info['column_name']
+                        source_col = target_col_to_source_col.get((target_t, target_col))
+                        if source_col:
+                            for s_seq in source_sequences:
+                                if s_seq.get('used_in_identity') and s_seq.get('column_name') == source_col:
+                                    source_sequence_schema_name = s_seq.get('sequence_schema_name')
+                                    source_sequence_name = s_seq.get('sequence_name')
+                                    break
+
                     self.migrator_tables.insert_mapping_target_sequences({
                         'target_schema_name': self.target_schema_name,
                         'target_table_name': target_t,
@@ -1951,8 +1978,12 @@ class Planner:
                         'used_in_identity': seq_info['used_in_identity'],
                         'used_in_trigger': seq_info['used_in_trigger'],
                         'trigger_name': seq_info['trigger_name'],
-                        'column_name': seq_info['column_name']
+                        'column_name': seq_info['column_name'],
+                        'source_sequence_schema_name': source_sequence_schema_name,
+                        'source_sequence_name': source_sequence_name
                     })
+            if self.config_parser.get_source_db_type() == 'postgresql':
+                self.source_connection.disconnect()
             self.target_connection.disconnect()
 
 if __name__ == "__main__":

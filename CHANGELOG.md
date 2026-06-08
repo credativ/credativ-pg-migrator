@@ -2,6 +2,10 @@
 
 ## 0.15.0rc1 - 2026.05.29
 
+- 2026.06.08
+
+  - Feature - Mapping Workflow: Implemented automated mapping of sequences for identity columns. The migrator now extracts identity sequences from both source and target databases, matches them, and securely records their dependencies alongside the `source_is_identity` and `target_is_identity` flags within the protocol mapping tables.
+
 - 2026.06.05
 
   - Feature - Tools: Fully expanded **Migrator Config Studio** (`config_studio.py`) to encompass all configuration parameters defined in `config_sample.yaml`, including detailed migration phases, target environment limits, validator switches, and advanced text-editor mapping workflows.

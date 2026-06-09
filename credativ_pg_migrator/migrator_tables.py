@@ -4857,15 +4857,14 @@ class MigratorTables:
                 target_schema_name text,
                 target_table_name text,
                 target_row_count bigint,
-                row_logic boolean,
-                row_msg text,
-                table_hash_logic boolean,
-                table_msg text,
-                row_hash_logic boolean,
-                row_hash_msg text,
-                lob_size_logic boolean,
-                lob_size_msg text,
-                passed boolean,
+                source_table_hash text,
+                target_table_hash text,
+                source_columns_count bigint,
+                target_columns_count bigint,
+                source_indexes_count bigint,
+                target_indexes_count bigint,
+                source_constraints_count bigint,
+                target_constraints_count bigint,
                 validated_at timestamp default current_timestamp
             )
         """
@@ -4924,22 +4923,21 @@ class MigratorTables:
         target_schema_name = settings.get('target_schema_name')
         target_table_name = settings.get('target_table_name')
         target_row_count = settings.get('target_row_count')
-        row_logic = settings.get('row_logic')
-        row_msg = settings.get('row_msg')
-        table_hash_logic = settings.get('table_hash_logic')
-        table_msg = settings.get('table_msg')
-        row_hash_logic = settings.get('row_hash_logic')
-        row_hash_msg = settings.get('row_hash_msg')
-        lob_size_logic = settings.get('lob_size_logic')
-        lob_size_msg = settings.get('lob_size_msg')
-        passed = settings.get('passed')
+        source_table_hash = settings.get('source_table_hash')
+        target_table_hash = settings.get('target_table_hash')
+        source_columns_count = settings.get('source_columns_count')
+        target_columns_count = settings.get('target_columns_count')
+        source_indexes_count = settings.get('source_indexes_count')
+        target_indexes_count = settings.get('target_indexes_count')
+        source_constraints_count = settings.get('source_constraints_count')
+        target_constraints_count = settings.get('target_constraints_count')
 
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{self.config_parser.get_validation_tables_name()}"
-            (source_schema_name, source_table_name, source_row_count, target_schema_name, target_table_name, target_row_count, row_logic, row_msg, table_hash_logic, table_msg, row_hash_logic, row_hash_msg, lob_size_logic, lob_size_msg, passed)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (source_schema_name, source_table_name, source_row_count, target_schema_name, target_table_name, target_row_count, source_table_hash, target_table_hash, source_columns_count, target_columns_count, source_indexes_count, target_indexes_count, source_constraints_count, target_constraints_count)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
-        params = (source_schema_name, source_table_name, source_row_count, target_schema_name, target_table_name, target_row_count, row_logic, row_msg, table_hash_logic, table_msg, row_hash_logic, row_hash_msg, lob_size_logic, lob_size_msg, passed)
+        params = (source_schema_name, source_table_name, source_row_count, target_schema_name, target_table_name, target_row_count, str(source_table_hash) if source_table_hash is not None else None, str(target_table_hash) if target_table_hash is not None else None, source_columns_count, target_columns_count, source_indexes_count, target_indexes_count, source_constraints_count, target_constraints_count)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -4980,14 +4978,43 @@ class MigratorTables:
             self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_validation_column_result: Error: {e}")
             raise
 
+    def get_source_indexes_count(self, source_schema_name, source_table_name):
+        query = f"""
+            SELECT count(*) FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_indexes()}"
+            WHERE source_schema_name = %s AND source_table_name = %s
+        """
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, (source_schema_name, source_table_name))
+            result = cursor.fetchone()
+            return result[0] if result else 0
+        except Exception as e:
+            self.logger.error(f"Error fetching source index count for {source_schema_name}.{source_table_name}: {e}")
+            return 0
+
+    def get_source_constraints_count(self, source_schema_name, source_table_name):
+        query = f"""
+            SELECT count(*) FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_constraints()}"
+            WHERE source_schema_name = %s AND source_table_name = %s
+        """
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, (source_schema_name, source_table_name))
+            result = cursor.fetchone()
+            return result[0] if result else 0
+        except Exception as e:
+            self.logger.error(f"Error fetching source constraint count for {source_schema_name}.{source_table_name}: {e}")
+            return 0
+
     def print_validation_summary(self, val_logger=None):
         protocol_tables = self.config_parser.get_protocol_name_tables()
         query = f"""
-            SELECT v.target_schema_name, v.target_table_name, v.row_logic, v.row_msg, v.table_hash_logic, v.table_msg, v.row_hash_logic, v.row_hash_msg, v.lob_size_logic, v.lob_size_msg, v.passed, MAX(t.source_schema_name), MAX(t.source_table_name)
+            SELECT v.target_schema_name, v.target_table_name, MAX(t.source_schema_name), MAX(t.source_table_name), MAX(v.source_row_count), MAX(v.target_row_count), MAX(v.source_table_hash), MAX(v.target_table_hash),
+                   MAX(v.source_columns_count), MAX(v.target_columns_count), MAX(v.source_indexes_count), MAX(v.target_indexes_count), MAX(v.source_constraints_count), MAX(v.target_constraints_count)
             FROM "{self.protocol_schema}"."{self.config_parser.get_validation_tables_name()}" v
             LEFT JOIN "{self.protocol_schema}"."{protocol_tables}" t
             ON v.target_schema_name = t.target_schema_name AND v.target_table_name = t.target_table_name
-            GROUP BY v.target_schema_name, v.target_table_name, v.row_logic, v.row_msg, v.table_hash_logic, v.table_msg, v.row_hash_logic, v.row_hash_msg, v.lob_size_logic, v.lob_size_msg, v.passed
+            GROUP BY v.target_schema_name, v.target_table_name
             ORDER BY v.target_schema_name, v.target_table_name
         """
         try:
@@ -5008,72 +5035,138 @@ class MigratorTables:
             lines.append("")
 
             total = len(results)
-            passed_count = sum(1 for r in results if r[10])
-            failed_count = total - passed_count
-
-            row_count_tests = sum(1 for r in results if r[2] is not None)
-            row_count_pass = sum(1 for r in results if r[2] is True)
-            row_count_fail = sum(1 for r in results if r[2] is False)
-
-            table_hash_tests = sum(1 for r in results if r[4] is not None)
-            table_hash_pass = sum(1 for r in results if r[4] is True)
-            table_hash_fail = sum(1 for r in results if r[4] is False)
-
-            row_hash_tests = sum(1 for r in results if r[6] is not None)
-            row_hash_pass = sum(1 for r in results if r[6] is True)
-            row_hash_fail = sum(1 for r in results if r[6] is False)
-
-            lob_size_tests = sum(1 for r in results if r[8] is not None)
-            lob_size_pass = sum(1 for r in results if r[8] is True)
-            lob_size_fail = sum(1 for r in results if r[8] is False)
+            
+            passed_count = 0
+            row_count_tests = 0
+            row_count_pass = 0
+            row_count_fail = 0
+            table_hash_tests = 0
+            table_hash_pass = 0
+            table_hash_fail = 0
+            
+            cols_tests = 0
+            cols_pass = 0
+            cols_fail = 0
+            
+            idxs_tests = 0
+            idxs_pass = 0
+            idxs_fail = 0
+            
+            cons_tests = 0
+            cons_pass = 0
+            cons_fail = 0
 
             details_lines = []
             if total > 0:
                 details_lines.append("")
                 details_lines.append("[ VALIDATION DETAILS ]")
-                max_source_len = max([len(f"{r[11]}.{r[12]}") if r[11] and r[12] else 12 for r in results] + [12])
+                max_source_len = max([len(f"{r[2]}.{r[3]}") if r[2] and r[3] else 12 for r in results] + [12])
                 max_target_len = max([len(f"{r[0]}.{r[1]}") for r in results] + [12])
                 max_num_len = max(3, len(str(len(results))))
-                header = f"{'No.':>{max_num_len}} | {'Source Table':<{max_source_len}} | {'Target Table':<{max_target_len}} | {'Status':<6} | {'RowCnt':<6} | {'SrcRows':>10} | {'TgtRows':>10} | {'TblHash':<7} | {'RowHash':<7} | {'LobSize':<7}"
+                header = f"{'No.':>{max_num_len}} | {'Source Table':<{max_source_len}} | {'Target Table':<{max_target_len}} | {'Status':<6} | {'RowCnt':<6} | {'SrcRows':>10} | {'TgtRows':>10} | {'TblHash':<7} | {'SrcHash':<15} | {'TgtHash':<15} | {'Cols':<7} | {'Idxs':<7} | {'Cons':<7}"
                 details_lines.append("-" * len(header))
                 details_lines.append(header)
                 details_lines.append("-" * len(header))
-                import re
                 for idx, r in enumerate(results, 1):
-                    status = "PASS" if r[10] else "X"
                     target_table = f"{r[0]}.{r[1]}"
-                    source_table = f"{r[11]}.{r[12]}" if r[11] and r[12] else "-"
+                    source_table = f"{r[2]}.{r[3]}" if r[2] and r[3] else "-"
                         
-                    src_rows = "-"
-                    tgt_rows = "-"
-                    row_cnt_res = "-"
-                    if r[2] is not None:
-                        row_cnt_res = "PASS" if r[2] else "X"
-                        msg = r[3].strip() if r[3] else ""
-                        if r[2] is True and msg.lower().startswith("pass: "):
-                            parts = msg.split()
-                            if len(parts) >= 2:
-                                src_rows = parts[1]
-                                tgt_rows = parts[1]
-                        elif r[2] is False and msg.lower().startswith("fail: "):
-                            m = re.search(r"Src=(\d+),\s*Tgt=(\d+)", msg, re.IGNORECASE)
-                            if m:
-                                src_rows = m.group(1)
-                                tgt_rows = m.group(2)
-                                
-                    tbl_hash_res = "-" if r[4] is None else ("PASS" if r[4] else "X")
-                    row_hash_res = "-" if r[6] is None else ("PASS" if r[6] else "X")
-                    lob_size_res = "-" if r[8] is None else ("PASS" if r[8] else "X")
+                    src_rows = r[4]
+                    tgt_rows = r[5]
+                    src_hash = r[6]
+                    tgt_hash = r[7]
+                    src_cols_cnt = r[8]
+                    tgt_cols_cnt = r[9]
+                    src_idxs_cnt = r[10]
+                    tgt_idxs_cnt = r[11]
+                    src_cons_cnt = r[12]
+                    tgt_cons_cnt = r[13]
                     
-                    details_lines.append(f"{idx:>{max_num_len}} | {source_table:<{max_source_len}} | {target_table:<{max_target_len}} | {status:<6} | {row_cnt_res:<6} | {src_rows:>10} | {tgt_rows:>10} | {tbl_hash_res:<7} | {row_hash_res:<7} | {lob_size_res:<7}")
+                    row_cnt_res = "-"
+                    if src_rows is not None and tgt_rows is not None:
+                        row_count_tests += 1
+                        if src_rows == tgt_rows:
+                            row_cnt_res = "PASS"
+                            row_count_pass += 1
+                        else:
+                            row_cnt_res = "X"
+                            row_count_fail += 1
+                                
+                    tbl_hash_res = "-"
+                    if src_hash is not None and tgt_hash is not None:
+                        table_hash_tests += 1
+                        if str(src_hash) == str(tgt_hash):
+                            tbl_hash_res = "PASS"
+                            table_hash_pass += 1
+                        else:
+                            tbl_hash_res = "X"
+                            table_hash_fail += 1
+                    
+                    cols_str = "-"
+                    cols_res = "-"
+                    if src_cols_cnt is not None and tgt_cols_cnt is not None:
+                        cols_tests += 1
+                        cols_str = f"{src_cols_cnt}/{tgt_cols_cnt}"
+                        if src_cols_cnt == tgt_cols_cnt:
+                            cols_res = "PASS"
+                            cols_pass += 1
+                        else:
+                            cols_res = "X"
+                            cols_fail += 1
+
+                    idxs_str = "-"
+                    idxs_res = "-"
+                    if src_idxs_cnt is not None and tgt_idxs_cnt is not None:
+                        idxs_tests += 1
+                        idxs_str = f"{src_idxs_cnt}/{tgt_idxs_cnt}"
+                        if src_idxs_cnt == tgt_idxs_cnt:
+                            idxs_res = "PASS"
+                            idxs_pass += 1
+                        else:
+                            idxs_res = "X"
+                            idxs_fail += 1
+
+                    cons_str = "-"
+                    cons_res = "-"
+                    if src_cons_cnt is not None and tgt_cons_cnt is not None:
+                        cons_tests += 1
+                        cons_str = f"{src_cons_cnt}/{tgt_cons_cnt}"
+                        if src_cons_cnt == tgt_cons_cnt:
+                            cons_res = "PASS"
+                            cons_pass += 1
+                        else:
+                            cons_res = "X"
+                            cons_fail += 1
+                            
+                    status = "PASS" if (row_cnt_res in ("PASS", "-") and tbl_hash_res in ("PASS", "-") and not (row_cnt_res == "-" and tbl_hash_res == "-")) else "X"
+                    
+                    # Ensure structural tests also pass for overall PASS
+                    if status == "PASS" and any(res == "X" for res in (cols_res, idxs_res, cons_res)):
+                        status = "X"
+                        
+                    if status == "PASS":
+                        passed_count += 1
+                        
+                    src_rows_str = "-" if src_rows is None else str(src_rows)
+                    tgt_rows_str = "-" if tgt_rows is None else str(tgt_rows)
+                    src_hash_str = "-" if src_hash is None else str(src_hash)
+                    tgt_hash_str = "-" if tgt_hash is None else str(tgt_hash)
+                    
+                    src_hash_str = (src_hash_str[:12] + '...') if len(src_hash_str) > 15 else src_hash_str
+                    tgt_hash_str = (tgt_hash_str[:12] + '...') if len(tgt_hash_str) > 15 else tgt_hash_str
+                    
+                    details_lines.append(f"{idx:>{max_num_len}} | {source_table:<{max_source_len}} | {target_table:<{max_target_len}} | {status:<6} | {row_cnt_res:<6} | {src_rows_str:>10} | {tgt_rows_str:>10} | {tbl_hash_res:<7} | {src_hash_str:<15} | {tgt_hash_str:<15} | {cols_str:<7} | {idxs_str:<7} | {cons_str:<7}")
+            
+            failed_count = total - passed_count
             
             # Append column validation details
             col_query = f"""
-                SELECT source_table_name, target_table_name, source_column_name, target_column_name,
-                source_data_type, target_data_type, passed, 
+                SELECT passed, source_schema_name, target_schema_name, source_table_name, target_table_name, source_column_name, target_column_name,
+                source_data_type, target_data_type, source_precision, target_precision,
+                source_hash, target_hash,
                 source_null_count, target_null_count, source_empty_string_count, target_empty_string_count, 
                 source_min_value, target_min_value, source_max_value, target_max_value, source_avg_value, target_avg_value,
-                source_row_count, target_row_count, source_precision, target_precision
+                source_row_count, target_row_count, validated_at
                 FROM "{self.protocol_schema}"."{self.config_parser.get_validation_columns_name()}"
                 ORDER BY source_table_name, target_table_name, target_column_name
             """
@@ -5086,31 +5179,35 @@ class MigratorTables:
                 details_lines.append("")
                 details_lines.append("[ COLUMN VALIDATION DETAILS ]")
                 
-                max_stbl_len = max([len(str(r[0])) for r in col_results if r[0]] + [12])
-                max_ttbl_len = max([len(str(r[1])) for r in col_results if r[1]] + [12])
-                max_scol_len = max([len(str(r[2])) for r in col_results if r[2]] + [13])
-                max_tcol_len = max([len(str(r[3])) for r in col_results if r[3]] + [13])
-                max_styp_len = max([len(str(r[4])) for r in col_results if r[4]] + [11])
-                max_ttyp_len = max([len(str(r[5])) for r in col_results if r[5]] + [11])
+                max_ssch_len = max([len(str(r[1])) for r in col_results if r[1]] + [13])
+                max_tsch_len = max([len(str(r[2])) for r in col_results if r[2]] + [13])
+                max_stbl_len = max([len(str(r[3])) for r in col_results if r[3]] + [12])
+                max_ttbl_len = max([len(str(r[4])) for r in col_results if r[4]] + [12])
+                max_scol_len = max([len(str(r[5])) for r in col_results if r[5]] + [13])
+                max_tcol_len = max([len(str(r[6])) for r in col_results if r[6]] + [13])
+                max_styp_len = max([len(str(r[7])) for r in col_results if r[7]] + [11])
+                max_ttyp_len = max([len(str(r[8])) for r in col_results if r[8]] + [11])
                 
-                col_header = f"{'Source Table':<{max_stbl_len}} | {'Target Table':<{max_ttbl_len}} | {'Source Column':<{max_scol_len}} | {'Target Column':<{max_tcol_len}} | {'Source Type':<{max_styp_len}} | {'Target Type':<{max_ttyp_len}} | {'Status':<6} | {'Row Cnt (S/T)':<15} | {'Null Cnt (S/T)':<15} | {'Empty Cnt (S/T)':<15} | {'Min Val (S/T)':<20} | {'Max Val (S/T)':<20} | {'Avg Val (S/T)':<20}"
+                col_header = f"{'Status':<6} | {'Source Schema':<{max_ssch_len}} | {'Target Schema':<{max_tsch_len}} | {'Source Table':<{max_stbl_len}} | {'Target Table':<{max_ttbl_len}} | {'Source Column':<{max_scol_len}} | {'Target Column':<{max_tcol_len}} | {'Source Type':<{max_styp_len}} | {'Target Type':<{max_ttyp_len}} | {'Hash (S/T)':<15} | {'Row Cnt (S/T)':<15} | {'Null Cnt (S/T)':<15} | {'Empty Cnt (S/T)':<15} | {'Min Val (S/T)':<20} | {'Max Val (S/T)':<20} | {'Avg Val (S/T)':<20} | {'Validated At':<19}"
                 details_lines.append("-" * len(col_header))
                 details_lines.append(col_header)
                 details_lines.append("-" * len(col_header))
                 
                 for r in col_results:
-                    s_tbl = r[0] or "-"
-                    t_tbl = r[1] or "-"
-                    s_col = r[2] or "-"
-                    t_col = r[3] or "-"
-                    s_typ = r[4] or "-"
-                    t_typ = r[5] or "-"
+                    status = "PASS" if r[0] else "X"
+                    s_sch = r[1] or "-"
+                    t_sch = r[2] or "-"
+                    s_tbl = r[3] or "-"
+                    t_tbl = r[4] or "-"
+                    s_col = r[5] or "-"
+                    t_col = r[6] or "-"
+                    s_typ = r[7] or "-"
+                    t_typ = r[8] or "-"
                     
-                    if r[19] is not None:
-                        s_typ += f"({r[19]})"
-                    if r[20] is not None:
-                        t_typ += f"({r[20]})"
-                    status = "PASS" if r[6] else "X"
+                    if r[9] is not None:
+                        s_typ += f"({r[9]})"
+                    if r[10] is not None:
+                        t_typ += f"({r[10]})"
                     
                     def clean_val(val):
                         if val is None:
@@ -5125,18 +5222,21 @@ class MigratorTables:
                             return "-"
                         return f"{s_str}/{t_str}"
                         
-                    rows = fmt_stat(r[17], r[18])
-                    nulls = fmt_stat(r[7], r[8])
-                    empties = fmt_stat(r[9], r[10])
-                    mins = fmt_stat(r[11], r[12])
-                    maxs = fmt_stat(r[13], r[14])
-                    avgs = fmt_stat(r[15], r[16])
+                    hashes = fmt_stat(r[11], r[12])
+                    nulls = fmt_stat(r[13], r[14])
+                    empties = fmt_stat(r[15], r[16])
+                    mins = fmt_stat(r[17], r[18])
+                    maxs = fmt_stat(r[19], r[20])
+                    avgs = fmt_stat(r[21], r[22])
+                    rows = fmt_stat(r[23], r[24])
+                    val_at = str(r[25])[:19] if r[25] else "-"
                     
+                    hashes = (hashes[:12] + '...') if len(hashes) > 15 else hashes
                     mins = (mins[:17] + '...') if len(mins) > 20 else mins
                     maxs = (maxs[:17] + '...') if len(maxs) > 20 else maxs
                     avgs = (avgs[:17] + '...') if len(avgs) > 20 else avgs
                     
-                    details_lines.append(f"{s_tbl:<{max_stbl_len}} | {t_tbl:<{max_ttbl_len}} | {s_col:<{max_scol_len}} | {t_col:<{max_tcol_len}} | {s_typ:<{max_styp_len}} | {t_typ:<{max_ttyp_len}} | {status:<6} | {rows:<15} | {nulls:<15} | {empties:<15} | {mins:<20} | {maxs:<20} | {avgs:<20}")
+                    details_lines.append(f"{status:<6} | {s_sch:<{max_ssch_len}} | {t_sch:<{max_tsch_len}} | {s_tbl:<{max_stbl_len}} | {t_tbl:<{max_ttbl_len}} | {s_col:<{max_scol_len}} | {t_col:<{max_tcol_len}} | {s_typ:<{max_styp_len}} | {t_typ:<{max_ttyp_len}} | {hashes:<15} | {rows:<15} | {nulls:<15} | {empties:<15} | {mins:<20} | {maxs:<20} | {avgs:<20} | {val_at:<19}")
 
             report_filename = self.config_parser.get_validator_report_filename()
             if report_filename:
@@ -5163,10 +5263,12 @@ class MigratorTables:
                 lines.append(f"{'Row Counts':<24} | {row_count_tests:>7} | {row_count_pass:>7} | {row_count_fail:>6}")
             if table_hash_tests > 0:
                 lines.append(f"{'Table Hashes':<24} | {table_hash_tests:>7} | {table_hash_pass:>7} | {table_hash_fail:>6}")
-            if row_hash_tests > 0:
-                lines.append(f"{'Row Level Hashes':<24} | {row_hash_tests:>7} | {row_hash_pass:>7} | {row_hash_fail:>6}")
-            if lob_size_tests > 0:
-                lines.append(f"{'LOB Sizes':<24} | {lob_size_tests:>7} | {lob_size_pass:>7} | {lob_size_fail:>6}")
+            if cols_tests > 0:
+                lines.append(f"{'Column Counts':<24} | {cols_tests:>7} | {cols_pass:>7} | {cols_fail:>6}")
+            if idxs_tests > 0:
+                lines.append(f"{'Index Counts':<24} | {idxs_tests:>7} | {idxs_pass:>7} | {idxs_fail:>6}")
+            if cons_tests > 0:
+                lines.append(f"{'Constraint Counts':<24} | {cons_tests:>7} | {cons_pass:>7} | {cons_fail:>6}")
             
             final_summary = "\n" + "\n".join(lines)
             if val_logger:

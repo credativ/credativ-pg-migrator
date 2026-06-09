@@ -118,6 +118,14 @@ class Validator:
             'target_table_name': target_table,
             'source_row_count': None,
             'target_row_count': None,
+            'source_table_hash': None,
+            'target_table_hash': None,
+            'source_columns_count': None,
+            'target_columns_count': None,
+            'source_indexes_count': None,
+            'target_indexes_count': None,
+            'source_constraints_count': None,
+            'target_constraints_count': None,
             'row_logic': None,
             'row_msg': '',
             'table_hash_logic': None,
@@ -137,6 +145,20 @@ class Validator:
         target_cols = list(t_cols_raw.values()) if isinstance(t_cols_raw, dict) else t_cols_raw
         source_cols = list(s_cols_raw.values()) if isinstance(s_cols_raw, dict) else s_cols_raw
         
+        res['source_columns_count'] = len(source_cols)
+        res['target_columns_count'] = len(target_cols)
+        
+        try:
+            res['source_indexes_count'] = self.migrator_tables.get_source_indexes_count(source_schema, source_table)
+            tgt_indexes = target_conn.fetch_mapping_target_indexes(target_schema, target_table) if hasattr(target_conn, 'fetch_mapping_target_indexes') else []
+            res['target_indexes_count'] = len(tgt_indexes)
+            
+            res['source_constraints_count'] = self.migrator_tables.get_source_constraints_count(source_schema, source_table)
+            tgt_constraints = target_conn.fetch_mapping_target_constraints(target_schema, target_table) if hasattr(target_conn, 'fetch_mapping_target_constraints') else []
+            res['target_constraints_count'] = len(tgt_constraints)
+        except Exception as e:
+            self.val_logger.logger.error(f"Error fetching structural validation metadata for {target_schema}.{target_table}: {e}")
+            
         pk_cols = self.migrator_tables.select_primary_key({'source_schema_name': source_schema, 'source_table_name': source_table})
         if pk_cols:
             pk_cols_list = [c.strip('" ') for c in pk_cols.split(',')]
@@ -171,6 +193,8 @@ class Validator:
             if check_table_sum:
                 s_sum = source_conn.get_table_checksum(source_schema, source_table, source_cols)
                 t_sum = target_conn.get_table_checksum(target_schema, target_table, target_cols)
+                res['source_table_hash'] = s_sum
+                res['target_table_hash'] = t_sum
                 if s_sum is not None and t_sum is not None:
                     res['table_hash_logic'] = (s_sum == t_sum)
                     if not res['table_hash_logic']:

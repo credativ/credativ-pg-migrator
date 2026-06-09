@@ -2,6 +2,10 @@
 
 ## 0.15.0rc1 - 2026.05.29
 
+- 2026.06.09
+
+  - Feature - Validation: Extended the migration validation workflow to verify that the table's structural definition successfully migrated. The validator now explicitly extracts and compares the counts of columns, indexes, and constraints (PKs, FKs, Unique, Check) between the source and target schemas. These new structural metrics (`source_columns_count`, `target_columns_count`, etc.) are natively persisted in the `validation_tables` database structure, and any mismatch will automatically flag the table validation as failed.
+
 - 2026.06.08
 
   - Fix - Validation: Resolved a false-positive hash mismatch where source databases with `NUMERIC(1,0)` (boolean representation) were failing against target PostgreSQL `BOOLEAN` columns due to internal checksum casting mismatches. The hash engine now correctly normalizes and casts boolean representations to `INT` for hashing consistency.

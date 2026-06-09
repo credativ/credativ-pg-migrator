@@ -777,7 +777,6 @@ class PostgreSQLConnector(DatabaseConnector):
         """
         indexes = []
         try:
-            self.connect()
             cursor = self.connection.cursor()
             cursor.execute(query)
             for row in cursor.fetchall():
@@ -788,7 +787,6 @@ class PostgreSQLConnector(DatabaseConnector):
                     'index_type': row[3].upper() if row[3] else 'UNKNOWN'
                 })
             cursor.close()
-            self.disconnect()
             return indexes
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"postgresql_connector: fetch_mapping_target_indexes: Error executing query: {query}")
@@ -815,7 +813,6 @@ class PostgreSQLConnector(DatabaseConnector):
         """
         constraints = []
         try:
-            self.connect()
             cursor = self.connection.cursor()
             cursor.execute(query)
             for row in cursor.fetchall():
@@ -825,7 +822,6 @@ class PostgreSQLConnector(DatabaseConnector):
                     'constraint_type': row[2]
                 })
             cursor.close()
-            self.disconnect()
             return constraints
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"postgresql_connector: fetch_mapping_target_constraints: Error executing query: {query}")
@@ -857,7 +853,6 @@ class PostgreSQLConnector(DatabaseConnector):
 
         sequences = []
         try:
-            self.connect()
             cursor = self.connection.cursor()
             
             # Fetch default and identity sequences
@@ -927,7 +922,6 @@ class PostgreSQLConnector(DatabaseConnector):
                         })
 
             cursor.close()
-            self.disconnect()
             
             # Deduplicate
             unique_seqs = {}

@@ -809,7 +809,7 @@ class PostgreSQLConnector(DatabaseConnector):
             JOIN pg_class t ON c.conrelid = t.oid
             JOIN pg_namespace n ON t.relnamespace = n.oid
             WHERE n.nspname = '{schema_name}' AND t.relname = '{table_name}'
-            AND c.contype NOT IN ('n', 'p', 'u')
+            AND c.contype NOT IN ('n')
         """
         constraints = []
         try:

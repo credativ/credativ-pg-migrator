@@ -398,7 +398,8 @@ class Validator:
                 target_constraints = []
                 try:
                     if hasattr(target_conn, 'fetch_mapping_target_constraints'):
-                        target_constraints = target_conn.fetch_mapping_target_constraints(target_schema, target_table)
+                        target_constraints_raw = target_conn.fetch_mapping_target_constraints(target_schema, target_table)
+                        target_constraints = [c for c in target_constraints_raw if c.get('constraint_type') not in ('PRIMARY KEY', 'UNIQUE')]
                 except Exception as e:
                     self.val_logger.logger.error(f"Error calling fetch_mapping_target_constraints: {e}")
                 

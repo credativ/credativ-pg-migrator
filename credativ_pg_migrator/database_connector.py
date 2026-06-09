@@ -783,7 +783,6 @@ class DatabaseConnector(ABC):
         import zlib
         total_hash = 0
         try:
-            self.connect()
             cursor = self.connection.cursor()
             cursor.execute(query)
             while True:
@@ -795,7 +794,6 @@ class DatabaseConnector(ABC):
                     row_hash = zlib.crc32(row_str.encode('utf-8'))
                     total_hash += row_hash
             cursor.close()
-            self.disconnect()
             return total_hash
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"database_connector: _compute_python_table_checksum: Error executing query: {query}")
@@ -824,7 +822,6 @@ class DatabaseConnector(ABC):
         import zlib
         checksums = {}
         try:
-            self.connect()
             cursor = self.connection.cursor()
             cursor.execute(query)
             for row in cursor.fetchall():
@@ -838,7 +835,6 @@ class DatabaseConnector(ABC):
                 
                 checksums[pk_key] = row_hash
             cursor.close()
-            self.disconnect()
             return checksums
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"database_connector: _compute_python_row_checksums: Error executing query: {query}")
@@ -911,7 +907,6 @@ class DatabaseConnector(ABC):
         }
         
         try:
-            self.connect()
             cursor = self.connection.cursor()
             cursor.execute(query)
             row = cursor.fetchone()
@@ -922,7 +917,6 @@ class DatabaseConnector(ABC):
                 stats['max_value'] = str(row[3]) if row[3] is not None else None
                 stats['avg_value'] = str(row[4]) if row[4] is not None else None
             cursor.close()
-            self.disconnect()
         except Exception as e:
             self.config_parser.print_log_message('DEBUG3', f"database_connector: get_column_statistics: Failed to gather stats for {schema_name}.{table_name}.{column_name}: {e}")
             

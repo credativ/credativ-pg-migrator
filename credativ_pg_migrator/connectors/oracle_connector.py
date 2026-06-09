@@ -644,7 +644,6 @@ class OracleConnector(DatabaseConnector):
                 ai.index_name
         """
         try:
-            self.connect()
             cursor = self.connection.cursor()
             cursor.execute(index_query)
             for row in cursor.fetchall():
@@ -700,9 +699,7 @@ class OracleConnector(DatabaseConnector):
                                     self.config_parser.print_log_message('DEBUG', f"oracle_connector: fetch_indexes: Updated index {index_info['index_name']} with hidden column {col_name} and default value {col_default}")
                 except Exception as e:
                     self.config_parser.print_log_message('ERROR', f"oracle_connector: fetch_indexes: Error fetching hidden columns for table {source_table_schema}.{source_table_name}: {e}")
-
             cursor.close()
-            self.disconnect()
             return table_indexes
 
         except Exception as e:
@@ -776,7 +773,6 @@ class OracleConnector(DatabaseConnector):
                 fk_cons.constraint_name
         """
         try:
-            self.connect()
             cursor = self.connection.cursor()
             cursor.execute(constraints_query)
             for row in cursor.fetchall():
@@ -808,7 +804,6 @@ class OracleConnector(DatabaseConnector):
                 order_num += 1
 
             cursor.close()
-            self.disconnect()
             return table_constraints
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"oracle_connector: fetch_constraints: Error executing query: {constraints_query}")

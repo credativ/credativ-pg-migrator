@@ -828,6 +828,43 @@ class PostgreSQLConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', e)
             return []
 
+    def get_indexes_count(self, schema_name: str, table_name: str) -> int:
+        query = f"""
+            SELECT count(*)
+            FROM pg_index i
+            JOIN pg_class t ON t.oid = i.indrelid
+            JOIN pg_namespace n ON n.oid = t.relnamespace
+            WHERE n.nspname = '{schema_name}' AND t.relname = '{table_name}'
+        """
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            count = cursor.fetchone()[0]
+            cursor.close()
+            return count
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"postgresql_connector: get_indexes_count: Error: {e}")
+            return -1
+
+    def get_constraints_count(self, schema_name: str, table_name: str) -> int:
+        query = f"""
+            SELECT count(*)
+            FROM pg_constraint c
+            JOIN pg_class t ON c.conrelid = t.oid
+            JOIN pg_namespace n ON t.relnamespace = n.oid
+            WHERE n.nspname = '{schema_name}' AND t.relname = '{table_name}'
+            AND c.contype NOT IN ('n')
+        """
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            count = cursor.fetchone()[0]
+            cursor.close()
+            return count
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"postgresql_connector: get_constraints_count: Error: {e}")
+            return -1
+
     def fetch_mapping_target_sequences(self, schema_name: str, table_name: str):
         self.config_parser.print_log_message('DEBUG', f"postgresql_connector: fetch_mapping_target_sequences: Fetching sequences for {schema_name}.{table_name}")
         query_general = f"""

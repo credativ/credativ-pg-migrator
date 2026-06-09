@@ -4900,9 +4900,47 @@ class MigratorTables:
                 validated_at timestamp default current_timestamp
             )
         """
+        create_indexes_query = f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."{self.config_parser.get_validation_indexes_name()}" (
+                id SERIAL PRIMARY KEY,
+                source_schema_name text,
+                source_table_name text,
+                source_index_name text,
+                target_schema_name text,
+                target_table_name text,
+                target_index_name text,
+                source_index_type text,
+                target_index_type text,
+                source_index_columns text,
+                target_index_columns text,
+                passed boolean,
+                validated_at timestamp default current_timestamp
+            )
+        """
+        
+        create_constraints_query = f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."{self.config_parser.get_validation_constraints_name()}" (
+                id SERIAL PRIMARY KEY,
+                source_schema_name text,
+                source_table_name text,
+                source_constraint_name text,
+                target_schema_name text,
+                target_table_name text,
+                target_constraint_name text,
+                source_constraint_type text,
+                target_constraint_type text,
+                source_constraint_columns text,
+                target_constraint_columns text,
+                passed boolean,
+                validated_at timestamp default current_timestamp
+            )
+        """
+        
         drop_new_tables_query = f"""
             DROP TABLE IF EXISTS "{self.protocol_schema}"."{self.config_parser.get_validation_tables_name()}";
             DROP TABLE IF EXISTS "{self.protocol_schema}"."{self.config_parser.get_validation_columns_name()}";
+            DROP TABLE IF EXISTS "{self.protocol_schema}"."{self.config_parser.get_validation_indexes_name()}";
+            DROP TABLE IF EXISTS "{self.protocol_schema}"."{self.config_parser.get_validation_constraints_name()}";
         """
         try:
             cursor = self.protocol_connection.connection.cursor()
@@ -4910,6 +4948,8 @@ class MigratorTables:
             cursor.execute(drop_new_tables_query)
             cursor.execute(create_tables_query)
             cursor.execute(create_columns_query)
+            cursor.execute(create_indexes_query)
+            cursor.execute(create_constraints_query)
             cursor.close()
             self.protocol_connection.connection.commit()
         except Exception as e:
@@ -4976,6 +5016,50 @@ class MigratorTables:
             self.protocol_connection.connection.commit()
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_validation_column_result: Error: {e}")
+            raise
+
+    def insert_validation_index_result(self, settings):
+        query = f"""
+            INSERT INTO "{self.protocol_schema}"."{self.config_parser.get_validation_indexes_name()}"
+            (source_schema_name, source_table_name, source_index_name, target_schema_name, target_table_name, target_index_name, source_index_type, target_index_type, source_index_columns, target_index_columns, passed)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """
+        params = (
+            settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_index_name'),
+            settings.get('target_schema_name'), settings.get('target_table_name'), settings.get('target_index_name'),
+            settings.get('source_index_type'), settings.get('target_index_type'),
+            settings.get('source_index_columns'), settings.get('target_index_columns'),
+            settings.get('passed')
+        )
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            cursor.close()
+            self.protocol_connection.connection.commit()
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_validation_index_result: Error: {e}")
+            raise
+
+    def insert_validation_constraint_result(self, settings):
+        query = f"""
+            INSERT INTO "{self.protocol_schema}"."{self.config_parser.get_validation_constraints_name()}"
+            (source_schema_name, source_table_name, source_constraint_name, target_schema_name, target_table_name, target_constraint_name, source_constraint_type, target_constraint_type, source_constraint_columns, target_constraint_columns, passed)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """
+        params = (
+            settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_constraint_name'),
+            settings.get('target_schema_name'), settings.get('target_table_name'), settings.get('target_constraint_name'),
+            settings.get('source_constraint_type'), settings.get('target_constraint_type'),
+            settings.get('source_constraint_columns'), settings.get('target_constraint_columns'),
+            settings.get('passed')
+        )
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            cursor.close()
+            self.protocol_connection.connection.commit()
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_validation_constraint_result: Error: {e}")
             raise
 
     def get_source_indexes_count(self, source_schema_name, source_table_name):
@@ -5237,6 +5321,102 @@ class MigratorTables:
                     avgs = (avgs[:17] + '...') if len(avgs) > 20 else avgs
                     
                     details_lines.append(f"{status:<6} | {s_sch:<{max_ssch_len}} | {t_sch:<{max_tsch_len}} | {s_tbl:<{max_stbl_len}} | {t_tbl:<{max_ttbl_len}} | {s_col:<{max_scol_len}} | {t_col:<{max_tcol_len}} | {s_typ:<{max_styp_len}} | {t_typ:<{max_ttyp_len}} | {hashes:<15} | {rows:<15} | {nulls:<15} | {empties:<15} | {mins:<20} | {maxs:<20} | {avgs:<20} | {val_at:<19}")
+
+            # Append index validation details
+            idx_query = f"""
+                SELECT passed, source_schema_name, target_schema_name, source_table_name, target_table_name, source_index_name, target_index_name,
+                source_index_type, target_index_type, source_index_columns, target_index_columns, validated_at
+                FROM "{self.protocol_schema}"."{self.config_parser.get_validation_indexes_name()}"
+                ORDER BY source_table_name, target_table_name, target_index_name
+            """
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(idx_query)
+            idx_results = cursor.fetchall()
+            cursor.close()
+
+            if idx_results:
+                details_lines.append("")
+                details_lines.append("")
+                details_lines.append("[ INDEX VALIDATION DETAILS ]")
+                
+                max_ssch_len = max([len(str(r[1])) for r in idx_results if r[1]] + [13])
+                max_tsch_len = max([len(str(r[2])) for r in idx_results if r[2]] + [13])
+                max_stbl_len = max([len(str(r[3])) for r in idx_results if r[3]] + [12])
+                max_ttbl_len = max([len(str(r[4])) for r in idx_results if r[4]] + [12])
+                max_sidx_len = max([len(str(r[5])) for r in idx_results if r[5]] + [12])
+                max_tidx_len = max([len(str(r[6])) for r in idx_results if r[6]] + [12])
+                max_styp_len = max([len(str(r[7])) for r in idx_results if r[7]] + [11])
+                max_ttyp_len = max([len(str(r[8])) for r in idx_results if r[8]] + [11])
+                max_scol_len = max([len(str(r[9])) for r in idx_results if r[9]] + [14])
+                max_tcol_len = max([len(str(r[10])) for r in idx_results if r[10]] + [14])
+                
+                idx_header = f"{'Status':<6} | {'Source Schema':<{max_ssch_len}} | {'Target Schema':<{max_tsch_len}} | {'Source Table':<{max_stbl_len}} | {'Target Table':<{max_ttbl_len}} | {'Source Index':<{max_sidx_len}} | {'Target Index':<{max_tidx_len}} | {'Source Type':<{max_styp_len}} | {'Target Type':<{max_ttyp_len}} | {'Source Columns':<{max_scol_len}} | {'Target Columns':<{max_tcol_len}} | {'Validated At':<19}"
+                details_lines.append("-" * len(idx_header))
+                details_lines.append(idx_header)
+                details_lines.append("-" * len(idx_header))
+
+                for r in idx_results:
+                    status = "PASS" if r[0] else "X"
+                    s_sch = r[1] or "-"
+                    t_sch = r[2] or "-"
+                    s_tbl = r[3] or "-"
+                    t_tbl = r[4] or "-"
+                    s_idx = r[5] or "-"
+                    t_idx = r[6] or "-"
+                    s_typ = r[7] or "-"
+                    t_typ = r[8] or "-"
+                    s_col = r[9] or "-"
+                    t_col = r[10] or "-"
+                    val_at = str(r[11])[:19] if r[11] else "-"
+                    details_lines.append(f"{status:<6} | {s_sch:<{max_ssch_len}} | {t_sch:<{max_tsch_len}} | {s_tbl:<{max_stbl_len}} | {t_tbl:<{max_ttbl_len}} | {s_idx:<{max_sidx_len}} | {t_idx:<{max_tidx_len}} | {s_typ:<{max_styp_len}} | {t_typ:<{max_ttyp_len}} | {s_col:<{max_scol_len}} | {t_col:<{max_tcol_len}} | {val_at:<19}")
+
+            # Append constraint validation details
+            con_query = f"""
+                SELECT passed, source_schema_name, target_schema_name, source_table_name, target_table_name, source_constraint_name, target_constraint_name,
+                source_constraint_type, target_constraint_type, source_constraint_columns, target_constraint_columns, validated_at
+                FROM "{self.protocol_schema}"."{self.config_parser.get_validation_constraints_name()}"
+                ORDER BY source_table_name, target_table_name, target_constraint_name
+            """
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(con_query)
+            con_results = cursor.fetchall()
+            cursor.close()
+
+            if con_results:
+                details_lines.append("")
+                details_lines.append("")
+                details_lines.append("[ CONSTRAINT VALIDATION DETAILS ]")
+                
+                max_ssch_len = max([len(str(r[1])) for r in con_results if r[1]] + [13])
+                max_tsch_len = max([len(str(r[2])) for r in con_results if r[2]] + [13])
+                max_stbl_len = max([len(str(r[3])) for r in con_results if r[3]] + [12])
+                max_ttbl_len = max([len(str(r[4])) for r in con_results if r[4]] + [12])
+                max_scon_len = max([len(str(r[5])) for r in con_results if r[5]] + [17])
+                max_tcon_len = max([len(str(r[6])) for r in con_results if r[6]] + [17])
+                max_styp_len = max([len(str(r[7])) for r in con_results if r[7]] + [11])
+                max_ttyp_len = max([len(str(r[8])) for r in con_results if r[8]] + [11])
+                max_scol_len = max([len(str(r[9])) for r in con_results if r[9]] + [14])
+                max_tcol_len = max([len(str(r[10])) for r in con_results if r[10]] + [14])
+                
+                con_header = f"{'Status':<6} | {'Source Schema':<{max_ssch_len}} | {'Target Schema':<{max_tsch_len}} | {'Source Table':<{max_stbl_len}} | {'Target Table':<{max_ttbl_len}} | {'Source Constraint':<{max_scon_len}} | {'Target Constraint':<{max_tcon_len}} | {'Source Type':<{max_styp_len}} | {'Target Type':<{max_ttyp_len}} | {'Source Columns':<{max_scol_len}} | {'Target Columns':<{max_tcol_len}} | {'Validated At':<19}"
+                details_lines.append("-" * len(con_header))
+                details_lines.append(con_header)
+                details_lines.append("-" * len(con_header))
+
+                for r in con_results:
+                    status = "PASS" if r[0] else "X"
+                    s_sch = r[1] or "-"
+                    t_sch = r[2] or "-"
+                    s_tbl = r[3] or "-"
+                    t_tbl = r[4] or "-"
+                    s_con = r[5] or "-"
+                    t_con = r[6] or "-"
+                    s_typ = r[7] or "-"
+                    t_typ = r[8] or "-"
+                    s_col = r[9] or "-"
+                    t_col = r[10] or "-"
+                    val_at = str(r[11])[:19] if r[11] else "-"
+                    details_lines.append(f"{status:<6} | {s_sch:<{max_ssch_len}} | {t_sch:<{max_tsch_len}} | {s_tbl:<{max_stbl_len}} | {t_tbl:<{max_ttbl_len}} | {s_con:<{max_scon_len}} | {t_con:<{max_tcon_len}} | {s_typ:<{max_styp_len}} | {t_typ:<{max_ttyp_len}} | {s_col:<{max_scol_len}} | {t_col:<{max_tcol_len}} | {val_at:<19}")
 
             report_filename = self.config_parser.get_validator_report_filename()
             if report_filename:

@@ -592,6 +592,12 @@ class ConfigParser:
     def get_validation_columns_name(self):
         return "validation_columns"
 
+    def get_validation_indexes_name(self):
+        return "validation_indexes"
+
+    def get_validation_constraints_name(self):
+        return "validation_constraints"
+
     def get_validator_config(self):
         return self.config.get('validator', {})
 

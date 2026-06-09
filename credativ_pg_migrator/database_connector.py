@@ -802,6 +802,20 @@ class DatabaseConnector(ABC):
             self.config_parser.print_log_message('ERROR', e)
             return None
 
+    def get_indexes_count(self, schema_name: str, table_name: str):
+        """
+        Returns the number of indexes on the given table.
+        Default implementation returns None if unsupported.
+        """
+        return None
+
+    def get_constraints_count(self, schema_name: str, table_name: str):
+        """
+        Returns the number of constraints on the given table.
+        Default implementation returns None if unsupported.
+        """
+        return None
+
     def _compute_python_row_checksums(self, query: str, num_pk_cols: int):
         """
         Helper method to compute row-level checksums for validation sampling.

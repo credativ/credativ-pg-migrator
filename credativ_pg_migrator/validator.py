@@ -149,13 +149,11 @@ class Validator:
         res['target_columns_count'] = len(target_cols)
         
         try:
-            res['source_indexes_count'] = self.migrator_tables.get_source_indexes_count(source_schema, source_table)
-            tgt_indexes = target_conn.fetch_mapping_target_indexes(target_schema, target_table) if hasattr(target_conn, 'fetch_mapping_target_indexes') else []
-            res['target_indexes_count'] = len(tgt_indexes)
+            res['source_indexes_count'] = source_conn.get_indexes_count(source_schema, source_table) if hasattr(source_conn, 'get_indexes_count') else 0
+            res['target_indexes_count'] = target_conn.get_indexes_count(target_schema, target_table) if hasattr(target_conn, 'get_indexes_count') else 0
             
-            res['source_constraints_count'] = self.migrator_tables.get_source_constraints_count(source_schema, source_table)
-            tgt_constraints = target_conn.fetch_mapping_target_constraints(target_schema, target_table) if hasattr(target_conn, 'fetch_mapping_target_constraints') else []
-            res['target_constraints_count'] = len(tgt_constraints)
+            res['source_constraints_count'] = source_conn.get_constraints_count(source_schema, source_table) if hasattr(source_conn, 'get_constraints_count') else 0
+            res['target_constraints_count'] = target_conn.get_constraints_count(target_schema, target_table) if hasattr(target_conn, 'get_constraints_count') else 0
         except Exception as e:
             self.val_logger.logger.error(f"Error fetching structural validation metadata for {target_schema}.{target_table}: {e}")
             
@@ -312,6 +310,69 @@ class Validator:
                     res['lob_size_msg'] = "Skip: No matching LOB columns identified"
             elif check_lob and not pk_cols_list:
                 res['lob_size_msg'] = "Skip: No PKs available"
+
+            # Index Validation
+            try:
+                source_indexes_raw = source_conn.fetch_indexes({'source_table_schema': source_schema, 'source_table_name': source_table, 'source_table_id': None}) if hasattr(source_conn, 'fetch_indexes') else {}
+                source_indexes = list(source_indexes_raw.values()) if isinstance(source_indexes_raw, dict) else source_indexes_raw
+                target_indexes = target_conn.fetch_mapping_target_indexes(target_schema, target_table) if hasattr(target_conn, 'fetch_mapping_target_indexes') else []
+                
+                s_idx_map = {idx.get('index_name', '').lower(): idx for idx in source_indexes if idx.get('index_name')}
+                t_idx_map = {idx.get('index_name', '').lower(): idx for idx in target_indexes if idx.get('index_name')}
+                all_idx_names = set(s_idx_map.keys()).union(set(t_idx_map.keys()))
+                
+                for name in all_idx_names:
+                    s_idx = s_idx_map.get(name, {})
+                    t_idx = t_idx_map.get(name, {})
+                    passed = (name in s_idx_map and name in t_idx_map)
+                    idx_res = {
+                        'source_schema_name': source_schema,
+                        'source_table_name': source_table,
+                        'source_index_name': s_idx.get('index_name'),
+                        'target_schema_name': target_schema,
+                        'target_table_name': target_table,
+                        'target_index_name': t_idx.get('index_name'),
+                        'source_index_type': s_idx.get('index_type'),
+                        'target_index_type': t_idx.get('index_type'),
+                        'source_index_columns': s_idx.get('index_columns'),
+                        'target_index_columns': t_idx.get('index_def') or t_idx.get('index_columns'),
+                        'passed': passed
+                    }
+                    self.migrator_tables.insert_validation_index_result(idx_res)
+            except Exception as e:
+                self.val_logger.logger.error(f"Error validating indexes for {target_table}: {e}")
+
+            # Constraint Validation
+            try:
+                source_constraints_raw = source_conn.fetch_constraints({'source_table_schema': source_schema, 'source_table_name': source_table, 'source_table_id': None}) if hasattr(source_conn, 'fetch_constraints') else {}
+                source_constraints = list(source_constraints_raw.values()) if isinstance(source_constraints_raw, dict) else source_constraints_raw
+                target_constraints = target_conn.fetch_mapping_target_constraints(target_schema, target_table) if hasattr(target_conn, 'fetch_mapping_target_constraints') else []
+                
+                s_con_map = {con.get('constraint_name', '').lower(): con for con in source_constraints if con.get('constraint_name')}
+                t_con_map = {con.get('constraint_name', '').lower(): con for con in target_constraints if con.get('constraint_name')}
+                all_con_names = set(s_con_map.keys()).union(set(t_con_map.keys()))
+                
+                for name in all_con_names:
+                    s_con = s_con_map.get(name, {})
+                    t_con = t_con_map.get(name, {})
+                    passed = (name in s_con_map and name in t_con_map)
+                    con_res = {
+                        'source_schema_name': source_schema,
+                        'source_table_name': source_table,
+                        'source_constraint_name': s_con.get('constraint_name'),
+                        'target_schema_name': target_schema,
+                        'target_table_name': target_table,
+                        'target_constraint_name': t_con.get('constraint_name'),
+                        'source_constraint_type': s_con.get('constraint_type'),
+                        'target_constraint_type': t_con.get('constraint_type'),
+                        'source_constraint_columns': s_con.get('constraint_columns'),
+                        'target_constraint_columns': t_con.get('constraint_def') or t_con.get('constraint_columns'),
+                        'passed': passed
+                    }
+                    self.migrator_tables.insert_validation_constraint_result(con_res)
+            except Exception as e:
+                self.val_logger.logger.error(f"Error validating constraints for {target_table}: {e}")
+
 
         except Exception as e:
             self.val_logger.logger.error(f"Validation crash on {res['target_table']}: {e}")

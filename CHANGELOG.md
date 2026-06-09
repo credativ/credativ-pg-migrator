@@ -4,6 +4,7 @@
 
 - 2026.06.09
 
+  - Feature - Validation: Extended the validation workflow to extract, compare, and persist detailed lists of indexes and constraints from the source and target databases. The structural comparisons are now saved to new protocol tables (`validation_indexes` and `validation_constraints`) and output as formatted side-by-side grids at the bottom of the Markdown validation report.
   - Feature - Validation: Extended the migration validation workflow to verify that the table's structural definition successfully migrated. The validator now explicitly extracts and compares the counts of columns, indexes, and constraints (PKs, FKs, Unique, Check) between the source and target schemas. These new structural metrics (`source_columns_count`, `target_columns_count`, etc.) are natively persisted in the `validation_tables` database structure, and any mismatch will automatically flag the table validation as failed.
 
 - 2026.06.08

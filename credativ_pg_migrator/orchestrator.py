@@ -229,6 +229,7 @@ class Orchestrator:
     def mapping_check_indexes_and_constraints(self):
         self.config_parser.print_log_message('INFO', "orchestrator: mapping_check_indexes_and_constraints: Starting global verification of indexes and constraints")
         target_conn = self.load_connector('target')
+        target_conn.connect()
 
         total_checked_constraints = 0
         total_missing_constraints = 0
@@ -267,6 +268,8 @@ class Orchestrator:
 
         self.config_parser.print_log_message('INFO', f"orchestrator: mapping_check_indexes_and_constraints: Constraints Summary: {total_checked_constraints} checked, {total_missing_constraints} missing.")
         self.config_parser.print_log_message('INFO', f"orchestrator: mapping_check_indexes_and_constraints: Indexes Summary: {total_checked_indexes} checked, {total_missing_indexes} missing.")
+        
+        target_conn.disconnect()
 
     def mapping_copy_data(self):
         self.migrator_tables.insert_main({'task_name': 'Orchestrator', 'subtask_name': 'mapping data copy'})

@@ -771,9 +771,75 @@ class DatabaseConnector(ABC):
     def get_row_checksums(self, schema_name: str, table_name: str, pk_columns: list, pk_values_list: list, columns: list):
         """
         Returns corresponding row-level hashes matched directly against the provided PK filter sets.
-        Returns a dictionary or list mapping PKs to Row Checksums.
+        Returns a dictionary mapping PKs to Row Checksums.
         """
         pass
+
+    def _compute_python_table_checksum(self, query: str):
+        """
+        Helper method to compute a deterministic, order-independent table checksum
+        by fetching rows in chunks and summing their CRC32 integer hashes.
+        """
+        import zlib
+        total_hash = 0
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            while True:
+                rows = cursor.fetchmany(10000)
+                if not rows:
+                    break
+                for row in rows:
+                    row_str = "|".join([str(val) if val is not None else "" for val in row])
+                    row_hash = zlib.crc32(row_str.encode('utf-8'))
+                    total_hash += row_hash
+            cursor.close()
+            return total_hash
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"database_connector: _compute_python_table_checksum: Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
+            return None
+
+    def get_indexes_count(self, schema_name: str, table_name: str):
+        """
+        Returns the number of indexes on the given table.
+        Default implementation returns None if unsupported.
+        """
+        return None
+
+    def get_constraints_count(self, schema_name: str, table_name: str):
+        """
+        Returns the number of constraints on the given table.
+        Default implementation returns None if unsupported.
+        """
+        return None
+
+    def _compute_python_row_checksums(self, query: str, num_pk_cols: int):
+        """
+        Helper method to compute row-level checksums for validation sampling.
+        Returns a dictionary of PKs to their CRC32 integer hashes.
+        """
+        import zlib
+        checksums = {}
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            for row in cursor.fetchall():
+                pk_tuple = tuple(row[:num_pk_cols])
+                pk_key = pk_tuple[0] if num_pk_cols == 1 else pk_tuple
+                
+                # Compute hash on the non-PK columns (the rest of the row)
+                data_row = row[num_pk_cols:]
+                row_str = "|".join([str(val) if val is not None else "" for val in data_row])
+                row_hash = zlib.crc32(row_str.encode('utf-8'))
+                
+                checksums[pk_key] = row_hash
+            cursor.close()
+            return checksums
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"database_connector: _compute_python_row_checksums: Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
+            return {}
 
     @abstractmethod
     def get_lob_sizes(self, schema_name: str, table_name: str, pk_columns: list, pk_values_list: list, lob_columns: list):
@@ -782,6 +848,79 @@ class DatabaseConnector(ABC):
         Returns dictionary mapping PKs to arrays of integer bounds.
         """
         pass
+
+    def get_column_statistics(self, schema_name: str, table_name: str, column_name: str, data_type: str, force_round_0: bool = False):
+        """
+        Retrieves advanced column statistics for mismatched columns during validation.
+        Determines the stats to retrieve based on the data_type category.
+        Returns a dict:
+        {
+            'null_count': int,
+            'empty_string_count': int,
+            'min_value': str,
+            'max_value': str,
+            'avg_value': str
+        }
+        """
+        dt_lower = data_type.lower()
+        
+        is_string = any(t in dt_lower for t in ['char', 'text', 'clob', 'string'])
+        is_numeric = any(t in dt_lower for t in ['int', 'number', 'numeric', 'decimal', 'float', 'double', 'real', 'serial'])
+        is_date = any(t in dt_lower for t in ['date', 'time'])
+        is_lob = any(t in dt_lower for t in ['lob', 'bytea', 'image', 'xml', 'json', 'raw', 'oid', 'long'])
+        is_boolean = any(t in dt_lower for t in ['bool', 'boolean'])
+        
+        null_sql = f"COUNT(CASE WHEN \"{column_name}\" IS NULL THEN 1 END)"
+        
+        empty_sql = "NULL"
+        if is_string and not is_lob:
+            empty_sql = f"COUNT(CASE WHEN \"{column_name}\" = '' THEN 1 END)"
+            
+        min_sql = "NULL"
+        max_sql = "NULL"
+        avg_sql = "NULL"
+        
+        if not is_lob:
+            if is_boolean:
+                min_sql = f"MIN(CAST(\"{column_name}\" AS INT))"
+                max_sql = f"MAX(CAST(\"{column_name}\" AS INT))"
+                avg_sql = f"AVG(CAST(\"{column_name}\" AS INT))"
+            else:
+                if is_numeric and force_round_0:
+                    min_sql = f"ROUND(MIN(\"{column_name}\"), 0)"
+                    max_sql = f"ROUND(MAX(\"{column_name}\"), 0)"
+                else:
+                    min_sql = f"MIN(\"{column_name}\")"
+                    max_sql = f"MAX(\"{column_name}\")"
+            
+        if is_numeric and not is_boolean:
+            avg_sql = f"AVG(CAST(\"{column_name}\" AS FLOAT))"
+            
+        query = f"SELECT {null_sql}, {empty_sql}, {min_sql}, {max_sql}, {avg_sql} FROM \"{schema_name}\".\"{table_name}\""
+        
+        stats = {
+            'null_count': None,
+            'empty_string_count': None,
+            'min_value': None,
+            'max_value': None,
+            'avg_value': None
+        }
+        
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            row = cursor.fetchone()
+            if row:
+                stats['null_count'] = int(row[0]) if row[0] is not None else None
+                stats['empty_string_count'] = int(row[1]) if row[1] is not None else None
+                stats['min_value'] = str(row[2]) if row[2] is not None else None
+                stats['max_value'] = str(row[3]) if row[3] is not None else None
+                stats['avg_value'] = str(row[4]) if row[4] is not None else None
+            cursor.close()
+        except Exception as e:
+            self.config_parser.print_log_message('DEBUG3', f"database_connector: get_column_statistics: Failed to gather stats for {schema_name}.{table_name}.{column_name}: {e}")
+            
+        return stats
 
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

@@ -21,6 +21,7 @@ import traceback
 from tabulate import tabulate
 import time
 import datetime
+import sqlglot
 import jaydebeapi
 import pyodbc
 
@@ -75,7 +76,24 @@ class MySQLConnector(DatabaseConnector):
         """ Returns a dictionary of SQL functions mapping for the target database """
         target_db_type = settings['target_db_type']
         if target_db_type == 'postgresql':
-            return {}
+            return {
+                'ifnull(': 'coalesce(',
+                'isnull(': 'coalesce(',
+                'sysdate()': 'current_timestamp',
+                'now()': 'current_timestamp',
+                'current_date()': 'current_date',
+                'current_time()': 'current_time',
+                'length(': 'length(',
+                'concat(': 'concat(',
+                'substring(': 'substring(',
+                'instr(': 'strpos(',
+                'replace(': 'replace(',
+                'upper(': 'upper(',
+                'lower(': 'lower(',
+                'ltrim(': 'ltrim(',
+                'rtrim(': 'rtrim(',
+                'space(': "repeat(' ', ",
+            }
         else:
             self.config_parser.print_log_message('ERROR', f"mysql_connector: get_sql_functions_mapping: Unsupported target database type: {target_db_type}")
 
@@ -453,6 +471,8 @@ class MySQLConnector(DatabaseConnector):
                             'migrator_tables': migrator_tables,
                             'insert_columns': insert_columns,
                             'insert_values': settings.get('insert_values'),
+                            'data_conflict_action': data_conflict_action,
+                            'primary_key_columns': primary_key_columns,
                         })
                         total_inserted_rows += inserted_rows
                         inserting_end_time = time.time()
@@ -813,11 +833,23 @@ class MySQLConnector(DatabaseConnector):
 
     def convert_view_code(self, settings: dict):
         view_code = settings['view_code']
+        
+        target_db_type = settings.get('target_db_type', self.config_parser.get_target_db_type())
+        if target_db_type == 'postgresql':
+            try:
+                transpiled = sqlglot.transpile(view_code, read="mysql", write="postgres")
+                if transpiled:
+                    view_code = transpiled[0]
+            except Exception as e:
+                self.config_parser.print_log_message('WARNING', f"mysql_connector: convert_view_code: sqlglot transpilation failed: {e}")
+
         converted_view_code = view_code
         converted_view_code = converted_view_code.replace('`', '"')
         converted_view_code = converted_view_code.replace(f'''"{settings['source_schema_name']}".''', f'''"{settings['target_schema_name']}".''')
         converted_view_code = converted_view_code.replace(f'''{settings['source_schema_name']}.''', f'''"{settings['target_schema_name']}".''')
         converted_view_code = converted_view_code.replace('""', '"')
+        
+        converted_view_code = self.apply_sql_functions_mapping(converted_view_code, settings)
         return converted_view_code
 
     def get_sequence_current_value(self, sequence_id: int):
@@ -1074,13 +1106,63 @@ class MySQLConnector(DatabaseConnector):
         return extracted_default_value
 
     def get_table_checksum(self, schema_name: str, table_name: str, columns: list):
-        return None
+        if not columns:
+            return None
+            
+        cols_list = []
+        for col in columns:
+            dtype = col.get('data_type', '').lower()
+            if any(x in dtype for x in ['lob', 'blob', 'xml', 'json', 'text', 'longtext', 'mediumtext']):
+                continue
+            cols_list.append(f'`{col["column_name"]}`')
+            
+        if not cols_list:
+            return None
+            
+        cols_str = ", ".join(cols_list)
+        query = f'SELECT {cols_str} FROM `{schema_name}`.`{table_name}`'
+        return self._compute_python_table_checksum(query)
 
     def get_random_pks(self, schema_name: str, table_name: str, pk_columns: list, sample_size: int):
         return []
 
     def get_row_checksums(self, schema_name: str, table_name: str, pk_columns: list, pk_values_list: list, columns: list):
-        return {}
+        if not columns or not pk_columns or not pk_values_list:
+            return {}
+            
+        cols_list = []
+        for col in columns:
+            dtype = col.get('data_type', '').lower()
+            if any(x in dtype for x in ['lob', 'blob', 'xml', 'json', 'text', 'longtext', 'mediumtext']):
+                continue
+            cols_list.append(f'`{col["column_name"]}`')
+            
+        if not cols_list:
+            return {}
+            
+        cols_str = ", ".join(cols_list)
+        pk_cols_str = ", ".join([f'`{c}`' for c in pk_columns])
+        
+        in_values = []
+        for pk_dict in pk_values_list:
+            vals = []
+            for c in pk_columns:
+                val = pk_dict[c]
+                if val is None:
+                    vals.append("NULL")
+                elif isinstance(val, str):
+                    escaped_val = val.replace("'", "''")
+                    vals.append(f"'{escaped_val}'")
+                else:
+                    vals.append(str(val))
+            in_values.append(f"({', '.join(vals)})")
+        
+        where_clause = f"({pk_cols_str}) IN ({', '.join(in_values)})"
+        if len(pk_columns) == 1:
+            where_clause = f"{pk_cols_str} IN ({', '.join([v.strip('()') for v in in_values])})"
+            
+        query = f'SELECT {pk_cols_str}, {cols_str} FROM `{schema_name}`.`{table_name}` WHERE {where_clause}'
+        return self._compute_python_row_checksums(query, len(pk_columns))
 
     def get_lob_sizes(self, schema_name: str, table_name: str, pk_columns: list, pk_values_list: list, lob_columns: list):
         return {}

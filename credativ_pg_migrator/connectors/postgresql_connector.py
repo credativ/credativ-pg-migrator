@@ -777,7 +777,6 @@ class PostgreSQLConnector(DatabaseConnector):
         """
         indexes = []
         try:
-            self.connect()
             cursor = self.connection.cursor()
             cursor.execute(query)
             for row in cursor.fetchall():
@@ -788,7 +787,6 @@ class PostgreSQLConnector(DatabaseConnector):
                     'index_type': row[3].upper() if row[3] else 'UNKNOWN'
                 })
             cursor.close()
-            self.disconnect()
             return indexes
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"postgresql_connector: fetch_mapping_target_indexes: Error executing query: {query}")
@@ -815,7 +813,6 @@ class PostgreSQLConnector(DatabaseConnector):
         """
         constraints = []
         try:
-            self.connect()
             cursor = self.connection.cursor()
             cursor.execute(query)
             for row in cursor.fetchall():
@@ -825,12 +822,48 @@ class PostgreSQLConnector(DatabaseConnector):
                     'constraint_type': row[2]
                 })
             cursor.close()
-            self.disconnect()
             return constraints
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"postgresql_connector: fetch_mapping_target_constraints: Error executing query: {query}")
             self.config_parser.print_log_message('ERROR', e)
             return []
+
+    def get_indexes_count(self, schema_name: str, table_name: str) -> int:
+        query = f"""
+            SELECT count(*)
+            FROM pg_index i
+            JOIN pg_class t ON t.oid = i.indrelid
+            JOIN pg_namespace n ON n.oid = t.relnamespace
+            WHERE n.nspname = '{schema_name}' AND t.relname = '{table_name}'
+        """
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            count = cursor.fetchone()[0]
+            cursor.close()
+            return count
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"postgresql_connector: get_indexes_count: Error: {e}")
+            return -1
+
+    def get_constraints_count(self, schema_name: str, table_name: str) -> int:
+        query = f"""
+            SELECT count(*)
+            FROM pg_constraint c
+            JOIN pg_class t ON c.conrelid = t.oid
+            JOIN pg_namespace n ON t.relnamespace = n.oid
+            WHERE n.nspname = '{schema_name}' AND t.relname = '{table_name}'
+            AND c.contype NOT IN ('n')
+        """
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            count = cursor.fetchone()[0]
+            cursor.close()
+            return count
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"postgresql_connector: get_constraints_count: Error: {e}")
+            return -1
 
     def fetch_mapping_target_sequences(self, schema_name: str, table_name: str):
         self.config_parser.print_log_message('DEBUG', f"postgresql_connector: fetch_mapping_target_sequences: Fetching sequences for {schema_name}.{table_name}")
@@ -857,7 +890,6 @@ class PostgreSQLConnector(DatabaseConnector):
 
         sequences = []
         try:
-            self.connect()
             cursor = self.connection.cursor()
             
             # Fetch default and identity sequences
@@ -927,7 +959,6 @@ class PostgreSQLConnector(DatabaseConnector):
                         })
 
             cursor.close()
-            self.disconnect()
             
             # Deduplicate
             unique_seqs = {}
@@ -1305,6 +1336,8 @@ class PostgreSQLConnector(DatabaseConnector):
                             'migrator_tables': migrator_tables,
                             'insert_columns': insert_columns,
                             'insert_values': settings.get('insert_values'),
+                            'data_conflict_action': data_conflict_action,
+                            'primary_key_columns': primary_key_columns,
                         })
                         total_inserted_rows += inserted_rows
                         inserting_end_time = time.time()
@@ -1461,7 +1494,12 @@ class PostgreSQLConnector(DatabaseConnector):
                     formatted_data.append(tuple(row))
                 self.config_parser.print_log_message('DEBUG3', f"postgresql_connector: insert_batch: INSERT COLUMNS: {insert_columns}")
                 self.config_parser.print_log_message('DEBUG3', f"postgresql_connector: insert_batch: EXTRACT KEYS: {extract_keys}")
-                self.config_parser.print_log_message('DEBUG3', f"postgresql_connector: insert_batch: FORMATTED DATA[0]: {formatted_data[0]}")
+                
+                formatted_data_str = str(formatted_data[0])
+                if len(formatted_data_str) > 500:
+                    formatted_data_str = formatted_data_str[:500] + "... (truncated)"
+                self.config_parser.print_log_message('DEBUG3', f"postgresql_connector: insert_batch: FORMATTED DATA[0]: {formatted_data_str}")
+                
                 data = formatted_data
             else:
                 self.config_parser.print_log_message('ERROR', f"postgresql_connector: insert_batch: Worker {worker_id}: Data for insert_batch must be a list of dictionaries, got {type(data)}")
@@ -1514,7 +1552,10 @@ class PostgreSQLConnector(DatabaseConnector):
                     inserted_rows = len(data)
                     self.connection.commit()
                 except Exception as e:
-                    self.config_parser.print_log_message('ERROR', f"postgresql_connector: insert_batch: Worker {worker_id}: Error inserting batch data into {target_table_name}: {e}")
+                    e_str = str(e)
+                    if len(e_str) > 1000:
+                        e_str = e_str[:1000] + "... (error message truncated)"
+                    self.config_parser.print_log_message('ERROR', f"postgresql_connector: insert_batch: Worker {worker_id}: Error inserting batch data into {target_table_name}: {e_str}")
                     self.config_parser.print_log_message('ERROR', f"postgresql_connector: insert_batch: Worker {worker_id}: Trying to insert row by row.")
                     self.connection.rollback()
                     for row in data:
@@ -1524,8 +1565,15 @@ class PostgreSQLConnector(DatabaseConnector):
                             self.connection.commit()
                         except Exception as e:
                             self.connection.rollback()
-                            self.config_parser.print_log_message('ERROR', f"postgresql_connector: insert_batch: Worker {worker_id}: Error inserting row into {target_table_name}: {row}")
-                            self.config_parser.print_log_message('ERROR', e)
+                            row_str = str(row)
+                            if len(row_str) > 500:
+                                row_str = row_str[:500] + "... (truncated)"
+                            self.config_parser.print_log_message('ERROR', f"postgresql_connector: insert_batch: Worker {worker_id}: Error inserting row into {target_table_name}: {row_str}")
+                            
+                            e_str = str(e)
+                            if len(e_str) > 1000:
+                                e_str = e_str[:1000] + "... (error message truncated)"
+                            self.config_parser.print_log_message('ERROR', e_str)
 
                 self.connection.autocommit = True
 
@@ -2298,21 +2346,29 @@ class PostgreSQLConnector(DatabaseConnector):
     def get_table_checksum(self, schema_name: str, table_name: str, columns: list):
         if not columns:
             return None
-        # Use hashtext of the concatenated text representations
-        cols_concat = " || ".join([f"COALESCE(\"{col['column_name']}\"::text, '')" for col in columns])
-        query = f'SELECT sum(hashtext({cols_concat})) FROM "{schema_name}"."{table_name}"'
-        try:
-            self.connect()
-            cursor = self.connection.cursor()
-            cursor.execute(query)
-            result = cursor.fetchone()[0]
-            cursor.close()
-            self.disconnect()
-            return result
-        except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"postgresql_connector: get_table_checksum: Error executing query: {query}")
-            self.config_parser.print_log_message('ERROR', e)
+        
+        # Use Python-based hashing for cross-database consistency
+        cols_list = []
+        for col in columns:
+            dtype = col.get('data_type', '').lower()
+            if any(x in dtype for x in ['lob', 'bytea', 'xml', 'json', 'text', 'oid']):
+                # Skip LOBs / massive text blocks for table checksums to save bandwidth
+                pass
+            elif 'time' in dtype or 'date' in dtype:
+                cols_list.append(f"TO_CHAR(\"{col['column_name']}\", 'YYYY-MM-DD HH24:MI:SS.US')")
+            elif 'bool' in dtype or 'boolean' in dtype:
+                cols_list.append(f"CAST(\"{col['column_name']}\" AS INT)")
+            elif col.get('_force_round_0'):
+                cols_list.append(f"ROUND(\"{col['column_name']}\", 0)")
+            else:
+                cols_list.append(f'"{col["column_name"]}"')
+            
+        if not cols_list:
             return None
+            
+        cols_str = ", ".join(cols_list)
+        query = f'SELECT {cols_str} FROM "{schema_name}"."{table_name}"'
+        return self._compute_python_table_checksum(query)
 
     def get_random_pks(self, schema_name: str, table_name: str, pk_columns: list, sample_size: int):
         if not pk_columns:
@@ -2337,7 +2393,25 @@ class PostgreSQLConnector(DatabaseConnector):
     def get_row_checksums(self, schema_name: str, table_name: str, pk_columns: list, pk_values_list: list, columns: list):
         if not columns or not pk_columns or not pk_values_list:
             return {}
-        cols_concat = " || ".join([f"COALESCE(\"{col['column_name']}\"::text, '')" for col in columns])
+            
+        cols_list = []
+        for col in columns:
+            dtype = col.get('data_type', '').lower()
+            if any(x in dtype for x in ['lob', 'bytea', 'xml', 'json', 'text', 'oid']):
+                pass
+            elif 'time' in dtype or 'date' in dtype:
+                cols_list.append(f"TO_CHAR(\"{col['column_name']}\", 'YYYY-MM-DD HH24:MI:SS.US')")
+            elif 'bool' in dtype or 'boolean' in dtype:
+                cols_list.append(f"CAST(\"{col['column_name']}\" AS INT)")
+            elif col.get('_force_round_0'):
+                cols_list.append(f"ROUND(\"{col['column_name']}\", 0)")
+            else:
+                cols_list.append(f'"{col["column_name"]}"')
+            
+        if not cols_list:
+            return {}
+            
+        cols_str = ", ".join(cols_list)
         pk_cols_str = ", ".join([f'"{c}"' for c in pk_columns])
         
         # Build IN clause properly
@@ -2359,24 +2433,8 @@ class PostgreSQLConnector(DatabaseConnector):
         if len(pk_columns) == 1:
             where_clause = f"{pk_cols_str} IN ({', '.join([v.strip('()') for v in in_values])})"
             
-        query = f'SELECT {pk_cols_str}, hashtext({cols_concat}) FROM "{schema_name}"."{table_name}" WHERE {where_clause}'
-        
-        checksums = {}
-        try:
-            self.connect()
-            cursor = self.connection.cursor()
-            cursor.execute(query)
-            for row in cursor.fetchall():
-                pk_tuple = tuple(row[:len(pk_columns)])
-                pk_key = pk_tuple[0] if len(pk_tuple) == 1 else pk_tuple
-                checksums[pk_key] = row[-1]
-            cursor.close()
-            self.disconnect()
-            return checksums
-        except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"postgresql_connector: get_row_checksums: Error executing query: {query}")
-            self.config_parser.print_log_message('ERROR', e)
-            return {}
+        query = f'SELECT {pk_cols_str}, {cols_str} FROM "{schema_name}"."{table_name}" WHERE {where_clause}'
+        return self._compute_python_row_checksums(query, len(pk_columns))
 
     def get_lob_sizes(self, schema_name: str, table_name: str, pk_columns: list, pk_values_list: list, lob_columns: list):
         if not lob_columns or not pk_columns or not pk_values_list:

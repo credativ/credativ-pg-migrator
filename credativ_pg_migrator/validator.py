@@ -36,6 +36,11 @@ class Validator:
         self.val_logger.logger.info("      Starting Data Validator Module     ")
         self.val_logger.logger.info("=========================================")
         
+        report_filename = self.config_parser.get_validator_report_filename()
+        if not report_filename:
+            self.val_logger.logger.error("FATAL: 'report_filename' is missing in validator config. A detailed report file is mandatory.")
+            return
+        
         try:
             self.migrator_tables.create_table_for_validation()
     
@@ -107,6 +112,20 @@ class Validator:
 
         res = {
             'target_table': f"{target_schema}.{target_table}",
+            'source_schema_name': source_schema,
+            'source_table_name': source_table,
+            'target_schema_name': target_schema,
+            'target_table_name': target_table,
+            'source_row_count': None,
+            'target_row_count': None,
+            'source_table_hash': None,
+            'target_table_hash': None,
+            'source_columns_count': None,
+            'target_columns_count': None,
+            'source_indexes_count': None,
+            'target_indexes_count': None,
+            'source_constraints_count': None,
+            'target_constraints_count': None,
             'row_logic': None,
             'row_msg': '',
             'table_hash_logic': None,
@@ -126,6 +145,18 @@ class Validator:
         target_cols = list(t_cols_raw.values()) if isinstance(t_cols_raw, dict) else t_cols_raw
         source_cols = list(s_cols_raw.values()) if isinstance(s_cols_raw, dict) else s_cols_raw
         
+        res['source_columns_count'] = len(source_cols)
+        res['target_columns_count'] = len(target_cols)
+        
+        try:
+            res['source_indexes_count'] = source_conn.get_indexes_count(source_schema, source_table) if hasattr(source_conn, 'get_indexes_count') else 0
+            res['target_indexes_count'] = target_conn.get_indexes_count(target_schema, target_table) if hasattr(target_conn, 'get_indexes_count') else 0
+            
+            res['source_constraints_count'] = source_conn.get_constraints_count(source_schema, source_table) if hasattr(source_conn, 'get_constraints_count') else 0
+            res['target_constraints_count'] = target_conn.get_constraints_count(target_schema, target_table) if hasattr(target_conn, 'get_constraints_count') else 0
+        except Exception as e:
+            self.val_logger.logger.error(f"Error fetching structural validation metadata for {target_schema}.{target_table}: {e}")
+            
         pk_cols = self.migrator_tables.select_primary_key({'source_schema_name': source_schema, 'source_table_name': source_table})
         if pk_cols:
             pk_cols_list = [c.strip('" ') for c in pk_cols.split(',')]
@@ -133,6 +164,13 @@ class Validator:
             pk_cols_list = []
 
         try:
+            for s_col, t_col in zip(source_cols, target_cols):
+                s_type = s_col.get('data_type', '').lower()
+                is_num = any(t in s_type for t in ['int', 'number', 'numeric', 'decimal', 'float', 'double', 'real', 'serial'])
+                if is_num and s_col.get('numeric_precision') == 0:
+                    s_col['_force_round_0'] = True
+                    t_col['_force_round_0'] = True
+                    
             if check_counts:
                 migration_limitation = None
                 limitations = self.migrator_tables.get_records_data_migration_limitation(source_table)
@@ -141,6 +179,8 @@ class Validator:
                 
                 s_count = source_conn.get_rows_count(source_schema, source_table, migration_limitation)
                 t_count = target_conn.get_rows_count(target_schema, target_table)
+                res['source_row_count'] = s_count
+                res['target_row_count'] = t_count
                 res['row_logic'] = (s_count == t_count)
                 if not res['row_logic']:
                     res['passed'] = False
@@ -151,11 +191,70 @@ class Validator:
             if check_table_sum:
                 s_sum = source_conn.get_table_checksum(source_schema, source_table, source_cols)
                 t_sum = target_conn.get_table_checksum(target_schema, target_table, target_cols)
+                res['source_table_hash'] = s_sum
+                res['target_table_hash'] = t_sum
                 if s_sum is not None and t_sum is not None:
                     res['table_hash_logic'] = (s_sum == t_sum)
                     if not res['table_hash_logic']:
                         res['passed'] = False
                         res['table_msg'] = f"Fail: Src={s_sum}, Tgt={t_sum}"
+                        
+                        self.val_logger.logger.warning(f"Validator: Table {source_table} hash mismatch. Inspecting columns...")
+                        for i in range(min(len(source_cols), len(target_cols))):
+                            s_col = [source_cols[i]]
+                            t_col = [target_cols[i]]
+                            s_col_sum = source_conn.get_table_checksum(source_schema, source_table, s_col)
+                            t_col_sum = target_conn.get_table_checksum(target_schema, target_table, t_col)
+                            
+                            col_passed = (s_col_sum == t_col_sum)
+                            if (s_count == 0 and t_count != 0) or (t_count == 0 and s_count != 0):
+                                col_passed = False
+                            
+                            s_prec = source_cols[i].get('numeric_precision')
+                            t_prec = target_cols[i].get('numeric_precision')
+                            force_round = source_cols[i].get('_force_round_0', False)
+                            
+                            s_stats = source_conn.get_column_statistics(source_schema, source_table, source_cols[i]['column_name'], source_cols[i].get('data_type', ''), force_round_0=force_round)
+                            t_stats = target_conn.get_column_statistics(target_schema, target_table, target_cols[i]['column_name'], target_cols[i].get('data_type', ''), force_round_0=force_round)
+                            
+                            col_res = {
+                                'source_schema_name': source_schema,
+                                'source_table_name': source_table,
+                                'source_column_name': source_cols[i]['column_name'],
+                                'target_schema_name': target_schema,
+                                'target_table_name': target_table,
+                                'target_column_name': target_cols[i]['column_name'],
+                                'source_data_type': source_cols[i].get('data_type', ''),
+                                'target_data_type': target_cols[i].get('data_type', ''),
+                                'source_precision': s_prec,
+                                'target_precision': t_prec,
+                                'source_hash': s_col_sum,
+                                'target_hash': t_col_sum,
+                                'source_null_count': s_stats.get('null_count'),
+                                'target_null_count': t_stats.get('null_count'),
+                                'source_empty_string_count': s_stats.get('empty_string_count'),
+                                'target_empty_string_count': t_stats.get('empty_string_count'),
+                                'source_min_value': s_stats.get('min_value'),
+                                'target_min_value': t_stats.get('min_value'),
+                                'source_max_value': s_stats.get('max_value'),
+                                'target_max_value': t_stats.get('max_value'),
+                                'source_avg_value': s_stats.get('avg_value'),
+                                'target_avg_value': t_stats.get('avg_value'),
+                                'source_row_count': s_count,
+                                'target_row_count': t_count,
+                                'passed': col_passed
+                            }
+                            
+                            try:
+                                self.migrator_tables.insert_validation_column_result(col_res)
+                            except Exception as e:
+                                self.val_logger.logger.error(f"Error persisting column validation protocol for {target_table}.{source_cols[i]['column_name']}: {e}")
+                                
+                            if not col_passed:
+                                if s_col_sum != t_col_sum:
+                                    self.val_logger.logger.warning(f"Validator: Table {source_table} column {source_cols[i]['column_name']} hash mismatch: Src={s_col_sum}, Tgt={t_col_sum}")
+                                else:
+                                    self.val_logger.logger.warning(f"Validator: Table {source_table} column {source_cols[i]['column_name']} row count mismatch: Src={s_count}, Tgt={t_count}")
                     else:
                         res['table_msg'] = f"Pass: {s_sum}"
                 else:
@@ -212,6 +311,166 @@ class Validator:
             elif check_lob and not pk_cols_list:
                 res['lob_size_msg'] = "Skip: No PKs available"
 
+            # Index Validation
+            try:
+                source_indexes_raw = source_conn.fetch_indexes({'source_table_schema': source_schema, 'source_table_name': source_table, 'source_table_id': None}) if hasattr(source_conn, 'fetch_indexes') else {}
+                source_indexes = list(source_indexes_raw.values()) if isinstance(source_indexes_raw, dict) else source_indexes_raw
+                
+                target_indexes = []
+                try:
+                    if hasattr(target_conn, 'fetch_mapping_target_indexes'):
+                        target_indexes = target_conn.fetch_mapping_target_indexes(target_schema, target_table)
+                except Exception as e:
+                    self.val_logger.logger.error(f"Error calling fetch_mapping_target_indexes: {e}")
+                
+                # Match indexes by columns or primary key status
+                matched_targets = set()
+                
+                for s_idx in source_indexes:
+                    s_name = s_idx.get('index_name')
+                    s_type = s_idx.get('index_type', '')
+                    s_cols = s_idx.get('index_columns', '').replace('"', '').lower()
+                    is_s_pk = 'PRIMARY' in s_type.upper()
+                    
+                    best_match = None
+                    for t_idx in target_indexes:
+                        t_name = t_idx.get('index_name')
+                        if t_name in matched_targets:
+                            continue
+                            
+                        is_t_pk = t_idx.get('is_primary_key', False)
+                        t_def = (t_idx.get('index_def') or t_idx.get('index_columns') or '').lower()
+                        
+                        if is_s_pk and is_t_pk:
+                            best_match = t_idx
+                            break
+                        
+                        if s_cols and s_cols in t_def:
+                            best_match = t_idx
+                            break
+                            
+                    if best_match:
+                        matched_targets.add(best_match.get('index_name'))
+                        t_idx = best_match
+                    else:
+                        t_idx = {}
+                        
+                    idx_res = {
+                        'source_schema_name': source_schema,
+                        'source_table_name': source_table,
+                        'source_index_name': s_idx.get('index_name'),
+                        'target_schema_name': target_schema,
+                        'target_table_name': target_table,
+                        'target_index_name': t_idx.get('index_name'),
+                        'source_index_type': s_idx.get('index_type'),
+                        'target_index_type': t_idx.get('index_type'),
+                        'source_index_columns': s_idx.get('index_columns'),
+                        'target_index_columns': t_idx.get('index_def') or t_idx.get('index_columns'),
+                        'passed': best_match is not None
+                    }
+                    self.migrator_tables.insert_validation_index_result(idx_res)
+                    
+                # Add any unmatched target indexes
+                for t_idx in target_indexes:
+                    if t_idx.get('index_name') not in matched_targets:
+                        idx_res = {
+                            'source_schema_name': source_schema,
+                            'source_table_name': source_table,
+                            'source_index_name': None,
+                            'target_schema_name': target_schema,
+                            'target_table_name': target_table,
+                            'target_index_name': t_idx.get('index_name'),
+                            'source_index_type': None,
+                            'target_index_type': t_idx.get('index_type'),
+                            'source_index_columns': None,
+                            'target_index_columns': t_idx.get('index_def') or t_idx.get('index_columns'),
+                            'passed': False
+                        }
+                        self.migrator_tables.insert_validation_index_result(idx_res)
+            except Exception as e:
+                self.val_logger.logger.error(f"Error validating indexes for {target_table}: {e}")
+
+            # Constraint Validation
+            try:
+                source_constraints_raw = source_conn.fetch_constraints({'source_table_schema': source_schema, 'source_table_name': source_table, 'source_table_id': None}) if hasattr(source_conn, 'fetch_constraints') else {}
+                source_constraints = list(source_constraints_raw.values()) if isinstance(source_constraints_raw, dict) else source_constraints_raw
+                
+                target_constraints = []
+                try:
+                    if hasattr(target_conn, 'fetch_mapping_target_constraints'):
+                        target_constraints_raw = target_conn.fetch_mapping_target_constraints(target_schema, target_table)
+                        target_constraints = [c for c in target_constraints_raw if c.get('constraint_type') not in ('PRIMARY KEY', 'UNIQUE')]
+                except Exception as e:
+                    self.val_logger.logger.error(f"Error calling fetch_mapping_target_constraints: {e}")
+                
+                # Match constraints by columns or primary key status
+                matched_targets = set()
+                
+                for s_con in source_constraints:
+                    s_type = s_con.get('constraint_type', '')
+                    s_cols = s_con.get('constraint_columns', '').replace('"', '').lower()
+                    is_s_pk = 'P' in s_type.upper() or 'PRIMARY' in s_type.upper()
+                    
+                    best_match = None
+                    for t_con in target_constraints:
+                        t_name = t_con.get('constraint_name')
+                        if t_name in matched_targets:
+                            continue
+                            
+                        t_type = t_con.get('constraint_type', '')
+                        is_t_pk = 'P' in t_type.upper() or 'PRIMARY' in t_type.upper()
+                        t_cols = (t_con.get('constraint_def') or t_con.get('constraint_sql') or t_con.get('constraint_columns') or '').lower()
+                        
+                        if is_s_pk and is_t_pk:
+                            best_match = t_con
+                            break
+                            
+                        if s_cols and s_cols in t_cols:
+                            best_match = t_con
+                            break
+                            
+                    if best_match:
+                        matched_targets.add(best_match.get('constraint_name'))
+                        t_con = best_match
+                    else:
+                        t_con = {}
+                        
+                    con_res = {
+                        'source_schema_name': source_schema,
+                        'source_table_name': source_table,
+                        'source_constraint_name': s_con.get('constraint_name'),
+                        'target_schema_name': target_schema,
+                        'target_table_name': target_table,
+                        'target_constraint_name': t_con.get('constraint_name'),
+                        'source_constraint_type': s_con.get('constraint_type'),
+                        'target_constraint_type': t_con.get('constraint_type'),
+                        'source_constraint_columns': s_con.get('constraint_columns'),
+                        'target_constraint_columns': t_con.get('constraint_def') or t_con.get('constraint_sql') or t_con.get('constraint_columns'),
+                        'passed': best_match is not None
+                    }
+                    self.migrator_tables.insert_validation_constraint_result(con_res)
+                    
+                # Add any unmatched target constraints
+                for t_con in target_constraints:
+                    if t_con.get('constraint_name') not in matched_targets:
+                        con_res = {
+                            'source_schema_name': source_schema,
+                            'source_table_name': source_table,
+                            'source_constraint_name': None,
+                            'target_schema_name': target_schema,
+                            'target_table_name': target_table,
+                            'target_constraint_name': t_con.get('constraint_name'),
+                            'source_constraint_type': None,
+                            'target_constraint_type': t_con.get('constraint_type'),
+                            'source_constraint_columns': None,
+                            'target_constraint_columns': t_con.get('constraint_def') or t_con.get('constraint_sql') or t_con.get('constraint_columns'),
+                            'passed': False
+                        }
+                        self.migrator_tables.insert_validation_constraint_result(con_res)
+            except Exception as e:
+                self.val_logger.logger.error(f"Error validating constraints for {target_table}: {e}")
+
+
         except Exception as e:
             self.val_logger.logger.error(f"Validation crash on {res['target_table']}: {e}")
             self.val_logger.logger.error(traceback.format_exc())
@@ -239,19 +498,7 @@ class Validator:
             self.val_logger.logger.warning(f"FAIL: {res['target_table']} failed validation against source {source_schema}.{source_table}. Details: {fail_str}")
 
         try:
-            self.migrator_tables.insert_validation_result({
-                'target_schema_name': target_schema,
-                'target_table_name': target_table,
-                'row_logic': res['row_logic'],
-                'row_msg': res['row_msg'],
-                'table_hash_logic': res['table_hash_logic'],
-                'table_msg': res['table_msg'],
-                'row_hash_logic': res['row_hash_logic'],
-                'row_hash_msg': res['row_hash_msg'],
-                'lob_size_logic': res['lob_size_logic'],
-                'lob_size_msg': res['lob_size_msg'],
-                'passed': res['passed']
-            })
+            self.migrator_tables.insert_validation_table_result(res)
         except Exception as e:
             self.val_logger.logger.error(f"Error persisting validation protocol for {res['target_table']}: {e}")
             self.val_logger.logger.error(traceback.format_exc())

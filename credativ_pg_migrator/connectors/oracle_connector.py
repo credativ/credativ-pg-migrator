@@ -477,6 +477,8 @@ class OracleConnector(DatabaseConnector):
                             'migrator_tables': migrator_tables,
                             'insert_columns': insert_columns,
                             'insert_values': settings.get('insert_values'),
+                            'data_conflict_action': data_conflict_action,
+                            'primary_key_columns': primary_key_columns,
                         })
                         total_inserted_rows += inserted_rows
                         inserting_end_time = time.time()
@@ -642,7 +644,6 @@ class OracleConnector(DatabaseConnector):
                 ai.index_name
         """
         try:
-            self.connect()
             cursor = self.connection.cursor()
             cursor.execute(index_query)
             for row in cursor.fetchall():
@@ -698,9 +699,7 @@ class OracleConnector(DatabaseConnector):
                                     self.config_parser.print_log_message('DEBUG', f"oracle_connector: fetch_indexes: Updated index {index_info['index_name']} with hidden column {col_name} and default value {col_default}")
                 except Exception as e:
                     self.config_parser.print_log_message('ERROR', f"oracle_connector: fetch_indexes: Error fetching hidden columns for table {source_table_schema}.{source_table_name}: {e}")
-
             cursor.close()
-            self.disconnect()
             return table_indexes
 
         except Exception as e:
@@ -710,6 +709,23 @@ class OracleConnector(DatabaseConnector):
 
     def get_create_index_sql(self, settings):
         return ""
+
+    def get_indexes_count(self, schema_name: str, table_name: str) -> int:
+        query = f"""
+            SELECT count(*)
+            FROM all_indexes
+            WHERE table_owner = '{schema_name.upper()}'
+            AND table_name = '{table_name.upper()}'
+        """
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            count = cursor.fetchone()[0]
+            cursor.close()
+            return count
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"oracle_connector: get_indexes_count: Error: {e}")
+            return -1
 
     def fetch_constraints(self, settings):
         source_table_id = settings['source_table_id']
@@ -757,7 +773,6 @@ class OracleConnector(DatabaseConnector):
                 fk_cons.constraint_name
         """
         try:
-            self.connect()
             cursor = self.connection.cursor()
             cursor.execute(constraints_query)
             for row in cursor.fetchall():
@@ -789,7 +804,6 @@ class OracleConnector(DatabaseConnector):
                 order_num += 1
 
             cursor.close()
-            self.disconnect()
             return table_constraints
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"oracle_connector: fetch_constraints: Error executing query: {constraints_query}")
@@ -798,6 +812,24 @@ class OracleConnector(DatabaseConnector):
 
     def get_create_constraint_sql(self, settings):
         return ""
+
+    def get_constraints_count(self, schema_name: str, table_name: str) -> int:
+        query = f"""
+            SELECT count(*)
+            FROM all_constraints
+            WHERE owner = '{schema_name.upper()}'
+            AND table_name = '{table_name.upper()}'
+            AND (constraint_type IN ('P', 'U', 'R') OR (constraint_type = 'C' AND generated = 'USER NAME'))
+        """
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            count = cursor.fetchone()[0]
+            cursor.close()
+            return count
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"oracle_connector: get_constraints_count: Error: {e}")
+            return -1
 
     def get_aliases(self, settings):
         source_schema_name = settings.get('source_schema_name')
@@ -1227,31 +1259,29 @@ class OracleConnector(DatabaseConnector):
         return extracted_default_value
 
     def get_table_checksum(self, schema_name: str, table_name: str, columns: list):
-        hash_parts = []
-        for i, col in enumerate(columns):
+        if not columns:
+            return None
+            
+        cols_list = []
+        for col in columns:
             dtype = col.get('data_type', '').lower()
             if any(x in dtype for x in ['lob', 'bfile', 'xml', 'json', 'long']):
                 continue
-            hash_parts.append(f"ORA_HASH(COALESCE(TO_CHAR(\"{col['column_name']}\"), ''), 4294967295, {i+1})")
+            if dtype == 'date':
+                cols_list.append(f"CASE WHEN \"{col['column_name']}\" IS NOT NULL THEN TO_CHAR(\"{col['column_name']}\", 'YYYY-MM-DD HH24:MI:SS') || '.000000' ELSE NULL END")
+            elif 'time' in dtype:
+                cols_list.append(f"TO_CHAR(\"{col['column_name']}\", 'YYYY-MM-DD HH24:MI:SS.FF6')")
+            elif col.get('_force_round_0'):
+                cols_list.append(f"ROUND(\"{col['column_name']}\", 0)")
+            else:
+                cols_list.append(f'"{col["column_name"]}"')
             
-        if not hash_parts:
+        if not cols_list:
             return None
             
-        cols_concat = " + ".join(hash_parts)
-        
-        query = f'SELECT sum({cols_concat}) FROM "{schema_name.upper()}"."{table_name.upper()}"'
-        try:
-            self.connect()
-            cursor = self.connection.cursor()
-            cursor.execute(query)
-            result = cursor.fetchone()[0]
-            cursor.close()
-            self.disconnect()
-            return result
-        except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"oracle_connector: get_table_checksum: Error executing query: {query}")
-            self.config_parser.print_log_message('ERROR', e)
-            return None
+        cols_str = ", ".join(cols_list)
+        query = f'SELECT {cols_str} FROM "{schema_name.upper()}"."{table_name.upper()}"'
+        return self._compute_python_table_checksum(query)
 
     def get_random_pks(self, schema_name: str, table_name: str, pk_columns: list, sample_size: int):
         if not pk_columns:
@@ -1274,18 +1304,27 @@ class OracleConnector(DatabaseConnector):
             return []
 
     def get_row_checksums(self, schema_name: str, table_name: str, pk_columns: list, pk_values_list: list, columns: list):
-        hash_parts = []
-        for i, col in enumerate(columns):
+        if not columns or not pk_columns or not pk_values_list:
+            return {}
+            
+        cols_list = []
+        for col in columns:
             dtype = col.get('data_type', '').lower()
             if any(x in dtype for x in ['lob', 'bfile', 'xml', 'json', 'long']):
                 continue
-            hash_parts.append(f"ORA_HASH(COALESCE(TO_CHAR(\"{col['column_name']}\"), ''), 4294967295, {i+1})")
+            if dtype == 'date':
+                cols_list.append(f"CASE WHEN \"{col['column_name']}\" IS NOT NULL THEN TO_CHAR(\"{col['column_name']}\", 'YYYY-MM-DD HH24:MI:SS') || '.000000' ELSE NULL END")
+            elif 'time' in dtype:
+                cols_list.append(f"TO_CHAR(\"{col['column_name']}\", 'YYYY-MM-DD HH24:MI:SS.FF6')")
+            elif col.get('_force_round_0'):
+                cols_list.append(f"ROUND(\"{col['column_name']}\", 0)")
+            else:
+                cols_list.append(f'"{col["column_name"]}"')
             
-        if not hash_parts:
+        if not cols_list:
             return {}
             
-        cols_concat = " + ".join(hash_parts)
-        
+        cols_str = ", ".join(cols_list)
         pk_cols_str = ", ".join([f'"{c}"' for c in pk_columns])
         
         in_values = []
@@ -1306,24 +1345,8 @@ class OracleConnector(DatabaseConnector):
         if len(pk_columns) == 1:
             where_clause = f"{pk_cols_str} IN ({', '.join([v.strip('()') for v in in_values])})"
             
-        query = f'SELECT {pk_cols_str}, ({cols_concat}) FROM "{schema_name.upper()}"."{table_name.upper()}" WHERE {where_clause}'
-        
-        checksums = {}
-        try:
-            self.connect()
-            cursor = self.connection.cursor()
-            cursor.execute(query)
-            for row in cursor.fetchall():
-                pk_tuple = tuple(row[:len(pk_columns)])
-                pk_key = pk_tuple[0] if len(pk_tuple) == 1 else pk_tuple
-                checksums[pk_key] = row[-1]
-            cursor.close()
-            self.disconnect()
-            return checksums
-        except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"oracle_connector: get_row_checksums: Error executing query: {query}")
-            self.config_parser.print_log_message('ERROR', e)
-            return {}
+        query = f'SELECT {pk_cols_str}, {cols_str} FROM "{schema_name.upper()}"."{table_name.upper()}" WHERE {where_clause}'
+        return self._compute_python_row_checksums(query, len(pk_columns))
 
     def get_lob_sizes(self, schema_name: str, table_name: str, pk_columns: list, pk_values_list: list, lob_columns: list):
         if not lob_columns or not pk_columns or not pk_values_list:

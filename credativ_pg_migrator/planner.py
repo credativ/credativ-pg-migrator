@@ -1600,6 +1600,9 @@ class Planner:
             target_cols_raw[t['table_name']] = cols
             target_columns_map[t['table_name']] = [{'name': c['column_name'], **c} for c in cols.values()]
 
+        heuristics = self.config_parser.get_mapping_workflow_heuristics()
+        migration_settings = self.config_parser.get_migration_settings()
+        
         settings = {
             'config_parser': self.config_parser,
             'source_tables': source_tables,
@@ -1608,10 +1611,10 @@ class Planner:
             'target_internal': {},
             'source_columns_map': source_columns_map,
             'target_columns_map': target_columns_map,
-            'column_prefixes': self.config_parser.get_migration_settings().get('column_prefixes', ["gov_", "log_"]),
-            'table_normalization_rules': self.config_parser.get_migration_settings().get('table_normalization_rules', ['lowercase', 'strip_trailing_numbers']),
-            'column_normalization_rules': self.config_parser.get_migration_settings().get('column_normalization_rules', ['lowercase', 'strip_trailing_numbers']),
-            'normalization_settings': self.config_parser.get_migration_settings().get('normalization_settings', {})
+            'column_prefixes': heuristics.get('column_prefixes_to_strip', migration_settings.get('column_prefixes', ["gov_", "log_"])),
+            'table_normalization_rules': heuristics.get('table_normalization_rules', migration_settings.get('table_normalization_rules', ['lowercase', 'strip_trailing_numbers'])),
+            'column_normalization_rules': heuristics.get('column_normalization_rules', migration_settings.get('column_normalization_rules', ['lowercase', 'strip_trailing_numbers'])),
+            'normalization_settings': heuristics.get('normalization_settings', migration_settings.get('normalization_settings', {}))
         }
 
         internal_mappings_table = self.config_parser.get_migration_settings().get('internal_mappings_table')
@@ -1654,8 +1657,112 @@ class Planner:
             except Exception as e:
                 self.config_parser.print_log_message('DEBUG', f"planner: mapping_match_tables: Failed to fetch target internal mappings: {e}")
 
+        forced_mappings = self.config_parser.get_forced_table_mappings()
+        forced_pairs = []
+        
+        if forced_mappings:
+            import re
+            for f in forced_mappings:
+                if 'source' in f and 'target' in f:
+                    src = f['source']
+                    tgt = f['target']
+                    if src in source_tables and tgt in target_tables:
+                        source_cols = source_columns_map.get(src, [])
+                        target_cols = target_columns_map.get(tgt, [])
+                        jaccard = match_schemas.calculate_enhanced_jaccard(source_cols, target_cols, heuristics.get('column_prefixes_to_strip', migration_settings.get('column_prefixes', ["gov_", "log_"])), heuristics.get('column_normalization_rules', migration_settings.get('column_normalization_rules', ['lowercase', 'strip_trailing_numbers'])), heuristics.get('normalization_settings', migration_settings.get('normalization_settings', {})))
+                        score = int(jaccard * 100)
+                        forced_pairs.append({'source_table': src, 'target_table': tgt, 'method': 'Forced Exact', 'details': f"Mapped explicitly to {tgt}", 'stats': {'jaccard': jaccard}, 'score': score, 'is_forced_mapping': True})
+                elif 'source_regex' in f and 'target' in f:
+                    src_re = re.compile(f['source_regex'])
+                    for src in list(source_tables):
+                        if src_re.match(src):
+                            tgt = src_re.sub(f['target'], src)
+                            if tgt in target_tables:
+                                source_cols = source_columns_map.get(src, [])
+                                target_cols = target_columns_map.get(tgt, [])
+                                jaccard = match_schemas.calculate_enhanced_jaccard(source_cols, target_cols, heuristics.get('column_prefixes_to_strip', migration_settings.get('column_prefixes', ["gov_", "log_"])), heuristics.get('column_normalization_rules', migration_settings.get('column_normalization_rules', ['lowercase', 'strip_trailing_numbers'])), heuristics.get('normalization_settings', migration_settings.get('normalization_settings', {})))
+                                score = int(jaccard * 100)
+                                forced_pairs.append({'source_table': src, 'target_table': tgt, 'method': 'Forced Regex Sub', 'details': f"Mapped via regex {f['source_regex']}", 'stats': {'jaccard': jaccard}, 'score': score, 'is_forced_mapping': True})
+
+        for pair in forced_pairs:
+            if pair['source_table'] in source_tables:
+                source_tables.remove(pair['source_table'])
+            if pair['target_table'] in target_tables:
+                target_tables.remove(pair['target_table'])
+                
+        settings['source_tables'] = source_tables
+        settings['target_tables'] = target_tables
+
         match_result = match_schemas.match_tables(settings)
-        self.config_parser.print_log_message('INFO', f"planner: mapping_match_tables: Found {len(match_result['matched_pairs'])} matched tables.")
+        match_result['matched_pairs'] = forced_pairs + match_result.get('matched_pairs', [])
+        
+        self.config_parser.print_log_message('INFO', f"planner: mapping_match_tables: Found {len(match_result['matched_pairs'])} matched tables ({len(forced_pairs)} forced).")
+
+        import difflib
+        
+        def get_col_match_stats(cols1, cols2):
+            rules = settings.get('column_normalization_rules')
+            norm_settings = settings.get('normalization_settings')
+            names1 = set(match_schemas.normalize_name(c.get('name', ''), rules, norm_settings) for c in cols1)
+            names2 = set(match_schemas.normalize_name(c.get('name', ''), rules, norm_settings) for c in cols2)
+            return len(names1), len(names2), len(names1.intersection(names2))
+
+        unmatched_objs = []
+        for t in match_result.get('unmatched_source', []):
+            try:
+                self.source_connection.connect()
+                rows = self.source_connection.get_rows_count(self.source_schema_name, t, None)
+                self.source_connection.disconnect()
+            except Exception as e:
+                self.config_parser.print_log_message('ERROR', f"planner: mapping_match_tables: Failed to fetch row count for unmapped source table {t}: {e}")
+                rows = -1
+                
+            similarities = []
+            for target_t in target_tables:
+                ratio = difflib.SequenceMatcher(None, t.lower(), target_t.lower()).ratio()
+                similarities.append((ratio, target_t))
+            similarities.sort(reverse=True)
+            
+            top_5 = []
+            for ratio, target_t in similarities[:5]:
+                len_src, len_tgt, intersection = get_col_match_stats(
+                    source_columns_map.get(t, []), 
+                    target_columns_map.get(target_t, [])
+                )
+                top_5.append(f"{target_t} (name match: {ratio*100:.1f}%, cols match: {intersection} [src: {len_src}, tgt: {len_tgt}])")
+                
+            info_json = json.dumps({'top_5_suggestions': top_5})
+            
+            unmatched_objs.append({'object_type': 'table', 'side': 'source', 'object_name': t, 'row_count': rows, 'info': info_json})
+            
+        for t in match_result.get('unmatched_target', []):
+            try:
+                self.target_connection.connect()
+                rows = self.target_connection.get_rows_count(self.target_schema_name, t, None)
+                self.target_connection.disconnect()
+            except Exception as e:
+                self.config_parser.print_log_message('ERROR', f"planner: mapping_match_tables: Failed to fetch row count for unmapped target table {t}: {e}")
+                rows = -1
+                
+            similarities = []
+            for source_t in source_tables:
+                ratio = difflib.SequenceMatcher(None, t.lower(), source_t.lower()).ratio()
+                similarities.append((ratio, source_t))
+            similarities.sort(reverse=True)
+            
+            top_5 = []
+            for ratio, source_t in similarities[:5]:
+                len_tgt, len_src, intersection = get_col_match_stats(
+                    target_columns_map.get(t, []), 
+                    source_columns_map.get(source_t, [])
+                )
+                top_5.append(f"{source_t} (name match: {ratio*100:.1f}%, cols match: {intersection} [src: {len_src}, tgt: {len_tgt}])")
+                
+            info_json = json.dumps({'top_5_suggestions': top_5})
+                
+            unmatched_objs.append({'object_type': 'table', 'side': 'target', 'object_name': t, 'row_count': rows, 'info': info_json})
+        target_to_source_table = {pair['target_table']: pair['source_table'] for pair in match_result['matched_pairs']}
+        target_col_to_source_col = {}
 
         for pair in match_result['matched_pairs']:
             source_t = pair['source_table']
@@ -1711,7 +1818,8 @@ class Planner:
                 'source_table_rows_all': source_table_rows_all,
                 'source_table_rows_limited': source_table_rows_limited,
                 'target_table_rows': target_table_rows,
-                'info': info_json # Use the already prepared info_json
+                'info': info_json, # Use the already prepared info_json
+                'is_forced_mapping': mapped_table.get('is_forced_mapping', False)
             })
 
             col_settings = {
@@ -1724,6 +1832,11 @@ class Planner:
             }
             col_match_res = match_schemas.match_columns(col_settings)
             self.config_parser.print_log_message('DEBUG', f"planner: mapping_match_tables: Matched {len(col_match_res['matched_columns'])} columns for pair '{source_t}' -> '{target_t}'")
+
+            for c in col_match_res.get('unmatched_source', []):
+                unmatched_objs.append({'object_type': 'column', 'side': 'source', 'parent_object': source_t, 'object_name': c.get('name', '')})
+            for c in col_match_res.get('unmatched_target', []):
+                unmatched_objs.append({'object_type': 'column', 'side': 'target', 'parent_object': target_t, 'object_name': c.get('name', '')})
 
             source_columns_dict = {}
             target_columns_dict = {}
@@ -1739,6 +1852,8 @@ class Planner:
                 target_col = target_c
                 match_type = cpair['method']
 
+                target_col_to_source_col[(target_t, target_column_name)] = source_column_name
+
                 self.migrator_tables.insert_mapping_columns({
                     'source_schema_name': source_schema_name,
                     'source_table_name': source_t, # Use source_t from the outer loop
@@ -1750,7 +1865,9 @@ class Planner:
                     'target_ordinal_number': target_col.get('ordinal_position', 0) if target_col else 0,
                     'source_data_type': source_col.get('data_type', '') if source_col else '',
                     'target_data_type': target_col.get('data_type', '') if target_col else '',
-                    'match_type': match_type
+                    'match_type': match_type,
+                    'source_is_identity': source_col.get('is_identity') in ('YES', True) if source_col else False,
+                    'target_is_identity': target_col.get('is_identity') in ('YES', True) if target_col else False
                 })
 
                 source_columns_dict[idx] = source_c
@@ -1776,7 +1893,40 @@ class Planner:
             target_table_rows = self.target_connection.get_rows_count(self.target_schema_name, target_t)
             self.target_connection.disconnect()
 
-            if self.config_parser.get_target_db_type() == 'postgresql':
+
+
+            self.migrator_tables.insert_tables({
+                'source_schema_name': self.source_schema_name,
+                'source_table_name': source_t,
+                'source_table_id': source_t_info.get('id', source_t),
+                'source_columns': source_columns_dict,
+                'source_table_rows_all': source_table_rows_all,
+                'source_table_rows_limited': source_table_rows_limited,
+                'source_table_description': '',
+                'source_table_sql': getattr(source_t_info, 'source_table_sql', ''),
+                'target_schema_name': self.target_schema_name,
+                'target_table_name': target_t,
+                'target_alias_name': '',
+                'target_columns': target_columns_dict,
+                'target_table_rows': target_table_rows,
+                'target_table_sql': '',
+                'table_comment': source_t_info.get('comment', ''),
+                'partitioned': False,
+                'partitioned_by': '',
+                'partitioning_columns': '',
+                'create_partitions_sql': ''
+            })
+
+        self.migrator_tables.insert_mapping_unmatched_objects(unmatched_objs)
+
+        if self.config_parser.get_target_db_type() == 'postgresql':
+            self.config_parser.print_log_message('INFO', "planner: mapping_match_tables: Fetching target indexes, constraints and sequences for all target tables")
+            self.target_connection.connect()
+            if self.config_parser.get_source_db_type() == 'postgresql':
+                self.source_connection.connect()
+
+            for _, target_table_info in target_tables_raw.items():
+                target_t = target_table_info['table_name']
                 self.config_parser.print_log_message('DEBUG', f"planner: mapping_match_tables: Fetching target indexes, constraints and sequences for PG table '{target_t}'")
                 target_indexes = self.target_connection.fetch_mapping_target_indexes(self.target_schema_name, target_t)
                 for idx_info in target_indexes:
@@ -1799,8 +1949,26 @@ class Planner:
                         'constraint_def': col_info['constraint_def']
                     })
 
+                source_t = target_to_source_table.get(target_t)
+                source_sequences = []
+                if source_t and self.config_parser.get_source_db_type() == 'postgresql':
+                    source_sequences = self.source_connection.fetch_mapping_target_sequences(self.source_schema_name, source_t)
+
                 target_sequences = self.target_connection.fetch_mapping_target_sequences(self.target_schema_name, target_t)
                 for seq_info in target_sequences:
+                    source_sequence_schema_name = None
+                    source_sequence_name = None
+
+                    if seq_info.get('used_in_identity') and seq_info.get('column_name'):
+                        target_col = seq_info['column_name']
+                        source_col = target_col_to_source_col.get((target_t, target_col))
+                        if source_col:
+                            for s_seq in source_sequences:
+                                if s_seq.get('used_in_identity') and s_seq.get('column_name') == source_col:
+                                    source_sequence_schema_name = s_seq.get('sequence_schema_name')
+                                    source_sequence_name = s_seq.get('sequence_name')
+                                    break
+
                     self.migrator_tables.insert_mapping_target_sequences({
                         'target_schema_name': self.target_schema_name,
                         'target_table_name': target_t,
@@ -1810,29 +1978,13 @@ class Planner:
                         'used_in_identity': seq_info['used_in_identity'],
                         'used_in_trigger': seq_info['used_in_trigger'],
                         'trigger_name': seq_info['trigger_name'],
-                        'column_name': seq_info['column_name']
+                        'column_name': seq_info['column_name'],
+                        'source_sequence_schema_name': source_sequence_schema_name,
+                        'source_sequence_name': source_sequence_name
                     })
-
-            self.migrator_tables.insert_tables({
-                'source_schema_name': self.source_schema_name,
-                'source_table_name': source_t,
-                'source_table_id': source_t_info.get('id', source_t),
-                'source_columns': source_columns_dict,
-                'source_table_rows': source_table_rows,
-                'source_table_description': '',
-                'source_table_sql': getattr(source_t_info, 'source_table_sql', ''),
-                'target_schema_name': self.target_schema_name,
-                'target_table_name': target_t,
-                'target_alias_name': '',
-                'target_columns': target_columns_dict,
-                'target_table_rows': target_table_rows,
-                'target_table_sql': '',
-                'table_comment': source_t_info.get('comment', ''),
-                'partitioned': False,
-                'partitioned_by': '',
-                'partitioning_columns': '',
-                'create_partitions_sql': ''
-            })
+            if self.config_parser.get_source_db_type() == 'postgresql':
+                self.source_connection.disconnect()
+            self.target_connection.disconnect()
 
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

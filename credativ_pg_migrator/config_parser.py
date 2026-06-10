@@ -254,6 +254,12 @@ class ConfigParser:
     def get_summary_top_anonymized_tables(self):
         return self.get_summary_config().get('top_anonymized_tables', 5)
 
+    def get_mapping_report_filename(self):
+        mapping_workflow = self.config.get('mapping_workflow', {}).get('workflow_settings', {})
+        if 'report_filename' in mapping_workflow:
+            return mapping_workflow.get('report_filename')
+        return self.config.get('migration', {}).get('mapping_report_filename')
+
     def get_summary_top_anonymized_columns(self):
         return self.get_summary_config().get('top_anonymized_columns', 5)
 
@@ -289,8 +295,20 @@ class ConfigParser:
         return self.get_workflow() == 'anonymization'
 
     def get_suspend_indexes_constraints(self):
+        mapping_workflow = self.config.get('mapping_workflow', {}).get('workflow_settings', {})
+        if 'suspend_indexes_constraints' in mapping_workflow:
+            return mapping_workflow.get('suspend_indexes_constraints')
         settings = self.get_migration_settings()
         return settings.get('suspend_indexes_constraints', True)
+
+    def get_mapping_workflow_heuristics(self):
+        return self.config.get('mapping_workflow', {}).get('heuristics', {})
+
+    def get_forced_table_mappings(self):
+        return self.config.get('mapping_workflow', {}).get('forced_table_mappings', [])
+
+    def get_forced_column_mappings(self):
+        return self.config.get('mapping_workflow', {}).get('forced_column_mappings', [])
 
     def get_use_aliases_as_target_names(self):
         settings = self.get_migration_settings()
@@ -568,14 +586,26 @@ class ConfigParser:
             return []
 
     ## Validator
-    def get_protocol_name_validation(self):
-        return f"{self.get_protocol_name()}_validation"
+    def get_validation_tables_name(self):
+        return "validation_tables"
+
+    def get_validation_columns_name(self):
+        return "validation_columns"
+
+    def get_validation_indexes_name(self):
+        return "validation_indexes"
+
+    def get_validation_constraints_name(self):
+        return "validation_constraints"
 
     def get_validator_config(self):
         return self.config.get('validator', {})
 
     def get_validator_workers(self):
         return int(self.get_validator_config().get('workers', 4))
+
+    def get_validator_report_filename(self):
+        return self.get_validator_config().get('report_filename', None)
 
     def is_validation_row_counts_enabled(self):
         return self.get_validator_config().get('check_row_counts', True)

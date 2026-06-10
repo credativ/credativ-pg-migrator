@@ -21,6 +21,7 @@ import traceback
 from tabulate import tabulate
 import time
 import datetime
+import sqlglot
 import jaydebeapi
 import pyodbc
 
@@ -75,7 +76,24 @@ class MySQLConnector(DatabaseConnector):
         """ Returns a dictionary of SQL functions mapping for the target database """
         target_db_type = settings['target_db_type']
         if target_db_type == 'postgresql':
-            return {}
+            return {
+                'ifnull(': 'coalesce(',
+                'isnull(': 'coalesce(',
+                'sysdate()': 'current_timestamp',
+                'now()': 'current_timestamp',
+                'current_date()': 'current_date',
+                'current_time()': 'current_time',
+                'length(': 'length(',
+                'concat(': 'concat(',
+                'substring(': 'substring(',
+                'instr(': 'strpos(',
+                'replace(': 'replace(',
+                'upper(': 'upper(',
+                'lower(': 'lower(',
+                'ltrim(': 'ltrim(',
+                'rtrim(': 'rtrim(',
+                'space(': "repeat(' ', ",
+            }
         else:
             self.config_parser.print_log_message('ERROR', f"mysql_connector: get_sql_functions_mapping: Unsupported target database type: {target_db_type}")
 
@@ -815,11 +833,23 @@ class MySQLConnector(DatabaseConnector):
 
     def convert_view_code(self, settings: dict):
         view_code = settings['view_code']
+        
+        target_db_type = settings.get('target_db_type', self.config_parser.get_target_db_type())
+        if target_db_type == 'postgresql':
+            try:
+                transpiled = sqlglot.transpile(view_code, read="mysql", write="postgres")
+                if transpiled:
+                    view_code = transpiled[0]
+            except Exception as e:
+                self.config_parser.print_log_message('WARNING', f"mysql_connector: convert_view_code: sqlglot transpilation failed: {e}")
+
         converted_view_code = view_code
         converted_view_code = converted_view_code.replace('`', '"')
         converted_view_code = converted_view_code.replace(f'''"{settings['source_schema_name']}".''', f'''"{settings['target_schema_name']}".''')
         converted_view_code = converted_view_code.replace(f'''{settings['source_schema_name']}.''', f'''"{settings['target_schema_name']}".''')
         converted_view_code = converted_view_code.replace('""', '"')
+        
+        converted_view_code = self.apply_sql_functions_mapping(converted_view_code, settings)
         return converted_view_code
 
     def get_sequence_current_value(self, sequence_id: int):

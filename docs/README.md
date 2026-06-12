@@ -129,7 +129,7 @@ sudo apt-get install credativ-pg-migrator
 The tool supports connecting to source databases using multiple strategies depending on the engine:
 - **ODBC**: via `pyodbc` and system ODBC drivers.
 - **JDBC**: via `jaydebeapi` and JDBC `.jar` files.
-- **Native Python drivers**: via engine-specific modules (e.g., `ibm_db`, `cx_Oracle`, `psycopg2`).
+- **Native Python drivers**: via engine-specific modules (e.g., `ibm_db`, `oracledb`, `psycopg2`).
 - **DDL Parsing (Offline)**: Parses `.sql` schema files offline without an active network connection to the source database.
 
 Which option is used is controlled in the YAML config for that source. At minimum specify:
@@ -153,7 +153,7 @@ IBM DB2 is supported via two fundamentally different connectors, heavily dependi
 
 ### 4.3 Oracle
 - **Mode**: Native Connection
-- **Python Module**: `cx_Oracle`
+- **Python Module**: `oracledb`
 - **Configuration**: Set `connectivity: "native"`. Configures natively via Oracle DSN strings. Supports `SYSDBA` connections when the username is `SYS`.
 
 ### 4.4 PostgreSQL

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.16.0rc1 - 2026.06.12
+
+- 2026.06.12
+
+  - Feature - Oracle: Replaced outdated `cx_Oracle` library with the modern `python-oracledb` library. Default operation now uses Thin mode, dropping the dependency on Oracle Instant Client libraries. Added `oracle_thick_mode` parameter to `config_sample.yaml` for fallback compatibility.
+  - Feature - Validation: Made validator batch size configurable in the config_sample.yaml file.
+
 ## 0.15.0rc1 - 2026.05.29
 
 - 2026.06.09

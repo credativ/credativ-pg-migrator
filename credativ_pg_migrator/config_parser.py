@@ -130,6 +130,14 @@ class ConfigParser:
         """
         return self.config['source'].get('db_locale', 'en_US.utf8')
 
+    def get_oracle_thick_mode(self):
+        """
+        Get the thick mode setting for the Oracle source connector.
+        If true, the Oracle Client libraries will be required.
+        Defaults to False (Thin mode).
+        """
+        return self.config['source'].get('oracle_thick_mode', False)
+
     def get_source_client_locale(self):
         """
         In this moment method is only prepared for future use.
@@ -603,6 +611,9 @@ class ConfigParser:
 
     def get_validator_workers(self):
         return int(self.get_validator_config().get('workers', 4))
+
+    def get_validator_batch_size(self):
+        return int(self.get_validator_config().get('batch_size', 10000))
 
     def get_validator_report_filename(self):
         return self.get_validator_config().get('report_filename', None)

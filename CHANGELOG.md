@@ -32,6 +32,8 @@
 - 2026.06.12
 
   - Fix - Sybase ASE Connector: Fixed parsing of explicit `RETURN <value>` statements in stored procedures and explicit `RETURNS <type>` declarations in functions to accurately enforce the correct return data types within the generated PostgreSQL headers.
+  - Feature - Oracle: Replaced outdated `cx_Oracle` library with the modern `python-oracledb` library. Default operation now uses Thin mode, dropping the dependency on Oracle Instant Client libraries. Added `oracle_thick_mode` parameter to `config_sample.yaml` for fallback compatibility.
+  - Feature - Validation: Made validator batch size configurable in the config_sample.yaml file.
 
 - 2026.06.09
 

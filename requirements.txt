@@ -5,5 +5,4 @@ pandas
 pyodbc
 tabulate
 sqlglot
-PyQt6
 ruamel.yaml

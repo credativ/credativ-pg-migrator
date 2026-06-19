@@ -35,7 +35,7 @@ migrator:
   schema: "migration"
 
 # source database connection
-# type: "informix", "sybase_ase", "mssql", "ibm_db2_luw", "ibm_db2_zos", "mysql", "sql_anywhere", "postgresql", "oracle"
+# type: "informix", "sybase_ase", "mssql", "ibm_db2_luw", "ibm_db2_zos", "mysql", "mariadb", "sql_anywhere", "postgresql", "oracle"
 source:
   type: "sybase_ase"
   host: "localhost"
@@ -58,9 +58,15 @@ source:
   jdbc:
     driver: "com.sybase.jdbc4.jdbc.SybDriver"
     libraries: "../lib/jdbc/jconn4.jar"
+    # For MariaDB:
+    # driver: "org.mariadb.jdbc.Driver"
+    # libraries: "../lib/jdbc/mariadb-java-client.jar"
   odbc:
     driver: 'FreeTDS'
     libraries: "/usr/lib/x86_64-linux-gnu/odbc/libtdsodbc.so"
+    # For MariaDB:
+    # driver: 'MariaDB ODBC 3.1 Driver'
+    # libraries: "/usr/lib/x86_64-linux-gnu/odbc/libmaodbc.so"
   ddl:
     path: "/path/to/ddl/directory" # either directory, or directory with mask for files or one specific file - currently no placeholders are supported here
   # system catalog is used only for some database

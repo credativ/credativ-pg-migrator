@@ -2,6 +2,10 @@
 
 ## 0.16.0rc1 - 2026.06.12
 
+- 2026.06.19
+
+  - Feature - MariaDB: Added a dedicated native MariaDB connector (`mariadb_connector.py`) using the `mariadb` Python module instead of `mysql-connector-python` to resolve licensing and compliance concerns. Added explicit JDBC and ODBC configuration examples for MariaDB in `config_sample.yaml`.
+
 - 2026.06.12
 
   - Feature - Oracle: Replaced outdated `cx_Oracle` library with the modern `python-oracledb` library. Default operation now uses Thin mode, dropping the dependency on Oracle Instant Client libraries. Added `oracle_thick_mode` parameter to `config_sample.yaml` for fallback compatibility.

@@ -1,6 +1,15 @@
 credativ-pg-migrator Releases
 =============================
 
+0.15.0 - 09.06.2026
+-------------------
+
+* Comprehensive Validation upgrades: Column-level checksums, cross-engine Python hashing, structural validation, and detailed side-by-side reporting
+* New Anonymization workflow: Standalone module for data masking using Python libraries or PostgreSQL extensions
+* Major enhancements to IBM Db2 LUW connector: Deep translation of views, constraints, triggers, and sequences to PostgreSQL equivalents
+* Enhancements in Mapping workflow: Forced Table Mappings, intelligent name matching for unmapped tables, and identity sequence mapping
+* Refined T-SQL Parser for accurate procedure and trigger conversion, plus numerous stability and reporting fixes across all connectors
+
 0.14.0 - 20.05.2026
 -------------------
 
@@ -9,7 +18,7 @@ credativ-pg-migrator Releases
   Improved replacement of native SQL functions
 * Mapping Workflow enhancements, including explicit `data_conflict_action` rules (`replace`, `merge_keep_target`, etc.)
   Enhanced configuration management, natively accepting arrays and regex patterns for table scoping directives
-  
+
 0.13.0 - 20.04.2026
 -------------------
 

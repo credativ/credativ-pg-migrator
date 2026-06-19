@@ -70,6 +70,7 @@ class MigratorConstants:
             'informix': 'credativ_pg_migrator.connectors.informix_connector:InformixConnector',
             'mssql': 'credativ_pg_migrator.connectors.ms_sql_connector:MsSQLConnector',
             'mysql': 'credativ_pg_migrator.connectors.mysql_connector:MySQLConnector',
+            'mariadb': 'credativ_pg_migrator.connectors.mariadb_connector:MariaDBConnector',
             'oracle': 'credativ_pg_migrator.connectors.oracle_connector:OracleConnector',
             'sql_anywhere': 'credativ_pg_migrator.connectors.sql_anywhere_connector:SQLAnywhereConnector',
             'sybase_ase': 'credativ_pg_migrator.connectors.sybase_ase_connector:SybaseASEConnector'

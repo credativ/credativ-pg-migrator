@@ -4,6 +4,12 @@
 
 - 2026.06.29
 
+- 2026.06.19
+
+  - Feature - MariaDB: Added a dedicated native MariaDB connector (`mariadb_connector.py`) using the `mariadb` Python module instead of `mysql-connector-python` to resolve licensing and compliance concerns. Added explicit JDBC and ODBC configuration examples for MariaDB in `config_sample.yaml`.
+
+- 2026.06.12
+
   - Fix - Sybase ASE Connector: Fixed parsing of explicit `RETURN <value>` statements in stored procedures and explicit `RETURNS <type>` declarations in functions to accurately enforce the correct return data types within the generated PostgreSQL headers.
 
 - 2026.06.09

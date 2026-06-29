@@ -1256,9 +1256,22 @@ class SybaseASEConnector(DatabaseConnector):
 
             pg_params_str = ""
             output_params = []
+            explicit_func_return = None
             if params_str:
                  clean_params = params_str.strip()
                  clean_params = re.sub(r'/\*.*?\*/', '', clean_params, flags=re.DOTALL).strip()
+
+                 explicit_func_return_match = re.search(r'\bRETURNS\s+([a-zA-Z0-9_]+(?:\s*\([^)]*\))?)', clean_params, flags=re.IGNORECASE)
+                 if explicit_func_return_match:
+                     explicit_func_return = explicit_func_return_match.group(1).strip()
+                     explicit_func_return = self._apply_data_type_substitutions(explicit_func_return)
+                     explicit_func_return = self._apply_udt_to_base_type_substitutions(explicit_func_return, settings)
+                     for syb, pg_tgt in types_mapping.items():
+                          explicit_func_return = re.sub(rf'\b{re.escape(syb)}\b', pg_tgt, explicit_func_return, flags=re.IGNORECASE)
+                     
+                     clean_params = clean_params[:explicit_func_return_match.start()] + clean_params[explicit_func_return_match.end():]
+                     clean_params = clean_params.strip()
+
                  while clean_params.startswith('(') and clean_params.endswith(')'):
                      clean_params = clean_params[1:-1].strip()
                      clean_params = re.sub(r'/\*.*?\*/', '', clean_params, flags=re.DOTALL).strip()
@@ -1284,8 +1297,19 @@ class SybaseASEConnector(DatabaseConnector):
                  pg_params_str = ", ".join(processed_params)
                  output_params = re.findall(r'\b(?:INOUT|OUT)\b', pg_params_str, flags=re.IGNORECASE)
 
+            # Detect explicit RETURN <value> in the function body
+            has_explicit_return_value = False
+            for line_obj in final_output:
+                stripped = line_obj.content.strip()
+                if re.match(r'^RETURN\s+[^;]+|^RETURN\s*\(', stripped, flags=re.IGNORECASE):
+                    if not re.match(r'^RETURN\s*;?$', stripped, flags=re.IGNORECASE):
+                        has_explicit_return_value = True
+                        break
+
             returns_clause = "RETURNS void"
-            if is_implicit_return:
+            if explicit_func_return:
+                 returns_clause = f"RETURNS {explicit_func_return}"
+            elif is_implicit_return:
                  col_defs = []
                  for col in implicit_return_schema:
                       c_name = col['name']
@@ -1306,6 +1330,8 @@ class SybaseASEConnector(DatabaseConnector):
                            returns_clause = f"RETURNS {single_out.group(1)}"
                       else:
                            returns_clause = "RETURNS RECORD"
+            elif has_explicit_return_value:
+                 returns_clause = "RETURNS integer"
 
             # Now we generate the PostgreSQL DDL string using the parsed output array
             # and append it with appropriate indentations

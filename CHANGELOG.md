@@ -1,6 +1,10 @@
 # Changelog
 
-## 0.15.0rc1 - 2026.05.29
+## 0.15.0rc1 - 2026.06.29
+
+- 2026.06.29
+
+  - Fix - Sybase ASE Connector: Fixed parsing of explicit `RETURN <value>` statements in stored procedures and explicit `RETURNS <type>` declarations in functions to accurately enforce the correct return data types within the generated PostgreSQL headers.
 
 - 2026.06.09
 

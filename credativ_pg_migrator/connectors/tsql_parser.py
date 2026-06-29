@@ -678,6 +678,28 @@ class TsqlParser:
 
             # Check for DECLARE
             if re.match(r'^DECLARE\b', content, re.IGNORECASE):
+                # Distinguish between variable declaration and cursor declaration.
+                # Variable declarations in Sybase must start with @ after DECLARE.
+                is_cursor = False
+                after_declare = re.sub(r'^DECLARE\b', '', content, flags=re.IGNORECASE).strip()
+                if after_declare:
+                    if not after_declare.startswith('@'):
+                        is_cursor = True
+                else:
+                    j = i + 1
+                    while j < len(self.body_lines):
+                        next_content = self.body_lines[j].content.strip()
+                        if next_content:
+                            if not next_content.startswith('@'):
+                                is_cursor = True
+                            break
+                        j += 1
+                        
+                if is_cursor:
+                    new_body_lines.append(line)
+                    i += 1
+                    continue
+
                 # Start of declaration
                 start_line = line.line_number
                 decl_lines = []

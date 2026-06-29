@@ -560,7 +560,7 @@ class Planner:
                             'check_column_data_type': column_info['data_type'],
                             'check_default_value': column_info['column_default_value'],
                         })
-                        if substitution and substitution != None and column_info['column_default_value'] != substitution:
+                        if substitution is not None and column_info['column_default_value'] != substitution:
                             column_info['replaced_column_default_value'] = substitution
                             self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_tables: Substituted default value: {column_info['column_default_value']} -> {substitution}")
 

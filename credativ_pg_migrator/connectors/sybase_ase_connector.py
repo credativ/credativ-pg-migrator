@@ -686,6 +686,27 @@ class SybaseASEConnector(DatabaseConnector):
                 'SERIAL': 'SERIAL',
                 'SMALLFLOAT': 'REAL',
             }
+
+            # Inject User Defined Domains (double quoted) so variables using them are properly quoted
+            if hasattr(self, 'migrator_tables') and self.migrator_tables:
+                if not hasattr(self, '_udt_domain_cache'):
+                    self._udt_domain_cache = {}
+                    try:
+                        udt_rows = self.migrator_tables.fetch_all_user_defined_types()
+                        for row in udt_rows:
+                            decoded = self.migrator_tables.decode_user_defined_type_row(row)
+                            src_type = decoded['source_type_name']
+                            tgt_type = decoded['target_type_name']
+                            if src_type and tgt_type:
+                                self._udt_domain_cache[src_type] = f'"{tgt_type}"'
+                                self._udt_domain_cache[src_type.upper()] = f'"{tgt_type}"'
+                    except Exception as e:
+                        if hasattr(self, 'config_parser') and self.config_parser:
+                            self.config_parser.print_log_message('WARNING', f"sybase_ase_connector: get_types_mapping: Failed to fetch UDTs for variable type mapping: {e}")
+                
+                if hasattr(self, '_udt_domain_cache'):
+                    types_mapping.update(self._udt_domain_cache)
+
         else:
             raise ValueError(f"Unsupported target database type: {target_db_type}")
 

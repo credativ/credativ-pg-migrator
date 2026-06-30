@@ -271,6 +271,7 @@ class SybaseASEConnector(DatabaseConnector):
                 'datepart(ss,': "date_part('second',",
                 'datepart(ms,': "date_part('milliseconds',",
                 'try_cast(': 'CAST(',
+                '@@nestlevel': '0',
             }
         else:
             self.config_parser.print_log_message('ERROR', f"sybase_ase_connector: get_sql_functions_mapping: Unsupported target database type: {target_db_type}")

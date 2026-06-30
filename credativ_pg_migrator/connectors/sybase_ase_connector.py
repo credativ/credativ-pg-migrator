@@ -714,9 +714,11 @@ class SybaseASEConnector(DatabaseConnector):
                 decoded = migrator_tables.decode_user_defined_type_row(row)
                 src_type = decoded['source_type_name']
                 tgt_type = decoded['target_type_name']
+                tgt_schema = decoded.get('target_schema_name', '')
                 if src_type and tgt_type:
+                    replacement = f'"{tgt_schema}"."{tgt_type}"' if tgt_schema else f'"{tgt_type}"'
                     # Target type needs double quotes in the declaration
-                    decl_content = re.sub(rf'\b{re.escape(src_type)}\b', f'"{tgt_type}"', decl_content, flags=re.IGNORECASE)
+                    decl_content = re.sub(rf'\b{re.escape(src_type)}\b', replacement, decl_content, flags=re.IGNORECASE)
         except Exception as e:
             if hasattr(self, 'config_parser') and self.config_parser:
                 self.config_parser.print_log_message('WARNING', f"sybase_ase_connector: _quote_udts_in_declaration: Failed to apply UDT quotes: {e}")

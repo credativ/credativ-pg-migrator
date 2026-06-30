@@ -836,6 +836,7 @@ class Planner:
                                 'trigger_sql': trigger_details['sql'],
                                 'table_list': [],
                                 'target_db_type': self.config_parser.get_target_db_type(),
+                                'migrator_tables': self.migrator_tables,
                             })
 
                         self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_tables: Source trigger code: {trigger_details['sql']}")

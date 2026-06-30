@@ -878,7 +878,7 @@ class SybaseASEConnector(DatabaseConnector):
                     ignored_types.add(entry[2].upper())
 
         # Get type mappings for recursive substitution
-        types_mapping = self.get_types_mapping({'target_db_type': settings.get('target_db_type', 'postgresql')})
+        types_mapping = self.get_types_mapping(settings)
 
         # Optimize: Pre-calculate all final definitions and use single regex pass
         self.config_parser.print_log_message('DEBUG', "sybase_ase_connector: _apply_udt_to_base_type_substitutions: Optimizing UDT substitution: preparing map...")
@@ -1237,7 +1237,9 @@ class SybaseASEConnector(DatabaseConnector):
             funcproc_code = re.sub(r'"([^"]*)"', replacer_dq, funcproc_code)
 
             target_db_type = settings.get('target_db_type', 'postgresql')
-            types_mapping = self.get_types_mapping({'target_db_type': target_db_type})
+            local_settings = settings.copy() if settings else {}
+            local_settings['target_db_type'] = target_db_type
+            types_mapping = self.get_types_mapping(local_settings)
 
             funcproc_code = self._apply_types_mapping(funcproc_code, types_mapping)
 
@@ -2083,7 +2085,9 @@ class SybaseASEConnector(DatabaseConnector):
 
         # 4. Extract Declarations (Ported from convert_funcproc_code_v2)
         declarations = []
-        types_mapping = self.get_types_mapping({'target_db_type': target_db_type})
+        local_settings = settings.copy() if settings else {}
+        local_settings['target_db_type'] = target_db_type
+        types_mapping = self.get_types_mapping(local_settings)
 
         declaration_replacer = lambda m: self._declaration_replacer(m, settings, types_mapping, declarations)
 

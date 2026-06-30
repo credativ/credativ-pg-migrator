@@ -1980,6 +1980,21 @@ class TsqlParser:
             if re.match(r'^BEGIN\b', content, re.IGNORECASE) and content.upper() == "BEGIN":
                 continue
 
+            # Convert Sybase BEGIN TRAN(SACTION) to simple BEGIN (with semicolon for PG)
+            if re.match(r'^BEGIN\s+TRAN(SACTION)?\b', content, re.IGNORECASE):
+                line.content = "BEGIN;"
+                continue
+
+            # Convert Sybase COMMIT TRAN(SACTION) to simple COMMIT
+            if re.match(r'^COMMIT(\s+TRAN(SACTION)?)?\b', content, re.IGNORECASE):
+                line.content = "COMMIT;"
+                continue
+
+            # Convert Sybase ROLLBACK TRAN(SACTION) to simple ROLLBACK
+            if re.match(r'^ROLLBACK(\s+TRAN(SACTION)?)?\b', content, re.IGNORECASE):
+                line.content = "ROLLBACK;"
+                continue
+
             # Allow SET ROWCOUNT to pass through cleanly so it can be handled by pass 11
             if re.match(r'^SET\s+ROWCOUNT\b', content, re.IGNORECASE):
                 continue

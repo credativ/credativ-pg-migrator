@@ -687,26 +687,6 @@ class SybaseASEConnector(DatabaseConnector):
                 'SMALLFLOAT': 'REAL',
             }
 
-            # Inject User Defined Domains (double quoted) so variables using them are properly quoted
-            if hasattr(self, 'migrator_tables') and self.migrator_tables:
-                if not hasattr(self, '_udt_domain_cache'):
-                    self._udt_domain_cache = {}
-                    try:
-                        udt_rows = self.migrator_tables.fetch_all_user_defined_types()
-                        for row in udt_rows:
-                            decoded = self.migrator_tables.decode_user_defined_type_row(row)
-                            src_type = decoded['source_type_name']
-                            tgt_type = decoded['target_type_name']
-                            if src_type and tgt_type:
-                                self._udt_domain_cache[src_type] = f'"{tgt_type}"'
-                                self._udt_domain_cache[src_type.upper()] = f'"{tgt_type}"'
-                    except Exception as e:
-                        if hasattr(self, 'config_parser') and self.config_parser:
-                            self.config_parser.print_log_message('WARNING', f"sybase_ase_connector: get_types_mapping: Failed to fetch UDTs for variable type mapping: {e}")
-                
-                if hasattr(self, '_udt_domain_cache'):
-                    types_mapping.update(self._udt_domain_cache)
-
         else:
             raise ValueError(f"Unsupported target database type: {target_db_type}")
 
@@ -719,6 +699,29 @@ class SybaseASEConnector(DatabaseConnector):
                 text = re.sub(rf'\b{re.escape(sybase_type)}\s*\(\s*\d+\s*(?:,\s*\d+\s*)?\)', pg_type, text, flags=re.IGNORECASE)
             text = re.sub(rf'\b{re.escape(sybase_type)}\b', pg_type, text, flags=re.IGNORECASE)
         return text
+
+    def _quote_udts_in_declaration(self, decl_content, settings):
+        migrator_tables = settings.get('migrator_tables') if settings else None
+        if not migrator_tables and hasattr(self, 'migrator_tables'):
+            migrator_tables = self.migrator_tables
+        
+        if not migrator_tables:
+            return decl_content
+
+        try:
+            udt_rows = migrator_tables.fetch_all_user_defined_types()
+            for row in udt_rows:
+                decoded = migrator_tables.decode_user_defined_type_row(row)
+                src_type = decoded['source_type_name']
+                tgt_type = decoded['target_type_name']
+                if src_type and tgt_type:
+                    # Target type needs double quotes in the declaration
+                    decl_content = re.sub(rf'\b{re.escape(src_type)}\b', f'"{tgt_type}"', decl_content, flags=re.IGNORECASE)
+        except Exception as e:
+            if hasattr(self, 'config_parser') and self.config_parser:
+                self.config_parser.print_log_message('WARNING', f"sybase_ase_connector: _quote_udts_in_declaration: Failed to apply UDT quotes: {e}")
+        
+        return decl_content
 
     def get_create_table_sql(self, settings):
         return ""
@@ -1382,6 +1385,10 @@ class SybaseASEConnector(DatabaseConnector):
 
                 is_begin = bool(re.match(r'^BEGIN\b', stripped, re.IGNORECASE))
                 is_end = bool(re.match(r'^END;', stripped, re.IGNORECASE))
+
+                if line_obj.source_array == "variable_declaration" or stripped.upper().startswith("DECLARE "):
+                    line_obj.content = self._quote_udts_in_declaration(line_obj.content, settings)
+                    stripped = line_obj.content.strip()
 
                 if stripped.upper() == "DECLARE":
                     indent_level = 0
@@ -2123,7 +2130,8 @@ class SybaseASEConnector(DatabaseConnector):
                 continue
 
             if line_obj.source_array == "variable_declaration" or stripped.upper().startswith("DECLARE "):
-                declarations.append(stripped)
+                decl_str = self._quote_udts_in_declaration(stripped, settings)
+                declarations.append(decl_str)
                 continue
 
             if re.match(r'^BEGIN\b', stripped, re.IGNORECASE):

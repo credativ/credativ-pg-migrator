@@ -2093,23 +2093,26 @@ class SybaseASEConnector(DatabaseConnector):
             if stripped in ('$$', '$$ LANGUAGE PLPGSQL;', '$$ LANGUAGE plpgsql;'): continue
             if line_obj.source_array == "header": continue
 
-            if stripped.upper() == "DECLARE":
+            if line_obj.source_array == "declare_section" or stripped.upper() == "DECLARE":
                 in_body = True
                 continue
 
-            if stripped.upper().startswith("DECLARE "):
+            if line_obj.source_array == "variable_declaration" or stripped.upper().startswith("DECLARE "):
                 declarations.append(stripped)
                 continue
 
             if re.match(r'^BEGIN\b', stripped, re.IGNORECASE):
                 if not first_begin_found:
                     first_begin_found = True
-                    indent_level = 1
+                    # Skip the outermost BEGIN, as pg_func template provides it
+                    continue
                 else:
                     indent_level += 1
             elif re.match(r'^END;', stripped, re.IGNORECASE):
+                if indent_level == 0:
+                    # Skip the outermost END;, as pg_func template provides it
+                    continue
                 indent_level -= 1
-                if indent_level < 0: indent_level = 0
 
             final_stmts_clean.append(get_indent(indent_level) + line_obj.content)
 

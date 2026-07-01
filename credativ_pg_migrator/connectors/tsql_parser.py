@@ -2460,6 +2460,9 @@ class TsqlParser:
                     else:
                         content = content.strip() + f" LIMIT {active_rowcount_limit}"
 
+            # Strip # prefix from temporary table identifiers (avoids string literals starting with ')
+            content = re.sub(r"(?<!')#([a-zA-Z0-9_]+)\b", r"\1", content)
+
             new_body_parts.append((line_num, content, source_name))
 
         body_parts = new_body_parts

@@ -1336,20 +1336,33 @@ class SybaseASEConnector(DatabaseConnector):
                         break
 
             returns_clause = "RETURNS void"
+            convert_to_scalar_return = False
+            
             if explicit_func_return:
                  returns_clause = f"RETURNS {explicit_func_return}"
             elif is_implicit_return:
-                 col_defs = []
-                 for col in implicit_return_schema:
-                      c_name = col['name']
+                 if has_explicit_return_value and len(implicit_return_schema) == 1:
+                      # If a function mixes RETURN and SELECT, and returns 1 column, force it to be a scalar return
+                      col = implicit_return_schema[0]
                       c_type = col.get('system_type_name', 'text')
                       t_mapped = self._apply_data_type_substitutions(c_type)
                       t_mapped = self._apply_udt_to_base_type_substitutions(t_mapped, settings)
                       for syb, pg_tgt in types_mapping.items():
                            t_mapped = re.sub(rf'\b{re.escape(syb)}\b', pg_tgt, t_mapped, flags=re.IGNORECASE)
-                      col_defs.append(f'"{c_name}" {t_mapped}')
-                 if col_defs:
-                      returns_clause = f"RETURNS TABLE ({', '.join(col_defs)})"
+                      returns_clause = f"RETURNS {t_mapped}"
+                      convert_to_scalar_return = True
+                 else:
+                      col_defs = []
+                      for col in implicit_return_schema:
+                           c_name = col['name']
+                           c_type = col.get('system_type_name', 'text')
+                           t_mapped = self._apply_data_type_substitutions(c_type)
+                           t_mapped = self._apply_udt_to_base_type_substitutions(t_mapped, settings)
+                           for syb, pg_tgt in types_mapping.items():
+                                t_mapped = re.sub(rf'\b{re.escape(syb)}\b', pg_tgt, t_mapped, flags=re.IGNORECASE)
+                           col_defs.append(f'"{c_name}" {t_mapped}')
+                      if col_defs:
+                           returns_clause = f"RETURNS TABLE ({', '.join(col_defs)})"
             elif output_params:
                  if len(output_params) > 1:
                       returns_clause = "RETURNS RECORD"
@@ -1370,6 +1383,17 @@ class SybaseASEConnector(DatabaseConnector):
 
             # Re-run pass_11 with the customized header to let the parser cleanly merge it
             final_output = parser.pass_11_assemble_output(pg_header_str)
+            
+            if convert_to_scalar_return:
+                 for line_obj in final_output:
+                      content = line_obj.content
+                      # If it's a simple variable or column
+                      if re.match(r'(?i)^(\s*)RETURN\s+QUERY\s+SELECT\s+([a-zA-Z0-9_@]+)\s*;?\s*$', content):
+                           line_obj.content = re.sub(r'(?i)^(\s*)RETURN\s+QUERY\s+SELECT\s+([a-zA-Z0-9_@]+)\s*;?', r'\1RETURN \2;', content)
+                      # Otherwise wrap in parentheses for evaluation
+                      elif re.match(r'(?i)^(\s*)RETURN\s+QUERY\s+SELECT\b', content):
+                           line_obj.content = re.sub(r'(?i)^(\s*)RETURN\s+QUERY\s+(SELECT\s+[^;]+);?', r'\1RETURN (\2);', content)
+
             parser.pass_12_add_if_levels(final_output)
 
             # Build DDL with indentation (Logic ported from TsqlParser.print_with_indentation)

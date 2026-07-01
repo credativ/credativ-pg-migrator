@@ -2418,11 +2418,20 @@ class TsqlParser:
                 
                 # Exclude dynamic SQL like EXECUTE ('...') or EXECUTE (locvar_...)
                 if not remainder.startswith('(') and not remainder.startswith('\''):
-                    # Split into procedure name and arguments
-                    parts = re.split(r'\s+', remainder, 1)
-                    proc_name = parts[0]
-                    args = parts[1].strip() if len(parts) > 1 else ""
-                    content = f"PERFORM {proc_name}({args})"
+                    assign_match = re.match(r'^(@[a-zA-Z0-9_]+|locvar_[a-zA-Z0-9_]+)\s*=\s*(.+)$', remainder)
+                    if assign_match:
+                        var_name = assign_match.group(1)
+                        rest = assign_match.group(2).strip()
+                        parts = re.split(r'\s+', rest, maxsplit=1)
+                        proc_name = '.'.join([f'"{p}"' for p in parts[0].split('.')])
+                        args = parts[1].strip() if len(parts) > 1 else ""
+                        content = f"{var_name} := {proc_name}({args})"
+                    else:
+                        # Split into procedure name and arguments
+                        parts = re.split(r'\s+', remainder, maxsplit=1)
+                        proc_name = '.'.join([f'"{p}"' for p in parts[0].split('.')])
+                        args = parts[1].strip() if len(parts) > 1 else ""
+                        content = f"PERFORM {proc_name}({args})"
                 else:
                     # Keep as EXECUTE for dynamic SQL
                     content = f"EXECUTE {remainder}"

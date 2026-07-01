@@ -73,7 +73,12 @@ class MariaDBConnector(DatabaseConnector):
 
     def disconnect(self):
         if self.connection:
-            self.connection.close()
+            try:
+                self.connection.close()
+            except Exception:
+                pass
+            finally:
+                self.connection = None
 
     def get_sql_functions_mapping(self, settings):
         """ Returns a dictionary of SQL functions mapping for the target database """

@@ -1641,7 +1641,7 @@ class TsqlParser:
         """
         self.log("Running Pass 3b: Split Inline IFs")
         new_body_lines = []
-        keywords = ["SELECT", "INSERT", "UPDATE", "DELETE", "PRINT", "EXEC", "EXECUTE", "BEGIN", "RETURN", "SET", "BREAK", "CONTINUE"]
+        keywords = ["SELECT", "INSERT", "UPDATE", "DELETE", "PRINT", "EXEC", "EXECUTE", "BEGIN", "RETURN", "SET", "BREAK", "CONTINUE", "COMMIT", "ROLLBACK", "SAVE"]
         
         for line in self.body_lines:
             content = line.content.strip()
@@ -2209,6 +2209,33 @@ class TsqlParser:
 
         print(f"--- END CHECKS FOR {self.filepath} ---")
 
+
+    def pass_9b_process_rowcount(self):
+        self.log("Running Pass 9b: Process @@rowcount")
+        import re
+        used_rowcount = False
+        for if_cmd in self.if_commands:
+            if re.search(r'@@rowcount', if_cmd['content'], re.IGNORECASE):
+                used_rowcount = True
+                if_cmd['content'] = re.sub(r'@@rowcount', 'locvar_rowcount', if_cmd['content'], flags=re.IGNORECASE)
+                self.exec_commands.append({
+                    "line": if_cmd['line'] - 0.1,
+                    "content": "GET DIAGNOSTICS locvar_rowcount = ROW_COUNT;"
+                })
+        
+        if used_rowcount:
+            # Check if locvar_rowcount is already in variables
+            found = False
+            for v in self.variables:
+                if 'locvar_rowcount' in v['content']:
+                    found = True
+                    break
+            if not found:
+                self.variables.append({
+                    "line": 0,
+                    "content": "locvar_rowcount INTEGER;"
+                })
+
     def pass_10_add_semicolons(self):
         """
         Pass 10 (New): Checks remaining body lines.
@@ -2242,9 +2269,9 @@ class TsqlParser:
             if re.match(r'^BEGIN\b', content, re.IGNORECASE) and content.upper() == "BEGIN":
                 continue
 
-            # Convert Sybase BEGIN TRAN(SACTION) to simple BEGIN (with semicolon for PG)
+            # Convert Sybase BEGIN TRAN(SACTION) to NULL; comment to prevent breaking IF block symmetry
             if re.match(r'^BEGIN\s+TRAN(SACTION)?\b', content, re.IGNORECASE):
-                line.content = "BEGIN;"
+                line.content = f"NULL; /* {content} (Not required in PL/pgSQL) */"
                 continue
 
             # Convert Sybase COMMIT TRAN(SACTION) to simple COMMIT
@@ -2340,6 +2367,15 @@ class TsqlParser:
 
         for d in self.delete_commands:
             content = d['content']
+            
+            match_from = re.match(r'^DELETE\s+([a-zA-Z0-9_]+)\s+FROM\s+(.+?)(?=\s+WHERE\b|\s*$)', content, re.IGNORECASE)
+            if match_from:
+                content = re.sub(r'^DELETE\s+([a-zA-Z0-9_]+)\s+FROM\s+', r'DELETE FROM \1 USING ', content, count=1, flags=re.IGNORECASE)
+            else:
+                match_where = re.match(r'^DELETE\s+([a-zA-Z0-9_]+)\s+(WHERE\b)', content, re.IGNORECASE)
+                if match_where:
+                    content = re.sub(r'^DELETE\s+([a-zA-Z0-9_]+)\s+WHERE\b', r'DELETE FROM \1 WHERE', content, count=1, flags=re.IGNORECASE)
+
             if not content.strip().endswith(';'):
                 content += ';'
             body_parts.append((d['line'], content, "delete_commands"))
@@ -2672,6 +2708,9 @@ class TsqlParser:
 
         # Pass 8d
         self.pass_8d_convert_selects()
+
+        # Pass 9b
+        self.pass_9b_process_rowcount()
 
         # Pass 8
         self.pass_8_process_select_assignments()

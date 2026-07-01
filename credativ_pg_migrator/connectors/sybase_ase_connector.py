@@ -1366,7 +1366,7 @@ class SybaseASEConnector(DatabaseConnector):
             # and append it with appropriate indentations
 
             # The pg header string formatted just like TsqlParser outputs:
-            pg_header_str = f"CREATE OR REPLACE FUNCTION {func_schema}.{proc_name}({pg_params_str})\n{returns_clause} AS"
+            pg_header_str = f'CREATE OR REPLACE FUNCTION "{func_schema}"."{proc_name}"({pg_params_str})\n{returns_clause} AS'
 
             # Re-run pass_11 with the customized header to let the parser cleanly merge it
             final_output = parser.pass_11_assemble_output(pg_header_str)
@@ -2181,7 +2181,7 @@ class SybaseASEConnector(DatabaseConnector):
              pg_events = ' OR '.join(event_list)
 
         # 7. Assemble DDL
-        pg_func = f"""CREATE OR REPLACE FUNCTION {target_schema_name}.{trigger_name}_func()
+        pg_func = f"""CREATE OR REPLACE FUNCTION "{target_schema_name}"."{trigger_name}_func"()
 RETURNS trigger AS $$
 DECLARE
 {chr(10).join(declarations)}
@@ -2192,10 +2192,10 @@ END;
 $$ LANGUAGE plpgsql;
 """
 
-        pg_trigger = f"""CREATE TRIGGER {trigger_name}
+        pg_trigger = f"""CREATE TRIGGER "{trigger_name}"
 AFTER {pg_events} ON "{target_schema_name}"."{target_table_name}"
 FOR EACH ROW
-EXECUTE FUNCTION {target_schema_name}.{trigger_name}_func();
+EXECUTE FUNCTION "{target_schema_name}"."{trigger_name}_func"();
 """
         return pg_func + '\n' + pg_trigger
 

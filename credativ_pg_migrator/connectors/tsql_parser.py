@@ -2368,13 +2368,13 @@ class TsqlParser:
         for d in self.delete_commands:
             content = d['content']
             
-            match_from = re.match(r'^DELETE\s+([a-zA-Z0-9_]+)\s+FROM\s+(.+?)(?=\s+WHERE\b|\s*$)', content, re.IGNORECASE)
+            match_from = re.match(r'^DELETE\s+([#a-zA-Z0-9_]+)\s+FROM\s+(.+?)(?=\s+WHERE\b|\s*$)', content, re.IGNORECASE)
             if match_from:
-                content = re.sub(r'^DELETE\s+([a-zA-Z0-9_]+)\s+FROM\s+', r'DELETE FROM \1 USING ', content, count=1, flags=re.IGNORECASE)
+                content = re.sub(r'^DELETE\s+([#a-zA-Z0-9_]+)\s+FROM\s+', r'DELETE FROM \1 USING ', content, count=1, flags=re.IGNORECASE)
             else:
-                match_where = re.match(r'^DELETE\s+([a-zA-Z0-9_]+)\s+(WHERE\b)', content, re.IGNORECASE)
+                match_where = re.match(r'^DELETE\s+([#a-zA-Z0-9_]+)\s+(WHERE\b)', content, re.IGNORECASE)
                 if match_where:
-                    content = re.sub(r'^DELETE\s+([a-zA-Z0-9_]+)\s+WHERE\b', r'DELETE FROM \1 WHERE', content, count=1, flags=re.IGNORECASE)
+                    content = re.sub(r'^DELETE\s+([#a-zA-Z0-9_]+)\s+WHERE\b', r'DELETE FROM \1 WHERE', content, count=1, flags=re.IGNORECASE)
 
             if not content.strip().endswith(';'):
                 content += ';'

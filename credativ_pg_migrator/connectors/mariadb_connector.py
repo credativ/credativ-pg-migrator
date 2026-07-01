@@ -40,8 +40,11 @@ class MariaDBConnector(DatabaseConnector):
         db_config = self.config_parser.get_db_config(self.source_or_target)
         if self.config_parser.get_connectivity(self.source_or_target) == 'native':
             import mariadb  ## only for native connectivity - install mariadb-connector-python
+            host = db_config['host']
+            if host == 'localhost':
+                host = '127.0.0.1'
             self.connection = mariadb.connect(
-                host=db_config['host'],
+                host=host,
                 user=db_config['username'],
                 password=db_config['password'],
                 database=db_config['database'],

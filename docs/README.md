@@ -205,9 +205,10 @@ Other ODBC parameters such as DSN or connection string are configured alongside 
 
 ### 4.7 Other databases
 
-Other supported engines (MS SQL Server, MySQL/MariaDB, SQL Anywhere) are accessed via their respective connectors utilizing:
+Other supported engines (MS SQL Server, MySQL, MariaDB, SQL Anywhere) are accessed via their respective connectors utilizing:
 - **MS SQL**: JDBC (`jaydebeapi`) or ODBC (`pyodbc`)
-- **MySQL/MariaDB**: Native (`mysql-connector-python`), JDBC (`jaydebeapi`), or ODBC (`pyodbc`)
+- **MySQL**: Native (`mysql-connector-python`), JDBC (`jaydebeapi`), or ODBC (`pyodbc`)
+- **MariaDB**: Native (`mariadb`), JDBC (`jaydebeapi`), or ODBC (`pyodbc`). Note: For native connectivity on Debian/Ubuntu systems, the C development headers are required before installing the Python package (`sudo apt install libmariadb-dev` followed by `pip install mariadb`).
 - **SQL Anywhere**: ODBC (`pyodbc`)
 
 The exact features supported per connector (e.g. whether stored procedures or triggers are handled) are summarized in FEATURE_MATRIX.md in the repo.

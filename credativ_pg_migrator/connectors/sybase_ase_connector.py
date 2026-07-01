@@ -271,6 +271,7 @@ class SybaseASEConnector(DatabaseConnector):
                 'datepart(ss,': "date_part('second',",
                 'datepart(ms,': "date_part('milliseconds',",
                 'try_cast(': 'CAST(',
+                '@@nestlevel': '0',
             }
         else:
             self.config_parser.print_log_message('ERROR', f"sybase_ase_connector: get_sql_functions_mapping: Unsupported target database type: {target_db_type}")
@@ -685,6 +686,7 @@ class SybaseASEConnector(DatabaseConnector):
                 'SERIAL': 'SERIAL',
                 'SMALLFLOAT': 'REAL',
             }
+
         else:
             raise ValueError(f"Unsupported target database type: {target_db_type}")
 
@@ -697,6 +699,31 @@ class SybaseASEConnector(DatabaseConnector):
                 text = re.sub(rf'\b{re.escape(sybase_type)}\s*\(\s*\d+\s*(?:,\s*\d+\s*)?\)', pg_type, text, flags=re.IGNORECASE)
             text = re.sub(rf'\b{re.escape(sybase_type)}\b', pg_type, text, flags=re.IGNORECASE)
         return text
+
+    def _quote_udts_in_declaration(self, decl_content, settings):
+        migrator_tables = settings.get('migrator_tables') if settings else None
+        if not migrator_tables and hasattr(self, 'migrator_tables'):
+            migrator_tables = self.migrator_tables
+        
+        if not migrator_tables:
+            return decl_content
+
+        try:
+            udt_rows = migrator_tables.fetch_all_user_defined_types()
+            for row in udt_rows:
+                decoded = migrator_tables.decode_user_defined_type_row(row)
+                src_type = decoded['source_type_name']
+                tgt_type = decoded['target_type_name']
+                tgt_schema = decoded.get('target_schema_name', '')
+                if src_type and tgt_type:
+                    replacement = f'"{tgt_schema}"."{tgt_type}"' if tgt_schema else f'"{tgt_type}"'
+                    # Target type needs double quotes in the declaration
+                    decl_content = re.sub(rf'\b{re.escape(src_type)}\b', replacement, decl_content, flags=re.IGNORECASE)
+        except Exception as e:
+            if hasattr(self, 'config_parser') and self.config_parser:
+                self.config_parser.print_log_message('WARNING', f"sybase_ase_connector: _quote_udts_in_declaration: Failed to apply UDT quotes: {e}")
+        
+        return decl_content
 
     def get_create_table_sql(self, settings):
         return ""
@@ -856,7 +883,7 @@ class SybaseASEConnector(DatabaseConnector):
                     ignored_types.add(entry[2].upper())
 
         # Get type mappings for recursive substitution
-        types_mapping = self.get_types_mapping({'target_db_type': settings.get('target_db_type', 'postgresql')})
+        types_mapping = self.get_types_mapping(settings)
 
         # Optimize: Pre-calculate all final definitions and use single regex pass
         self.config_parser.print_log_message('DEBUG', "sybase_ase_connector: _apply_udt_to_base_type_substitutions: Optimizing UDT substitution: preparing map...")
@@ -1215,7 +1242,9 @@ class SybaseASEConnector(DatabaseConnector):
             funcproc_code = re.sub(r'"([^"]*)"', replacer_dq, funcproc_code)
 
             target_db_type = settings.get('target_db_type', 'postgresql')
-            types_mapping = self.get_types_mapping({'target_db_type': target_db_type})
+            local_settings = settings.copy() if settings else {}
+            local_settings['target_db_type'] = target_db_type
+            types_mapping = self.get_types_mapping(local_settings)
 
             funcproc_code = self._apply_types_mapping(funcproc_code, types_mapping)
 
@@ -1256,9 +1285,22 @@ class SybaseASEConnector(DatabaseConnector):
 
             pg_params_str = ""
             output_params = []
+            explicit_func_return = None
             if params_str:
                  clean_params = params_str.strip()
                  clean_params = re.sub(r'/\*.*?\*/', '', clean_params, flags=re.DOTALL).strip()
+
+                 explicit_func_return_match = re.search(r'\bRETURNS\s+([a-zA-Z0-9_]+(?:\s*\([^)]*\))?)', clean_params, flags=re.IGNORECASE)
+                 if explicit_func_return_match:
+                     explicit_func_return = explicit_func_return_match.group(1).strip()
+                     explicit_func_return = self._apply_data_type_substitutions(explicit_func_return)
+                     explicit_func_return = self._apply_udt_to_base_type_substitutions(explicit_func_return, settings)
+                     for syb, pg_tgt in types_mapping.items():
+                          explicit_func_return = re.sub(rf'\b{re.escape(syb)}\b', pg_tgt, explicit_func_return, flags=re.IGNORECASE)
+                     
+                     clean_params = clean_params[:explicit_func_return_match.start()] + clean_params[explicit_func_return_match.end():]
+                     clean_params = clean_params.strip()
+
                  while clean_params.startswith('(') and clean_params.endswith(')'):
                      clean_params = clean_params[1:-1].strip()
                      clean_params = re.sub(r'/\*.*?\*/', '', clean_params, flags=re.DOTALL).strip()
@@ -1284,19 +1326,43 @@ class SybaseASEConnector(DatabaseConnector):
                  pg_params_str = ", ".join(processed_params)
                  output_params = re.findall(r'\b(?:INOUT|OUT)\b', pg_params_str, flags=re.IGNORECASE)
 
+            # Detect explicit RETURN <value> in the function body
+            has_explicit_return_value = False
+            for line_obj in final_output:
+                stripped = line_obj.content.strip()
+                if re.match(r'^RETURN\s+[^;]+|^RETURN\s*\(', stripped, flags=re.IGNORECASE):
+                    if not re.match(r'^RETURN\s*;?$', stripped, flags=re.IGNORECASE):
+                        has_explicit_return_value = True
+                        break
+
             returns_clause = "RETURNS void"
-            if is_implicit_return:
-                 col_defs = []
-                 for col in implicit_return_schema:
-                      c_name = col['name']
+            convert_to_scalar_return = False
+            
+            if explicit_func_return:
+                 returns_clause = f"RETURNS {explicit_func_return}"
+            elif is_implicit_return:
+                 if has_explicit_return_value and len(implicit_return_schema) == 1:
+                      # If a function mixes RETURN and SELECT, and returns 1 column, force it to be a scalar return
+                      col = implicit_return_schema[0]
                       c_type = col.get('system_type_name', 'text')
                       t_mapped = self._apply_data_type_substitutions(c_type)
                       t_mapped = self._apply_udt_to_base_type_substitutions(t_mapped, settings)
                       for syb, pg_tgt in types_mapping.items():
                            t_mapped = re.sub(rf'\b{re.escape(syb)}\b', pg_tgt, t_mapped, flags=re.IGNORECASE)
-                      col_defs.append(f'"{c_name}" {t_mapped}')
-                 if col_defs:
-                      returns_clause = f"RETURNS TABLE ({', '.join(col_defs)})"
+                      returns_clause = f"RETURNS {t_mapped}"
+                      convert_to_scalar_return = True
+                 else:
+                      col_defs = []
+                      for col in implicit_return_schema:
+                           c_name = col['name']
+                           c_type = col.get('system_type_name', 'text')
+                           t_mapped = self._apply_data_type_substitutions(c_type)
+                           t_mapped = self._apply_udt_to_base_type_substitutions(t_mapped, settings)
+                           for syb, pg_tgt in types_mapping.items():
+                                t_mapped = re.sub(rf'\b{re.escape(syb)}\b', pg_tgt, t_mapped, flags=re.IGNORECASE)
+                           col_defs.append(f'"{c_name}" {t_mapped}')
+                      if col_defs:
+                           returns_clause = f"RETURNS TABLE ({', '.join(col_defs)})"
             elif output_params:
                  if len(output_params) > 1:
                       returns_clause = "RETURNS RECORD"
@@ -1306,15 +1372,28 @@ class SybaseASEConnector(DatabaseConnector):
                            returns_clause = f"RETURNS {single_out.group(1)}"
                       else:
                            returns_clause = "RETURNS RECORD"
+            elif has_explicit_return_value:
+                 returns_clause = "RETURNS integer"
 
             # Now we generate the PostgreSQL DDL string using the parsed output array
             # and append it with appropriate indentations
 
             # The pg header string formatted just like TsqlParser outputs:
-            pg_header_str = f"CREATE OR REPLACE FUNCTION {func_schema}.{proc_name}({pg_params_str})\n{returns_clause} AS"
+            pg_header_str = f'CREATE OR REPLACE FUNCTION "{func_schema}"."{proc_name}"({pg_params_str})\n{returns_clause} AS'
 
             # Re-run pass_11 with the customized header to let the parser cleanly merge it
             final_output = parser.pass_11_assemble_output(pg_header_str)
+            
+            if convert_to_scalar_return:
+                 for line_obj in final_output:
+                      content = line_obj.content
+                      # If it's a simple variable or column
+                      if re.match(r'(?i)^(\s*)RETURN\s+QUERY\s+SELECT\s+([a-zA-Z0-9_@]+)\s*;?\s*$', content):
+                           line_obj.content = re.sub(r'(?i)^(\s*)RETURN\s+QUERY\s+SELECT\s+([a-zA-Z0-9_@]+)\s*;?', r'\1RETURN \2;', content)
+                      # Otherwise wrap in parentheses for evaluation
+                      elif re.match(r'(?i)^(\s*)RETURN\s+QUERY\s+SELECT\b', content):
+                           line_obj.content = re.sub(r'(?i)^(\s*)RETURN\s+QUERY\s+(SELECT\s+[^;]+);?', r'\1RETURN (\2);', content)
+
             parser.pass_12_add_if_levels(final_output)
 
             # Build DDL with indentation (Logic ported from TsqlParser.print_with_indentation)
@@ -1332,6 +1411,10 @@ class SybaseASEConnector(DatabaseConnector):
 
                 is_begin = bool(re.match(r'^BEGIN\b', stripped, re.IGNORECASE))
                 is_end = bool(re.match(r'^END;', stripped, re.IGNORECASE))
+
+                if line_obj.source_array == "variable_declaration" or stripped.upper().startswith("DECLARE "):
+                    line_obj.content = self._quote_udts_in_declaration(line_obj.content, settings)
+                    stripped = line_obj.content.strip()
 
                 if stripped.upper() == "DECLARE":
                     indent_level = 0
@@ -2035,7 +2118,9 @@ class SybaseASEConnector(DatabaseConnector):
 
         # 4. Extract Declarations (Ported from convert_funcproc_code_v2)
         declarations = []
-        types_mapping = self.get_types_mapping({'target_db_type': target_db_type})
+        local_settings = settings.copy() if settings else {}
+        local_settings['target_db_type'] = target_db_type
+        types_mapping = self.get_types_mapping(local_settings)
 
         declaration_replacer = lambda m: self._declaration_replacer(m, settings, types_mapping, declarations)
 
@@ -2066,23 +2151,27 @@ class SybaseASEConnector(DatabaseConnector):
             if stripped in ('$$', '$$ LANGUAGE PLPGSQL;', '$$ LANGUAGE plpgsql;'): continue
             if line_obj.source_array == "header": continue
 
-            if stripped.upper() == "DECLARE":
+            if line_obj.source_array == "declare_section" or stripped.upper() == "DECLARE":
                 in_body = True
                 continue
 
-            if stripped.upper().startswith("DECLARE "):
-                declarations.append(stripped)
+            if line_obj.source_array == "variable_declaration" or stripped.upper().startswith("DECLARE "):
+                decl_str = self._quote_udts_in_declaration(stripped, settings)
+                declarations.append(decl_str)
                 continue
 
             if re.match(r'^BEGIN\b', stripped, re.IGNORECASE):
                 if not first_begin_found:
                     first_begin_found = True
-                    indent_level = 1
+                    # Skip the outermost BEGIN, as pg_func template provides it
+                    continue
                 else:
                     indent_level += 1
             elif re.match(r'^END;', stripped, re.IGNORECASE):
+                if indent_level == 0:
+                    # Skip the outermost END;, as pg_func template provides it
+                    continue
                 indent_level -= 1
-                if indent_level < 0: indent_level = 0
 
             final_stmts_clean.append(get_indent(indent_level) + line_obj.content)
 
@@ -2116,7 +2205,7 @@ class SybaseASEConnector(DatabaseConnector):
              pg_events = ' OR '.join(event_list)
 
         # 7. Assemble DDL
-        pg_func = f"""CREATE OR REPLACE FUNCTION {target_schema_name}.{trigger_name}_func()
+        pg_func = f"""CREATE OR REPLACE FUNCTION "{target_schema_name}"."{trigger_name}_func"()
 RETURNS trigger AS $$
 DECLARE
 {chr(10).join(declarations)}
@@ -2127,10 +2216,10 @@ END;
 $$ LANGUAGE plpgsql;
 """
 
-        pg_trigger = f"""CREATE TRIGGER {trigger_name}
+        pg_trigger = f"""CREATE TRIGGER "{trigger_name}"
 AFTER {pg_events} ON "{target_schema_name}"."{target_table_name}"
 FOR EACH ROW
-EXECUTE FUNCTION {target_schema_name}.{trigger_name}_func();
+EXECUTE FUNCTION "{target_schema_name}"."{trigger_name}_func"();
 """
         return pg_func + '\n' + pg_trigger
 
@@ -2869,23 +2958,38 @@ EXECUTE FUNCTION {target_schema_name}.{trigger_name}_func();
                     return sqlglot.exp.Cast(this=expr_node, to=new_type_node)
             return node
 
+        def is_string_expr(node):
+            if node is None:
+                return False
+            if node.is_string:
+                return True
+            if isinstance(node, sqlglot.exp.Cast) and getattr(node.to.this, 'name', '').upper() in ('VARCHAR', 'CHAR', 'TEXT', 'NVARCHAR', 'NCHAR', 'UNIVARCHAR', 'UNICHAR'):
+                return True
+            if isinstance(node, sqlglot.exp.DPipe):
+                return True
+            if isinstance(node, sqlglot.exp.Add):
+                return is_string_expr(node.left) or is_string_expr(node.right)
+            return False
+
         def convert_string_concatenation(node):
             if isinstance(node, sqlglot.exp.Add):
-                left = node.left
-                right = node.right
-                is_left_string = left.is_string or (isinstance(left, sqlglot.exp.Cast) and left.to.this.name.upper() in ('VARCHAR', 'CHAR', 'TEXT', 'NVARCHAR', 'NCHAR', 'UNIVARCHAR', 'UNICHAR'))
-                is_right_string = right.is_string or (isinstance(right, sqlglot.exp.Cast) and right.to.this.name.upper() in ('VARCHAR', 'CHAR', 'TEXT', 'NVARCHAR', 'NCHAR', 'UNIVARCHAR', 'UNICHAR'))
+                # Process children first to do a bottom-up replacement
+                left = node.left.transform(convert_string_concatenation)
+                right = node.right.transform(convert_string_concatenation)
+
+                is_left_string = is_string_expr(left)
+                is_right_string = is_string_expr(right)
 
                 if is_left_string or is_right_string:
-                    # Conversion needed
-                    new_left = left
-                    new_right = right
-
-                    # Cast non-string operands to text to avoid type errors in PostgreSQL
                     if not is_left_string:
-                         new_left = sqlglot.exp.Cast(this=left, to=sqlglot.exp.DataType.build('text'))
+                         new_left = sqlglot.exp.Cast(this=left.copy(), to=sqlglot.exp.DataType.build('text'))
+                    else:
+                         new_left = left.copy()
+                         
                     if not is_right_string:
-                         new_right = sqlglot.exp.Cast(this=right, to=sqlglot.exp.DataType.build('text'))
+                         new_right = sqlglot.exp.Cast(this=right.copy(), to=sqlglot.exp.DataType.build('text'))
+                    else:
+                         new_right = right.copy()
 
                     return sqlglot.exp.DPipe(this=new_left, expression=new_right)
             return node

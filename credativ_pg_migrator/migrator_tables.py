@@ -300,9 +300,9 @@ class MigratorTables:
             query = f"""
                 SELECT target_default_value
                 FROM "{self.protocol_schema}".default_values_substitution
-                WHERE (lower(trim(%s)) ~ lower(trim(column_name)) OR lower(trim(%s)) ILIKE lower(trim(column_name)) OR lower(trim(column_name)) = '')
-                AND (lower(trim(%s)) ~ lower(trim(source_column_data_type)) OR lower(trim(%s)) ILIKE lower(trim(source_column_data_type)) OR lower(trim(source_column_data_type)) = '')
-                AND (lower(trim(%s::TEXT)) ~ lower(trim(default_value_value::TEXT)) OR lower(trim(%s::TEXT)) ILIKE lower(trim(default_value_value::TEXT)) )
+                WHERE (lower(trim(column_name)) = '' OR lower(trim(%s)) ILIKE lower(trim(column_name)) OR lower(trim(%s)) ~ NULLIF(lower(trim(column_name)), ''))
+                AND (lower(trim(source_column_data_type)) = '' OR lower(trim(%s)) ILIKE lower(trim(source_column_data_type)) OR lower(trim(%s)) ~ NULLIF(lower(trim(source_column_data_type)), ''))
+                AND (lower(trim(%s::TEXT)) ILIKE lower(trim(default_value_value::TEXT)) OR lower(trim(%s::TEXT)) ~ NULLIF(lower(trim(default_value_value::TEXT)), ''))
                 ORDER BY CASE WHEN default_value_value LIKE '%%(?i)%%' THEN 1 ELSE 2 END
             """
             cursor = self.protocol_connection.connection.cursor()

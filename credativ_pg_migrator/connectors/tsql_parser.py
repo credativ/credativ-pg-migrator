@@ -45,6 +45,9 @@ class TsqlParser:
         self.print_commands = []
         self.set_commands = []
         self.raiserror_commands = []
+        self.cursors = []
+        self.cursor_commands = []
+        self.while_commands = []
 
     def log(self, message):
         if self.config_parser:
@@ -60,10 +63,28 @@ class TsqlParser:
         self.read_code()
         self.parse_header_and_body_boundary()
         self.pass_1_split_inline_comments()
+
+        # Pass 0b
+        self.pass_0b_map_tempdb()
+
+        # Pass 1c
+        self.pass_1c_split_inline_goto()
         self.pass_2_extract_comments()
         self.pass_3_parse_variables()
+
+        # Pass 3c
+        self.pass_3c_parse_cursors()
         self.pass_3b_split_inline_ifs()
+
+        # Pass 3d
+        self.pass_7d_parse_goto_and_labels()
         self.pass_4_parse_inserts()
+
+        # Pass 4b
+        self.pass_4b_parse_cursor_commands()
+
+        # Pass 4c
+        self.pass_4c_parse_create_drop_table()
         self.pass_5_parse_updates()
         self.pass_5b_parse_deletes()
         self.pass_5c_parse_prints()
@@ -552,6 +573,48 @@ class TsqlParser:
                 # No marker found
                 i += 1
 
+
+
+    def pass_0b_map_tempdb(self):
+        self.log("Running Pass 0b: Map tempdb to pg_temp")
+        for line in self.body_lines:
+            import re
+            line.content = re.sub(r'tempdb\.\.', 'pg_temp.', line.content, flags=re.IGNORECASE)
+
+    def pass_1c_split_inline_goto(self):
+        self.log("Running Pass 1c: Split Inline GOTO")
+        new_body_lines = []
+        for line in self.body_lines:
+            content = line.content.strip()
+            if re.match(r'^GOTO\b', content, re.IGNORECASE):
+                new_body_lines.append(line)
+                continue
+                
+            m = re.search(r'\s+(GOTO\s+[a-zA-Z0-9_]+)', content, re.IGNORECASE)
+            if m:
+                in_single = False
+                in_double = False
+                split_idx = -1
+                for j in range(len(content) - 4):
+                    if content[j] == "'": in_single = not in_single
+                    elif content[j] == '"': in_double = not in_double
+                    if not in_single and not in_double:
+                        if content[j:j+5].upper() == ' GOTO' and (j+5 == len(content) or content[j+5].isspace()):
+                            split_idx = j
+                            break
+                if split_idx != -1:
+                    part1 = content[:split_idx].strip()
+                    part2 = content[split_idx:].strip()
+                    print(f"Split part 1: {part1}")
+                    new_body_lines.append(type(line)(line.line_number, part1))
+                    print(f"Split part 2: {part2}")
+                    new_body_lines.append(type(line)(line.line_number + 0.1, part2))
+                else:
+                    new_body_lines.append(line)
+            else:
+                new_body_lines.append(line)
+        self.body_lines = new_body_lines
+
     def pass_2_extract_comments(self):
         """
         Pass 2: Extracts comments from body lines.
@@ -678,6 +741,28 @@ class TsqlParser:
 
             # Check for DECLARE
             if re.match(r'^DECLARE\b', content, re.IGNORECASE):
+                # Distinguish between variable declaration and cursor declaration.
+                # Variable declarations in Sybase must start with @ after DECLARE.
+                is_cursor = False
+                after_declare = re.sub(r'^DECLARE\b', '', content, flags=re.IGNORECASE).strip()
+                if after_declare:
+                    if not after_declare.startswith('@'):
+                        is_cursor = True
+                else:
+                    j = i + 1
+                    while j < len(self.body_lines):
+                        next_content = self.body_lines[j].content.strip()
+                        if next_content:
+                            if not next_content.startswith('@'):
+                                is_cursor = True
+                            break
+                        j += 1
+                        
+                if is_cursor:
+                    new_body_lines.append(line)
+                    i += 1
+                    continue
+
                 # Start of declaration
                 start_line = line.line_number
                 decl_lines = []
@@ -688,7 +773,7 @@ class TsqlParser:
                     current_content = current_line.content.strip()
 
                     if len(decl_lines) > 0:
-                        is_terminator = re.match(r'^(IF|ELSE\s+IF|ELSE|ELSIF|END|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT|SET|BEGIN|EXEC|EXECUTE|WHILE|COMMIT|ROLLBACK|DECLARE|CREATE|ALTER|DROP|RAISERROR)\b', current_content, re.IGNORECASE)
+                        is_terminator = re.match(r'^(IF|ELSE\s+IF|ELSE|ELSIF|END|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT|SET|BEGIN|EXEC|EXECUTE|WHILE|COMMIT|ROLLBACK|DECLARE|CREATE|ALTER|DROP|RAISERROR|BREAK|CONTINUE|OPEN|FETCH|CLOSE|DEALLOCATE|GOTO)\b', current_content, re.IGNORECASE)
                         if is_terminator:
                             break
 
@@ -726,6 +811,105 @@ class TsqlParser:
 
         self.body_lines = new_body_lines
 
+
+    def pass_3c_parse_cursors(self):
+        self.log("Running Pass 3c: Parse Cursors")
+        new_body_lines = []
+        i = 0
+        while i < len(self.body_lines):
+            line = self.body_lines[i]
+            line_content = line.content.strip()
+
+            if re.match(r'^DECLARE\b', line_content, re.IGNORECASE):
+                if re.search(r'\bCURSOR\b', line_content, re.IGNORECASE):
+                    start_line = line.line_number
+                    cursor_lines = []
+                    while i < len(self.body_lines):
+                        current_line = self.body_lines[i]
+                        current_content = current_line.content.strip()
+                        
+                        if len(cursor_lines) > 0:
+                            is_terminator = re.match(r'^(IF|ELSE\s+IF|ELSE|ELSIF|END|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT|SET|BEGIN|EXEC|EXECUTE|WHILE|COMMIT|ROLLBACK|DECLARE|CREATE|ALTER|DROP|RAISERROR|BREAK|CONTINUE|OPEN|FETCH|CLOSE|DEALLOCATE|GOTO)\b', current_content, re.IGNORECASE)
+                            if is_terminator:
+                                break
+                        cursor_lines.append(current_line.content)
+                        i += 1
+                        
+                    cleaned_lines = [l.strip() for l in cursor_lines]
+                    full_cursor = " ".join(cleaned_lines)
+                    
+                    full_cursor = re.sub(r'^DECLARE\s+', '', full_cursor, flags=re.IGNORECASE)
+                    if not full_cursor.strip().endswith(';'):
+                        full_cursor = full_cursor.rstrip() + ';'
+                        
+                    self.cursors.append({
+                        "line": start_line,
+                        "content": full_cursor
+                    })
+                    continue
+            new_body_lines.append(line)
+            i += 1
+        self.body_lines = new_body_lines
+
+    def pass_4b_parse_cursor_commands(self):
+        self.log("Running Pass 4b: Parse Cursor Commands")
+        new_body_lines = []
+        i = 0
+        while i < len(self.body_lines):
+            line = self.body_lines[i]
+            line_content = line.content.strip()
+
+            if re.match(r'^(OPEN|FETCH|CLOSE|DEALLOCATE)\b', line_content, re.IGNORECASE):
+                start_line = line.line_number
+                cmd_lines = []
+                while i < len(self.body_lines):
+                    current_line = self.body_lines[i]
+                    current_content = current_line.content.strip()
+                    if len(cmd_lines) > 0:
+                        is_terminator = re.match(r'^(IF|ELSE\s+IF|ELSE|ELSIF|END|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT|SET|BEGIN|EXEC|EXECUTE|WHILE|COMMIT|ROLLBACK|DECLARE|CREATE|ALTER|DROP|RAISERROR|BREAK|CONTINUE|OPEN|FETCH|CLOSE|DEALLOCATE|GOTO)\b', current_content, re.IGNORECASE)
+                        if is_terminator:
+                            break
+                    cmd_lines.append(current_line.content)
+                    i += 1
+                
+                cleaned_lines = [l.strip() for l in cmd_lines]
+                full_cmd = " ".join(cleaned_lines)
+                
+                if re.match(r'^DEALLOCATE\s+CURSOR\b', full_cmd, re.IGNORECASE):
+                    full_cmd = f"/* {full_cmd} (Not required in PL/pgSQL) */"
+                else:
+                    if not full_cmd.strip().endswith(';'):
+                        full_cmd += ';'
+                        
+                self.cursor_commands.append({
+                    "line": start_line,
+                    "content": full_cmd
+                })
+            else:
+                new_body_lines.append(line)
+                i += 1
+        self.body_lines = new_body_lines
+
+    def pass_7b_parse_while_loops(self):
+        self.log("Running Pass 7b: Parse WHILE Loops")
+        new_body_lines = []
+        for line in self.body_lines:
+            line_content = line.content.strip()
+            m = re.match(r'^WHILE\s+(.*)', line_content, re.IGNORECASE)
+            if m:
+                condition = m.group(1).strip()
+                if re.search(r'\bBEGIN$', condition, re.IGNORECASE):
+                    condition = re.sub(r'\s+BEGIN$', '', condition, flags=re.IGNORECASE).strip()
+                
+                full_while = f"WHILE {condition} LOOP"
+                self.while_commands.append({
+                    "line": line.line_number,
+                    "content": full_while
+                })
+            else:
+                new_body_lines.append(line)
+        self.body_lines = new_body_lines
+
     def pass_4_parse_inserts(self):
         """
         Parses INSERT commands.
@@ -758,7 +942,7 @@ class TsqlParser:
 
                     if len(insert_lines) > 0: # Checks for subsequent lines
                         # Check start of line for keywords
-                        if re.match(r'^(IF|ELSE\s+IF|ELSE|ELSIF|END|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT|SET|BEGIN|EXEC|EXECUTE|WHILE|COMMIT|ROLLBACK|DECLARE|CREATE|ALTER|DROP|RAISERROR)\b', current_content, re.IGNORECASE):
+                        if re.match(r'^(IF|ELSE\s+IF|ELSE|ELSIF|END|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT|SET|BEGIN|EXEC|EXECUTE|WHILE|COMMIT|ROLLBACK|DECLARE|CREATE|ALTER|DROP|RAISERROR|BREAK|CONTINUE|OPEN|FETCH|CLOSE|DEALLOCATE|GOTO)\b', current_content, re.IGNORECASE):
                              # Terminator found.
                              # But verify continuation first?
                              # Rule: "if line ... ends with ',' or '=' ... next line is part"
@@ -786,12 +970,12 @@ class TsqlParser:
                                     break
                                 next_idx_check += 1
                             if next_l_check:
-                                terminator_pattern = r'^(IF|ELSE\s+IF|ELSE|ELSIF|END|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT|SET|BEGIN|EXEC|EXECUTE|WHILE|COMMIT|ROLLBACK|DECLARE|CREATE|ALTER|DROP|RAISERROR)\b'
+                                terminator_pattern = r'^(IF|ELSE\s+IF|ELSE|ELSIF|END|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT|SET|BEGIN|EXEC|EXECUTE|WHILE|COMMIT|ROLLBACK|DECLARE|CREATE|ALTER|DROP|RAISERROR|BREAK|CONTINUE|OPEN|FETCH|CLOSE|DEALLOCATE|GOTO)\b'
                                 if re.match(terminator_pattern, next_l_check, re.IGNORECASE):
                                     is_terminator = True
                             else:
                                 is_terminator = True
-                        elif re.match(r'^(IF|ELSE\s+IF|ELSE|ELSIF|END|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT|SET|BEGIN|EXEC|EXECUTE|WHILE|COMMIT|ROLLBACK|DECLARE|CREATE|ALTER|DROP|RAISERROR)\b', current_content, re.IGNORECASE):
+                        elif re.match(r'^(IF|ELSE\s+IF|ELSE|ELSIF|END|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT|SET|BEGIN|EXEC|EXECUTE|WHILE|COMMIT|ROLLBACK|DECLARE|CREATE|ALTER|DROP|RAISERROR|BREAK|CONTINUE|OPEN|FETCH|CLOSE|DEALLOCATE|GOTO)\b', current_content, re.IGNORECASE):
                             is_terminator = True
 
                         if is_terminator:
@@ -841,6 +1025,44 @@ class TsqlParser:
 
         self.body_lines = new_body_lines
 
+
+    def pass_4c_parse_create_drop_table(self):
+        self.log("Running Pass 4c: Parse CREATE and DROP TABLE")
+        new_body_lines = []
+        i = 0
+        import re
+        while i < len(self.body_lines):
+            line = self.body_lines[i]
+            content = line.content.strip()
+
+            if re.match(r'^(CREATE|DROP)\s+TABLE\b', content, re.IGNORECASE):
+                cmd_lines = []
+                start_line = line.line_number
+                
+                while i < len(self.body_lines):
+                    current_line = self.body_lines[i]
+                    current_content = current_line.content.strip()
+                    if len(cmd_lines) > 0:
+                        is_terminator = re.match(r'^(IF|ELSE\s+IF|ELSE|ELSIF|END|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT|SET|BEGIN|EXEC|EXECUTE|WHILE|COMMIT|ROLLBACK|DECLARE|CREATE|ALTER|DROP|RAISERROR|BREAK|CONTINUE|OPEN|FETCH|CLOSE|DEALLOCATE|GOTO)\b', current_content, re.IGNORECASE)
+                        if is_terminator:
+                            break
+                    cmd_lines.append(current_line.content)
+                    i += 1
+                
+                full_cmd = " ".join([l.strip() for l in cmd_lines])
+                if not full_cmd.strip().endswith(';'):
+                    full_cmd = full_cmd.rstrip() + ';'
+                    
+                self.exec_commands.append({
+                    "line": start_line,
+                    "content": full_cmd
+                })
+                continue
+                
+            new_body_lines.append(line)
+            i += 1
+        self.body_lines = new_body_lines
+
     def pass_5_parse_updates(self):
         """
         Pass 5: Parses UPDATE commands.
@@ -863,7 +1085,7 @@ class TsqlParser:
                     current_content = current_line.content.strip()
 
                     if len(update_lines) > 0:
-                        is_terminator = re.match(r'^(IF|ELSE\s+IF|ELSE|ELSIF|END|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT|SET|BEGIN|EXEC|EXECUTE|WHILE|COMMIT|ROLLBACK|DECLARE|CREATE|ALTER|DROP|RAISERROR)\b', current_content, re.IGNORECASE)
+                        is_terminator = re.match(r'^(IF|ELSE\s+IF|ELSE|ELSIF|END|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT|SET|BEGIN|EXEC|EXECUTE|WHILE|COMMIT|ROLLBACK|DECLARE|CREATE|ALTER|DROP|RAISERROR|BREAK|CONTINUE|OPEN|FETCH|CLOSE|DEALLOCATE|GOTO)\b', current_content, re.IGNORECASE)
 
                         if is_terminator:
                             prev_content = update_lines[-1].strip()
@@ -929,7 +1151,7 @@ class TsqlParser:
                     current_content = current_line.content.strip()
 
                     if len(delete_lines) > 0:
-                        is_terminator = re.match(r'^(IF|ELSE\s+IF|ELSE|ELSIF|END|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT|SET|BEGIN|EXEC|EXECUTE|WHILE|COMMIT|ROLLBACK|DECLARE|CREATE|ALTER|DROP|RAISERROR)\b', current_content, re.IGNORECASE)
+                        is_terminator = re.match(r'^(IF|ELSE\s+IF|ELSE|ELSIF|END|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT|SET|BEGIN|EXEC|EXECUTE|WHILE|COMMIT|ROLLBACK|DECLARE|CREATE|ALTER|DROP|RAISERROR|BREAK|CONTINUE|OPEN|FETCH|CLOSE|DEALLOCATE|GOTO)\b', current_content, re.IGNORECASE)
 
                         if is_terminator:
                             prev_content = delete_lines[-1].strip()
@@ -1004,7 +1226,7 @@ class TsqlParser:
                             i += 1
                             break
 
-                        is_terminator = re.match(r'^(IF|ELSE\s+IF|ELSE|ELSIF|END|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT|SET|BEGIN|EXEC|EXECUTE|WHILE|COMMIT|ROLLBACK|DECLARE|CREATE|ALTER|DROP|RAISERROR)\b', current_content, re.IGNORECASE)
+                        is_terminator = re.match(r'^(IF|ELSE\s+IF|ELSE|ELSIF|END|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT|SET|BEGIN|EXEC|EXECUTE|WHILE|COMMIT|ROLLBACK|DECLARE|CREATE|ALTER|DROP|RAISERROR|BREAK|CONTINUE|OPEN|FETCH|CLOSE|DEALLOCATE|GOTO)\b', current_content, re.IGNORECASE)
 
                         if is_terminator:
                             prev_content = print_lines[-1].strip()
@@ -1100,7 +1322,7 @@ class TsqlParser:
                     current_content = current_line.content.strip()
 
                     if len(set_lines) > 0:
-                        is_terminator = re.match(r'^(IF|ELSE\s+IF|ELSE|ELSIF|END|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT|SET|BEGIN|EXEC|EXECUTE|WHILE|COMMIT|ROLLBACK|DECLARE|CREATE|ALTER|DROP|RAISERROR)\b', current_content, re.IGNORECASE)
+                        is_terminator = re.match(r'^(IF|ELSE\s+IF|ELSE|ELSIF|END|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT|SET|BEGIN|EXEC|EXECUTE|WHILE|COMMIT|ROLLBACK|DECLARE|CREATE|ALTER|DROP|RAISERROR|BREAK|CONTINUE|OPEN|FETCH|CLOSE|DEALLOCATE|GOTO)\b', current_content, re.IGNORECASE)
 
                         if is_terminator:
                             prev_content = set_lines[-1].strip()
@@ -1187,12 +1409,12 @@ class TsqlParser:
                                     break
                                 next_idx_check += 1
                             if next_l_check:
-                                terminator_pattern = r'^(IF|ELSE\s+IF|ELSE|ELSIF|END|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT|SET|BEGIN|EXEC|EXECUTE|WHILE|COMMIT|ROLLBACK|DECLARE|CREATE|ALTER|DROP|RAISERROR)\b'
+                                terminator_pattern = r'^(IF|ELSE\s+IF|ELSE|ELSIF|END|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT|SET|BEGIN|EXEC|EXECUTE|WHILE|COMMIT|ROLLBACK|DECLARE|CREATE|ALTER|DROP|RAISERROR|BREAK|CONTINUE|OPEN|FETCH|CLOSE|DEALLOCATE|GOTO)\b'
                                 if re.match(terminator_pattern, next_l_check, re.IGNORECASE):
                                     is_terminator = True
                             else:
                                 is_terminator = True
-                        elif re.match(r'^(IF|ELSE\s+IF|ELSE|ELSIF|END|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT|SET|BEGIN|EXEC|EXECUTE|WHILE|COMMIT|ROLLBACK|DECLARE|CREATE|ALTER|DROP|RAISERROR)\b', current_content, re.IGNORECASE):
+                        elif re.match(r'^(IF|ELSE\s+IF|ELSE|ELSIF|END|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT|SET|BEGIN|EXEC|EXECUTE|WHILE|COMMIT|ROLLBACK|DECLARE|CREATE|ALTER|DROP|RAISERROR|BREAK|CONTINUE|OPEN|FETCH|CLOSE|DEALLOCATE|GOTO)\b', current_content, re.IGNORECASE):
                             is_terminator = True
 
                         if is_terminator:
@@ -1282,7 +1504,7 @@ class TsqlParser:
                         is_terminator = False
                         if current_content == "":
                             is_terminator = True
-                        elif re.match(r'^(IF|ELSE\s+IF|ELSE|ELSIF|END|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT|SET|BEGIN|EXEC|EXECUTE|WHILE|COMMIT|ROLLBACK|DECLARE|CREATE|ALTER|DROP|RAISERROR)\b', current_content, re.IGNORECASE):
+                        elif re.match(r'^(IF|ELSE\s+IF|ELSE|ELSIF|END|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT|SET|BEGIN|EXEC|EXECUTE|WHILE|COMMIT|ROLLBACK|DECLARE|CREATE|ALTER|DROP|RAISERROR|BREAK|CONTINUE|OPEN|FETCH|CLOSE|DEALLOCATE|GOTO)\b', current_content, re.IGNORECASE):
                             is_terminator = True
 
                         if is_terminator:
@@ -1321,7 +1543,7 @@ class TsqlParser:
                                      next_idx_check += 1
                                 
                                 if next_l_check:
-                                     terminator_pattern = r'^(IF|ELSE\s+IF|ELSE|ELSIF|END|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT|SET|BEGIN|EXEC|EXECUTE|WHILE|COMMIT|ROLLBACK|DECLARE|CREATE|ALTER|DROP|RAISERROR)\b'
+                                     terminator_pattern = r'^(IF|ELSE\s+IF|ELSE|ELSIF|END|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT|SET|BEGIN|EXEC|EXECUTE|WHILE|COMMIT|ROLLBACK|DECLARE|CREATE|ALTER|DROP|RAISERROR|BREAK|CONTINUE|OPEN|FETCH|CLOSE|DEALLOCATE|GOTO)\b'
                                      if not re.match(terminator_pattern, next_l_check, re.IGNORECASE):
                                          is_continuation = True
 
@@ -1378,12 +1600,12 @@ class TsqlParser:
                                     break
                                 next_idx_check += 1
                             if next_l_check:
-                                terminator_pattern = r'^(IF|ELSE\s+IF|ELSE|ELSIF|END|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT|SET|BEGIN|EXEC|EXECUTE|WHILE|COMMIT|ROLLBACK|DECLARE|CREATE|ALTER|DROP|RAISERROR)\b'
+                                terminator_pattern = r'^(IF|ELSE\s+IF|ELSE|ELSIF|END|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT|SET|BEGIN|EXEC|EXECUTE|WHILE|COMMIT|ROLLBACK|DECLARE|CREATE|ALTER|DROP|RAISERROR|BREAK|CONTINUE|OPEN|FETCH|CLOSE|DEALLOCATE|GOTO)\b'
                                 if re.match(terminator_pattern, next_l_check, re.IGNORECASE):
                                     is_terminator = True
                             else:
                                 is_terminator = True
-                        elif re.match(r'^(IF|ELSE\s+IF|ELSE|ELSIF|END|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT|SET|BEGIN|EXEC|EXECUTE|WHILE|COMMIT|ROLLBACK|DECLARE|CREATE|ALTER|DROP|RAISERROR)\b', current_content, re.IGNORECASE):
+                        elif re.match(r'^(IF|ELSE\s+IF|ELSE|ELSIF|END|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT|SET|BEGIN|EXEC|EXECUTE|WHILE|COMMIT|ROLLBACK|DECLARE|CREATE|ALTER|DROP|RAISERROR|BREAK|CONTINUE|OPEN|FETCH|CLOSE|DEALLOCATE|GOTO)\b', current_content, re.IGNORECASE):
                             is_terminator = True
 
                         if is_terminator:
@@ -1419,7 +1641,7 @@ class TsqlParser:
         """
         self.log("Running Pass 3b: Split Inline IFs")
         new_body_lines = []
-        keywords = ["SELECT", "INSERT", "UPDATE", "DELETE", "PRINT", "EXEC", "EXECUTE", "BEGIN", "RETURN", "SET"]
+        keywords = ["SELECT", "INSERT", "UPDATE", "DELETE", "PRINT", "EXEC", "EXECUTE", "BEGIN", "RETURN", "SET", "BREAK", "CONTINUE", "COMMIT", "ROLLBACK", "SAVE"]
         
         for line in self.body_lines:
             content = line.content.strip()
@@ -1460,7 +1682,9 @@ class TsqlParser:
                 if split_idx != -1:
                     part1 = content[:split_idx].strip()
                     part2 = content[split_idx:].strip()
+                    print(f"Split part 1: {part1}")
                     new_body_lines.append(type(line)(line.line_number, part1))
+                    print(f"Split part 2: {part2}")
                     new_body_lines.append(type(line)(line.line_number + 0.1, part2))
                 else:
                     new_body_lines.append(line)
@@ -1511,7 +1735,7 @@ class TsqlParser:
                         next_line_content = self.body_lines[next_idx].content.strip()
                         if next_line_content == "":
                             is_terminator = True
-                        elif re.match(r'^(IF|ELSE\s+IF|ELSE|ELSIF|END|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT|SET|BEGIN|EXEC|EXECUTE|WHILE|COMMIT|ROLLBACK|DECLARE|CREATE|ALTER|DROP|RAISERROR)\b', next_line_content, re.IGNORECASE):
+                        elif re.match(r'^(IF|ELSE\s+IF|ELSE|ELSIF|END|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT|SET|BEGIN|EXEC|EXECUTE|WHILE|COMMIT|ROLLBACK|DECLARE|CREATE|ALTER|DROP|RAISERROR|BREAK|CONTINUE|OPEN|FETCH|CLOSE|DEALLOCATE|GOTO)\b', next_line_content, re.IGNORECASE):
                             is_terminator = True
 
                     if is_terminator:
@@ -1795,6 +2019,54 @@ class TsqlParser:
 
                 cmd_obj['content'] = new_content
 
+
+    def pass_7c_parse_break_continue(self):
+        self.log("Running Pass 7c: Parse BREAK/CONTINUE")
+        new_body_lines = []
+        for line in self.body_lines:
+            line_content = line.content.strip()
+            if re.match(r'^BREAK\b', line_content, re.IGNORECASE):
+                self.exec_commands.append({
+                    "line": line.line_number,
+                    "content": "EXIT;"
+                })
+            elif re.match(r'^CONTINUE\b', line_content, re.IGNORECASE):
+                self.exec_commands.append({
+                    "line": line.line_number,
+                    "content": "CONTINUE;"
+                })
+            else:
+                new_body_lines.append(line)
+        self.body_lines = new_body_lines
+
+
+    def pass_7d_parse_goto_and_labels(self):
+        self.log("Running Pass 7d: Parse GOTO and Labels")
+        new_body_lines = []
+        for line in self.body_lines:
+            content = line.content.strip()
+            
+            m_label = re.match(r'^([a-zA-Z0-9_]+)\s*:$', content)
+            if m_label:
+                label_name = m_label.group(1)
+                self.exec_commands.append({
+                    "line": line.line_number,
+                    "content": f"/* TODO: LABEL {label_name} */"
+                })
+                continue
+                
+            m_goto = re.match(r'^GOTO\s+([a-zA-Z0-9_]+)', content, re.IGNORECASE)
+            if m_goto:
+                label_name = m_goto.group(1)
+                self.exec_commands.append({
+                    "line": line.line_number,
+                    "content": f"/* TODO: GOTO {label_name} - unsupported in PL/pgSQL */"
+                })
+                continue
+                
+            new_body_lines.append(line)
+        self.body_lines = new_body_lines
+
     def pass_8d_convert_selects(self):
         """
         Pass 8d: Converts SELECT commands using the view converter if provided.
@@ -1822,6 +2094,11 @@ class TsqlParser:
 
 
     def pass_9_rename_variables(self):
+        """
+        ...
+        Also transforms IF (@@sqlstatus!=0) BREAK into EXIT WHEN NOT FOUND;
+        """
+
         """
         Pass 9: Global replacement of local variable notation.
         Iterate over all arrays and replace @var with locvar_var.
@@ -1859,12 +2136,19 @@ class TsqlParser:
             self.select_commands,
             self.exec_commands,
             self.if_commands,
-            self.comments
+            self.comments,
+            self.cursors,
+            self.cursor_commands,
+            self.while_commands
         ]
 
         for array in targets:
             for item in array:
                 item['content'] = apply_rename(item['content'])
+
+        for i_cmd in self.if_commands:
+            i_cmd['content'] = re.sub(r'@@sqlstatus\s*!=\s*0', 'NOT FOUND', i_cmd['content'], flags=re.IGNORECASE)
+            i_cmd['content'] = re.sub(r'@@sqlstatus\s*=\s*0', 'FOUND', i_cmd['content'], flags=re.IGNORECASE)
 
 
 
@@ -1925,6 +2209,33 @@ class TsqlParser:
 
         print(f"--- END CHECKS FOR {self.filepath} ---")
 
+
+    def pass_9b_process_rowcount(self):
+        self.log("Running Pass 9b: Process @@rowcount")
+        import re
+        used_rowcount = False
+        for if_cmd in self.if_commands:
+            if re.search(r'@@rowcount', if_cmd['content'], re.IGNORECASE):
+                used_rowcount = True
+                if_cmd['content'] = re.sub(r'@@rowcount', 'locvar_rowcount', if_cmd['content'], flags=re.IGNORECASE)
+                self.exec_commands.append({
+                    "line": if_cmd['line'] - 0.1,
+                    "content": "GET DIAGNOSTICS locvar_rowcount = ROW_COUNT;"
+                })
+        
+        if used_rowcount:
+            # Check if locvar_rowcount is already in variables
+            found = False
+            for v in self.variables:
+                if 'locvar_rowcount' in v['content']:
+                    found = True
+                    break
+            if not found:
+                self.variables.append({
+                    "line": 0,
+                    "content": "locvar_rowcount INTEGER;"
+                })
+
     def pass_10_add_semicolons(self):
         """
         Pass 10 (New): Checks remaining body lines.
@@ -1956,6 +2267,26 @@ class TsqlParser:
 
             # Rule 122: BEGIN -> keep unchanged
             if re.match(r'^BEGIN\b', content, re.IGNORECASE) and content.upper() == "BEGIN":
+                continue
+
+            # Convert Sybase BEGIN TRAN(SACTION) to NULL; comment to prevent breaking IF block symmetry
+            if re.match(r'^BEGIN\s+TRAN(SACTION)?\b', content, re.IGNORECASE):
+                line.content = f"NULL; /* {content} (Not required in PL/pgSQL) */"
+                continue
+
+            # Convert Sybase SAVE TRAN(SACTION) to NULL; comment
+            if re.match(r'^SAVE\s+TRAN(SACTION)?\b', content, re.IGNORECASE):
+                line.content = f"NULL; /* {content} (Not required in PL/pgSQL) */"
+                continue
+
+            # Convert Sybase COMMIT TRAN(SACTION) to simple COMMIT
+            if re.match(r'^COMMIT(\s+TRAN(SACTION)?)?\b', content, re.IGNORECASE):
+                line.content = "COMMIT;"
+                continue
+
+            # Convert Sybase ROLLBACK TRAN(SACTION) to simple ROLLBACK
+            if re.match(r'^ROLLBACK(\s+TRAN(SACTION)?)?\b', content, re.IGNORECASE):
+                line.content = "ROLLBACK;"
                 continue
 
             # Allow SET ROWCOUNT to pass through cleanly so it can be handled by pass 11
@@ -1999,12 +2330,17 @@ class TsqlParser:
         add_line("separator", 0, "$$")
 
         # 3. DECLARE
-        if self.variables:
+        if self.variables or self.cursors:
             add_line("declare_section", 0, "DECLARE")
 
             # 4. Variables
             for var in self.variables:
                 add_line("variable_declaration", var['line'], var['content'])
+
+
+            # 4b. Cursors
+            for c in self.cursors:
+                add_line("cursor_declaration", c['line'], c['content'])
 
         # 5. Body Output Array
         # Collect all parts, sort by original line number, then append.
@@ -2014,6 +2350,13 @@ class TsqlParser:
 
         for l in self.body_lines:
             body_parts.append((l.line_number, l.content, "remaining_body_lines"))
+
+
+        for cmd in self.cursor_commands:
+            body_parts.append((cmd['line'], cmd['content'], "cursor_commands"))
+
+        for w in self.while_commands:
+            body_parts.append((w['line'], w['content'], "while_commands"))
 
         for i in self.inserts:
             content = i['content']
@@ -2029,6 +2372,15 @@ class TsqlParser:
 
         for d in self.delete_commands:
             content = d['content']
+            
+            match_from = re.match(r'^DELETE\s+([#a-zA-Z0-9_]+)\s+FROM\s+(.+?)(?=\s+WHERE\b|\s*$)', content, re.IGNORECASE)
+            if match_from:
+                content = re.sub(r'^DELETE\s+([#a-zA-Z0-9_]+)\s+FROM\s+', r'DELETE FROM \1 USING ', content, count=1, flags=re.IGNORECASE)
+            else:
+                match_where = re.match(r'^DELETE\s+([#a-zA-Z0-9_]+)\s+(WHERE\b)', content, re.IGNORECASE)
+                if match_where:
+                    content = re.sub(r'^DELETE\s+([#a-zA-Z0-9_]+)\s+WHERE\b', r'DELETE FROM \1 WHERE', content, count=1, flags=re.IGNORECASE)
+
             if not content.strip().endswith(';'):
                 content += ';'
             body_parts.append((d['line'], content, "delete_commands"))
@@ -2066,16 +2418,25 @@ class TsqlParser:
                 
                 # Exclude dynamic SQL like EXECUTE ('...') or EXECUTE (locvar_...)
                 if not remainder.startswith('(') and not remainder.startswith('\''):
-                    # Split into procedure name and arguments
-                    parts = re.split(r'\s+', remainder, 1)
-                    proc_name = parts[0]
-                    args = parts[1].strip() if len(parts) > 1 else ""
-                    content = f"PERFORM {proc_name}({args})"
+                    assign_match = re.match(r'^(@[a-zA-Z0-9_]+|locvar_[a-zA-Z0-9_]+)\s*=\s*(.+)$', remainder)
+                    if assign_match:
+                        var_name = assign_match.group(1)
+                        rest = assign_match.group(2).strip()
+                        parts = re.split(r'\s+', rest, maxsplit=1)
+                        proc_name = '.'.join([f'"{p}"' for p in parts[0].split('.')])
+                        args = parts[1].strip() if len(parts) > 1 else ""
+                        content = f"{var_name} := {proc_name}({args})"
+                    else:
+                        # Split into procedure name and arguments
+                        parts = re.split(r'\s+', remainder, maxsplit=1)
+                        proc_name = '.'.join([f'"{p}"' for p in parts[0].split('.')])
+                        args = parts[1].strip() if len(parts) > 1 else ""
+                        content = f"PERFORM {proc_name}({args})"
                 else:
                     # Keep as EXECUTE for dynamic SQL
                     content = f"EXECUTE {remainder}"
 
-            if not content.strip().endswith(';'):
+            if not content.strip().endswith(';') and not content.strip().startswith('/*'):
                 content += ';'
             body_parts.append((e['line'], content, "exec_commands"))
 
@@ -2112,6 +2473,9 @@ class TsqlParser:
                         content = content.strip()[:-1] + f" LIMIT {active_rowcount_limit};"
                     else:
                         content = content.strip() + f" LIMIT {active_rowcount_limit}"
+
+            # Strip # prefix from temporary table identifiers (avoids string literals starting with ')
+            content = re.sub(r"(?<!')#([a-zA-Z0-9_]+)\b", r"\1", content)
 
             new_body_parts.append((line_num, content, source_name))
 
@@ -2166,9 +2530,13 @@ class TsqlParser:
             # Check what the current line is
             if re.match(r'^IF\b', content, re.IGNORECASE):
                 # New IF statement starts
-                if_stack.append({"state": "EXPECT_TARGET"})
+                if_stack.append({"type": "IF", "state": "EXPECT_TARGET"})
                 new_array.append(line)
                 
+
+            elif re.match(r'^WHILE\b', content, re.IGNORECASE):
+                if_stack.append({"type": "WHILE", "state": "EXPECT_TARGET"})
+                new_array.append(line)
             elif re.match(r'^(ELSIF|ELSE\s+IF|ELSE)\b', content, re.IGNORECASE):
                 # Extends the current IF statement
                 if if_stack:
@@ -2201,9 +2569,12 @@ class TsqlParser:
                     break
                 else:
                     # Close the IF!
-                    if_stack.pop()
+                    popped_item = if_stack.pop()
                     orig_line = getattr(line, 'original_line_number', getattr(line, 'line_number_approx', 0))
-                    new_line = type(line)(0, 'injected_end_if', orig_line, "END IF;")
+                    if popped_item["type"] == "WHILE":
+                        new_line = type(line)(0, 'injected_end_loop', orig_line, "END LOOP;")
+                    else:
+                        new_line = type(line)(0, 'injected_end_if', orig_line, "END IF;")
                     new_array.append(new_line)
 
         # Update the output array
@@ -2291,17 +2662,35 @@ class TsqlParser:
         # Pass 1
         self.pass_1_split_inline_comments()
 
+        # Pass 0b
+        self.pass_0b_map_tempdb()
+
+        # Pass 1c
+        self.pass_1c_split_inline_goto()
+
         # Pass 2
         self.pass_2_extract_comments()
 
         # Pass 3
         self.pass_3_parse_variables()
 
+        # Pass 3c
+        self.pass_3c_parse_cursors()
+
         # Pass 3b
         self.pass_3b_split_inline_ifs()
 
+        # Pass 3d
+        self.pass_7d_parse_goto_and_labels()
+
         # Pass 4
         self.pass_4_parse_inserts()
+
+        # Pass 4b
+        self.pass_4b_parse_cursor_commands()
+
+        # Pass 4c
+        self.pass_4c_parse_create_drop_table()
 
         # Pass 5
         self.pass_5_parse_updates()
@@ -2327,8 +2716,18 @@ class TsqlParser:
         # Pass 7
         self.pass_7_parse_if_commands()
 
+        # Pass 7b
+        self.pass_7b_parse_while_loops()
+
+        # Pass 7c
+        self.pass_7c_parse_break_continue()
+
+
         # Pass 8d
         self.pass_8d_convert_selects()
+
+        # Pass 9b
+        self.pass_9b_process_rowcount()
 
         # Pass 8
         self.pass_8_process_select_assignments()

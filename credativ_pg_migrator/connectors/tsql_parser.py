@@ -2274,6 +2274,11 @@ class TsqlParser:
                 line.content = f"NULL; /* {content} (Not required in PL/pgSQL) */"
                 continue
 
+            # Convert Sybase SAVE TRAN(SACTION) to NULL; comment
+            if re.match(r'^SAVE\s+TRAN(SACTION)?\b', content, re.IGNORECASE):
+                line.content = f"NULL; /* {content} (Not required in PL/pgSQL) */"
+                continue
+
             # Convert Sybase COMMIT TRAN(SACTION) to simple COMMIT
             if re.match(r'^COMMIT(\s+TRAN(SACTION)?)?\b', content, re.IGNORECASE):
                 line.content = "COMMIT;"

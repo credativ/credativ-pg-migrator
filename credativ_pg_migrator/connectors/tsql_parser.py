@@ -64,6 +64,9 @@ class TsqlParser:
         self.parse_header_and_body_boundary()
         self.pass_1_split_inline_comments()
 
+        # Pass 0b
+        self.pass_0b_map_tempdb()
+
         # Pass 1c
         self.pass_1c_split_inline_goto()
         self.pass_2_extract_comments()
@@ -72,10 +75,16 @@ class TsqlParser:
         # Pass 3c
         self.pass_3c_parse_cursors()
         self.pass_3b_split_inline_ifs()
+
+        # Pass 3d
+        self.pass_7d_parse_goto_and_labels()
         self.pass_4_parse_inserts()
 
         # Pass 4b
         self.pass_4b_parse_cursor_commands()
+
+        # Pass 4c
+        self.pass_4c_parse_create_drop_table()
         self.pass_5_parse_updates()
         self.pass_5b_parse_deletes()
         self.pass_5c_parse_prints()
@@ -565,6 +574,13 @@ class TsqlParser:
                 i += 1
 
 
+
+    def pass_0b_map_tempdb(self):
+        self.log("Running Pass 0b: Map tempdb to pg_temp")
+        for line in self.body_lines:
+            import re
+            line.content = re.sub(r'tempdb\.\.', 'pg_temp.', line.content, flags=re.IGNORECASE)
+
     def pass_1c_split_inline_goto(self):
         self.log("Running Pass 1c: Split Inline GOTO")
         new_body_lines = []
@@ -1007,6 +1023,44 @@ class TsqlParser:
                 new_body_lines.append(line)
                 i += 1
 
+        self.body_lines = new_body_lines
+
+
+    def pass_4c_parse_create_drop_table(self):
+        self.log("Running Pass 4c: Parse CREATE and DROP TABLE")
+        new_body_lines = []
+        i = 0
+        import re
+        while i < len(self.body_lines):
+            line = self.body_lines[i]
+            content = line.content.strip()
+
+            if re.match(r'^(CREATE|DROP)\s+TABLE\b', content, re.IGNORECASE):
+                cmd_lines = []
+                start_line = line.line_number
+                
+                while i < len(self.body_lines):
+                    current_line = self.body_lines[i]
+                    current_content = current_line.content.strip()
+                    if len(cmd_lines) > 0:
+                        is_terminator = re.match(r'^(IF|ELSE\s+IF|ELSE|ELSIF|END|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT|SET|BEGIN|EXEC|EXECUTE|WHILE|COMMIT|ROLLBACK|DECLARE|CREATE|ALTER|DROP|RAISERROR|BREAK|CONTINUE|OPEN|FETCH|CLOSE|DEALLOCATE|GOTO)\b', current_content, re.IGNORECASE)
+                        if is_terminator:
+                            break
+                    cmd_lines.append(current_line.content)
+                    i += 1
+                
+                full_cmd = " ".join([l.strip() for l in cmd_lines])
+                if not full_cmd.strip().endswith(';'):
+                    full_cmd = full_cmd.rstrip() + ';'
+                    
+                self.exec_commands.append({
+                    "line": start_line,
+                    "content": full_cmd
+                })
+                continue
+                
+            new_body_lines.append(line)
+            i += 1
         self.body_lines = new_body_lines
 
     def pass_5_parse_updates(self):
@@ -2332,7 +2386,7 @@ class TsqlParser:
                     # Keep as EXECUTE for dynamic SQL
                     content = f"EXECUTE {remainder}"
 
-            if not content.strip().endswith(';'):
+            if not content.strip().endswith(';') and not content.strip().startswith('/*'):
                 content += ';'
             body_parts.append((e['line'], content, "exec_commands"))
 
@@ -2555,6 +2609,9 @@ class TsqlParser:
         # Pass 1
         self.pass_1_split_inline_comments()
 
+        # Pass 0b
+        self.pass_0b_map_tempdb()
+
         # Pass 1c
         self.pass_1c_split_inline_goto()
 
@@ -2570,11 +2627,17 @@ class TsqlParser:
         # Pass 3b
         self.pass_3b_split_inline_ifs()
 
+        # Pass 3d
+        self.pass_7d_parse_goto_and_labels()
+
         # Pass 4
         self.pass_4_parse_inserts()
 
         # Pass 4b
         self.pass_4b_parse_cursor_commands()
+
+        # Pass 4c
+        self.pass_4c_parse_create_drop_table()
 
         # Pass 5
         self.pass_5_parse_updates()
@@ -2606,8 +2669,6 @@ class TsqlParser:
         # Pass 7c
         self.pass_7c_parse_break_continue()
 
-        # Pass 7d
-        self.pass_7d_parse_goto_and_labels()
 
         # Pass 8d
         self.pass_8d_convert_selects()

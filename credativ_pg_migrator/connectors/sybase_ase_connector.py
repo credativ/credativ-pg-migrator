@@ -2934,23 +2934,38 @@ EXECUTE FUNCTION {target_schema_name}.{trigger_name}_func();
                     return sqlglot.exp.Cast(this=expr_node, to=new_type_node)
             return node
 
+        def is_string_expr(node):
+            if node is None:
+                return False
+            if node.is_string:
+                return True
+            if isinstance(node, sqlglot.exp.Cast) and getattr(node.to.this, 'name', '').upper() in ('VARCHAR', 'CHAR', 'TEXT', 'NVARCHAR', 'NCHAR', 'UNIVARCHAR', 'UNICHAR'):
+                return True
+            if isinstance(node, sqlglot.exp.DPipe):
+                return True
+            if isinstance(node, sqlglot.exp.Add):
+                return is_string_expr(node.left) or is_string_expr(node.right)
+            return False
+
         def convert_string_concatenation(node):
             if isinstance(node, sqlglot.exp.Add):
-                left = node.left
-                right = node.right
-                is_left_string = left.is_string or (isinstance(left, sqlglot.exp.Cast) and left.to.this.name.upper() in ('VARCHAR', 'CHAR', 'TEXT', 'NVARCHAR', 'NCHAR', 'UNIVARCHAR', 'UNICHAR'))
-                is_right_string = right.is_string or (isinstance(right, sqlglot.exp.Cast) and right.to.this.name.upper() in ('VARCHAR', 'CHAR', 'TEXT', 'NVARCHAR', 'NCHAR', 'UNIVARCHAR', 'UNICHAR'))
+                # Process children first to do a bottom-up replacement
+                left = node.left.transform(convert_string_concatenation)
+                right = node.right.transform(convert_string_concatenation)
+
+                is_left_string = is_string_expr(left)
+                is_right_string = is_string_expr(right)
 
                 if is_left_string or is_right_string:
-                    # Conversion needed
-                    new_left = left
-                    new_right = right
-
-                    # Cast non-string operands to text to avoid type errors in PostgreSQL
                     if not is_left_string:
-                         new_left = sqlglot.exp.Cast(this=left, to=sqlglot.exp.DataType.build('text'))
+                         new_left = sqlglot.exp.Cast(this=left.copy(), to=sqlglot.exp.DataType.build('text'))
+                    else:
+                         new_left = left.copy()
+                         
                     if not is_right_string:
-                         new_right = sqlglot.exp.Cast(this=right, to=sqlglot.exp.DataType.build('text'))
+                         new_right = sqlglot.exp.Cast(this=right.copy(), to=sqlglot.exp.DataType.build('text'))
+                    else:
+                         new_right = right.copy()
 
                     return sqlglot.exp.DPipe(this=new_left, expression=new_right)
             return node

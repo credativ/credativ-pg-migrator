@@ -4,6 +4,16 @@
 
 - 2026.06.29
 
+  - Feature - Sybase ASE Connector: Intelligent mixed-return flattening. Automatically converts implicit procedural `SELECT` outputs into proper scalar `RETURN` statements when developers improperly mixed them with explicit `RETURN <status_code>` directives.
+  - Feature - T-SQL Parser: Engineered robust extraction and handling for `#` prefixed temporary tables (`tempdb..`). Natively overrides these references to use standard `pg_temp.` contexts and applies a late-stage AST clean-up pass to systematically strip trailing `#` hashes from `DELETE`, `UPDATE`, `CREATE`, and `DROP` commands to preserve PostgreSQL identifier legality.
+  - Fix - T-SQL Parser: Safely bypassed legacy transaction directives (`BEGIN TRAN`, `SAVE TRAN`, `COMMIT TRAN`, `ROLLBACK TRAN`) by converting them directly into structural `NULL;` statements. This guarantees perfect block parity across nested `IF` bodies by strictly preventing the AST generator from artificially consuming the function's terminating `END;` marker.
+  - Fix - T-SQL Parser: Upgraded `EXEC` / `EXECUTE` conversion engine to correctly distinguish and map assignments (e.g. `EXEC @id = func(...)`) into proper `var := func();` PL/pgSQL assignments rather than invalid `PERFORM` functions.
+  - Fix - Sybase ASE Connector: Fixed DDL generation formatting to securely split and wrap generated function, procedure, and trigger schema mapping identifiers inside strict double-quotes (`"schema"."name"`).
+  - Fix - T-SQL Parser: Updated the `DELETE` regex conversion engine to successfully identify and restructure multi-table temporary hash syntax (e.g. `DELETE [#temp] FROM [table]`) securely into the PostgreSQL-compliant `DELETE FROM [temp] USING [table]`.
+  - Fix - T-SQL Parser: Broadened the AST iteration matrix in `pass_3_parse_variables` to intercept and safely isolate multi-line `CURSOR` definitions (`DECLARE <name> CURSOR FOR SELECT ...`), resolving critical truncation errors caused by embedded keywords.
+  - Fix - T-SQL Parser: Added interception and dynamic cleanup for Sybase `GOTO` syntax. Legacy label definitions (`label:`) and corresponding `GOTO label` invocations are now correctly bypassed or neutralized.
+  - Fix - Sybase ASE Connector: Replaced legacy string concatenation `+` operators encountered inside generated view expressions natively with standard `||` operators.
+
 - 2026.06.19
 
   - Feature - MariaDB: Added a dedicated native MariaDB connector (`mariadb_connector.py`) using the `mariadb` Python module instead of `mysql-connector-python` to resolve licensing and compliance concerns. Added explicit JDBC and ODBC configuration examples for MariaDB in `config_sample.yaml`.

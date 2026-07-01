@@ -8,7 +8,8 @@ credativ-pg-migrator Releases
 * New Anonymization workflow: Standalone module for data masking using Python libraries or PostgreSQL extensions
 * Major enhancements to IBM Db2 LUW connector: Deep translation of views, constraints, triggers, and sequences to PostgreSQL equivalents
 * Enhancements in Mapping workflow: Forced Table Mappings, intelligent name matching for unmapped tables, and identity sequence mapping
-* Refined T-SQL Parser for accurate procedure and trigger conversion, plus numerous stability and reporting fixes across all connectors
+* Extensive upgrades to the native T-SQL Parser and Sybase ASE Connector for procedure and trigger conversion: Supports dynamic mixed-return flattening, `#temp` table transpilations, native `EXEC` assignments, `GOTO` and `CURSOR` processing, and block-parity preservation.
+* Numerous stability and reporting fixes across all connectors
 
 0.14.0 - 20.05.2026
 -------------------

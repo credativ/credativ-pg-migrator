@@ -11,7 +11,7 @@
 
   - Fix - Planner: Fixed a bug where the target schema was unconditionally dropped during `pre_planning` when `migration.drop_schema` was `true`, causing the `mapping` workflow to erroneously delete all existing tables it was supposed to map. Target schema dropping is now explicitly bypassed during mapping.
 
-## 0.15.0rc1 - 2026.06.29
+## 0.15.0 - 2026.07.03
 
 - 2026.06.29
 

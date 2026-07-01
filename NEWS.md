@@ -1,7 +1,7 @@
 credativ-pg-migrator Releases
 =============================
 
-0.15.0 - 29.06.2026
+0.15.0 - 01.07.2026
 -------------------
 
 * Comprehensive Validation upgrades: Column-level checksums, cross-engine Python hashing, structural validation, and detailed side-by-side reporting

@@ -727,6 +727,18 @@ class OracleConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', f"oracle_connector: get_indexes_count: Error: {e}")
             return -1
 
+    def get_schema_indexes_count(self, schema_name: str) -> int:
+        query = f"SELECT count(*) FROM all_indexes WHERE table_owner = '{schema_name.upper()}'"
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            count = cursor.fetchone()[0]
+            cursor.close()
+            return count
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"oracle_connector: get_schema_indexes_count: Error: {e}")
+            return -1
+
     def fetch_constraints(self, settings):
         source_table_id = settings['source_table_id']
         source_table_schema = settings['source_table_schema']
@@ -829,6 +841,18 @@ class OracleConnector(DatabaseConnector):
             return count
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"oracle_connector: get_constraints_count: Error: {e}")
+            return -1
+
+    def get_schema_constraints_count(self, schema_name: str) -> int:
+        query = f"SELECT count(*) FROM all_constraints WHERE owner = '{schema_name.upper()}'"
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            count = cursor.fetchone()[0]
+            cursor.close()
+            return count
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"oracle_connector: get_schema_constraints_count: Error: {e}")
             return -1
 
     def get_aliases(self, settings):

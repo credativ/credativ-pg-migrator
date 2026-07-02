@@ -775,6 +775,20 @@ class DatabaseConnector(ABC):
         """
         pass
 
+    def get_schema_indexes_count(self, schema_name: str) -> int:
+        """
+        Returns the total number of indexes in a given schema.
+        Returns -1 if not supported or implemented.
+        """
+        return -1
+
+    def get_schema_constraints_count(self, schema_name: str) -> int:
+        """
+        Returns the total number of constraints in a given schema.
+        Returns -1 if not supported or implemented.
+        """
+        return -1
+
     def _compute_python_table_checksum(self, query: str):
         """
         Helper method to compute a deterministic, order-independent table checksum

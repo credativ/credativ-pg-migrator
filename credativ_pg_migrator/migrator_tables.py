@@ -397,6 +397,14 @@ class MigratorTables:
 
     def create_table_for_mapping(self):
         self.protocol_connection.execute_query(f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."mapping_pre_stats" (
+                id SERIAL PRIMARY KEY,
+                side VARCHAR(10),
+                object_type VARCHAR(50),
+                object_count INTEGER
+            );
+        """)
+        self.protocol_connection.execute_query(f"""
             CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."mapping_tables" (
                 id SERIAL PRIMARY KEY,
                 source_schema_name TEXT,
@@ -487,6 +495,17 @@ class MigratorTables:
         """)
         self.config_parser.print_log_message('DEBUG3', f"migrator_tables: create_table_for_mapping: Mapping tables created in schema {self.protocol_schema}")
 
+
+    def insert_mapping_pre_stat(self, side: str, object_type: str, object_count: int):
+        try:
+            self.protocol_connection.execute_query(f"""
+                INSERT INTO "{self.protocol_schema}"."mapping_pre_stats"
+                (side, object_type, object_count)
+                VALUES (%s, %s, %s)
+            """, (side, object_type, object_count))
+            self.protocol_connection.connection.commit()
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_mapping_pre_stat: Error: {e}")
 
     def insert_mapping_tables(self, settings):
         func_run_id = uuid.uuid4()
@@ -3493,6 +3512,30 @@ class MigratorTables:
             pass
 
         lines.append("")
+        if self.config_parser.get_workflow() == 'mapping':
+            lines.append("[ PRE-MAPPING OBJECT STATISTICS ]")
+            lines.append("-" * 80)
+            lines.append(f"{'Object Type':<24} | {'Source DB':>12} | {'Target DB':>12}")
+            lines.append("-" * 80)
+            try:
+                cursor = self.protocol_connection.connection.cursor()
+                cursor.execute(f"""SELECT side, object_type, object_count FROM "{self.protocol_schema}"."mapping_pre_stats" """)
+                stats = cursor.fetchall()
+                stats_dict = {'tables': {'source': '-', 'target': '-'}, 'indexes': {'source': '-', 'target': '-'}, 'constraints': {'source': '-', 'target': '-'}}
+                for r in stats:
+                    side = r[0]
+                    otype = r[1]
+                    count = r[2]
+                    display_count = 'N/A' if count == -1 else str(count)
+                    if otype in stats_dict:
+                        stats_dict[otype][side] = display_count
+                for otype in ['tables', 'indexes', 'constraints']:
+                    lines.append(f"{otype.capitalize():<24} | {stats_dict[otype]['source']:>12} | {stats_dict[otype]['target']:>12}")
+                lines.append("-" * 80)
+                lines.append("")
+            except Exception as e:
+                self.config_parser.print_log_message('ERROR', f"migrator_tables: print_migration_summary: mapping_pre_stats error: {e}")
+
         lines.append("[ OBJECTS MIGRATION RESULTS ]")
         lines.append("-" * 80)
         lines.append(f"{'Object Type':<24} | {'Source':>6} | {'Success':>7} | {'Failed':>6} | Details")

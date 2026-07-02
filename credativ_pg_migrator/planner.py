@@ -209,7 +209,9 @@ class Planner:
                 self.target_connection.execute_query(self.target_connection.session_settings)
 
             if self.config_parser.should_drop_schema():
-                if self.target_schema_name.lower() == 'public':
+                if self.config_parser.is_mapping_workflow():
+                    self.config_parser.print_log_message('WARNING', "planner: pre_planning: Migration workflow is set to 'mapping', skipping drop of target schema.")
+                elif self.target_schema_name.lower() == 'public':
                     self.config_parser.print_log_message('INFO', "planner: pre_planning: Cannot drop the 'public' schema - skipping drop of schema.")
                 else:
                     self.config_parser.print_log_message('INFO', f"planner: pre_planning: Dropping target schema '{self.target_schema_name}'...")
@@ -1582,6 +1584,13 @@ class Planner:
 
         self.config_parser.print_log_message('INFO', f"planner: mapping_match_tables: source_tables: {source_tables}")
         self.config_parser.print_log_message('INFO', f"planner: mapping_match_tables: target_tables: {target_tables}")
+
+        self.migrator_tables.insert_mapping_pre_stat('source', 'tables', len(source_tables))
+        self.migrator_tables.insert_mapping_pre_stat('target', 'tables', len(target_tables))
+        self.migrator_tables.insert_mapping_pre_stat('source', 'indexes', self.source_connection.get_schema_indexes_count(self.source_schema_name))
+        self.migrator_tables.insert_mapping_pre_stat('target', 'indexes', self.target_connection.get_schema_indexes_count(self.target_schema_name))
+        self.migrator_tables.insert_mapping_pre_stat('source', 'constraints', self.source_connection.get_schema_constraints_count(self.source_schema_name))
+        self.migrator_tables.insert_mapping_pre_stat('target', 'constraints', self.target_connection.get_schema_constraints_count(self.target_schema_name))
 
         source_columns_map = {}
         target_columns_map = {}

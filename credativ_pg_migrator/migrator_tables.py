@@ -538,6 +538,44 @@ class MigratorTables:
             self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_mapping_tables: ({func_run_id}): Error: {e}")
             raise
 
+    def fetch_mapping_tables_for_validation(self):
+        query = f"""SELECT id, source_schema_name, source_table_name, target_schema_name, target_table_name FROM "{self.protocol_schema}"."mapping_tables" ORDER BY id"""
+        cursor = self.protocol_connection.connection.cursor()
+        cursor.execute(query)
+        tables = cursor.fetchall()
+        
+        result = []
+        for t in tables:
+            table_id, s_schema, s_table, t_schema, t_table = t
+            
+            c_query = f"""SELECT source_column_name, target_column_name, source_data_type, target_data_type FROM "{self.protocol_schema}"."mapping_columns" WHERE source_schema_name=%s AND source_table_name=%s AND target_schema_name=%s AND target_table_name=%s ORDER BY target_ordinal_number"""
+            cursor.execute(c_query, (s_schema, s_table, t_schema, t_table))
+            columns = cursor.fetchall()
+            
+            source_columns = []
+            target_columns = []
+            for c in columns:
+                s_col, t_col, s_type, t_type = c
+                if s_col:
+                    s_type_lower = s_type.lower() if s_type else ''
+                    s_is_num = any(t in s_type_lower for t in ['int', 'number', 'numeric', 'decimal', 'float', 'double', 'real', 'serial'])
+                    source_columns.append({'name': s_col, 'data_type': s_type, 'numeric_precision': 0 if s_is_num else None})
+                if t_col:
+                    t_type_lower = t_type.lower() if t_type else ''
+                    t_is_num = any(t in t_type_lower for t in ['int', 'number', 'numeric', 'decimal', 'float', 'double', 'real', 'serial'])
+                    target_columns.append({'name': t_col, 'data_type': t_type, 'numeric_precision': 0 if t_is_num else None})
+            
+            result.append({
+                'id': table_id,
+                'source_schema_name': s_schema,
+                'source_table_name': s_table,
+                'target_schema_name': t_schema,
+                'target_table_name': t_table,
+                'source_columns': source_columns,
+                'target_columns': target_columns
+            })
+        return result
+
     def insert_mapping_columns(self, settings):
         func_run_id = uuid.uuid4()
         source_schema_name = settings.get('source_schema_name')

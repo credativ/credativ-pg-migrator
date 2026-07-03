@@ -44,12 +44,15 @@ class Validator:
         try:
             self.migrator_tables.create_table_for_validation()
     
-            tables_raw = self.migrator_tables.fetch_all_tables(only_unfinished=False)
-            if not tables_raw:
+            if self.config_parser.get_workflow() == 'mapping':
+                tables = self.migrator_tables.fetch_mapping_tables_for_validation()
+            else:
+                tables_raw = self.migrator_tables.fetch_all_tables(only_unfinished=False)
+                tables = [self.migrator_tables.decode_table_row(t) for t in tables_raw]
+            
+            if not tables:
                 self.val_logger.logger.info("No tables found in migrator tracking to validate.")
                 return
-                
-            tables = [self.migrator_tables.decode_table_row(t) for t in tables_raw]
     
             threads = self.config_parser.get_validation_workers()
             check_counts = self.config_parser.is_validation_row_counts_enabled()

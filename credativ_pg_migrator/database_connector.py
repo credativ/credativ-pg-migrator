@@ -799,7 +799,7 @@ class DatabaseConnector(ABC):
         try:
             cursor = self.connection.cursor()
             cursor.execute(query)
-            batch_size = self.config_parser.get_validator_batch_size()
+            batch_size = self.config_parser.get_validation_batch_size()
             while True:
                 rows = cursor.fetchmany(batch_size)
                 if not rows:

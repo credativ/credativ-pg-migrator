@@ -36,7 +36,7 @@ class Validator:
         self.val_logger.logger.info("      Starting Data Validator Module     ")
         self.val_logger.logger.info("=========================================")
         
-        report_filename = self.config_parser.get_validator_report_filename()
+        report_filename = self.config_parser.get_validation_report_filename()
         if not report_filename:
             self.val_logger.logger.error("FATAL: 'report_filename' is missing in validator config. A detailed report file is mandatory.")
             return
@@ -51,7 +51,7 @@ class Validator:
                 
             tables = [self.migrator_tables.decode_table_row(t) for t in tables_raw]
     
-            threads = self.config_parser.get_validator_workers()
+            threads = self.config_parser.get_validation_workers()
             check_counts = self.config_parser.is_validation_row_counts_enabled()
             check_table_sum = self.config_parser.is_validation_table_checksums_enabled()
             check_random = self.config_parser.is_validation_random_sample_enabled()
@@ -91,7 +91,7 @@ class Validator:
         target_conn = self._get_connector('target')
         
         target_copy_conn = None
-        if self.config_parser.get_validator_workflow() == 'mapping':
+        if self.config_parser.get_workflow() == 'mapping':
             target_copy_conn = self._get_connector('target_copy')
         
         try:
@@ -174,7 +174,7 @@ class Validator:
         try:
             target_copy_schema = None
             if target_copy_conn:
-                target_copy_config = self.config_parser.get_validator_target_copy_config()
+                target_copy_config = self.config_parser.get_validation_target_copy_config()
                 target_copy_schema = target_copy_config.get('schema', target_copy_config.get('owner', 'public'))
 
             for s_col, t_col in zip(source_cols, target_cols):

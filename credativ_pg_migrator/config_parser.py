@@ -81,7 +81,7 @@ class ConfigParser:
 
     def get_db_config(self, source_or_target):
         if source_or_target == 'target_copy':
-            return self.get_validator_target_copy_config()
+            return self.get_validation_target_copy_config()
         if source_or_target not in ['source', 'target']:
             raise ValueError(f"Invalid source_or_target: {source_or_target}")
         return self.config[source_or_target]
@@ -292,7 +292,7 @@ class ConfigParser:
         return self.config['migration']
 
     def get_workflow(self):
-        return self.get_migration_settings().get('workflow', 'standard')
+        return self.config.get('workflow', 'standard')
 
     def is_standard_workflow(self):
         return self.get_workflow() == 'standard'
@@ -607,38 +607,35 @@ class ConfigParser:
     def get_validation_constraints_name(self):
         return "validation_constraints"
 
-    def get_validator_config(self):
-        return self.config.get('validator', {})
+    def get_validation_config(self):
+        return self.config.get('validation', {})
 
-    def get_validator_workflow(self):
-        return self.get_validator_config().get('workflow', 'standard')
+    def get_validation_target_copy_config(self):
+        return self.get_validation_config().get('target_copy', {})
 
-    def get_validator_target_copy_config(self):
-        return self.get_validator_config().get('target_copy', {})
+    def get_validation_workers(self):
+        return int(self.get_validation_config().get('workers', 4))
 
-    def get_validator_workers(self):
-        return int(self.get_validator_config().get('workers', 4))
+    def get_validation_batch_size(self):
+        return int(self.get_validation_config().get('batch_size', 10000))
 
-    def get_validator_batch_size(self):
-        return int(self.get_validator_config().get('batch_size', 10000))
-
-    def get_validator_report_filename(self):
-        return self.get_validator_config().get('report_filename', None)
+    def get_validation_report_filename(self):
+        return self.get_validation_config().get('report_filename', None)
 
     def is_validation_row_counts_enabled(self):
-        return self.get_validator_config().get('check_row_counts', True)
+        return self.get_validation_config().get('check_row_counts', True)
 
     def is_validation_table_checksums_enabled(self):
-        return self.get_validator_config().get('check_table_checksums', False)
+        return self.get_validation_config().get('check_table_checksums', False)
 
     def is_validation_random_sample_enabled(self):
-        return self.get_validator_config().get('check_random_sample', False)
+        return self.get_validation_config().get('check_random_sample', False)
 
     def is_validation_lob_sizes_enabled(self):
-        return self.get_validator_config().get('check_lob_sizes', False)
+        return self.get_validation_config().get('check_lob_sizes', False)
 
     def get_validation_sample_size(self):
-        return int(self.get_validator_config().get('random_sample_size', 1000))
+        return int(self.get_validation_config().get('random_sample_size', 1000))
 
     def get_exclude_tables(self):
         return self.config['exclude_tables']

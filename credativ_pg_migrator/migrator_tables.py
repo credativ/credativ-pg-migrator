@@ -5282,15 +5282,16 @@ class MigratorTables:
             lines.append(f"- **Source**: {self.config_parser.get_source_db_name()}, schema: {self.config_parser.get_source_owner()} ({self.config_parser.get_source_db_type()})")
             lines.append(f"- **Target**: {self.config_parser.get_target_db_name()}, schema: {self.config_parser.get_target_schema()} ({self.config_parser.get_target_db_type()})")
             
-            if self.config_parser.get_validator_workflow() == 'mapping':
-                tc_config = self.config_parser.get_validator_target_copy_config()
+            workflow = self.config_parser.get_workflow()
+            if workflow == 'mapping':
+                tc_config = self.config_parser.get_validation_target_copy_config()
                 if tc_config:
                     tc_db = tc_config.get('database', '')
                     tc_schema = tc_config.get('schema', tc_config.get('owner', 'public'))
                     tc_type = tc_config.get('type', '')
                     lines.append(f"- **Target Copy**: {tc_db}, schema: {tc_schema} ({tc_type})")
             
-            lines.append(f"- **Workflow**: {self.config_parser.get_workflow()}")
+            lines.append(f"- **Workflow**: {workflow}")
             lines.append("")
 
             total = len(results)
@@ -5322,7 +5323,13 @@ class MigratorTables:
                 max_source_len = max([len(f"{r[2]}.{r[3]}") if r[2] and r[3] else 12 for r in results] + [12])
                 max_target_len = max([len(f"{r[0]}.{r[1]}") for r in results] + [12])
                 max_num_len = max(3, len(str(len(results))))
-                header = f"| {'No.':>{max_num_len}} | {'Source Table':<{max_source_len}} | {'Target Table':<{max_target_len}} | {'Status':<6} | {'RowCnt':<6} | {'SrcRows':>10} | {'TgtRows':>10} | {'TblHash':<7} | {'SrcHash':<15} | {'TgtHash':<15} | {'Cols':<7} | {'Idxs':<7} | {'Cons':<7} |"
+                workflow = self.config_parser.get_workflow()
+                is_mapping = (workflow == 'mapping')
+                
+                header = f"| {'No.':>{max_num_len}} | {'Source Table':<{max_source_len}} | {'Target Table':<{max_target_len}} |"
+                if is_mapping:
+                    header += f" {'Action':<15} |"
+                header += f" {'Status':<6} | {'RowCnt':<6} | {'SrcRows':>10} | {'TgtRows':>10} | {'TblHash':<7} | {'SrcHash':<15} | {'TgtHash':<15} | {'Cols':<7} | {'Idxs':<7} | {'Cons':<7} |"
                 sep = "|" + "|".join(['-' * len(c) for c in header.split('|')[1:-1]]) + "|"
                 details_lines.append(header)
                 details_lines.append(sep)
@@ -5410,7 +5417,15 @@ class MigratorTables:
                     src_hash_str = (src_hash_str[:12] + '...') if len(src_hash_str) > 15 else src_hash_str
                     tgt_hash_str = (tgt_hash_str[:12] + '...') if len(tgt_hash_str) > 15 else tgt_hash_str
 
-                    details_lines.append(f"| {idx:>{max_num_len}} | {source_table:<{max_source_len}} | {target_table:<{max_target_len}} | {status:<6} | {row_cnt_res:<6} | {src_rows_str:>10} | {tgt_rows_str:>10} | {tbl_hash_res:<7} | {src_hash_str:<15} | {tgt_hash_str:<15} | {cols_str:<7} | {idxs_str:<7} | {cons_str:<7} |")
+                    if is_mapping:
+                        action = self.config_parser.get_mapping_data_resolution(r[3]) if r[3] else "-"
+                        if not action:
+                            action = "-"
+                        action_str = f" {action:<15} |"
+                    else:
+                        action_str = ""
+
+                    details_lines.append(f"| {idx:>{max_num_len}} | {source_table:<{max_source_len}} | {target_table:<{max_target_len}} |{action_str} {status:<6} | {row_cnt_res:<6} | {src_rows_str:>10} | {tgt_rows_str:>10} | {tbl_hash_res:<7} | {src_hash_str:<15} | {tgt_hash_str:<15} | {cols_str:<7} | {idxs_str:<7} | {cons_str:<7} |")
 
             failed_count = total - passed_count
 
@@ -5589,7 +5604,7 @@ class MigratorTables:
                     val_at = str(r[11])[:19] if r[11] else "-"
                     details_lines.append(f"| {status:<6} | {s_sch:<{max_ssch_len}} | {t_sch:<{max_tsch_len}} | {s_tbl:<{max_stbl_len}} | {t_tbl:<{max_ttbl_len}} | {s_con:<{max_scon_len}} | {t_con:<{max_tcon_len}} | {s_typ:<{max_styp_len}} | {t_typ:<{max_ttyp_len}} | {s_col:<{max_scol_len}} | {t_col:<{max_tcol_len}} | {val_at:<19} |")
 
-            report_filename = self.config_parser.get_validator_report_filename()
+            report_filename = self.config_parser.get_validation_report_filename()
             if report_filename:
                 try:
                     with open(report_filename, 'w', encoding='utf-8') as f:

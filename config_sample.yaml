@@ -1,5 +1,11 @@
 # File contains muster configuration file for credativ-pg-migrator
 
+# workflow can be:
+# - standard: default migrator workflow
+# - mapping: migrator mapping workflow, used for nscale egov migration
+# - anonymization: standalone workflow for data masking
+workflow: "standard"
+
 ## Configuration for the pre migration analysis
 pre_migration_analysis:
   # Section for listing TOP N tables from the source database
@@ -174,7 +180,6 @@ migration:
   # migration workflow - type of migration
   # standard (default) = read source objects from source DB or DDL files, convert them to target objects, create target objects, copy data
   # objects_mapping = map existing objects in target db to existing objects in source database, copy data
-  workflow: "standard" # "mapping"
 
   # drop schema if exists - uses DROP CASCADE if true
   drop_schema: true
@@ -405,8 +410,7 @@ data_migration_limitation:
 # - check_table_checksums: Computes explicit hashes containing aggregates of string-casted structures across the entire tables
 # - check_random_sample: Validates individual random row arrays querying mapped precise primary keys bridging origin to destination
 # - check_lob_sizes: Validates exact byte size allocations for migrated LOB (BLOB/CLOB) instances on the sampled rows
-validator:
-  workflow: "standard"                     # "standard" (default) or "mapping". Determines validation logic for data conflicts.
+validation:
   workers: 4                               # Number of parallel worker threads used simultaneously for table evaluations (default is 4)
   batch_size: 10000                        # Batch size for python table checksum calculation (default is 10000)
 

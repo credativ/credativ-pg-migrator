@@ -48,13 +48,11 @@ class OracleConnector(DatabaseConnector):
                 self.connection = oracledb.connect(user=username,
                                                     password=self.config_parser.get_db_config(self.source_or_target)['password'],
                                                     dsn=connection_string,
-                                                    encoding="UTF-8",
                                                     mode=oracledb.SYSDBA)
             else:
                 self.connection = oracledb.connect(user=username,
                                                     password = self.config_parser.get_db_config(self.source_or_target)['password'],
-                                                    dsn=connection_string,
-                                                    encoding="UTF-8")
+                                                    dsn=connection_string)
 
         except Exception as e:
             self.config_parser.print_log_message('ERROR', "oracle_connector: connect: oracledb module is not installed.")
@@ -737,10 +735,12 @@ class OracleConnector(DatabaseConnector):
     def get_schema_indexes_count(self, schema_name: str) -> int:
         query = f"SELECT count(*) FROM all_indexes WHERE table_owner = '{schema_name.upper()}'"
         try:
+            self.connect()
             cursor = self.connection.cursor()
             cursor.execute(query)
             count = cursor.fetchone()[0]
             cursor.close()
+            self.disconnect()
             return count
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"oracle_connector: get_schema_indexes_count: Error: {e}")
@@ -853,10 +853,12 @@ class OracleConnector(DatabaseConnector):
     def get_schema_constraints_count(self, schema_name: str) -> int:
         query = f"SELECT count(*) FROM all_constraints WHERE owner = '{schema_name.upper()}'"
         try:
+            self.connect()
             cursor = self.connection.cursor()
             cursor.execute(query)
             count = cursor.fetchone()[0]
             cursor.close()
+            self.disconnect()
             return count
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"oracle_connector: get_schema_constraints_count: Error: {e}")

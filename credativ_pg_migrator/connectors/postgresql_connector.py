@@ -874,10 +874,12 @@ class PostgreSQLConnector(DatabaseConnector):
             WHERE n.nspname = '{schema_name}'
         """
         try:
+            self.connect()
             cursor = self.connection.cursor()
             cursor.execute(query)
             count = cursor.fetchone()[0]
             cursor.close()
+            self.disconnect()
             return count
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"postgresql_connector: get_schema_indexes_count: Error: {e}")
@@ -893,10 +895,12 @@ class PostgreSQLConnector(DatabaseConnector):
             AND c.contype NOT IN ('n')
         """
         try:
+            self.connect()
             cursor = self.connection.cursor()
             cursor.execute(query)
             count = cursor.fetchone()[0]
             cursor.close()
+            self.disconnect()
             return count
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"postgresql_connector: get_schema_constraints_count: Error: {e}")

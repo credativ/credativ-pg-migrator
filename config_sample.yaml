@@ -409,9 +409,10 @@ validator:
   workflow: "standard"                     # "standard" (default) or "mapping". Determines validation logic for data conflicts.
   workers: 4                               # Number of parallel worker threads used simultaneously for table evaluations (default is 4)
   batch_size: 10000                        # Batch size for python table checksum calculation (default is 10000)
-  
-  # target_copy is required when workflow = 'mapping' and data conflicts exist. 
+
+  # target_copy is required when workflow = 'mapping' and data conflicts exist.
   # Represents the untouched state of the target database before migration.
+  # Setting is ignored when workflow = 'standard'
   target_copy:
     type: "postgresql"
     host: "localhost"

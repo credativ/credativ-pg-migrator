@@ -7,6 +7,11 @@
   - Feature - Reporting: Enhanced the `mapping_report.md` file format. Introduced a `Configuration Settings` block at the beginning of the report to display `data_conflict_action` (both global and table-specific), mapping heuristics, and forced mappings.
   - Feature - Reporting: Redesigned the mapping report's layout by aggregating mapped table statistics into a clean, unified `Mapped Tables Summary` markdown table, providing immediate visibility into source and target row counts across the migration lifecycle. Raw column-level mappings were decoupled and moved to a dedicated `Mapped Columns Details` section, and the table of contents was disabled.
 
+- 2026.07.03
+
+  - Feature - Reporting: Enhanced the `mapping_report.md` file format. Introduced a `Configuration Settings` block at the beginning of the report to display `data_conflict_action` (both global and table-specific), mapping heuristics, and forced mappings.
+  - Feature - Reporting: Redesigned the mapping report's layout by aggregating mapped table statistics into a clean, unified `Mapped Tables Summary` markdown table, providing immediate visibility into source and target row counts across the migration lifecycle. Raw column-level mappings were decoupled and moved to a dedicated `Mapped Columns Details` section, and the table of contents was disabled.
+
 - 2026.07.02
 
   - Fix - Planner: Fixed a bug where the target schema was unconditionally dropped during `pre_planning` when `migration.drop_schema` was `true`, causing the `mapping` workflow to erroneously delete all existing tables it was supposed to map. Target schema dropping is now explicitly bypassed during mapping.

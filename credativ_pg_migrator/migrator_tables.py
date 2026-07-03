@@ -3321,6 +3321,51 @@ class MigratorTables:
         lines.append("# Mapping Workflow Detailed Report")
         lines.append("")
 
+        import yaml
+
+        lines.append("## Configuration Settings")
+        lines.append("")
+
+        lines.append("### Data Conflict Action")
+        global_action = self.config_parser.get_migration_settings().get('data_conflict_action', 'skip')
+        lines.append(f"- **Global**: `{global_action}`")
+        table_settings = self.config_parser.config.get('table_settings', [])
+        if isinstance(table_settings, list):
+            for entry in table_settings:
+                if 'data_conflict_action' in entry:
+                    lines.append(f"- **Table override** (`{entry.get('table_name')}`): `{entry['data_conflict_action']}`")
+        lines.append("")
+
+        lines.append("### Mapping Workflow Heuristics")
+        heuristics = self.config_parser.get_mapping_workflow_heuristics()
+        if heuristics:
+            lines.append("```yaml")
+            lines.append(yaml.dump(heuristics, default_flow_style=False, sort_keys=False).strip())
+            lines.append("```")
+        else:
+            lines.append("*None configured.*")
+        lines.append("")
+
+        lines.append("### Forced Table Mappings")
+        forced_tables = self.config_parser.get_forced_table_mappings()
+        if forced_tables:
+            lines.append("```yaml")
+            lines.append(yaml.dump(forced_tables, default_flow_style=False, sort_keys=False).strip())
+            lines.append("```")
+        else:
+            lines.append("*None configured.*")
+        lines.append("")
+
+        lines.append("### Forced Column Mappings")
+        forced_cols = self.config_parser.get_forced_column_mappings()
+        if forced_cols:
+            lines.append("```yaml")
+            lines.append(yaml.dump(forced_cols, default_flow_style=False, sort_keys=False).strip())
+            lines.append("```")
+        else:
+            lines.append("*None configured.*")
+        lines.append("")
+
         # Fetch mapped tables
         dm_table = self.config_parser.get_protocol_name_data_migration()
         query_mapped = f"""
@@ -3360,16 +3405,16 @@ class MigratorTables:
             unmatched_cols_by_table[key].append(col_name)
 
         # Generate Table of Contents
-        lines.append("## Table of Contents")
-        lines.append("")
-        lines.append("- [Mapped Tables Summary](#mapped-tables-summary)")
-        lines.append("- [Mapped Columns Details](#mapped-columns-details)")
-        for tbl in mapped_tables:
-            anchor = f"{tbl[0]}-mapped-to-{tbl[1]}".replace('_', '-').lower()
-            lines.append(f"  - [{tbl[0]} -> {tbl[1]}](#{anchor})")
-        lines.append("- [Unmapped Source Tables](#unmapped-source-tables)")
-        lines.append("- [Unmapped Target Tables](#unmapped-target-tables)")
-        lines.append("")
+        # lines.append("## Table of Contents")
+        # lines.append("")
+        # lines.append("- [Mapped Tables Summary](#mapped-tables-summary)")
+        # lines.append("- [Mapped Columns Details](#mapped-columns-details)")
+        # for tbl in mapped_tables:
+        #     anchor = f"{tbl[0]}-mapped-to-{tbl[1]}".replace('_', '-').lower()
+        #     lines.append(f"  - [{tbl[0]} -> {tbl[1]}](#{anchor})")
+        # lines.append("- [Unmapped Source Tables](#unmapped-source-tables)")
+        # lines.append("- [Unmapped Target Tables](#unmapped-target-tables)")
+        # lines.append("")
 
         # Generate Mapped Tables Summary Section
         lines.append("## Mapped Tables Summary")

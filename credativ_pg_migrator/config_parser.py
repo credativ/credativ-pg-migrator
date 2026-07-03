@@ -867,6 +867,12 @@ class ConfigParser:
                         return entry.get('data_export', None)
         return None
 
+    def get_global_data_conflict_action(self):
+        mapping_action = self.config.get('mapping_workflow', {}).get('workflow_settings', {}).get('data_conflict_action')
+        if mapping_action:
+            return mapping_action
+        return self.get_migration_settings().get('data_conflict_action', 'skip')
+
     def get_mapping_data_resolution(self, table_name):
         # First check specific table overrides
         if table_name:
@@ -878,8 +884,8 @@ class ConfigParser:
                         action = entry.get('data_conflict_action')
                         if action:
                             return action
-        # Fallback to global migration setting or 'skip'
-        return self.get_migration_settings().get('data_conflict_action', 'skip')
+        # Fallback to global setting or 'skip'
+        return self.get_global_data_conflict_action()
 
     def get_table_data_export_format(self, schema_name, table_name):
         return self.get_table_data_export(schema_name, table_name).get('format', None)

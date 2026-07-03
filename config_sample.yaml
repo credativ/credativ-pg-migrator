@@ -268,6 +268,10 @@ table_settings:
     # Merge data in specified tables, but prioritize source content
     data_conflict_action: "merge_keep_source"
 
+  - table_name: "app_settings"
+    # Skip migration for specified tables
+    data_conflict_action: "skip"
+
   - table_name: "table1"
     table_schema: "dbo"  # source schema for the table, if not specified, default is the source schema from the source database connection
     batch_size: 50000
@@ -419,7 +423,14 @@ mapping_workflow:
   workflow_settings:
     report_filename: "mapping_report.csv" # Mandatory file to write detailed tabular mapping report
     suspend_indexes_constraints: true
-    
+    # data_conflict_action: action when data exists in both source and target tables.
+    # Options:
+    # - skip: do not migrate data for this table
+    # - replace: truncate target table and migrate all data from source
+    # - merge_keep_target: migrate only rows that do not exist in target table (based on primary key)
+    # - merge_keep_source: migrate all rows, overwriting existing rows in target table (based on primary key)
+    data_conflict_action: "skip"
+
   # 2. Automated Mapping Heuristics
   heuristics:
     table_normalization_rules:

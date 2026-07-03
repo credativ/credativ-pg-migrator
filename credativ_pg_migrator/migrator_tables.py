@@ -3327,8 +3327,8 @@ class MigratorTables:
         lines.append("")
 
         lines.append("### Data Conflict Action")
-        global_action = self.config_parser.get_migration_settings().get('data_conflict_action', 'skip')
-        lines.append(f"- **Global**: `{global_action}`")
+        global_action = self.config_parser.get_global_data_conflict_action()
+        lines.append(f"- **Global** (`data_conflict_action`): `{global_action}`")
         table_settings = self.config_parser.config.get('table_settings', [])
         if isinstance(table_settings, list):
             for entry in table_settings:

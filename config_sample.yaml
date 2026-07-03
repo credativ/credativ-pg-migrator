@@ -406,8 +406,21 @@ data_migration_limitation:
 # - check_random_sample: Validates individual random row arrays querying mapped precise primary keys bridging origin to destination
 # - check_lob_sizes: Validates exact byte size allocations for migrated LOB (BLOB/CLOB) instances on the sampled rows
 validator:
+  workflow: "standard"                     # "standard" (default) or "mapping". Determines validation logic for data conflicts.
   workers: 4                               # Number of parallel worker threads used simultaneously for table evaluations (default is 4)
   batch_size: 10000                        # Batch size for python table checksum calculation (default is 10000)
+  
+  # target_copy is required when workflow = 'mapping' and data conflicts exist. 
+  # Represents the untouched state of the target database before migration.
+  target_copy:
+    type: "postgresql"
+    host: "localhost"
+    port: 5432
+    username: "postgres"
+    password: "postgres_password"
+    database: "target_db"
+    schema: "public_backup"
+
   check_row_counts: true                   # Simply compares total row counts between corresponding source and target tables
   check_table_checksums: true              # Computes explicit hashes containing aggregates of string-casted structures across the entire tables
   check_random_sample: true                # Validates individual random row arrays querying mapped precise primary keys bridging origin to destination

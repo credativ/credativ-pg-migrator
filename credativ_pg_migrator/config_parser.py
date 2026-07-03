@@ -78,13 +78,16 @@ class ConfigParser:
 
 
     ## Databases
+
     def get_db_config(self, source_or_target):
+        if source_or_target == 'target_copy':
+            return self.get_validator_target_copy_config()
+        if source_or_target not in ['source', 'target']:
+            raise ValueError(f"Invalid source_or_target: {source_or_target}")
         return self.config[source_or_target]
 
     def get_db_type(self, source_or_target):
-        if source_or_target not in ['source', 'target']:
-            raise ValueError(f"Invalid source_or_target: {source_or_target}")
-        return self.config[source_or_target]['type']
+        return self.get_db_config(source_or_target).get('type')
 
     def get_source_config(self):
         return self.config['source']
@@ -117,7 +120,7 @@ class ConfigParser:
         self.config['source']['version'] = version
 
     def get_connectivity(self, source_or_target):
-        return self.config[source_or_target].get('connectivity', None)
+        return self.get_db_config(source_or_target).get('connectivity', None)
 
     def get_source_connectivity(self):
         return self.get_connectivity('source').lower()
@@ -161,10 +164,8 @@ class ConfigParser:
         return target_config.get('schema', target_config.get('owner', 'public'))
 
     def get_connect_string(self, source_or_target):
-        if source_or_target not in ['source', 'target']:
-            raise ValueError(f"Invalid source_or_target: {source_or_target}")
         connectivity = self.get_connectivity(source_or_target)
-        db_config = self.config[source_or_target]
+        db_config = self.get_db_config(source_or_target)
         db_locale = self.get_source_db_locale() if source_or_target == 'source' else None
         # client_locale = self.get_source_client_locale() if source_or_target == 'source' else None
         if db_config['type'] == 'postgresql':
@@ -608,6 +609,12 @@ class ConfigParser:
 
     def get_validator_config(self):
         return self.config.get('validator', {})
+
+    def get_validator_workflow(self):
+        return self.get_validator_config().get('workflow', 'standard')
+
+    def get_validator_target_copy_config(self):
+        return self.get_validator_config().get('target_copy', {})
 
     def get_validator_workers(self):
         return int(self.get_validator_config().get('workers', 4))

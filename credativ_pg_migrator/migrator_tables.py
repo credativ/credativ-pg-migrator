@@ -3420,8 +3420,8 @@ class MigratorTables:
         lines.append("## Mapped Tables Summary")
         lines.append("")
         if mapped_tables:
-            lines.append("| Source Table | Target Table | Source Rows (Start) | Target Rows (Start) | Target Rows (End) | Match Type | Similarity |")
-            lines.append("|---|---|---|---|---|---|---|")
+            lines.append("| Source Table | Target Table | Source Rows (Start) | Target Rows (Start) | Target Rows (End) | Match Type | Similarity | Data Conflict Action |")
+            lines.append("|---|---|---|---|---|---|---|---|")
             for tbl in mapped_tables:
                 src_tbl = tbl[0]
                 tgt_tbl = tbl[1]
@@ -3431,7 +3431,22 @@ class MigratorTables:
                 is_forced = tbl[5] if tbl[5] is not None else False
                 match_type = tbl[6] if tbl[6] is not None else "Unknown"
                 similarity = tbl[7] if tbl[7] is not None else 0.0
-                lines.append(f"| {src_tbl} | {tgt_tbl} | {src_rows} | {tgt_rows_start} | {tgt_rows_end} | {match_type} | {similarity}% |")
+
+                conflict_note = ""
+                if tgt_rows_start != 0:
+                    action = self.config_parser.get_mapping_data_resolution(src_tbl)
+                    is_table_specific = False
+                    table_settings = self.config_parser.config.get('table_settings', [])
+                    if isinstance(table_settings, list):
+                        for entry in table_settings:
+                            pattern = entry.get('table_name')
+                            if self.config_parser._match_table_name(src_tbl, pattern) and entry.get('data_conflict_action'):
+                                is_table_specific = True
+                                break
+                    origin = "table specific" if is_table_specific else "global"
+                    conflict_note = f"{action} ({origin})"
+
+                lines.append(f"| {src_tbl} | {tgt_tbl} | {src_rows} | {tgt_rows_start} | {tgt_rows_end} | {match_type} | {similarity}% | {conflict_note} |")
         else:
             lines.append("*No mapped tables found.*")
         lines.append("")

@@ -264,9 +264,9 @@ class ConfigParser:
         return self.get_summary_config().get('top_anonymized_tables', 5)
 
     def get_mapping_report_filename(self):
-        mapping_workflow = self.config.get('mapping_workflow', {}).get('workflow_settings', {})
-        if 'report_filename' in mapping_workflow:
-            return mapping_workflow.get('report_filename')
+        mapping_config = self.config.get('mapping', {})
+        if 'report_filename' in mapping_config:
+            return mapping_config.get('report_filename')
         return self.config.get('migration', {}).get('mapping_report_filename')
 
     def get_summary_top_anonymized_columns(self):
@@ -304,20 +304,20 @@ class ConfigParser:
         return self.get_workflow() == 'anonymization'
 
     def get_suspend_indexes_constraints(self):
-        mapping_workflow = self.config.get('mapping_workflow', {}).get('workflow_settings', {})
-        if 'suspend_indexes_constraints' in mapping_workflow:
-            return mapping_workflow.get('suspend_indexes_constraints')
+        mapping_config = self.config.get('mapping', {})
+        if 'suspend_indexes_constraints' in mapping_config:
+            return mapping_config.get('suspend_indexes_constraints')
         settings = self.get_migration_settings()
         return settings.get('suspend_indexes_constraints', True)
 
     def get_mapping_workflow_heuristics(self):
-        return self.config.get('mapping_workflow', {}).get('heuristics', {})
+        return self.config.get('mapping', {}).get('heuristics', {})
 
     def get_forced_table_mappings(self):
-        return self.config.get('mapping_workflow', {}).get('forced_table_mappings', [])
+        return self.config.get('mapping', {}).get('forced_table_mappings', [])
 
     def get_forced_column_mappings(self):
-        return self.config.get('mapping_workflow', {}).get('forced_column_mappings', [])
+        return self.config.get('mapping', {}).get('forced_column_mappings', [])
 
     def get_use_aliases_as_target_names(self):
         settings = self.get_migration_settings()
@@ -872,7 +872,7 @@ class ConfigParser:
         return None
 
     def get_global_data_conflict_action(self):
-        mapping_action = self.config.get('mapping_workflow', {}).get('workflow_settings', {}).get('data_conflict_action')
+        mapping_action = self.config.get('mapping', {}).get('data_conflict_action')
         if mapping_action:
             return mapping_action
         return self.get_migration_settings().get('data_conflict_action', 'skip')

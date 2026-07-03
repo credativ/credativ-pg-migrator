@@ -3322,10 +3322,16 @@ class MigratorTables:
         lines.append("")
 
         # Fetch mapped tables
+        dm_table = self.config_parser.get_protocol_name_data_migration()
         query_mapped = f"""
-            SELECT source_table_name, target_table_name, source_table_rows_all, target_table_rows, is_forced_mapping, match_type, similarity_score
-            FROM "{self.protocol_schema}"."mapping_tables"
-            ORDER BY source_table_name
+            SELECT m.source_table_name, m.target_table_name, 
+                   m.source_table_rows_all, m.target_table_rows AS target_table_rows_start, 
+                   d.target_table_rows AS target_table_rows_end, 
+                   m.is_forced_mapping, m.match_type, m.similarity_score
+            FROM "{self.protocol_schema}"."mapping_tables" m
+            LEFT JOIN "{self.protocol_schema}"."{dm_table}" d
+              ON m.source_table_name = d.source_table_name AND m.target_table_name = d.target_table_name
+            ORDER BY m.source_table_name
         """
         cursor = self.protocol_connection.connection.cursor()
         cursor.execute(query_mapped)
@@ -3356,7 +3362,8 @@ class MigratorTables:
         # Generate Table of Contents
         lines.append("## Table of Contents")
         lines.append("")
-        lines.append("- [Mapped Tables](#mapped-tables)")
+        lines.append("- [Mapped Tables Summary](#mapped-tables-summary)")
+        lines.append("- [Mapped Columns Details](#mapped-columns-details)")
         for tbl in mapped_tables:
             anchor = f"{tbl[0]}-mapped-to-{tbl[1]}".replace('_', '-').lower()
             lines.append(f"  - [{tbl[0]} -> {tbl[1]}](#{anchor})")
@@ -3364,24 +3371,44 @@ class MigratorTables:
         lines.append("- [Unmapped Target Tables](#unmapped-target-tables)")
         lines.append("")
 
-        # Generate Mapped Tables Section
-        lines.append("## Mapped Tables")
+        # Generate Mapped Tables Summary Section
+        lines.append("## Mapped Tables Summary")
+        lines.append("")
+        if mapped_tables:
+            lines.append("| Source Table | Target Table | Source Rows (Start) | Target Rows (Start) | Target Rows (End) | Match Type | Similarity |")
+            lines.append("|---|---|---|---|---|---|---|")
+            for tbl in mapped_tables:
+                src_tbl = tbl[0]
+                tgt_tbl = tbl[1]
+                src_rows = tbl[2] if tbl[2] is not None else 0
+                tgt_rows_start = tbl[3] if tbl[3] is not None else 0
+                tgt_rows_end = tbl[4] if tbl[4] is not None else tgt_rows_start
+                is_forced = tbl[5] if tbl[5] is not None else False
+                match_type = tbl[6] if tbl[6] is not None else "Unknown"
+                similarity = tbl[7] if tbl[7] is not None else 0.0
+                lines.append(f"| {src_tbl} | {tgt_tbl} | {src_rows} | {tgt_rows_start} | {tgt_rows_end} | {match_type} | {similarity}% |")
+        else:
+            lines.append("*No mapped tables found.*")
+        lines.append("")
+
+        # Generate Mapped Columns Details Section
+        lines.append("## Mapped Columns Details")
         lines.append("")
         for tbl in mapped_tables:
             src_tbl = tbl[0]
             tgt_tbl = tbl[1]
             src_rows = tbl[2] if tbl[2] is not None else 0
-            tgt_rows = tbl[3] if tbl[3] is not None else 0
-            is_forced = tbl[4] if tbl[4] is not None else False
-            match_type = tbl[5] if tbl[5] is not None else "Unknown"
-            similarity = tbl[6] if tbl[6] is not None else 0.0
+            tgt_rows_start = tbl[3] if tbl[3] is not None else 0
+            tgt_rows_end = tbl[4] if tbl[4] is not None else tgt_rows_start
+            is_forced = tbl[5] if tbl[5] is not None else False
+            match_type = tbl[6] if tbl[6] is not None else "Unknown"
+            similarity = tbl[7] if tbl[7] is not None else 0.0
 
             anchor_text = f"{src_tbl} mapped to {tgt_tbl}"
             if is_forced:
                 anchor_text += " (FORCED)"
 
             lines.append(f"### {anchor_text}")
-            lines.append(f"**Source Rows:** {src_rows} | **Target Rows:** {tgt_rows} | **Match Type:** {match_type} | **Similarity:** {similarity}%")
             lines.append("")
 
             # Fetch mapped columns

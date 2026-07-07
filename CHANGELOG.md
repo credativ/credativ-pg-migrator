@@ -4,10 +4,10 @@
 
 - 2026.07.07
 
-  - Fix - Config: Resolved ValueError crash during the migration planning phase by supporting the 4-item data migration limitation structure (`table_pattern`, `condition`, `column_pattern`, `row_limit`). Added the `row_limit` column to the `data_migration_limitation` table schema, and updated the planner, orchestrator, and validator to respect `row_limit` before applying limitations.
-  - Fix - Stored Procedures: Corrected mixed-return and dataset-returning stored procedure conversion logic in the Sybase ASE connector and T-SQL parser to comment out incompatible scalar returns and prevent parser crashes.
-  - Fix - Config: Prevented TypeError during the pre-planning phase by ensuring `get_remote_objects_substitution` returns an empty list if the configuration key is defined but left empty or set to null.
-  - Fix - Reporting: Resolved missing sequence names and DDL in the `migration.protocol` table by ensuring `insert_sequence` falls back to target sequence metadata when source attributes are omitted.
+  - Fix - Config: Resolved ValueError crash during the migration planning phase by supporting the 4-item data migration limitation structure (`table_pattern`, `condition`, `column_pattern`, `row_limit`). Added the `row_limit` column to the `data_migration_limitation` table schema, and updated the planner, orchestrator, and validator to respect `row_limit` before applying limitations. (#92)
+  - Fix - Stored Procedures: Corrected mixed-return and dataset-returning stored procedure conversion logic in the Sybase ASE connector and T-SQL parser to comment out incompatible scalar returns and prevent parser crashes. (#88, #92)
+  - Fix - Config: Prevented TypeError during the pre-planning phase by ensuring `get_remote_objects_substitution` returns an empty list if the configuration key is defined but left empty or set to null. (#92)
+  - Fix - Reporting: Resolved missing sequence names and DDL in the `migration.protocol` table by ensuring `insert_sequence` falls back to target sequence metadata when source attributes are omitted. (#91)
   - Feature - Security/Config: Added configuration check to prevent the migrator protocol schema from being set to 'public' in both standard and mapping workflows, stopping execution with a ValueError to avoid accidental schema drops. Also added validation to ensure that neither the protocol schema nor the target schema can be empty.
   - Fix - Connectors: Ensured identity columns in Sybase ASE are correctly mapped and populated in the protocol_sequences table with their source side details (schema, table, column name) during migration.
   - Fix - Connectors/Reporting: Added persistent storage of current/next sequence values for migrated sequences by adding `source_last_value` and `source_next_value` columns to the `protocol_sequences` table. Enabled extraction and logging of these values from Sybase ASE identity columns (via `next_identity`), PostgreSQL sequences, and standard workflow planners.
@@ -21,19 +21,19 @@
 
 - 2026.06.29
 
-  - Feature - Sybase ASE Connector: Intelligent mixed-return flattening. Automatically converts implicit procedural `SELECT` outputs into proper scalar `RETURN` statements when developers improperly mixed them with explicit `RETURN <status_code>` directives.
-  - Feature - T-SQL Parser: Engineered robust extraction and handling for `#` prefixed temporary tables (`tempdb..`). Natively overrides these references to use standard `pg_temp.` contexts and applies a late-stage AST clean-up pass to systematically strip trailing `#` hashes from `DELETE`, `UPDATE`, `CREATE`, and `DROP` commands to preserve PostgreSQL identifier legality.
-  - Fix - T-SQL Parser: Safely bypassed legacy transaction directives (`BEGIN TRAN`, `SAVE TRAN`, `COMMIT TRAN`, `ROLLBACK TRAN`) by converting them directly into structural `NULL;` statements. This guarantees perfect block parity across nested `IF` bodies by strictly preventing the AST generator from artificially consuming the function's terminating `END;` marker.
-  - Fix - T-SQL Parser: Upgraded `EXEC` / `EXECUTE` conversion engine to correctly distinguish and map assignments (e.g. `EXEC @id = func(...)`) into proper `var := func();` PL/pgSQL assignments rather than invalid `PERFORM` functions.
-  - Fix - Sybase ASE Connector: Fixed DDL generation formatting to securely split and wrap generated function, procedure, and trigger schema mapping identifiers inside strict double-quotes (`"schema"."name"`).
-  - Fix - T-SQL Parser: Updated the `DELETE` regex conversion engine to successfully identify and restructure multi-table temporary hash syntax (e.g. `DELETE [#temp] FROM [table]`) securely into the PostgreSQL-compliant `DELETE FROM [temp] USING [table]`.
-  - Fix - T-SQL Parser: Broadened the AST iteration matrix in `pass_3_parse_variables` to intercept and safely isolate multi-line `CURSOR` definitions (`DECLARE <name> CURSOR FOR SELECT ...`), resolving critical truncation errors caused by embedded keywords.
-  - Fix - T-SQL Parser: Added interception and dynamic cleanup for Sybase `GOTO` syntax. Legacy label definitions (`label:`) and corresponding `GOTO label` invocations are now correctly bypassed or neutralized.
+  - Feature - Sybase ASE Connector: Intelligent mixed-return flattening. Automatically converts implicit procedural `SELECT` outputs into proper scalar `RETURN` statements when developers improperly mixed them with explicit `RETURN <status_code>` directives. (#88)
+  - Feature - T-SQL Parser: Engineered robust extraction and handling for `#` prefixed temporary tables (`tempdb..`). Natively overrides these references to use standard `pg_temp.` contexts and applies a late-stage AST clean-up pass to systematically strip trailing `#` hashes from `DELETE`, `UPDATE`, `CREATE`, and `DROP` commands to preserve PostgreSQL identifier legality. (#89)
+  - Fix - T-SQL Parser: Safely bypassed legacy transaction directives (`BEGIN TRAN`, `SAVE TRAN`, `COMMIT TRAN`, `ROLLBACK TRAN`) by converting them directly into structural `NULL;` statements. This guarantees perfect block parity across nested `IF` bodies by strictly preventing the AST generator from artificially consuming the function's terminating `END;` marker. (#89)
+  - Fix - T-SQL Parser: Upgraded `EXEC` / `EXECUTE` conversion engine to correctly distinguish and map assignments (e.g. `EXEC @id = func(...)`) into proper `var := func();` PL/pgSQL assignments rather than invalid `PERFORM` functions. (#89)
+  - Fix - Sybase ASE Connector: Fixed DDL generation formatting to securely split and wrap generated function, procedure, and trigger schema mapping identifiers inside strict double-quotes (`"schema"."name"`). (#89)
+  - Fix - T-SQL Parser: Updated the `DELETE` regex conversion engine to successfully identify and restructure multi-table temporary hash syntax (e.g. `DELETE [#temp] FROM [table]`) securely into the PostgreSQL-compliant `DELETE FROM [temp] USING [table]`. (#89)
+  - Fix - T-SQL Parser: Broadened the AST iteration matrix in `pass_3_parse_variables` to intercept and safely isolate multi-line `CURSOR` definitions (`DECLARE <name> CURSOR FOR SELECT ...`), resolving critical truncation errors caused by embedded keywords. (#89)
+  - Fix - T-SQL Parser: Added interception and dynamic cleanup for Sybase `GOTO` syntax. Legacy label definitions (`label:`) and corresponding `GOTO label` invocations are now correctly bypassed or neutralized. (#89)
   - Fix - Sybase ASE Connector: Replaced legacy string concatenation `+` operators encountered inside generated view expressions natively with standard `||` operators.
 
 - 2026.06.19
 
-  - Feature - MariaDB: Added a dedicated native MariaDB connector (`mariadb_connector.py`) using the `mariadb` Python module instead of `mysql-connector-python` to resolve licensing and compliance concerns. Added explicit JDBC and ODBC configuration examples for MariaDB in `config_sample.yaml`.
+  - Feature - MariaDB: Added a dedicated native MariaDB connector (`mariadb_connector.py`) using the `mariadb` Python module instead of `mysql-connector-python` to resolve licensing and compliance concerns. Added explicit JDBC and ODBC configuration examples for MariaDB in `config_sample.yaml`. (#85, #86)
 
 - 2026.06.12
 
@@ -96,23 +96,23 @@
 
 - 2026.06.03
 
-  - Fix - Orchestrator: Moved table dropping logic out of parallel workers into a sequential execution block before data migration begins. This prevents potential deadlocks on the target database when multiple parallel workers attempt to drop tables concurrently.
-  - Fix - PostgreSQL Connector: Resolved an issue where non-standard Unix socket directories (e.g., `/tmp`) could not be used in the `host` configuration parameter. The connection string builder now properly URL-encodes the `host` parameter and utilizes the standard `postgresql://` URI schema, ensuring flawless connection resolution for both standard network hosts and Unix domain sockets via psycopg2.
+  - Fix - Orchestrator: Moved table dropping logic out of parallel workers into a sequential execution block before data migration begins. This prevents potential deadlocks on the target database when multiple parallel workers attempt to drop tables concurrently. (#73)
+  - Fix - PostgreSQL Connector: Resolved an issue where non-standard Unix socket directories (e.g., `/tmp`) could not be used in the `host` configuration parameter. The connection string builder now properly URL-encodes the `host` parameter and utilizes the standard `postgresql://` URI schema, ensuring flawless connection resolution for both standard network hosts and Unix domain sockets via psycopg2. (#36)
 
 - 2026.06.02
 
   - Feature - Core Migrator: Standardized diagnostic row counting across all database connectors to natively apply the `migration_limitation` configuration parameter. Ensures reported source table diagnostics exactly match the subsets defined for partial migrations. Removed redundant un-filtered row counting queries from `sybase_ase_connector.py` and `sql_anywhere_connector.py`.
   - Feature - Protocol: Improved transparency of the migration process by replacing `source_table_rows` with `source_table_rows_all` and `source_table_rows_limited` in protocol tables (`data_migration`, `data_chunks`, and `tables_info`) to differentiate total table size from filtered subsets when migration limitations are active. All connectors and validation logic are updated to track and compare against the `limited` metric for accurate parity checks.
   - Fix - Sybase ASE Connector: Resolved a critical issue causing data duplication (2-3x multiplier) during migrations. Unconditionally set `migration_stats['finished'] = True` to prevent the orchestrator from infinitely looping on tables where target row counts fell short of expected source row counts (e.g. due to data validation rejections or missing `migration_limitation` filters).
-  - Feature - Core Migrator: Completely eliminated the target-side `MAX(column)` aggregation abstraction for synchronizing identity sequences, shifting responsibility strictly to source database engine catalog extraction. Natively implemented the unified `get_table_next_identity()` interface across all legacy connectors (PostgreSQL, MySQL, MS SQL Server, Oracle, IBM Db2 LUW, IBM Db2 z/OS, Sybase ASE, Informix, and SQL Anywhere) to systematically extract pure sequence cache states. Orchestrator implicitly formats valid `setval()` payloads allowing perfectly accurate sequence replication irrespective of non-contiguous database row gaps.
+  - Feature - Core Migrator: Completely eliminated the target-side `MAX(column)` aggregation abstraction for synchronizing identity sequences, shifting responsibility strictly to source database engine catalog extraction. Natively implemented the unified `get_table_next_identity()` interface across all legacy connectors (PostgreSQL, MySQL, MS SQL Server, Oracle, IBM Db2 LUW, IBM Db2 z/OS, Sybase ASE, Informix, and SQL Anywhere) to systematically extract pure sequence cache states. Orchestrator implicitly formats valid `setval()` payloads allowing perfectly accurate sequence replication irrespective of non-contiguous database row gaps. (#30)
 
 - 2026.06.01
 
-  - Feature - Sybase ASE Connector: Used `ROW_COUNT` instead of `COUNT(*)` for initial row count fetch if no migration limitation is defined to improve performance.
+  - Feature - Sybase ASE Connector: Used `ROW_COUNT` instead of `COUNT(*)` for initial row count fetch if no migration limitation is defined to improve performance. (#77)
   - Feature - TSQL Parser: Implemented logic to automatically comment out `RETURN` statements following `RAISERROR` in Sybase ASE procedures to ensure PostgreSQL compatibility.
-  - Feature - Core Migrator: Enhanced `handle_error` logging across all connectors and the orchestrator to explicitly output a warning message when errors are bypassed due to the `on_error_action=continue` configuration setting.
+  - Feature - Core Migrator: Enhanced `handle_error` logging across all connectors and the orchestrator to explicitly output a warning message when errors are bypassed due to the `on_error_action=continue` configuration setting. (#78)
   - Feature - Core Migrator: Enhanced migration summary report to calculate and display the total count of errors encountered across all objects and data migration phases.
-  - Feature - PostgreSQL Connector: Set `application_name` to `credativ-pg-migrator` (defined in `constants.py`) for all PostgreSQL connections to improve database monitoring and connection visibility.
+  - Feature - PostgreSQL Connector: Set `application_name` to `credativ-pg-migrator` (defined in `constants.py`) for all PostgreSQL connections to improve database monitoring and connection visibility. (#76)
   - Feature - TSQL Parser: Implemented logic to automatically convert `EXEC`/`EXECUTE` procedure calls to `PERFORM` statements in PostgreSQL PL/pgSQL, properly enclosing arguments in parentheses.
 
 - 2026.05.29
@@ -187,15 +187,15 @@
 
   - Significant improvement in summary output, now showing results in better format and without timestamp and other prefixes for better readability.
   - Fix - IBM DB2 z/OS Connector: Allow "@" as a statement terminator in addition to ";". Added debug messages to trace the DDL parsing process.
-  - Fix - T-SQL Parser: Fixed missing comments in PostgreSQL converted code, fixed conversion of data types in stored procedures, key word "noholdlock" removed from select statements.
+  - Fix - T-SQL Parser: Fixed missing comments in PostgreSQL converted code, fixed conversion of data types in stored procedures, key word "noholdlock" removed from select statements. (#69)
 - 2026.03.30
 
-  - Fix - Protocol Tables: Resolved an issue where the `task_started` timestamp was null while tasks were running. The Orchestrator now immediately and actively updates the `task_started` column across all protocol tables as soon as migration payload processing begins.
+  - Fix - Protocol Tables: Resolved an issue where the `task_started` timestamp was null while tasks were running. The Orchestrator now immediately and actively updates the `task_started` column across all protocol tables as soon as migration payload processing begins. (#60)
   - Fix - PostgreSQL Connector: Repaired the creation of User Defined Data Types (UDTs). When migrating from PostgreSQL to PostgreSQL, UDTs utilized within a table's structure now dynamically bind to the designated target schema rather than improperly retaining the original source schema name, preventing 'type does not exist' instantiation failures.
   - Fix - Global Planner: Addressed a foundational bug in `planner.py` where successfully mapped data types (e.g., Sybase ASE `SMALLDATETIME` to `TIMESTAMP`) were orphaned during generation. The mapping dictionary application logic has been rewritten to explicitly override the live pointer upon confirmation, guaranteeing accurate cross-engine data structures.
 - 2026.03.27
 
-  - Feature - T-SQL Parser: Designed and integrated a comprehensive native T-SQL parser matrix natively utilized across both the MS SQL and Sybase ASE connectors. Ensures extensive capability to systematically resolve complex or incomplete legacy syntax structures before target PostgreSQL generation.
+  - Feature - T-SQL Parser: Designed and integrated a comprehensive native T-SQL parser matrix natively utilized across both the MS SQL and Sybase ASE connectors. Ensures extensive capability to systematically resolve complex or incomplete legacy syntax structures before target PostgreSQL generation. (#70, #71, #72)
   - Fix - MS SQL Connector: Resolved a critical scope-shadowing bug where procedure variable type mappings silently overwrote global table column architectures, restoring full dynamic type binding and preventing widespread `TEXT` fallbacks.
   - Fix - MS SQL Connector: Implemented advanced AST-based parsing via `sqlglot` to explicitly cast mathematical view operands to numeric types natively, preventing downstream text-multiplication operator failures in PostgreSQL.
   - Fix - MS SQL Procedures: Upgraded the T-SQL parser matrix to flawlessly identify missing `END` block markers, safely inject required string-encapsulation layers for aliases, and dynamically translate legacy `SET ROWCOUNT` directives into PostgreSQL-compliant `LIMIT` clauses.
@@ -288,25 +288,25 @@
 - 2026.01.10
 
   - Fixes in PostgreSQL connector
-    - repaired conversion of sequences to PostgreSQL sequences - now sequences are converted to PostgreSQL sequences with correct start value and increment
+    - repaired conversion of sequences to PostgreSQL sequences - now sequences are converted to PostgreSQL sequences with correct start value and increment (#37)
     - repaired conversion of domains to PostgreSQL domains - now domains are converted to PostgreSQL domains with correct data type and default value
     - repaired conversion of user defined types to PostgreSQL types - now user defined types are converted to PostgreSQL types with correct data type and default value
     - repaired conversion of functions to PostgreSQL functions - fixed extraction of function type ('FUNCTION' vs 'PROCEDURE') to resolve KeyErrors during migration
     - repaired conversion of triggers to PostgreSQL triggers - implemented correct fetching of trigger definitions from source PostgreSQL database
-    - repaired conversion of constraints to PostgreSQL constraints - fixed filtering of constraints to exclude internal NOT NULL constraints (contype='n') - NOT NULL constraints are part of column definition and are not converted as separate constraints
+    - repaired conversion of constraints to PostgreSQL constraints - fixed filtering of constraints to exclude internal NOT NULL constraints (contype='n') - NOT NULL constraints are part of column definition and are not converted as separate constraints (#45)
     - multiple small fixes
 
 ## 0.11.0 - 2026.01.09
 
 - 2026.01.09
 
-  - Fix in Sybase ASE connector - repaired fetch of triggers source code from Sybase ASE system tables, fixes in trigger code conversion, added conversion of user defined data types and SQL functions in code
+  - Fix in Sybase ASE connector - repaired fetch of triggers source code from Sybase ASE system tables, fixes in trigger code conversion, added conversion of user defined data types and SQL functions in code (#59)
 - 2026.01.08
 
   - Fix in Sybase ASE connector - rewrite of convert_funcproc_code and convert_trigger_code functions - implemented sql parser to better distinguish and convert control flow statements, cursors, data types and other features. Successrate of conversion is now significantly better than before.
 - 2026.01.06
 
-  - Fix in Sybase ASE connector - repaired convert_funcproc_code function - fixed issue where missing schema in source function definition resulted in invalid PostgreSQL function name (e.g. .funcname) - now uses target schema as fallback
+  - Fix in Sybase ASE connector - repaired convert_funcproc_code function - fixed issue where missing schema in source function definition resulted in invalid PostgreSQL function name (e.g. .funcname) - now uses target schema as fallback (#59)
   - Fix in Sybase ASE connector - repaired convert_view_code function - implemented support for legacy Sybase outer join syntax (*= and =*) - these are now correctly parsed and converted to ANSI standard LEFT OUTER JOINs
   - Features in Sybase ASE connector - implemented fetching of User Defined Types (UDTs) and their substitution with base types or custom defined types from config file
   - Improvements in Sybase ASE connector - enhanced conversion of stored procedures and functions - Converted OUTPUT parameters to INOUT parameters, implemented conversion of BREAK statement to EXIT, implemented conversion of RAISERROR to RAISE EXCEPTION, added handling of @@rowcount using GET DIAGNOSTICS, improved parsing and conversion of cursors
@@ -339,13 +339,13 @@
 - 2025.10.31:
 
   - Improvements in MySQL connector - added support for ODBC / JDBC connection, current implementation moved under "native" connectivity type
-  - Fix in Orchestrator - fix in check of existence of target table before creating the constraint - target schema from target database was mistakenly used instead of referenced schema and referenced table name from source database for checking existence of referenced table
+  - Fix in Orchestrator - fix in check of existence of target table before creating the constraint - target schema from target database was mistakenly used instead of referenced schema and referenced table name from source database for checking existence of referenced table (#57)
   - Fix in Orchestrator - repair in creation of comments in the target database for all objects - proper handling of names casing based on migration.names_case_handling setting in the config file
-  - Fix in all connectors - target schema name must be used as it is defined in the config file, not converted based on migration.names_case_handling setting - this setting applies only for object names taken from the source database
-  - Fix in PostgreSQL connector - lists of columns in indexes and constraints must be properly double quoted to preserve case as defined in the config file
+  - Fix in all connectors - target schema name must be used as it is defined in the config file, not converted based on migration.names_case_handling setting - this setting applies only for object names taken from the source database (#53)
+  - Fix in PostgreSQL connector - lists of columns in indexes and constraints must be properly double quoted to preserve case as defined in the config file (#58)
 - 2025.10.29:
 
-  - Fix in Orchestrator - repaired check of existence of referenced table before creating the constraint - when creating foreign key constraints, referenced table must be checked based on target database schema and target table name
+  - Fix in Orchestrator - repaired check of existence of referenced table before creating the constraint - when creating foreign key constraints, referenced table must be checked based on target database schema and target table name (#57)
 - 2025.10.28:
 
   - Change in Planner and Migrator tables - count of rows in source table is now part of planning phase and value is stored in the protocol table - this allows to have information about source table row counts even in case of data import from CSV/UNL files when source database can be inaccessible during data import
@@ -387,7 +387,7 @@
     - Possible values: "error", "skip", "source_table_name" - use source table from the source database instead of the data file
 - 2025.07.31:
 
-  - Fix in "resume" functionality - planner must check row counts of fully migrated tables to ensure they were not mistakenly marked as fully migrated
+  - Fix in "resume" functionality - planner must check row counts of fully migrated tables to ensure they were not mistakenly marked as fully migrated (#33)
     - Implementation still covers only optimistic variant of resuming migration, i.e. it presumes original planning phase was done correctly and data in the source database did not change since the interruption of the migration
   - Added experimental support for Informix text dump UNL files as data source for inserting data into target tables.
     - This is necessary because Informix database can be extremely slow in reading data from tables - depends on license and underlying hardware
@@ -404,7 +404,7 @@
   - Properly implemented option chunk_size = -1 to disable chunking - this means that all data will be migrated in one chunk, i.e. chunk as big as the table
 - 2025.07.15:
 
-  - Repaired issue #11 - exiting with 0 when error is caught in the main function - now it exits with 1 as expected
+  - Repaired issue (#11) - exiting with 0 when error is caught in the main function - now it exits with 1 as expected
   - Updated debug3 messages in migrator_tables.py - added more debug messages for better tracking of the migration process
   - Repair in logging data migration - if database did not expose internal table ID like MySQL, logging created duplicates
   - Improvements in error messages in the migrate table function
@@ -500,7 +500,7 @@
 
 - 2025.06.24:
 
-  - Add project logo and architecture diagram to PyPI page (@mbanck)
+  - Add project logo and architecture diagram to PyPI page (@mbanck) (#6)
 - 2025.06.19:
 
   - Implemented better conversion of views in Sybase ASE connector - added parsing of view code using sqlglot library - change significantly improves success rate of views migration
@@ -513,7 +513,7 @@
 
 - 2025.06.18:
 
-  - Add support for PyPi distribution via pyproject.toml (@mbanck-cd)
+  - Add support for PyPi distribution via pyproject.toml (@mbanck-cd) (#6)
 - 2025.06.17:
 
   - Constants transformed into a class with static methods - this allows to use constants in the code without importing them, just using the class name
@@ -541,7 +541,7 @@
     - Refactoring of all calls to print log messages in the whole code
 - 2025.06.13:
 
-  - Sybase ASE connector - added new functions into SQL functions mapping (solves issues in migration of views like replacement of isNull etc)
+  - Sybase ASE connector - added new functions into SQL functions mapping (solves issues in migration of views like replacement of isNull etc) (#55)
   - Function convert_funcproc_code in any connector cannot return None - it causes issues in Orchestrator
   - Fixed not working setting for truncation of tables in the target database - parameter migration.truncate_tables
     - Truncation now works, but migration of data into existing data model might fail due to foreign key constraints
@@ -551,7 +551,7 @@
 
   - Created fully automated test for MS SQL Server connector (dev repository)
   - Fixes in MS SQL Server connector after previous refactoring changes in 0.7.x releases - fix in column types conversion, fix in foreign key migrations, fix in VARCHAR to TEXT conversion
-  - Proper implementation of handling of names casing - parameter migration.names_case_handling (lower, upper, preserve) is now used when CREATE DDL statements are generated
+  - Proper implementation of handling of names casing - parameter migration.names_case_handling (lower, upper, preserve) is now used when CREATE DDL statements are generated (#54)
     - Rationale: legacy and proprietary databases have different rules for names casing, users might want to preserve original casing or convert names to lower or upper case based on their use cases
   - Fix in Oracle connector - migration of indexes - function based indexes contain in system tables hidden columns SYS_N% which must be replaced with their values in the DDL statements
 - 2025.06.11:
@@ -571,7 +571,7 @@
     - creation some functions failed in the target database because they did not find views referenced in the code
   - Changed order of actions in the Orchestrator - views must be migrated before functions/procedures/triggers, because these objects can reference views
     - View can be created with errors, if it uses some user defined functions/procedures which are not yet migrated - PostgreSQL validates them once missing objects are created
-  - Fix in the migration of VARCHAR columns - added new parameter migration.varchar_to_text_length to the config file
+  - Fix in the migration of VARCHAR columns - added new parameter migration.varchar_to_text_length to the config file (#4)
     - Rationale: different use cases might require different handling on how to migrate VARCHAR columns, either as TEXT or as VARCHAR based on length or always or never
     - Usage - see config file example
 - 2025.06.08:

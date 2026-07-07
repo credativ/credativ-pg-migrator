@@ -4,10 +4,10 @@ credativ-pg-migrator Releases
 0.15.1 - XX.XX.XXXX
 -------------------
 
-* Fix in ConfigParser to support 4-item data migration limitation structures (including row_limit) and resolve ValueError crash in planning phase.
-* Fix in Sybase ASE connector and T-SQL parser to correctly convert mixed return stored procedures and prevent function parsing crashes.
-* Fix in ConfigParser to handle null or empty remote_objects_substitution entries, avoiding a TypeError exception during pre-planning.
-* Fix in sequence logging to populate object_name and DDL from target sequence properties when source attributes are omitted.
+* Fix in ConfigParser to support 4-item data migration limitation structures (including row_limit) and resolve ValueError crash in planning phase. (#92)
+* Fix in Sybase ASE connector and T-SQL parser to correctly convert mixed return stored procedures and prevent function parsing crashes. (#88, #92)
+* Fix in ConfigParser to handle null or empty remote_objects_substitution entries, avoiding a TypeError exception during pre-planning. (#92)
+* Fix in sequence logging to populate object_name and DDL from target sequence properties when source attributes are omitted. (#91)
 * Validation check in ConfigParser to reject 'public' as the migrator schema in standard and mapping workflows to prevent accidental schema drops. Also added check to prevent empty protocol schema or target schema settings.
 * Fix in Sybase ASE connector sequence tracking to populate source-side metadata (schema, table, column) in the protocol_sequences table for identity columns.
 
@@ -21,15 +21,15 @@ credativ-pg-migrator Releases
 * Comprehensive Validation upgrades: Column-level checksums, cross-engine Python hashing, structural validation, and detailed side-by-side reporting
 * New Anonymization workflow: Standalone module for data masking using Python libraries or PostgreSQL extensions
 * Major enhancements to IBM Db2 LUW connector: Deep translation of views, constraints, triggers, and sequences to PostgreSQL equivalents
-* Enhancements in Mapping workflow: Forced Table Mappings, intelligent name matching for unmapped tables, and identity sequence mapping
-* Extensive upgrades to the native T-SQL Parser and Sybase ASE Connector for procedure and trigger conversion: Supports dynamic mixed-return flattening, `#temp` table transpilations, native `EXEC` assignments, `GOTO` and `CURSOR` processing, and block-parity preservation.
-* Numerous stability and reporting fixes across all connectors
+* Enhancements in Mapping workflow: Forced Table Mappings, intelligent name matching for unmapped tables, and identity sequence mapping (#30)
+* Extensive upgrades to the native T-SQL Parser and Sybase ASE Connector for procedure and trigger conversion: Supports dynamic mixed-return flattening, `#temp` table transpilations, native `EXEC` assignments, `GOTO` and `CURSOR` processing, and block-parity preservation. (#88, #89)
+* Numerous stability and reporting fixes across all connectors (#36, #60, #73, #76, #77, #78, #85, #86)
 
 0.14.0 - 20.05.2026
 -------------------
 
 * Extensive upgrades to the native T-SQL parser for Sybase ASE migrations
-  Added handling of procedures yielding implicit data sets into cache, improved injection of command / procedural terminators
+  Added handling of procedures yielding implicit data sets into cache, improved injection of command / procedural terminators (#75)
   Improved replacement of native SQL functions
 * Mapping Workflow enhancements, including explicit `data_conflict_action` rules (`replace`, `merge_keep_target`, etc.)
   Enhanced configuration management, natively accepting arrays and regex patterns for table scoping directives
@@ -37,13 +37,13 @@ credativ-pg-migrator Releases
 0.13.0 - 20.04.2026
 -------------------
 
+* New TSQL parser for MS SQL Server and Sybase ASE
+  Our new custom built parser is able to process even very messy source code of stored procedures and triggers and convert them to PL/pgSQL code for PostgreSQL (#70, #71, #72)
 * New migration workflow for migrating applications data between installations on different databases
   Typical use case are ticketing systems or accounting software which supports proprietary database and PostgreSQL
   Workflow maps tables and columns from original installation to PostgreSQL installation and migrates just data
-* New TSQL parser for MS SQL Server and Sybase ASE
-  Our new custom built parser is able to process even very messy source code of stored procedures and triggers and convert them to PL/pgSQL code for PostgreSQL
 * New migration summary output
-* Multiple fixes in all connectors
+* Multiple fixes in all connectors (#60, #69)
 
 0.12.2 - 15.04.2026
 -------------------
@@ -70,7 +70,7 @@ credativ-pg-migrator Releases
 0.11.0 - 09.01.2026
 -------------------
 
-* Sybase: Significantly Improved Code Conversion: Rewrite of function, procedure, and trigger conversion logic (convert_funcproc_code, convert_trigger_code) using a proper SQL parser
+* Sybase: Significantly Improved Code Conversion: Rewrite of function, procedure, and trigger conversion logic (convert_funcproc_code, convert_trigger_code) using a proper SQL parser (#59)
 * Sybase: Legacy SQL Support: Added support for legacy Sybase outer join syntax (= and =), which is now correctly parsed and converted to ANSI standard LEFT OUTER JOIN
 * Sybase: User Defined Types (UDTs): Implemented fetching of UDTs and their automated substitution with base types or custom types defined in the configuration
 * Sybase: Repaired fetching of trigger source code from system tables
@@ -82,9 +82,9 @@ credativ-pg-migrator Releases
 -------------------
 
 * Informix: Fixed LOB imports to allow multiple LOB columns per table and properly handle NULL values (placeholder 0,0,0 or explicit NULLs)
-* PostgreSQL: Fixed quoting for column lists in indexes and constraints to preserve case sensitivity
-* Foreign Keys: Fixed the existence check for referenced tables to ensure the correct target schema/table is validated before creating constraints
-* Casing: Improved handling of object name casing (based on migration.names_case_handling) for comments and schema validation
+* PostgreSQL: Fixed quoting for column lists in indexes and constraints to preserve case sensitivity (#58)
+* Foreign Keys: Fixed the existence check for referenced tables to ensure the correct target schema/table is validated before creating constraints (#57)
+* Casing: Improved handling of object name casing (based on migration.names_case_handling) for comments and schema validation (#53, #54)
 * Planning: Source table row counts are now stored in the protocol table during the planning phase. This supports data imports even when the source database is inaccessible (e.g., offline CSV/UNL imports)
 * UNL to CSV Conversion: Fixed parsing issues where text values ended with backslashes or contained Windows line endings (\r\n)
 * Informix LOB Handling: Fixed errors where 0,0,0 placeholders caused import failures. Fixed error catching for unreadable CLOB/BLOB files (sets value to NULL and logs the error).
@@ -93,23 +93,23 @@ credativ-pg-migrator Releases
 -------------------
 
 * Add support for reading data from Informix UNL files
-* Added resume functionality to resume in case the source or target crashed or were restarted
+* Added resume functionality to resume in case the source or target crashed or were restarted (#33)
 * Introduced scheduled actions to pause and resume migration of data
 * Improved timing statistics
 * Improved usage of dry-run command line parameter
-* Many additional bug fixes and migration improvements
+* Many additional bug fixes and migration improvements (#11)
 
 0.9.1 - 24.06.2025
 ------------------
 
-* Add project logo and architecture diagram to PyPI
+* Add project logo and architecture diagram to PyPI (#6)
 * Implemented better conversion of views in Sybase ASE connector
 * Started implementation of functions for premigration analysis of the source databases
 
 0.9.0 - 19.06.2025
 ------------------
 
-* Add support for PyPi distribution via pyproject.toml
+* Add support for PyPi distribution via pyproject.toml (#6)
 * Constants transformed into a class with static methods
 * Refactoring of log levels for different messages in the migrator
 * Improvements in Informix connector: improved handling of default values for columns, fix in is_nullable flag, updates in data migration for special data types, fix in interpretation of numeric precision and scale, implemented proper handling of function based indexes
@@ -126,7 +126,7 @@ credativ-pg-migrator Releases
 * Multiple fixes in connectors
 * Added description of migrated tables
 * Improvements in Informix user defined functions conversion
-* Improvements in VARCHAR columns migration
+* Improvements in VARCHAR columns migration (#4)
 
 0.8.1 - 05.06.2025
 ------------------

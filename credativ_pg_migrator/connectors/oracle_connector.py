@@ -16,7 +16,7 @@
 
 from credativ_pg_migrator.database_connector import DatabaseConnector
 from credativ_pg_migrator.migrator_logging import MigratorLogger
-import cx_Oracle
+import oracledb  ## pip install python-oracledb
 import traceback
 from tabulate import tabulate
 import time
@@ -33,24 +33,29 @@ class OracleConnector(DatabaseConnector):
         self.on_error_action = self.config_parser.get_on_error_action()
         self.logger = MigratorLogger(self.config_parser.get_log_file()).logger
 
+        if self.config_parser.get_oracle_thick_mode():
+            try:
+                oracledb.init_oracle_client()
+                self.config_parser.print_log_message('INFO', "oracle_connector: Oracle thick mode enabled via configuration.")
+            except Exception as e:
+                self.config_parser.print_log_message('DEBUG', f"oracle_connector: thick mode already initialized or failed: {e}")
+
     def connect(self):
         connection_string = self.config_parser.get_connect_string(self.source_or_target)
         username = self.config_parser.get_db_config(self.source_or_target)['username']
         try:
             if username == 'SYS':
-                self.connection = cx_Oracle.connect(user=username,
+                self.connection = oracledb.connect(user=username,
                                                     password=self.config_parser.get_db_config(self.source_or_target)['password'],
                                                     dsn=connection_string,
-                                                    encoding="UTF-8",
-                                                    mode=cx_Oracle.SYSDBA)
+                                                    mode=oracledb.SYSDBA)
             else:
-                self.connection = cx_Oracle.connect(user=username,
+                self.connection = oracledb.connect(user=username,
                                                     password = self.config_parser.get_db_config(self.source_or_target)['password'],
-                                                    dsn=connection_string,
-                                                    encoding="UTF-8")
+                                                    dsn=connection_string)
 
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', "oracle_connector: connect: cx_Oracle module is not installed.")
+            self.config_parser.print_log_message('ERROR', "oracle_connector: connect: oracledb module is not installed.")
             raise e
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"oracle_connector: connect: Error connecting to Oracle database: {e}")
@@ -365,7 +370,7 @@ class OracleConnector(DatabaseConnector):
             else:
 
                 data_conflict_action = settings.get('data_conflict_action')
-                if source_table_rows_limited > target_table_rows or data_conflict_action in ('merge_keep_target', 'merge_keep_source', 'replace'):
+                if target_table_rows == 0 or data_conflict_action in ('merge_keep_target', 'merge_keep_source', 'replace'):
                     migrator_tables.update_data_migration_started(protocol_id)
 
                     self.config_parser.print_log_message('INFO', f"oracle_connector: migrate_table: Worker {worker_id}: Source table {source_table_name}: {source_table_rows_limited} rows / Target table {target_table_name}: {target_table_rows} rows - starting data migration.")
@@ -534,8 +539,8 @@ class OracleConnector(DatabaseConnector):
 
                     cursor.close()
 
-                elif source_table_rows_limited <= target_table_rows and data_conflict_action not in ('merge_keep_target', 'merge_keep_source', 'replace'):
-                    self.config_parser.print_log_message('INFO', f"oracle_connector: migrate_table: Worker {worker_id}: Source table {source_table_name} has {source_table_rows_limited} rows, which is less than or equal to target table {target_table_name} with {target_table_rows} rows. No data migration needed.")
+                else:
+                    self.config_parser.print_log_message('INFO', f"oracle_connector: migrate_table: Worker {worker_id}: Target table {target_table_name} has {target_table_rows} rows and data_conflict_action is '{data_conflict_action}'. Skipping data migration.")
 
                 migration_stats = {
                     'rows_migrated': total_inserted_rows,
@@ -727,6 +732,20 @@ class OracleConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', f"oracle_connector: get_indexes_count: Error: {e}")
             return -1
 
+    def get_schema_indexes_count(self, schema_name: str) -> int:
+        query = f"SELECT count(*) FROM all_indexes WHERE table_owner = '{schema_name.upper()}'"
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            count = cursor.fetchone()[0]
+            cursor.close()
+            self.disconnect()
+            return count
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"oracle_connector: get_schema_indexes_count: Error: {e}")
+            return -1
+
     def fetch_constraints(self, settings):
         source_table_id = settings['source_table_id']
         source_table_schema = settings['source_table_schema']
@@ -829,6 +848,20 @@ class OracleConnector(DatabaseConnector):
             return count
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"oracle_connector: get_constraints_count: Error: {e}")
+            return -1
+
+    def get_schema_constraints_count(self, schema_name: str) -> int:
+        query = f"SELECT count(*) FROM all_constraints WHERE owner = '{schema_name.upper()}'"
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            count = cursor.fetchone()[0]
+            cursor.close()
+            self.disconnect()
+            return count
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"oracle_connector: get_schema_constraints_count: Error: {e}")
             return -1
 
     def get_aliases(self, settings):
@@ -1261,7 +1294,7 @@ class OracleConnector(DatabaseConnector):
     def get_table_checksum(self, schema_name: str, table_name: str, columns: list):
         if not columns:
             return None
-            
+
         cols_list = []
         for col in columns:
             dtype = col.get('data_type', '').lower()
@@ -1275,10 +1308,10 @@ class OracleConnector(DatabaseConnector):
                 cols_list.append(f"ROUND(\"{col['column_name']}\", 0)")
             else:
                 cols_list.append(f'"{col["column_name"]}"')
-            
+
         if not cols_list:
             return None
-            
+
         cols_str = ", ".join(cols_list)
         query = f'SELECT {cols_str} FROM "{schema_name.upper()}"."{table_name.upper()}"'
         return self._compute_python_table_checksum(query)
@@ -1306,7 +1339,7 @@ class OracleConnector(DatabaseConnector):
     def get_row_checksums(self, schema_name: str, table_name: str, pk_columns: list, pk_values_list: list, columns: list):
         if not columns or not pk_columns or not pk_values_list:
             return {}
-            
+
         cols_list = []
         for col in columns:
             dtype = col.get('data_type', '').lower()
@@ -1320,13 +1353,13 @@ class OracleConnector(DatabaseConnector):
                 cols_list.append(f"ROUND(\"{col['column_name']}\", 0)")
             else:
                 cols_list.append(f'"{col["column_name"]}"')
-            
+
         if not cols_list:
             return {}
-            
+
         cols_str = ", ".join(cols_list)
         pk_cols_str = ", ".join([f'"{c}"' for c in pk_columns])
-        
+
         in_values = []
         for pk_dict in pk_values_list:
             vals = []
@@ -1340,22 +1373,22 @@ class OracleConnector(DatabaseConnector):
                 else:
                     vals.append(str(val))
             in_values.append(f"({', '.join(vals)})")
-        
+
         where_clause = f"({pk_cols_str}) IN ({', '.join(in_values)})"
         if len(pk_columns) == 1:
             where_clause = f"{pk_cols_str} IN ({', '.join([v.strip('()') for v in in_values])})"
-            
+
         query = f'SELECT {pk_cols_str}, {cols_str} FROM "{schema_name.upper()}"."{table_name.upper()}" WHERE {where_clause}'
         return self._compute_python_row_checksums(query, len(pk_columns))
 
     def get_lob_sizes(self, schema_name: str, table_name: str, pk_columns: list, pk_values_list: list, lob_columns: list):
         if not lob_columns or not pk_columns or not pk_values_list:
             return {}
-        
+
         size_cols = [f"DBMS_LOB.GETLENGTH(\"{col['column_name']}\")" for col in lob_columns]
         size_selects = ", ".join(size_cols)
         pk_cols_str = ", ".join([f'"{c}"' for c in pk_columns])
-        
+
         in_values = []
         for pk_dict in pk_values_list:
             vals = []
@@ -1369,13 +1402,13 @@ class OracleConnector(DatabaseConnector):
                 else:
                     vals.append(str(val))
             in_values.append(f"({', '.join(vals)})")
-        
+
         where_clause = f"({pk_cols_str}) IN ({', '.join(in_values)})"
         if len(pk_columns) == 1:
             where_clause = f"{pk_cols_str} IN ({', '.join([v.strip('()') for v in in_values])})"
-            
+
         query = f'SELECT {pk_cols_str}, {size_selects} FROM "{schema_name.upper()}"."{table_name.upper()}" WHERE {where_clause}'
-        
+
         sizes = {}
         cursor = None
         try:

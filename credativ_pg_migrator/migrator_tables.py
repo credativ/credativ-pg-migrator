@@ -397,6 +397,14 @@ class MigratorTables:
 
     def create_table_for_mapping(self):
         self.protocol_connection.execute_query(f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."mapping_pre_stats" (
+                id SERIAL PRIMARY KEY,
+                side VARCHAR(10),
+                object_type VARCHAR(50),
+                object_count INTEGER
+            );
+        """)
+        self.protocol_connection.execute_query(f"""
             CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."mapping_tables" (
                 id SERIAL PRIMARY KEY,
                 source_schema_name TEXT,
@@ -488,6 +496,17 @@ class MigratorTables:
         self.config_parser.print_log_message('DEBUG3', f"migrator_tables: create_table_for_mapping: Mapping tables created in schema {self.protocol_schema}")
 
 
+    def insert_mapping_pre_stat(self, side: str, object_type: str, object_count: int):
+        try:
+            self.protocol_connection.execute_query(f"""
+                INSERT INTO "{self.protocol_schema}"."mapping_pre_stats"
+                (side, object_type, object_count)
+                VALUES (%s, %s, %s)
+            """, (side, object_type, object_count))
+            self.protocol_connection.connection.commit()
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_mapping_pre_stat: Error: {e}")
+
     def insert_mapping_tables(self, settings):
         func_run_id = uuid.uuid4()
         source_schema_name = settings.get('source_schema_name')
@@ -518,6 +537,44 @@ class MigratorTables:
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_mapping_tables: ({func_run_id}): Error: {e}")
             raise
+
+    def fetch_mapping_tables_for_validation(self):
+        query = f"""SELECT id, source_schema_name, source_table_name, target_schema_name, target_table_name FROM "{self.protocol_schema}"."mapping_tables" ORDER BY id"""
+        cursor = self.protocol_connection.connection.cursor()
+        cursor.execute(query)
+        tables = cursor.fetchall()
+        
+        result = []
+        for t in tables:
+            table_id, s_schema, s_table, t_schema, t_table = t
+            
+            c_query = f"""SELECT source_column_name, target_column_name, source_data_type, target_data_type FROM "{self.protocol_schema}"."mapping_columns" WHERE source_schema_name=%s AND source_table_name=%s AND target_schema_name=%s AND target_table_name=%s ORDER BY target_ordinal_number"""
+            cursor.execute(c_query, (s_schema, s_table, t_schema, t_table))
+            columns = cursor.fetchall()
+            
+            source_columns = []
+            target_columns = []
+            for c in columns:
+                s_col, t_col, s_type, t_type = c
+                if s_col:
+                    s_type_lower = s_type.lower() if s_type else ''
+                    s_is_num = any(t in s_type_lower for t in ['int', 'number', 'numeric', 'decimal', 'serial'])
+                    source_columns.append({'column_name': s_col, 'data_type': s_type, 'numeric_precision': 0 if s_is_num else None})
+                if t_col:
+                    t_type_lower = t_type.lower() if t_type else ''
+                    t_is_num = any(t in t_type_lower for t in ['int', 'number', 'numeric', 'decimal', 'serial'])
+                    target_columns.append({'column_name': t_col, 'data_type': t_type, 'numeric_precision': 0 if t_is_num else None})
+            
+            result.append({
+                'id': table_id,
+                'source_schema_name': s_schema,
+                'source_table_name': s_table,
+                'target_schema_name': t_schema,
+                'target_table_name': t_table,
+                'source_columns': source_columns,
+                'target_columns': target_columns
+            })
+        return result
 
     def insert_mapping_columns(self, settings):
         func_run_id = uuid.uuid4()
@@ -3302,11 +3359,62 @@ class MigratorTables:
         lines.append("# Mapping Workflow Detailed Report")
         lines.append("")
 
+        import yaml
+
+        lines.append("## Configuration Settings")
+        lines.append("")
+
+        lines.append("### Data Conflict Action")
+        global_action = self.config_parser.get_global_data_conflict_action()
+        lines.append(f"- **Global** (`data_conflict_action`): `{global_action}`")
+        table_settings = self.config_parser.config.get('table_settings', [])
+        if isinstance(table_settings, list):
+            for entry in table_settings:
+                if 'data_conflict_action' in entry:
+                    lines.append(f"- **Table override** (`{entry.get('table_name')}`): `{entry['data_conflict_action']}`")
+        lines.append("")
+
+        lines.append("### Mapping Workflow Heuristics")
+        heuristics = self.config_parser.get_mapping_workflow_heuristics()
+        if heuristics:
+            lines.append("```yaml")
+            lines.append(yaml.dump(heuristics, default_flow_style=False, sort_keys=False).strip())
+            lines.append("```")
+        else:
+            lines.append("*None configured.*")
+        lines.append("")
+
+        lines.append("### Forced Table Mappings")
+        forced_tables = self.config_parser.get_forced_table_mappings()
+        if forced_tables:
+            lines.append("```yaml")
+            lines.append(yaml.dump(forced_tables, default_flow_style=False, sort_keys=False).strip())
+            lines.append("```")
+        else:
+            lines.append("*None configured.*")
+        lines.append("")
+
+        lines.append("### Forced Column Mappings")
+        forced_cols = self.config_parser.get_forced_column_mappings()
+        if forced_cols:
+            lines.append("```yaml")
+            lines.append(yaml.dump(forced_cols, default_flow_style=False, sort_keys=False).strip())
+            lines.append("```")
+        else:
+            lines.append("*None configured.*")
+        lines.append("")
+
         # Fetch mapped tables
+        dm_table = self.config_parser.get_protocol_name_data_migration()
         query_mapped = f"""
-            SELECT source_table_name, target_table_name, source_table_rows_all, target_table_rows, is_forced_mapping, match_type, similarity_score
-            FROM "{self.protocol_schema}"."mapping_tables"
-            ORDER BY source_table_name
+            SELECT m.source_table_name, m.target_table_name, 
+                   m.source_table_rows_all, m.target_table_rows AS target_table_rows_start, 
+                   d.target_table_rows AS target_table_rows_end, 
+                   m.is_forced_mapping, m.match_type, m.similarity_score
+            FROM "{self.protocol_schema}"."mapping_tables" m
+            LEFT JOIN "{self.protocol_schema}"."{dm_table}" d
+              ON m.source_table_name = d.source_table_name AND m.target_table_name = d.target_table_name
+            ORDER BY m.source_table_name
         """
         cursor = self.protocol_connection.connection.cursor()
         cursor.execute(query_mapped)
@@ -3335,34 +3443,70 @@ class MigratorTables:
             unmatched_cols_by_table[key].append(col_name)
 
         # Generate Table of Contents
-        lines.append("## Table of Contents")
+        # lines.append("## Table of Contents")
+        # lines.append("")
+        # lines.append("- [Mapped Tables Summary](#mapped-tables-summary)")
+        # lines.append("- [Mapped Columns Details](#mapped-columns-details)")
+        # for tbl in mapped_tables:
+        #     anchor = f"{tbl[0]}-mapped-to-{tbl[1]}".replace('_', '-').lower()
+        #     lines.append(f"  - [{tbl[0]} -> {tbl[1]}](#{anchor})")
+        # lines.append("- [Unmapped Source Tables](#unmapped-source-tables)")
+        # lines.append("- [Unmapped Target Tables](#unmapped-target-tables)")
+        # lines.append("")
+
+        # Generate Mapped Tables Summary Section
+        lines.append("## Mapped Tables Summary")
         lines.append("")
-        lines.append("- [Mapped Tables](#mapped-tables)")
-        for tbl in mapped_tables:
-            anchor = f"{tbl[0]}-mapped-to-{tbl[1]}".replace('_', '-').lower()
-            lines.append(f"  - [{tbl[0]} -> {tbl[1]}](#{anchor})")
-        lines.append("- [Unmapped Source Tables](#unmapped-source-tables)")
-        lines.append("- [Unmapped Target Tables](#unmapped-target-tables)")
+        if mapped_tables:
+            lines.append("| Source Table | Target Table | Source Rows (Start) | Target Rows (Start) | Target Rows (End) | Match Type | Similarity | Data Conflict Action |")
+            lines.append("|---|---|---|---|---|---|---|---|")
+            for tbl in mapped_tables:
+                src_tbl = tbl[0]
+                tgt_tbl = tbl[1]
+                src_rows = tbl[2] if tbl[2] is not None else 0
+                tgt_rows_start = tbl[3] if tbl[3] is not None else 0
+                tgt_rows_end = tbl[4] if tbl[4] is not None else tgt_rows_start
+                is_forced = tbl[5] if tbl[5] is not None else False
+                match_type = tbl[6] if tbl[6] is not None else "Unknown"
+                similarity = tbl[7] if tbl[7] is not None else 0.0
+
+                conflict_note = ""
+                if tgt_rows_start != 0:
+                    action = self.config_parser.get_mapping_data_resolution(src_tbl)
+                    is_table_specific = False
+                    table_settings = self.config_parser.config.get('table_settings', [])
+                    if isinstance(table_settings, list):
+                        for entry in table_settings:
+                            pattern = entry.get('table_name')
+                            if self.config_parser._match_table_name(src_tbl, pattern) and entry.get('data_conflict_action'):
+                                is_table_specific = True
+                                break
+                    origin = "table specific" if is_table_specific else "global"
+                    conflict_note = f"{action} ({origin})"
+
+                lines.append(f"| {src_tbl} | {tgt_tbl} | {src_rows} | {tgt_rows_start} | {tgt_rows_end} | {match_type} | {similarity}% | {conflict_note} |")
+        else:
+            lines.append("*No mapped tables found.*")
         lines.append("")
 
-        # Generate Mapped Tables Section
-        lines.append("## Mapped Tables")
+        # Generate Mapped Columns Details Section
+        lines.append("## Mapped Columns Details")
         lines.append("")
         for tbl in mapped_tables:
             src_tbl = tbl[0]
             tgt_tbl = tbl[1]
             src_rows = tbl[2] if tbl[2] is not None else 0
-            tgt_rows = tbl[3] if tbl[3] is not None else 0
-            is_forced = tbl[4] if tbl[4] is not None else False
-            match_type = tbl[5] if tbl[5] is not None else "Unknown"
-            similarity = tbl[6] if tbl[6] is not None else 0.0
+            tgt_rows_start = tbl[3] if tbl[3] is not None else 0
+            tgt_rows_end = tbl[4] if tbl[4] is not None else tgt_rows_start
+            is_forced = tbl[5] if tbl[5] is not None else False
+            match_type = tbl[6] if tbl[6] is not None else "Unknown"
+            similarity = tbl[7] if tbl[7] is not None else 0.0
 
             anchor_text = f"{src_tbl} mapped to {tgt_tbl}"
             if is_forced:
                 anchor_text += " (FORCED)"
 
             lines.append(f"### {anchor_text}")
-            lines.append(f"**Source Rows:** {src_rows} | **Target Rows:** {tgt_rows} | **Match Type:** {match_type} | **Similarity:** {similarity}%")
             lines.append("")
 
             # Fetch mapped columns
@@ -3493,6 +3637,30 @@ class MigratorTables:
             pass
 
         lines.append("")
+        if self.config_parser.get_workflow() == 'mapping':
+            lines.append("[ PRE-MAPPING OBJECT STATISTICS ]")
+            lines.append("-" * 80)
+            lines.append(f"{'Object Type':<24} | {'Source DB':>12} | {'Target DB':>12}")
+            lines.append("-" * 80)
+            try:
+                cursor = self.protocol_connection.connection.cursor()
+                cursor.execute(f"""SELECT side, object_type, object_count FROM "{self.protocol_schema}"."mapping_pre_stats" """)
+                stats = cursor.fetchall()
+                stats_dict = {'tables': {'source': '-', 'target': '-'}, 'indexes': {'source': '-', 'target': '-'}, 'constraints': {'source': '-', 'target': '-'}}
+                for r in stats:
+                    side = r[0]
+                    otype = r[1]
+                    count = r[2]
+                    display_count = 'N/A' if count == -1 else str(count)
+                    if otype in stats_dict:
+                        stats_dict[otype][side] = display_count
+                for otype in ['tables', 'indexes', 'constraints']:
+                    lines.append(f"{otype.capitalize():<24} | {stats_dict[otype]['source']:>12} | {stats_dict[otype]['target']:>12}")
+                lines.append("-" * 80)
+                lines.append("")
+            except Exception as e:
+                self.config_parser.print_log_message('ERROR', f"migrator_tables: print_migration_summary: mapping_pre_stats error: {e}")
+
         lines.append("[ OBJECTS MIGRATION RESULTS ]")
         lines.append("-" * 80)
         lines.append(f"{'Object Type':<24} | {'Source':>6} | {'Success':>7} | {'Failed':>6} | Details")
@@ -4886,6 +5054,8 @@ class MigratorTables:
                 target_indexes_count bigint,
                 source_constraints_count bigint,
                 target_constraints_count bigint,
+                row_count_passed text,
+                table_hash_passed text,
                 validated_at timestamp default current_timestamp
             )
         """
@@ -4992,13 +5162,25 @@ class MigratorTables:
         target_indexes_count = settings.get('target_indexes_count')
         source_constraints_count = settings.get('source_constraints_count')
         target_constraints_count = settings.get('target_constraints_count')
+        
+        row_logic = settings.get('row_logic')
+        if row_logic is True: row_cnt_res = 'PASS'
+        elif row_logic is False: row_cnt_res = 'X'
+        elif row_logic is None and settings.get('row_msg', '').startswith('Skip'): row_cnt_res = 'SKIP'
+        else: row_cnt_res = '-'
+
+        table_hash_logic = settings.get('table_hash_logic')
+        if table_hash_logic is True: tbl_hash_res = 'PASS'
+        elif table_hash_logic is False: tbl_hash_res = 'X'
+        elif table_hash_logic is None and settings.get('table_msg', '').startswith('Skip'): tbl_hash_res = 'SKIP'
+        else: tbl_hash_res = '-'
 
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{self.config_parser.get_validation_tables_name()}"
-            (source_schema_name, source_table_name, source_row_count, target_schema_name, target_table_name, target_row_count, source_table_hash, target_table_hash, source_columns_count, target_columns_count, source_indexes_count, target_indexes_count, source_constraints_count, target_constraints_count)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (source_schema_name, source_table_name, source_row_count, target_schema_name, target_table_name, target_row_count, source_table_hash, target_table_hash, source_columns_count, target_columns_count, source_indexes_count, target_indexes_count, source_constraints_count, target_constraints_count, row_count_passed, table_hash_passed)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
-        params = (source_schema_name, source_table_name, source_row_count, target_schema_name, target_table_name, target_row_count, str(source_table_hash) if source_table_hash is not None else None, str(target_table_hash) if target_table_hash is not None else None, source_columns_count, target_columns_count, source_indexes_count, target_indexes_count, source_constraints_count, target_constraints_count)
+        params = (source_schema_name, source_table_name, source_row_count, target_schema_name, target_table_name, target_row_count, str(source_table_hash) if source_table_hash is not None else None, str(target_table_hash) if target_table_hash is not None else None, source_columns_count, target_columns_count, source_indexes_count, target_indexes_count, source_constraints_count, target_constraints_count, row_cnt_res, tbl_hash_res)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -5115,7 +5297,8 @@ class MigratorTables:
         protocol_tables = self.config_parser.get_protocol_name_tables()
         query = f"""
             SELECT v.target_schema_name, v.target_table_name, MAX(t.source_schema_name), MAX(t.source_table_name), MAX(v.source_row_count), MAX(v.target_row_count), MAX(v.source_table_hash), MAX(v.target_table_hash),
-                   MAX(v.source_columns_count), MAX(v.target_columns_count), MAX(v.source_indexes_count), MAX(v.target_indexes_count), MAX(v.source_constraints_count), MAX(v.target_constraints_count)
+                   MAX(v.source_columns_count), MAX(v.target_columns_count), MAX(v.source_indexes_count), MAX(v.target_indexes_count), MAX(v.source_constraints_count), MAX(v.target_constraints_count),
+                   MAX(v.row_count_passed), MAX(v.table_hash_passed)
             FROM "{self.protocol_schema}"."{self.config_parser.get_validation_tables_name()}" v
             LEFT JOIN "{self.protocol_schema}"."{protocol_tables}" t
             ON v.target_schema_name = t.target_schema_name AND v.target_table_name = t.target_table_name
@@ -5133,10 +5316,20 @@ class MigratorTables:
             lines.append("                     CREDATIV PG-MIGRATOR VALIDATOR SUMMARY                     ")
             lines.append("=" * 80)
             lines.append("")
-            lines.append("[ DATABASE CONTEXT ]")
-            lines.append(f"Source: {self.config_parser.get_source_db_name()}, schema: {self.config_parser.get_source_owner()} ({self.config_parser.get_source_db_type()})")
-            lines.append(f"Target: {self.config_parser.get_target_db_name()}, schema: {self.config_parser.get_target_schema()} ({self.config_parser.get_target_db_type()})")
-            lines.append(f"Workflow: {self.config_parser.get_workflow()}")
+            lines.append("### Database Context")
+            lines.append(f"- **Source**: {self.config_parser.get_source_db_name()}, schema: {self.config_parser.get_source_owner()} ({self.config_parser.get_source_db_type()})")
+            lines.append(f"- **Target**: {self.config_parser.get_target_db_name()}, schema: {self.config_parser.get_target_schema()} ({self.config_parser.get_target_db_type()})")
+            
+            workflow = self.config_parser.get_workflow()
+            if workflow == 'mapping':
+                tc_config = self.config_parser.get_validation_target_copy_config()
+                if tc_config:
+                    tc_db = tc_config.get('database', '')
+                    tc_schema = tc_config.get('schema', tc_config.get('owner', 'public'))
+                    tc_type = tc_config.get('type', '')
+                    lines.append(f"- **Target Copy**: {tc_db}, schema: {tc_schema} ({tc_type})")
+            
+            lines.append(f"- **Workflow**: {workflow}")
             lines.append("")
 
             total = len(results)
@@ -5164,14 +5357,20 @@ class MigratorTables:
             details_lines = []
             if total > 0:
                 details_lines.append("")
-                details_lines.append("[ VALIDATION DETAILS ]")
+                details_lines.append("### Validation Details")
                 max_source_len = max([len(f"{r[2]}.{r[3]}") if r[2] and r[3] else 12 for r in results] + [12])
                 max_target_len = max([len(f"{r[0]}.{r[1]}") for r in results] + [12])
                 max_num_len = max(3, len(str(len(results))))
-                header = f"{'No.':>{max_num_len}} | {'Source Table':<{max_source_len}} | {'Target Table':<{max_target_len}} | {'Status':<6} | {'RowCnt':<6} | {'SrcRows':>10} | {'TgtRows':>10} | {'TblHash':<7} | {'SrcHash':<15} | {'TgtHash':<15} | {'Cols':<7} | {'Idxs':<7} | {'Cons':<7}"
-                details_lines.append("-" * len(header))
+                workflow = self.config_parser.get_workflow()
+                is_mapping = (workflow == 'mapping')
+                
+                header = f"| {'No.':>{max_num_len}} | {'Source Table':<{max_source_len}} | {'Target Table':<{max_target_len}} |"
+                if is_mapping:
+                    header += f" {'Action':<15} |"
+                header += f" {'Status':<6} | {'RowCnt':<6} | {'SrcRows':>10} | {'TgtRows':>10} | {'TblHash':<7} | {'SrcHash':<15} | {'TgtHash':<15} | {'Cols':<7} | {'Idxs':<7} | {'Cons':<7} |"
+                sep = "|" + "|".join(['-' * len(c) for c in header.split('|')[1:-1]]) + "|"
                 details_lines.append(header)
-                details_lines.append("-" * len(header))
+                details_lines.append(sep)
                 for idx, r in enumerate(results, 1):
                     target_table = f"{r[0]}.{r[1]}"
                     source_table = f"{r[2]}.{r[3]}" if r[2] and r[3] else "-"
@@ -5186,25 +5385,21 @@ class MigratorTables:
                     tgt_idxs_cnt = r[11]
                     src_cons_cnt = r[12]
                     tgt_cons_cnt = r[13]
-
-                    row_cnt_res = "-"
-                    if src_rows is not None and tgt_rows is not None:
+                    
+                    row_cnt_res = r[14] if r[14] is not None else "-"
+                    if row_cnt_res != "-":
                         row_count_tests += 1
-                        if src_rows == tgt_rows:
-                            row_cnt_res = "PASS"
+                        if row_cnt_res == "PASS" or row_cnt_res == "SKIP":
                             row_count_pass += 1
                         else:
-                            row_cnt_res = "X"
                             row_count_fail += 1
 
-                    tbl_hash_res = "-"
-                    if src_hash is not None and tgt_hash is not None:
+                    tbl_hash_res = r[15] if r[15] is not None else "-"
+                    if tbl_hash_res != "-":
                         table_hash_tests += 1
-                        if str(src_hash) == str(tgt_hash):
-                            tbl_hash_res = "PASS"
+                        if tbl_hash_res == "PASS" or tbl_hash_res == "SKIP":
                             table_hash_pass += 1
                         else:
-                            tbl_hash_res = "X"
                             table_hash_fail += 1
 
                     cols_str = "-"
@@ -5260,7 +5455,15 @@ class MigratorTables:
                     src_hash_str = (src_hash_str[:12] + '...') if len(src_hash_str) > 15 else src_hash_str
                     tgt_hash_str = (tgt_hash_str[:12] + '...') if len(tgt_hash_str) > 15 else tgt_hash_str
 
-                    details_lines.append(f"{idx:>{max_num_len}} | {source_table:<{max_source_len}} | {target_table:<{max_target_len}} | {status:<6} | {row_cnt_res:<6} | {src_rows_str:>10} | {tgt_rows_str:>10} | {tbl_hash_res:<7} | {src_hash_str:<15} | {tgt_hash_str:<15} | {cols_str:<7} | {idxs_str:<7} | {cons_str:<7}")
+                    if is_mapping:
+                        action = self.config_parser.get_mapping_data_resolution(r[3]) if r[3] else "-"
+                        if not action:
+                            action = "-"
+                        action_str = f" {action:<15} |"
+                    else:
+                        action_str = ""
+
+                    details_lines.append(f"| {idx:>{max_num_len}} | {source_table:<{max_source_len}} | {target_table:<{max_target_len}} |{action_str} {status:<6} | {row_cnt_res:<6} | {src_rows_str:>10} | {tgt_rows_str:>10} | {tbl_hash_res:<7} | {src_hash_str:<15} | {tgt_hash_str:<15} | {cols_str:<7} | {idxs_str:<7} | {cons_str:<7} |")
 
             failed_count = total - passed_count
 
@@ -5282,7 +5485,7 @@ class MigratorTables:
             if col_results:
                 details_lines.append("")
                 details_lines.append("")
-                details_lines.append("[ COLUMN VALIDATION DETAILS ]")
+                details_lines.append("### Column Validation Details")
 
                 max_ssch_len = max([len(str(r[1])) for r in col_results if r[1]] + [13])
                 max_tsch_len = max([len(str(r[2])) for r in col_results if r[2]] + [13])
@@ -5293,10 +5496,10 @@ class MigratorTables:
                 max_styp_len = max([len(str(r[7])) for r in col_results if r[7]] + [11])
                 max_ttyp_len = max([len(str(r[8])) for r in col_results if r[8]] + [11])
 
-                col_header = f"{'Status':<6} | {'Source Schema':<{max_ssch_len}} | {'Target Schema':<{max_tsch_len}} | {'Source Table':<{max_stbl_len}} | {'Target Table':<{max_ttbl_len}} | {'Source Column':<{max_scol_len}} | {'Target Column':<{max_tcol_len}} | {'Source Type':<{max_styp_len}} | {'Target Type':<{max_ttyp_len}} | {'Hash (S/T)':<15} | {'Row Cnt (S/T)':<15} | {'Null Cnt (S/T)':<15} | {'Empty Cnt (S/T)':<15} | {'Min Val (S/T)':<20} | {'Max Val (S/T)':<20} | {'Avg Val (S/T)':<20} | {'Validated At':<19}"
-                details_lines.append("-" * len(col_header))
+                col_header = f"| {'Status':<6} | {'Source Schema':<{max_ssch_len}} | {'Target Schema':<{max_tsch_len}} | {'Source Table':<{max_stbl_len}} | {'Target Table':<{max_ttbl_len}} | {'Source Column':<{max_scol_len}} | {'Target Column':<{max_tcol_len}} | {'Source Type':<{max_styp_len}} | {'Target Type':<{max_ttyp_len}} | {'Hash (S/T)':<15} | {'Row Cnt (S/T)':<15} | {'Null Cnt (S/T)':<15} | {'Empty Cnt (S/T)':<15} | {'Min Val (S/T)':<20} | {'Max Val (S/T)':<20} | {'Avg Val (S/T)':<20} | {'Validated At':<19} |"
+                sep = "|" + "|".join(['-' * len(c) for c in col_header.split('|')[1:-1]]) + "|"
                 details_lines.append(col_header)
-                details_lines.append("-" * len(col_header))
+                details_lines.append(sep)
 
                 for r in col_results:
                     status = "PASS" if r[0] else "X"
@@ -5341,7 +5544,7 @@ class MigratorTables:
                     maxs = (maxs[:17] + '...') if len(maxs) > 20 else maxs
                     avgs = (avgs[:17] + '...') if len(avgs) > 20 else avgs
 
-                    details_lines.append(f"{status:<6} | {s_sch:<{max_ssch_len}} | {t_sch:<{max_tsch_len}} | {s_tbl:<{max_stbl_len}} | {t_tbl:<{max_ttbl_len}} | {s_col:<{max_scol_len}} | {t_col:<{max_tcol_len}} | {s_typ:<{max_styp_len}} | {t_typ:<{max_ttyp_len}} | {hashes:<15} | {rows:<15} | {nulls:<15} | {empties:<15} | {mins:<20} | {maxs:<20} | {avgs:<20} | {val_at:<19}")
+                    details_lines.append(f"| {status:<6} | {s_sch:<{max_ssch_len}} | {t_sch:<{max_tsch_len}} | {s_tbl:<{max_stbl_len}} | {t_tbl:<{max_ttbl_len}} | {s_col:<{max_scol_len}} | {t_col:<{max_tcol_len}} | {s_typ:<{max_styp_len}} | {t_typ:<{max_ttyp_len}} | {hashes:<15} | {rows:<15} | {nulls:<15} | {empties:<15} | {mins:<20} | {maxs:<20} | {avgs:<20} | {val_at:<19} |")
 
             # Append index validation details
             idx_query = f"""
@@ -5358,7 +5561,7 @@ class MigratorTables:
             if idx_results:
                 details_lines.append("")
                 details_lines.append("")
-                details_lines.append("[ INDEX VALIDATION DETAILS ]")
+                details_lines.append("### Index Validation Details")
 
                 max_ssch_len = max([len(str(r[1])) for r in idx_results if r[1]] + [13])
                 max_tsch_len = max([len(str(r[2])) for r in idx_results if r[2]] + [13])
@@ -5371,10 +5574,10 @@ class MigratorTables:
                 max_scol_len = max([len(str(r[9])) for r in idx_results if r[9]] + [14])
                 max_tcol_len = max([len(str(r[10])) for r in idx_results if r[10]] + [14])
 
-                idx_header = f"{'Status':<6} | {'Source Schema':<{max_ssch_len}} | {'Target Schema':<{max_tsch_len}} | {'Source Table':<{max_stbl_len}} | {'Target Table':<{max_ttbl_len}} | {'Source Index':<{max_sidx_len}} | {'Target Index':<{max_tidx_len}} | {'Source Type':<{max_styp_len}} | {'Target Type':<{max_ttyp_len}} | {'Source Columns':<{max_scol_len}} | {'Target Columns':<{max_tcol_len}} | {'Validated At':<19}"
-                details_lines.append("-" * len(idx_header))
+                idx_header = f"| {'Status':<6} | {'Source Schema':<{max_ssch_len}} | {'Target Schema':<{max_tsch_len}} | {'Source Table':<{max_stbl_len}} | {'Target Table':<{max_ttbl_len}} | {'Source Index':<{max_sidx_len}} | {'Target Index':<{max_tidx_len}} | {'Source Type':<{max_styp_len}} | {'Target Type':<{max_ttyp_len}} | {'Source Columns':<{max_scol_len}} | {'Target Columns':<{max_tcol_len}} | {'Validated At':<19} |"
+                sep = "|" + "|".join(['-' * len(c) for c in idx_header.split('|')[1:-1]]) + "|"
                 details_lines.append(idx_header)
-                details_lines.append("-" * len(idx_header))
+                details_lines.append(sep)
 
                 for r in idx_results:
                     status = "PASS" if r[0] else "X"
@@ -5389,7 +5592,7 @@ class MigratorTables:
                     s_col = r[9] or "-"
                     t_col = r[10] or "-"
                     val_at = str(r[11])[:19] if r[11] else "-"
-                    details_lines.append(f"{status:<6} | {s_sch:<{max_ssch_len}} | {t_sch:<{max_tsch_len}} | {s_tbl:<{max_stbl_len}} | {t_tbl:<{max_ttbl_len}} | {s_idx:<{max_sidx_len}} | {t_idx:<{max_tidx_len}} | {s_typ:<{max_styp_len}} | {t_typ:<{max_ttyp_len}} | {s_col:<{max_scol_len}} | {t_col:<{max_tcol_len}} | {val_at:<19}")
+                    details_lines.append(f"| {status:<6} | {s_sch:<{max_ssch_len}} | {t_sch:<{max_tsch_len}} | {s_tbl:<{max_stbl_len}} | {t_tbl:<{max_ttbl_len}} | {s_idx:<{max_sidx_len}} | {t_idx:<{max_tidx_len}} | {s_typ:<{max_styp_len}} | {t_typ:<{max_ttyp_len}} | {s_col:<{max_scol_len}} | {t_col:<{max_tcol_len}} | {val_at:<19} |")
 
             # Append constraint validation details
             con_query = f"""
@@ -5406,7 +5609,7 @@ class MigratorTables:
             if con_results:
                 details_lines.append("")
                 details_lines.append("")
-                details_lines.append("[ CONSTRAINT VALIDATION DETAILS ]")
+                details_lines.append("### Constraint Validation Details")
 
                 max_ssch_len = max([len(str(r[1])) for r in con_results if r[1]] + [13])
                 max_tsch_len = max([len(str(r[2])) for r in con_results if r[2]] + [13])
@@ -5419,10 +5622,10 @@ class MigratorTables:
                 max_scol_len = max([len(str(r[9])) for r in con_results if r[9]] + [14])
                 max_tcol_len = max([len(str(r[10])) for r in con_results if r[10]] + [14])
 
-                con_header = f"{'Status':<6} | {'Source Schema':<{max_ssch_len}} | {'Target Schema':<{max_tsch_len}} | {'Source Table':<{max_stbl_len}} | {'Target Table':<{max_ttbl_len}} | {'Source Constraint':<{max_scon_len}} | {'Target Constraint':<{max_tcon_len}} | {'Source Type':<{max_styp_len}} | {'Target Type':<{max_ttyp_len}} | {'Source Columns':<{max_scol_len}} | {'Target Columns':<{max_tcol_len}} | {'Validated At':<19}"
-                details_lines.append("-" * len(con_header))
+                con_header = f"| {'Status':<6} | {'Source Schema':<{max_ssch_len}} | {'Target Schema':<{max_tsch_len}} | {'Source Table':<{max_stbl_len}} | {'Target Table':<{max_ttbl_len}} | {'Source Constraint':<{max_scon_len}} | {'Target Constraint':<{max_tcon_len}} | {'Source Type':<{max_styp_len}} | {'Target Type':<{max_ttyp_len}} | {'Source Columns':<{max_scol_len}} | {'Target Columns':<{max_tcol_len}} | {'Validated At':<19} |"
+                sep = "|" + "|".join(['-' * len(c) for c in con_header.split('|')[1:-1]]) + "|"
                 details_lines.append(con_header)
-                details_lines.append("-" * len(con_header))
+                details_lines.append(sep)
 
                 for r in con_results:
                     status = "PASS" if r[0] else "X"
@@ -5437,9 +5640,9 @@ class MigratorTables:
                     s_col = r[9] or "-"
                     t_col = r[10] or "-"
                     val_at = str(r[11])[:19] if r[11] else "-"
-                    details_lines.append(f"{status:<6} | {s_sch:<{max_ssch_len}} | {t_sch:<{max_tsch_len}} | {s_tbl:<{max_stbl_len}} | {t_tbl:<{max_ttbl_len}} | {s_con:<{max_scon_len}} | {t_con:<{max_tcon_len}} | {s_typ:<{max_styp_len}} | {t_typ:<{max_ttyp_len}} | {s_col:<{max_scol_len}} | {t_col:<{max_tcol_len}} | {val_at:<19}")
+                    details_lines.append(f"| {status:<6} | {s_sch:<{max_ssch_len}} | {t_sch:<{max_tsch_len}} | {s_tbl:<{max_stbl_len}} | {t_tbl:<{max_ttbl_len}} | {s_con:<{max_scon_len}} | {t_con:<{max_tcon_len}} | {s_typ:<{max_styp_len}} | {t_typ:<{max_ttyp_len}} | {s_col:<{max_scol_len}} | {t_col:<{max_tcol_len}} | {val_at:<19} |")
 
-            report_filename = self.config_parser.get_validator_report_filename()
+            report_filename = self.config_parser.get_validation_report_filename()
             if report_filename:
                 try:
                     with open(report_filename, 'w', encoding='utf-8') as f:
@@ -5455,21 +5658,22 @@ class MigratorTables:
                 lines.append("[ INFO: Detailed report to file was not requested in config (report_filename is not set) ]")
 
             lines.append("")
-            lines.append("[ VALIDATION TOTALS ]")
-            lines.append("-" * 80)
-            lines.append(f"{'Test Category':<24} | {'Total':>7} | {'Passed':>7} | {'Failed':>6}")
-            lines.append("-" * 80)
-            lines.append(f"{'All Evaluated Tables':<24} | {total:>7} | {passed_count:>7} | {failed_count:>6}")
+            lines.append("### Validation Totals")
+            header = f"| {'Test Category':<24} | {'Total':>7} | {'Passed':>7} | {'Failed':>6} |"
+            sep = "|" + "|".join(['-' * len(c) for c in header.split('|')[1:-1]]) + "|"
+            lines.append(header)
+            lines.append(sep)
+            lines.append(f"| {'All Evaluated Tables':<24} | {total:>7} | {passed_count:>7} | {failed_count:>6} |")
             if row_count_tests > 0:
-                lines.append(f"{'Row Counts':<24} | {row_count_tests:>7} | {row_count_pass:>7} | {row_count_fail:>6}")
+                lines.append(f"| {'Row Counts':<24} | {row_count_tests:>7} | {row_count_pass:>7} | {row_count_fail:>6} |")
             if table_hash_tests > 0:
-                lines.append(f"{'Table Hashes':<24} | {table_hash_tests:>7} | {table_hash_pass:>7} | {table_hash_fail:>6}")
+                lines.append(f"| {'Table Hashes':<24} | {table_hash_tests:>7} | {table_hash_pass:>7} | {table_hash_fail:>6} |")
             if cols_tests > 0:
-                lines.append(f"{'Column Counts':<24} | {cols_tests:>7} | {cols_pass:>7} | {cols_fail:>6}")
+                lines.append(f"| {'Column Counts':<24} | {cols_tests:>7} | {cols_pass:>7} | {cols_fail:>6} |")
             if idxs_tests > 0:
-                lines.append(f"{'Index Counts':<24} | {idxs_tests:>7} | {idxs_pass:>7} | {idxs_fail:>6}")
+                lines.append(f"| {'Index Counts':<24} | {idxs_tests:>7} | {idxs_pass:>7} | {idxs_fail:>6} |")
             if cons_tests > 0:
-                lines.append(f"{'Constraint Counts':<24} | {cons_tests:>7} | {cons_pass:>7} | {cons_fail:>6}")
+                lines.append(f"| {'Constraint Counts':<24} | {cons_tests:>7} | {cons_pass:>7} | {cons_fail:>6} |")
 
             final_summary = "\n" + "\n".join(lines)
             if val_logger:

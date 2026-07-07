@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.16.0 - 2026.07.07
+
+- 2026.07.07
+
+  - Fix - Config: Upgraded dictionary retrieval logic in ConfigParser to gracefully handle optional/null configuration blocks (wrapping them in safe-navigation checks) to prevent parser crashes when sections are parsed as `None`.
+  - Fix - Validation: Renamed columns key to `column_name` in mapping workflow metadata structures to align with standard validation metrics.
+  - Fix - Validation: Bypassed implicit precision scaling logic for floating-point/approximate datatypes (`float`, `double`, `real`) to prevent incorrect validation failures.
+  - Fix - Validation: Fixed the validation table iteration loop to correctly execute validations for tables under the `mapping` workflow even when row counts are not available in tracking metadata.
+  - Fix - Validation: Repaired target copy validation target mapping; when validating against a target copy connection, the validator now correctly resolves checksum and statistics queries using the target table name rather than the source table name.
+
+- 2026.07.03
+
+  - Refactor - Config: Elevated `workflow` to a global configuration setting (removing redundant entries from nested modules) and uniformly renamed the `validator` namespace to `validation` to standardise schema naming conventions.
+  - Refactor - Config: Restructured and simplified the schema mapping configuration block by renaming `mapping_workflow` to `mapping` and flattening its `workflow_settings` directly into its root level.
+  - Feature - Validation: The validation engine now fully differentiates between standard execution and the mapping workflow. When operating under the global `mapping` workflow, the validator automatically bypasses standard protocol tracking loops and natively interfaces with the explicit `mapping_tables` and `mapping_columns` tracking tables to evaluate dynamically mapped relationships.
+  - Feature - Reporting: Enhanced the validation `[ DATABASE CONTEXT ]` summary report layout to dynamically display a single, globally inferred `Workflow:` status instead of splitting workflow reporting between systems.
+  - Feature - Validation: Validator now intercepts the specific `data_conflict_action` used during migration (`skip`, `replace`, `merge`). Applied specialized validation logic: `skip` compares the target directly to the `target_copy` to ensure it was untouched; `merge` applies row count bound checks between the target, `target_copy`, and source schemas; and `replace` operates as standard.
+  - Fix - Connectors: Unified and refactored data conflict resolution logic across all database connectors (`oracle`, `postgresql`, `mysql`, `mariadb`, `ms_sql`, `ibm_db2_luw`, `sybase_ase`, `informix`). The migration tool now correctly prioritizes the `data_conflict_action` configuration setting (defaulting to `skip`) over explicit source/target row count comparisons, fixing a bug where `skip` was ignored if the target table count was non-zero.
+  - Feature - Reporting: Enhanced the `mapping_report.md` file format. Introduced a `Configuration Settings` block at the beginning of the report to display `data_conflict_action` (both global and table-specific), mapping heuristics, and forced mappings.
+  - Feature - Reporting: Redesigned the mapping report's layout by aggregating mapped table statistics into a clean, unified `Mapped Tables Summary` markdown table, providing immediate visibility into source and target row counts across the migration lifecycle. The summary now dynamically indicates the applied `Data Conflict Action` (e.g., global vs table-specific rules). Raw column-level mappings were decoupled and moved to a dedicated `Mapped Columns Details` section, and the table of contents was disabled.
+
+- 2026.07.02
+
+  - Fix - Planner: Fixed a bug where the target schema was unconditionally dropped during `pre_planning` when `migration.drop_schema` was `true`, causing the `mapping` workflow to erroneously delete all existing tables it was supposed to map. Target schema dropping is now explicitly bypassed during mapping.
+
 ## 0.15.0 - 2026.07.03
 
 - 2026.06.29
@@ -21,6 +46,8 @@
 - 2026.06.12
 
   - Fix - Sybase ASE Connector: Fixed parsing of explicit `RETURN <value>` statements in stored procedures and explicit `RETURNS <type>` declarations in functions to accurately enforce the correct return data types within the generated PostgreSQL headers.
+  - Feature - Oracle: Replaced outdated `cx_Oracle` library with the modern `python-oracledb` library. Default operation now uses Thin mode, dropping the dependency on Oracle Instant Client libraries. Added `oracle_thick_mode` parameter to `config_sample.yaml` for fallback compatibility.
+  - Feature - Validation: Made validator batch size configurable in the config_sample.yaml file.
 
 - 2026.06.09
 

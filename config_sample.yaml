@@ -1,5 +1,11 @@
 # File contains muster configuration file for credativ-pg-migrator
 
+# workflow can be:
+# - standard: default migrator workflow
+# - mapping: migrator mapping workflow, used for nscale egov migration
+# - anonymization: standalone workflow for data masking
+workflow: "standard"
+
 ## Configuration for the pre migration analysis
 pre_migration_analysis:
   # Section for listing TOP N tables from the source database
@@ -78,6 +84,11 @@ source:
   # database locale - used for date and time formatting
   # currently working only for Informix
   db_locale: "en_US.utf8"
+
+  # Optional config for Oracle source connector only:
+  # oracle_thick_mode (default: false) uses Thin mode to connect directly.
+  # Set to true to require Oracle Client libraries (Thick mode).
+  oracle_thick_mode: false
 
   # Global settings for using database export files as source of data for the migration, otherwise source table in the source database is used
   # This option is currently supported only for Informix
@@ -169,7 +180,6 @@ migration:
   # migration workflow - type of migration
   # standard (default) = read source objects from source DB or DDL files, convert them to target objects, create target objects, copy data
   # objects_mapping = map existing objects in target db to existing objects in source database, copy data
-  workflow: "standard" # "mapping"
 
   # drop schema if exists - uses DROP CASCADE if true
   drop_schema: true
@@ -262,6 +272,10 @@ table_settings:
   - table_name: "settings_.*"
     # Merge data in specified tables, but prioritize source content
     data_conflict_action: "merge_keep_source"
+
+  - table_name: "app_settings"
+    # Skip migration for specified tables
+    data_conflict_action: "skip"
 
   - table_name: "table1"
     table_schema: "dbo"  # source schema for the table, if not specified, default is the source schema from the source database connection
@@ -396,8 +410,22 @@ data_migration_limitation:
 # - check_table_checksums: Computes explicit hashes containing aggregates of string-casted structures across the entire tables
 # - check_random_sample: Validates individual random row arrays querying mapped precise primary keys bridging origin to destination
 # - check_lob_sizes: Validates exact byte size allocations for migrated LOB (BLOB/CLOB) instances on the sampled rows
-validator:
+validation:
   workers: 4                               # Number of parallel worker threads used simultaneously for table evaluations (default is 4)
+  batch_size: 10000                        # Batch size for python table checksum calculation (default is 10000)
+
+  # target_copy is required when workflow = 'mapping' and data conflicts exist.
+  # Represents the untouched state of the target database before migration.
+  # Setting is ignored when workflow = 'standard'
+  target_copy:
+    type: "postgresql"
+    host: "localhost"
+    port: 5432
+    username: "postgres"
+    password: "postgres_password"
+    database: "target_db"
+    schema: "public_backup"
+
   check_row_counts: true                   # Simply compares total row counts between corresponding source and target tables
   check_table_checksums: true              # Computes explicit hashes containing aggregates of string-casted structures across the entire tables
   check_random_sample: true                # Validates individual random row arrays querying mapped precise primary keys bridging origin to destination
@@ -408,12 +436,18 @@ validator:
 # SCHEMA AND OBJECT MAPPING CONFIGURATION
 # -----------------------------------------------------------------------------
 # This block handles all settings related to the 'mapping' workflow and schema translation.
-mapping_workflow:
-  # 1. General Mapping Workflow Settings
-  workflow_settings:
-    report_filename: "mapping_report.csv" # Mandatory file to write detailed tabular mapping report
-    suspend_indexes_constraints: true
-    
+mapping:
+  # 1. General Mapping Settings
+  report_filename: "mapping_report.csv" # Mandatory file to write detailed tabular mapping report
+  suspend_indexes_constraints: true
+  # data_conflict_action: action when data exists in both source and target tables.
+  # Options:
+  # - skip: do not migrate data for this table
+  # - replace: truncate target table and migrate all data from source
+  # - merge_keep_target: migrate only rows that do not exist in target table (based on primary key)
+  # - merge_keep_source: migrate all rows, overwriting existing rows in target table (based on primary key)
+  data_conflict_action: "skip"
+
   # 2. Automated Mapping Heuristics
   heuristics:
     table_normalization_rules:

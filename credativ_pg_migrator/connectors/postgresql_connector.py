@@ -865,6 +865,47 @@ class PostgreSQLConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', f"postgresql_connector: get_constraints_count: Error: {e}")
             return -1
 
+    def get_schema_indexes_count(self, schema_name: str) -> int:
+        query = f"""
+            SELECT count(*)
+            FROM pg_index i
+            JOIN pg_class t ON t.oid = i.indrelid
+            JOIN pg_namespace n ON n.oid = t.relnamespace
+            WHERE n.nspname = '{schema_name}'
+        """
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            count = cursor.fetchone()[0]
+            cursor.close()
+            self.disconnect()
+            return count
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"postgresql_connector: get_schema_indexes_count: Error: {e}")
+            return -1
+
+    def get_schema_constraints_count(self, schema_name: str) -> int:
+        query = f"""
+            SELECT count(*)
+            FROM pg_constraint c
+            JOIN pg_class t ON c.conrelid = t.oid
+            JOIN pg_namespace n ON t.relnamespace = n.oid
+            WHERE n.nspname = '{schema_name}'
+            AND c.contype NOT IN ('n')
+        """
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            count = cursor.fetchone()[0]
+            cursor.close()
+            self.disconnect()
+            return count
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"postgresql_connector: get_schema_constraints_count: Error: {e}")
+            return -1
+
     def fetch_mapping_target_sequences(self, schema_name: str, table_name: str):
         self.config_parser.print_log_message('DEBUG', f"postgresql_connector: fetch_mapping_target_sequences: Fetching sequences for {schema_name}.{table_name}")
         query_general = f"""
@@ -1235,7 +1276,7 @@ class PostgreSQLConnector(DatabaseConnector):
             else:
 
                 data_conflict_action = settings.get('data_conflict_action')
-                if source_table_rows_limited > target_table_rows or data_conflict_action in ('merge_keep_target', 'merge_keep_source', 'replace'):
+                if target_table_rows == 0 or data_conflict_action in ('merge_keep_target', 'merge_keep_source', 'replace'):
                     migrator_tables.update_data_migration_started(protocol_id)
 
                     part_name = 'migrate_table in batches using cursor'
@@ -1393,8 +1434,8 @@ class PostgreSQLConnector(DatabaseConnector):
 
                     cursor.close()
 
-                elif source_table_rows_limited <= target_table_rows and data_conflict_action not in ('merge_keep_target', 'merge_keep_source', 'replace'):
-                    self.config_parser.print_log_message('INFO', f"postgresql_connector: migrate_table: Worker {worker_id}: Source table {source_table_name} has {source_table_rows_limited} rows, which is less than or equal to target table {target_table_name} with {target_table_rows} rows. No data migration needed.")
+                else:
+                    self.config_parser.print_log_message('INFO', f"postgresql_connector: migrate_table: Worker {worker_id}: Target table {target_table_name} has {target_table_rows} rows and data_conflict_action is '{data_conflict_action}'. Skipping data migration.")
 
                 migration_stats = {
                     'rows_migrated': total_inserted_rows,

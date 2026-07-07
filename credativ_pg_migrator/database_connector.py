@@ -775,6 +775,20 @@ class DatabaseConnector(ABC):
         """
         pass
 
+    def get_schema_indexes_count(self, schema_name: str) -> int:
+        """
+        Returns the total number of indexes in a given schema.
+        Returns -1 if not supported or implemented.
+        """
+        return -1
+
+    def get_schema_constraints_count(self, schema_name: str) -> int:
+        """
+        Returns the total number of constraints in a given schema.
+        Returns -1 if not supported or implemented.
+        """
+        return -1
+
     def _compute_python_table_checksum(self, query: str):
         """
         Helper method to compute a deterministic, order-independent table checksum
@@ -785,8 +799,9 @@ class DatabaseConnector(ABC):
         try:
             cursor = self.connection.cursor()
             cursor.execute(query)
+            batch_size = self.config_parser.get_validation_batch_size()
             while True:
-                rows = cursor.fetchmany(10000)
+                rows = cursor.fetchmany(batch_size)
                 if not rows:
                     break
                 for row in rows:

@@ -36,7 +36,7 @@ class Validator:
         self.val_logger.logger.info("      Starting Data Validator Module     ")
         self.val_logger.logger.info("=========================================")
         
-        report_filename = self.config_parser.get_validator_report_filename()
+        report_filename = self.config_parser.get_validation_report_filename()
         if not report_filename:
             self.val_logger.logger.error("FATAL: 'report_filename' is missing in validator config. A detailed report file is mandatory.")
             return
@@ -44,14 +44,17 @@ class Validator:
         try:
             self.migrator_tables.create_table_for_validation()
     
-            tables_raw = self.migrator_tables.fetch_all_tables(only_unfinished=False)
-            if not tables_raw:
+            if self.config_parser.get_workflow() == 'mapping':
+                tables = self.migrator_tables.fetch_mapping_tables_for_validation()
+            else:
+                tables_raw = self.migrator_tables.fetch_all_tables(only_unfinished=False)
+                tables = [self.migrator_tables.decode_table_row(t) for t in tables_raw]
+            
+            if not tables:
                 self.val_logger.logger.info("No tables found in migrator tracking to validate.")
                 return
-                
-            tables = [self.migrator_tables.decode_table_row(t) for t in tables_raw]
     
-            threads = self.config_parser.get_validator_workers()
+            threads = self.config_parser.get_validation_workers()
             check_counts = self.config_parser.is_validation_row_counts_enabled()
             check_table_sum = self.config_parser.is_validation_table_checksums_enabled()
             check_random = self.config_parser.is_validation_random_sample_enabled()
@@ -62,7 +65,7 @@ class Validator:
             with concurrent.futures.ThreadPoolExecutor(max_workers=threads) as executor:
                 futures = []
                 for t in tables:
-                    if t.get('target_table_rows', 0) > 0 or t.get('source_table_rows', 0) > 0:
+                    if self.config_parser.get_workflow() == 'mapping' or t.get('target_table_rows', 0) > 0 or t.get('source_table_rows', 0) > 0:
                         futures.append(executor.submit(
                             self.validate_table, 
                             t, check_counts, check_table_sum, check_random, check_lob, sample_size
@@ -90,10 +93,16 @@ class Validator:
         source_conn = self._get_connector('source')
         target_conn = self._get_connector('target')
         
+        target_copy_conn = None
+        if self.config_parser.get_workflow() == 'mapping':
+            target_copy_conn = self._get_connector('target_copy')
+        
         try:
             source_conn.connect()
             target_conn.connect()
-            return self._validate_table_inner(source_conn, target_conn, table_info, check_counts, check_table_sum, check_random, check_lob, sample_size)
+            if target_copy_conn:
+                target_copy_conn.connect()
+            return self._validate_table_inner(source_conn, target_conn, target_copy_conn, table_info, check_counts, check_table_sum, check_random, check_lob, sample_size)
         except Exception as e:
             self.val_logger.logger.error(f"Failed to connect to databases for validating table {table_info.get('target_table_name')}: {e}")
             self.val_logger.logger.error(traceback.format_exc())
@@ -103,8 +112,10 @@ class Validator:
                 source_conn.disconnect()
             if getattr(target_conn, 'connection', None):
                 target_conn.disconnect()
+            if target_copy_conn and getattr(target_copy_conn, 'connection', None):
+                target_copy_conn.disconnect()
 
-    def _validate_table_inner(self, source_conn, target_conn, table_info, check_counts, check_table_sum, check_random, check_lob, sample_size):
+    def _validate_table_inner(self, source_conn, target_conn, target_copy_conn, table_info, check_counts, check_table_sum, check_random, check_lob, sample_size):
         source_schema = table_info['source_schema_name']
         source_table = table_info['source_table_name']
         target_schema = table_info['target_schema_name']
@@ -164,6 +175,11 @@ class Validator:
             pk_cols_list = []
 
         try:
+            target_copy_schema = None
+            if target_copy_conn:
+                target_copy_config = self.config_parser.get_validation_target_copy_config()
+                target_copy_schema = target_copy_config.get('schema', target_copy_config.get('owner', 'public'))
+
             for s_col, t_col in zip(source_cols, target_cols):
                 s_type = s_col.get('data_type', '').lower()
                 is_num = any(t in s_type for t in ['int', 'number', 'numeric', 'decimal', 'float', 'double', 'real', 'serial'])
@@ -171,6 +187,9 @@ class Validator:
                     s_col['_force_round_0'] = True
                     t_col['_force_round_0'] = True
                     
+            t_copy_count = 0
+            action = None
+
             if check_counts:
                 migration_limitation = None
                 limitations = self.migrator_tables.get_records_data_migration_limitation(source_table)
@@ -179,135 +198,197 @@ class Validator:
                 
                 s_count = source_conn.get_rows_count(source_schema, source_table, migration_limitation)
                 t_count = target_conn.get_rows_count(target_schema, target_table)
+                
+                if target_copy_conn:
+                    t_copy_count = target_copy_conn.get_rows_count(target_copy_schema, target_table)
+                    if t_copy_count > 0:
+                        action = self.config_parser.get_mapping_data_resolution(source_table)
+
                 res['source_row_count'] = s_count
                 res['target_row_count'] = t_count
-                res['row_logic'] = (s_count == t_count)
-                if not res['row_logic']:
-                    res['passed'] = False
-                    res['row_msg'] = f"Fail: Src={s_count}, Tgt={t_count}"
-                else:
-                    res['row_msg'] = f"Pass: {s_count} rows"
+
+                if not action or action == 'replace':
+                    res['row_logic'] = (s_count == t_count)
+                    if not res['row_logic']:
+                        res['passed'] = False
+                        res['row_msg'] = f"Fail: Src={s_count}, Tgt={t_count}"
+                    else:
+                        res['row_msg'] = f"Pass: {s_count} rows"
+                elif action == 'skip':
+                    res['row_logic'] = (t_copy_count == t_count)
+                    if not res['row_logic']:
+                        res['passed'] = False
+                        res['row_msg'] = f"Fail (skip): OrigTgt={t_copy_count}, Tgt={t_count}"
+                    else:
+                        res['row_msg'] = f"Pass (skip): {t_count} rows untouched"
+                elif action in ('merge_keep_target', 'merge_keep_source'):
+                    min_rows = max(t_copy_count, s_count)
+                    max_rows = t_copy_count + s_count
+                    res['row_logic'] = (min_rows <= t_count <= max_rows)
+                    if not res['row_logic']:
+                        res['passed'] = False
+                        res['row_msg'] = f"Fail (merge): OrigTgt={t_copy_count}, Src={s_count}, Tgt={t_count} bounds [{min_rows}, {max_rows}]"
+                    else:
+                        res['row_msg'] = f"Pass (merge bounds): {t_count} rows"
 
             if check_table_sum:
-                s_sum = source_conn.get_table_checksum(source_schema, source_table, source_cols)
-                t_sum = target_conn.get_table_checksum(target_schema, target_table, target_cols)
-                res['source_table_hash'] = s_sum
-                res['target_table_hash'] = t_sum
-                if s_sum is not None and t_sum is not None:
-                    res['table_hash_logic'] = (s_sum == t_sum)
-                    if not res['table_hash_logic']:
-                        res['passed'] = False
-                        res['table_msg'] = f"Fail: Src={s_sum}, Tgt={t_sum}"
-                        
-                        self.val_logger.logger.warning(f"Validator: Table {source_table} hash mismatch. Inspecting columns...")
-                        for i in range(min(len(source_cols), len(target_cols))):
-                            s_col = [source_cols[i]]
-                            t_col = [target_cols[i]]
-                            s_col_sum = source_conn.get_table_checksum(source_schema, source_table, s_col)
-                            t_col_sum = target_conn.get_table_checksum(target_schema, target_table, t_col)
-                            
-                            col_passed = (s_col_sum == t_col_sum)
-                            if (s_count == 0 and t_count != 0) or (t_count == 0 and s_count != 0):
-                                col_passed = False
-                            
-                            s_prec = source_cols[i].get('numeric_precision')
-                            t_prec = target_cols[i].get('numeric_precision')
-                            force_round = source_cols[i].get('_force_round_0', False)
-                            
-                            s_stats = source_conn.get_column_statistics(source_schema, source_table, source_cols[i]['column_name'], source_cols[i].get('data_type', ''), force_round_0=force_round)
-                            t_stats = target_conn.get_column_statistics(target_schema, target_table, target_cols[i]['column_name'], target_cols[i].get('data_type', ''), force_round_0=force_round)
-                            
-                            col_res = {
-                                'source_schema_name': source_schema,
-                                'source_table_name': source_table,
-                                'source_column_name': source_cols[i]['column_name'],
-                                'target_schema_name': target_schema,
-                                'target_table_name': target_table,
-                                'target_column_name': target_cols[i]['column_name'],
-                                'source_data_type': source_cols[i].get('data_type', ''),
-                                'target_data_type': target_cols[i].get('data_type', ''),
-                                'source_precision': s_prec,
-                                'target_precision': t_prec,
-                                'source_hash': s_col_sum,
-                                'target_hash': t_col_sum,
-                                'source_null_count': s_stats.get('null_count'),
-                                'target_null_count': t_stats.get('null_count'),
-                                'source_empty_string_count': s_stats.get('empty_string_count'),
-                                'target_empty_string_count': t_stats.get('empty_string_count'),
-                                'source_min_value': s_stats.get('min_value'),
-                                'target_min_value': t_stats.get('min_value'),
-                                'source_max_value': s_stats.get('max_value'),
-                                'target_max_value': t_stats.get('max_value'),
-                                'source_avg_value': s_stats.get('avg_value'),
-                                'target_avg_value': t_stats.get('avg_value'),
-                                'source_row_count': s_count,
-                                'target_row_count': t_count,
-                                'passed': col_passed
-                            }
-                            
-                            try:
-                                self.migrator_tables.insert_validation_column_result(col_res)
-                            except Exception as e:
-                                self.val_logger.logger.error(f"Error persisting column validation protocol for {target_table}.{source_cols[i]['column_name']}: {e}")
-                                
-                            if not col_passed:
-                                if s_col_sum != t_col_sum:
-                                    self.val_logger.logger.warning(f"Validator: Table {source_table} column {source_cols[i]['column_name']} hash mismatch: Src={s_col_sum}, Tgt={t_col_sum}")
-                                else:
-                                    self.val_logger.logger.warning(f"Validator: Table {source_table} column {source_cols[i]['column_name']} row count mismatch: Src={s_count}, Tgt={t_count}")
-                    else:
-                        res['table_msg'] = f"Pass: {s_sum}"
-                else:
+                if action in ('merge_keep_target', 'merge_keep_source'):
                     res['table_hash_logic'] = None
-                    res['table_msg'] = f"Skip: Table checksum unavailable (Src={s_sum}, Tgt={t_sum})"
+                    res['table_msg'] = "Skip: Table checksum not supported for merged tables"
+                else:
+                    if action == 'skip':
+                        s_sum = target_copy_conn.get_table_checksum(target_copy_schema, target_table, target_cols)
+                        t_sum = target_conn.get_table_checksum(target_schema, target_table, target_cols)
+                        conn_s = target_copy_conn
+                        schema_s = target_copy_schema
+                        cols_s = target_cols
+                        table_s = target_table
+                    else:
+                        s_sum = source_conn.get_table_checksum(source_schema, source_table, source_cols)
+                        t_sum = target_conn.get_table_checksum(target_schema, target_table, target_cols)
+                        conn_s = source_conn
+                        schema_s = source_schema
+                        cols_s = source_cols
+                        table_s = source_table
+
+                    res['source_table_hash'] = s_sum
+                    res['target_table_hash'] = t_sum
+                    if s_sum is not None and t_sum is not None:
+                        res['table_hash_logic'] = (s_sum == t_sum)
+                        if not res['table_hash_logic']:
+                            res['passed'] = False
+                            res['table_msg'] = f"Fail: Src={s_sum}, Tgt={t_sum}"
+                            
+                            self.val_logger.logger.warning(f"Validator: Table {source_table} hash mismatch. Inspecting columns...")
+                            for i in range(min(len(cols_s), len(target_cols))):
+                                s_col = [cols_s[i]]
+                                t_col = [target_cols[i]]
+                                s_col_sum = conn_s.get_table_checksum(schema_s, table_s, s_col)
+                                t_col_sum = target_conn.get_table_checksum(target_schema, target_table, t_col)
+                                
+                                col_passed = (s_col_sum == t_col_sum)
+                                if (s_count == 0 and t_count != 0) or (t_count == 0 and s_count != 0):
+                                    col_passed = False
+                                
+                                s_prec = cols_s[i].get('numeric_precision')
+                                t_prec = target_cols[i].get('numeric_precision')
+                                force_round = cols_s[i].get('_force_round_0', False)
+                                
+                                s_stats = conn_s.get_column_statistics(schema_s, table_s, cols_s[i]['column_name'], cols_s[i].get('data_type', ''), force_round_0=force_round)
+                                t_stats = target_conn.get_column_statistics(target_schema, target_table, target_cols[i]['column_name'], target_cols[i].get('data_type', ''), force_round_0=force_round)
+                                
+                                col_res = {
+                                    'source_schema_name': source_schema,
+                                    'source_table_name': source_table,
+                                    'source_column_name': cols_s[i]['column_name'],
+                                    'target_schema_name': target_schema,
+                                    'target_table_name': target_table,
+                                    'target_column_name': target_cols[i]['column_name'],
+                                    'source_data_type': cols_s[i].get('data_type', ''),
+                                    'target_data_type': target_cols[i].get('data_type', ''),
+                                    'source_precision': s_prec,
+                                    'target_precision': t_prec,
+                                    'source_hash': s_col_sum,
+                                    'target_hash': t_col_sum,
+                                    'source_null_count': s_stats.get('null_count'),
+                                    'target_null_count': t_stats.get('null_count'),
+                                    'source_empty_string_count': s_stats.get('empty_string_count'),
+                                    'target_empty_string_count': t_stats.get('empty_string_count'),
+                                    'source_min_value': s_stats.get('min_value'),
+                                    'target_min_value': t_stats.get('min_value'),
+                                    'source_max_value': s_stats.get('max_value'),
+                                    'target_max_value': t_stats.get('max_value'),
+                                    'source_avg_value': s_stats.get('avg_value'),
+                                    'target_avg_value': t_stats.get('avg_value'),
+                                    'source_row_count': s_count,
+                                    'target_row_count': t_count,
+                                    'passed': col_passed
+                                }
+                                
+                                try:
+                                    self.migrator_tables.insert_validation_column_result(col_res)
+                                except Exception as e:
+                                    self.val_logger.logger.error(f"Error persisting column validation protocol for {target_table}.{cols_s[i]['column_name']}: {e}")
+                                    
+                                if not col_passed:
+                                    if s_col_sum != t_col_sum:
+                                        self.val_logger.logger.warning(f"Validator: Table {source_table} column {cols_s[i]['column_name']} hash mismatch: Src={s_col_sum}, Tgt={t_col_sum}")
+                                    else:
+                                        self.val_logger.logger.warning(f"Validator: Table {source_table} column {cols_s[i]['column_name']} row count mismatch: Src={s_count}, Tgt={t_count}")
+                        else:
+                            res['table_msg'] = f"Pass: {s_sum}"
+                    else:
+                        res['table_hash_logic'] = None
+                        res['table_msg'] = f"Skip: Table checksum unavailable (Src={s_sum}, Tgt={t_sum})"
 
             if check_random and pk_cols_list:
-                pks = target_conn.get_random_pks(target_schema, target_table, pk_cols_list, sample_size)
-                if pks:
-                    s_row_sums = source_conn.get_row_checksums(source_schema, source_table, pk_cols_list, pks, source_cols)
-                    t_row_sums = target_conn.get_row_checksums(target_schema, target_table, pk_cols_list, pks, target_cols)
-                    
-                    mismatches = 0
-                    for pk_val, t_hash in t_row_sums.items():
-                        if s_row_sums.get(pk_val) != t_hash:
-                            mismatches += 1
-                    
-                    res['row_hash_logic'] = (mismatches == 0)
-                    if mismatches > 0:
-                        res['passed'] = False
-                        res['row_hash_msg'] = f"Fail: {mismatches}/{len(pks)} sample rows mismatched"
-                    else:
-                        res['row_hash_msg'] = f"Pass: {len(pks)} samples matched"
+                if action in ('merge_keep_target', 'merge_keep_source'):
+                    res['row_hash_logic'] = None
+                    res['row_hash_msg'] = "Skip: Random sample not supported for merged tables"
                 else:
-                    res['row_hash_msg'] = "Skip: No samples fetched"
+                    pks = target_conn.get_random_pks(target_schema, target_table, pk_cols_list, sample_size)
+                    if pks:
+                        if action == 'skip':
+                            s_row_sums = target_copy_conn.get_row_checksums(target_copy_schema, target_table, pk_cols_list, pks, target_cols)
+                        else:
+                            s_row_sums = source_conn.get_row_checksums(source_schema, source_table, pk_cols_list, pks, source_cols)
+                        t_row_sums = target_conn.get_row_checksums(target_schema, target_table, pk_cols_list, pks, target_cols)
+                        
+                        mismatches = 0
+                        for pk_val, t_hash in t_row_sums.items():
+                            if s_row_sums.get(pk_val) != t_hash:
+                                mismatches += 1
+                        
+                        res['row_hash_logic'] = (mismatches == 0)
+                        if mismatches > 0:
+                            res['passed'] = False
+                            res['row_hash_msg'] = f"Fail: {mismatches}/{len(pks)} sample rows mismatched"
+                        else:
+                            res['row_hash_msg'] = f"Pass: {len(pks)} samples matched"
+                    else:
+                        res['row_hash_msg'] = "Skip: No samples fetched"
             elif check_random and not pk_cols_list:
                 res['row_hash_msg'] = "Skip: No PKs available"
 
             if check_lob and pk_cols_list:
-                s_lobs = [c for c in source_cols if any(x in c.get('data_type', '').lower() for x in ['lob', 'text', 'bytea', 'image', 'xml', 'json'])]
-                t_lobs = [c for c in target_cols if any(x in c.get('data_type', '').lower() for x in ['lob', 'text', 'bytea', 'image', 'xml', 'json'])]
-                if s_lobs and t_lobs and len(s_lobs) == len(t_lobs):
-                    pks = target_conn.get_random_pks(target_schema, target_table, pk_cols_list, sample_size)
-                    if pks:
-                        s_lob_sizes = source_conn.get_lob_sizes(source_schema, source_table, pk_cols_list, pks, s_lobs)
-                        t_lob_sizes = target_conn.get_lob_sizes(target_schema, target_table, pk_cols_list, pks, t_lobs)
-                        
-                        mismatches = 0
-                        for pk_val, t_sizes in t_lob_sizes.items():
-                            s_sizes = s_lob_sizes.get(pk_val)
-                            if s_sizes != t_sizes:
-                                mismatches += 1
-                                
-                        res['lob_size_logic'] = (mismatches == 0)
-                        if mismatches > 0:
-                            res['passed'] = False
-                            res['lob_size_msg'] = f"Fail: {mismatches}/{len(pks)} sample LOB sizes mismatched"
-                        else:
-                            res['lob_size_msg'] = f"Pass: {len(pks)} samples matched"
-                    else:
-                        res['lob_size_msg'] = "Skip: No samples fetched"
+                if action in ('merge_keep_target', 'merge_keep_source'):
+                    res['lob_size_logic'] = None
+                    res['lob_size_msg'] = "Skip: LOB size check not supported for merged tables"
                 else:
-                    res['lob_size_msg'] = "Skip: No matching LOB columns identified"
+                    if action == 'skip':
+                        s_lobs = [c for c in target_cols if any(x in c.get('data_type', '').lower() for x in ['lob', 'text', 'bytea', 'image', 'xml', 'json'])]
+                        conn_s = target_copy_conn
+                        schema_s = target_copy_schema
+                        table_s = target_table
+                    else:
+                        s_lobs = [c for c in source_cols if any(x in c.get('data_type', '').lower() for x in ['lob', 'text', 'bytea', 'image', 'xml', 'json'])]
+                        conn_s = source_conn
+                        schema_s = source_schema
+                        table_s = source_table
+                    
+                    t_lobs = [c for c in target_cols if any(x in c.get('data_type', '').lower() for x in ['lob', 'text', 'bytea', 'image', 'xml', 'json'])]
+                    if s_lobs and t_lobs and len(s_lobs) == len(t_lobs):
+                        pks = target_conn.get_random_pks(target_schema, target_table, pk_cols_list, sample_size)
+                        if pks:
+                            s_lob_sizes = conn_s.get_lob_sizes(schema_s, table_s, pk_cols_list, pks, s_lobs)
+                            t_lob_sizes = target_conn.get_lob_sizes(target_schema, target_table, pk_cols_list, pks, t_lobs)
+                            
+                            mismatches = 0
+                            for pk_val, t_sizes in t_lob_sizes.items():
+                                s_sizes = s_lob_sizes.get(pk_val)
+                                if s_sizes != t_sizes:
+                                    mismatches += 1
+                                    
+                            res['lob_size_logic'] = (mismatches == 0)
+                            if mismatches > 0:
+                                res['passed'] = False
+                                res['lob_size_msg'] = f"Fail: {mismatches}/{len(pks)} sample LOB sizes mismatched"
+                            else:
+                                res['lob_size_msg'] = f"Pass: {len(pks)} samples matched"
+                        else:
+                            res['lob_size_msg'] = "Skip: No samples fetched"
+                    else:
+                        res['lob_size_msg'] = "Skip: No matching LOB columns identified"
             elif check_lob and not pk_cols_list:
                 res['lob_size_msg'] = "Skip: No PKs available"
 

@@ -62,6 +62,12 @@ class ConfigParser:
             migrator_schema = self.get_migrator_schema()
             if migrator_schema and migrator_schema.lower().strip() == 'public':
                 raise ValueError("Migrator protocol schema cannot be 'public'")
+            if not migrator_schema or not str(migrator_schema).strip():
+                raise ValueError("Migrator protocol schema cannot be empty")
+
+            target_schema = self.get_target_schema()
+            if not target_schema or not str(target_schema).strip():
+                raise ValueError("Target schema cannot be empty")
 
         return True
 

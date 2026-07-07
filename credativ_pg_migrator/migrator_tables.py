@@ -63,7 +63,9 @@ class MigratorTables:
             raise ValueError(f"Unsupported database type for protocol table: {protocol_db_type}")
         self.protocol_connection.connect()
         self.protocol_schema = self.config_parser.get_migrator_schema()
-        if self.protocol_schema and self.protocol_schema.lower().strip() == 'public':
+        if not self.protocol_schema or not str(self.protocol_schema).strip():
+            raise ValueError("Migrator protocol schema cannot be empty")
+        if self.protocol_schema.lower().strip() == 'public':
             raise ValueError("Migrator protocol schema cannot be 'public'")
         self.drop_table_sql = """DROP TABLE IF EXISTS "{protocol_schema}"."{table_name}";"""
 

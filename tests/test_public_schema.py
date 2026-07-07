@@ -32,6 +32,7 @@ class TestPublicSchema(unittest.TestCase):
             },
             'target': {
                 'type': 'postgresql',
+                'schema': 'my_target_schema',
             },
             'migration': {
                 'names_case_handling': 'keep',
@@ -70,6 +71,40 @@ class TestPublicSchema(unittest.TestCase):
             with self.assertRaises(ValueError) as context:
                 ConfigParser(args, LoggerMock())
             self.assertIn("Migrator protocol schema cannot be 'public'", str(context.exception))
+        finally:
+            os.remove(f_path)
+
+    def test_empty_migrator_schema_fails(self):
+        config_data = self.base_config.copy()
+        config_data['migration']['workflow'] = 'standard'
+        config_data['migrator'] = {'type': 'postgresql', 'schema': '  '}
+        
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
+            yaml.dump(config_data, f)
+            f_path = f.name
+            
+        try:
+            args = ArgsMock(f_path)
+            with self.assertRaises(ValueError) as context:
+                ConfigParser(args, LoggerMock())
+            self.assertIn("Migrator protocol schema cannot be empty", str(context.exception))
+        finally:
+            os.remove(f_path)
+
+    def test_empty_target_schema_fails(self):
+        config_data = self.base_config.copy()
+        config_data['migration']['workflow'] = 'standard'
+        config_data['target'] = {'type': 'postgresql', 'schema': ''}
+        
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
+            yaml.dump(config_data, f)
+            f_path = f.name
+            
+        try:
+            args = ArgsMock(f_path)
+            with self.assertRaises(ValueError) as context:
+                ConfigParser(args, LoggerMock())
+            self.assertIn("Target schema cannot be empty", str(context.exception))
         finally:
             os.remove(f_path)
 

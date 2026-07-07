@@ -9,6 +9,8 @@
   - Fix - Config: Prevented TypeError during the pre-planning phase by ensuring `get_remote_objects_substitution` returns an empty list if the configuration key is defined but left empty or set to null.
   - Fix - Reporting: Resolved missing sequence names and DDL in the `migration.protocol` table by ensuring `insert_sequence` falls back to target sequence metadata when source attributes are omitted.
   - Feature - Security/Config: Added configuration check to prevent the migrator protocol schema from being set to 'public' in both standard and mapping workflows, stopping execution with a ValueError to avoid accidental schema drops. Also added validation to ensure that neither the protocol schema nor the target schema can be empty.
+  - Fix - Connectors: Ensured identity columns in Sybase ASE are correctly mapped and populated in the protocol_sequences table with their source side details (schema, table, column name) during migration.
+
 
 
 

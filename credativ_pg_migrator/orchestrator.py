@@ -452,13 +452,31 @@ class Orchestrator:
             self.config_parser.print_log_message('INFO', f"orchestrator: mapping_data_worker: Worker {worker_id}: Setting sequences for table {target_table_name} in target database.")
             sequences = worker_target_connection.fetch_table_sequences(target_schema_name, target_table_name)
             if sequences:
+                source_schema_name = table_data.get('source_schema_name')
+                source_table_name = table_data.get('source_table_name')
                 for order_num, sequence_details in sequences.items():
                     sequence_id = sequence_details['id']
                     sequence_name = sequence_details['name']
                     column_name = sequence_details['column_name']
                     sequence_sql = sequence_details['set_sequence_sql']
+                    
+                    # Try to map to source column name (identity column)
+                    source_column_name = None
+                    for col in table_data.get('source_columns', {}).values():
+                        if col.get('is_identity') == 'YES':
+                            source_column_name = col.get('column_name')
+                            break
+                    if not source_column_name and column_name:
+                        for col in table_data.get('source_columns', {}).values():
+                            if col.get('column_name', '').lower() == column_name.lower():
+                                source_column_name = col.get('column_name')
+                                break
+
                     self.migrator_tables.insert_sequence({
                         'sequence_id': sequence_id,
+                        'source_schema_name': source_schema_name,
+                        'source_table_name': source_table_name,
+                        'source_column_name': source_column_name,
                         'target_schema_name': target_schema_name,
                         'target_table_name': target_table_name,
                         'target_column_name': column_name,
@@ -1367,6 +1385,8 @@ class Orchestrator:
                     self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Setting sequences for table {target_table_name} in target database.")
                     sequences = worker_target_connection.fetch_table_sequences(target_schema_name, target_table_name)
                     if sequences:
+                        source_schema_name = table_data.get('source_schema_name')
+                        source_table_name = table_data.get('source_table_name')
                         for order_num, sequence_details in sequences.items():
                             sequence_id = sequence_details['id']
                             sequence_name = sequence_details['name']
@@ -1375,8 +1395,23 @@ class Orchestrator:
                             if next_identity is not None:
                                 sequence_sql = f"SELECT setval('\"{target_schema_name}\".\"{sequence_name}\"', {next_identity}, false);"
 
+                            # Try to map to source column name (identity column)
+                            source_column_name = None
+                            for col in table_data.get('source_columns', {}).values():
+                                if col.get('is_identity') == 'YES':
+                                    source_column_name = col.get('column_name')
+                                    break
+                            if not source_column_name and column_name:
+                                for col in table_data.get('source_columns', {}).values():
+                                    if col.get('column_name', '').lower() == column_name.lower():
+                                        source_column_name = col.get('column_name')
+                                        break
+
                             self.migrator_tables.insert_sequence({
                                 'sequence_id': sequence_id,
+                                'source_schema_name': source_schema_name,
+                                'source_table_name': source_table_name,
+                                'source_column_name': source_column_name,
                                 'target_schema_name': target_schema_name,
                                 'target_table_name': target_table_name,
                                 'target_column_name': column_name,

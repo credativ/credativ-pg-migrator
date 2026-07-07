@@ -9,6 +9,8 @@ credativ-pg-migrator Releases
 * Fix in ConfigParser to handle null or empty remote_objects_substitution entries, avoiding a TypeError exception during pre-planning.
 * Fix in sequence logging to populate object_name and DDL from target sequence properties when source attributes are omitted.
 * Validation check in ConfigParser to reject 'public' as the migrator schema in standard and mapping workflows to prevent accidental schema drops. Also added check to prevent empty protocol schema or target schema settings.
+* Fix in Sybase ASE connector sequence tracking to populate source-side metadata (schema, table, column) in the protocol_sequences table for identity columns.
+
 
 
 

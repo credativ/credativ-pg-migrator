@@ -2956,7 +2956,9 @@ class MigratorTables:
 
             sequence_row = self.decode_sequence_row(row)
             self.config_parser.print_log_message('DEBUG3', f"migrator_tables: insert_sequence: ({func_run_id}): Returned row: {sequence_row}")
-            self.insert_protocol({'object_type': 'sequence', 'object_name': settings.get('source_sequence_name'), 'object_action': 'create', 'object_ddl': settings.get('source_sequence_sql'), 'execution_timestamp': None, 'execution_success': None, 'execution_error_message': None, 'row_type': 'info', 'execution_results': None, 'object_protocol_id': sequence_row['sequence_id']})
+            object_name = settings.get('source_sequence_name') or settings.get('target_sequence_name')
+            object_ddl = settings.get('source_sequence_sql') or settings.get('target_sequence_sql')
+            self.insert_protocol({'object_type': 'sequence', 'object_name': object_name, 'object_action': 'create', 'object_ddl': object_ddl, 'execution_timestamp': None, 'execution_success': None, 'execution_error_message': None, 'row_type': 'info', 'execution_results': None, 'object_protocol_id': sequence_row['sequence_id']})
             return sequence_row['sequence_id']
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_sequence: ({func_run_id}): Error inserting sequence info {settings.get('source_sequence_name')} into {protocol_table_name}.")

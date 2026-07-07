@@ -58,6 +58,11 @@ class ConfigParser:
                 if not isinstance(entry, (list, tuple)) or len(entry) != 5:
                     raise ValueError("Please update your config file. Each entry in data_types_substitution must have 5 elements - [table_name, column_name, source_type, target_type, comment].")
 
+        if self.is_standard_workflow() or self.is_mapping_workflow():
+            migrator_schema = self.get_migrator_schema()
+            if migrator_schema and migrator_schema.lower().strip() == 'public':
+                raise ValueError("Migrator protocol schema cannot be 'public'")
+
         return True
 
 

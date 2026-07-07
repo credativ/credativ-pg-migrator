@@ -6,6 +6,8 @@ credativ-pg-migrator Releases
 
 * Fix in ConfigParser to support 4-item data migration limitation structures (including row_limit) and resolve ValueError crash in planning phase.
 * Fix in Sybase ASE connector and T-SQL parser to correctly convert mixed return stored procedures and prevent function parsing crashes.
+* Fix in ConfigParser to handle null or empty remote_objects_substitution entries, avoiding a TypeError exception during pre-planning.
+
 
 0.15.0 - 03.07.2026
 -------------------

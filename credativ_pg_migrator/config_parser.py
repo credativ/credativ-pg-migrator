@@ -438,7 +438,10 @@ class ConfigParser:
         return normalized
 
     def get_remote_objects_substitution(self):
-        return self.config.get('remote_objects_substitution', {})
+        subs = self.config.get('remote_objects_substitution')
+        if not subs or not isinstance(subs, list):
+            return []
+        return subs
 
     ## Migration settings
     def _match_table_name(self, table_name, pattern):

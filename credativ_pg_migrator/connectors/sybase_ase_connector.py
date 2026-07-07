@@ -1335,13 +1335,20 @@ class SybaseASEConnector(DatabaseConnector):
                         has_explicit_return_value = True
                         break
 
+            # If the procedure returns a dataset (is_implicit_return is True) and also has an explicit scalar return,
+            # we prioritize the dataset return and comment out the scalar return.
+            if is_implicit_return and has_explicit_return_value:
+                 convert_to_scalar_return_allowed = False
+            else:
+                 convert_to_scalar_return_allowed = True
+
             returns_clause = "RETURNS void"
             convert_to_scalar_return = False
             
             if explicit_func_return:
                  returns_clause = f"RETURNS {explicit_func_return}"
             elif is_implicit_return:
-                 if has_explicit_return_value and len(implicit_return_schema) == 1:
+                 if convert_to_scalar_return_allowed and has_explicit_return_value and len(implicit_return_schema) == 1:
                       # If a function mixes RETURN and SELECT, and returns 1 column, force it to be a scalar return
                       col = implicit_return_schema[0]
                       c_type = col.get('system_type_name', 'text')
@@ -1384,6 +1391,15 @@ class SybaseASEConnector(DatabaseConnector):
             # Re-run pass_11 with the customized header to let the parser cleanly merge it
             final_output = parser.pass_11_assemble_output(pg_header_str)
             
+            if is_implicit_return and not convert_to_scalar_return:
+                 for line_obj in final_output:
+                      content_line = line_obj.content
+                      m = re.match(r'^(\s*)RETURN\s+(?!QUERY\b|NEXT\b)(.+?)\s*;?\s*$', content_line, re.IGNORECASE)
+                      if m:
+                           indent_len = m.group(1)
+                           expr = m.group(2)
+                           line_obj.content = f"{indent_len}/* RETURN {expr}; -- Sybase ASE construct which cannot be used in PostgreSQL */"
+
             if convert_to_scalar_return:
                  for line_obj in final_output:
                       content = line_obj.content

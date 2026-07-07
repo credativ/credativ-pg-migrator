@@ -1,5 +1,6 @@
 import concurrent.futures
 import time
+import re
 from credativ_pg_migrator.migrator_tables import MigratorTables
 from credativ_pg_migrator.migrator_logging import MigratorLogger
 import traceback
@@ -172,12 +173,32 @@ class Validator:
                     t_col['_force_round_0'] = True
                     
             if check_counts:
+                s_count_unlimited = source_conn.get_rows_count(source_schema, source_table, None)
                 migration_limitation = None
                 limitations = self.migrator_tables.get_records_data_migration_limitation(source_table)
                 if limitations:
-                    migration_limitation = limitations[0][0]
+                    migration_limitations = []
+                    for limitation in limitations:
+                        where_clause = limitation[0]
+                        use_when_column_name = limitation[1]
+                        row_limit = limitation[2] if len(limitation) > 2 else None
+                        
+                        if row_limit is not None and s_count_unlimited <= row_limit:
+                            continue
+                        
+                        for col_info in source_cols:
+                            column_name = col_info.get('name') or col_info.get('column_name')
+                            if column_name == use_when_column_name or re.match(use_when_column_name, column_name):
+                                where_clause = where_clause.replace('{source_schema_name}', source_schema).replace('{source_table_name}', source_table)
+                                migration_limitations.append(where_clause)
+                                break
+                    if migration_limitations:
+                        migration_limitation = ' AND '.join(migration_limitations)
                 
-                s_count = source_conn.get_rows_count(source_schema, source_table, migration_limitation)
+                if migration_limitation:
+                    s_count = source_conn.get_rows_count(source_schema, source_table, migration_limitation)
+                else:
+                    s_count = s_count_unlimited
                 t_count = target_conn.get_rows_count(target_schema, target_table)
                 res['source_row_count'] = s_count
                 res['target_row_count'] = t_count

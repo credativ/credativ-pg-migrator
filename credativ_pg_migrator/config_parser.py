@@ -423,7 +423,19 @@ class ConfigParser:
         return merged_substitutions
 
     def get_data_migration_limitation(self):
-        return self.config.get('data_migration_limitation', {})
+        limitations = self.config.get('data_migration_limitation') or []
+        normalized = []
+        if isinstance(limitations, list):
+            for item in limitations:
+                if isinstance(item, list):
+                    if len(item) == 3:
+                        normalized.append(item + [None])
+                    elif len(item) >= 4:
+                        normalized.append(item[:4])
+                    else:
+                        padded = item + [None] * (4 - len(item))
+                        normalized.append(padded)
+        return normalized
 
     def get_remote_objects_substitution(self):
         return self.config.get('remote_objects_substitution', {})

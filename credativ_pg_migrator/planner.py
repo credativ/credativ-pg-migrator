@@ -646,16 +646,32 @@ class Planner:
 
                 self.config_parser.print_log_message( 'INFO', f"planner: stdwf_prepare_tables: Counting rows in source table {table_info['table_name']}...")
                 self.source_connection.connect()
-                migration_limitation = None
-                limitations = self.migrator_tables.get_records_data_migration_limitation(table_info['table_name'])
-                if limitations:
-                    migration_limitation = limitations[0][0]
-                
                 source_table_rows_all = self.source_connection.get_rows_count(
                     self.source_schema_name,
                     table_info['table_name'],
                     None
                 )
+                
+                migration_limitation = None
+                limitations = self.migrator_tables.get_records_data_migration_limitation(table_info['table_name'])
+                if limitations:
+                    migration_limitations = []
+                    for limitation in limitations:
+                        where_clause = limitation[0]
+                        use_when_column_name = limitation[1]
+                        row_limit = limitation[2] if len(limitation) > 2 else None
+                        
+                        if row_limit is not None and source_table_rows_all <= row_limit:
+                            continue
+                        
+                        for _, column_info in source_columns.items():
+                            column_name = column_info['column_name']
+                            if column_name == use_when_column_name or re.match(use_when_column_name, column_name):
+                                where_clause = where_clause.replace('{source_schema_name}', self.source_schema_name).replace('{source_table_name}', table_info['table_name'])
+                                migration_limitations.append(where_clause)
+                                break
+                    if migration_limitations:
+                        migration_limitation = ' AND '.join(migration_limitations)
                 
                 source_table_rows_limited = source_table_rows_all
                 if migration_limitation:
@@ -1297,15 +1313,31 @@ class Planner:
                         source_table_rows_all = data_migration_info.get('source_table_rows_all', 0)
                         source_table_rows_limited = data_migration_info.get('source_table_rows_limited', 0)
                     else:
-                        migration_limitation = None
-                        limitations = self.migrator_tables.get_records_data_migration_limitation(data_migration_info['source_table_name'])
-                        if limitations:
-                            migration_limitation = limitations[0][0]
                         source_table_rows_all = self.source_connection.get_rows_count(
                             data_migration_info['source_schema_name'],
                             data_migration_info['source_table_name'],
                             None
                         )
+                        migration_limitation = None
+                        limitations = self.migrator_tables.get_records_data_migration_limitation(data_migration_info['source_table_name'])
+                        if limitations:
+                            migration_limitations = []
+                            for limitation in limitations:
+                                where_clause = limitation[0]
+                                use_when_column_name = limitation[1]
+                                row_limit = limitation[2] if len(limitation) > 2 else None
+                                
+                                if row_limit is not None and source_table_rows_all <= row_limit:
+                                    continue
+                                
+                                for _, column_info in table_info['source_columns'].items():
+                                    column_name = column_info['column_name']
+                                    if column_name == use_when_column_name or re.match(use_when_column_name, column_name):
+                                        where_clause = where_clause.replace('{source_schema_name}', table_info['source_schema_name']).replace('{source_table_name}', table_info['source_table_name'])
+                                        migration_limitations.append(where_clause)
+                                        break
+                            if migration_limitations:
+                                migration_limitation = ' AND '.join(migration_limitations)
                         source_table_rows_limited = source_table_rows_all
                         if migration_limitation:
                             source_table_rows_limited = self.source_connection.get_rows_count(
@@ -1781,17 +1813,34 @@ class Planner:
             target_schema_name = self.target_schema_name
             mapped_table = pair # Assuming 'pair' itself represents the mapped table info
 
-            migration_limitation = None
-            limitations = self.migrator_tables.get_records_data_migration_limitation(source_t)
-            if limitations:
-                migration_limitation = limitations[0][0]
-
             self.source_connection.connect()
             source_table_rows_all = self.source_connection.get_rows_count(
                 source_schema_name,
                 source_t,
                 None
             )
+
+            migration_limitation = None
+            limitations = self.migrator_tables.get_records_data_migration_limitation(source_t)
+            if limitations:
+                migration_limitations = []
+                for limitation in limitations:
+                    where_clause = limitation[0]
+                    use_when_column_name = limitation[1]
+                    row_limit = limitation[2] if len(limitation) > 2 else None
+                    
+                    if row_limit is not None and source_table_rows_all <= row_limit:
+                        continue
+                    
+                    cols = source_columns_map.get(source_t, [])
+                    for col_info in cols:
+                        column_name = col_info.get('name') or col_info.get('column_name')
+                        if column_name == use_when_column_name or re.match(use_when_column_name, column_name):
+                            where_clause = where_clause.replace('{source_schema_name}', source_schema_name).replace('{source_table_name}', source_t)
+                            migration_limitations.append(where_clause)
+                            break
+                if migration_limitations:
+                    migration_limitation = ' AND '.join(migration_limitations)
             
             source_table_rows_limited = source_table_rows_all
             if migration_limitation:
@@ -1882,7 +1931,24 @@ class Planner:
             migration_limitation = None
             limitations = self.migrator_tables.get_records_data_migration_limitation(source_t)
             if limitations:
-                migration_limitation = limitations[0][0]
+                migration_limitations = []
+                for limitation in limitations:
+                    where_clause = limitation[0]
+                    use_when_column_name = limitation[1]
+                    row_limit = limitation[2] if len(limitation) > 2 else None
+                    
+                    if row_limit is not None and source_table_rows_all <= row_limit:
+                        continue
+                    
+                    cols = source_columns_map.get(source_t, [])
+                    for col_info in cols:
+                        column_name = col_info.get('name') or col_info.get('column_name')
+                        if column_name == use_when_column_name or re.match(use_when_column_name, column_name):
+                            where_clause = where_clause.replace('{source_schema_name}', self.source_schema_name).replace('{source_table_name}', source_t)
+                            migration_limitations.append(where_clause)
+                            break
+                if migration_limitations:
+                    migration_limitation = ' AND '.join(migration_limitations)
             
             # Since this section only seems to be re-fetching or is redundant for the log message,
             # we'll fetch just limited for the message or rely on what's available

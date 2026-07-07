@@ -1327,8 +1327,15 @@ class Orchestrator:
                         self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Found data migration limitations matching table {target_table_name}: {rows_migration_limitations}")
                         for limitation in rows_migration_limitations:
                             where_clause = limitation[0]
-                            where_clause = where_clause.replace('{source_schema_name}', table_data['source_schema_name']).replace('{source_table_name}', table_data['source_table_name'])
                             use_when_column_name = limitation[1]
+                            row_limit = limitation[2] if len(limitation) > 2 else None
+
+                            if row_limit is not None:
+                                source_rows = table_data.get('source_table_rows_all', 0)
+                                if source_rows <= row_limit:
+                                    continue
+
+                            where_clause = where_clause.replace('{source_schema_name}', table_data['source_schema_name']).replace('{source_table_name}', table_data['source_table_name'])
                             for col_order_num, column_info in table_data['source_columns'].items():
                                 column_name = column_info['column_name']
                                 if column_name == use_when_column_name or re.match(use_when_column_name, column_name):

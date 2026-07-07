@@ -2,6 +2,12 @@
 
 ## 0.15.1 - XXXX.XX.XX
 
+- XXXX.XX.XX
+
+  - Fix - Config: Resolved ValueError crash during the migration planning phase by supporting the 4-item data migration limitation structure (`table_pattern`, `condition`, `column_pattern`, `row_limit`). Added the `row_limit` column to the `data_migration_limitation` table schema, and updated the planner, orchestrator, and validator to respect `row_limit` before applying limitations.
+  - Fix - Stored Procedures: Corrected mixed-return and dataset-returning stored procedure conversion logic in the Sybase ASE connector and T-SQL parser to comment out incompatible scalar returns and prevent parser crashes.
+
+
 ## 0.15.0 - 2026.07.03
 
 - 2026.06.29

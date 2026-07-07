@@ -2754,8 +2754,7 @@ class TsqlParser:
         if self.functions_mapping_converter:
             target_db_type = 'postgresql'
             if self.config_parser:
-                target_conn = self.config_parser.get_connectivity('target')
-                target_db_type = target_conn.get('db_type', 'postgresql') if target_conn else 'postgresql'
+                target_db_type = self.config_parser.get_target_db_type() or 'postgresql'
             for line in final_output:
                 line.content = self.functions_mapping_converter(line.content, {'target_db_type': target_db_type})
 

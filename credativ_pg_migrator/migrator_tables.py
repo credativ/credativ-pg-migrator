@@ -188,23 +188,24 @@ class MigratorTables:
         source_table_name TEXT,
         where_limitation TEXT,
         use_when_column_present TEXT,
+        row_limit INTEGER,
         inserted TIMESTAMP DEFAULT clock_timestamp()
         )
         """)
         self.config_parser.print_log_message('DEBUG3', f"migrator_tables: prepare_data_migration_limitation: Table data_migration_limitation created in schema {self.protocol_schema}")
 
         # Insert data into the table
-        for source_table_name, where_limitation, use_when_column_present in self.config_parser.get_data_migration_limitation():
+        for source_table_name, where_limitation, use_when_column_present, row_limit in self.config_parser.get_data_migration_limitation():
             self.protocol_connection.execute_query(f"""
             INSERT INTO "{self.protocol_schema}".data_migration_limitation
-            (source_table_name, where_limitation, use_when_column_present)
-            VALUES (%s, %s, %s)
-            """, (source_table_name, where_limitation, use_when_column_present))
+            (source_table_name, where_limitation, use_when_column_present, row_limit)
+            VALUES (%s, %s, %s, %s)
+            """, (source_table_name, where_limitation, use_when_column_present, row_limit))
         self.config_parser.print_log_message('DEBUG3', f"migrator_tables: prepare_data_migration_limitation: Data inserted into table data_migration_limitation in schema {self.protocol_schema}")
 
     def get_records_data_migration_limitation(self, source_table_name):
         query = f"""
-        SELECT where_limitation, use_when_column_present
+        SELECT where_limitation, use_when_column_present, row_limit
         FROM "{self.protocol_schema}".data_migration_limitation
         WHERE trim('{source_table_name}') = trim(source_table_name)
         OR trim('{source_table_name}') ~ trim(source_table_name)

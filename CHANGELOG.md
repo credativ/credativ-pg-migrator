@@ -1,8 +1,8 @@
 # Changelog
 
-## 0.15.1 - XXXX.XX.XX
+## 0.15.1 - 2026.07.07
 
-- XXXX.XX.XX
+- 2026.07.07
 
   - Fix - Config: Resolved ValueError crash during the migration planning phase by supporting the 4-item data migration limitation structure (`table_pattern`, `condition`, `column_pattern`, `row_limit`). Added the `row_limit` column to the `data_migration_limitation` table schema, and updated the planner, orchestrator, and validator to respect `row_limit` before applying limitations.
   - Fix - Stored Procedures: Corrected mixed-return and dataset-returning stored procedure conversion logic in the Sybase ASE connector and T-SQL parser to comment out incompatible scalar returns and prevent parser crashes.
@@ -10,6 +10,7 @@
   - Fix - Reporting: Resolved missing sequence names and DDL in the `migration.protocol` table by ensuring `insert_sequence` falls back to target sequence metadata when source attributes are omitted.
   - Feature - Security/Config: Added configuration check to prevent the migrator protocol schema from being set to 'public' in both standard and mapping workflows, stopping execution with a ValueError to avoid accidental schema drops. Also added validation to ensure that neither the protocol schema nor the target schema can be empty.
   - Fix - Connectors: Ensured identity columns in Sybase ASE are correctly mapped and populated in the protocol_sequences table with their source side details (schema, table, column name) during migration.
+  - Fix - Connectors/Reporting: Added persistent storage of current/next sequence values for migrated sequences by adding `source_last_value` and `source_next_value` columns to the `protocol_sequences` table. Enabled extraction and logging of these values from Sybase ASE identity columns (via `next_identity`), PostgreSQL sequences, and standard workflow planners.
 
 
 

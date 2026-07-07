@@ -430,6 +430,15 @@ class Planner:
             else:
                 target_sequence_name = self.config_parser.convert_names_case(sequence_info['sequence_name'])
 
+            last_val = sequence_info.get('last_value', None)
+            inc = sequence_info.get('source_increment_by', None) or sequence_info.get('increment_by', 1)
+            next_val = sequence_info.get('next_value', None)
+            if last_val is not None and next_val is None:
+                try:
+                    next_val = int(last_val) + int(inc)
+                except (ValueError, TypeError):
+                    pass
+
             settings = {
                 'sequence_id': sequence_info.get('id', order_num),
                 'source_schema_name': self.source_schema_name,
@@ -443,6 +452,8 @@ class Planner:
                 'source_maxvalue': sequence_info.get('source_maxvalue', None),
                 'source_cache': sequence_info.get('source_cache', None),
                 'source_is_cycled': sequence_info.get('source_is_cycled', None),
+                'source_last_value': last_val,
+                'source_next_value': next_val,
                 'source_sequence_comment': '',
                 'target_schema_name': self.target_schema_name,
                 'target_table_name': sequence_info.get('target_table_name', None),

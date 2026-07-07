@@ -1906,25 +1906,6 @@ class PostgreSQLConnector(DatabaseConnector):
 
                 self.config_parser.print_log_message('DEBUG', f"postgresql_connector: migrate_sequences: Processing sequence: {seq_name}")
 
-                # Insert into protocol table if migrator_tables is available
-                # We don't have table/column info here as we are migrating all sequences in schema
-                if migrator_tables:
-                    try:
-                        # set_sequence_sql will be populated later, but we need to insert first to get ID/track start?
-                        # insert_sequence(self, sequence_id, schema_name, table_name, column_name, sequence_name, set_sequence_sql)
-                        # We'll update it later or insert it now with placeholders?
-                        # Usually insert happens before work starts to track 'started', but insert_sequence seems to just log existence?
-                        # Looking at other methods, insert_* usually logs the item and then update_* sets status.
-                        migrator_tables.insert_sequence({
-                            'sequence_id': seq_oid,
-                            'source_schema_name': source_schema_name,
-                            'source_table_name': '',
-                            'source_column_name': '',
-                            'source_sequence_name': seq_name,
-                            'source_sequence_sql': ''
-                        })
-                    except Exception as e:
-                        self.config_parser.print_log_message('ERROR', f"postgresql_connector: migrate_sequences: Failed to insert sequence {seq_name} into protocol: {e}")
                 details = self.get_sequence_details(source_schema_name, seq_name)
 
                 # Fetch current value separately as it's not in pg_sequence catalog
@@ -1935,6 +1916,36 @@ class PostgreSQLConnector(DatabaseConnector):
                 last_value = curr_val_row[0]
                 is_called = curr_val_row[1]
                 cursor.close()
+
+                # Insert into protocol table if migrator_tables is available
+                if migrator_tables:
+                    try:
+                        inc = details.get('increment_by', 1)
+                        next_val = None
+                        if last_value is not None:
+                            try:
+                                next_val = int(last_value) + int(inc)
+                            except (ValueError, TypeError):
+                                pass
+
+                        migrator_tables.insert_sequence({
+                            'sequence_id': seq_oid,
+                            'source_schema_name': source_schema_name,
+                            'source_table_name': '',
+                            'source_column_name': '',
+                            'source_sequence_name': seq_name,
+                            'source_sequence_sql': '',
+                            'source_start_value': details.get('start_value'),
+                            'source_increment_by': details.get('increment_by'),
+                            'source_minvalue': details.get('min_value'),
+                            'source_maxvalue': details.get('max_value'),
+                            'source_cache': details.get('cache_size'),
+                            'source_is_cycled': details.get('cycle'),
+                            'source_last_value': last_value,
+                            'source_next_value': next_val
+                        })
+                    except Exception as e:
+                        self.config_parser.print_log_message('ERROR', f"postgresql_connector: migrate_sequences: Failed to insert sequence {seq_name} into protocol: {e}")
 
                 # Generate CREATE SEQUENCE
                 # Details: min_value, max_value, increment_by, cycle, cache_size, start_value

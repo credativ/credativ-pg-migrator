@@ -443,6 +443,7 @@ class Orchestrator:
                     break
                 settings['chunk_number'] += 1
 
+            next_identity = worker_source_connection.get_table_next_identity(table_data['source_schema_name'], table_data['source_table_name'])
             worker_source_connection.disconnect()
 
             # sequences setting
@@ -459,6 +460,8 @@ class Orchestrator:
                     sequence_name = sequence_details['name']
                     column_name = sequence_details['column_name']
                     sequence_sql = sequence_details['set_sequence_sql']
+                    if next_identity is not None:
+                        sequence_sql = f"SELECT setval('\"{target_schema_name}\".\"{sequence_name}\"', {next_identity}, false);"
                     
                     # Try to map to source column name (identity column)
                     source_column_name = None
@@ -472,11 +475,38 @@ class Orchestrator:
                                 source_column_name = col.get('column_name')
                                 break
 
+                    details = sequence_details.get('details') or {}
+                    source_start_value = details.get('start_value')
+                    source_increment_by = details.get('increment_by')
+                    source_minvalue = details.get('min_value')
+                    source_maxvalue = details.get('max_value')
+                    source_cache = details.get('cache_size')
+                    source_is_cycled = details.get('cycle')
+
+                    source_next_value = next_identity
+                    source_last_value = None
+                    if next_identity is not None:
+                        inc = source_increment_by if source_increment_by is not None else 1
+                        source_last_value = next_identity - inc
+                    else:
+                        source_last_value = details.get('last_value')
+                        if source_last_value is not None:
+                            inc = source_increment_by if source_increment_by is not None else 1
+                            source_next_value = source_last_value + inc
+
                     self.migrator_tables.insert_sequence({
                         'sequence_id': sequence_id,
                         'source_schema_name': source_schema_name,
                         'source_table_name': source_table_name,
                         'source_column_name': source_column_name,
+                        'source_start_value': source_start_value,
+                        'source_increment_by': source_increment_by,
+                        'source_minvalue': source_minvalue,
+                        'source_maxvalue': source_maxvalue,
+                        'source_cache': source_cache,
+                        'source_is_cycled': source_is_cycled,
+                        'source_last_value': source_last_value,
+                        'source_next_value': source_next_value,
                         'target_schema_name': target_schema_name,
                         'target_table_name': target_table_name,
                         'target_column_name': column_name,
@@ -1407,11 +1437,38 @@ class Orchestrator:
                                         source_column_name = col.get('column_name')
                                         break
 
+                            details = sequence_details.get('details') or {}
+                            source_start_value = details.get('start_value')
+                            source_increment_by = details.get('increment_by')
+                            source_minvalue = details.get('min_value')
+                            source_maxvalue = details.get('max_value')
+                            source_cache = details.get('cache_size')
+                            source_is_cycled = details.get('cycle')
+
+                            source_next_value = next_identity
+                            source_last_value = None
+                            if next_identity is not None:
+                                inc = source_increment_by if source_increment_by is not None else 1
+                                source_last_value = next_identity - inc
+                            else:
+                                source_last_value = details.get('last_value')
+                                if source_last_value is not None:
+                                    inc = source_increment_by if source_increment_by is not None else 1
+                                    source_next_value = source_last_value + inc
+
                             self.migrator_tables.insert_sequence({
                                 'sequence_id': sequence_id,
                                 'source_schema_name': source_schema_name,
                                 'source_table_name': source_table_name,
                                 'source_column_name': source_column_name,
+                                'source_start_value': source_start_value,
+                                'source_increment_by': source_increment_by,
+                                'source_minvalue': source_minvalue,
+                                'source_maxvalue': source_maxvalue,
+                                'source_cache': source_cache,
+                                'source_is_cycled': source_is_cycled,
+                                'source_last_value': source_last_value,
+                                'source_next_value': source_next_value,
                                 'target_schema_name': target_schema_name,
                                 'target_table_name': target_table_name,
                                 'target_column_name': column_name,

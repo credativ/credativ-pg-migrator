@@ -65,7 +65,7 @@ class Validator:
             with concurrent.futures.ThreadPoolExecutor(max_workers=threads) as executor:
                 futures = []
                 for t in tables:
-                    if t.get('target_table_rows', 0) > 0 or t.get('source_table_rows', 0) > 0:
+                    if self.config_parser.get_workflow() == 'mapping' or t.get('target_table_rows', 0) > 0 or t.get('source_table_rows', 0) > 0:
                         futures.append(executor.submit(
                             self.validate_table, 
                             t, check_counts, check_table_sum, check_random, check_lob, sample_size
@@ -242,12 +242,14 @@ class Validator:
                         conn_s = target_copy_conn
                         schema_s = target_copy_schema
                         cols_s = target_cols
+                        table_s = target_table
                     else:
                         s_sum = source_conn.get_table_checksum(source_schema, source_table, source_cols)
                         t_sum = target_conn.get_table_checksum(target_schema, target_table, target_cols)
                         conn_s = source_conn
                         schema_s = source_schema
                         cols_s = source_cols
+                        table_s = source_table
 
                     res['source_table_hash'] = s_sum
                     res['target_table_hash'] = t_sum
@@ -261,7 +263,7 @@ class Validator:
                             for i in range(min(len(cols_s), len(target_cols))):
                                 s_col = [cols_s[i]]
                                 t_col = [target_cols[i]]
-                                s_col_sum = conn_s.get_table_checksum(schema_s, source_table, s_col)
+                                s_col_sum = conn_s.get_table_checksum(schema_s, table_s, s_col)
                                 t_col_sum = target_conn.get_table_checksum(target_schema, target_table, t_col)
                                 
                                 col_passed = (s_col_sum == t_col_sum)
@@ -272,7 +274,7 @@ class Validator:
                                 t_prec = target_cols[i].get('numeric_precision')
                                 force_round = cols_s[i].get('_force_round_0', False)
                                 
-                                s_stats = conn_s.get_column_statistics(schema_s, source_table, cols_s[i]['column_name'], cols_s[i].get('data_type', ''), force_round_0=force_round)
+                                s_stats = conn_s.get_column_statistics(schema_s, table_s, cols_s[i]['column_name'], cols_s[i].get('data_type', ''), force_round_0=force_round)
                                 t_stats = target_conn.get_column_statistics(target_schema, target_table, target_cols[i]['column_name'], target_cols[i].get('data_type', ''), force_round_0=force_round)
                                 
                                 col_res = {

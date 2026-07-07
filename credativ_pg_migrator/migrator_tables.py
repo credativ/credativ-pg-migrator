@@ -558,12 +558,12 @@ class MigratorTables:
                 s_col, t_col, s_type, t_type = c
                 if s_col:
                     s_type_lower = s_type.lower() if s_type else ''
-                    s_is_num = any(t in s_type_lower for t in ['int', 'number', 'numeric', 'decimal', 'float', 'double', 'real', 'serial'])
-                    source_columns.append({'name': s_col, 'data_type': s_type, 'numeric_precision': 0 if s_is_num else None})
+                    s_is_num = any(t in s_type_lower for t in ['int', 'number', 'numeric', 'decimal', 'serial'])
+                    source_columns.append({'column_name': s_col, 'data_type': s_type, 'numeric_precision': 0 if s_is_num else None})
                 if t_col:
                     t_type_lower = t_type.lower() if t_type else ''
-                    t_is_num = any(t in t_type_lower for t in ['int', 'number', 'numeric', 'decimal', 'float', 'double', 'real', 'serial'])
-                    target_columns.append({'name': t_col, 'data_type': t_type, 'numeric_precision': 0 if t_is_num else None})
+                    t_is_num = any(t in t_type_lower for t in ['int', 'number', 'numeric', 'decimal', 'serial'])
+                    target_columns.append({'column_name': t_col, 'data_type': t_type, 'numeric_precision': 0 if t_is_num else None})
             
             result.append({
                 'id': table_id,

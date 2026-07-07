@@ -249,7 +249,7 @@ class ConfigParser:
 
     ## Summary
     def get_summary_config(self):
-        return self.config.get('summary', {})
+        return (self.config.get('summary') or {})
 
     def get_summary_top_migrated_tables(self):
         return self.get_summary_config().get('top_migrated_tables', 5)
@@ -264,10 +264,10 @@ class ConfigParser:
         return self.get_summary_config().get('top_anonymized_tables', 5)
 
     def get_mapping_report_filename(self):
-        mapping_config = self.config.get('mapping', {})
+        mapping_config = (self.config.get('mapping') or {})
         if 'report_filename' in mapping_config:
             return mapping_config.get('report_filename')
-        return self.config.get('migration', {}).get('mapping_report_filename')
+        return (self.config.get('migration') or {}).get('mapping_report_filename')
 
     def get_summary_top_anonymized_columns(self):
         return self.get_summary_config().get('top_anonymized_columns', 5)
@@ -277,7 +277,7 @@ class ConfigParser:
 
     ## Migrator
     def get_migrator_config(self):
-        return self.config.get('migrator', {})
+        return (self.config.get('migrator') or {})
 
     def get_migrator_db_type(self):
         return self.get_migrator_config().get('type', None)
@@ -286,7 +286,7 @@ class ConfigParser:
         return self.get_migrator_config().get('schema', MigratorConstants.get_default_schema())
 
     def get_anonymization_config(self):
-        return self.config.get('anonymization', {})
+        return (self.config.get('anonymization') or {})
 
     def get_migration_settings(self):
         return self.config['migration']
@@ -304,20 +304,20 @@ class ConfigParser:
         return self.get_workflow() == 'anonymization'
 
     def get_suspend_indexes_constraints(self):
-        mapping_config = self.config.get('mapping', {})
+        mapping_config = (self.config.get('mapping') or {})
         if 'suspend_indexes_constraints' in mapping_config:
             return mapping_config.get('suspend_indexes_constraints')
         settings = self.get_migration_settings()
         return settings.get('suspend_indexes_constraints', True)
 
     def get_mapping_workflow_heuristics(self):
-        return self.config.get('mapping', {}).get('heuristics', {})
+        return (self.config.get('mapping') or {}).get('heuristics', {})
 
     def get_forced_table_mappings(self):
-        return self.config.get('mapping', {}).get('forced_table_mappings', [])
+        return (self.config.get('mapping') or {}).get('forced_table_mappings', [])
 
     def get_forced_column_mappings(self):
-        return self.config.get('mapping', {}).get('forced_column_mappings', [])
+        return (self.config.get('mapping') or {}).get('forced_column_mappings', [])
 
     def get_use_aliases_as_target_names(self):
         settings = self.get_migration_settings()
@@ -405,11 +405,11 @@ class ConfigParser:
         return f"{self.get_protocol_name()}_aliases"
 
     def get_data_types_substitution(self):
-        return self.config.get('data_types_substitution', {})
+        return (self.config.get('data_types_substitution') or {})
 
     def get_default_values_substitution(self):
         implicit_substitutions = []
-        from_config_file = self.config.get('default_values_substitution', {})
+        from_config_file = (self.config.get('default_values_substitution') or {})
         self.print_log_message('DEBUG3', f"config_parser: get_default_values_substitution: from_config_file: {from_config_file}")
         if self.get_source_db_type() == 'sybase_ase':
             implicit_substitutions = [
@@ -432,10 +432,10 @@ class ConfigParser:
         return merged_substitutions
 
     def get_data_migration_limitation(self):
-        return self.config.get('data_migration_limitation', {})
+        return (self.config.get('data_migration_limitation') or {})
 
     def get_remote_objects_substitution(self):
-        return self.config.get('remote_objects_substitution', {})
+        return (self.config.get('remote_objects_substitution') or {})
 
     ## Migration settings
     def _match_table_name(self, table_name, pattern):
@@ -449,20 +449,20 @@ class ConfigParser:
         return bool(re.fullmatch(pattern, table_name, re.IGNORECASE))
 
     def should_drop_schema(self):
-        return self.config.get('migration', {}).get('drop_schema', False)
+        return (self.config.get('migration') or {}).get('drop_schema', False)
 
     def should_drop_tables(self):
-        return self.config.get('migration', {}).get('drop_tables', False) # Default to False
+        return (self.config.get('migration') or {}).get('drop_tables', False) # Default to False
 
     def should_truncate_tables(self):
-        return self.config.get('migration', {}).get('truncate_tables', False)
+        return (self.config.get('migration') or {}).get('truncate_tables', False)
 
     def should_create_tables(self):
-        return self.config.get('migration', {}).get('create_tables', False)
+        return (self.config.get('migration') or {}).get('create_tables', False)
 
     def should_migrate_data(self, table_name=None):
         if table_name:
-            table_settings = self.config.get('table_settings', {})
+            table_settings = (self.config.get('table_settings') or {})
             # table_settings is expected to be a list of dicts with 'table_name' and settings
             if isinstance(table_settings, list):
                 for entry in table_settings:
@@ -471,55 +471,55 @@ class ConfigParser:
                     if self._match_table_name(table_name, pattern):
                         # self.print_log_message('DEBUG3', f"config_parser: should_migrate_data: table {table_name} matched pattern {pattern}, setting is {entry.get('migrate_data', False)}")
                         return entry.get('migrate_data', False)
-        # self.print_log_message('DEBUG3', f"config_parser: should_migrate_data: table {table_name} returned default setting {self.config.get('migration', {}).get('migrate_data', False)}")
-        return self.config.get('migration', {}).get('migrate_data', False)
+        # self.print_log_message('DEBUG3', f"config_parser: should_migrate_data: table {table_name} returned default setting {(self.config.get('migration') or {}).get('migrate_data', False)}")
+        return (self.config.get('migration') or {}).get('migrate_data', False)
 
     def should_migrate_indexes(self, table_name=None):
         if table_name:
-            table_settings = self.config.get('table_settings', {})
+            table_settings = (self.config.get('table_settings') or {})
             if isinstance(table_settings, list):
                 for entry in table_settings:
                     pattern = entry.get('table_name')
                     if self._match_table_name(table_name, pattern):
                         return entry.get('migrate_indexes', False)
-        return self.config.get('migration', {}).get('migrate_indexes', False)
+        return (self.config.get('migration') or {}).get('migrate_indexes', False)
 
     def should_migrate_constraints(self, table_name=None):
         if table_name:
-            table_settings = self.config.get('table_settings', {})
+            table_settings = (self.config.get('table_settings') or {})
             # table_settings is expected to be a list of dicts with 'table_name' and settings
             if isinstance(table_settings, list):
                 for entry in table_settings:
                     pattern = entry.get('table_name')
                     if self._match_table_name(table_name, pattern):
                         return entry.get('migrate_constraints', False)
-        return self.config.get('migration', {}).get('migrate_constraints', False)
+        return (self.config.get('migration') or {}).get('migrate_constraints', False)
 
     def should_migrate_funcprocs(self):
-        return self.config.get('migration', {}).get('migrate_funcprocs', False)
+        return (self.config.get('migration') or {}).get('migrate_funcprocs', False)
 
     def should_set_sequences(self):
-        return self.config.get('migration', {}).get('set_sequences', False)
+        return (self.config.get('migration') or {}).get('set_sequences', False)
 
     def should_migrate_triggers(self, table_name=None):
         if table_name:
-            table_settings = self.config.get('table_settings', {})
+            table_settings = (self.config.get('table_settings') or {})
             # table_settings is expected to be a list of dicts with 'table_name' and settings
             if isinstance(table_settings, list):
                 for entry in table_settings:
                     pattern = entry.get('table_name')
                     if self._match_table_name(table_name, pattern):
                         return entry.get('migrate_triggers', False)
-        return self.config.get('migration', {}).get('migrate_triggers', False)
+        return (self.config.get('migration') or {}).get('migrate_triggers', False)
 
     def should_migrate_views(self):
-        return self.config.get('migration', {}).get('migrate_views', False)
+        return (self.config.get('migration') or {}).get('migrate_views', False)
 
     def get_batch_size(self):
-        return int(self.config.get('migration', {}).get('batch_size', 100000))
+        return int((self.config.get('migration') or {}).get('batch_size', 100000))
 
     def get_chunk_size(self):
-        chunk_size = self.config.get('migration', {}).get('chunk_size', -1)
+        chunk_size = (self.config.get('migration') or {}).get('chunk_size', -1)
         if chunk_size == -1:
             self.print_log_message('DEBUG', "config_parser: get_chunk_size: Chunk size is set to -1, which means no chunking will be done.")
             return -1
@@ -537,19 +537,19 @@ class ConfigParser:
         return total_chunks
 
     def get_parallel_workers_count(self):
-        return int(self.config.get('migration', {}).get('parallel_workers', 1)) # Default to 1
+        return int((self.config.get('migration') or {}).get('parallel_workers', 1)) # Default to 1
 
     def get_on_error_action(self):
-        return self.config.get('migration', {}).get('on_error', 'stop')
+        return (self.config.get('migration') or {}).get('on_error', 'stop')
 
     def get_pre_migration_script(self):
-        return self.config.get('migration', {}).get('pre_migration_script', None)
+        return (self.config.get('migration') or {}).get('pre_migration_script', None)
 
     def get_post_migration_script(self):
-        return self.config.get('migration', {}).get('post_migration_script', None)
+        return (self.config.get('migration') or {}).get('post_migration_script', None)
 
     def get_names_case_handling(self):
-        return self.config.get('migration', {}).get('names_case_handling', 'keep').lower()
+        return (self.config.get('migration') or {}).get('names_case_handling', 'keep').lower()
 
     def convert_names_case(self, name):
         if name is None:
@@ -565,14 +565,14 @@ class ConfigParser:
             raise ValueError(f"Invalid names_case_handling: {case_handling}")
 
     def get_varchar_to_text_length(self):
-        varchar_to_text_length = self.config.get('migration', {}).get('varchar_to_text_length', None)
+        varchar_to_text_length = (self.config.get('migration') or {}).get('varchar_to_text_length', None)
         if varchar_to_text_length is not None:
             return int(varchar_to_text_length)
         else:
             return -1 # migrate varchars as they are
 
     def get_char_to_text_length(self):
-        char_to_text_length = self.config.get('migration', {}).get('char_to_text_length', None)
+        char_to_text_length = (self.config.get('migration') or {}).get('char_to_text_length', None)
         if char_to_text_length is not None:
             return int(char_to_text_length)
         else:
@@ -583,7 +583,7 @@ class ConfigParser:
         Check if LOB values (BLOB, CLOB) should be migrated.
         If not specified, defaults to False.
         """
-        return self.config.get('migration', {}).get('migrate_lob_values', True)
+        return (self.config.get('migration') or {}).get('migrate_lob_values', True)
 
     def get_include_tables(self):
         include_tables = self.config.get('include_tables', None)
@@ -608,7 +608,7 @@ class ConfigParser:
         return "validation_constraints"
 
     def get_validation_config(self):
-        return self.config.get('validation', {})
+        return (self.config.get('validation') or {})
 
     def get_validation_target_copy_config(self):
         return self.get_validation_config().get('target_copy', {})
@@ -693,13 +693,13 @@ class ConfigParser:
                 self.logger.info(message_level.upper() + ': ' + message)
 
     def get_indent(self):
-        return self.config.get('migrator', {}).get('indent', MigratorConstants.get_default_indent())
+        return (self.config.get('migrator') or {}).get('indent', MigratorConstants.get_default_indent())
 
     def get_target_db_session_settings(self):
         return self.config['target'].get('settings', {})
 
     def get_target_partitioning(self):
-        return self.config.get('target_partitioning', {})
+        return (self.config.get('target_partitioning') or {})
 
     def get_source_data_export(self):
         source_config = self.get_source_config()
@@ -872,7 +872,7 @@ class ConfigParser:
         return None
 
     def get_global_data_conflict_action(self):
-        mapping_action = self.config.get('mapping', {}).get('data_conflict_action')
+        mapping_action = (self.config.get('mapping') or {}).get('data_conflict_action')
         if mapping_action:
             return mapping_action
         return self.get_migration_settings().get('data_conflict_action', 'skip')
@@ -919,49 +919,49 @@ class ConfigParser:
         Get the pre-migration analysis settings.
         If not specified, returns an empty dictionary.
         """
-        return self.config.get('pre_migration_analysis', {})
+        return (self.config.get('pre_migration_analysis') or {})
 
     def get_top_n_tables(self):
         """
         Get the TOP N tables settings.
         If not specified, returns an empty dictionary.
         """
-        return self.config.get('top_n_tables', {})
+        return (self.config.get('top_n_tables') or {})
 
     def get_top_n_tables_by_rows(self):
         """
         Get the TOP N tables by rows setting from pre_migration_analysis.
         If not specified, returns None.
         """
-        return self.config.get('pre_migration_analysis', {}).get('top_n_tables', {}).get('by_rows', 0)
+        return (self.config.get('pre_migration_analysis') or {}).get('top_n_tables', {}).get('by_rows', 0)
 
     def get_top_n_tables_by_size(self):
         """
         Get the TOP N tables by total size setting from pre_migration_analysis.
         If not specified, returns None.
         """
-        return self.config.get('pre_migration_analysis', {}).get('top_n_tables', {}).get('by_size', 0)
+        return (self.config.get('pre_migration_analysis') or {}).get('top_n_tables', {}).get('by_size', 0)
 
     def get_top_n_tables_by_columns(self):
         """
         Get the TOP N tables by column count setting from pre_migration_analysis.
         If not specified, returns None.
         """
-        return self.config.get('pre_migration_analysis', {}).get('top_n_tables', {}).get('by_columns', 0)
+        return (self.config.get('pre_migration_analysis') or {}).get('top_n_tables', {}).get('by_columns', 0)
 
     def get_top_n_tables_by_indexes(self):
         """
         Get the TOP N tables by index count setting from pre_migration_analysis.
         If not specified, returns None.
         """
-        return self.config.get('pre_migration_analysis', {}).get('top_n_tables', {}).get('by_indexes', 0)
+        return (self.config.get('pre_migration_analysis') or {}).get('top_n_tables', {}).get('by_indexes', 0)
 
     def get_top_n_tables_by_constraints(self):
         """
         Get the TOP N tables by constraint count setting from pre_migration_analysis.
         If not specified, returns None.
         """
-        return self.config.get('pre_migration_analysis', {}).get('top_n_tables', {}).get('by_constraints', 0)
+        return (self.config.get('pre_migration_analysis') or {}).get('top_n_tables', {}).get('by_constraints', 0)
 
 
     ## scheduled actions
@@ -969,7 +969,7 @@ class ConfigParser:
     def pause_migration_fired(self):
         config_dir = os.path.dirname(os.path.abspath(self.args.config))
 
-        scheduled_actions = self.config.get('migration', {}).get('scheduled_actions', [])
+        scheduled_actions = (self.config.get('migration') or {}).get('scheduled_actions', [])
         self.print_log_message('DEBUG3', f"config_parser: pause_migration_fired: Checking for scheduled actions: {scheduled_actions}")
         resume_file = os.path.join(config_dir, "resume_migration")
 

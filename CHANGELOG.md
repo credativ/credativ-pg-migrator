@@ -1,6 +1,14 @@
 # Changelog
 
-## 0.16.0 - 2026.07.03
+## 0.16.0 - 2026.07.07
+
+- 2026.07.07
+
+  - Fix - Config: Upgraded dictionary retrieval logic in ConfigParser to gracefully handle optional/null configuration blocks (wrapping them in safe-navigation checks) to prevent parser crashes when sections are parsed as `None`.
+  - Fix - Validation: Renamed columns key to `column_name` in mapping workflow metadata structures to align with standard validation metrics.
+  - Fix - Validation: Bypassed implicit precision scaling logic for floating-point/approximate datatypes (`float`, `double`, `real`) to prevent incorrect validation failures.
+  - Fix - Validation: Fixed the validation table iteration loop to correctly execute validations for tables under the `mapping` workflow even when row counts are not available in tracking metadata.
+  - Fix - Validation: Repaired target copy validation target mapping; when validating against a target copy connection, the validator now correctly resolves checksum and statistics queries using the target table name rather than the source table name.
 
 - 2026.07.03
 
@@ -12,9 +20,6 @@
   - Fix - Connectors: Unified and refactored data conflict resolution logic across all database connectors (`oracle`, `postgresql`, `mysql`, `mariadb`, `ms_sql`, `ibm_db2_luw`, `sybase_ase`, `informix`). The migration tool now correctly prioritizes the `data_conflict_action` configuration setting (defaulting to `skip`) over explicit source/target row count comparisons, fixing a bug where `skip` was ignored if the target table count was non-zero.
   - Feature - Reporting: Enhanced the `mapping_report.md` file format. Introduced a `Configuration Settings` block at the beginning of the report to display `data_conflict_action` (both global and table-specific), mapping heuristics, and forced mappings.
   - Feature - Reporting: Redesigned the mapping report's layout by aggregating mapped table statistics into a clean, unified `Mapped Tables Summary` markdown table, providing immediate visibility into source and target row counts across the migration lifecycle. The summary now dynamically indicates the applied `Data Conflict Action` (e.g., global vs table-specific rules). Raw column-level mappings were decoupled and moved to a dedicated `Mapped Columns Details` section, and the table of contents was disabled.
-  - Feature - Reporting: Enhanced the `mapping_report.md` file format. Introduced a `Configuration Settings` block at the beginning of the report to display `data_conflict_action` (both global and table-specific), mapping heuristics, and forced mappings.
-  - Feature - Reporting: Redesigned the mapping report's layout by aggregating mapped table statistics into a clean, unified `Mapped Tables Summary` markdown table, providing immediate visibility into source and target row counts across the migration lifecycle. Raw column-level mappings were decoupled and moved to a dedicated `Mapped Columns Details` section, and the table of contents was disabled.
-
 
 - 2026.07.02
 

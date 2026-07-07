@@ -1,7 +1,7 @@
 credativ-pg-migrator Releases
 =============================
 
-0.15.1 - XX.XX.XXXX
+0.15.1 - 07.07.2026
 -------------------
 
 * Fix in ConfigParser to support 4-item data migration limitation structures (including row_limit) and resolve ValueError crash in planning phase. (#92)
@@ -10,10 +10,6 @@ credativ-pg-migrator Releases
 * Fix in sequence logging to populate object_name and DDL from target sequence properties when source attributes are omitted. (#91)
 * Validation check in ConfigParser to reject 'public' as the migrator schema in standard and mapping workflows to prevent accidental schema drops. Also added check to prevent empty protocol schema or target schema settings.
 * Fix in Sybase ASE connector sequence tracking to populate source-side metadata (schema, table, column) in the protocol_sequences table for identity columns.
-
-
-
-
 
 0.15.0 - 03.07.2026
 -------------------

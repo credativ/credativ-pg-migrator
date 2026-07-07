@@ -12,11 +12,6 @@
   - Fix - Connectors: Ensured identity columns in Sybase ASE are correctly mapped and populated in the protocol_sequences table with their source side details (schema, table, column name) during migration.
   - Fix - Connectors/Reporting: Added persistent storage of current/next sequence values for migrated sequences by adding `source_last_value` and `source_next_value` columns to the `protocol_sequences` table. Enabled extraction and logging of these values from Sybase ASE identity columns (via `next_identity`), PostgreSQL sequences, and standard workflow planners.
 
-
-
-
-
-
 ## 0.15.0 - 2026.07.03
 
 - 2026.06.29

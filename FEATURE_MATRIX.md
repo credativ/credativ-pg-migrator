@@ -31,14 +31,15 @@ Note to the unclear status - the biggest issue is to find reasonable testing dat
 | Secondary Indexes                         | yes     | yes      | yes    | yes   | yes    | yes        | yes      | yes    |
 | Foreign Keys                              | yes     | yes      | yes    | yes   | yes    | yes        | yes      | yes    |
 | FK on delete action                       | --      | --       | --     | --    | yes    | WIP        | --       | N/A*   |
-| Check Constraints                         | --      | yes      | --     | --    | --     | WIP        | --       | yes    |
-| Check Rules/Domains[3]                    | --      | --       | --     | --    | --     | --         | --       | yes    |
+| Check Constraints                         | --      | yes      | --     | --    | ?      | WIP        | --       | yes    |
+| Check Rules/Domains[3]                    | --      | --       | --     | --    | ?[7]   | --         | --       | yes    |
+| User-defined types                        | --      | --       | ?      | --    | ?[7]   | yes        | --       | yes    |
 | Comments on columns                       | --      | --       | --     | --    | --     | WIP        | --       | N/A*   |
 | Comments on tables                        | --      | --       | --     | --    | --     | WIP        | --       | N/A*   |
 | Migration of views                        | WIP     | WIP      | WIP    | WIP   | WIP    | WIP        | WIP      | WIP    |
 | Conversion of user defined funcs/procs    | --      | yes      | --     | --    | --     | yes        | --       | --     |
 | Conversion of user defined triggers       | --      | yes      | --     | --    | --     | yes        | --       | --     |
-| Sequences[2]                              | --      | --       | --     | --    | --     | --         | --       | N/A*   |
+| Sequences[2]                              | --      | --       | --     | --    | ?[7]   | --         | --       | N/A*   |
 | SQL functions mapping                     | WIP     | WIP      | WIP    | WIP   | WIP    | WIP        | WIP      | WIP    |
 | ....                                      | --      | --       | --     | --    | --     | --         | --       | --     |
 
@@ -47,11 +48,12 @@ Note to the unclear status - the biggest issue is to find reasonable testing dat
 Notes:
 
 - [1]: IDENTITY columns are recognized based on sequence used as the default value. But there is still an issue with data types. Oracle allows PRIMARY KEY on NUMBER with sequence. But IDENTITY column in PostgresSQL must be INT or BIGINT.
-- [2]: Sequences are not explicitly migrated (presuming source database implements them). But SERIAL/BIGSERIAL and IDENTITY columns and columns with a sequence as default value are migrated into PostgreSQL as IDENTITY columns. Which means the sequence is created in PostgreSQL automatically. The current value of the sequence is set to the last value found in migrated data after the data migration is finished.
+- [2]: Sequences are not explicitly migrated (presuming source database implements them). But SERIAL/BIGSERIAL and IDENTITY columns and columns with a sequence as default value are migrated into PostgreSQL as IDENTITY columns. Which means the sequence is created in PostgreSQL automatically. The current value of the sequence is set to the last value found in migrated data after the data migration is finished. Exception: for Oracle, standalone sequences (not attached to a table column) are additionally migrated as independent PostgreSQL sequences - see note [7].
 - [3]: Check rules/domains are addiional checks externally defined and bound to specific column or data type. In PostgreSQL they are implemented as [domains](https://www.postgresql.org/docs/current/sql-createdomain.html), in some other databases as rules bind to columns/data types. Currently we work on implementing this feature for Sybase ASE migration.
 - [4]: Sybase ASE has SQL command CREATE DEFAULT which creates independent named default value and this can be attached to a multiple columns using its name. PostgreSQL does not support this, therefore we attach corresponding underlying default value directly to the target column.
 - [5]: Sybase ASE in some cases creates internal computed columns, not visible in selects, but documented in system tables. One example is column for this index: CREATE NONCLUSTERED INDEX IX_Products_LowerProductName ON dbo.Products (LOWER(ProductName)) - Sybase created internal calculated materialized column "sybfi4_1" with computation formula "AS LOWER(ProductName) MATERIALIZED". There internal computed columns have status3 = 1 – Indicates a hidden computed column for a function-based index key. This feature also means that the index has different DDL command in system tables - uses the hidden column: CREATE INDEX IX_Products_LowerProductName_608002166_4 ON Products (sybfi4_1);
 - [6]: Typical most commonly used default values not compatible with target PostgreSQL syntax are replaced implicitly during migration.
+- [7]: Oracle - CHECK constraints, standalone sequences, user-defined types and domains are implemented but not yet validated against a live database. Standalone sequences (`ALL_SEQUENCES`) are migrated as independent PostgreSQL sequences, with bounds clamped to PostgreSQL's `bigint` range. Oracle object types are migrated as PostgreSQL composite types and collection types (VARRAY / nested tables) as array-based domains; SQL domains exist only in Oracle 23ai (`ALL_DOMAINS`) and that path is best-effort. See section 4.3 of `docs/README.md` for the full list of Oracle limitations.
 
 ## Tested versions of databases
 

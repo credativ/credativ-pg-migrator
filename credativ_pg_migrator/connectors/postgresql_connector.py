@@ -2303,6 +2303,7 @@ class PostgreSQLConnector(DatabaseConnector):
 
     def fetch_default_values(self, settings) -> dict:
         # Placeholder for fetching default values
+        # Relevant only for database that support independently created named default values
         return {}
 
     def testing_select(self):

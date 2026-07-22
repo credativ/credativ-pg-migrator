@@ -154,7 +154,24 @@ IBM DB2 is supported via two fundamentally different connectors, heavily dependi
 ### 4.3 Oracle
 - **Mode**: Native Connection
 - **Python Module**: `oracledb`
-- **Configuration**: Set `connectivity: "native"`. Configures natively via Oracle DSN strings. Supports `SYSDBA` connections when the username is `SYS`.
+- **Configuration**: Set `connectivity: "native"`. Configures natively via Oracle DSN strings. Supports `SYSDBA` connections when the username is `SYS`. Set `oracle_thick_mode: true` in the source configuration to enable the Oracle thick client (Instant Client) when a thin-mode connection is not sufficient.
+- **Tested version**: Oracle 21.3 (see `FEATURE_MATRIX.md`).
+
+**Current status (Oracle as source):**
+
+- Migrated: tables and data, columns with data-type mapping, primary keys, unique/secondary indexes, foreign keys (including `ON DELETE CASCADE`), CHECK constraints, and identity columns (recognized both via sequence-based defaults and 12c+ `GENERATED ... AS IDENTITY`).
+- Standalone sequences: Oracle sequences (`ALL_SEQUENCES`) are migrated as independent PostgreSQL sequences (`CREATE SEQUENCE`), preserving increment, min/max, cache and cycle, and continuing from the source's current position.
+- User-defined types: Oracle **object types** are migrated as PostgreSQL composite types (`CREATE TYPE ... AS (...)`); **collection types** (VARRAY / nested tables) are migrated as array-based domains (`CREATE DOMAIN ... AS <element_type>[]`).
+- Domains: Oracle **23ai** SQL domains (`ALL_DOMAINS`) are migrated as PostgreSQL domains.
+
+**Known limitations (Oracle):**
+
+- **PL/SQL not converted**: stored procedures, functions, packages and triggers are not yet converted for Oracle (full procedural conversion currently exists only for Informix). Trigger metadata is read but bodies are not translated.
+- **Standalone sequences**: migrated as independent PostgreSQL sequences. Oracle bounds that exceed PostgreSQL's `bigint` range (e.g. the default `MAXVALUE`) are dropped so PostgreSQL applies its own defaults, and the start position is captured at planning time (not re-read at migration time). Sequence-backed table columns continue to be handled separately via PostgreSQL identity columns.
+- **CHECK constraints**: Oracle's internal `NOT NULL` checks are intentionally excluded (they are part of the column definition). `DISABLED` checks are still migrated as enforced constraints, and expressions using Oracle-specific functions/pseudocolumns are copied verbatim and may need manual adjustment.
+- **User-defined types** conversion is best-effort: attributes that reference other object types are emitted unqualified (may not resolve on the target), and type inheritance (`UNDER`/supertypes) and VARRAY upper bounds are not modeled.
+- **Domains** exist only in Oracle 23ai; on older releases (11g/12c/19c/21c) there are no domain objects to migrate, and the 23ai path is best-effort and has not been validated against a live 23ai instance.
+- **Data-type coverage**: some Oracle types (e.g. `RAW`, `XMLTYPE`, `TIMESTAMP WITH [LOCAL] TIME ZONE`, `BINARY_FLOAT`/`BINARY_DOUBLE`) are not yet fully mapped and may require custom data-type replacement rules.
 
 ### 4.4 PostgreSQL
 - **Mode**: Native Connection

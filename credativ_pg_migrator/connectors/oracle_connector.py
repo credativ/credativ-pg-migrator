@@ -21,6 +21,7 @@ import traceback
 from tabulate import tabulate
 import time
 import datetime
+import re
 
 class OracleConnector(DatabaseConnector):
     def __init__(self, config_parser, source_or_target):
@@ -41,6 +42,11 @@ class OracleConnector(DatabaseConnector):
                 self.config_parser.print_log_message('DEBUG', f"oracle_connector: thick mode already initialized or failed: {e}")
 
     def connect(self):
+        # Idempotent: reuse an already-open connection instead of orphaning it.
+        # Combined with disconnect() clearing self.connection, this lets every method
+        # safely call self.connect() at its start without depending on caller bracketing.
+        if self.connection is not None:
+            return
         connection_string = self.config_parser.get_connect_string(self.source_or_target)
         username = self.config_parser.get_db_config(self.source_or_target)['username']
         try:
@@ -55,20 +61,20 @@ class OracleConnector(DatabaseConnector):
                                                     dsn=connection_string)
 
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', "oracle_connector: connect: oracledb module is not installed.")
-            raise e
-        except Exception as e:
             self.config_parser.print_log_message('ERROR', f"oracle_connector: connect: Error connecting to Oracle database: {e}")
             self.config_parser.print_log_message('ERROR', "oracle_connector: connect: Full stack trace:")
             self.config_parser.print_log_message('ERROR', traceback.format_exc())
             raise e
 
     def disconnect(self):
-        try:
-            if self.connection:
+        if self.connection is not None:
+            try:
                 self.connection.close()
-        except Exception as e:
-            pass
+            except Exception as e:
+                self.config_parser.print_log_message('DEBUG', f"oracle_connector: disconnect: Error while closing connection: {e}")
+            finally:
+                # Always clear the handle so connect() reopens on next use
+                self.connection = None
 
     def get_sql_functions_mapping(self, settings):
         """ Returns a dictionary of SQL functions mapping for the target database """
@@ -79,13 +85,81 @@ class OracleConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', f"oracle_connector: get_sql_functions_mapping: Unsupported target database type: {target_db_type}")
 
     def migrate_sequences(self, target_connector, settings):
-        return True
+        """
+        Create a single standalone sequence in the target database.
+        Called once per sequence by the orchestrator's sequence_worker, receiving the
+        decoded protocol row (settings) with the source_* attributes captured by
+        fetch_sequences() at planning time. Returns True on success, False on failure.
+        """
+        target_schema_name = settings['target_schema_name']
+        target_sequence_name = settings['target_sequence_name']
+
+        # PostgreSQL sequences are backed by bigint; Oracle's default bounds
+        # (e.g. MAXVALUE 9999999999999999999999999999) exceed that range and must be clamped.
+        PG_BIGINT_MAX = 9223372036854775807
+        PG_BIGINT_MIN = -9223372036854775808
+
+        def _to_int(val):
+            try:
+                return int(val)
+            except (TypeError, ValueError):
+                return None
+
+        increment_by = _to_int(settings.get('source_increment_by')) or 1
+        minvalue = _to_int(settings.get('source_minvalue'))
+        maxvalue = _to_int(settings.get('source_maxvalue'))
+        start_value = _to_int(settings.get('source_start_value'))
+        cache = _to_int(settings.get('source_cache'))
+        is_cycled = str(settings.get('source_is_cycled') or '').upper() in ('Y', 'YES', 'TRUE', '1')
+
+        # Drop bounds that fall outside PostgreSQL's bigint range - let PostgreSQL use its defaults
+        if maxvalue is not None and maxvalue >= PG_BIGINT_MAX:
+            maxvalue = None
+        if minvalue is not None and minvalue <= PG_BIGINT_MIN:
+            minvalue = None
+        if start_value is not None:
+            start_value = max(min(start_value, PG_BIGINT_MAX), PG_BIGINT_MIN)
+
+        try:
+            target_connector.connect()
+
+            parts = [f'CREATE SEQUENCE IF NOT EXISTS "{target_schema_name}"."{target_sequence_name}"']
+            parts.append(f"INCREMENT BY {increment_by}")
+            if minvalue is not None:
+                parts.append(f"MINVALUE {minvalue}")
+            if maxvalue is not None:
+                parts.append(f"MAXVALUE {maxvalue}")
+            if start_value is not None:
+                # START WITH must respect the (possibly clamped) MINVALUE / MAXVALUE
+                if minvalue is not None:
+                    start_value = max(start_value, minvalue)
+                if maxvalue is not None:
+                    start_value = min(start_value, maxvalue)
+                parts.append(f"START WITH {start_value}")
+            # PostgreSQL requires CACHE >= 1; only emit an explicit cache when meaningful
+            if cache is not None and cache > 1:
+                parts.append(f"CACHE {cache}")
+            parts.append("CYCLE" if is_cycled else "NO CYCLE")
+            create_sql = " ".join(parts) + ";"
+
+            self.config_parser.print_log_message('DEBUG', f"oracle_connector: migrate_sequences: Creating sequence with SQL: {create_sql}")
+            target_connector.execute_query(create_sql)
+            target_connector.disconnect()
+            self.config_parser.print_log_message('INFO', f"oracle_connector: migrate_sequences: Sequence \"{target_schema_name}\".\"{target_sequence_name}\" created successfully.")
+            return True
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"oracle_connector: migrate_sequences: Error migrating sequence {target_sequence_name}: {e}")
+            try:
+                target_connector.disconnect()
+            except Exception:
+                pass
+            return False
 
     def fetch_table_names(self, table_schema: str):
-        query = f"""
+        query = """
             SELECT table_name
             FROM all_tables
-            WHERE owner = '{table_schema.upper()}'
+            WHERE owner = :owner
             ORDER BY table_name
         """
         try:
@@ -93,7 +167,7 @@ class OracleConnector(DatabaseConnector):
             order_num = 1
             self.connect()
             cursor = self.connection.cursor()
-            cursor.execute(query)
+            cursor.execute(query, {'owner': table_schema.upper()})
             for row in cursor.fetchall():
                 tables[order_num] = {
                     'id': None,
@@ -113,7 +187,7 @@ class OracleConnector(DatabaseConnector):
     def fetch_table_columns(self, settings) -> dict:
         table_schema = settings['table_schema']
         table_name = settings['table_name']
-        query = f"""
+        query = """
             SELECT
                 column_id,
                 column_name,
@@ -124,14 +198,29 @@ class OracleConnector(DatabaseConnector):
                 nullable,
                 data_default
             FROM all_tab_columns
-            WHERE owner = '{table_schema.upper()}' AND table_name = '{table_name.upper()}'
+            WHERE owner = :owner AND table_name = :table_name
             ORDER BY column_id
         """
+        binds = {'owner': table_schema.upper(), 'table_name': table_name.upper()}
         try:
             result = {}
             self.connect()
             cursor = self.connection.cursor()
-            cursor.execute(query)
+
+            # Oracle 12c+ identity columns (GENERATED ... AS IDENTITY) are not reflected in
+            # data_default, so collect them separately from ALL_TAB_IDENTITY_COLS.
+            identity_columns = set()
+            try:
+                cursor.execute("""
+                    SELECT column_name
+                    FROM all_tab_identity_cols
+                    WHERE owner = :owner AND table_name = :table_name
+                """, binds)
+                identity_columns = {r[0] for r in cursor.fetchall()}
+            except Exception as e_ident:
+                self.config_parser.print_log_message('DEBUG', f"oracle_connector: fetch_table_columns: ALL_TAB_IDENTITY_COLS not available (Oracle < 12c?): {e_ident}")
+
+            cursor.execute(query, binds)
             for row in cursor.fetchall():
                 column_id = row[0]
                 column_name = row[1]
@@ -158,10 +247,15 @@ class OracleConnector(DatabaseConnector):
                     'numeric_precision': data_precision if self.is_numeric_type(data_type) else None,
                     'numeric_scale': data_scale if self.is_numeric_type(data_type) else None,
                     'is_nullable': 'NO' if column_nullable == 'N' else 'YES',
-                    'is_identity': 'NO',
+                    'is_identity': 'YES' if column_name in identity_columns else 'NO',
                     'column_default_value': column_default,
                     'comment': '',
                 }
+
+                # Identity columns carry a system-generated sequence default; clear it so it
+                # is not emitted as a column default on the target.
+                if column_name in identity_columns:
+                    result[column_id]['column_default_value'] = ""
 
                 self.config_parser.print_log_message('DEBUG3', f"oracle_connector: fetch_table_columns: Checking if default value is a sequence for column {column_name} ({column_default})...")
                 if (isinstance(column_default, str)
@@ -227,7 +321,6 @@ class OracleConnector(DatabaseConnector):
                 'SMALLINT': 'SMALLINT',
                 'REAL': 'REAL',
                 'DECIMAL': 'DECIMAL',
-                'NUMBER': 'NUMERIC',
             }
         else:
             raise ValueError(f"Unsupported target database type: {target_db_type}")
@@ -239,6 +332,9 @@ class OracleConnector(DatabaseConnector):
 
     def is_string_type(self, column_type: str) -> bool:
         column_type_upper = column_type.upper()
+        # RAW and LONG RAW are binary types despite 'LONG' appearing in 'LONG RAW'
+        if 'RAW' in column_type_upper:
+            return False
         return 'CHAR' in column_type_upper or 'VARCHAR' in column_type_upper or 'LONG' in column_type_upper or 'TEXT' in column_type_upper or 'CLOB' in column_type_upper
 
     def is_numeric_type(self, column_type: str) -> bool:
@@ -257,16 +353,15 @@ class OracleConnector(DatabaseConnector):
                 cache_size,
                 last_number
             FROM all_sequences
-            WHERE sequence_owner = '{sequence_owner.upper()}'
-            AND sequence_name = '{sequence_name.upper()}'
+            WHERE sequence_owner = :sequence_owner
+            AND sequence_name = :sequence_name
         """
         try:
-            # self.connect()
+            self.connect()  # idempotent; must NOT disconnect (called within caller scopes)
             cursor = self.connection.cursor()
-            cursor.execute(query)
+            cursor.execute(query, {'sequence_owner': sequence_owner.upper(), 'sequence_name': sequence_name.upper()})
             result = cursor.fetchone()
             cursor.close()
-            # self.disconnect()
             if result:
                 return {
                     'name': result[0],
@@ -301,6 +396,7 @@ class OracleConnector(DatabaseConnector):
         processing_start_time = time.time()
         order_by_clause = ''
         try:
+            self.connect()  # ensure the source connection is open (idempotent)
             worker_id = settings['worker_id']
             source_schema_name = settings['source_schema_name']
             source_table_name = settings['source_table_name']
@@ -382,13 +478,10 @@ class OracleConnector(DatabaseConnector):
                         self.config_parser.print_log_message('DEBUG2',
                                                             f"Worker {worker_id}: Table {source_schema_name}.{source_table_name}: Processing column {col['column_name']} ({order_num}) with data type {col['data_type']}")
 
-                        if col['data_type'].lower() == 'datetime':
-                            select_columns_list.append(f"TO_CHAR({col['column_name']}, '%Y-%m-%d %H:%M:%S') as {col['column_name']}")
-                        #     select_columns_list.append(f"ST_asText(`{col['column_name']}`) as `{col['column_name']}`")
-                        # elif col['data_type'].lower() == 'set':
-                        #     select_columns_list.append(f"cast(`{col['column_name']}` as char(4000)) as `{col['column_name']}`")
-                        else:
-                            select_columns_list.append(f'''"{col['column_name']}"''')
+                        # DATE / TIMESTAMP values are returned natively as Python datetime
+                        # objects by python-oracledb and inserted directly into PostgreSQL,
+                        # so no TO_CHAR string conversion is applied here.
+                        select_columns_list.append(f'''"{col['column_name']}"''')
 
                         if col['data_type'].lower() not in ('clob', 'nclob', 'blob', 'bfile', 'long', 'long raw', 'xmltype'):
                             orderby_columns_list.append(f'''"{col['column_name']}"''')
@@ -464,9 +557,14 @@ class OracleConnector(DatabaseConnector):
                                 column_name = column['column_name']
                                 column_type = column['data_type']
                                 # self.config_parser.print_log_message('DEBUG3', f"oracle_connector: migrate_table: Worker {worker_id}: Processing column {column_name} with data type {column_type} in record {record}")
-                                if column_type.lower() in ['blob', 'clob']:
-                                    if record[column_name] is not None:
-                                        record[column_name] = record[column_name].read()
+                                # LOB values are returned as locator objects and must be read into
+                                # memory before insertion. NCLOB is included here (previously only
+                                # BLOB/CLOB were handled); the hasattr guard tolerates drivers/config
+                                # that already return LOBs as str/bytes.
+                                if column_type.lower() in ('blob', 'clob', 'nclob'):
+                                    lob_value = record[column_name]
+                                    if lob_value is not None and hasattr(lob_value, 'read'):
+                                        record[column_name] = lob_value.read()
 
                         # Insert batch into target table
                         self.config_parser.print_log_message('DEBUG', f"oracle_connector: migrate_table: Worker {worker_id}: Starting insert of {len(records)} rows from source table {source_table_name}")
@@ -615,7 +713,8 @@ class OracleConnector(DatabaseConnector):
         # AND  table_name = 'ALBUM';
         # 'TABLE', 'INDEX', 'VIEW', 'SEQUENCE', 'PACKAGE', 'FUNCTION', 'PROCEDURE', 'CONSTRAINT', 'TRIGGER', 'SYNONYM'
 
-        index_query = f"""
+        binds = {'owner': source_table_schema.upper(), 'table_name': source_table_name.upper()}
+        index_query = """
             SELECT
                 ai.index_name,
                 c.constraint_type,
@@ -632,11 +731,11 @@ class OracleConnector(DatabaseConnector):
             LEFT JOIN all_tab_cols cols
             ON cols.owner = ai.table_owner AND cols.table_name = ai.table_name AND cols.column_name = aic.column_name
             AND ai.table_owner = aic.table_owner AND ai.table_name = aic.table_name
-            LEFT JOIN dba_constraints c
+            LEFT JOIN all_constraints c
             ON c.owner = ai.owner AND c.table_name = ai.table_name AND c.constraint_name = ai.index_name
             WHERE
-                ai.table_owner = '{source_table_schema.upper()}'
-                AND ai.table_name = '{source_table_name.upper()}'
+                ai.table_owner = :owner
+                AND ai.table_name = :table_name
             GROUP BY
                 ai.owner,
                 ai.index_name,
@@ -649,8 +748,9 @@ class OracleConnector(DatabaseConnector):
                 ai.index_name
         """
         try:
+            self.connect()
             cursor = self.connection.cursor()
-            cursor.execute(index_query)
+            cursor.execute(index_query, binds)
             for row in cursor.fetchall():
                 index_name = row[0]
                 constraint_type = row[1]
@@ -675,8 +775,8 @@ class OracleConnector(DatabaseConnector):
             for order_num, index_info in table_indexes.items():
                 # Fetch the DDL for each index
                 try:
-                    query = f"""SELECT DBMS_METADATA.GET_DDL('INDEX', '{index_info['index_name'].upper()}', '{source_table_schema.upper()}') FROM dual"""
-                    cursor.execute(query)
+                    query = "SELECT DBMS_METADATA.GET_DDL('INDEX', :index_name, :owner) FROM dual"
+                    cursor.execute(query, {'index_name': index_info['index_name'].upper(), 'owner': source_table_schema.upper()})
                     ddl = cursor.fetchone()[0]
                     if ddl:
                         ddl = ddl.decode('utf-8') if isinstance(ddl, bytes) else ddl
@@ -689,8 +789,8 @@ class OracleConnector(DatabaseConnector):
             if hidden_columns_count > 0:
                 self.config_parser.print_log_message('INFO', f"oracle_connector: fetch_indexes: Table {source_table_schema}.{source_table_name} has {hidden_columns_count} hidden columns in indexes.")
                 try:
-                    query = f"""SELECT COLUMN_NAME, DATA_DEFAULT FROM all_tab_cols WHERE owner = '{source_table_schema.upper()}' AND table_name = '{source_table_name.upper()}' AND hidden_column = 'YES'"""
-                    cursor.execute(query)
+                    query = "SELECT COLUMN_NAME, DATA_DEFAULT FROM all_tab_cols WHERE owner = :owner AND table_name = :table_name AND hidden_column = 'YES'"
+                    cursor.execute(query, binds)
                     hidden_columns = cursor.fetchall()
                     for col in hidden_columns:
                         col_name = col[0]
@@ -716,15 +816,16 @@ class OracleConnector(DatabaseConnector):
         return ""
 
     def get_indexes_count(self, schema_name: str, table_name: str) -> int:
-        query = f"""
+        query = """
             SELECT count(*)
             FROM all_indexes
-            WHERE table_owner = '{schema_name.upper()}'
-            AND table_name = '{table_name.upper()}'
+            WHERE table_owner = :owner
+            AND table_name = :table_name
         """
         try:
+            self.connect()
             cursor = self.connection.cursor()
-            cursor.execute(query)
+            cursor.execute(query, {'owner': schema_name.upper(), 'table_name': table_name.upper()})
             count = cursor.fetchone()[0]
             cursor.close()
             return count
@@ -733,11 +834,11 @@ class OracleConnector(DatabaseConnector):
             return -1
 
     def get_schema_indexes_count(self, schema_name: str) -> int:
-        query = f"SELECT count(*) FROM all_indexes WHERE table_owner = '{schema_name.upper()}'"
+        query = "SELECT count(*) FROM all_indexes WHERE table_owner = :owner"
         try:
             self.connect()
             cursor = self.connection.cursor()
-            cursor.execute(query)
+            cursor.execute(query, {'owner': schema_name.upper()})
             count = cursor.fetchone()[0]
             cursor.close()
             self.disconnect()
@@ -753,7 +854,8 @@ class OracleConnector(DatabaseConnector):
 
         order_num = 1
         table_constraints = {}
-        constraints_query = f"""
+        binds = {'owner': source_table_schema.upper(), 'table_name': source_table_name.upper()}
+        constraints_query = """
             SELECT
                 fk_cons.constraint_name AS fk_constraint_name,
                 fk_cons.delete_rule,
@@ -779,8 +881,8 @@ class OracleConnector(DatabaseConnector):
                                         AND fk_col.position = pk_col.position -- Ensures correct order for composite keys
             WHERE
                 fk_cons.constraint_type = 'R'
-                AND fk_cons.owner = '{source_table_schema.upper()}'
-                AND fk_cons.table_name = '{source_table_name.upper()}'
+                AND fk_cons.owner = :owner
+                AND fk_cons.table_name = :table_name
             GROUP BY
                 fk_cons.constraint_name,
                 fk_cons.delete_rule,
@@ -792,8 +894,9 @@ class OracleConnector(DatabaseConnector):
                 fk_cons.constraint_name
         """
         try:
+            self.connect()
             cursor = self.connection.cursor()
-            cursor.execute(constraints_query)
+            cursor.execute(constraints_query, binds)
             for row in cursor.fetchall():
                 constraint_name = row[0]
                 delete_rule = row[1]
@@ -822,6 +925,64 @@ class OracleConnector(DatabaseConnector):
 
                 order_num += 1
 
+            # Fetch CHECK constraints.
+            # Oracle stores NOT NULL constraints as CHECK constraints (constraint_type = 'C')
+            # with a search_condition of the form "COLUMN" IS NOT NULL. Those are part of the
+            # column definition (already handled via is_nullable) and must NOT be migrated as
+            # separate CHECK constraints.
+            check_query = """
+                SELECT
+                    constraint_name,
+                    search_condition,
+                    status
+                FROM all_constraints
+                WHERE constraint_type = 'C'
+                    AND owner = :owner
+                    AND table_name = :table_name
+                ORDER BY constraint_name
+            """
+            try:
+                check_cursor = self.connection.cursor()
+                check_cursor.execute(check_query, binds)
+                for row in check_cursor.fetchall():
+                    check_constraint_name = row[0]
+                    # search_condition is a LONG column - python-oracledb returns it as str
+                    search_condition = (row[1] or '').strip()
+                    check_status = row[2]
+
+                    if not search_condition:
+                        continue
+
+                    # Skip Oracle internal NOT NULL constraints - handled by column definition
+                    if re.match(r'^\s*"?[\w$#]+"?\s+IS\s+NOT\s+NULL\s*$', search_condition, re.IGNORECASE):
+                        self.config_parser.print_log_message('DEBUG3', f"oracle_connector: fetch_constraints: Skipping NOT NULL check constraint {check_constraint_name} ({search_condition})")
+                        continue
+
+                    # Oracle quotes and uppercases identifiers in the stored condition
+                    # (e.g. "SALARY" > 0). The target connector re-quotes column names itself,
+                    # so strip Oracle's identifier quoting to avoid double-quoted identifiers
+                    # in the generated CHECK expression.
+                    check_expression = search_condition.replace('"', '')
+
+                    table_constraints[order_num] = {
+                        'constraint_name': check_constraint_name,
+                        'constraint_type': 'CHECK',
+                        'constraint_owner': source_table_schema,
+                        'referenced_table_name': '',
+                        'referenced_table_schema': '',
+                        'referenced_columns': '',
+                        'constraint_columns': '',
+                        'constraint_sql': check_expression,
+                        'constraint_comment': '',
+                        'delete_rule': '',
+                        'constraint_status': check_status,
+                    }
+                    self.config_parser.print_log_message('DEBUG', f"oracle_connector: fetch_constraints: Found CHECK constraint {check_constraint_name}: {check_expression}")
+                    order_num += 1
+                check_cursor.close()
+            except Exception as e:
+                self.config_parser.print_log_message('WARNING', f"oracle_connector: fetch_constraints: Error fetching CHECK constraints for {source_table_schema}.{source_table_name}: {e}")
+
             cursor.close()
             return table_constraints
         except Exception as e:
@@ -833,16 +994,17 @@ class OracleConnector(DatabaseConnector):
         return ""
 
     def get_constraints_count(self, schema_name: str, table_name: str) -> int:
-        query = f"""
+        query = """
             SELECT count(*)
             FROM all_constraints
-            WHERE owner = '{schema_name.upper()}'
-            AND table_name = '{table_name.upper()}'
+            WHERE owner = :owner
+            AND table_name = :table_name
             AND (constraint_type IN ('P', 'U', 'R') OR (constraint_type = 'C' AND generated = 'USER NAME'))
         """
         try:
+            self.connect()
             cursor = self.connection.cursor()
-            cursor.execute(query)
+            cursor.execute(query, {'owner': schema_name.upper(), 'table_name': table_name.upper()})
             count = cursor.fetchone()[0]
             cursor.close()
             return count
@@ -851,11 +1013,11 @@ class OracleConnector(DatabaseConnector):
             return -1
 
     def get_schema_constraints_count(self, schema_name: str) -> int:
-        query = f"SELECT count(*) FROM all_constraints WHERE owner = '{schema_name.upper()}'"
+        query = "SELECT count(*) FROM all_constraints WHERE owner = :owner"
         try:
             self.connect()
             cursor = self.connection.cursor()
-            cursor.execute(query)
+            cursor.execute(query, {'owner': schema_name.upper()})
             count = cursor.fetchone()[0]
             cursor.close()
             self.disconnect()
@@ -875,13 +1037,13 @@ class OracleConnector(DatabaseConnector):
                 table_name AS aliased_table_name,
                 owner AS alias_owner
             FROM all_synonyms
-            WHERE owner = '{source_schema_name}'
+            WHERE owner = :owner
             ORDER BY synonym_name
         """
         try:
             self.connect()
             cursor = self.connection.cursor()
-            cursor.execute(query)
+            cursor.execute(query, {'owner': source_schema_name})
             for row in cursor.fetchall():
                 alias_name = row[0].strip() if row[0] else ''
                 aliased_schema_name = row[1].strip() if row[1] else ''
@@ -911,7 +1073,7 @@ class OracleConnector(DatabaseConnector):
         try:
             triggers = {}
             order_num = 1
-            query = f"""
+            query = """
                 SELECT
                     trigger_name,
                     trigger_type,
@@ -919,13 +1081,13 @@ class OracleConnector(DatabaseConnector):
                     status,
                     referencing_names
                 FROM all_triggers
-                WHERE table_owner = '{table_schema.upper()}'
-                AND table_name = '{table_name.upper()}'
+                WHERE table_owner = :owner
+                AND table_name = :table_name
                 ORDER BY trigger_name
             """
             self.connect()
             cursor = self.connection.cursor()
-            cursor.execute(query)
+            cursor.execute(query, {'owner': table_schema.upper(), 'table_name': table_name.upper()})
             for row in cursor.fetchall():
                 referencing = row[4]
                 old_ref = ""
@@ -980,22 +1142,87 @@ class OracleConnector(DatabaseConnector):
         return converted_code
 
     def fetch_sequences(self, schema_name: str):
-        # Placeholder for fetching sequences
-        return {}
+        """
+        Fetch standalone sequences owned by the given schema from ALL_SEQUENCES.
+        The current position (LAST_NUMBER) is used as the target START WITH so the
+        migrated sequence continues from where the source left off. The actual
+        CREATE SEQUENCE on the target is generated by migrate_sequences().
+        """
+        sequences = {}
+        order_num = 1
+        query = f"""
+            SELECT
+                sequence_name,
+                min_value,
+                max_value,
+                increment_by,
+                cycle_flag,
+                cache_size,
+                last_number
+            FROM all_sequences
+            WHERE sequence_owner = :owner
+            ORDER BY sequence_name
+        """
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query, {'owner': schema_name.upper()})
+            for row in cursor.fetchall():
+                sequence_name = row[0]
+                min_value = row[1]
+                max_value = row[2]
+                increment_by = row[3]
+                cycle_flag = row[4]
+                cache_size = row[5]
+                last_number = row[6]
+                is_cycled = 'YES' if str(cycle_flag or '').upper() in ('Y', 'YES') else 'NO'
+
+                source_sequence_sql = (
+                    f'CREATE SEQUENCE "{schema_name}"."{sequence_name}" '
+                    f'MINVALUE {min_value} MAXVALUE {max_value} '
+                    f'INCREMENT BY {increment_by} START WITH {last_number} '
+                    f'CACHE {cache_size} {"CYCLE" if is_cycled == "YES" else "NOCYCLE"}'
+                )
+
+                sequences[order_num] = {
+                    'sequence_name': sequence_name,
+                    'id': order_num,
+                    'table_name': None,
+                    'column_name': None,
+                    'source_sequence_sql': source_sequence_sql,
+                    'source_start_value': last_number,
+                    'source_increment_by': increment_by,
+                    'source_minvalue': min_value,
+                    'source_maxvalue': max_value,
+                    'source_cache': cache_size,
+                    'source_is_cycled': is_cycled,
+                }
+                self.config_parser.print_log_message('DEBUG', f"oracle_connector: fetch_sequences: Found sequence {sequence_name} (start {last_number}, increment {increment_by}).")
+                order_num += 1
+            cursor.close()
+            self.disconnect()
+            return sequences
+        except Exception as e:
+            self.config_parser.print_log_message('WARNING', f"oracle_connector: fetch_sequences: Error fetching sequences for schema {schema_name}: {e}")
+            try:
+                self.disconnect()
+            except Exception:
+                pass
+            return sequences
 
     def fetch_views_names(self, source_schema_name: str):
         views = {}
         order_num = 1
-        query = f"""
+        query = """
             SELECT view_name
             FROM all_views
-            WHERE owner = '{source_schema_name.upper()}'
+            WHERE owner = :owner
             ORDER BY view_name
         """
         try:
             self.connect()
             cursor = self.connection.cursor()
-            cursor.execute(query)
+            cursor.execute(query, {'owner': source_schema_name.upper()})
             for row in cursor.fetchall():
                 views[order_num] = {
                     'id': None,
@@ -1018,16 +1245,16 @@ class OracleConnector(DatabaseConnector):
         source_view_name = settings['source_view_name']
         target_schema_name = settings['target_schema_name']
         target_view_name = settings['target_view_name']
-        query = f"""
+        query = """
             SELECT text
             FROM all_views
-            WHERE owner = '{source_schema_name.upper()}'
-            AND view_name = '{source_view_name.upper()}'
+            WHERE owner = :owner
+            AND view_name = :view_name
         """
         try:
             self.connect()
             cursor = self.connection.cursor()
-            cursor.execute(query)
+            cursor.execute(query, {'owner': source_schema_name.upper(), 'view_name': source_view_name.upper()})
             view_code = cursor.fetchone()[0]
             cursor.close()
             self.disconnect()
@@ -1049,6 +1276,7 @@ class OracleConnector(DatabaseConnector):
 
     def execute_query(self, query: str, params=None):
         try:
+            self.connect()
             cursor = self.connection.cursor()
             if params:
                 cursor.execute(query, params)
@@ -1062,6 +1290,7 @@ class OracleConnector(DatabaseConnector):
 
     def execute_sql_script(self, script_path: str):
         try:
+            self.connect()
             with open(script_path, 'r') as file:
                 script = file.read()
             cursor = self.connection.cursor()
@@ -1082,10 +1311,13 @@ class OracleConnector(DatabaseConnector):
         self.connection.rollback()
 
     def get_rows_count(self, table_schema: str, table_name: str, migration_limitation: str = None):
+        # Table name is a dynamic identifier and the limitation is arbitrary SQL, so neither
+        # can be bound; only the connection is ensured here.
         query = f"SELECT COUNT(*) FROM {table_schema}.{table_name}"
         if migration_limitation:
             query += f" WHERE {migration_limitation}"
         try:
+            self.connect()
             cursor = self.connection.cursor()
             cursor.execute(query)
             count = cursor.fetchone()[0]
@@ -1102,15 +1334,16 @@ class OracleConnector(DatabaseConnector):
 
     def get_table_next_identity(self, table_schema: str, table_name: str):
         try:
+            self.connect()
             # Check for Oracle 12c+ identity columns
-            query = f"""
+            query = """
                 SELECT s.LAST_NUMBER
                 FROM ALL_TAB_IDENTITY_COLS i
                 JOIN ALL_SEQUENCES s ON i.sequence_name = s.sequence_name AND i.owner = s.sequence_owner
-                WHERE i.owner = '{table_schema}' AND i.table_name = '{table_name}'
+                WHERE i.owner = :owner AND i.table_name = :table_name
             """
             cursor = self.connection.cursor()
-            cursor.execute(query)
+            cursor.execute(query, {'owner': table_schema.upper(), 'table_name': table_name.upper()})
             row = cursor.fetchone()
             cursor.close()
             if row and row[0] is not None:
@@ -1120,13 +1353,165 @@ class OracleConnector(DatabaseConnector):
             # Table or view doesn't exist (e.g. Oracle < 12c)
             return None
 
+    def _oracle_type_to_pg(self, ora_type, length, precision, scale, types_mapping):
+        """Map an Oracle scalar type (+ length/precision/scale) to a PostgreSQL type string."""
+        ora_type_up = (ora_type or '').upper()
+        pg_type = types_mapping.get(ora_type_up, ora_type_up)
+        if self.is_string_type(ora_type_up) and length:
+            pg_type += f"({length})"
+        elif self.is_numeric_type(ora_type_up) and precision:
+            if scale:
+                pg_type += f"({precision}, {scale})"
+            else:
+                pg_type += f"({precision})"
+        return pg_type
+
     def fetch_user_defined_types(self, schema: str):
-        # Placeholder for fetching user-defined types
-        return {}
+        """
+        Fetch Oracle user-defined types (object types and collection types).
+        - OBJECT types are mapped to PostgreSQL composite types (CREATE TYPE ... AS (...)).
+        - COLLECTION types (VARRAY / nested table) are mapped to a PostgreSQL array domain
+          (CREATE DOMAIN ... AS <element_type>[]).
+        Note: PL/SQL scalar SUBTYPEs are not schema objects and are not handled here.
+        Oracle SQL-standard domains (23ai+) are handled by fetch_domains().
+        """
+        user_defined_types = {}
+        order_num = 1
+        # Only PostgreSQL is supported as target by this connector
+        types_mapping = {k.upper(): v for k, v in self.get_types_mapping({'target_db_type': 'postgresql'}).items()}
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute("""
+                SELECT type_name, typecode
+                FROM all_types
+                WHERE owner = :owner
+                    AND typecode IN ('OBJECT', 'COLLECTION')
+                ORDER BY type_name
+            """, {'owner': schema.upper()})
+            type_rows = cursor.fetchall()
+
+            for type_name, typecode in type_rows:
+                type_sql = ''
+                if typecode == 'OBJECT':
+                    cursor.execute("""
+                        SELECT attr_name, attr_type_name, length, precision, scale
+                        FROM all_type_attrs
+                        WHERE owner = :owner AND type_name = :type_name
+                        ORDER BY attr_no
+                    """, {'owner': schema.upper(), 'type_name': type_name})
+                    attr_defs = []
+                    for attr_name, attr_type_name, length, precision, scale in cursor.fetchall():
+                        pg_type = self._oracle_type_to_pg(attr_type_name, length, precision, scale, types_mapping)
+                        attr_defs.append(f'"{attr_name}" {pg_type}')
+                    if not attr_defs:
+                        self.config_parser.print_log_message('DEBUG', f"oracle_connector: fetch_user_defined_types: Object type {type_name} has no scalar attributes - skipping.")
+                        continue
+                    type_sql = f'CREATE TYPE "{schema}"."{type_name}" AS (' + ', '.join(attr_defs) + ');'
+                else:  # COLLECTION - VARRAY or nested table
+                    cursor.execute("""
+                        SELECT elem_type_name, length, precision, scale
+                        FROM all_coll_types
+                        WHERE owner = :owner AND type_name = :type_name
+                    """, {'owner': schema.upper(), 'type_name': type_name})
+                    coll = cursor.fetchone()
+                    if not coll or not coll[0]:
+                        self.config_parser.print_log_message('DEBUG', f"oracle_connector: fetch_user_defined_types: Collection type {type_name} element type could not be resolved - skipping.")
+                        continue
+                    pg_elem_type = self._oracle_type_to_pg(coll[0], coll[1], coll[2], coll[3], types_mapping)
+                    type_sql = f'CREATE DOMAIN "{schema}"."{type_name}" AS {pg_elem_type}[];'
+
+                user_defined_types[order_num] = {
+                    'schema_name': schema,
+                    'type_name': type_name,
+                    'base_type': '',
+                    'sql': type_sql,
+                    'comment': '',
+                }
+                self.config_parser.print_log_message('DEBUG', f"oracle_connector: fetch_user_defined_types: {typecode} type {type_name} -> {type_sql}")
+                order_num += 1
+
+            cursor.close()
+            self.disconnect()
+            return user_defined_types
+        except Exception as e:
+            self.config_parser.print_log_message('WARNING', f"oracle_connector: fetch_user_defined_types: Error fetching user-defined types for schema {schema}: {e}")
+            try:
+                self.disconnect()
+            except Exception:
+                pass
+            return user_defined_types
 
     def fetch_domains(self, schema: str):
-        # Placeholder for fetching domains
-        return {}
+        """
+        Fetch Oracle SQL-standard domains.
+        Oracle only introduced SQL domains in 23ai (ALL_DOMAINS view). Older releases
+        (11g/12c/19c/21c) have no domain objects, so this returns {} on those versions
+        (the ALL_DOMAINS query fails and is handled gracefully).
+        Object types, VARRAYs and nested tables are handled by fetch_user_defined_types().
+        """
+        domains = {}
+        order_num = 1
+        types_mapping = {k.upper(): v for k, v in self.get_types_mapping({'target_db_type': 'postgresql'}).items()}
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute("""
+                SELECT owner, name
+                FROM all_domains
+                WHERE owner = :owner
+                ORDER BY name
+            """, {'owner': schema.upper()})
+            domain_rows = cursor.fetchall()
+
+            for domain_owner, domain_name in domain_rows:
+                # Resolve the base data type of a single-column domain
+                domain_data_type = 'TEXT'
+                try:
+                    cursor.execute("""
+                        SELECT data_type, data_length, data_precision, data_scale
+                        FROM all_domain_cols
+                        WHERE owner = :owner AND domain_name = :domain_name
+                        ORDER BY column_id
+                        FETCH FIRST 1 ROWS ONLY
+                    """, {'owner': domain_owner, 'domain_name': domain_name})
+                    dcol = cursor.fetchone()
+                    if dcol and dcol[0]:
+                        domain_data_type = self._oracle_type_to_pg(dcol[0], dcol[1], dcol[2], dcol[3], types_mapping)
+                except Exception as e_col:
+                    self.config_parser.print_log_message('DEBUG', f"oracle_connector: fetch_domains: Could not resolve base type for domain {domain_name}: {e_col}")
+
+                source_domain_sql = ''
+                try:
+                    cursor.execute("SELECT DBMS_METADATA.GET_DDL('DOMAIN', :domain_name, :owner) FROM dual", {'domain_name': domain_name, 'owner': domain_owner})
+                    ddl_row = cursor.fetchone()
+                    if ddl_row and ddl_row[0] is not None:
+                        source_domain_sql = ddl_row[0].read() if hasattr(ddl_row[0], 'read') else str(ddl_row[0])
+                except Exception as e_ddl:
+                    self.config_parser.print_log_message('DEBUG', f"oracle_connector: fetch_domains: Could not fetch DDL for domain {domain_name}: {e_ddl}")
+
+                domains[order_num] = {
+                    'domain_schema': domain_owner,
+                    'domain_name': domain_name,
+                    'source_domain_sql': source_domain_sql,
+                    'domain_data_type': domain_data_type,
+                    'source_domain_check_sql': '',
+                    'domain_comment': '',
+                }
+                self.config_parser.print_log_message('DEBUG', f"oracle_connector: fetch_domains: Found domain {domain_name} (base type {domain_data_type}).")
+                order_num += 1
+
+            cursor.close()
+            self.disconnect()
+            return domains
+        except Exception as e:
+            # Expected on Oracle < 23ai (ALL_DOMAINS does not exist) - return {} silently
+            self.config_parser.print_log_message('DEBUG', f"oracle_connector: fetch_domains: No domains fetched (Oracle < 23ai or unsupported): {e}")
+            try:
+                self.disconnect()
+            except Exception:
+                pass
+            return domains
 
     def get_create_domain_sql(self, settings):
         # Placeholder for generating CREATE DOMAIN SQL
@@ -1144,7 +1529,7 @@ class OracleConnector(DatabaseConnector):
         try:
             self.connect()
             cursor = self.connection.cursor()
-            cursor.execute(f"SELECT dbms_metadata.get_ddl('TABLE', '{table_name}', '{table_schema}') FROM dual")
+            cursor.execute("SELECT dbms_metadata.get_ddl('TABLE', :table_name, :owner) FROM dual", {'table_name': table_name, 'owner': table_schema})
 
             set_num = 1
             if cursor.description is not None:
@@ -1184,6 +1569,8 @@ class OracleConnector(DatabaseConnector):
             raise
 
     def get_database_size(self):
+        # DBA_DATA_FILES requires DBA privileges and has no ALL_* equivalent; this is a
+        # reporting-only metric, so degrade gracefully to None for non-DBA accounts.
         query = """
             SELECT SUM(bytes) / 1024 / 1024 AS size_mb
             FROM dba_data_files
@@ -1198,9 +1585,12 @@ class OracleConnector(DatabaseConnector):
             self.disconnect()
             return size_mb
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"oracle_connector: get_database_size: Error executing query: {query}")
-            self.config_parser.print_log_message('ERROR', e)
-            raise
+            self.config_parser.print_log_message('WARNING', f"oracle_connector: get_database_size: Could not determine database size (DBA_DATA_FILES may require DBA privileges): {e}")
+            try:
+                self.disconnect()
+            except Exception:
+                pass
+            return None
 
     def get_top_n_tables(self, settings):
         top_tables = {}
@@ -1211,27 +1601,45 @@ class OracleConnector(DatabaseConnector):
         top_tables['by_constraints'] = {}
 
         source_schema_name = settings.get('source_schema_name', None)
+        owner_bind = source_schema_name.upper() if source_schema_name else None
         try:
-            order_num = 1
             top_n = self.config_parser.get_top_n_tables_by_rows()
             if top_n > 0:
-                query = f"""
+                # Preferred query includes on-disk size from DBA_SEGMENTS (requires DBA privileges).
+                size_query = f"""
                     SELECT
                     t.owner,
                     t.table_name,
-                    nvl(num_rows, 0) AS row_count,
+                    nvl(t.num_rows, 0) AS row_count,
                     ROUND((s.bytes / 1024 / 1024), 2) AS row_size
                     FROM all_tables t
                     LEFT JOIN dba_segments s
                     ON t.owner = s.owner AND t.table_name = s.segment_name AND s.segment_type = 'TABLE'
-                    WHERE t.owner = '{source_schema_name.upper()}' OR '{source_schema_name.upper()}' IS NULL
-                    ORDER BY nvl(num_rows, 0) DESC
+                    WHERE (:owner IS NULL OR t.owner = :owner)
+                    ORDER BY nvl(t.num_rows, 0) DESC
+                    FETCH FIRST {top_n} ROWS ONLY
+                """
+                # Fallback without DBA_SEGMENTS so non-DBA accounts still get row counts.
+                fallback_query = f"""
+                    SELECT
+                    t.owner,
+                    t.table_name,
+                    nvl(t.num_rows, 0) AS row_count,
+                    NULL AS row_size
+                    FROM all_tables t
+                    WHERE (:owner IS NULL OR t.owner = :owner)
+                    ORDER BY nvl(t.num_rows, 0) DESC
                     FETCH FIRST {top_n} ROWS ONLY
                 """
                 self.connect()
                 cursor = self.connection.cursor()
-                cursor.execute(query)
-                tables = cursor.fetchall()
+                try:
+                    cursor.execute(size_query, {'owner': owner_bind})
+                    tables = cursor.fetchall()
+                except Exception as e_seg:
+                    self.config_parser.print_log_message('WARNING', f"oracle_connector: get_top_n_tables: DBA_SEGMENTS not accessible ({e_seg}); falling back to row counts without on-disk size.")
+                    cursor.execute(fallback_query, {'owner': owner_bind})
+                    tables = cursor.fetchall()
                 cursor.close()
                 self.disconnect()
 
@@ -1247,7 +1655,7 @@ class OracleConnector(DatabaseConnector):
                 self.config_parser.print_log_message('DEBUG', "oracle_connector: get_top_n_tables: Top N tables by rows is not configured or set to 0, skipping this part.")
 
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"oracle_connector: get_top_n_tables: Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', f"oracle_connector: get_top_n_tables: Error fetching top N tables: {e}")
 
         return top_tables
 
@@ -1256,16 +1664,16 @@ class OracleConnector(DatabaseConnector):
         return top_fk_dependencies
 
     def target_table_exists(self, target_schema_name, target_table_name):
-        query = f"""
+        query = """
             SELECT COUNT(*)
             FROM all_tables
-            WHERE owner = '{target_schema_name.upper()}'
-            AND table_name = '{target_table_name.upper()}'
+            WHERE owner = :owner
+            AND table_name = :table_name
         """
         try:
             self.connect()
             cursor = self.connection.cursor()
-            cursor.execute(query)
+            cursor.execute(query, {'owner': target_schema_name.upper(), 'table_name': target_table_name.upper()})
             exists = cursor.fetchone()[0] > 0
             cursor.close()
             self.disconnect()
@@ -1277,6 +1685,7 @@ class OracleConnector(DatabaseConnector):
 
     def fetch_all_rows(self, query):
         try:
+            self.connect()
             cursor = self.connection.cursor()
             cursor.execute(query)
             rows = cursor.fetchall()

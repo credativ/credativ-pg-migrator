@@ -1,6 +1,20 @@
 # Changelog
 
-## 0.16.0 - 2026.07.07
+## 0.16.0 - 2026.07.22
+
+- 2026.07.22
+
+  - Feature - Oracle Connector: Implemented migration of sequences as standalone objects. `fetch_sequences` reads sequences from `ALL_SEQUENCES` (increment, min/max value, cache, cycle) using the current position (`LAST_NUMBER`) as the target `START WITH`, and `migrate_sequences` creates each one on the target via `CREATE SEQUENCE IF NOT EXISTS`.
+    - Limitations: Oracle bounds that exceed PostgreSQL's `bigint` range (e.g. the default `MAXVALUE 9999999999999999999999999999`) are dropped so PostgreSQL applies its own defaults; the sequence start reflects the source position captured at planning time (it is not re-read at migration time); and Oracle `NOCACHE` / cache sizes below 2 fall back to the PostgreSQL default cache.
+  - Feature - Oracle Connector: Implemented migration of user-defined types and SQL domains. Object types are converted to PostgreSQL composite types (`CREATE TYPE ... AS (...)`, reading attributes from `ALL_TYPE_ATTRS`), collection types (VARRAY / nested tables) to array-based domains (`CREATE DOMAIN ... AS <element_type>[]`), and Oracle 23ai SQL domains (`ALL_DOMAINS`) to PostgreSQL domains. On Oracle releases without the `ALL_DOMAINS` view (11g/12c/19c/21c) domain fetching degrades gracefully to a no-op.
+    - Limitations: user-defined type conversion is best-effort — attributes referencing other object types are emitted unqualified (may not resolve on the target), and type inheritance (`UNDER`/supertypes) and VARRAY upper bounds are not modeled. The Oracle 23ai domain path is best-effort and has not been validated against a live 23ai instance. Attribute/element types depend on the existing Oracle→PostgreSQL type-mapping coverage, which is still incomplete for some types (e.g. `RAW`, `XMLTYPE`).
+  - Feature - Oracle Connector: Added migration of CHECK constraints. `fetch_constraints` now also fetches user-defined CHECK constraints in addition to foreign keys, excluding Oracle's internal NOT NULL check constraints (handled by the column definition) and stripping Oracle's identifier quoting so the generated PostgreSQL CHECK expression re-quotes cleanly.
+    - Limitations: `DISABLED` check constraints are still migrated as enforced PostgreSQL constraints; no translation of Oracle-specific functions/pseudocolumns is applied, so such expressions may require manual adjustment; and column re-quoting is heuristic (word-boundary based), so identifiers matching SQL keywords or appearing inside string literals could be affected.
+  - Fix - Oracle Connector: Detect Oracle 12c+ `GENERATED ... AS IDENTITY` columns via `ALL_TAB_IDENTITY_COLS` (previously only sequence-based `nextval` defaults were recognized as identity columns).
+  - Fix - Oracle Connector: `is_string_type` no longer misclassifies binary `RAW` / `LONG RAW` columns as string types.
+  - Fix - Oracle Connector: `connect()` no longer reports the misleading "oracledb module is not installed" for every failure; it now logs the actual connection error with a full stack trace (removed an unreachable duplicate `except` block).
+  - Fix - Oracle Connector: Removed a dead, incorrect `datetime` branch in `migrate_table` (it gated on a non-existent Oracle type and used Python `strftime` codes inside Oracle `TO_CHAR`); `DATE`/`TIMESTAMP` values are migrated natively. Also removed a duplicate `NUMBER` key in the type mapping.
+  - Improvement - Oracle Connector: Hardened connection handling and catalog access. `connect()` is now idempotent and `disconnect()` clears the connection handle (and logs close errors instead of silently swallowing them), and every catalog/query method ensures its own connection so metadata fetches no longer depend on caller connection bracketing. All catalog-view lookups and `DBMS_METADATA` calls now use bind variables (reducing hard parses / shared-pool bloat on large migrations). `fetch_indexes` uses `ALL_CONSTRAINTS` instead of `DBA_CONSTRAINTS`, and the DBA-only reporting queries `get_database_size` (`DBA_DATA_FILES`) and `get_top_n_tables` (`DBA_SEGMENTS`) now degrade gracefully for non-DBA accounts. `NCLOB` values are migrated alongside `BLOB`/`CLOB`.
 
 - 2026.07.07
 

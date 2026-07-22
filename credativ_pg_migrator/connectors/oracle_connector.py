@@ -157,10 +157,12 @@ class OracleConnector(DatabaseConnector):
 
     def fetch_table_names(self, table_schema: str):
         query = """
-            SELECT table_name
-            FROM all_tables
-            WHERE owner = :owner
-            ORDER BY table_name
+            SELECT t.table_name, tc.comments
+            FROM all_tables t
+            LEFT JOIN all_tab_comments tc
+                ON tc.owner = t.owner AND tc.table_name = t.table_name AND tc.table_type = 'TABLE'
+            WHERE t.owner = :owner
+            ORDER BY t.table_name
         """
         try:
             tables = {}
@@ -173,7 +175,7 @@ class OracleConnector(DatabaseConnector):
                     'id': None,
                     'schema_name': table_schema,
                     'table_name': row[0],
-                    'comment': ''
+                    'comment': row[1] or ''
                 }
                 order_num += 1
             cursor.close()
@@ -189,17 +191,20 @@ class OracleConnector(DatabaseConnector):
         table_name = settings['table_name']
         query = """
             SELECT
-                column_id,
-                column_name,
-                data_type,
-                char_length,
-                data_precision,
-                data_scale,
-                nullable,
-                data_default
-            FROM all_tab_columns
-            WHERE owner = :owner AND table_name = :table_name
-            ORDER BY column_id
+                c.column_id,
+                c.column_name,
+                c.data_type,
+                c.char_length,
+                c.data_precision,
+                c.data_scale,
+                c.nullable,
+                c.data_default,
+                cc.comments
+            FROM all_tab_columns c
+            LEFT JOIN all_col_comments cc
+                ON cc.owner = c.owner AND cc.table_name = c.table_name AND cc.column_name = c.column_name
+            WHERE c.owner = :owner AND c.table_name = :table_name
+            ORDER BY c.column_id
         """
         binds = {'owner': table_schema.upper(), 'table_name': table_name.upper()}
         try:
@@ -230,6 +235,21 @@ class OracleConnector(DatabaseConnector):
                 data_scale = row[5]
                 column_nullable = row[6]
                 column_default = row[7]
+                column_comment = row[8]
+
+                # Normalize Oracle types that embed precision in data_type (e.g.
+                # "TIMESTAMP(6) WITH TIME ZONE", "INTERVAL DAY(2) TO SECOND(6)") to canonical
+                # forms so get_types_mapping can match them instead of falling back to TEXT.
+                dt_upper = (data_type or '').upper()
+                if 'WITH LOCAL TIME ZONE' in dt_upper:
+                    data_type = 'TIMESTAMP WITH LOCAL TIME ZONE'
+                elif 'WITH TIME ZONE' in dt_upper:
+                    data_type = 'TIMESTAMP WITH TIME ZONE'
+                elif dt_upper.startswith('INTERVAL YEAR'):
+                    data_type = 'INTERVAL YEAR TO MONTH'
+                elif dt_upper.startswith('INTERVAL DAY'):
+                    data_type = 'INTERVAL DAY TO SECOND'
+
                 column_type = data_type.upper()
                 if self.is_string_type(column_type) and character_maximum_length is not None:
                     column_type += f"({character_maximum_length})"
@@ -249,7 +269,8 @@ class OracleConnector(DatabaseConnector):
                     'is_nullable': 'NO' if column_nullable == 'N' else 'YES',
                     'is_identity': 'YES' if column_name in identity_columns else 'NO',
                     'column_default_value': column_default,
-                    'comment': '',
+                    'comment': column_comment or '',
+                    'column_comment': column_comment or '',
                 }
 
                 # Identity columns carry a system-generated sequence default; clear it so it
@@ -297,21 +318,36 @@ class OracleConnector(DatabaseConnector):
                 'LONG NVARCHAR': 'TEXT',
                 'NCHAR': 'CHAR',
                 'LONG': 'TEXT',
+                'NCLOB': 'TEXT',
 
                 'NUMBER': 'NUMERIC',
                 'FLOAT': 'FLOAT',
                 'DOUBLE PRECISION': 'DOUBLE PRECISION',
+                'BINARY_FLOAT': 'REAL',
+                'BINARY_DOUBLE': 'DOUBLE PRECISION',
 
                 'DATE': 'DATE',
                 'TIMESTAMP': 'TIMESTAMP',
                 'TIMESTAMP(6)': 'TIMESTAMP',
+                # data_type for these embeds the precision (e.g. TIMESTAMP(6) WITH TIME ZONE);
+                # fetch_table_columns normalizes them to these canonical forms.
+                'TIMESTAMP WITH TIME ZONE': 'TIMESTAMPTZ',
+                'TIMESTAMP WITH LOCAL TIME ZONE': 'TIMESTAMPTZ',
 
                 'CLOB': 'TEXT',
                 'BLOB': 'BYTEA',
                 'LONG RAW': 'BYTEA',
+                'RAW': 'BYTEA',
 
                 'BOOLEAN': 'BOOLEAN',
                 'INTERVAL': 'INTERVAL',
+                'INTERVAL YEAR TO MONTH': 'INTERVAL',
+                'INTERVAL DAY TO SECOND': 'INTERVAL',
+
+                'ROWID': 'TEXT',
+                'UROWID': 'TEXT',
+                'XMLTYPE': 'XML',
+                'JSON': 'JSONB',
 
                 'SERIAL': 'SERIAL',
                 'BIGSERIAL': 'BIGSERIAL',
@@ -1329,8 +1365,23 @@ class OracleConnector(DatabaseConnector):
             raise
 
     def get_table_size(self, table_schema: str, table_name: str):
-        # Placeholder for fetching table size
-        return None
+        # Best-effort on-disk size in bytes from DBA_SEGMENTS (requires DBA privileges).
+        # Reporting-only and not called by the core migration, so degrade to None otherwise.
+        query = """
+            SELECT NVL(SUM(bytes), 0)
+            FROM dba_segments
+            WHERE owner = :owner AND segment_name = :table_name AND segment_type = 'TABLE'
+        """
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query, {'owner': table_schema.upper(), 'table_name': table_name.upper()})
+            row = cursor.fetchone()
+            cursor.close()
+            return row[0] if row else None
+        except Exception as e:
+            self.config_parser.print_log_message('DEBUG', f"oracle_connector: get_table_size: Could not determine size for {table_schema}.{table_name} (DBA_SEGMENTS may require DBA privileges): {e}")
+            return None
 
     def get_table_next_identity(self, table_schema: str, table_name: str):
         try:
@@ -1602,6 +1653,10 @@ class OracleConnector(DatabaseConnector):
 
         source_schema_name = settings.get('source_schema_name', None)
         owner_bind = source_schema_name.upper() if source_schema_name else None
+        # NOTE: row counts come from ALL_TABLES.NUM_ROWS (Oracle optimizer statistics). They
+        # are an estimate and may be stale or NULL if statistics were not recently gathered
+        # (DBMS_STATS). This is intentional for a fast pre-migration overview - an exact
+        # COUNT(*) per table would be prohibitively expensive on large schemas.
         try:
             top_n = self.config_parser.get_top_n_tables_by_rows()
             if top_n > 0:

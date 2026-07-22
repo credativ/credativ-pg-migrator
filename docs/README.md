@@ -160,6 +160,8 @@ IBM DB2 is supported via two fundamentally different connectors, heavily dependi
 **Current status (Oracle as source):**
 
 - Migrated: tables and data, columns with data-type mapping, primary keys, unique/secondary indexes, foreign keys (including `ON DELETE CASCADE`), CHECK constraints, and identity columns (recognized both via sequence-based defaults and 12c+ `GENERATED ... AS IDENTITY`).
+- Table and column comments (`ALL_TAB_COMMENTS` / `ALL_COL_COMMENTS`) are migrated as PostgreSQL `COMMENT ON` statements.
+- Data types: broad mapping to PostgreSQL, including `BINARY_FLOAT`/`BINARY_DOUBLE`, `RAW`, `NCLOB`, `ROWID`/`UROWID`, `XMLTYPE`, `JSON`, `TIMESTAMP WITH [LOCAL] TIME ZONE` (→ `TIMESTAMPTZ`) and `INTERVAL YEAR/DAY` variants. `NUMBER(p,s)` is mapped to the most appropriate PostgreSQL numeric/integer type based on precision and scale.
 - Standalone sequences: Oracle sequences (`ALL_SEQUENCES`) are migrated as independent PostgreSQL sequences (`CREATE SEQUENCE`), preserving increment, min/max, cache and cycle, and continuing from the source's current position.
 - User-defined types: Oracle **object types** are migrated as PostgreSQL composite types (`CREATE TYPE ... AS (...)`); **collection types** (VARRAY / nested tables) are migrated as array-based domains (`CREATE DOMAIN ... AS <element_type>[]`).
 - Domains: Oracle **23ai** SQL domains (`ALL_DOMAINS`) are migrated as PostgreSQL domains.
@@ -171,7 +173,8 @@ IBM DB2 is supported via two fundamentally different connectors, heavily dependi
 - **CHECK constraints**: Oracle's internal `NOT NULL` checks are intentionally excluded (they are part of the column definition). `DISABLED` checks are still migrated as enforced constraints, and expressions using Oracle-specific functions/pseudocolumns are copied verbatim and may need manual adjustment.
 - **User-defined types** conversion is best-effort: attributes that reference other object types are emitted unqualified (may not resolve on the target), and type inheritance (`UNDER`/supertypes) and VARRAY upper bounds are not modeled.
 - **Domains** exist only in Oracle 23ai; on older releases (11g/12c/19c/21c) there are no domain objects to migrate, and the 23ai path is best-effort and has not been validated against a live 23ai instance.
-- **Data-type coverage**: some Oracle types (e.g. `RAW`, `XMLTYPE`, `TIMESTAMP WITH [LOCAL] TIME ZONE`, `BINARY_FLOAT`/`BINARY_DOUBLE`) are not yet fully mapped and may require custom data-type replacement rules.
+- **Data-type coverage**: `SDO_GEOMETRY` (spatial) is not mapped and falls back to `TEXT` (it requires PostGIS on the target); `BFILE` (external file locator) is not migrated. `INTERVAL YEAR TO MONTH` is mapped to PostgreSQL `INTERVAL` but its value semantics differ, so such columns are worth verifying. Any type can still be overridden with custom data-type replacement rules.
+- **Large-table extraction**: data is fetched in chunks using `OFFSET … FETCH NEXT`, which becomes less efficient at very large offsets. Keyset/ROWID-range pagination is a planned optimization.
 
 ### 4.4 PostgreSQL
 - **Mode**: Native Connection

@@ -1167,23 +1167,331 @@ class OracleConnector(DatabaseConnector):
         pass
 
     def fetch_funcproc_names(self, schema: str):
-        # Placeholder for fetching function/procedure names
-        return {}
+        """Fetch standalone functions, procedures and packages from ALL_OBJECTS. The integer
+        object_id is used as the id (the protocol table stores it as INTEGER); PACKAGE BODY is
+        skipped because the package is fetched as a unit under its PACKAGE (spec) object."""
+        funcprocs = {}
+        order_num = 1
+        query = """
+            SELECT object_name, object_id, object_type
+            FROM all_objects
+            WHERE owner = :owner
+                AND object_type IN ('FUNCTION', 'PROCEDURE', 'PACKAGE')
+            ORDER BY object_type, object_name
+        """
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query, {'owner': schema.upper()})
+            for row in cursor.fetchall():
+                funcprocs[order_num] = {
+                    'name': row[0],
+                    'id': row[1],
+                    'type': row[2],
+                    'comment': '',
+                }
+                order_num += 1
+            cursor.close()
+            self.disconnect()
+            return funcprocs
+        except Exception as e:
+            self.config_parser.print_log_message('WARNING', f"oracle_connector: fetch_funcproc_names: Error fetching functions/procedures for schema {schema}: {e}")
+            try:
+                self.disconnect()
+            except Exception:
+                pass
+            return funcprocs
 
     def fetch_funcproc_code(self, funcproc_id: int):
-        # Placeholder for fetching function/procedure code
-        return ""
+        """Fetch the full source of a function/procedure/package by its ALL_OBJECTS object_id,
+        preferring DBMS_METADATA.GET_DDL (clean CREATE OR REPLACE output) and falling back to
+        reconstructing it from ALL_SOURCE."""
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute("SELECT object_type, object_name, owner FROM all_objects WHERE object_id = :id", {'id': funcproc_id})
+            row = cursor.fetchone()
+            if not row:
+                cursor.close()
+                self.disconnect()
+                return ''
+            object_type, object_name, owner = row
+            ddl_type = 'PACKAGE' if object_type in ('PACKAGE', 'PACKAGE BODY') else object_type
+            code = ''
+            try:
+                cursor.execute("SELECT DBMS_METADATA.GET_DDL(:t, :n, :o) FROM dual", {'t': ddl_type, 'n': object_name, 'o': owner})
+                r = cursor.fetchone()
+                if r and r[0] is not None:
+                    code = r[0].read() if hasattr(r[0], 'read') else str(r[0])
+            except Exception as e_md:
+                self.config_parser.print_log_message('DEBUG', f"oracle_connector: fetch_funcproc_code: DBMS_METADATA failed for {object_name} ({e_md}); falling back to ALL_SOURCE.")
+                cursor.execute("""
+                    SELECT text FROM all_source
+                    WHERE owner = :o AND name = :n
+                    ORDER BY (CASE type WHEN 'PACKAGE' THEN 1 WHEN 'PACKAGE BODY' THEN 2 ELSE 0 END), line
+                """, {'o': owner, 'n': object_name})
+                body = ''.join(t[0] for t in cursor.fetchall() if t[0] is not None)
+                code = ('CREATE OR REPLACE ' + body) if body else ''
+            cursor.close()
+            self.disconnect()
+            return code
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"oracle_connector: fetch_funcproc_code: Error fetching code for object_id {funcproc_id}: {e}")
+            try:
+                self.disconnect()
+            except Exception:
+                pass
+            return ''
+
+    def _plsql_find_top_level_kw(self, code, keywords, start=0):
+        """Return (start_idx, end_idx, word) of the first keyword found at parenthesis depth 0,
+        skipping single-quoted strings and -- / /* */ comments. (-1, -1, None) if not found."""
+        i, n, depth = start, len(code), 0
+        while i < n:
+            c = code[i]
+            if c == "'":
+                i += 1
+                while i < n and code[i] != "'":
+                    i += 1
+                i += 1
+                continue
+            if c == '-' and i + 1 < n and code[i + 1] == '-':
+                while i < n and code[i] != '\n':
+                    i += 1
+                continue
+            if c == '/' and i + 1 < n and code[i + 1] == '*':
+                i += 2
+                while i + 1 < n and not (code[i] == '*' and code[i + 1] == '/'):
+                    i += 1
+                i += 2
+                continue
+            if c == '(':
+                depth += 1
+                i += 1
+                continue
+            if c == ')':
+                depth -= 1
+                i += 1
+                continue
+            if depth == 0 and (c.isalpha() or c == '_'):
+                j = i
+                while j < n and (code[j].isalnum() or code[j] in '_$#'):
+                    j += 1
+                if code[i:j].upper() in keywords:
+                    return i, j, code[i:j].upper()
+                i = j
+                continue
+            i += 1
+        return -1, -1, None
+
+    def _map_plsql_datatypes(self, code):
+        """Map common Oracle scalar type names to PostgreSQL equivalents (word-boundaried)."""
+        mapping = [
+            (r'\bVARCHAR2\b', 'VARCHAR'), (r'\bNVARCHAR2\b', 'VARCHAR'), (r'\bNVARCHAR\b', 'VARCHAR'),
+            (r'\bNCHAR\b', 'CHAR'), (r'\bNUMBER\b', 'NUMERIC'), (r'\bBINARY_FLOAT\b', 'REAL'),
+            (r'\bBINARY_DOUBLE\b', 'DOUBLE PRECISION'), (r'\bPLS_INTEGER\b', 'INTEGER'),
+            (r'\bBINARY_INTEGER\b', 'INTEGER'), (r'\bSIMPLE_INTEGER\b', 'INTEGER'),
+            (r'\bLONG\s+RAW\b', 'BYTEA'), (r'\bRAW\b', 'BYTEA'), (r'\bCLOB\b', 'TEXT'),
+            (r'\bNCLOB\b', 'TEXT'), (r'\bBLOB\b', 'BYTEA'), (r'\bLONG\b', 'TEXT'),
+            (r'\bVARCHAR\s*\(\s*(\d+)\s+(?:BYTE|CHAR)\s*\)', r'VARCHAR(\1)'),
+        ]
+        for pat, repl in mapping:
+            code = re.sub(rf'(?i){pat}', repl, code)
+        return code
+
+    def _convert_plsql_params(self, params_str):
+        """Convert an Oracle parameter list to PostgreSQL form: reorder IN/OUT/IN OUT modes to
+        precede the name, drop the default IN, and normalize DEFAULT."""
+        params_str = params_str.strip()
+        if not params_str:
+            return ''
+        # split on top-level commas
+        parts, depth, cur = [], 0, ''
+        for ch in params_str:
+            if ch == '(':
+                depth += 1
+            elif ch == ')':
+                depth -= 1
+            if ch == ',' and depth == 0:
+                parts.append(cur)
+                cur = ''
+            else:
+                cur += ch
+        if cur.strip():
+            parts.append(cur)
+
+        converted = []
+        for p in parts:
+            p = p.strip()
+            m = re.match(r'(?is)^([\w$#]+)\s+(IN\s+OUT|IN|OUT)?\s*(.*)$', p)
+            if not m:
+                converted.append(p)
+                continue
+            name, mode, rest = m.group(1), (m.group(2) or '').upper(), m.group(3).strip()
+            rest = re.sub(r'(?i)^\s*(?::=|DEFAULT)\s*', 'DEFAULT ', rest) if re.match(r'(?i)^\s*(:=|DEFAULT)', rest) else rest
+            # separate DEFAULT clause from the type
+            dm = re.match(r'(?is)^(.*?)\s*(?::=|DEFAULT)\s+(.*)$', rest)
+            if dm:
+                ptype, default = dm.group(1).strip(), dm.group(2).strip()
+            else:
+                ptype, default = rest, ''
+            prefix = 'INOUT ' if mode == 'IN OUT' else ('OUT ' if mode == 'OUT' else '')
+            piece = f"{prefix}{name} {ptype}".strip()
+            if default:
+                piece += f" DEFAULT {default}"
+            converted.append(piece)
+        return ', '.join(converted)
+
+    def _apply_plsql_substitutions(self, code):
+        """Best-effort replacement of common Oracle PL/SQL constructs with PL/pgSQL equivalents."""
+        # DBMS_OUTPUT.PUT_LINE(x) -> RAISE NOTICE '%', (x)
+        code = re.sub(r'(?i)\bDBMS_OUTPUT\.PUT_LINE\s*\(', "RAISE NOTICE '%', (", code)
+        # RAISE_APPLICATION_ERROR(code, msg) -> RAISE EXCEPTION msg (drop the numeric code)
+        code = re.sub(r'(?i)\bRAISE_APPLICATION_ERROR\s*\(\s*-?[\w]+\s*,\s*([^;]+?)\)\s*;', r'RAISE EXCEPTION \1;', code)
+        # sequence.NEXTVAL / CURRVAL -> nextval('sequence') / currval('sequence')
+        code = re.sub(r'(?i)\b([A-Za-z_][\w$#]*)\s*\.\s*NEXTVAL\b', r"nextval('\1')", code)
+        code = re.sub(r'(?i)\b([A-Za-z_][\w$#]*)\s*\.\s*CURRVAL\b', r"currval('\1')", code)
+        # date/time + null helpers
+        code = re.sub(r'(?i)\bSYSTIMESTAMP\b', 'CURRENT_TIMESTAMP', code)
+        code = re.sub(r'(?i)\bSYSDATE\b', 'CURRENT_TIMESTAMP', code)
+        code = re.sub(r'(?i)\bNVL\s*\(', 'COALESCE(', code)
+        # EXECUTE IMMEDIATE -> EXECUTE
+        code = re.sub(r'(?i)\bEXECUTE\s+IMMEDIATE\b', 'EXECUTE', code)
+        # Oracle's dummy DUAL table
+        code = re.sub(r'(?i)\s+FROM\s+dual\b', '', code)
+        return code
+
+    def _warn_plsql_constructs(self, code, funcproc_name):
+        """Warn about PL/SQL constructs that this best-effort converter does not translate."""
+        upper = code.upper()
+        checks = [
+            ('BULK COLLECT', 'BULK COLLECT'),
+            ('FORALL', 'FORALL bulk DML'),
+            ('PRAGMA AUTONOMOUS_TRANSACTION', 'PRAGMA AUTONOMOUS_TRANSACTION (no PostgreSQL equivalent)'),
+            ('CONNECT BY', 'CONNECT BY hierarchical query'),
+            ('%ROWTYPE', '%ROWTYPE (verify - supported in PL/pgSQL but declaration order may differ)'),
+        ]
+        for needle, desc in checks:
+            if needle in upper:
+                self.config_parser.print_log_message('WARNING', f"oracle_connector: convert_funcproc_code: {funcproc_name} uses {desc}; manual review of the generated PL/pgSQL is required.")
+        # DBMS_* packages other than the OUTPUT calls we rewrite
+        for m in set(re.findall(r'(?i)\bDBMS_[A-Z_]+', code)):
+            if m.upper() != 'DBMS_OUTPUT':
+                self.config_parser.print_log_message('WARNING', f"oracle_connector: convert_funcproc_code: {funcproc_name} calls {m}, which has no automatic PostgreSQL equivalent; manual review required.")
 
     def convert_funcproc_code(self, settings):
         funcproc_code = settings['funcproc_code']
+        if isinstance(funcproc_code, dict):
+            funcproc_code = funcproc_code.get('definition', '') or ''
+        funcproc_code = (funcproc_code or '').strip()
         target_db_type = settings['target_db_type']
-        source_schema_name = settings['source_schema_name']
+        source_schema_name = settings.get('source_schema_name', '')
         target_schema_name = settings['target_schema_name']
-        table_list = settings['table_list']
-        view_list = settings['view_list']
-        converted_code = ''
-        # placeholder for actual conversion logic
-        return converted_code
+        funcproc_name = settings.get('funcproc_name', '')
+
+        if target_db_type != 'postgresql':
+            raise ValueError(f"oracle_connector: convert_funcproc_code: unsupported target database type: {target_db_type}")
+        if not funcproc_code:
+            return ''
+
+        # Strip DBMS_METADATA / Oracle DDL artifacts
+        code = re.sub(r'(?i)\b(?:NON)?EDITIONABLE\b', '', funcproc_code).strip()
+        code = re.sub(r'\s*/\s*$', '', code).strip()  # trailing SQL*Plus slash terminator
+
+        self._warn_plsql_constructs(code, funcproc_name)
+
+        # Packages have no direct PostgreSQL equivalent - preserve the source, do not create.
+        if re.match(r'(?is)^\s*CREATE\s+(OR\s+REPLACE\s+)?(EDITIONABLE\s+|NONEDITIONABLE\s+)?PACKAGE\b', code):
+            self.config_parser.print_log_message('WARNING', f"oracle_connector: convert_funcproc_code: {funcproc_name} is an Oracle PACKAGE, which has no direct PostgreSQL equivalent. It must be split manually into individual functions/procedures (and package state into session settings). Source preserved; nothing created.")
+            return ''
+
+        is_function = bool(re.match(r'(?is)^\s*CREATE\s+(OR\s+REPLACE\s+)?FUNCTION\b', code))
+        is_procedure = bool(re.match(r'(?is)^\s*CREATE\s+(OR\s+REPLACE\s+)?PROCEDURE\b', code))
+        if not (is_function or is_procedure):
+            self.config_parser.print_log_message('WARNING', f"oracle_connector: convert_funcproc_code: could not recognize {funcproc_name} as a FUNCTION or PROCEDURE; source preserved, nothing created.")
+            return ''
+
+        kind = 'FUNCTION' if is_function else 'PROCEDURE'
+
+        # Extract the object name (schema-qualified or not) right after FUNCTION/PROCEDURE
+        header_re = re.match(r'(?is)^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:FUNCTION|PROCEDURE)\s+("?[\w$#]+"?(?:\s*\.\s*"?[\w$#]+"?)?)\s*(.*)$', code)
+        if not header_re:
+            self.config_parser.print_log_message('WARNING', f"oracle_connector: convert_funcproc_code: could not parse header of {funcproc_name}; source preserved, nothing created.")
+            return ''
+        raw_name = header_re.group(1)
+        remainder = header_re.group(2)
+        # bare object name (drop any source schema qualifier and quotes); apply the configured
+        # target name-case handling for consistency with tables/views/sequences.
+        bare_name = raw_name.split('.')[-1].strip().strip('"')
+        target_name = self.config_parser.convert_names_case(bare_name)
+
+        # Parameter list (balanced-paren aware via the top-level scanner is overkill here; the
+        # params are the first parenthesised group when present)
+        params_pg = ''
+        after_params = remainder
+        if remainder.lstrip().startswith('('):
+            depth, idx = 0, remainder.index('(')
+            end = None
+            k = idx
+            in_str = False
+            while k < len(remainder):
+                ch = remainder[k]
+                if ch == "'":
+                    in_str = not in_str
+                elif not in_str and ch == '(':
+                    depth += 1
+                elif not in_str and ch == ')':
+                    depth -= 1
+                    if depth == 0:
+                        end = k
+                        break
+                k += 1
+            if end is not None:
+                params_pg = self._convert_plsql_params(remainder[idx + 1:end])
+                after_params = remainder[end + 1:]
+
+        # Return type (functions) then the IS/AS that starts the block
+        return_type = ''
+        rm = re.match(r'(?is)^\s*RETURN\s+(.+?)\s+(IS|AS)\b(.*)$', after_params)
+        if is_function and rm:
+            return_type = self._map_plsql_datatypes(rm.group(1).strip())
+            block = rm.group(3)
+        else:
+            # find the block-introducing IS/AS at top level
+            s, e, _ = self._plsql_find_top_level_kw(after_params, {'IS', 'AS'})
+            if s == -1:
+                self.config_parser.print_log_message('WARNING', f"oracle_connector: convert_funcproc_code: could not locate the IS/AS block of {funcproc_name}; source preserved, nothing created.")
+                return ''
+            block = after_params[e:]
+
+        # Split declarations (before the first top-level BEGIN) from the executable body
+        bs, be, _ = self._plsql_find_top_level_kw(block, {'BEGIN'})
+        if bs == -1:
+            declarations, body = '', block
+        else:
+            declarations, body = block[:bs].strip(), block[bs:]
+
+        # Normalize the trailing "END <name>;" -> "END;"
+        body = re.sub(r'(?is)\bEND\s+' + re.escape(bare_name) + r'\s*;\s*$', 'END;', body.strip())
+
+        # Assemble PostgreSQL DDL
+        header = f'CREATE OR REPLACE {kind} "{target_schema_name}"."{target_name}"({params_pg})'
+        if kind == 'FUNCTION':
+            header += f' RETURNS {return_type or "void"}'
+        inner = (f"DECLARE\n{declarations}\n" if declarations else '') + body
+        result = f"{header}\nAS $$\n{inner}\n$$ LANGUAGE plpgsql;"
+
+        # Type mapping + Oracle->PG construct substitutions across the whole function
+        result = self._map_plsql_datatypes(result)
+        result = self._apply_plsql_substitutions(result)
+        result = self.apply_sql_functions_mapping(result, settings)
+
+        # Re-point source-schema-qualified references to the target schema
+        if source_schema_name:
+            result = result.replace(f'"{source_schema_name.upper()}".', f'"{target_schema_name}".')
+
+        self.config_parser.print_log_message('WARNING', f"oracle_connector: convert_funcproc_code: {funcproc_name or bare_name} was converted from PL/SQL to PL/pgSQL on a best-effort basis - please review and test the generated function before relying on it.")
+        return result
 
     def fetch_sequences(self, schema_name: str):
         """

@@ -1317,14 +1317,13 @@ class OracleConnector(DatabaseConnector):
 
     def _warn_unconvertible_oracle_sql(self, sql, view_label):
         """Log warnings for Oracle constructs that cannot be reliably auto-converted, so they
-        get manual review instead of silently producing wrong PostgreSQL."""
+        get manual review instead of silently producing wrong PostgreSQL.
+        (Oracle (+) outer joins are handled by _convert_marked_outer_joins and warned about
+        separately only when a specific condition could not be converted.)"""
         if not sql:
             return
         upper = sql.upper()
         issues = []
-        if '(+)' in sql:
-            # sqlglot silently drops (+), turning an OUTER join into an INNER join - dangerous.
-            issues.append("Oracle (+) outer-join syntax, which the transpiler converts to an INNER join - the generated view MUST be rewritten with an explicit ANSI LEFT/RIGHT OUTER JOIN")
         if 'CONNECT BY' in upper or 'START WITH' in upper:
             issues.append("Oracle CONNECT BY / START WITH hierarchical query - needs a PostgreSQL recursive CTE")
         if re.search(r'\bROWNUM\b', upper):
@@ -1333,6 +1332,65 @@ class OracleConnector(DatabaseConnector):
             issues.append("Oracle LISTAGG - use STRING_AGG in PostgreSQL")
         for issue in issues:
             self.config_parser.print_log_message('WARNING', f"oracle_connector: convert_view_code: view {view_label} contains {issue}. Manual review of the generated view is recommended.")
+
+    def _preprocess_oracle_outer_joins(self, sql):
+        """Turn Oracle (+) outer-join operators into inline comment markers on the '=' so the
+        parser attaches them to the EQ node (reuses the Sybase ASE *=/=* marker technique).
+        'col = col(+)' -> right side is null-supplying -> LEFT outer.
+        'col(+) = col' -> left side is null-supplying  -> RIGHT outer."""
+        if not sql or '(+)' not in sql:
+            return sql
+        sql = re.sub(r'([\w."]+)\s*=\s*([\w."]+)\s*\(\s*\+\s*\)', r'\1 = /* left_outer */ \2', sql)
+        sql = re.sub(r'([\w."]+)\s*\(\s*\+\s*\)\s*=\s*([\w."]+)', r'\1 = /* right_outer */ \2', sql)
+        return sql
+
+    def _convert_marked_outer_joins(self, expression):
+        """Rewrite comment-marked equality predicates in the WHERE clause into ANSI LEFT/RIGHT
+        JOINs. In sqlglot's model the extra comma-separated tables are implicit joins on the
+        SELECT, so the null-supplying table's implicit join becomes a LEFT JOIN; if that table is
+        the FROM anchor, the preserved table's join becomes a RIGHT JOIN instead. Returns
+        (expression, unconverted_count)."""
+        unconverted = 0
+        for select_node in expression.find_all(sqlglot.exp.Select):
+            where = select_node.args.get('where')
+            joins = select_node.args.get('joins') or []
+            if not where or not joins:
+                continue
+            join_by_alias = {}
+            for j in joins:
+                t = j.this
+                if t is not None and t.alias_or_name:
+                    join_by_alias[t.alias_or_name] = j
+            for eq in list(where.find_all(sqlglot.exp.EQ)):
+                if not eq.comments:
+                    continue
+                if any('left_outer' in c for c in eq.comments):
+                    null_col, preserved_col = eq.right, eq.left
+                elif any('right_outer' in c for c in eq.comments):
+                    null_col, preserved_col = eq.left, eq.right
+                else:
+                    continue
+                if not isinstance(null_col, sqlglot.exp.Column) or not null_col.table:
+                    unconverted += 1
+                    continue
+                join_kind = 'LEFT'
+                target_join = join_by_alias.get(null_col.table)
+                if target_join is None and isinstance(preserved_col, sqlglot.exp.Column) and preserved_col.table:
+                    # null-supplying table is the FROM anchor - RIGHT JOIN the preserved table
+                    target_join = join_by_alias.get(preserved_col.table)
+                    join_kind = 'RIGHT'
+                if target_join is None:
+                    unconverted += 1
+                    continue
+                cond = eq.copy()
+                cond.comments = None
+                existing_on = target_join.args.get('on')
+                if existing_on is not None:
+                    cond = sqlglot.exp.And(this=existing_on, expression=cond)
+                target_join.set('kind', target_join.args.get('kind') or join_kind)
+                target_join.set('on', cond)
+                eq.replace(sqlglot.exp.Boolean(this=True))
+        return expression, unconverted
 
     def _postfix_oracle_to_pg_sql(self, sql):
         """Targeted fixes for Oracle constructs sqlglot leaves as-is or mis-handles."""
@@ -1354,6 +1412,11 @@ class OracleConnector(DatabaseConnector):
             r"STRING_AGG(\1, \2 ORDER BY \3)",
             sql,
         )
+        # Tidy the boolean placeholders left by outer-join extraction (all semantics-preserving:
+        # "WHERE TRUE AND x" == "WHERE x", "x AND TRUE" == "x", "WHERE TRUE" == no filter).
+        sql = re.sub(r'(?i)\bWHERE\s+TRUE\s+AND\s+', 'WHERE ', sql)
+        sql = re.sub(r'(?i)\s+AND\s+TRUE\b', '', sql)
+        sql = re.sub(r'(?i)\bWHERE\s+TRUE\b(?=\s*(?:;|\)|$|GROUP\s+BY|ORDER\s+BY|HAVING|LIMIT|UNION|INTERSECT|EXCEPT))', '', sql)
         return sql
 
     def convert_view_code(self, settings: dict):
@@ -1367,16 +1430,23 @@ class OracleConnector(DatabaseConnector):
         # Surface constructs that cannot be reliably auto-converted before touching the SQL.
         self._warn_unconvertible_oracle_sql(view_code, view_label)
 
-        # Transpile the Oracle defining query to PostgreSQL (handles NVL/DECODE/SYSDATE/SUBSTR/
-        # INSTR/MINUS/REGEXP/MOD/analytic functions/casts, etc.). Fall back to the raw query on
-        # any parse failure so the view is still stored (with a warning) for manual fixing.
+        # Parse the Oracle defining query and generate PostgreSQL (handles NVL/DECODE/SYSDATE/
+        # SUBSTR/INSTR/MINUS/REGEXP/MOD/analytic functions/casts, etc.), rewriting Oracle (+)
+        # outer joins into ANSI LEFT/RIGHT JOINs along the way. Fall back to the raw query on any
+        # parse failure so the view is still stored (with a warning) for manual fixing.
         converted = view_code
         try:
-            transpiled = sqlglot.transpile(view_code, read="oracle", write="postgres")
-            if transpiled and transpiled[0].strip():
-                converted = transpiled[0]
+            marked = self._preprocess_oracle_outer_joins(view_code)
+            ast = sqlglot.parse_one(marked, read="oracle")
+            ast, unconverted_joins = self._convert_marked_outer_joins(ast)
+            converted = ast.sql(dialect="postgres")
+            # Strip any outer-join markers that could not be converted, then warn about them
+            converted = re.sub(r'\s*/\*\s*(?:left|right)_outer\s*\*/\s*', ' ', converted)
+            if unconverted_joins:
+                self.config_parser.print_log_message('WARNING', f"oracle_connector: convert_view_code: view {view_label} has {unconverted_joins} Oracle (+) outer-join condition(s) that could not be converted to ANSI joins (they remain as inner-join conditions). Manual review required.")
         except Exception as e:
-            self.config_parser.print_log_message('WARNING', f"oracle_connector: convert_view_code: sqlglot transpilation of view {view_label} failed ({e}); using the raw Oracle definition. Manual review required.")
+            self.config_parser.print_log_message('WARNING', f"oracle_connector: convert_view_code: sqlglot conversion of view {view_label} failed ({e}); using the raw Oracle definition. Manual review required.")
+            converted = view_code
 
         converted = self._postfix_oracle_to_pg_sql(converted)
 

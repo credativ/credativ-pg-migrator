@@ -156,12 +156,19 @@ class OracleConnector(DatabaseConnector):
             return False
 
     def fetch_table_names(self, table_schema: str):
+        # Exclude materialized view container tables (they share the mview name and appear in
+        # ALL_TABLES) - they are migrated via the view path as CREATE MATERIALIZED VIEW, not as
+        # base tables, to avoid duplicate/conflicting objects.
         query = """
             SELECT t.table_name, tc.comments
             FROM all_tables t
             LEFT JOIN all_tab_comments tc
                 ON tc.owner = t.owner AND tc.table_name = t.table_name AND tc.table_type = 'TABLE'
             WHERE t.owner = :owner
+                AND NOT EXISTS (
+                    SELECT 1 FROM all_mviews m
+                    WHERE m.owner = t.owner AND m.mview_name = t.table_name
+                )
             ORDER BY t.table_name
         """
         try:
@@ -1247,13 +1254,19 @@ class OracleConnector(DatabaseConnector):
             return sequences
 
     def fetch_views_names(self, source_schema_name: str):
+        # Regular views (ALL_VIEWS) and materialized views (ALL_MVIEWS) are returned together,
+        # tagged with view_type so the target creates CREATE VIEW / CREATE MATERIALIZED VIEW.
         views = {}
         order_num = 1
         query = """
-            SELECT view_name
+            SELECT view_name, 'VIEW' AS view_type
             FROM all_views
             WHERE owner = :owner
-            ORDER BY view_name
+            UNION ALL
+            SELECT mview_name AS view_name, 'MATERIALIZED VIEW' AS view_type
+            FROM all_mviews
+            WHERE owner = :owner
+            ORDER BY 1
         """
         try:
             self.connect()
@@ -1264,7 +1277,8 @@ class OracleConnector(DatabaseConnector):
                     'id': None,
                     'schema_name': source_schema_name,
                     'view_name': row[0],
-                    'comment': ''
+                    'comment': '',
+                    'view_type': row[1],
                 }
                 order_num += 1
             cursor.close()
@@ -1276,35 +1290,47 @@ class OracleConnector(DatabaseConnector):
             raise
 
     def fetch_view_code(self, settings):
-        view_id = settings['view_id']
         source_schema_name = settings['source_schema_name']
         source_view_name = settings['source_view_name']
-        target_schema_name = settings['target_schema_name']
-        target_view_name = settings['target_view_name']
-        query = """
-            SELECT text
-            FROM all_views
-            WHERE owner = :owner
-            AND view_name = :view_name
-        """
+        binds = {'owner': source_schema_name.upper(), 'view_name': source_view_name.upper()}
+        # ALL_VIEWS.TEXT / ALL_MVIEWS.QUERY both hold only the defining query (no CREATE prefix).
+        view_query = "SELECT text FROM all_views WHERE owner = :owner AND view_name = :view_name"
+        mview_query = "SELECT query FROM all_mviews WHERE owner = :owner AND mview_name = :view_name"
         try:
             self.connect()
             cursor = self.connection.cursor()
-            cursor.execute(query, {'owner': source_schema_name.upper(), 'view_name': source_view_name.upper()})
-            view_code = cursor.fetchone()[0]
+            cursor.execute(view_query, binds)
+            row = cursor.fetchone()
+            if row is None:
+                # Not a plain view - fall back to a materialized view definition
+                cursor.execute(mview_query, binds)
+                row = cursor.fetchone()
+            view_code = row[0] if row and row[0] is not None else ''
             cursor.close()
             self.disconnect()
             return view_code
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"oracle_connector: fetch_view_code: Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', f"oracle_connector: fetch_view_code: Error fetching view/mview code for {source_schema_name}.{source_view_name}")
             self.config_parser.print_log_message('ERROR', e)
             raise
 
     def convert_view_code(self, settings: dict):
-        view_code = settings['view_code']
-        converted_view_code = view_code
-        converted_view_code = converted_view_code.replace(f'''"{settings['source_schema_name'].upper()}".''', f'''"{settings['target_schema_name']}".''')
-        return converted_view_code
+        view_code = settings['view_code'] or ''
+        view_type = settings.get('view_type', 'VIEW')
+        source_schema_name = settings.get('source_schema_name', '')
+        target_schema_name = settings['target_schema_name']
+        target_view_name = settings.get('target_view_name', '')
+
+        # Re-point any source-schema-qualified references to the target schema
+        if source_schema_name:
+            view_code = view_code.replace(f'"{source_schema_name.upper()}".', f'"{target_schema_name}".')
+
+        # ALL_VIEWS.TEXT / ALL_MVIEWS.QUERY store only the defining query, so wrap it into a
+        # full CREATE [MATERIALIZED] VIEW statement (view_type is 'VIEW' or 'MATERIALIZED VIEW').
+        ddl = f'CREATE {view_type} "{target_schema_name}"."{target_view_name}" AS {view_code.strip()}'
+        if not ddl.rstrip().endswith(';'):
+            ddl += ';'
+        return ddl
 
     def get_sequence_current_value(self, sequence_id: int):
         # Placeholder for fetching sequence current value

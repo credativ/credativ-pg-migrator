@@ -1114,57 +1114,159 @@ class OracleConnector(DatabaseConnector):
             raise
 
     def fetch_triggers(self, table_id: int, table_schema: str, table_name: str):
-        try:
-            triggers = {}
-            order_num = 1
-            query = """
-                SELECT
-                    trigger_name,
-                    trigger_type,
-                    triggering_event,
-                    status,
-                    referencing_names
-                FROM all_triggers
-                WHERE table_owner = :owner
+        triggers = {}
+        order_num = 1
+        query = """
+            SELECT owner, trigger_name, trigger_type, triggering_event, referencing_names, status
+            FROM all_triggers
+            WHERE table_owner = :owner
                 AND table_name = :table_name
-                ORDER BY trigger_name
-            """
+            ORDER BY trigger_name
+        """
+        try:
             self.connect()
             cursor = self.connection.cursor()
             cursor.execute(query, {'owner': table_schema.upper(), 'table_name': table_name.upper()})
-            for row in cursor.fetchall():
-                referencing = row[4]
-                old_ref = ""
-                new_ref = ""
+            rows = cursor.fetchall()
+            for row in rows:
+                owner, trigger_name, trigger_type, triggering_event, referencing, status = row
+                old_ref, new_ref = 'OLD', 'NEW'
                 if referencing:
-                    parts = referencing.split()
-                    if "OLD" in parts:
-                        old_ref = parts[parts.index("OLD") + 2]
-                    if "NEW" in parts:
-                        new_ref = parts[parts.index("NEW") + 2]
+                    parts = referencing.upper().split()
+                    if 'OLD' in parts and parts.index('OLD') + 2 < len(parts):
+                        old_ref = parts[parts.index('OLD') + 2]
+                    if 'NEW' in parts and parts.index('NEW') + 2 < len(parts):
+                        new_ref = parts[parts.index('NEW') + 2]
+
+                # Full CREATE TRIGGER DDL (contains timing/events/level/when + the PL/SQL body)
+                trigger_ddl = ''
+                try:
+                    cursor.execute("SELECT DBMS_METADATA.GET_DDL('TRIGGER', :n, :o) FROM dual", {'n': trigger_name, 'o': owner})
+                    r = cursor.fetchone()
+                    if r and r[0] is not None:
+                        trigger_ddl = r[0].read() if hasattr(r[0], 'read') else str(r[0])
+                except Exception as e_md:
+                    self.config_parser.print_log_message('DEBUG', f"oracle_connector: fetch_triggers: DBMS_METADATA failed for trigger {trigger_name}: {e_md}")
 
                 triggers[order_num] = {
                     'id': None,
-                    'name': row[0],
-                    'event': row[2],
-                    'row_statement': '',
+                    'name': trigger_name,
+                    'event': triggering_event,
+                    'row_statement': 'ROW' if 'EACH ROW' in (trigger_type or '').upper() else 'STATEMENT',
                     'old': old_ref,
                     'new': new_ref,
-                    'sql': '',
-                    'comment': ''
+                    'sql': trigger_ddl,
+                    'comment': '',
                 }
                 order_num += 1
             cursor.close()
             self.disconnect()
             return triggers
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"oracle_connector: fetch_triggers: Error executing query: {query}")
-            self.config_parser.print_log_message('ERROR', e)
-            raise
+            self.config_parser.print_log_message('WARNING', f"oracle_connector: fetch_triggers: Error fetching triggers for {table_schema}.{table_name}: {e}")
+            try:
+                self.disconnect()
+            except Exception:
+                pass
+            return triggers
 
-    def convert_trigger(self, trig: str, settings: dict):
-        # Placeholder for trigger conversion
-        pass
+    def convert_trigger(self, settings):
+        """
+        Convert an Oracle CREATE TRIGGER (row/statement level) into a PostgreSQL trigger
+        function plus a CREATE TRIGGER that calls it. Best-effort: the PL/SQL body is converted
+        with the same heuristics as convert_funcproc_code, and constructs that cannot be
+        translated are flagged for manual review.
+        """
+        trigger_sql = settings.get('trigger_sql', '') or ''
+        target_db_type = settings.get('target_db_type', 'postgresql')
+        source_schema_name = settings.get('source_schema_name', '')
+        target_schema_name = settings['target_schema_name']
+        target_table_name = settings.get('target_table_name', '')
+        trigger_name = settings.get('trigger_name', '')
+
+        if target_db_type != 'postgresql' or not trigger_sql.strip():
+            return ''
+
+        code = re.sub(r'(?i)\b(?:NON)?EDITIONABLE\b', '', trigger_sql).strip()
+        code = re.sub(r'\s*/\s*$', '', code).strip()
+
+        # Locate the PL/SQL block (DECLARE or BEGIN at top level) that follows the header.
+        ds, de, _ = self._plsql_find_top_level_kw(code, {'DECLARE', 'BEGIN'})
+        if ds == -1:
+            self.config_parser.print_log_message('WARNING', f"oracle_connector: convert_trigger: could not locate the body of trigger {trigger_name} (compound/complex trigger?); source preserved, nothing created.")
+            return ''
+        header = code[:ds]
+        body = code[ds:]
+        header_u = header.upper()
+
+        if 'COMPOUND TRIGGER' in header_u:
+            self.config_parser.print_log_message('WARNING', f"oracle_connector: convert_trigger: {trigger_name} is a COMPOUND trigger, which has no direct PostgreSQL equivalent; source preserved, nothing created.")
+            return ''
+        if re.search(r'(?i)REFERENCING\b', header) and not re.search(r'(?i)REFERENCING\s+NEW\s+AS\s+NEW\s+OLD\s+AS\s+OLD', header):
+            self.config_parser.print_log_message('WARNING', f"oracle_connector: convert_trigger: {trigger_name} uses custom REFERENCING names; the body's correlation names may need manual adjustment (PostgreSQL uses NEW/OLD).")
+
+        # Timing
+        if 'INSTEAD OF' in header_u:
+            timing = 'INSTEAD OF'
+        elif re.search(r'\bAFTER\b', header_u):
+            timing = 'AFTER'
+        else:
+            timing = 'BEFORE'
+
+        # Events (between the timing keyword and ON), e.g. "INSERT OR UPDATE OF col"
+        ev = re.search(r'(?is)\b(?:BEFORE|AFTER|INSTEAD\s+OF)\b(.*?)\bON\b', header)
+        events = re.sub(r'\s+', ' ', ev.group(1)).strip() if ev else 'INSERT'
+
+        level = 'ROW' if re.search(r'(?is)\bFOR\s+EACH\s+ROW\b', header) else 'STATEMENT'
+
+        # WHEN (condition) - only valid for row-level, non-INSTEAD-OF triggers in PostgreSQL
+        when_clause = ''
+        wm = re.search(r'(?is)\bWHEN\s*\((.*)\)\s*$', header.strip())
+        if wm and level == 'ROW' and timing != 'INSTEAD OF':
+            when_clause = re.sub(r'(?i)\bnew\s*\.', 'NEW.', wm.group(1).strip())
+            when_clause = re.sub(r'(?i)\bold\s*\.', 'OLD.', when_clause)
+
+        # Convert the body: :NEW/:OLD -> NEW/OLD, trigger predicates, PL/SQL constructs, types.
+        body = re.sub(r'(?i):\s*NEW\b', 'NEW', body)
+        body = re.sub(r'(?i):\s*OLD\b', 'OLD', body)
+        # Oracle trigger predicates INSERTING / UPDATING / DELETING -> TG_OP checks.
+        if re.search(r"(?i)\bUPDATING\s*\(", body):
+            self.config_parser.print_log_message('WARNING', f"oracle_connector: convert_trigger: {trigger_name} uses column-level UPDATING('col'); mapped to TG_OP = 'UPDATE' (column specificity is lost) - manual review recommended.")
+        body = re.sub(r"(?i)\bUPDATING\s*\(\s*'[^']*'\s*\)", "TG_OP = 'UPDATE'", body)
+        body = re.sub(r"(?i)\bINSERTING\b", "TG_OP = 'INSERT'", body)
+        body = re.sub(r"(?i)\bUPDATING\b", "TG_OP = 'UPDATE'", body)
+        body = re.sub(r"(?i)\bDELETING\b", "TG_OP = 'DELETE'", body)
+        body = self._map_plsql_datatypes(body)
+        body = self._apply_plsql_substitutions(body)
+        body = re.sub(r'(?is)\bEND\s+[\w$#]+\s*;\s*$', 'END;', body.strip())
+        if not body.rstrip().endswith(';'):
+            body += ';'
+
+        # Insert a fall-through RETURN before the outermost END (Oracle trigger bodies never
+        # RETURN, but PostgreSQL row-level triggers must return NEW/OLD).
+        if timing != 'AFTER':
+            ret_stmt = ("IF TG_OP = 'DELETE' THEN RETURN OLD; ELSE RETURN NEW; END IF;"
+                        if level == 'ROW' else "RETURN NULL;")
+            body = re.sub(r'(?is)\bEND\s*;\s*$', f'{ret_stmt}\nEND;', body, count=1)
+        else:
+            body = re.sub(r'(?is)\bEND\s*;\s*$', 'RETURN NULL;\nEND;', body, count=1)
+
+        target_trigger_name = self.config_parser.convert_names_case(trigger_name)
+        target_table = self.config_parser.convert_names_case(target_table_name)
+        func_name = f"{target_trigger_name}_tgfn"
+
+        func_ddl = (f'CREATE OR REPLACE FUNCTION "{target_schema_name}"."{func_name}"() RETURNS TRIGGER AS $$\n'
+                    f'{body}\n$$ LANGUAGE plpgsql;')
+        when_sql = f' WHEN ({when_clause})' if when_clause else ''
+        trigger_ddl = (f'CREATE TRIGGER "{target_trigger_name}" {timing} {events} ON "{target_schema_name}"."{target_table}"\n'
+                       f'FOR EACH {level}{when_sql} EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();')
+
+        result = func_ddl + '\n\n' + trigger_ddl
+        if source_schema_name:
+            result = result.replace(f'"{source_schema_name.upper()}".', f'"{target_schema_name}".')
+
+        self.config_parser.print_log_message('WARNING', f"oracle_connector: convert_trigger: trigger {trigger_name} was converted from PL/SQL to a PL/pgSQL trigger function on a best-effort basis - please review and test before relying on it.")
+        return result
 
     def fetch_funcproc_names(self, schema: str):
         """Fetch standalone functions, procedures and packages from ALL_OBJECTS. The integer

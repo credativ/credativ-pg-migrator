@@ -22,6 +22,7 @@ from tabulate import tabulate
 import time
 import datetime
 import re
+import sqlglot
 
 class OracleConnector(DatabaseConnector):
     def __init__(self, config_parser, source_or_target):
@@ -1314,20 +1315,82 @@ class OracleConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', e)
             raise
 
+    def _warn_unconvertible_oracle_sql(self, sql, view_label):
+        """Log warnings for Oracle constructs that cannot be reliably auto-converted, so they
+        get manual review instead of silently producing wrong PostgreSQL."""
+        if not sql:
+            return
+        upper = sql.upper()
+        issues = []
+        if '(+)' in sql:
+            # sqlglot silently drops (+), turning an OUTER join into an INNER join - dangerous.
+            issues.append("Oracle (+) outer-join syntax, which the transpiler converts to an INNER join - the generated view MUST be rewritten with an explicit ANSI LEFT/RIGHT OUTER JOIN")
+        if 'CONNECT BY' in upper or 'START WITH' in upper:
+            issues.append("Oracle CONNECT BY / START WITH hierarchical query - needs a PostgreSQL recursive CTE")
+        if re.search(r'\bROWNUM\b', upper):
+            issues.append("Oracle ROWNUM - use LIMIT or a window function in PostgreSQL")
+        if 'LISTAGG' in upper:
+            issues.append("Oracle LISTAGG - use STRING_AGG in PostgreSQL")
+        for issue in issues:
+            self.config_parser.print_log_message('WARNING', f"oracle_connector: convert_view_code: view {view_label} contains {issue}. Manual review of the generated view is recommended.")
+
+    def _postfix_oracle_to_pg_sql(self, sql):
+        """Targeted fixes for Oracle constructs sqlglot leaves as-is or mis-handles."""
+        if not sql:
+            return sql
+        # sqlglot renders SYSTIMESTAMP as SYSTIMESTAMP() which does not exist in PostgreSQL
+        sql = re.sub(r'(?i)\bSYSTIMESTAMP\s*\(\s*\)', 'CURRENT_TIMESTAMP', sql)
+        sql = re.sub(r'(?i)\bSYSTIMESTAMP\b', 'CURRENT_TIMESTAMP', sql)
+        # sequence.NEXTVAL / sequence.CURRVAL -> nextval('sequence') / currval('sequence')
+        sql = re.sub(r'(?i)\b([A-Za-z_][\w$#]*)\s*\.\s*NEXTVAL\b', r"nextval('\1')", sql)
+        sql = re.sub(r'(?i)\b([A-Za-z_][\w$#]*)\s*\.\s*CURRVAL\b', r"currval('\1')", sql)
+        # Oracle's dummy DUAL table - PostgreSQL allows SELECT without FROM
+        sql = re.sub(r'(?i)\s+FROM\s+dual\b', '', sql)
+        # LISTAGG(expr, 'delim') WITHIN GROUP (ORDER BY cols) -> STRING_AGG(expr, 'delim' ORDER BY cols).
+        # Conservative: only the common form (simple expr/order-by without nested parens); anything
+        # more complex is left for the manual review flagged by _warn_unconvertible_oracle_sql.
+        sql = re.sub(
+            r"(?i)\bLISTAGG\s*\(\s*([^,()]+?)\s*,\s*('[^']*')\s*\)\s*WITHIN\s+GROUP\s*\(\s*ORDER\s+BY\s+([^()]+?)\s*\)",
+            r"STRING_AGG(\1, \2 ORDER BY \3)",
+            sql,
+        )
+        return sql
+
     def convert_view_code(self, settings: dict):
         view_code = settings['view_code'] or ''
         view_type = settings.get('view_type', 'VIEW')
         source_schema_name = settings.get('source_schema_name', '')
         target_schema_name = settings['target_schema_name']
         target_view_name = settings.get('target_view_name', '')
+        view_label = f"{source_schema_name}.{target_view_name}" if source_schema_name else target_view_name
 
-        # Re-point any source-schema-qualified references to the target schema
+        # Surface constructs that cannot be reliably auto-converted before touching the SQL.
+        self._warn_unconvertible_oracle_sql(view_code, view_label)
+
+        # Transpile the Oracle defining query to PostgreSQL (handles NVL/DECODE/SYSDATE/SUBSTR/
+        # INSTR/MINUS/REGEXP/MOD/analytic functions/casts, etc.). Fall back to the raw query on
+        # any parse failure so the view is still stored (with a warning) for manual fixing.
+        converted = view_code
+        try:
+            transpiled = sqlglot.transpile(view_code, read="oracle", write="postgres")
+            if transpiled and transpiled[0].strip():
+                converted = transpiled[0]
+        except Exception as e:
+            self.config_parser.print_log_message('WARNING', f"oracle_connector: convert_view_code: sqlglot transpilation of view {view_label} failed ({e}); using the raw Oracle definition. Manual review required.")
+
+        converted = self._postfix_oracle_to_pg_sql(converted)
+
+        # Re-point any source-schema-qualified references to the target schema (both the Oracle
+        # canonical quoted-upper form and an unquoted any-case form). Unqualified references are
+        # resolved by the target search_path set by the orchestrator before view creation.
         if source_schema_name:
-            view_code = view_code.replace(f'"{source_schema_name.upper()}".', f'"{target_schema_name}".')
+            converted = converted.replace(f'"{source_schema_name.upper()}".', f'"{target_schema_name}".')
+            converted = re.sub(rf'(?i)\b{re.escape(source_schema_name)}\s*\.', f'"{target_schema_name}".', converted)
+            converted = converted.replace('""', '"')
 
         # ALL_VIEWS.TEXT / ALL_MVIEWS.QUERY store only the defining query, so wrap it into a
         # full CREATE [MATERIALIZED] VIEW statement (view_type is 'VIEW' or 'MATERIALIZED VIEW').
-        ddl = f'CREATE {view_type} "{target_schema_name}"."{target_view_name}" AS {view_code.strip()}'
+        ddl = f'CREATE {view_type} "{target_schema_name}"."{target_view_name}" AS {converted.strip()}'
         if not ddl.rstrip().endswith(';'):
             ddl += ';'
         return ddl

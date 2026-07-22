@@ -165,7 +165,7 @@ IBM DB2 is supported via two fundamentally different connectors, heavily dependi
 - Standalone sequences: Oracle sequences (`ALL_SEQUENCES`) are migrated as independent PostgreSQL sequences (`CREATE SEQUENCE`), preserving increment, min/max, cache and cycle, and continuing from the source's current position.
 - User-defined types: Oracle **object types** are migrated as PostgreSQL composite types (`CREATE TYPE ... AS (...)`); **collection types** (VARRAY / nested tables) are migrated as array-based domains (`CREATE DOMAIN ... AS <element_type>[]`).
 - Domains: Oracle **23ai** SQL domains (`ALL_DOMAINS`) are migrated as PostgreSQL domains.
-- Views and **materialized views** (`ALL_VIEWS` / `ALL_MVIEWS`) are migrated as PostgreSQL `CREATE VIEW` / `CREATE MATERIALIZED VIEW`. Materialized view container tables are excluded from base-table migration.
+- Views and **materialized views** (`ALL_VIEWS` / `ALL_MVIEWS`) are migrated as PostgreSQL `CREATE VIEW` / `CREATE MATERIALIZED VIEW`. The defining query is transpiled from Oracle to PostgreSQL SQL via `sqlglot` (e.g. `NVL`→`COALESCE`, `DECODE`→`CASE`, `SYSDATE`/`SYSTIMESTAMP`→`CURRENT_TIMESTAMP`, `SUBSTR`/`INSTR`→`SUBSTRING`/`POSITION`, `MINUS`→`EXCEPT`, `REGEXP_LIKE`→`~`, `LISTAGG`→`STRING_AGG`, `seq.NEXTVAL`→`nextval('seq')`, `FROM dual` removed). Materialized view container tables are excluded from base-table migration.
 
 **Known limitations (Oracle):**
 
@@ -176,7 +176,7 @@ IBM DB2 is supported via two fundamentally different connectors, heavily dependi
 - **Domains** exist only in Oracle 23ai; on older releases (11g/12c/19c/21c) there are no domain objects to migrate, and the 23ai path is best-effort and has not been validated against a live 23ai instance.
 - **Data-type coverage**: `SDO_GEOMETRY` (spatial) is not mapped and falls back to `TEXT` (it requires PostGIS on the target); `BFILE` (external file locator) is not migrated. `INTERVAL YEAR TO MONTH` is mapped to PostgreSQL `INTERVAL` but its value semantics differ, so such columns are worth verifying. Any type can still be overridden with custom data-type replacement rules.
 - **Large-table extraction**: data is fetched in chunks using `OFFSET … FETCH NEXT`, which becomes less efficient at very large offsets. Keyset/ROWID-range pagination is a planned optimization.
-- **Views / materialized views**: the view definition is wrapped into a `CREATE [MATERIALIZED] VIEW` and schema-requalified, but the underlying query is not deeply rewritten, so Oracle-specific SQL may need manual adjustment. There is no separate toggle for materialized vs. regular views (both follow `migrate_views`), and view dependency ordering is not topologically resolved.
+- **Views / materialized views**: the defining query is transpiled to PostgreSQL via `sqlglot` and wrapped into a `CREATE [MATERIALIZED] VIEW`. A few Oracle constructs cannot be auto-converted reliably and are logged as `WARNING`s for manual review: **`(+)` outer joins** (the transpiler turns them into INNER joins — they must be rewritten as ANSI `LEFT/RIGHT JOIN`), **`CONNECT BY` / `START WITH`** hierarchical queries (need a recursive CTE), **`ROWNUM`** (use `LIMIT`), and complex **`LISTAGG`** forms. There is no separate toggle for materialized vs. regular views (both follow `migrate_views`), and view dependency ordering is not topologically resolved.
 
 ### 4.4 PostgreSQL
 - **Mode**: Native Connection

@@ -24,6 +24,7 @@ from credativ_pg_migrator.constants import MigratorConstants
 import traceback
 import re
 import datetime
+from decimal import Decimal
 
 class PostgreSQLConnector(DatabaseConnector):
     def __init__(self, config_parser, source_or_target):
@@ -417,12 +418,20 @@ class PostgreSQLConnector(DatabaseConnector):
                 create_column_sql = f""""{column_name}" {altered_data_type}"""
                 self.config_parser.print_log_message('DEBUG', f"postgresql_connector: get_create_table_sql: Column {column_name} is NUMBER without precision, scale {numeric_scale}, altered data type to {altered_data_type}")
             elif column_data_type in ('NUMBER', 'NUMERIC') and numeric_precision == 1 and numeric_scale == 0:
-                altered_data_type = 'BOOLEAN'
+                # Narrow numeric (precision 1, scale 0). Historically mapped to BOOLEAN
+                # (common 0/1 flag convention), but that is lossy for columns storing
+                # other small integers; configurable via migration.map_numeric_1_to_boolean.
+                if self.config_parser.should_map_numeric_1_to_boolean():
+                    altered_data_type = 'BOOLEAN'
+                    alteration_reason = 'NUMBER with precision 1, scale 0'
+                else:
+                    altered_data_type = 'SMALLINT'
+                    alteration_reason = 'NUMBER with precision 1, scale 0 (boolean mapping disabled)'
                 migrator_tables.insert_target_column_alteration({
                     'target_schema_name': settings['target_schema_name'],
                     'target_table_name': settings['target_table_name'],
                     'target_column': column_info['column_name'],
-                    'reason': 'NUMBER with precision 1, scale 0',
+                    'reason': alteration_reason,
                     'original_data_type': column_data_type,
                     'altered_data_type': altered_data_type,
                 })
@@ -1503,6 +1512,34 @@ class PostgreSQLConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', f"postgresql_connector: migrate_table: Worker {worker_id}: Full stack trace: {traceback.format_exc()}")
             raise e
 
+    @staticmethod
+    def _coerce_boolean_value(value):
+        """
+        Coerce a source value into a Python bool for insertion into a PostgreSQL
+        BOOLEAN target column.
+
+        Several source connectors map narrow numeric types to BOOLEAN (e.g. Oracle
+        NUMBER(1,0)). The raw source value is then a number/string that PostgreSQL
+        will not implicitly assign to a boolean column, so we normalize it here.
+        Any non-zero number (or common truthy text) becomes True, zero/empty/common
+        falsy text becomes False, and None is preserved as SQL NULL.
+        """
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float, Decimal)):
+            return value != 0
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in ('1', 't', 'true', 'y', 'yes'):
+                return True
+            if normalized in ('0', 'f', 'false', 'n', 'no', ''):
+                return False
+            # Fallback: any other non-empty string is treated as truthy.
+            return True
+        return bool(value)
+
     def insert_batch(self, settings):
         target_schema_name = settings['target_schema_name']
         target_table_name = settings['target_table_name']
@@ -1536,11 +1573,23 @@ class PostgreSQLConnector(DatabaseConnector):
                 else:
                     extract_keys = [columns[col]['column_name'] for col in sorted(columns.keys(), key=lambda x: int(x))]
 
+                # Target columns mapped to BOOLEAN (e.g. Oracle NUMBER(1,0)) need their
+                # source numeric/text values coerced to Python bool so PostgreSQL accepts
+                # them - a bare integer (e.g. 2) cannot be implicitly assigned to boolean.
+                boolean_columns = {
+                    col_info['column_name']
+                    for col_info in columns.values()
+                    if str(col_info.get('data_type', '')).strip().lower() in ('boolean', 'bool')
+                }
+
                 formatted_data = []
                 for item in data:
                     row = []
                     for col_name in extract_keys:
-                        row.append(item.get(col_name))
+                        value = item.get(col_name)
+                        if col_name in boolean_columns:
+                            value = self._coerce_boolean_value(value)
+                        row.append(value)
                     formatted_data.append(tuple(row))
                 self.config_parser.print_log_message('DEBUG3', f"postgresql_connector: insert_batch: INSERT COLUMNS: {insert_columns}")
                 self.config_parser.print_log_message('DEBUG3', f"postgresql_connector: insert_batch: EXTRACT KEYS: {extract_keys}")

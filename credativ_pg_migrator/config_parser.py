@@ -515,6 +515,15 @@ class ConfigParser:
     def should_migrate_views(self):
         return (self.config.get('migration') or {}).get('migrate_views', False)
 
+    def should_map_numeric_1_to_boolean(self):
+        # Controls whether a narrow numeric source column (precision 1, scale 0 -
+        # e.g. Oracle NUMBER(1,0), or NUMERIC(1,0) from other engines) is mapped to
+        # a PostgreSQL BOOLEAN. Many schemas use such columns as 0/1 flags, but some
+        # store other small integers (e.g. a day-of-week 1-7), for which the boolean
+        # mapping is lossy. When disabled, these columns are mapped to SMALLINT.
+        # Default True preserves the historical behavior.
+        return (self.config.get('migration') or {}).get('map_numeric_1_to_boolean', True)
+
     def get_batch_size(self):
         return int((self.config.get('migration') or {}).get('batch_size', 100000))
 

@@ -2,6 +2,11 @@
 
 ## 0.16.0 - 2026.07.22
 
+- 2026.07.23
+
+  - Fix - PostgreSQL Connector: `insert_batch` now coerces values destined for `BOOLEAN` target columns into Python `bool` before insertion. Source connectors map narrow numeric types to `BOOLEAN` (e.g. Oracle `NUMBER(1,0)`), but the raw source value is a number/text that PostgreSQL will not implicitly assign to a boolean column (`column "..." is of type boolean but expression is of type integer`). Any non-zero number / common truthy text (`1`, `t`, `true`, `y`, `yes`) becomes `TRUE`, zero / falsy text (`0`, `f`, `false`, `n`, `no`, empty) becomes `FALSE`, and `NULL` is preserved. This fixes both the standard migration path and the mapping path, and applies to every source connector, not just Oracle.
+  - Feature - Config: The narrow-numeric → `BOOLEAN` mapping (source precision 1, scale 0 — e.g. Oracle `NUMBER(1,0)` / `NUMERIC(1,0)` from any engine) is now configurable via `migration.map_numeric_1_to_boolean` (default `true`, preserving the historical behavior). When set to `false`, such columns are mapped to `SMALLINT` instead of `BOOLEAN`, which is lossless for columns that actually store small integers rather than 0/1 flags (e.g. a `day_number_in_week` holding 1–7, which under the boolean mapping would collapse to all-`TRUE`). The rule lives in the shared target DDL generator (`postgresql_connector.get_create_table_sql`), so the setting applies uniformly to every source database.
+
 - 2026.07.22
 
   - Feature - Oracle Connector: Implemented migration of sequences as standalone objects. `fetch_sequences` reads sequences from `ALL_SEQUENCES` (increment, min/max value, cache, cycle) using the current position (`LAST_NUMBER`) as the target `START WITH`, and `migrate_sequences` creates each one on the target via `CREATE SEQUENCE IF NOT EXISTS`.

@@ -96,6 +96,11 @@ class Orchestrator:
                     self.check_pausing_resuming()
 
                     self.run_post_migration_script()
+                    self.check_pausing_resuming()
+
+                    # Final validity pass: re-attempt failed objects (if configured) and mark
+                    # which views / functions / triggers are valid at the end of the migration.
+                    self.stdwf_validate_objects()
                 else:
                     self.config_parser.print_log_message('INFO', "orchestrator: run: Dry run mode enabled. No data migration performed.")
 
@@ -1938,6 +1943,130 @@ class Orchestrator:
 
         except Exception as e:
             self.handle_error(e, 'migrate_triggers')
+
+    def stdwf_validate_objects(self):
+        """Final validity pass over migrated views, functions/procedures and triggers, run at
+        the end of a standard migration (before the summary). An object whose creation failed
+        because a dependency did not yet exist can become creatable once the whole schema is
+        present. Depending on migration.validate_objects: 'retry' re-runs the stored DDL of
+        objects not yet present and then verifies; 'check' only verifies existence; 'off' skips.
+        The outcome is recorded per object in the protocol tables (final_valid column) and the
+        valid/invalid counts appear in the summary."""
+        mode = self.config_parser.get_validate_objects_mode()
+        if mode == 'off':
+            self.config_parser.print_log_message('INFO', "orchestrator: stdwf_validate_objects: Final object validation disabled (migration.validate_objects=off).")
+            return
+        if self.config_parser.get_target_db_type() != 'postgresql':
+            self.config_parser.print_log_message('INFO', "orchestrator: stdwf_validate_objects: Skipping - object validation is implemented for PostgreSQL targets only.")
+            return
+
+        self.migrator_tables.insert_main({'task_name': 'Orchestrator', 'subtask_name': 'objects validation'})
+        self.config_parser.print_log_message('INFO', f"orchestrator: stdwf_validate_objects: Starting final object validity check (mode={mode}).")
+        try:
+            target_conn = self.load_connector('target')
+            target_conn.connect()
+            # Autocommit so a failed retry DDL does not poison later existence checks.
+            if hasattr(target_conn, 'connection') and target_conn.connection is not None:
+                target_conn.connection.autocommit = True
+            if target_conn.session_settings:
+                target_conn.execute_query(target_conn.session_settings)
+
+            object_groups = [
+                ('view', 'Views', self.migrator_tables.fetch_all_views, self.migrator_tables.decode_view_row,
+                 lambda d: {'id': d['id'], 'schema': d['target_schema_name'], 'name': d['target_view_name'],
+                            'table': None, 'ddl': d['target_view_sql'], 'label': d['target_view_name']}),
+                ('funcproc', 'Functions/Procedures', self.migrator_tables.fetch_all_funcprocs, self.migrator_tables.decode_funcproc_row,
+                 lambda d: {'id': d['id'], 'schema': d['target_schema_name'], 'name': d['target_funcproc_name'],
+                            'table': None, 'ddl': d['target_funcproc_sql'], 'label': d['target_funcproc_name']}),
+                ('trigger', 'Triggers', self.migrator_tables.fetch_all_triggers, self.migrator_tables.decode_trigger_row,
+                 lambda d: {'id': d['id'], 'schema': d['target_schema_name'], 'name': d['trigger_name'],
+                            'table': d['target_table_name'], 'ddl': d['trigger_target_sql'], 'label': d['trigger_name']}),
+            ]
+
+            for object_type, group_label, fetch_fn, decode_fn, to_obj in object_groups:
+                valid = 0
+                invalid = 0
+                retried = 0
+                for row in (fetch_fn() or []):
+                    obj = to_obj(decode_fn(row))
+                    final_valid, was_retried = self._validate_one_object(target_conn, mode, object_type, obj)
+                    if was_retried:
+                        retried += 1
+                    if final_valid is True:
+                        valid += 1
+                    elif final_valid is False:
+                        invalid += 1
+                    # final_valid is None -> object was never created (no DDL); not counted.
+                self.config_parser.print_log_message('INFO', f"orchestrator: stdwf_validate_objects: {group_label} - valid: {valid}, invalid: {invalid}" + (f", re-created on retry: {retried}" if retried else ""))
+
+            target_conn.disconnect()
+            self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': 'objects validation', 'success': True, 'message': 'finished OK'})
+        except Exception as e:
+            self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': 'objects validation', 'success': False, 'message': f'ERROR: {e}'})
+            self.handle_error(e, 'stdwf_validate_objects')
+
+    def _validate_one_object(self, target_conn, mode, object_type, obj):
+        """Determine whether a single migrated object exists (is valid) in the target, optionally
+        re-attempting its creation first (mode='retry'), and record the result in the protocol
+        table. Returns (final_valid, was_retried) where final_valid is True (present/valid),
+        False (has DDL but not present) or None (nothing was ever created for it, e.g. an object
+        with no converted DDL - left unchecked so it is not counted as invalid)."""
+        schema = obj['schema']
+        name = obj['name']
+        ddl = obj.get('ddl')
+        has_ddl = bool(ddl and ddl.strip())
+
+        def _exists():
+            if object_type == 'view':
+                return target_conn.target_view_exists(schema, name)
+            if object_type == 'funcproc':
+                return target_conn.target_funcproc_exists(schema, name)
+            if object_type == 'trigger':
+                return target_conn.target_trigger_exists(schema, obj.get('table'), name)
+            return False
+
+        message = ''
+        was_retried = False
+        try:
+            present = _exists()
+        except Exception as e:
+            present = False
+            message = f'existence check error: {e}'
+
+        if not present and mode == 'retry' and has_ddl:
+            was_retried = True
+            try:
+                if target_conn.session_settings:
+                    target_conn.execute_query(target_conn.session_settings)
+                target_conn.execute_query(f'SET search_path TO "{schema}"')
+                target_conn.execute_query(ddl)
+                target_conn.execute_query('RESET search_path')
+                message = 'valid after retry'
+                self.config_parser.print_log_message('INFO', f"orchestrator: stdwf_validate_objects: Re-created {object_type} {obj['label']} on retry (dependency now present).")
+            except Exception as e:
+                message = f'retry failed: {e}'
+                self.config_parser.print_log_message('DEBUG', f"orchestrator: stdwf_validate_objects: Retry of {object_type} {obj['label']} failed: {e}")
+            try:
+                present = _exists()
+            except Exception as e:
+                present = False
+                message = f'existence check error after retry: {e}'
+
+        if present:
+            final_valid = True
+            if not message:
+                message = 'valid'
+        elif has_ddl:
+            final_valid = False
+            if not message:
+                message = 'not found in target'
+        else:
+            # Nothing was ever created for this object (no converted DDL) - do not count it.
+            final_valid = None
+            message = 'not migrated (no target DDL)'
+
+        self.migrator_tables.update_object_final_valid(object_type, obj['id'], final_valid, message)
+        return final_valid, was_retried
 
     def view_worker(self, view_detail):
         worker_id = uuid.uuid4()

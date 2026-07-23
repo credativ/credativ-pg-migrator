@@ -2609,6 +2609,57 @@ class PostgreSQLConnector(DatabaseConnector):
         cursor.close()
         return exists
 
+    def target_view_exists(self, target_schema_name, target_view_name):
+        """True if a view or materialized view with this name exists in the target schema.
+        In PostgreSQL a view can only exist if its defining query is valid, so existence is a
+        sufficient validity signal."""
+        query = """
+            SELECT EXISTS (
+                SELECT 1 FROM pg_catalog.pg_class c
+                JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+                WHERE c.relkind IN ('v', 'm')
+                  AND lower(n.nspname) = lower(%s)
+                  AND lower(c.relname) = lower(%s)
+            )
+        """
+        with self.connection.cursor() as cursor:
+            cursor.execute(query, (target_schema_name, target_view_name))
+            return cursor.fetchone()[0]
+
+    def target_funcproc_exists(self, target_schema_name, target_funcproc_name):
+        """True if a function or procedure with this name exists in the target schema
+        (any overload / argument signature)."""
+        query = """
+            SELECT EXISTS (
+                SELECT 1 FROM pg_catalog.pg_proc p
+                JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+                WHERE lower(n.nspname) = lower(%s)
+                  AND lower(p.proname) = lower(%s)
+            )
+        """
+        with self.connection.cursor() as cursor:
+            cursor.execute(query, (target_schema_name, target_funcproc_name))
+            return cursor.fetchone()[0]
+
+    def target_trigger_exists(self, target_schema_name, target_table_name, trigger_name):
+        """True if a trigger with this name exists on the given table in the target schema.
+        The table name is optional; if not provided, any trigger with this name in the schema
+        counts."""
+        query = """
+            SELECT EXISTS (
+                SELECT 1 FROM pg_catalog.pg_trigger t
+                JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid
+                JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+                WHERE NOT t.tgisinternal
+                  AND lower(n.nspname) = lower(%s)
+                  AND lower(t.tgname) = lower(%s)
+                  AND (%s IS NULL OR lower(c.relname) = lower(%s))
+            )
+        """
+        with self.connection.cursor() as cursor:
+            cursor.execute(query, (target_schema_name, trigger_name, target_table_name, target_table_name))
+            return cursor.fetchone()[0]
+
     def fetch_all_rows(self, query):
         cursor = self.connection.cursor()
         cursor.execute(query)

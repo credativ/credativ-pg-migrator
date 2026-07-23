@@ -193,6 +193,15 @@ migration:
   migrate_triggers: true
   migrate_views: true
   set_sequences: true
+  # validate_objects: final validity pass for views, functions/procedures and triggers,
+  # run at the very end of a standard migration (before the summary). An object whose
+  # creation failed because a dependency did not yet exist can become creatable once the
+  # whole schema is migrated; this pass records which objects are valid at the end and the
+  # counts are shown in the summary.
+  #   retry (default) = re-run the stored DDL of objects not yet present, then verify and mark
+  #   check           = verify existence only, do not re-run any DDL
+  #   off             = skip the pass entirely
+  validate_objects: retry
   # Narrow numeric source columns (precision 1, scale 0 - e.g. Oracle NUMBER(1,0),
   # or NUMERIC(1,0) from other engines) are ambiguous: the same type is used both for
   # 0/1 boolean flags and for small integer codes (e.g. channel_id, day-of-week 1-7).

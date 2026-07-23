@@ -515,6 +515,28 @@ class ConfigParser:
     def should_migrate_views(self):
         return (self.config.get('migration') or {}).get('migrate_views', False)
 
+    def get_validate_objects_mode(self):
+        # Final object-validity pass at the end of standard migration (views, functions/
+        # procedures, triggers). Objects that failed to create because a dependency did not
+        # yet exist can become creatable once the whole schema is migrated.
+        #   'retry' (default): re-attempt the stored DDL of objects that are not yet present,
+        #                      then verify existence in the target catalog and mark validity.
+        #   'check'          : verify existence only (no DDL is re-executed).
+        #   'off'            : skip the pass entirely.
+        val = (self.config.get('migration') or {}).get('validate_objects', 'retry')
+        if val is True:
+            return 'retry'
+        if val is False or val is None:
+            return 'off'
+        normalized = str(val).strip().lower()
+        if normalized in ('retry', 'true', 'yes', 'on'):
+            return 'retry'
+        if normalized in ('check', 'verify', 'check_only'):
+            return 'check'
+        if normalized in ('off', 'false', 'no', 'none', 'skip'):
+            return 'off'
+        return 'retry'
+
     def should_map_numeric_1_to_boolean(self, schema_name=None, table_name=None, column_name=None):
         # Decides whether a narrow numeric source column (precision 1, scale 0 -
         # e.g. Oracle NUMBER(1,0), or NUMERIC(1,0) from other engines) is mapped to

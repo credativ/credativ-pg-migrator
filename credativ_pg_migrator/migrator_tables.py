@@ -2294,7 +2294,9 @@ class MigratorTables:
             task_started TIMESTAMP,
             task_completed TIMESTAMP,
             success BOOLEAN,
-            message TEXT
+            message TEXT,
+            final_valid BOOLEAN,
+            final_valid_message TEXT
             )
         """)
         self.config_parser.print_log_message('DEBUG', f"migrator_tables: create_table_for_funcprocs: Created protocol table {table_name} for functions/procedures.")
@@ -2386,7 +2388,9 @@ class MigratorTables:
             task_started TIMESTAMP,
             task_completed TIMESTAMP,
             success BOOLEAN,
-            message TEXT
+            message TEXT,
+            final_valid BOOLEAN,
+            final_valid_message TEXT
             )
         """)
         self.config_parser.print_log_message('DEBUG', f"migrator_tables: create_table_for_triggers: Created protocol table {table_name} for triggers.")
@@ -2411,7 +2415,9 @@ class MigratorTables:
             task_started TIMESTAMP,
             task_completed TIMESTAMP,
             success BOOLEAN,
-            message TEXT
+            message TEXT,
+            final_valid BOOLEAN,
+            final_valid_message TEXT
             )
         """)
         self.config_parser.print_log_message('DEBUG', f"migrator_tables: create_table_for_views: Created protocol table {table_name} for views.")
@@ -3171,6 +3177,52 @@ class MigratorTables:
             self.config_parser.print_log_message('ERROR', e)
             return None
 
+    def fetch_all_funcprocs(self):
+        table_name = self.config_parser.get_protocol_name_funcprocs()
+        query = f"""
+            SELECT * FROM "{self.protocol_schema}"."{table_name}" ORDER BY id
+        """
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            cursor.close()
+            return rows
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: fetch_all_funcprocs: Error selecting functions/procedures.")
+            self.config_parser.print_log_message('ERROR', e)
+            return None
+
+    def update_object_final_valid(self, object_type, row_id, final_valid, message):
+        """Record the final validity (valid/invalid) of a migrated object in its protocol
+        table, as determined by the end-of-migration validity pass. object_type is one of
+        'view', 'funcproc', 'trigger'; final_valid is a Python bool (or None)."""
+        table_map = {
+            'view': self.config_parser.get_protocol_name_views(),
+            'funcproc': self.config_parser.get_protocol_name_funcprocs(),
+            'trigger': self.config_parser.get_protocol_name_triggers(),
+        }
+        table_name = table_map.get(object_type)
+        if not table_name:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_object_final_valid: unknown object_type '{object_type}'.")
+            return
+        query = f"""
+            UPDATE "{self.protocol_schema}"."{table_name}"
+            SET final_valid = %s, final_valid_message = %s
+            WHERE id = %s
+        """
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, (final_valid, message, row_id))
+            cursor.close()
+            self.protocol_connection.connection.commit()
+        except Exception as e:
+            try:
+                self.protocol_connection.connection.rollback()
+            except Exception:
+                pass
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_object_final_valid: Error updating {object_type} {row_id} in {table_name}: {e}")
+
     def insert_view(self, settings):
         func_run_id = uuid.uuid4()
         table_name = self.config_parser.get_protocol_name_views()
@@ -3757,6 +3809,24 @@ class MigratorTables:
                     cursor.execute(f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{table_name}" WHERE source_table_rows_limited > 0""")
                     data_tables = cursor.fetchone()[0]
                     details.append(f"Empty: {empty_tables}, With Data: {data_tables}")
+
+                # Final object-validity counts (from the end-of-migration validity pass).
+                # Only shown for object types that carry a final_valid column and only when the
+                # pass actually marked something (final_valid is not all NULL).
+                if obj_name in ('Functions / Procedures', 'Triggers', 'Views') and not self.config_parser.is_dry_run():
+                    try:
+                        cursor.execute(f"""SELECT final_valid, COUNT(*) FROM "{self.protocol_schema}"."{table_name}" GROUP BY 1""")
+                        valid_count = 0
+                        invalid_count = 0
+                        for fv, c in cursor.fetchall():
+                            if fv is True:
+                                valid_count = c
+                            elif fv is False:
+                                invalid_count = c
+                        if valid_count or invalid_count:
+                            details.append(f"Valid: {valid_count}, Invalid: {invalid_count}")
+                    except Exception:
+                        self.protocol_connection.connection.rollback()
 
                 details_str = ", ".join(details)
                 if obj_name == 'Altered Columns':

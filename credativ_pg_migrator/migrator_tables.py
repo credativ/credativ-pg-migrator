@@ -2994,16 +2994,59 @@ class MigratorTables:
             self.config_parser.print_log_message('ERROR', f"migrator_tables: update_funcproc_status: ({func_run_id}): Exception: {e}")
             raise
 
+    def clamp_bigint_sequence_fields(self, settings, fields):
+        """Clamp sequence numeric fields to the PostgreSQL BIGINT range.
+
+        Some source databases (e.g. Oracle) allow sequence values well beyond
+        the BIGINT range (Oracle MAXVALUE can be up to 28 nines), which would
+        otherwise raise "bigint out of range" when inserted into the protocol
+        tables. Values outside the range are clamped to the BIGINT boundary.
+
+        Returns a tuple (clamped_values, message) where clamped_values is a dict
+        keyed by field name and message is a human readable note describing any
+        clamping that happened (None if nothing was clamped).
+        """
+        BIGINT_MIN = -9223372036854775808
+        BIGINT_MAX = 9223372036854775807
+        clamped = {}
+        overflow_notes = []
+        for field in fields:
+            value = settings.get(field)
+            if value is None:
+                clamped[field] = None
+                continue
+            try:
+                int_value = int(value)
+            except (TypeError, ValueError):
+                clamped[field] = value
+                continue
+            if int_value > BIGINT_MAX:
+                clamped[field] = BIGINT_MAX
+                overflow_notes.append(f"{field} value {int_value} exceeded bigint maximum, clamped to {BIGINT_MAX}")
+            elif int_value < BIGINT_MIN:
+                clamped[field] = BIGINT_MIN
+                overflow_notes.append(f"{field} value {int_value} exceeded bigint minimum, clamped to {BIGINT_MIN}")
+            else:
+                clamped[field] = int_value
+        message = '; '.join(overflow_notes) if overflow_notes else None
+        return clamped, message
+
     def insert_sequence(self, settings):
         func_run_id = uuid.uuid4()
         protocol_table_name = self.config_parser.get_protocol_name_sequences()
+
+        clamped, message = self.clamp_bigint_sequence_fields(
+            settings, ('source_start_value', 'source_increment_by', 'source_minvalue', 'source_maxvalue', 'source_cache'))
+        if message:
+            self.config_parser.print_log_message('WARNING', f"migrator_tables: insert_sequence: ({func_run_id}): sequence {settings.get('source_sequence_name')}: {message}")
+
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{protocol_table_name}"
-            (sequence_id, source_schema_name, source_table_name, source_column_name, source_sequence_name, source_sequence_sql, source_start_value, source_increment_by, source_minvalue, source_maxvalue, source_cache, source_is_cycled, source_sequence_comment, target_schema_name, target_table_name, target_column_name, target_sequence_name, target_sequence_sql, target_sequence_comment)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (sequence_id, source_schema_name, source_table_name, source_column_name, source_sequence_name, source_sequence_sql, source_start_value, source_increment_by, source_minvalue, source_maxvalue, source_cache, source_is_cycled, source_sequence_comment, target_schema_name, target_table_name, target_column_name, target_sequence_name, target_sequence_sql, target_sequence_comment, message)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (settings.get('sequence_id'), settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_column_name'), settings.get('source_sequence_name'), settings.get('source_sequence_sql'), settings.get('source_start_value'), settings.get('source_increment_by'), settings.get('source_minvalue'), settings.get('source_maxvalue'), settings.get('source_cache'), settings.get('source_is_cycled'), settings.get('source_sequence_comment'), settings.get('target_schema_name'), settings.get('target_table_name'), settings.get('target_column_name'), settings.get('target_sequence_name'), settings.get('target_sequence_sql'), settings.get('target_sequence_comment'))
+        params = (settings.get('sequence_id'), settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_column_name'), settings.get('source_sequence_name'), settings.get('source_sequence_sql'), clamped['source_start_value'], clamped['source_increment_by'], clamped['source_minvalue'], clamped['source_maxvalue'], clamped['source_cache'], settings.get('source_is_cycled'), settings.get('source_sequence_comment'), settings.get('target_schema_name'), settings.get('target_table_name'), settings.get('target_column_name'), settings.get('target_sequence_name'), settings.get('target_sequence_sql'), settings.get('target_sequence_comment'), message)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -4915,13 +4958,21 @@ class MigratorTables:
 
     def insert_ddl_sequences(self, settings):
         func_run_id = uuid.uuid4()
+
+        clamped, message = self.clamp_bigint_sequence_fields(
+            settings, ('source_start_value', 'source_increment_by', 'source_minvalue', 'source_maxvalue', 'source_cache'))
+        source_seq_comment = settings.get('source_seq_comment')
+        if message:
+            self.config_parser.print_log_message('WARNING', f"migrator_tables: insert_ddl_sequences: ({func_run_id}): sequence {settings.get('source_seq_name')}: {message}")
+            source_seq_comment = f"{source_seq_comment} | {message}" if source_seq_comment else message
+
         query = f"""
             INSERT INTO "{self.protocol_schema}"."ddl_sequences"
             (source_schema_name, source_seq_name, source_table_name, source_column_name, source_start_value, source_increment_by, source_minvalue, source_maxvalue, source_cache, source_is_cycled, source_ddl_text, source_seq_comment)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
         """
-        params = (settings.get('source_schema_name'), settings.get('source_seq_name'), settings.get('source_table_name'), settings.get('source_column_name'), settings.get('source_start_value'), settings.get('source_increment_by'), settings.get('source_minvalue'), settings.get('source_maxvalue'), settings.get('source_cache'), settings.get('source_is_cycled'), settings.get('source_ddl_text'), settings.get('source_seq_comment'))
+        params = (settings.get('source_schema_name'), settings.get('source_seq_name'), settings.get('source_table_name'), settings.get('source_column_name'), clamped['source_start_value'], clamped['source_increment_by'], clamped['source_minvalue'], clamped['source_maxvalue'], clamped['source_cache'], settings.get('source_is_cycled'), settings.get('source_ddl_text'), source_seq_comment)
         self.config_parser.print_log_message('DEBUG3', f"migrator_tables: insert_ddl_sequences: inserting: {params}")
         try:
             cursor = self.protocol_connection.connection.cursor()

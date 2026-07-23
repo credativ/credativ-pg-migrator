@@ -634,16 +634,25 @@ class PostgreSQLConnector(DatabaseConnector):
         target_table_name = self.config_parser.convert_names_case(settings['target_table_name'])
         index_columns = settings['index_columns']
 
-        # Split index_columns by comma, clean up quotes, convert case, and re-quote
+        # Split index_columns by comma, clean up quotes, convert case, and re-quote.
+        # A column entry may carry an ASC/DESC ordering keyword (e.g. '"STORE_NAME" ASC')
+        # which must be preserved but must NOT be quoted together with the column name -
+        # otherwise the re-quoting produces a dangling quote ('"store_name" asc"').
         column_names = []
         for col in index_columns.split(','):
             col = col.strip()
+            # Split off a trailing ASC/DESC ordering keyword (split on the last whitespace)
+            order_direction = ''
+            parts = col.rsplit(None, 1)
+            if len(parts) == 2 and parts[1].upper() in ('ASC', 'DESC'):
+                col = parts[0].strip()
+                order_direction = f' {parts[1].upper()}'
             # Remove backticks, single quotes, and double quotes
             col = col.strip('`').strip("'").strip('"')
             # Convert case using config parser function
             col = self.config_parser.convert_names_case(col)
-            # Add to list with double quotes
-            column_names.append(f'"{col}"')
+            # Add to list with double quotes, preserving the (unquoted) ordering keyword
+            column_names.append(f'"{col}"{order_direction}')
         # Join back with comma
         index_columns = ', '.join(column_names)
         # index_comment = settings['index_comment']

@@ -2057,6 +2057,26 @@ class OracleConnector(DatabaseConnector):
                 pg_type += f"({precision})"
         return pg_type
 
+    def _toposort_udts(self, deps):
+        """Order user-defined type names so each type appears after the types it depends on.
+        `deps` maps a type name to the set of (in-schema) type names it references. Ties are
+        broken alphabetically for deterministic output; a dependency cycle (rare - possible via
+        REF attributes) is broken by emitting the remaining names alphabetically."""
+        remaining = {name: set(d) for name, d in deps.items()}
+        ordered = []
+        while remaining:
+            ready = sorted(name for name, d in remaining.items() if not d)
+            if not ready:
+                # cycle or dangling dependency - emit the rest deterministically
+                ordered.extend(sorted(remaining.keys()))
+                break
+            for name in ready:
+                ordered.append(name)
+                remaining.pop(name)
+            for d in remaining.values():
+                d.difference_update(ready)
+        return ordered
+
     def fetch_user_defined_types(self, schema: str):
         """
         Fetch Oracle user-defined types (object types and collection types).
@@ -2082,8 +2102,17 @@ class OracleConnector(DatabaseConnector):
             """, {'owner': schema.upper()})
             type_rows = cursor.fetchall()
 
+            # Set of all UDT names in this schema (upper-cased). A type attribute / collection
+            # element whose type is in this set is a dependency on another user-defined type.
+            udt_names = {tn.upper() for tn, _tc in type_rows}
+            typecode_by_name = {tn.upper(): tc for tn, tc in type_rows}
+            attrs_by_type = {}    # type_name(upper) -> list of (attr_name, attr_type_name, length, precision, scale)
+            elem_by_type = {}     # type_name(upper) -> (elem_type_name, length, precision, scale)
+            deps = {tn.upper(): set() for tn, _tc in type_rows}
+
+            # Pass 1: collect attributes / element types and build the dependency graph.
             for type_name, typecode in type_rows:
-                type_sql = ''
+                tn_up = type_name.upper()
                 if typecode == 'OBJECT':
                     cursor.execute("""
                         SELECT attr_name, attr_type_name, length, precision, scale
@@ -2091,14 +2120,11 @@ class OracleConnector(DatabaseConnector):
                         WHERE owner = :owner AND type_name = :type_name
                         ORDER BY attr_no
                     """, {'owner': schema.upper(), 'type_name': type_name})
-                    attr_defs = []
-                    for attr_name, attr_type_name, length, precision, scale in cursor.fetchall():
-                        pg_type = self._oracle_type_to_pg(attr_type_name, length, precision, scale, types_mapping)
-                        attr_defs.append(f'"{attr_name}" {pg_type}')
-                    if not attr_defs:
-                        self.config_parser.print_log_message('DEBUG', f"oracle_connector: fetch_user_defined_types: Object type {type_name} has no scalar attributes - skipping.")
-                        continue
-                    type_sql = f'CREATE TYPE "{schema}"."{type_name}" AS (' + ', '.join(attr_defs) + ');'
+                    attrs = cursor.fetchall()
+                    attrs_by_type[tn_up] = attrs
+                    for _attr_name, attr_type_name, _length, _precision, _scale in attrs:
+                        if attr_type_name and attr_type_name.upper() in udt_names:
+                            deps[tn_up].add(attr_type_name.upper())
                 else:  # COLLECTION - VARRAY or nested table
                     cursor.execute("""
                         SELECT elem_type_name, length, precision, scale
@@ -2106,20 +2132,54 @@ class OracleConnector(DatabaseConnector):
                         WHERE owner = :owner AND type_name = :type_name
                     """, {'owner': schema.upper(), 'type_name': type_name})
                     coll = cursor.fetchone()
-                    if not coll or not coll[0]:
-                        self.config_parser.print_log_message('DEBUG', f"oracle_connector: fetch_user_defined_types: Collection type {type_name} element type could not be resolved - skipping.")
+                    elem_by_type[tn_up] = coll
+                    if coll and coll[0] and coll[0].upper() in udt_names:
+                        deps[tn_up].add(coll[0].upper())
+
+            # Pass 2: emit CREATE statements in dependency order (a referenced type must be
+            # created before the type that references it), applying the configured name-case
+            # handling to BOTH the type name and any nested UDT reference so they always match.
+            def _q(name):
+                return self.config_parser.convert_names_case(name)
+
+            for tn_up in self._toposort_udts(deps):
+                typecode = typecode_by_name.get(tn_up)
+                type_sql = ''
+                if typecode == 'OBJECT':
+                    attr_defs = []
+                    for attr_name, attr_type_name, length, precision, scale in attrs_by_type.get(tn_up, []):
+                        if attr_type_name and attr_type_name.upper() in udt_names:
+                            # reference to another user-defined type in this schema (schema-qualified
+                            # so the planner rewrites the source schema to the target schema)
+                            pg_type = f'"{schema}"."{_q(attr_type_name)}"'
+                        else:
+                            pg_type = self._oracle_type_to_pg(attr_type_name, length, precision, scale, types_mapping)
+                        attr_defs.append(f'"{_q(attr_name)}" {pg_type}')
+                    if not attr_defs:
+                        self.config_parser.print_log_message('DEBUG', f"oracle_connector: fetch_user_defined_types: Object type {tn_up} has no scalar attributes - skipping.")
                         continue
-                    pg_elem_type = self._oracle_type_to_pg(coll[0], coll[1], coll[2], coll[3], types_mapping)
-                    type_sql = f'CREATE DOMAIN "{schema}"."{type_name}" AS {pg_elem_type}[];'
+                    type_sql = f'CREATE TYPE "{schema}"."{_q(tn_up)}" AS (' + ', '.join(attr_defs) + ');'
+                elif typecode == 'COLLECTION':
+                    coll = elem_by_type.get(tn_up)
+                    if not coll or not coll[0]:
+                        self.config_parser.print_log_message('DEBUG', f"oracle_connector: fetch_user_defined_types: Collection type {tn_up} element type could not be resolved - skipping.")
+                        continue
+                    if coll[0].upper() in udt_names:
+                        pg_elem_type = f'"{schema}"."{_q(coll[0])}"'
+                    else:
+                        pg_elem_type = self._oracle_type_to_pg(coll[0], coll[1], coll[2], coll[3], types_mapping)
+                    type_sql = f'CREATE DOMAIN "{schema}"."{_q(tn_up)}" AS {pg_elem_type}[];'
+                else:
+                    continue
 
                 user_defined_types[order_num] = {
                     'schema_name': schema,
-                    'type_name': type_name,
+                    'type_name': _q(tn_up),
                     'base_type': '',
                     'sql': type_sql,
                     'comment': '',
                 }
-                self.config_parser.print_log_message('DEBUG', f"oracle_connector: fetch_user_defined_types: {typecode} type {type_name} -> {type_sql}")
+                self.config_parser.print_log_message('DEBUG', f"oracle_connector: fetch_user_defined_types: {typecode} type {tn_up} -> {type_sql}")
                 order_num += 1
 
             cursor.close()

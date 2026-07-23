@@ -78,12 +78,39 @@ class OracleConnector(DatabaseConnector):
                 self.connection = None
 
     def get_sql_functions_mapping(self, settings):
-        """ Returns a dictionary of SQL functions mapping for the target database """
+        """ Returns a dictionary of SQL functions mapping for the target database.
+
+        This mapping is applied (via the base apply_sql_functions_mapping, a
+        case-insensitive regex substitution) when converting views, functions and
+        procedures. It therefore only lists Oracle functions that need an explicit
+        rename to a PostgreSQL function with the *same argument order and semantics*
+        - anything requiring argument reordering or restructuring (DECODE, NVL2,
+        INSTR with 3+ args, MONTHS_BETWEEN, ...) is intentionally left out and is
+        either handled by sqlglot during view conversion or flagged for manual review.
+
+        Note: several common Oracle constructs (NVL, SYSDATE, SYSTIMESTAMP, DUAL,
+        NEXTVAL/CURRVAL) are already handled by sqlglot (views) and by
+        _apply_plsql_substitutions (functions/procedures); they are repeated here as
+        harmless no-op-if-already-converted fallbacks for the raw/fallback code path.
+        """
         target_db_type = settings['target_db_type']
         if target_db_type == 'postgresql':
-            return {}
+            return {
+                # Oracle GROUPING_ID(a, b, ...) == PostgreSQL GROUPING(a, b, ...):
+                # both return the bitmask of the GROUP BY expressions not present in
+                # the current grouping set. sqlglot does not translate GROUPING_ID.
+                'grouping_id(': 'grouping(',
+                # Null handling / misc functions with identical PostgreSQL equivalents
+                'nvl(': 'coalesce(',
+                'lengthb(': 'octet_length(',
+                'sys_guid()': 'gen_random_uuid()',
+                # Date/time pseudo-columns (no parentheses in Oracle)
+                'systimestamp': 'current_timestamp',
+                'sysdate': 'current_timestamp',
+            }
         else:
             self.config_parser.print_log_message('ERROR', f"oracle_connector: get_sql_functions_mapping: Unsupported target database type: {target_db_type}")
+            return {}
 
     def migrate_sequences(self, target_connector, settings):
         """
@@ -1859,6 +1886,10 @@ class OracleConnector(DatabaseConnector):
             converted = view_code
 
         converted = self._postfix_oracle_to_pg_sql(converted)
+
+        # Translate Oracle SQL functions that sqlglot leaves as-is (e.g. GROUPING_ID -> GROUPING)
+        # to their PostgreSQL equivalents. Same mapping used for functions/procedures.
+        converted = self.apply_sql_functions_mapping(converted, settings)
 
         # Re-point any source-schema-qualified references to the target schema (both the Oracle
         # canonical quoted-upper form and an unquoted any-case form). Unqualified references are

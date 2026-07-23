@@ -1829,6 +1829,19 @@ class OracleConnector(DatabaseConnector):
                 eq.replace(sqlglot.exp.Boolean(this=True))
         return expression, unconverted
 
+    def _strip_listagg_on_overflow(self, sql):
+        """Remove Oracle LISTAGG's ON OVERFLOW clause, which has no PostgreSQL equivalent
+        (and which sqlglot cannot even parse). Forms: ON OVERFLOW ERROR |
+        ON OVERFLOW TRUNCATE ['indicator'] [WITH COUNT | WITHOUT COUNT]. Stripping it lets
+        the aggregate parse/convert to STRING_AGG; the overflow behaviour itself is dropped."""
+        if not sql:
+            return sql
+        return re.sub(
+            r"(?i)\s+ON\s+OVERFLOW\s+(?:ERROR|TRUNCATE(?:\s+'[^']*')?(?:\s+WITH(?:OUT)?\s+COUNT)?)",
+            '',
+            sql,
+        )
+
     def _postfix_oracle_to_pg_sql(self, sql):
         """Targeted fixes for Oracle constructs sqlglot leaves as-is or mis-handles."""
         if not sql:
@@ -1841,6 +1854,9 @@ class OracleConnector(DatabaseConnector):
         sql = re.sub(r'(?i)\b([A-Za-z_][\w$#]*)\s*\.\s*CURRVAL\b', r"currval('\1')", sql)
         # Oracle's dummy DUAL table - PostgreSQL allows SELECT without FROM
         sql = re.sub(r'(?i)\s+FROM\s+dual\b', '', sql)
+        # Drop the ON OVERFLOW clause (defensive: normally already stripped before sqlglot,
+        # but the raw-fallback path reaches here with it still present).
+        sql = self._strip_listagg_on_overflow(sql)
         # LISTAGG(expr, 'delim') WITHIN GROUP (ORDER BY cols) -> STRING_AGG(expr, 'delim' ORDER BY cols).
         # Conservative: only the common form (simple expr/order-by without nested parens); anything
         # more complex is left for the manual review flagged by _warn_unconvertible_oracle_sql.
@@ -1873,7 +1889,10 @@ class OracleConnector(DatabaseConnector):
         # parse failure so the view is still stored (with a warning) for manual fixing.
         converted = view_code
         try:
-            marked = self._preprocess_oracle_outer_joins(view_code)
+            # Strip Oracle LISTAGG's ON OVERFLOW clause first - sqlglot cannot parse it, and
+            # leaving it in would force the whole view onto the raw-Oracle fallback path.
+            preprocessed = self._strip_listagg_on_overflow(view_code)
+            marked = self._preprocess_oracle_outer_joins(preprocessed)
             ast = sqlglot.parse_one(marked, read="oracle")
             ast, unconverted_joins = self._convert_marked_outer_joins(ast)
             converted = ast.sql(dialect="postgres")

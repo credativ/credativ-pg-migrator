@@ -1217,6 +1217,16 @@ class OracleConnector(DatabaseConnector):
         code = re.sub(r'(?i)\b(?:NON)?EDITIONABLE\b', '', trigger_sql).strip()
         code = re.sub(r'\s*/\s*$', '', code).strip()
 
+        # DBMS_METADATA.GET_DDL appends "ALTER TRIGGER <name> ENABLE|DISABLE" after the body.
+        # PostgreSQL has no "ALTER TRIGGER ... ENABLE" (triggers are enabled on creation;
+        # disabling uses ALTER TABLE ... DISABLE TRIGGER), so strip the trailing statement -
+        # otherwise it would be swept into the function body and cause a syntax error.
+        alter_m = re.search(r'(?is)\bALTER\s+TRIGGER\b[^;]*\b(ENABLE|DISABLE)\s*;?\s*$', code)
+        if alter_m:
+            if alter_m.group(1).upper() == 'DISABLE':
+                self.config_parser.print_log_message('WARNING', f"oracle_connector: convert_trigger: source trigger {trigger_name} was DISABLED in Oracle; PostgreSQL creates it ENABLED. Run 'ALTER TABLE ... DISABLE TRIGGER' manually if it should stay disabled.")
+            code = code[:alter_m.start()].rstrip()
+
         # Locate the PL/SQL block (DECLARE or BEGIN at top level) that follows the header.
         ds, de, _ = self._plsql_find_top_level_kw(code, {'DECLARE', 'BEGIN'})
         if ds == -1:

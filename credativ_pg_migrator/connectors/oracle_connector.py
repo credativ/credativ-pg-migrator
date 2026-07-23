@@ -1452,11 +1452,15 @@ class OracleConnector(DatabaseConnector):
         converted = []
         for p in parts:
             p = p.strip()
-            m = re.match(r'(?is)^([\w$#]+)\s+(IN\s+OUT|IN|OUT)?\s*(.*)$', p)
+            # The mode keyword (IN / OUT / IN OUT) must be a standalone token followed by
+            # whitespace - otherwise the leading "IN" of a type like INTEGER would be
+            # mis-parsed as a mode, corrupting the type (e.g. "p_in INTEGER" -> "TEGER").
+            m = re.match(r'(?is)^([\w$#]+)\s+(?:(IN\s+OUT|IN|OUT)\s+)?(.*)$', p)
             if not m:
                 converted.append(p)
                 continue
             name, mode, rest = m.group(1), (m.group(2) or '').upper(), m.group(3).strip()
+            mode = re.sub(r'\s+', ' ', mode)
             rest = re.sub(r'(?i)^\s*(?::=|DEFAULT)\s*', 'DEFAULT ', rest) if re.match(r'(?i)^\s*(:=|DEFAULT)', rest) else rest
             # separate DEFAULT clause from the type
             dm = re.match(r'(?is)^(.*?)\s*(?::=|DEFAULT)\s+(.*)$', rest)

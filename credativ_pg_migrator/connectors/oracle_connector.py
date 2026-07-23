@@ -1902,10 +1902,28 @@ class OracleConnector(DatabaseConnector):
             sql,
         )
 
+    def _strip_translate_using(self, sql):
+        """Rewrite Oracle's charset-conversion form TRANSLATE(expr USING CHAR_CS|NCHAR_CS)
+        to just (expr). This is the two-argument USING variant that converts a value to the
+        database / national character set - distinct from the three-argument
+        TRANSLATE(str, from, to). PostgreSQL has no equivalent (and sqlglot cannot parse the
+        USING form), and with a single database encoding the conversion is a no-op, so the
+        inner expression is kept as-is."""
+        if not sql:
+            return sql
+        return re.sub(
+            r'(?is)\bTRANSLATE\s*\(\s*(.+?)\s+USING\s+N?CHAR_CS\s*\)',
+            r'(\1)',
+            sql,
+        )
+
     def _postfix_oracle_to_pg_sql(self, sql):
         """Targeted fixes for Oracle constructs sqlglot leaves as-is or mis-handles."""
         if not sql:
             return sql
+        # Defensive: normally stripped before sqlglot, but the raw-fallback path reaches here
+        # with TRANSLATE(... USING [N]CHAR_CS) still present.
+        sql = self._strip_translate_using(sql)
         # sqlglot renders SYSTIMESTAMP as SYSTIMESTAMP() which does not exist in PostgreSQL
         sql = re.sub(r'(?i)\bSYSTIMESTAMP\s*\(\s*\)', 'CURRENT_TIMESTAMP', sql)
         sql = re.sub(r'(?i)\bSYSTIMESTAMP\b', 'CURRENT_TIMESTAMP', sql)
@@ -1952,6 +1970,8 @@ class OracleConnector(DatabaseConnector):
             # Strip Oracle LISTAGG's ON OVERFLOW clause first - sqlglot cannot parse it, and
             # leaving it in would force the whole view onto the raw-Oracle fallback path.
             preprocessed = self._strip_listagg_on_overflow(view_code)
+            # Rewrite TRANSLATE(expr USING [N]CHAR_CS) - sqlglot cannot parse the USING form.
+            preprocessed = self._strip_translate_using(preprocessed)
             marked = self._preprocess_oracle_outer_joins(preprocessed)
             ast = sqlglot.parse_one(marked, read="oracle")
             ast, unconverted_joins = self._convert_marked_outer_joins(ast)

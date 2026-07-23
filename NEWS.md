@@ -1,6 +1,16 @@
 credativ-pg-migrator Releases
 =============================
 
+0.16.0 - 22.07.2026
+-------------------
+
+* Major Oracle connector expansion: full schema and data migration including functions/procedures, triggers, standalone sequences, user-defined types and domains, CHECK constraints, and views/materialized views with real Oracle→PostgreSQL query conversion (including `(+)` outer joins)
+* Much broader Oracle data-type coverage (BINARY_FLOAT/DOUBLE, RAW, XMLTYPE, JSON, INTERVAL, timestamps with time zone, SDO_GEOMETRY point geometries) plus table/column comments, and hardened connection handling
+* New final object-validity pass: after migration it re-attempts objects that failed only because a dependency did not yet exist, and reports which views, functions and triggers are valid at the end (configurable via `migration.validate_objects`)
+* Configurable NUMBER(1,0) mapping: narrow numeric columns now default to SMALLINT (lossless), with an opt-in for mapping true 0/1 flags to BOOLEAN
+* Mapping workflow and validation improvements: `data_conflict_action`-aware validation, redesigned mapping report, and configuration cleanup
+* Numerous Oracle conversion fixes across PL/SQL parameters, triggers, views and boolean data handling
+
 0.15.0 - 03.07.2026
 -------------------
 

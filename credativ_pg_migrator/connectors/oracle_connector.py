@@ -187,12 +187,19 @@ class OracleConnector(DatabaseConnector):
         # Exclude materialized view container tables (they share the mview name and appear in
         # ALL_TABLES) - they are migrated via the view path as CREATE MATERIALIZED VIEW, not as
         # base tables, to avoid duplicate/conflicting objects.
+        # Also exclude system-managed sub-object tables that cannot be migrated standalone and
+        # for which DBMS_METADATA.GET_DDL raises ORA-31603:
+        #   - nested-table storage tables (NESTED='YES', e.g. OE's *_NESTEDTAB) - the nested
+        #     collection is migrated via its parent table's column (VARRAY/nested table mapping);
+        #   - domain-index secondary tables (SECONDARY='Y') - internal to a domain index.
         query = """
             SELECT t.table_name, tc.comments
             FROM all_tables t
             LEFT JOIN all_tab_comments tc
                 ON tc.owner = t.owner AND tc.table_name = t.table_name AND tc.table_type = 'TABLE'
             WHERE t.owner = :owner
+                AND t.nested = 'NO'
+                AND t.secondary = 'N'
                 AND NOT EXISTS (
                     SELECT 1 FROM all_mviews m
                     WHERE m.owner = t.owner AND m.mview_name = t.table_name

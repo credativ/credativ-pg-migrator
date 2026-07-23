@@ -241,7 +241,8 @@ class OracleConnector(DatabaseConnector):
                 c.data_scale,
                 c.nullable,
                 c.data_default,
-                cc.comments
+                cc.comments,
+                c.data_type_owner
             FROM all_tab_columns c
             LEFT JOIN all_col_comments cc
                 ON cc.owner = c.owner AND cc.table_name = c.table_name AND cc.column_name = c.column_name
@@ -278,6 +279,7 @@ class OracleConnector(DatabaseConnector):
                 column_nullable = row[6]
                 column_default = row[7]
                 column_comment = row[8]
+                data_type_owner = row[9]
 
                 # Normalize Oracle types that embed precision in data_type (e.g.
                 # "TIMESTAMP(6) WITH TIME ZONE", "INTERVAL DAY(2) TO SECOND(6)") to canonical
@@ -314,6 +316,18 @@ class OracleConnector(DatabaseConnector):
                     'comment': column_comment or '',
                     'column_comment': column_comment or '',
                 }
+
+                # Schema-local user-defined type column (Oracle object type / VARRAY / nested
+                # table). DATA_TYPE_OWNER is the owner of the column's type: NULL for built-in
+                # scalars, and MDSYS / SYS / PUBLIC for SDO_GEOMETRY / XMLTYPE (handled
+                # elsewhere). Only route types owned by the source schema through the
+                # USER-DEFINED path so the column references the composite type / domain
+                # created by fetch_user_defined_types (instead of collapsing to TEXT).
+                if data_type_owner and data_type_owner.upper() == table_schema.upper():
+                    result[column_id]['data_type'] = 'USER-DEFINED'
+                    result[column_id]['column_type'] = 'USER-DEFINED'
+                    result[column_id]['udt_schema'] = data_type_owner
+                    result[column_id]['udt_name'] = data_type
 
                 # Identity columns carry a system-generated sequence default; clear it so it
                 # is not emitted as a column default on the target.
@@ -559,9 +573,12 @@ class OracleConnector(DatabaseConnector):
                         # DATE / TIMESTAMP values are returned natively as Python datetime
                         # objects by python-oracledb and inserted directly into PostgreSQL,
                         # so no TO_CHAR string conversion is applied here.
+                        # Note: SDO_GEOMETRY is selected as-is and converted to WKT client-side in
+                        # the value loop below (Oracle's SDO_UTIL.TO_WKTGEOMETRY needs MDSYS INHERIT
+                        # privileges the migration user may lack -> ORA-06598).
                         select_columns_list.append(f'''"{col['column_name']}"''')
 
-                        if col['data_type'].lower() not in ('clob', 'nclob', 'blob', 'bfile', 'long', 'long raw', 'xmltype'):
+                        if col['data_type'].lower() not in ('clob', 'nclob', 'blob', 'bfile', 'long', 'long raw', 'xmltype', 'sdo_geometry', 'user-defined'):
                             orderby_columns_list.append(f'''"{col['column_name']}"''')
 
                     for order_num, col in target_columns.items():
@@ -643,6 +660,28 @@ class OracleConnector(DatabaseConnector):
                                     lob_value = record[column_name]
                                     if lob_value is not None and hasattr(lob_value, 'read'):
                                         record[column_name] = lob_value.read()
+                                elif column_type.upper() == 'USER-DEFINED':
+                                    # Oracle object type -> PostgreSQL composite type (tuple),
+                                    # VARRAY / nested table -> PostgreSQL array (list).
+                                    record[column_name] = self._convert_oracle_dbobject(record[column_name])
+                                elif column_type.lower() == 'xmltype':
+                                    xml_value = record[column_name]
+                                    if xml_value is not None and hasattr(xml_value, 'read'):
+                                        record[column_name] = xml_value.read()
+                                    elif xml_value is not None and not isinstance(xml_value, str):
+                                        record[column_name] = str(xml_value)
+                                elif column_type.upper() == 'SDO_GEOMETRY':
+                                    # Spatial geometry -> WKT text, converted client-side (point
+                                    # geometries); anything else degrades to NULL. No PostGIS or
+                                    # MDSYS privileges required.
+                                    record[column_name] = self._sdo_geometry_to_wkt(record[column_name])
+                                elif column_type.upper().startswith('INTERVAL YEAR'):
+                                    # python-oracledb returns INTERVAL YEAR TO MONTH as IntervalYM,
+                                    # a namedtuple psycopg2 would treat as a composite record; render
+                                    # it as a PostgreSQL interval literal instead.
+                                    iym = record[column_name]
+                                    if iym is not None and hasattr(iym, 'years'):
+                                        record[column_name] = f"{iym.years} years {iym.months} months"
 
                         # Insert batch into target table
                         self.config_parser.print_log_message('DEBUG', f"oracle_connector: migrate_table: Worker {worker_id}: Starting insert of {len(records)} rows from source table {source_table_name}")
@@ -2042,6 +2081,51 @@ class OracleConnector(DatabaseConnector):
             return None
         except Exception as e:
             # Table or view doesn't exist (e.g. Oracle < 12c)
+            return None
+
+    def _convert_oracle_dbobject(self, value):
+        """Convert a python-oracledb DbObject (Oracle object type / VARRAY / nested table) into a
+        value PostgreSQL accepts: a collection becomes a Python list (-> array / array domain) and
+        an object type becomes a tuple of its attribute values (-> composite type). Nested objects
+        and collections are converted recursively. Anything unexpected degrades to its string form
+        so a single odd value never aborts the whole batch."""
+        if value is None:
+            return None
+        obj_type = getattr(value, 'type', None)
+        if obj_type is None or not hasattr(obj_type, 'iscollection'):
+            return value  # plain scalar (str, int, datetime, ...) - nothing to convert
+        try:
+            if obj_type.iscollection:
+                return [self._convert_oracle_dbobject(elem) for elem in value.aslist()]
+            return tuple(
+                self._convert_oracle_dbobject(getattr(value, attr.name))
+                for attr in obj_type.attributes
+            )
+        except Exception as e:
+            self.config_parser.print_log_message('WARNING', f"oracle_connector: _convert_oracle_dbobject: could not convert object value ({e}) - using string form")
+            return str(value)
+
+    def _sdo_geometry_to_wkt(self, geom):
+        """Convert an Oracle SDO_GEOMETRY value to a WKT text string, entirely client-side (no
+        MDSYS SDO_UTIL call, which needs INHERIT privileges the migration user may lack). Only
+        simple point geometries (SDO_POINT populated) are converted to 'POINT(x y)'; any other
+        geometry degrades to NULL with a warning (migrate spatial data manually / via PostGIS)."""
+        if geom is None:
+            return None
+        try:
+            sdo_point = getattr(geom, 'SDO_POINT', None)
+            if sdo_point is not None:
+                x = getattr(sdo_point, 'X', None)
+                y = getattr(sdo_point, 'Y', None)
+                z = getattr(sdo_point, 'Z', None)
+                if x is not None and y is not None:
+                    if z is not None:
+                        return f'POINT Z ({x} {y} {z})'
+                    return f'POINT ({x} {y})'
+            self.config_parser.print_log_message('WARNING', "oracle_connector: _sdo_geometry_to_wkt: non-point SDO_GEOMETRY (or empty point) - migrating as NULL")
+            return None
+        except Exception as e:
+            self.config_parser.print_log_message('WARNING', f"oracle_connector: _sdo_geometry_to_wkt: could not convert SDO_GEOMETRY ({e}) - migrating as NULL")
             return None
 
     def _oracle_type_to_pg(self, ora_type, length, precision, scale, types_mapping):

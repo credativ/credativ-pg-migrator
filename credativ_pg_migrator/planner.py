@@ -891,7 +891,10 @@ class Planner:
                         character_maximum_length = int(column_info['character_maximum_length']) if column_info['character_maximum_length'] is not None else 0
                     except (ValueError, TypeError):
                         character_maximum_length = 0
-                    if source_db_type != 'postgresql':
+                    # USER-DEFINED marks an object type / VARRAY / nested-table column; keep the
+                    # marker (do not run the scalar type mapping, which would collapse it to
+                    # TEXT) so the DDL builder emits the composite type / domain via udt_name.
+                    if source_db_type != 'postgresql' and coltype != 'USER-DEFINED':
                         if types_mapping.get(coltype, 'UNKNOWN').startswith('UNKNOWN'):
                             self.config_parser.print_log_message('INFO', f"planner: convert_table_columns: Column {column_info['column_name']} - unknown data type: {column_info['data_type']} - checking column_type...")
                             if 'column_type' in column_info and column_info['column_type']:

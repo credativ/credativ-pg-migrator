@@ -154,7 +154,31 @@ IBM DB2 is supported via two fundamentally different connectors, heavily dependi
 ### 4.3 Oracle
 - **Mode**: Native Connection
 - **Python Module**: `oracledb`
-- **Configuration**: Set `connectivity: "native"`. Configures natively via Oracle DSN strings. Supports `SYSDBA` connections when the username is `SYS`.
+- **Configuration**: Set `connectivity: "native"`. Configures natively via Oracle DSN strings. Supports `SYSDBA` connections when the username is `SYS`. Set `oracle_thick_mode: true` in the source configuration to enable the Oracle thick client (Instant Client) when a thin-mode connection is not sufficient.
+- **Tested version**: Oracle 21.3 (see `FEATURE_MATRIX.md`).
+
+**Current status (Oracle as source):**
+
+- Migrated: tables and data, columns with data-type mapping, primary keys, unique/secondary indexes, foreign keys (including `ON DELETE CASCADE`), CHECK constraints, and identity columns (recognized both via sequence-based defaults and 12c+ `GENERATED ... AS IDENTITY`).
+- Table and column comments (`ALL_TAB_COMMENTS` / `ALL_COL_COMMENTS`) are migrated as PostgreSQL `COMMENT ON` statements.
+- Data types: broad mapping to PostgreSQL, including `BINARY_FLOAT`/`BINARY_DOUBLE`, `RAW`, `NCLOB`, `ROWID`/`UROWID`, `XMLTYPE`, `JSON`, `TIMESTAMP WITH [LOCAL] TIME ZONE` (→ `TIMESTAMPTZ`) and `INTERVAL YEAR/DAY` variants. `NUMBER(p,s)` is mapped to the most appropriate PostgreSQL numeric/integer type based on precision and scale.
+- Standalone sequences: Oracle sequences (`ALL_SEQUENCES`) are migrated as independent PostgreSQL sequences (`CREATE SEQUENCE`), preserving increment, min/max, cache and cycle, and continuing from the source's current position.
+- User-defined types: Oracle **object types** are migrated as PostgreSQL composite types (`CREATE TYPE ... AS (...)`); **collection types** (VARRAY / nested tables) are migrated as array-based domains (`CREATE DOMAIN ... AS <element_type>[]`).
+- Domains: Oracle **23ai** SQL domains (`ALL_DOMAINS`) are migrated as PostgreSQL domains.
+- Stored **functions and procedures** are converted from PL/SQL to PL/pgSQL on a best-effort basis (header/parameter/data-type conversion plus common construct rewrites); see the limitations below. Packages are not converted (no PostgreSQL equivalent) but their source is preserved.
+- **Triggers** are converted to a PL/pgSQL trigger function plus a `CREATE TRIGGER` (`:NEW`/`:OLD`→`NEW`/`OLD`, `INSERTING`/`UPDATING`/`DELETING`→`TG_OP`, timing/events/`WHEN` preserved), also best-effort.
+- Views and **materialized views** (`ALL_VIEWS` / `ALL_MVIEWS`) are migrated as PostgreSQL `CREATE VIEW` / `CREATE MATERIALIZED VIEW`. The defining query is transpiled from Oracle to PostgreSQL SQL via `sqlglot` (e.g. `NVL`→`COALESCE`, `DECODE`→`CASE`, `SYSDATE`/`SYSTIMESTAMP`→`CURRENT_TIMESTAMP`, `SUBSTR`/`INSTR`→`SUBSTRING`/`POSITION`, `MINUS`→`EXCEPT`, `REGEXP_LIKE`→`~`, `LISTAGG`→`STRING_AGG`, `seq.NEXTVAL`→`nextval('seq')`, `FROM dual` removed). Materialized view container tables are excluded from base-table migration.
+
+**Known limitations (Oracle):**
+
+- **PL/SQL conversion is best-effort**: functions/procedures are converted heuristically (`sqlglot` cannot parse PL/SQL bodies), so generated routines should be reviewed and tested. **Packages** are not converted (PostgreSQL has none — split them into individual functions and session settings manually). Constructs with no automatic translation — `BULK COLLECT`, `FORALL`, `PRAGMA AUTONOMOUS_TRANSACTION`, other `DBMS_*` calls, `CONNECT BY`, `%TYPE` in a `RETURNS` clause, `SYS_REFCURSOR` returns — are logged as `WARNING`s. **Triggers** are converted best-effort (compound triggers and custom `REFERENCING` names are flagged; column-level `UPDATING('col')` loses column specificity). Enable function/procedure migration with `migration.migrate_funcprocs: true` and trigger migration with `migration.migrate_triggers: true`.
+- **Standalone sequences**: migrated as independent PostgreSQL sequences. Oracle bounds that exceed PostgreSQL's `bigint` range (e.g. the default `MAXVALUE`) are dropped so PostgreSQL applies its own defaults, and the start position is captured at planning time (not re-read at migration time). Sequence-backed table columns continue to be handled separately via PostgreSQL identity columns.
+- **CHECK constraints**: Oracle's internal `NOT NULL` checks are intentionally excluded (they are part of the column definition). `DISABLED` checks are still migrated as enforced constraints, and expressions using Oracle-specific functions/pseudocolumns are copied verbatim and may need manual adjustment.
+- **User-defined types** conversion is best-effort: attributes that reference other object types are emitted unqualified (may not resolve on the target), and type inheritance (`UNDER`/supertypes) and VARRAY upper bounds are not modeled.
+- **Domains** exist only in Oracle 23ai; on older releases (11g/12c/19c/21c) there are no domain objects to migrate, and the 23ai path is best-effort and has not been validated against a live 23ai instance.
+- **Data-type coverage**: `SDO_GEOMETRY` (spatial) is not mapped and falls back to `TEXT` (it requires PostGIS on the target); `BFILE` (external file locator) is not migrated. `INTERVAL YEAR TO MONTH` is mapped to PostgreSQL `INTERVAL` but its value semantics differ, so such columns are worth verifying. Any type can still be overridden with custom data-type replacement rules.
+- **Large-table extraction**: data is fetched in chunks using `OFFSET … FETCH NEXT`, which becomes less efficient at very large offsets. Keyset/ROWID-range pagination is a planned optimization.
+- **Views / materialized views**: the defining query is parsed with `sqlglot` and generated as PostgreSQL, including rewriting Oracle **`(+)` outer joins** into ANSI `LEFT`/`RIGHT JOIN`s. A few constructs still cannot be auto-converted reliably and are logged as `WARNING`s for manual review: **`CONNECT BY` / `START WITH`** hierarchical queries (need a recursive CTE), **`ROWNUM`** (use `LIMIT`), and complex **`LISTAGG`** forms. An unusual `(+)` predicate that could not be mapped to a join is also warned about individually. There is no separate toggle for materialized vs. regular views (both follow `migrate_views`), and view dependency ordering is not topologically resolved.
 
 ### 4.4 PostgreSQL
 - **Mode**: Native Connection

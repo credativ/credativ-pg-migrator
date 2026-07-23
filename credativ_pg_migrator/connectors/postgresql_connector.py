@@ -24,6 +24,7 @@ from credativ_pg_migrator.constants import MigratorConstants
 import traceback
 import re
 import datetime
+from decimal import Decimal
 
 class PostgreSQLConnector(DatabaseConnector):
     def __init__(self, config_parser, source_or_target):
@@ -356,8 +357,10 @@ class PostgreSQLConnector(DatabaseConnector):
             # if column_info['column_type_substitution'] != '':
             #     column_data_type = column_info['column_type_substitution'].upper()
             if column_info['data_type'] == 'USER-DEFINED' and column_info['udt_schema'] != '' and column_info['udt_name'] != '':
-                mapped_schema = target_schema_name if column_info['udt_schema'] == source_schema_name else column_info['udt_schema']
-                column_data_type = f'''"{mapped_schema}"."{column_info['udt_name']}"'''
+                mapped_schema = target_schema_name if column_info['udt_schema'].upper() == source_schema_name.upper() else column_info['udt_schema']
+                # Apply the configured name-case handling to the type name so it matches the
+                # user-defined type actually created in the target (e.g. lower-cased).
+                column_data_type = f'''"{mapped_schema}"."{self.config_parser.convert_names_case(column_info['udt_name'])}"'''
             # elif column_info['basic_data_type'] != '':
             #     column_data_type = column_info['basic_data_type'].upper()
 
@@ -417,12 +420,23 @@ class PostgreSQLConnector(DatabaseConnector):
                 create_column_sql = f""""{column_name}" {altered_data_type}"""
                 self.config_parser.print_log_message('DEBUG', f"postgresql_connector: get_create_table_sql: Column {column_name} is NUMBER without precision, scale {numeric_scale}, altered data type to {altered_data_type}")
             elif column_data_type in ('NUMBER', 'NUMERIC') and numeric_precision == 1 and numeric_scale == 0:
-                altered_data_type = 'BOOLEAN'
+                # Narrow numeric (precision 1, scale 0). Such a column may be a 0/1
+                # boolean flag OR a small integer code (e.g. channel_id, day-of-week),
+                # which are indistinguishable from the metadata. Default to SMALLINT
+                # (lossless); opt specific columns in to BOOLEAN via
+                # migration.numeric_1_boolean_columns (or the global map_numeric_1_to_boolean).
+                if self.config_parser.should_map_numeric_1_to_boolean(
+                        target_schema_name, target_table_name, column_info['column_name']):
+                    altered_data_type = 'BOOLEAN'
+                    alteration_reason = 'NUMBER with precision 1, scale 0 (mapped to boolean by config)'
+                else:
+                    altered_data_type = 'SMALLINT'
+                    alteration_reason = 'NUMBER with precision 1, scale 0'
                 migrator_tables.insert_target_column_alteration({
                     'target_schema_name': settings['target_schema_name'],
                     'target_table_name': settings['target_table_name'],
                     'target_column': column_info['column_name'],
-                    'reason': 'NUMBER with precision 1, scale 0',
+                    'reason': alteration_reason,
                     'original_data_type': column_data_type,
                     'altered_data_type': altered_data_type,
                 })
@@ -634,16 +648,25 @@ class PostgreSQLConnector(DatabaseConnector):
         target_table_name = self.config_parser.convert_names_case(settings['target_table_name'])
         index_columns = settings['index_columns']
 
-        # Split index_columns by comma, clean up quotes, convert case, and re-quote
+        # Split index_columns by comma, clean up quotes, convert case, and re-quote.
+        # A column entry may carry an ASC/DESC ordering keyword (e.g. '"STORE_NAME" ASC')
+        # which must be preserved but must NOT be quoted together with the column name -
+        # otherwise the re-quoting produces a dangling quote ('"store_name" asc"').
         column_names = []
         for col in index_columns.split(','):
             col = col.strip()
+            # Split off a trailing ASC/DESC ordering keyword (split on the last whitespace)
+            order_direction = ''
+            parts = col.rsplit(None, 1)
+            if len(parts) == 2 and parts[1].upper() in ('ASC', 'DESC'):
+                col = parts[0].strip()
+                order_direction = f' {parts[1].upper()}'
             # Remove backticks, single quotes, and double quotes
             col = col.strip('`').strip("'").strip('"')
             # Convert case using config parser function
             col = self.config_parser.convert_names_case(col)
-            # Add to list with double quotes
-            column_names.append(f'"{col}"')
+            # Add to list with double quotes, preserving the (unquoted) ordering keyword
+            column_names.append(f'"{col}"{order_direction}')
         # Join back with comma
         index_columns = ', '.join(column_names)
         # index_comment = settings['index_comment']
@@ -1494,6 +1517,34 @@ class PostgreSQLConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', f"postgresql_connector: migrate_table: Worker {worker_id}: Full stack trace: {traceback.format_exc()}")
             raise e
 
+    @staticmethod
+    def _coerce_boolean_value(value):
+        """
+        Coerce a source value into a Python bool for insertion into a PostgreSQL
+        BOOLEAN target column.
+
+        Several source connectors map narrow numeric types to BOOLEAN (e.g. Oracle
+        NUMBER(1,0)). The raw source value is then a number/string that PostgreSQL
+        will not implicitly assign to a boolean column, so we normalize it here.
+        Any non-zero number (or common truthy text) becomes True, zero/empty/common
+        falsy text becomes False, and None is preserved as SQL NULL.
+        """
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float, Decimal)):
+            return value != 0
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in ('1', 't', 'true', 'y', 'yes'):
+                return True
+            if normalized in ('0', 'f', 'false', 'n', 'no', ''):
+                return False
+            # Fallback: any other non-empty string is treated as truthy.
+            return True
+        return bool(value)
+
     def insert_batch(self, settings):
         target_schema_name = settings['target_schema_name']
         target_table_name = settings['target_table_name']
@@ -1527,11 +1578,23 @@ class PostgreSQLConnector(DatabaseConnector):
                 else:
                     extract_keys = [columns[col]['column_name'] for col in sorted(columns.keys(), key=lambda x: int(x))]
 
+                # Target columns mapped to BOOLEAN (e.g. Oracle NUMBER(1,0)) need their
+                # source numeric/text values coerced to Python bool so PostgreSQL accepts
+                # them - a bare integer (e.g. 2) cannot be implicitly assigned to boolean.
+                boolean_columns = {
+                    col_info['column_name']
+                    for col_info in columns.values()
+                    if str(col_info.get('data_type', '')).strip().lower() in ('boolean', 'bool')
+                }
+
                 formatted_data = []
                 for item in data:
                     row = []
                     for col_name in extract_keys:
-                        row.append(item.get(col_name))
+                        value = item.get(col_name)
+                        if col_name in boolean_columns:
+                            value = self._coerce_boolean_value(value)
+                        row.append(value)
                     formatted_data.append(tuple(row))
                 self.config_parser.print_log_message('DEBUG3', f"postgresql_connector: insert_batch: INSERT COLUMNS: {insert_columns}")
                 self.config_parser.print_log_message('DEBUG3', f"postgresql_connector: insert_batch: EXTRACT KEYS: {extract_keys}")
@@ -2303,6 +2366,7 @@ class PostgreSQLConnector(DatabaseConnector):
 
     def fetch_default_values(self, settings) -> dict:
         # Placeholder for fetching default values
+        # Relevant only for database that support independently created named default values
         return {}
 
     def testing_select(self):
@@ -2544,6 +2608,57 @@ class PostgreSQLConnector(DatabaseConnector):
         exists = cursor.fetchone()[0]
         cursor.close()
         return exists
+
+    def target_view_exists(self, target_schema_name, target_view_name):
+        """True if a view or materialized view with this name exists in the target schema.
+        In PostgreSQL a view can only exist if its defining query is valid, so existence is a
+        sufficient validity signal."""
+        query = """
+            SELECT EXISTS (
+                SELECT 1 FROM pg_catalog.pg_class c
+                JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+                WHERE c.relkind IN ('v', 'm')
+                  AND lower(n.nspname) = lower(%s)
+                  AND lower(c.relname) = lower(%s)
+            )
+        """
+        with self.connection.cursor() as cursor:
+            cursor.execute(query, (target_schema_name, target_view_name))
+            return cursor.fetchone()[0]
+
+    def target_funcproc_exists(self, target_schema_name, target_funcproc_name):
+        """True if a function or procedure with this name exists in the target schema
+        (any overload / argument signature)."""
+        query = """
+            SELECT EXISTS (
+                SELECT 1 FROM pg_catalog.pg_proc p
+                JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+                WHERE lower(n.nspname) = lower(%s)
+                  AND lower(p.proname) = lower(%s)
+            )
+        """
+        with self.connection.cursor() as cursor:
+            cursor.execute(query, (target_schema_name, target_funcproc_name))
+            return cursor.fetchone()[0]
+
+    def target_trigger_exists(self, target_schema_name, target_table_name, trigger_name):
+        """True if a trigger with this name exists on the given table in the target schema.
+        The table name is optional; if not provided, any trigger with this name in the schema
+        counts."""
+        query = """
+            SELECT EXISTS (
+                SELECT 1 FROM pg_catalog.pg_trigger t
+                JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid
+                JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+                WHERE NOT t.tgisinternal
+                  AND lower(n.nspname) = lower(%s)
+                  AND lower(t.tgname) = lower(%s)
+                  AND (%s IS NULL OR lower(c.relname) = lower(%s))
+            )
+        """
+        with self.connection.cursor() as cursor:
+            cursor.execute(query, (target_schema_name, trigger_name, target_table_name, target_table_name))
+            return cursor.fetchone()[0]
 
     def fetch_all_rows(self, query):
         cursor = self.connection.cursor()

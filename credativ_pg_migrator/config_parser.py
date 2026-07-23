@@ -515,14 +515,50 @@ class ConfigParser:
     def should_migrate_views(self):
         return (self.config.get('migration') or {}).get('migrate_views', False)
 
-    def should_map_numeric_1_to_boolean(self):
-        # Controls whether a narrow numeric source column (precision 1, scale 0 -
+    def should_map_numeric_1_to_boolean(self, schema_name=None, table_name=None, column_name=None):
+        # Decides whether a narrow numeric source column (precision 1, scale 0 -
         # e.g. Oracle NUMBER(1,0), or NUMERIC(1,0) from other engines) is mapped to
-        # a PostgreSQL BOOLEAN. Many schemas use such columns as 0/1 flags, but some
-        # store other small integers (e.g. a day-of-week 1-7), for which the boolean
-        # mapping is lossy. When disabled, these columns are mapped to SMALLINT.
-        # Default True preserves the historical behavior.
-        return (self.config.get('migration') or {}).get('map_numeric_1_to_boolean', True)
+        # PostgreSQL BOOLEAN. Such a column can legitimately be a 0/1 flag OR a small
+        # integer code (e.g. channel_id, day-of-week 1-7), and the two are
+        # indistinguishable from the type metadata alone. By default these columns are
+        # therefore mapped to SMALLINT (lossless); individual columns are opted in to
+        # BOOLEAN via migration.numeric_1_boolean_columns.
+        migration = self.config.get('migration') or {}
+
+        # Global escape hatch: map ALL such columns to BOOLEAN (restores the historical
+        # 0.16.0 behavior). Default False.
+        if migration.get('map_numeric_1_to_boolean', False) is True:
+            return True
+
+        if not column_name:
+            return False
+
+        patterns = migration.get('numeric_1_boolean_columns') or []
+        for entry in patterns:
+            # Structured entry: match any provided schema/table/column regex (all
+            # supplied keys must match). Case-insensitive, full match.
+            if isinstance(entry, dict):
+                checks = [
+                    (entry.get('schema'), schema_name),
+                    (entry.get('table'), table_name),
+                    (entry.get('column'), column_name),
+                ]
+                matched_any = False
+                ok = True
+                for pat, value in checks:
+                    if not pat:
+                        continue
+                    matched_any = True
+                    if value is None or not re.fullmatch(str(pat), str(value), re.IGNORECASE):
+                        ok = False
+                        break
+                if matched_any and ok:
+                    return True
+            # Plain string entry: a column-name regex (matches in any table).
+            elif entry and re.fullmatch(str(entry), str(column_name), re.IGNORECASE):
+                return True
+
+        return False
 
     def get_batch_size(self):
         return int((self.config.get('migration') or {}).get('batch_size', 100000))

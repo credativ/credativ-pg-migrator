@@ -418,15 +418,18 @@ class PostgreSQLConnector(DatabaseConnector):
                 create_column_sql = f""""{column_name}" {altered_data_type}"""
                 self.config_parser.print_log_message('DEBUG', f"postgresql_connector: get_create_table_sql: Column {column_name} is NUMBER without precision, scale {numeric_scale}, altered data type to {altered_data_type}")
             elif column_data_type in ('NUMBER', 'NUMERIC') and numeric_precision == 1 and numeric_scale == 0:
-                # Narrow numeric (precision 1, scale 0). Historically mapped to BOOLEAN
-                # (common 0/1 flag convention), but that is lossy for columns storing
-                # other small integers; configurable via migration.map_numeric_1_to_boolean.
-                if self.config_parser.should_map_numeric_1_to_boolean():
+                # Narrow numeric (precision 1, scale 0). Such a column may be a 0/1
+                # boolean flag OR a small integer code (e.g. channel_id, day-of-week),
+                # which are indistinguishable from the metadata. Default to SMALLINT
+                # (lossless); opt specific columns in to BOOLEAN via
+                # migration.numeric_1_boolean_columns (or the global map_numeric_1_to_boolean).
+                if self.config_parser.should_map_numeric_1_to_boolean(
+                        target_schema_name, target_table_name, column_info['column_name']):
                     altered_data_type = 'BOOLEAN'
-                    alteration_reason = 'NUMBER with precision 1, scale 0'
+                    alteration_reason = 'NUMBER with precision 1, scale 0 (mapped to boolean by config)'
                 else:
                     altered_data_type = 'SMALLINT'
-                    alteration_reason = 'NUMBER with precision 1, scale 0 (boolean mapping disabled)'
+                    alteration_reason = 'NUMBER with precision 1, scale 0'
                 migrator_tables.insert_target_column_alteration({
                     'target_schema_name': settings['target_schema_name'],
                     'target_table_name': settings['target_table_name'],

@@ -193,14 +193,28 @@ migration:
   migrate_triggers: true
   migrate_views: true
   set_sequences: true
-  # map_numeric_1_to_boolean: default true
-  # controls how a narrow numeric source column (precision 1, scale 0 -
-  # e.g. Oracle NUMBER(1,0), or NUMERIC(1,0) from other engines) is mapped.
-  # true  = map to PostgreSQL BOOLEAN (common 0/1 flag convention); source
-  #         values are coerced to true/false on insert (0 -> false, non-zero -> true).
-  # false = map to SMALLINT (lossless); use this when such columns store other
-  #         small integers (e.g. a day-of-week 1-7) rather than boolean flags.
-  map_numeric_1_to_boolean: true
+  # Narrow numeric source columns (precision 1, scale 0 - e.g. Oracle NUMBER(1,0),
+  # or NUMERIC(1,0) from other engines) are ambiguous: the same type is used both for
+  # 0/1 boolean flags and for small integer codes (e.g. channel_id, day-of-week 1-7).
+  # By DEFAULT such columns are mapped to SMALLINT (always lossless).
+  #
+  # numeric_1_boolean_columns: opt specific columns in to PostgreSQL BOOLEAN instead.
+  # Matching is case-insensitive regex (full match), like table_settings patterns.
+  # When a column is mapped to BOOLEAN its source values are coerced on insert
+  # (0 -> false, non-zero / truthy text -> true).
+  # Entries can be:
+  #   - a plain column-name regex (matches that column in any table), or
+  #   - a mapping with optional schema / table / column regex keys (all given keys must match).
+  # Example:
+  # numeric_1_boolean_columns:
+  #   - 'is_.*'          # any column named is_*
+  #   - '.*_flag'        # any column named *_flag
+  #   - { table: 'customers', column: 'active' }
+  #   - { schema: 'app', table: 'orders', column: 'is_paid' }
+  #
+  # map_numeric_1_to_boolean: global escape hatch (default false). Set to true to map
+  # ALL narrow-numeric columns to BOOLEAN (the pre-0.16.1 behavior), ignoring the list.
+  map_numeric_1_to_boolean: false
   on_error: continue # stop, continue
   parallel_workers: 8
   # batch_size: number of rows to migrate in one batch during data migration, default is 100000

@@ -231,10 +231,17 @@ class Planner:
                 for src_func, tgt_func in self.sql_functions_mapping.items():
                     # Escape parentheses in src_func for regex usage
                     escaped_src_func = re.escape(src_func)
+                    # Anchor the regex so a function mapping only replaces a default
+                    # that IS exactly that function - not one where the function is a
+                    # substring of a larger expression. Otherwise a whole expression
+                    # like '['+suser_name()+'@'+host_name()+']' would collapse to the
+                    # bare target (e.g. current_user), discarding the rest of it.
+                    # Function-in-expression defaults are handled token-wise by
+                    # convert_default_value / apply_sql_functions_mapping instead.
                     self.migrator_tables.insert_default_values_substitution({
                         'column_name': '',
                         'source_column_data_type': '',
-                        'default_value_value': rf"(?i){escaped_src_func}",
+                        'default_value_value': rf"(?i)^{escaped_src_func}$",
                         'target_default_value': tgt_func
                     })
 

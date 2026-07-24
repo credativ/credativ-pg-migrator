@@ -1,6 +1,11 @@
 credativ-pg-migrator Releases
 =============================
 
+0.15.2 - 24.07.2026
+-------------------
+
+* Fix in Planner default value substitution so composite column defaults containing a mapped SQL function are no longer collapsed to the bare replacement, and user-defined substitutions are no longer overridden by generic function mappings.
+
 0.15.1 - 07.07.2026
 -------------------
 

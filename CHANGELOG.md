@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.15.2 - 2026.07.24
+
+- 2026.07.24
+
+  - Fix - Planner/Default Values: Anchored the auto-injected SQL function mapping regexes in the `default_values_substitution` table (`(?i)^...$` instead of the unanchored `(?i)...`). Previously a generic function mapping such as `suser_name() -> current_user` was stored as an unanchored regex and matched via a substring search, so a composite column default like `'['+suser_name()+'@'+host_name()+']'` was collapsed to the bare replacement `current_user`, discarding the surrounding brackets, `@`, `host_name()`, and concatenation. Because these rows are flagged with `(?i)`, they also took precedence in the query `ORDER BY` and silently overrode user-defined whole-value substitutions from the configuration file. With the anchored pattern, a function mapping only replaces a default that is exactly that function; function-in-expression defaults are instead translated token-wise by each connector's `convert_default_value` / `apply_sql_functions_mapping`, and user-defined whole-value substitutions are honored. The change is shared by all connectors and is safe because every connector already performs token-level default translation.
+
 ## 0.15.1 - 2026.07.07
 
 - 2026.07.07

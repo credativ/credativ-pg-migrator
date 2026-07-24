@@ -505,8 +505,21 @@ class PostgreSQLConnector(DatabaseConnector):
                 # Skip empty defaults
                 if not column_default:
                     column_default = ''
+                # Niladic SQL keyword-functions have no parentheses (e.g. suser_name()
+                # mapped to current_user), so they must NOT be quoted as string literals.
+                sql_keyword_defaults = (
+                    'current_user', 'current_role', 'session_user', 'user',
+                    'current_catalog', 'current_schema',
+                    'current_timestamp', 'current_date', 'current_time',
+                    'localtime', 'localtimestamp',
+                )
+                default_is_expression = (
+                    '||' in column_default or '(' in column_default
+                    or ')' in column_default or '::' in column_default
+                    or column_default.strip().lower() in sql_keyword_defaults
+                )
                 if (('CHAR' in column_data_type or column_data_type in ('TEXT'))
-                    and ('||' in column_default or '(' in column_default or ')' in column_default or '::' in column_default)):
+                    and default_is_expression):
                     # default value is here NOT quoted
                     create_column_sql += f""" DEFAULT {column_default}""".replace("''", "'")
                 elif 'CHAR' in column_data_type or column_data_type in ('TEXT'):

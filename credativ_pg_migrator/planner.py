@@ -944,15 +944,22 @@ class Planner:
                         else:
                             coltype = types_mapping.get(coltype, coltype).upper()
 
-                    if self.config_parser.get_varchar_to_text_length() >= 0 or self.config_parser.get_char_to_text_length() >= 0:
-                        if (self.source_connection.is_string_type(coltype)
-                            and 'VARCHAR' in coltype.upper()
-                            and character_maximum_length >= self.config_parser.get_varchar_to_text_length()):
-                            coltype = 'TEXT'
-                        elif (self.source_connection.is_string_type(coltype)
-                              and 'CHAR' in coltype.upper()
-                              and character_maximum_length >= self.config_parser.get_char_to_text_length()):
-                            coltype = 'TEXT'
+                    if self.source_connection.is_string_type(coltype):
+                        coltype_upper = coltype.upper()
+                        varchar_to_text_length = self.config_parser.get_varchar_to_text_length()
+                        char_to_text_length = self.config_parser.get_char_to_text_length()
+                        # Note: 'CHAR' is a substring of 'VARCHAR', so varchar-family types
+                        # (including univarchar/nvarchar mapped to VARCHAR) must be matched
+                        # first and excluded from the CHAR branch - otherwise they would be
+                        # subjected to char_to_text_length instead of varchar_to_text_length.
+                        # Each branch is guarded by its own limit >= 0 check so that an unset
+                        # limit (-1) never triggers a conversion.
+                        if 'VARCHAR' in coltype_upper:
+                            if varchar_to_text_length >= 0 and character_maximum_length >= varchar_to_text_length:
+                                coltype = 'TEXT'
+                        elif 'CHAR' in coltype_upper:
+                            if char_to_text_length >= 0 and character_maximum_length >= char_to_text_length:
+                                coltype = 'TEXT'
 
                 self.config_parser.print_log_message( 'DEBUG', f"planner: convert_table_columns: Column {column_info['column_name']} - using data type: {coltype}")
 

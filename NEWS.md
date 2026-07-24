@@ -5,6 +5,8 @@ credativ-pg-migrator Releases
 -------------------
 
 * Fix in Planner default value substitution so composite column defaults containing a mapped SQL function are no longer collapsed to the bare replacement, and user-defined substitutions are no longer overridden by generic function mappings.
+* Fix in Planner varchar/char to text promotion so varchar-family columns (including Sybase ASE `univarchar`) honour `varchar_to_text_length` and are no longer wrongly converted to `text` based on `char_to_text_length`.
+* Fix in PostgreSQL connector so niladic SQL keyword defaults such as `current_user` (e.g. from Sybase `suser_name()`) are emitted as the function on string columns instead of the quoted literal `'current_user'`.
 
 0.15.1 - 07.07.2026
 -------------------

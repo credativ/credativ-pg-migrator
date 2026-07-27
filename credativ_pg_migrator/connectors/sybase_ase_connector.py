@@ -407,7 +407,21 @@ class SybaseASEConnector(DatabaseConnector):
                 # full_data_type_length = row[7].strip()
                 column_domain = row[8]
                 column_default_name = row[9]
-                column_default_value = row[10].replace('DEFAULT ', '').strip().strip('"') if row[10] and row[10].replace('DEFAULT ', '').strip().startswith('"') and row[10].replace('DEFAULT ', '').strip().endswith('"') else (row[10].replace('DEFAULT ', '').strip() if row[10] else '')
+                default_val = row[10] if row[10] else ''
+                if default_val:
+                    # Strip block comments
+                    default_val = re.sub(r'/\*.*?\*/', '', default_val, flags=re.DOTALL)
+                    # Strip line comments
+                    default_val = '\n'.join(re.sub(r'--.*$', '', line) for line in default_val.splitlines())
+                    default_val = re.sub(r'\s+', ' ', default_val).strip()
+
+                # Clean up Sybase default object definition if present
+                default_match = re.match(r'(?i)^\s*create\s+default\s+.*?\s+as\s+(.*)$', default_val.strip(), re.DOTALL)
+                if default_match:
+                    default_val = default_match.group(1).strip()
+                column_default_value = default_val.replace('DEFAULT ', '').strip().strip('"') if default_val.replace('DEFAULT ', '').strip().startswith('"') and default_val.replace('DEFAULT ', '').strip().endswith('"') else default_val.replace('DEFAULT ', '').strip()
+                # Strip $ from money literals
+                column_default_value = re.sub(r'\$(\d+(?:\.\d+)?)', r'\1', column_default_value)
                 status = row[11]
                 variable_length = row[12]
                 data_type_precision = row[13]
@@ -419,7 +433,45 @@ class SybaseASEConnector(DatabaseConnector):
                 is_generated_stored = row[19]
                 generation_expression = row[20]
                 is_hidden_column = row[21]
-                stripped_generation_expression = generation_expression.replace('AS ', '').replace('MATERIALIZED', '').strip() if generation_expression else ''
+                stripped_val = re.sub(r'(?i)\bmaterialized\b', '', generation_expression).strip() if generation_expression else ''
+                stripped_val = re.sub(r'(?i)^\s*as\s+', '', stripped_val).strip()
+                if stripped_val:
+                    def convert_to_cast(expr):
+                        while True:
+                            match = re.search(r'(?i)\bconvert\s*\(', expr)
+                            if not match:
+                                break
+                            start_idx = match.start()
+                            open_count = 1
+                            comma_idx = -1
+                            end_idx = -1
+                            for i in range(start_idx + len(match.group(0)), len(expr)):
+                                char = expr[i]
+                                if char == '(':
+                                    open_count += 1
+                                elif char == ')':
+                                    open_count -= 1
+                                    if open_count == 0:
+                                        end_idx = i
+                                        break
+                                elif char == ',' and open_count == 1:
+                                    comma_idx = i
+                            if end_idx != -1 and comma_idx != -1:
+                                target_type = expr[start_idx + len(match.group(0)):comma_idx].strip()
+                                if target_type.lower() == 'money':
+                                    target_type = 'numeric'
+                                source_expr = expr[comma_idx + 1:end_idx].strip()
+                                source_expr = convert_to_cast(source_expr)
+                                cast_str = f"({source_expr})::{target_type}"
+                                expr = expr[:start_idx] + cast_str + expr[end_idx + 1:]
+                            else:
+                                break
+                        # Replace $digits money literals with digits
+                        expr = re.sub(r'\$(\d+(?:\.\d+)?)', r'\1', expr)
+                        return expr
+                    stripped_generation_expression = convert_to_cast(stripped_val)
+                else:
+                    stripped_generation_expression = ''
 
                 if data_type.lower() in ('univarchar', 'unichar'):
                     data_type_length = str(int(length / unichar_size))
@@ -610,7 +662,12 @@ class SybaseASEConnector(DatabaseConnector):
         self.disconnect()
 
         for default_object_name, default_value in default_values.items():
-            default_value['default_value_sql'] = re.sub(r'\s+', ' ', default_value['default_value_sql']).strip()
+            sql_text = default_value['default_value_sql']
+            # Strip block comments
+            sql_text = re.sub(r'/\*.*?\*/', '', sql_text, flags=re.DOTALL)
+            # Strip line comments
+            sql_text = '\n'.join(re.sub(r'--.*$', '', line) for line in sql_text.splitlines())
+            default_value['default_value_sql'] = re.sub(r'\s+', ' ', sql_text).strip()
             default_value['default_value_sql'] = re.sub(r'\n', '', default_value['default_value_sql'])
             # default_value['default_value_sql'] = re.sub(r'\"', '', default_value['default_value_sql'])
             # default_value['default_value_sql'] = re.sub(r'`', '', default_value['default_value_sql'])
@@ -619,6 +676,7 @@ class SybaseASEConnector(DatabaseConnector):
             extracted_default_value = re.sub(rf'default\s+', '', extracted_default_value, flags=re.IGNORECASE).strip()
             extracted_default_value = extracted_default_value.replace('"', '')
             extracted_default_value = extracted_default_value.replace("'", '')
+            extracted_default_value = re.sub(r'\$(\d+(?:\.\d+)?)', r'\1', extracted_default_value)
             default_value['extracted_default_value'] = extracted_default_value.strip()
         return default_values
 
@@ -639,7 +697,7 @@ class SybaseASEConnector(DatabaseConnector):
                 'SMALLDATETIME(4)': 'TIMESTAMP',
                 'SMALLDATETIME': 'TIMESTAMP',
                 'TIME': 'TIME',
-                'TIMESTAMP': 'TIMESTAMP',
+                'TIMESTAMP': 'BYTEA',
                 'BIGINT': 'BIGINT',
                 'UNSIGNED BIGINT': 'BIGINT',
                 'INTEGER': 'INTEGER',
@@ -1139,6 +1197,7 @@ class SybaseASEConnector(DatabaseConnector):
             check_name = check_constraint[0]
             check_expression = check_constraint[1].strip()
             check_expression = check_expression.replace('CONSTRAINT', '').replace(check_name, '').replace('CHECK','').strip()
+            check_expression = re.sub(r'\$(\d+(?:\.\d+)?)', r'\1::money', check_expression)
             table_constraints[order_num] = {
                 'constraint_name': check_name,
                 'constraint_type': 'CHECK',
@@ -1846,10 +1905,11 @@ class SybaseASEConnector(DatabaseConnector):
 
                     self.config_parser.print_log_message('INFO', f"sybase_ase_connector: migrate_table: Worker {worker_id}: Source table {source_table_name}: {source_table_rows_limited} rows / Target table {target_table_name}: {target_table_rows} rows - starting data migration.")
 
+                    non_generated_columns = {k: v for k, v in source_columns.items() if v.get('is_generated_virtual') != 'YES' and v.get('is_generated_stored') != 'YES'}
                     select_columns_list = []
                     orderby_columns_list = []
                     insert_columns_list = []
-                    for order_num, col in source_columns.items():
+                    for order_num, col in non_generated_columns.items():
                         self.config_parser.print_log_message('DEBUG2',
                                                             f"Worker {worker_id}: Table {source_schema_name}.{source_table_name}: Processing column {col['column_name']} ({order_num}) with data type {col['data_type']}")
 
@@ -1927,16 +1987,16 @@ class SybaseASEConnector(DatabaseConnector):
                         # Convert records to a list of dictionaries
                         transforming_start_time = time.time()
                         records = [
-                            {column['column_name']: value for column, value in zip(source_columns.values(), record)}
+                            {column['column_name']: value for column, value in zip(non_generated_columns.values(), record)}
                             for record in records
                         ]
                         for record in records:
-                            for order_num, column in source_columns.items():
+                            for order_num, column in non_generated_columns.items():
                                 column_name = column['column_name']
                                 column_type = column['data_type']
-                                if column_type.lower() in ['binary', 'varbinary', 'image']:
+                                if column_type.lower() in ['binary', 'varbinary', 'image', 'timestamp']:
                                     record[column_name] = bytes(record[column_name]) if record[column_name] is not None else None
-                                elif column_type.lower() in ['datetime', 'smalldatetime', 'date', 'time', 'timestamp']:
+                                elif column_type.lower() in ['datetime', 'smalldatetime', 'date', 'time']:
                                     record[column_name] = str(record[column_name]) if record[column_name] is not None else None
 
                         # Insert batch into target table
@@ -1952,7 +2012,7 @@ class SybaseASEConnector(DatabaseConnector):
                             'worker_id': worker_id,
                             'migrator_tables': migrator_tables,
                             'insert_columns': insert_columns,
-                            'insert_values': settings.get('insert_values'),
+                            'insert_values': ', '.join(['%s' for _ in range(len(non_generated_columns))]),
                             'data_conflict_action': data_conflict_action,
                             'primary_key_columns': primary_key_columns,
                         })
@@ -3116,7 +3176,12 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_name}_func"();
                 bt.name as base_type_name
             FROM dbo.systypes t
             JOIN dbo.sysusers u ON t.uid = u.uid
-            LEFT JOIN dbo.systypes bt ON t.type = bt.type AND bt.usertype < 100
+            LEFT JOIN dbo.systypes bt ON t.type = bt.type AND bt.usertype < 100 AND bt.name IN (
+                'image', 'text', 'varbinary', 'varchar', 'binary', 'char', 'tinyint', 'date', 
+                'bit', 'time', 'smallint', 'decimal', 'int', 'smalldatetime', 'real', 'money', 
+                'datetime', 'float', 'numeric', 'usmallint', 'uint', 'ubigint', 'unichar', 
+                'univarchar', 'unitext', 'bigdatetime', 'bigtime', 'bigint'
+            )
             WHERE t.usertype > 100
             ORDER BY t.name
         """

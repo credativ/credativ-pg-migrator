@@ -481,7 +481,7 @@ class PostgreSQLConnector(DatabaseConnector):
                     )
                 if self.is_string_type(column_data_type):
                     generated_column_expression = generated_column_expression.replace("+", "||")
-                create_column_sql += f" GENERATED ALWAYS AS {generated_column_expression} STORED"
+                create_column_sql += f" GENERATED ALWAYS AS ({generated_column_expression}) STORED"
 
             column_default = ''
             if column_info['column_default_name'] != '' and column_info['column_default_value'] == '' and column_info['replaced_column_default_value'] == '':

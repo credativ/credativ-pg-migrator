@@ -2829,6 +2829,22 @@ class PostgreSQLConnector(DatabaseConnector):
             cursor.execute(query, (target_schema_name, target_funcproc_name))
             return cursor.fetchone()[0]
 
+    def target_funcprocs_with_prefix_exist(self, target_schema_name, name_prefix):
+        """True if at least one function or procedure whose name starts with the given prefix
+        exists in the target schema - used for objects migrated as a set of functions, such as
+        an Oracle package split into <package>_<routine> functions."""
+        query = """
+            SELECT EXISTS (
+                SELECT 1 FROM pg_catalog.pg_proc p
+                JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+                WHERE lower(n.nspname) = lower(%s)
+                  AND lower(p.proname) LIKE lower(%s)
+            )
+        """
+        with self.connection.cursor() as cursor:
+            cursor.execute(query, (target_schema_name, name_prefix.replace('%', '') + '%'))
+            return cursor.fetchone()[0]
+
     def target_trigger_exists(self, target_schema_name, target_table_name, trigger_name):
         """True if a trigger with this name exists on the given table in the target schema.
         The table name is optional; if not provided, any trigger with this name in the schema

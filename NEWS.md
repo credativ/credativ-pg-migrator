@@ -10,6 +10,7 @@ credativ-pg-migrator Releases
 * Configurable NUMBER(1,0) mapping: narrow numeric columns now default to SMALLINT (lossless), with an opt-in for mapping true 0/1 flags to BOOLEAN
 * Mapping workflow and validation improvements: `data_conflict_action`-aware validation, redesigned mapping report, and configuration cleanup
 * Numerous Oracle conversion fixes across PL/SQL parameters, triggers, views and boolean data handling
+* Oracle packages are now migrated: each package is split into standalone `<package>_<routine>` functions and all calls into the package (in functions, procedures and triggers) are rewritten to them
 * New target capability check in the pre-migration analysis: the migrator now stops before creating any object if the target PostgreSQL version cannot support what the source schema requires (first case: generated columns need PostgreSQL 12+)
 * Oracle virtual (computed) columns are migrated as PostgreSQL generated columns, and Oracle-specific column defaults (`SYS_CONTEXT('USERENV', ...)`, `USER`, `SYSDATE`, `SYS_GUID()`) are translated to their PostgreSQL equivalents instead of producing invalid DDL
 

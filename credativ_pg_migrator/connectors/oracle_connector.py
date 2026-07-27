@@ -32,6 +32,9 @@ class OracleConnector(DatabaseConnector):
         self.connection = None
         self.config_parser = config_parser
         self.source_or_target = source_or_target
+        # Names of the packages in the source schema, read once on first use. Calls into a
+        # package are rewritten to the standalone functions the package is split into.
+        self.source_package_names = None
         self.on_error_action = self.config_parser.get_on_error_action()
         self.logger = MigratorLogger(self.config_parser.get_log_file()).logger
 
@@ -1554,6 +1557,171 @@ class OracleConnector(DatabaseConnector):
             i += 1
         return -1, -1, None
 
+    def _plsql_iter_words(self, code, start=0):
+        """Yield (start_idx, end_idx, UPPERCASE_WORD) for every identifier in the code,
+        skipping single-quoted strings and -- / /* */ comments."""
+        i, n = start, len(code)
+        while i < n:
+            c = code[i]
+            if c == "'":
+                i += 1
+                while i < n and code[i] != "'":
+                    i += 1
+                i += 1
+                continue
+            if c == '-' and i + 1 < n and code[i + 1] == '-':
+                while i < n and code[i] != '\n':
+                    i += 1
+                continue
+            if c == '/' and i + 1 < n and code[i + 1] == '*':
+                i += 2
+                while i + 1 < n and not (code[i] == '*' and code[i + 1] == '/'):
+                    i += 1
+                i += 2
+                continue
+            if c.isalpha() or c == '_':
+                j = i
+                while j < n and (code[j].isalnum() or code[j] in '_$#'):
+                    j += 1
+                yield i, j, code[i:j].upper()
+                i = j
+                continue
+            i += 1
+
+    def _plsql_routine_end(self, code, start):
+        """
+        Index just past the "END ...;" that terminates the PL/SQL routine starting at `start`.
+
+        BEGIN and CASE are counted as block openers; a bare END (or END CASE) closes one of
+        them, while END IF / END LOOP close constructs whose openers are not counted, so both
+        the statement form (IF ... END IF) and the expression form (CASE ... END) balance out.
+        Returns -1 when the structure could not be followed.
+        """
+        depth = 0
+        block_seen = False
+        words = list(self._plsql_iter_words(code, start))
+        position = 0
+        while position < len(words):
+            word_start, word_end, word = words[position]
+            position += 1
+            if word in ('BEGIN', 'CASE'):
+                depth += 1
+                block_seen = True
+                continue
+            if word != 'END':
+                continue
+            following = words[position][2] if position < len(words) else ''
+            if following in ('IF', 'LOOP'):
+                # closes a construct whose opener was not counted
+                position += 1
+                continue
+            if following == 'CASE':
+                # consume the CASE of "END CASE" so it is not counted as a new opener
+                position += 1
+            depth -= 1
+            if block_seen and depth <= 0:
+                semicolon = code.find(';', word_end)
+                return len(code) if semicolon == -1 else semicolon + 1
+        return -1
+
+    def _split_package_routines(self, code):
+        """
+        Split the body of an Oracle package into its routines. Returns a list of dicts
+        {'kind': 'FUNCTION' | 'PROCEDURE', 'name': str, 'code': str} in source order.
+        The specification is skipped - it carries only signatures, no implementation.
+        """
+        routines = []
+        body_match = re.search(r'(?is)\bPACKAGE\s+BODY\b', code)
+        if not body_match:
+            return routines
+
+        block_start, block_end, _ = self._plsql_find_top_level_kw(code, {'IS', 'AS'}, body_match.end())
+        position = block_end if block_start != -1 else body_match.end()
+        while True:
+            header_start, header_end, kind = self._plsql_find_top_level_kw(
+                code, {'PROCEDURE', 'FUNCTION'}, position)
+            if header_start == -1:
+                break
+
+            # A forward declaration ends with a semicolon before any IS/AS block
+            is_start, _, _ = self._plsql_find_top_level_kw(code, {'IS', 'AS'}, header_end)
+            declaration_end = code.find(';', header_end)
+            if is_start == -1 or (declaration_end != -1 and declaration_end < is_start):
+                position = (declaration_end + 1) if declaration_end != -1 else header_end
+                continue
+
+            routine_end = self._plsql_routine_end(code, header_end)
+            if routine_end == -1:
+                self.config_parser.print_log_message('WARNING', f"oracle_connector: _split_package_routines: Could not determine the end of a package {kind.lower()} - the rest of the package is not converted.")
+                break
+
+            name_match = re.match(r'(?is)\s*"?([\w$#]+)"?', code[header_end:routine_end])
+            routines.append({
+                'kind': kind,
+                'name': name_match.group(1) if name_match else '',
+                'code': code[header_start:routine_end],
+            })
+            position = routine_end
+        return routines
+
+    def _package_routine_target_name(self, package_name, routine_name):
+        """ Package routines become standalone functions named <package>_<routine>. """
+        return self.config_parser.convert_names_case(f"{package_name}_{routine_name}")
+
+    def _source_package_names(self):
+        """ Names of the packages in the source schema (read once, empty set on failure). """
+        if self.source_package_names is not None:
+            return self.source_package_names
+        self.source_package_names = set()
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute("""
+                SELECT object_name
+                FROM all_objects
+                WHERE owner = :owner AND object_type = 'PACKAGE'
+            """, {'owner': (self.config_parser.get_source_schema() or '').upper()})
+            self.source_package_names = {row[0] for row in cursor.fetchall()}
+            cursor.close()
+        except Exception as e:
+            self.config_parser.print_log_message('WARNING', f"oracle_connector: _source_package_names: Could not read the list of packages: {e}")
+        return self.source_package_names
+
+    def _add_perform_to_statement_calls(self, code, routine_names):
+        """
+        A call that forms a whole statement (Oracle: "pkg.proc(a, b);") is not valid PL/pgSQL -
+        it needs PERFORM. Calls used as an expression (assignment, condition, argument) are
+        left alone.
+        """
+        if not routine_names:
+            return code
+        names = '|'.join(re.escape(name) for name in sorted(routine_names, key=len, reverse=True))
+        pattern = re.compile(rf'(?is)(^|;|\bBEGIN\b|\bTHEN\b|\bELSE\b|\bLOOP\b)(\s*)((?:{names})\s*\()')
+        return pattern.sub(lambda m: f"{m.group(1)}{m.group(2)}PERFORM {m.group(3)}", code)
+
+    def _rewrite_package_calls(self, code):
+        """
+        Rewrite calls into an Oracle package (pkg_audit.log_change(...)) to the standalone
+        function the package routine is migrated as (pkg_audit_log_change(...)), and add the
+        PERFORM that PL/pgSQL requires for a call used as a statement.
+        """
+        package_names = self._source_package_names()
+        if not package_names:
+            return code
+
+        called_routines = set()
+
+        def replace_call(match):
+            target_name = self._package_routine_target_name(match.group(1), match.group(2))
+            called_routines.add(target_name)
+            return f"{target_name}("
+
+        for package_name in package_names:
+            pattern = re.compile(rf'(?i)\b({re.escape(package_name)})\s*\.\s*([A-Za-z_][\w$#]*)\s*\(')
+            code = pattern.sub(replace_call, code)
+
+        return self._add_perform_to_statement_calls(code, called_routines)
+
     def _map_plsql_datatypes(self, code):
         """Map common Oracle scalar type names to PostgreSQL equivalents (word-boundaried)."""
         mapping = [
@@ -1633,6 +1801,8 @@ class OracleConnector(DatabaseConnector):
         code = re.sub(r'(?i)\bEXECUTE\s+IMMEDIATE\b', 'EXECUTE', code)
         # Oracle's dummy DUAL table
         code = re.sub(r'(?i)\s+FROM\s+dual\b', '', code)
+        # Calls into a package -> the standalone functions the package is split into
+        code = self._rewrite_package_calls(code)
         return code
 
     def _warn_plsql_constructs(self, code, funcproc_name):
@@ -1659,8 +1829,6 @@ class OracleConnector(DatabaseConnector):
             funcproc_code = funcproc_code.get('definition', '') or ''
         funcproc_code = (funcproc_code or '').strip()
         target_db_type = settings['target_db_type']
-        source_schema_name = settings.get('source_schema_name', '')
-        target_schema_name = settings['target_schema_name']
         funcproc_name = settings.get('funcproc_name', '')
 
         if target_db_type != 'postgresql':
@@ -1674,10 +1842,74 @@ class OracleConnector(DatabaseConnector):
 
         self._warn_plsql_constructs(code, funcproc_name)
 
-        # Packages have no direct PostgreSQL equivalent - preserve the source, do not create.
+        # PostgreSQL has no packages - the package is split into standalone functions.
         if re.match(r'(?is)^\s*CREATE\s+(OR\s+REPLACE\s+)?(EDITIONABLE\s+|NONEDITIONABLE\s+)?PACKAGE\b', code):
-            self.config_parser.print_log_message('WARNING', f"oracle_connector: convert_funcproc_code: {funcproc_name} is an Oracle PACKAGE, which has no direct PostgreSQL equivalent. It must be split manually into individual functions/procedures (and package state into session settings). Source preserved; nothing created.")
+            return self._convert_package_code(code, funcproc_name, settings)
+
+        return self._convert_plsql_routine(code, funcproc_name, settings)
+
+    def _convert_package_code(self, code, funcproc_name, settings):
+        """
+        Convert an Oracle package into standalone PostgreSQL functions, one per package
+        routine, named <package>_<routine>. Calls into the package are rewritten to the same
+        names by _rewrite_package_calls, in this connector's routines, triggers and views.
+        Package state (variables, constants, cursors declared in the package) has no
+        PostgreSQL equivalent and is reported.
+        """
+        header_match = re.match(
+            r'(?is)^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:EDITIONABLE\s+|NONEDITIONABLE\s+)?PACKAGE\s+(?:BODY\s+)?'
+            r'(?:"?[\w$#]+"?\s*\.\s*)?"?([\w$#]+)"?', code)
+        package_name = header_match.group(1) if header_match else (funcproc_name or '')
+
+        routines = self._split_package_routines(code)
+        if not routines:
+            self.config_parser.print_log_message('WARNING', f"oracle_connector: _convert_package_code: Package {package_name} contains no convertible routine (package body not available?); source preserved, nothing created.")
             return ''
+
+        # Sibling routines are called unqualified inside the package - rewrite those calls to
+        # the standalone names as well, before the shared substitutions run.
+        sibling_names = {}
+        for routine in routines:
+            sibling_names[routine['name'].upper()] = self._package_routine_target_name(package_name, routine['name'])
+
+        converted_routines = []
+        for routine in routines:
+            routine_code = routine['code']
+            for source_name, target_name in sibling_names.items():
+                routine_code = re.sub(rf'(?i)(?<![\w$#.]){re.escape(source_name)}\s*\(',
+                                      f'{target_name}(', routine_code)
+            # the routine's own header must keep its original name so it is parsed correctly
+            routine_code = re.sub(rf'(?i)^(\s*(?:PROCEDURE|FUNCTION)\s+){re.escape(sibling_names[routine["name"].upper()])}\s*\(',
+                                  rf'\g<1>{routine["name"]}(', routine_code)
+            routine_code = self._add_perform_to_statement_calls(routine_code, set(sibling_names.values()))
+
+            routine_sql = self._convert_plsql_routine(
+                f"CREATE OR REPLACE {routine_code}",
+                f"{package_name}.{routine['name']}",
+                settings,
+                target_name_override=self._package_routine_target_name(package_name, routine['name']),
+                force_function=True)
+            if routine_sql:
+                converted_routines.append(routine_sql)
+
+        if not converted_routines:
+            return ''
+
+        self.config_parser.print_log_message('INFO', f"oracle_connector: _convert_package_code: Package {package_name} split into {len(converted_routines)} standalone function(s): " + ', '.join(sorted(sibling_names.values())))
+        self.config_parser.print_log_message('WARNING', f"oracle_connector: _convert_package_code: Package {package_name} was split into standalone functions on a best-effort basis. Package state (package level variables, constants and cursors) has no PostgreSQL equivalent and is NOT migrated - review the generated functions before relying on them.")
+
+        return (f"-- Oracle package {package_name} migrated as standalone functions "
+                f"named {self._package_routine_target_name(package_name, '<routine>')}\n"
+                + '\n\n'.join(converted_routines))
+
+    def _convert_plsql_routine(self, code, funcproc_name, settings, target_name_override=None, force_function=False):
+        """
+        Convert one standalone PL/SQL function/procedure to PL/pgSQL. target_name_override
+        renames the created object (used for package routines); force_function creates a
+        procedure as a function, so every call site can use the same PERFORM form.
+        """
+        source_schema_name = settings.get('source_schema_name', '')
+        target_schema_name = settings['target_schema_name']
 
         is_function = bool(re.match(r'(?is)^\s*CREATE\s+(OR\s+REPLACE\s+)?FUNCTION\b', code))
         is_procedure = bool(re.match(r'(?is)^\s*CREATE\s+(OR\s+REPLACE\s+)?PROCEDURE\b', code))
@@ -1697,7 +1929,7 @@ class OracleConnector(DatabaseConnector):
         # bare object name (drop any source schema qualifier and quotes); apply the configured
         # target name-case handling for consistency with tables/views/sequences.
         bare_name = raw_name.split('.')[-1].strip().strip('"')
-        target_name = self.config_parser.convert_names_case(bare_name)
+        target_name = target_name_override or self.config_parser.convert_names_case(bare_name)
 
         # Parameter list (balanced-paren aware via the top-level scanner is overkill here; the
         # params are the first parenthesised group when present)
@@ -1748,10 +1980,17 @@ class OracleConnector(DatabaseConnector):
         # Normalize the trailing "END <name>;" -> "END;"
         body = re.sub(r'(?is)\bEND\s+' + re.escape(bare_name) + r'\s*;\s*$', 'END;', body.strip())
 
-        # Assemble PostgreSQL DDL
+        # Assemble PostgreSQL DDL. A procedure created as a function (package routines) keeps
+        # its OUT parameters - PostgreSQL then derives the result type from them, so RETURNS
+        # must be omitted; without OUT parameters it returns void.
+        if force_function:
+            kind = 'FUNCTION'
         header = f'CREATE OR REPLACE {kind} "{target_schema_name}"."{target_name}"({params_pg})'
         if kind == 'FUNCTION':
-            header += f' RETURNS {return_type or "void"}'
+            if return_type:
+                header += f' RETURNS {return_type}'
+            elif not re.search(r'(?i)(^|,)\s*(OUT|INOUT)\s', params_pg):
+                header += ' RETURNS void'
         inner = (f"DECLARE\n{declarations}\n" if declarations else '') + body
         result = f"{header}\nAS $$\n{inner}\n$$ LANGUAGE plpgsql;"
 

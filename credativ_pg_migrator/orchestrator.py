@@ -896,13 +896,15 @@ class Orchestrator:
                         self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Partition of '{target_table_name}' created successfully [{partition_sql}].")
 
                 ## now check alterations of columns due to FK IDENTITY dependency
+                ## the protocol tables are keyed by the untranslated target table name,
+                ## target_table_name here already went through the name-case conversion
                 for result in migrator_tables.fk_find_dependent_columns_to_alter({
                     'target_schema_name': target_schema_name,
-                    'target_table_name': target_table_name,
+                    'target_table_name': table_data['target_table_name'],
                 }):
                     self.config_parser.print_log_message( 'DEBUG', f"orchestrator: table_worker: Worker {worker_id}: Found dependency for column alteration: {result}")
                     alter_column_sql = f"""
-                        ALTER TABLE "{target_schema_name}"."{self.config_parser.convert_names_case(target_table_name)}"
+                        ALTER TABLE "{target_schema_name}"."{target_table_name}"
                         ALTER COLUMN "{self.config_parser.convert_names_case(result['target_column'].replace('"',''))}"
                         TYPE {result['altered_data_type']}"""
                     self.config_parser.print_log_message( 'DEBUG', f"orchestrator: table_worker: Worker {worker_id}: Altering column with SQL: {alter_column_sql}")

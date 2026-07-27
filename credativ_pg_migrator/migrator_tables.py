@@ -1458,34 +1458,68 @@ class MigratorTables:
 
     def fk_find_dependent_columns_to_alter(self, settings):
         """
-        Find the dependent column to alter in the target table based on the foreign key constraints.
-        Yields each matching row as a dict.
+        Find the columns of the given target table that must be altered because the column
+        they reference through a foreign key was altered on the target - typically a source
+        identity column promoted to BIGINT, which leaves the referencing column with the
+        original type ("Key columns ... are of incompatible types: numeric and bigint").
+        Yields each column to alter as a dict.
+
+        Table and column names are compared case-insensitively, because the protocol tables
+        store them in the source spelling while callers may pass the converted target name.
+        Composite foreign keys are paired position by position.
         """
+        def split_columns(columns):
+            return [col.replace('"', '').strip() for col in (columns or '').split(',') if col.strip()]
+
         table_name_constraints = self.config_parser.get_protocol_name_constraints()
         table_name_target_columns_alterations = self.config_parser.get_protocol_name_target_columns_alterations()
-        query = f"""SELECT
-                        replace(c.constraint_columns,'"','') AS target_column,
-                        a.reason,
-                        a.original_data_type,
-                        a.altered_data_type
+
+        constraints_query = f"""SELECT c.constraint_columns, c.referenced_table_name, c.referenced_columns,
+                        c.referenced_table_schema
                     FROM "{self.protocol_schema}".{table_name_constraints} c
-                    JOIN "{self.protocol_schema}".{table_name_target_columns_alterations} a
-                    ON c.referenced_table_name = a.target_table_name
-                    AND replace(c.referenced_columns,'"','') = a.target_column
                     WHERE c.constraint_type = 'FOREIGN KEY'
-                    AND c.target_schema_name = '{settings['target_schema_name']}'
-                    AND c.target_table_name = '{settings['target_table_name']}'
+                    AND upper(c.target_schema_name) = upper(%s)
+                    AND upper(c.target_table_name) = upper(%s)
                 """
+        alterations_query = f"""SELECT a.target_table_name, a.target_column, a.reason,
+                        a.original_data_type, a.altered_data_type
+                    FROM "{self.protocol_schema}".{table_name_target_columns_alterations} a
+                    WHERE upper(a.target_schema_name) = upper(%s)
+                """
+
         cursor = self.protocol_connection.connection.cursor()
-        cursor.execute(query)
-        for row in cursor:
-            yield {
-                'target_column': row[0],
-                'reason': row[1],
-                'original_data_type': row[2],
-                'altered_data_type': row[3]
-            }
+        cursor.execute(constraints_query, (settings['target_schema_name'], settings['target_table_name']))
+        foreign_keys = cursor.fetchall()
+        cursor.execute(alterations_query, (settings['target_schema_name'],))
+        alterations = {((row[0] or '').upper(), (row[1] or '').upper()): row for row in cursor.fetchall()}
         cursor.close()
+
+        already_yielded = set()
+        for constraint_columns, referenced_table_name, referenced_columns, referenced_table_schema in foreign_keys:
+            # The constraint stores the source name of the referenced table, the alterations
+            # the target name - these differ when aliases are used as target names.
+            referenced_target_names = [(referenced_table_name or '').upper()]
+            if self.config_parser.get_use_aliases_as_target_names():
+                alias_dict = self.get_alias_for_table(referenced_table_schema, referenced_table_name)
+                if alias_dict and alias_dict.get('target_alias_name'):
+                    referenced_target_names.append(alias_dict['target_alias_name'].upper())
+
+            for constraint_column, referenced_column in zip(split_columns(constraint_columns),
+                                                            split_columns(referenced_columns)):
+                alteration = None
+                for referenced_target_name in referenced_target_names:
+                    alteration = alterations.get((referenced_target_name, referenced_column.upper()))
+                    if alteration:
+                        break
+                if not alteration or constraint_column.upper() in already_yielded:
+                    continue
+                already_yielded.add(constraint_column.upper())
+                yield {
+                    'target_column': constraint_column,
+                    'reason': alteration[2],
+                    'original_data_type': alteration[3],
+                    'altered_data_type': alteration[4],
+                }
 
     def create_table_for_data_migration(self):
         table_name = self.config_parser.get_protocol_name_data_migration()

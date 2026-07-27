@@ -47,7 +47,19 @@ class OracleConnector(DatabaseConnector):
         # Combined with disconnect() clearing self.connection, this lets every method
         # safely call self.connect() at its start without depending on caller bracketing.
         if self.connection is not None:
-            return
+            # The handle can outlive the server session (idle timeout, resource profile limit,
+            # DBA kill). ping() detects that here so the session is re-established, instead of
+            # the next cursor() failing with "not connected" in the middle of a migration.
+            try:
+                self.connection.ping()
+                return
+            except Exception as e:
+                self.config_parser.print_log_message('DEBUG', f"oracle_connector: connect: Stale connection detected ({e}) - reconnecting.")
+                try:
+                    self.connection.close()
+                except Exception:
+                    pass
+                self.connection = None
         connection_string = self.config_parser.get_connect_string(self.source_or_target)
         username = self.config_parser.get_db_config(self.source_or_target)['username']
         try:
@@ -268,6 +280,22 @@ class OracleConnector(DatabaseConnector):
             except Exception as e_ident:
                 self.config_parser.print_log_message('DEBUG', f"oracle_connector: fetch_table_columns: ALL_TAB_IDENTITY_COLS not available (Oracle < 12c?): {e_ident}")
 
+            # Virtual (computed) columns store their expression in DATA_DEFAULT, which would
+            # otherwise be emitted as a column DEFAULT. They are migrated as PostgreSQL
+            # generated columns instead. Hidden virtual columns (function-based indexes) are
+            # not part of ALL_TAB_COLUMNS and are excluded here as well.
+            virtual_columns = set()
+            try:
+                cursor.execute("""
+                    SELECT column_name
+                    FROM all_tab_cols
+                    WHERE owner = :owner AND table_name = :table_name
+                      AND virtual_column = 'YES' AND hidden_column = 'NO'
+                """, binds)
+                virtual_columns = {r[0] for r in cursor.fetchall()}
+            except Exception as e_virtual:
+                self.config_parser.print_log_message('DEBUG', f"oracle_connector: fetch_table_columns: ALL_TAB_COLS virtual column info not available: {e_virtual}")
+
             cursor.execute(query, binds)
             for row in cursor.fetchall():
                 column_id = row[0]
@@ -333,6 +361,18 @@ class OracleConnector(DatabaseConnector):
                 # is not emitted as a column default on the target.
                 if column_name in identity_columns:
                     result[column_id]['column_default_value'] = ""
+
+                # Virtual column -> PostgreSQL generated column. Oracle computes the value on
+                # read, PostgreSQL only supports STORED, so the value is materialized on the
+                # target; the expression must not stay behind as a column default.
+                if column_name in virtual_columns:
+                    generation_expression = (column_default or '').strip()
+                    result[column_id]['is_generated_virtual'] = 'YES'
+                    result[column_id]['generation_expression'] = generation_expression
+                    result[column_id]['stripped_generation_expression'] = generation_expression
+                    result[column_id]['column_default_value'] = ""
+                    self.config_parser.print_log_message('DEBUG', f"oracle_connector: fetch_table_columns: Column {column_name} is a virtual column - migrated as generated column: {generation_expression}")
+                    continue
 
                 self.config_parser.print_log_message('DEBUG3', f"oracle_connector: fetch_table_columns: Checking if default value is a sequence for column {column_name} ({column_default})...")
                 if (isinstance(column_default, str)
@@ -566,7 +606,20 @@ class OracleConnector(DatabaseConnector):
                     select_columns_list = []
                     orderby_columns_list = []
                     insert_columns_list = []
-                    for order_num, col in source_columns.items():
+
+                    # Oracle virtual columns become PostgreSQL generated columns, which are
+                    # computed by the target and reject INSERT values. They are dropped from
+                    # the source SELECT and the target INSERT lists, which stay aligned
+                    # because both sides carry the same flags for the same column.
+                    def is_generated_column(col):
+                        return col.get('is_generated_virtual') == 'YES' or col.get('is_generated_stored') == 'YES'
+
+                    migrated_source_columns = {
+                        order_num: col for order_num, col in source_columns.items()
+                        if not is_generated_column(col)
+                    }
+
+                    for order_num, col in migrated_source_columns.items():
                         self.config_parser.print_log_message('DEBUG2',
                                                             f"Worker {worker_id}: Table {source_schema_name}.{source_table_name}: Processing column {col['column_name']} ({order_num}) with data type {col['data_type']}")
 
@@ -582,10 +635,12 @@ class OracleConnector(DatabaseConnector):
                             orderby_columns_list.append(f'''"{col['column_name']}"''')
 
                     for order_num, col in target_columns.items():
+                        if is_generated_column(col):
+                            continue
                         insert_columns_list.append(f'''"{self.config_parser.convert_names_case(col['column_name'])}"''')
 
                     if not orderby_columns_list:
-                        first_valid_col = next(iter(source_columns.values()))['column_name']
+                        first_valid_col = next(iter(migrated_source_columns.values()))['column_name']
                         orderby_columns_list.append(f'''"{first_valid_col}"''')
 
                     select_columns = ', '.join(select_columns_list)
@@ -644,11 +699,11 @@ class OracleConnector(DatabaseConnector):
 
                         transforming_start_time = time.time()
                         records = [
-                            {column['column_name']: value for column, value in zip(source_columns.values(), record)}
+                            {column['column_name']: value for column, value in zip(migrated_source_columns.values(), record)}
                             for record in records
                         ]
                         for record in records:
-                            for order_num, column in source_columns.items():
+                            for order_num, column in migrated_source_columns.items():
                                 column_name = column['column_name']
                                 column_type = column['data_type']
                                 # self.config_parser.print_log_message('DEBUG3', f"oracle_connector: migrate_table: Worker {worker_id}: Processing column {column_name} with data type {column_type} in record {record}")
@@ -2555,9 +2610,83 @@ class OracleConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', e)
             raise
 
+    # Oracle SYS_CONTEXT('USERENV', <parameter>) -> nearest PostgreSQL equivalent.
+    # Parameters without any equivalent are not listed and cause the default to be dropped.
+    USERENV_TO_POSTGRESQL = {
+        'SESSION_USER': 'session_user',
+        'SESSION_USERID': 'session_user',
+        'AUTHENTICATED_IDENTITY': 'session_user',
+        'PROXY_USER': 'session_user',
+        # PostgreSQL has no notion of the client's operating system user - the login role is
+        # the closest audit information available.
+        'OS_USER': 'session_user',
+        'CURRENT_USER': 'current_user',
+        'CURRENT_USERID': 'current_user',
+        'CURRENT_SCHEMA': 'current_schema',
+        'DB_NAME': 'current_database()',
+        'DB_UNIQUE_NAME': 'current_database()',
+        'HOST': 'inet_client_addr()::text',
+        'IP_ADDRESS': 'inet_client_addr()::text',
+        'SERVER_HOST': 'inet_server_addr()::text',
+        'SID': 'pg_backend_pid()::text',
+        'SESSIONID': 'pg_backend_pid()::text',
+        'MODULE': "current_setting('application_name')",
+        'CLIENT_INFO': "current_setting('application_name')",
+        'CLIENT_IDENTIFIER': "current_setting('application_name')",
+    }
+
+    # Oracle niladic functions / pseudocolumns usable as a column default.
+    DEFAULT_FUNCTIONS_TO_POSTGRESQL = {
+        'USER': 'current_user',
+        'SYSDATE': 'current_timestamp',
+        'SYSTIMESTAMP': 'current_timestamp',
+        'CURRENT_TIMESTAMP': 'current_timestamp',
+        'CURRENT_DATE': 'current_date',
+        'LOCALTIMESTAMP': 'localtimestamp',
+    }
+
     def convert_default_value(self, settings) -> dict:
         extracted_default_value = settings['extracted_default_value']
-        return extracted_default_value
+        if not isinstance(extracted_default_value, str) or not extracted_default_value.strip():
+            return extracted_default_value
+
+        default_value = extracted_default_value.strip()
+        column_type = str(settings.get('column_type', '')).upper()
+
+        # SYS_CONTEXT / USERENV have no PostgreSQL counterpart and must be translated even
+        # when embedded in a larger expression.
+        def replace_sys_context(match):
+            namespace = match.group(1).upper()
+            parameter = match.group(2).upper()
+            if namespace != 'USERENV' or parameter not in self.USERENV_TO_POSTGRESQL:
+                self.config_parser.print_log_message('WARNING', f"oracle_connector: convert_default_value: SYS_CONTEXT('{namespace}','{parameter}') has no PostgreSQL equivalent - default value is dropped.")
+                return ''
+            replacement = self.USERENV_TO_POSTGRESQL[parameter]
+            self.config_parser.print_log_message('INFO', f"oracle_connector: convert_default_value: SYS_CONTEXT('{namespace}','{parameter}') converted to {replacement}.")
+            return replacement
+
+        sys_context_pattern = re.compile(
+            r"""SYS_CONTEXT\s*\(\s*'([^']*)'\s*,\s*'([^']*)'\s*(?:,\s*\d+\s*)?\)""",
+            re.IGNORECASE)
+        if sys_context_pattern.search(default_value):
+            default_value = sys_context_pattern.sub(replace_sys_context, default_value).strip()
+            if not default_value:
+                return ''
+
+        # Whole-value niladic function / pseudocolumn (USER, SYSDATE, ...)
+        bare_value = default_value.rstrip(';').strip()
+        if bare_value.upper() in self.DEFAULT_FUNCTIONS_TO_POSTGRESQL:
+            return self.DEFAULT_FUNCTIONS_TO_POSTGRESQL[bare_value.upper()]
+
+        if re.fullmatch(r"(?i)SYS_GUID\s*\(\s*\)", bare_value):
+            if column_type.startswith('UUID'):
+                return 'gen_random_uuid()'
+            if self.is_string_type(column_type) or column_type.startswith('TEXT'):
+                return 'gen_random_uuid()::text'
+            self.config_parser.print_log_message('WARNING', f"oracle_connector: convert_default_value: SYS_GUID() default on a {column_type} column has no PostgreSQL equivalent - default value is dropped.")
+            return ''
+
+        return default_value
 
     def get_table_checksum(self, schema_name: str, table_name: str, columns: list):
         if not columns:

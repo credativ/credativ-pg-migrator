@@ -896,13 +896,15 @@ class Orchestrator:
                         self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Partition of '{target_table_name}' created successfully [{partition_sql}].")
 
                 ## now check alterations of columns due to FK IDENTITY dependency
+                ## the protocol tables are keyed by the untranslated target table name,
+                ## target_table_name here already went through the name-case conversion
                 for result in migrator_tables.fk_find_dependent_columns_to_alter({
                     'target_schema_name': target_schema_name,
-                    'target_table_name': target_table_name,
+                    'target_table_name': table_data['target_table_name'],
                 }):
                     self.config_parser.print_log_message( 'DEBUG', f"orchestrator: table_worker: Worker {worker_id}: Found dependency for column alteration: {result}")
                     alter_column_sql = f"""
-                        ALTER TABLE "{target_schema_name}"."{self.config_parser.convert_names_case(target_table_name)}"
+                        ALTER TABLE "{target_schema_name}"."{target_table_name}"
                         ALTER COLUMN "{self.config_parser.convert_names_case(result['target_column'].replace('"',''))}"
                         TYPE {result['altered_data_type']}"""
                     self.config_parser.print_log_message( 'DEBUG', f"orchestrator: table_worker: Worker {worker_id}: Altering column with SQL: {alter_column_sql}")
@@ -2020,6 +2022,15 @@ class Orchestrator:
             if object_type == 'view':
                 return target_conn.target_view_exists(schema, name)
             if object_type == 'funcproc':
+                # A package is migrated as one function per package routine (migration.
+                # packages_as: <package>_<routine> in the target schema, or <routine> in a
+                # schema named after the package). It is valid when at least one is present.
+                if has_ddl and ddl.lstrip().startswith('-- Oracle package '):
+                    package_schema = self.config_parser.convert_names_case(name)
+                    if self.config_parser.get_packages_migration_style() == 'schemas':
+                        return target_conn.target_funcprocs_with_prefix_exist(package_schema, '')
+                    return target_conn.target_funcprocs_with_prefix_exist(
+                        schema, self.config_parser.convert_names_case(f"{name}_"))
                 return target_conn.target_funcproc_exists(schema, name)
             if object_type == 'trigger':
                 return target_conn.target_trigger_exists(schema, obj.get('table'), name)

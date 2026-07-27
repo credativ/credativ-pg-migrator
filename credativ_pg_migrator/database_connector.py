@@ -686,6 +686,23 @@ class DatabaseConnector(ABC):
         """
         pass
 
+    def get_server_version_num(self):
+        """
+        Returns the version of the database as a comparable integer, or None when the
+        connector cannot report it. Used by the pre-migration analysis to check whether the
+        target database supports what the source schema requires.
+        """
+        return None
+
+    def get_generated_columns_count(self, table_schema: str) -> int:
+        """
+        Returns the number of generated / computed (virtual) columns in the given schema.
+        Used by the pre-migration analysis to decide whether the target database must support
+        generated columns. Connectors of engines that have such columns override this;
+        the default 0 means "this source has none / cannot report them".
+        """
+        return 0
+
     @abstractmethod
     def get_top_n_tables(self, settings):
         """

@@ -308,6 +308,136 @@ class PostgreSQLConnector(DatabaseConnector):
             raise ValueError(f"Unsupported target database type: {target_db_type}")
         return types_mapping
 
+    def convert_expression_identifiers(self, expression, converted_columns=None, convert_plain_text=None):
+        """
+        Rewrite the identifiers of a source SQL expression for PostgreSQL.
+
+        Source engines write the expression with their own identifier quoting and case
+        (Oracle: "CREDIT_LIMIT", MySQL/MariaDB: `credit_limit`, others: bare names). Names
+        that match a column of the table are re-emitted with the configured name-case
+        handling and PostgreSQL quoting; when no column list is available, any quoted
+        identifier is treated as a column name (only identifiers are quoted in an
+        expression). String literals, function names and keywords are left untouched.
+
+        convert_plain_text, if given, is applied to everything between the tokens - use it
+        for operator translation that must not touch the inside of string literals.
+        """
+        if not expression:
+            return expression
+
+        column_names = {}
+        for column_info in (converted_columns or {}).values():
+            column_names[column_info['column_name'].upper()] = column_info['column_name']
+
+        # String literal | double-quoted identifier | backtick-quoted identifier | bare identifier
+        token_pattern = re.compile(r"""('(?:''|[^'])*')|("(?:""|[^"])*")|(`[^`]*`)|([A-Za-z_][A-Za-z0-9_$#]*)""")
+
+        def convert_plain(text):
+            return convert_plain_text(text) if convert_plain_text else text
+
+        converted_parts = []
+        last_end = 0
+        for match in token_pattern.finditer(expression):
+            converted_parts.append(convert_plain(expression[last_end:match.start()]))
+            last_end = match.end()
+            literal, quoted_identifier, backtick_identifier, identifier = match.groups()
+            if literal:
+                converted_parts.append(literal)
+                continue
+            if quoted_identifier:
+                name = quoted_identifier[1:-1]
+            elif backtick_identifier:
+                name = backtick_identifier[1:-1]
+            else:
+                name = identifier
+            if name.upper() in column_names:
+                converted_parts.append(f'"{self.config_parser.convert_names_case(column_names[name.upper()])}"')
+            elif (quoted_identifier or backtick_identifier) and not column_names:
+                # No column list to match against - a quoted name in an expression is a column
+                converted_parts.append(f'"{self.config_parser.convert_names_case(name)}"')
+            elif backtick_identifier:
+                # Unknown backtick-quoted name - keep the name, drop the foreign quoting
+                converted_parts.append(f'"{name}"')
+            else:
+                converted_parts.append(match.group(0))
+        converted_parts.append(convert_plain(expression[last_end:]))
+
+        return ''.join(converted_parts).strip()
+
+    def convert_generation_expression(self, expression, converted_columns, column_data_type):
+        """
+        Rewrite a source generated-column expression for PostgreSQL. The result is wrapped in
+        parentheses, which GENERATED ALWAYS AS (...) STORED requires.
+        """
+        if not expression:
+            return expression
+
+        def convert_operators(text):
+            # Concatenation is '+' in some source engines, '||' in PostgreSQL. Applied only
+            # outside string literals, and only for string results (the same guard as before).
+            return text.replace('+', '||') if self.is_string_type(column_data_type) else text
+
+        converted_expression = self.convert_expression_identifiers(
+            expression, converted_columns, convert_plain_text=convert_operators)
+        if not self.expression_is_parenthesized(converted_expression):
+            converted_expression = f"({converted_expression})"
+        return converted_expression
+
+    def split_top_level_commas(self, text):
+        """ Split on commas that are outside parentheses, string literals and quoted names. """
+        parts = []
+        current = []
+        depth = 0
+        in_literal = False
+        in_quoted_name = False
+        for char in text:
+            if in_literal:
+                current.append(char)
+                if char == "'":
+                    in_literal = False
+                continue
+            if in_quoted_name:
+                current.append(char)
+                if char == '"':
+                    in_quoted_name = False
+                continue
+            if char == "'":
+                in_literal = True
+            elif char == '"':
+                in_quoted_name = True
+            elif char == '(':
+                depth += 1
+            elif char == ')':
+                depth = max(depth - 1, 0)
+            elif char == ',' and depth == 0:
+                parts.append(''.join(current))
+                current = []
+                continue
+            current.append(char)
+        parts.append(''.join(current))
+        return [part for part in parts if part.strip()]
+
+    def expression_is_parenthesized(self, expression):
+        """ True when the whole expression is already wrapped in one pair of parentheses. """
+        if not expression.startswith('(') or not expression.endswith(')'):
+            return False
+        depth = 0
+        in_literal = False
+        for position, char in enumerate(expression):
+            if in_literal:
+                if char == "'":
+                    in_literal = False
+                continue
+            if char == "'":
+                in_literal = True
+            elif char == '(':
+                depth += 1
+            elif char == ')':
+                depth -= 1
+                if depth == 0:
+                    return position == len(expression) - 1
+        return False
+
     def get_create_table_sql(self, settings):
         source_schema_name = settings['source_schema_name']
         source_table_name = settings['source_table_name']
@@ -481,21 +611,14 @@ class PostgreSQLConnector(DatabaseConnector):
                 create_column_sql += " GENERATED BY DEFAULT AS IDENTITY"
 
             if column_info['is_generated_virtual'] == 'YES' or column_info['is_generated_stored'] == 'YES':
-                generated_column_expression = column_info['stripped_generation_expression']
-                # Quote column names in generated_column_expression if they match any column name in converted
-                for other_col_info in converted.values():
-                    other_col_name = other_col_info['column_name']
-                    # Use word boundary for precise match, preserve case
-                    pattern = r'\b{}\b'.format(re.escape(other_col_name))
-                    # Only replace if not already quoted
-                    generated_column_expression = re.sub(
-                        pattern,
-                        lambda m: f'"{m.group(0)}"' if not m.group(0).startswith('"') and not m.group(0).endswith('"') else m.group(0),
-                        generated_column_expression
-                    )
-                if self.is_string_type(column_data_type):
-                    generated_column_expression = generated_column_expression.replace("+", "||")
-                create_column_sql += f" GENERATED ALWAYS AS {generated_column_expression} STORED"
+                generated_column_expression = self.convert_generation_expression(
+                    column_info['stripped_generation_expression'], converted, column_data_type)
+                if generated_column_expression:
+                    create_column_sql += f" GENERATED ALWAYS AS {generated_column_expression} STORED"
+                else:
+                    # Without an expression the column cannot be generated - creating it as an
+                    # ordinary column is better than emitting "GENERATED ALWAYS AS  STORED".
+                    self.config_parser.print_log_message('WARNING', f"postgresql_connector: get_create_table_sql: Column {column_name} is marked as generated but carries no generation expression - created as an ordinary column.")
 
             column_default = ''
             if column_info['column_default_name'] != '' and column_info['column_default_value'] == '' and column_info['replaced_column_default_value'] == '':
@@ -519,8 +642,22 @@ class PostgreSQLConnector(DatabaseConnector):
                 # Skip empty defaults
                 if not column_default:
                     column_default = ''
+                # Niladic SQL keyword-functions have no parentheses (e.g. Oracle USER or
+                # Sybase suser_name() mapped to current_user), so they must NOT be quoted
+                # as string literals.
+                sql_keyword_defaults = (
+                    'current_user', 'current_role', 'session_user', 'user',
+                    'current_catalog', 'current_schema',
+                    'current_timestamp', 'current_date', 'current_time',
+                    'localtime', 'localtimestamp',
+                )
+                default_is_expression = (
+                    '||' in column_default or '(' in column_default
+                    or ')' in column_default or '::' in column_default
+                    or column_default.strip().lower() in sql_keyword_defaults
+                )
                 if (('CHAR' in column_data_type or column_data_type in ('TEXT'))
-                    and ('||' in column_default or '(' in column_default or ')' in column_default or '::' in column_default)):
+                    and default_is_expression):
                     # default value is here NOT quoted
                     create_column_sql += f""" DEFAULT {column_default}""".replace("''", "'")
                 elif 'CHAR' in column_data_type or column_data_type in ('TEXT'):
@@ -647,13 +784,17 @@ class PostgreSQLConnector(DatabaseConnector):
         target_schema_name = settings['target_schema_name'] ## target schema is used as it is defined in config, not converted to upper/lower case
         target_table_name = self.config_parser.convert_names_case(settings['target_table_name'])
         index_columns = settings['index_columns']
+        target_columns = settings.get('target_columns')
+        is_function_based = str(settings.get('is_function_based', 'NO')).upper() == 'YES'
 
-        # Split index_columns by comma, clean up quotes, convert case, and re-quote.
+        # Split index_columns into elements, clean up quotes, convert case, and re-quote.
         # A column entry may carry an ASC/DESC ordering keyword (e.g. '"STORE_NAME" ASC')
         # which must be preserved but must NOT be quoted together with the column name -
         # otherwise the re-quoting produces a dangling quote ('"store_name" asc"').
+        # Splitting is on top-level commas only, because an element of a function-based index
+        # is a whole expression that may contain commas of its own, e.g. (NVL("CODE",'X')).
         column_names = []
-        for col in index_columns.split(','):
+        for col in self.split_top_level_commas(index_columns):
             col = col.strip()
             # Split off a trailing ASC/DESC ordering keyword (split on the last whitespace)
             order_direction = ''
@@ -661,6 +802,16 @@ class PostgreSQLConnector(DatabaseConnector):
             if len(parts) == 2 and parts[1].upper() in ('ASC', 'DESC'):
                 col = parts[0].strip()
                 order_direction = f' {parts[1].upper()}'
+            # An element of a function-based index is an expression (Oracle delivers it
+            # parenthesized), not a column name: its identifiers are rewritten, but the
+            # expression itself must stay unquoted - quoting it whole would produce
+            # '"(upper("last_name"))"' and fail with a syntax error.
+            if self.expression_is_parenthesized(col) or (is_function_based and '(' in col):
+                expression = self.convert_expression_identifiers(col, target_columns)
+                if not self.expression_is_parenthesized(expression):
+                    expression = f"({expression})"
+                column_names.append(f'{expression}{order_direction}')
+                continue
             # Remove backticks, single quotes, and double quotes
             col = col.strip('`').strip("'").strip('"')
             # Convert case using config parser function
@@ -1034,6 +1185,16 @@ class PostgreSQLConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', f"postgresql_connector: fetch_mapping_target_sequences: Error fetching sequences for {schema_name}.{table_name}")
             self.config_parser.print_log_message('ERROR', e)
             return []
+    def convert_constraint_sql_case(self, sql_expr):
+        if not sql_expr:
+            return ''
+        # Pattern to match single-quoted string literals, allowing for doubled single quotes as escapes
+        pattern = r"('[^']*(?:''[^']*)*')"
+        parts = re.split(pattern, sql_expr)
+        for i in range(len(parts)):
+            if i % 2 == 0:  # Outside single quotes
+                parts[i] = self.config_parser.convert_names_case(parts[i])
+        return ''.join(parts)
 
     def get_create_constraint_sql(self, settings):
         create_constraint_query = ''
@@ -1054,7 +1215,7 @@ class PostgreSQLConnector(DatabaseConnector):
         delete_rule = settings['delete_rule'] if 'delete_rule' in settings else 'NO ACTION'
         update_rule = settings['update_rule'] if 'update_rule' in settings else 'NO ACTION'
         constraint_comment = settings['constraint_comment']
-        constraint_sql = self.config_parser.convert_names_case(settings['constraint_sql']) if settings.get('constraint_sql') else ''
+        constraint_sql = self.convert_constraint_sql_case(settings['constraint_sql']) if settings.get('constraint_sql') else ''
         constraint_status = settings['constraint_status'] if 'constraint_status' in settings else 'ENABLED'
 
         # Split constraint_columns by comma, clean up quotes, convert case, and re-quote
@@ -1545,6 +1706,21 @@ class PostgreSQLConnector(DatabaseConnector):
             return True
         return bool(value)
 
+    def sorted_column_keys(self, columns):
+        """
+        Column dictionaries are keyed by the source column position, but the protocol tables
+        store them as JSON, so a position the source could not provide (e.g. an Oracle
+        invisible column without COLUMN_ID) arrives as the string "null". Order numerically
+        where possible and keep such keys last instead of raising ValueError.
+        """
+        def sort_key(key):
+            try:
+                return (0, int(key), '')
+            except (TypeError, ValueError):
+                return (1, 0, str(key))
+
+        return sorted(columns.keys(), key=sort_key)
+
     def insert_batch(self, settings):
         target_schema_name = settings['target_schema_name']
         target_table_name = settings['target_table_name']
@@ -1556,11 +1732,18 @@ class PostgreSQLConnector(DatabaseConnector):
         insert_columns_provided = settings.get('insert_columns', None)
         insert_values = settings.get('insert_values', None)
 
+        # Generated columns are computed by PostgreSQL and reject inserted values, so they are
+        # not part of the INSERT - the source connectors omit them from the payload as well.
+        insertable_column_keys = [
+            col for col in self.sorted_column_keys(columns)
+            if columns[col].get('is_generated_virtual') != 'YES' and columns[col].get('is_generated_stored') != 'YES'
+        ]
+
         if not insert_columns:
-            insert_columns = [f'"{columns[col]["column_name"]}"' for col in sorted(columns.keys(), key=lambda x: int(x))]
+            insert_columns = [f'"{columns[col]["column_name"]}"' for col in insertable_column_keys]
 
         if not insert_values:
-            insert_values = ', '.join(['%s' for _ in columns.keys()])
+            insert_values = ', '.join(['%s' for _ in insertable_column_keys])
 
         if isinstance(insert_columns, list):
             insert_columns = ', '.join(insert_columns)
@@ -1576,7 +1759,7 @@ class PostgreSQLConnector(DatabaseConnector):
                 if insert_columns_provided and len(data) > 0:
                     extract_keys = list(data[0].keys())
                 else:
-                    extract_keys = [columns[col]['column_name'] for col in sorted(columns.keys(), key=lambda x: int(x))]
+                    extract_keys = [columns[col]['column_name'] for col in insertable_column_keys]
 
                 # Target columns mapped to BOOLEAN (e.g. Oracle NUMBER(1,0)) need their
                 # source numeric/text values coerced to Python bool so PostgreSQL accepts
@@ -2382,6 +2565,21 @@ class PostgreSQLConnector(DatabaseConnector):
         self.disconnect()
         return version
 
+    def get_server_version_num(self):
+        """ PostgreSQL server version as an integer, e.g. 120008 for 12.8, 170002 for 17.2. """
+        query = "SHOW server_version_num"
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            version_num = int(cursor.fetchone()[0])
+            cursor.close()
+            self.disconnect()
+            return version_num
+        except Exception as e:
+            self.config_parser.print_log_message('WARNING', f"postgresql_connector: get_server_version_num: Could not read the server version: {e}")
+            return None
+
     def get_database_size(self):
         query = "SELECT pg_database_size(current_database())"
         self.connect()
@@ -2639,6 +2837,22 @@ class PostgreSQLConnector(DatabaseConnector):
         """
         with self.connection.cursor() as cursor:
             cursor.execute(query, (target_schema_name, target_funcproc_name))
+            return cursor.fetchone()[0]
+
+    def target_funcprocs_with_prefix_exist(self, target_schema_name, name_prefix):
+        """True if at least one function or procedure whose name starts with the given prefix
+        exists in the target schema - used for objects migrated as a set of functions, such as
+        an Oracle package split into <package>_<routine> functions."""
+        query = """
+            SELECT EXISTS (
+                SELECT 1 FROM pg_catalog.pg_proc p
+                JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+                WHERE lower(n.nspname) = lower(%s)
+                  AND lower(p.proname) LIKE lower(%s)
+            )
+        """
+        with self.connection.cursor() as cursor:
+            cursor.execute(query, (target_schema_name, name_prefix.replace('%', '') + '%'))
             return cursor.fetchone()[0]
 
     def target_trigger_exists(self, target_schema_name, target_table_name, trigger_name):

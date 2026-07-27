@@ -515,6 +515,21 @@ class ConfigParser:
     def should_migrate_views(self):
         return (self.config.get('migration') or {}).get('migrate_views', False)
 
+    def get_packages_migration_style(self):
+        # How source packages (Oracle) are represented on the target, which has no packages.
+        #   'functions' (default): one function per package routine in the target schema,
+        #                          named <package>_<routine>
+        #   'schemas'            : a schema named after the package, holding one function
+        #                          per package routine under its own name
+        val = (self.config.get('migration') or {}).get('packages_as', 'functions')
+        normalized = str(val).strip().lower() if val is not None else 'functions'
+        if normalized in ('schemas', 'schema', 'package_schema', 'package_schemas'):
+            return 'schemas'
+        if normalized in ('functions', 'function', 'prefixed_functions', 'prefix'):
+            return 'functions'
+        self.print_log_message('WARNING', f"config_parser: get_packages_migration_style: Unknown value '{val}' for migration.packages_as - using 'functions'.")
+        return 'functions'
+
     def get_validate_objects_mode(self):
         # Final object-validity pass at the end of standard migration (views, functions/
         # procedures, triggers). Objects that failed to create because a dependency did not

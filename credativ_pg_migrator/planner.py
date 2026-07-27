@@ -252,6 +252,7 @@ class Planner:
         if self.source_db_config.get('connectivity') == 'ddl':
             self.config_parser.print_log_message('DEBUG', "planner: run_premigration_analysis: skipping source db pre-migration analysis due to DDL connectivity")
             return
+        blocking_issues = []
         try:
             self.source_connection.connect()
             self.target_connection.connect()
@@ -409,12 +410,50 @@ class Planner:
             # for ord_num, table in target_db_top10_tables.items():
             #     self.config_parser.print_log_message('INFO', f"planner: run_premigration_analysis: Table: {table['table_name']}, Size: {table['size_bytes']}, Rows: {table['total_rows'] if 'total_rows' in table else 'N/A'}")
 
+            blocking_issues = self.check_target_capabilities()
+
             self.config_parser.print_log_message('INFO', "planner: run_premigration_analysis: Pre-migration analysis completed successfully.")
         except Exception as e:
             self.handle_error(e, "Pre-migration analysis")
         finally:
             self.source_connection.disconnect()
             self.target_connection.disconnect()
+
+        # Reported after the analysis finished, so the whole report is available in the log,
+        # and independently of on_error_action - the migration cannot succeed in these cases.
+        if blocking_issues:
+            self.config_parser.print_log_message('ERROR', "planner: run_premigration_analysis: The target database does not support features required by the source schema:")
+            for issue in blocking_issues:
+                self.config_parser.print_log_message('ERROR', f"planner: run_premigration_analysis: - {issue}")
+            self.config_parser.print_log_message('ERROR', "planner: run_premigration_analysis: Stopping the migrator after the pre-migration analysis.")
+            exit(1)
+
+    def check_target_capabilities(self):
+        """
+        Check that the target database can express what the source schema needs.
+        Returns a list of blocking issues - findings that would make the migration fail later,
+        during the creation of the target objects.
+        """
+        blocking_issues = []
+        if self.config_parser.get_target_db_type() != 'postgresql':
+            return blocking_issues
+
+        target_version_num = self.target_connection.get_server_version_num()
+        if target_version_num is None:
+            self.config_parser.print_log_message('WARNING', "planner: check_target_capabilities: Target version could not be determined - skipping target capability checks.")
+            return blocking_issues
+
+        # Generated columns (GENERATED ALWAYS AS (...) STORED) require PostgreSQL 12 or newer.
+        generated_columns_count = self.source_connection.get_generated_columns_count(self.source_schema_name)
+        self.config_parser.print_log_message('INFO', f"planner: check_target_capabilities: Source schema {self.source_schema_name} has {generated_columns_count} generated (computed/virtual) columns.")
+        if generated_columns_count > 0 and target_version_num < 120000:
+            blocking_issues.append(
+                f"Generated columns: the source schema has {generated_columns_count} generated (computed/virtual) column(s), "
+                f"which are migrated as PostgreSQL generated columns (GENERATED ALWAYS AS (...) STORED). "
+                f"This requires PostgreSQL 12 or newer, but the target runs version {target_version_num // 10000}. "
+                f"Upgrade the target database, or exclude the affected tables from the migration.")
+
+        return blocking_issues
 
     def stdwf_prepare_sequences(self):
         self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_sequences: Preparing sequences...")
@@ -743,8 +782,12 @@ class Planner:
                         values['target_alias_name'] = target_alias_name
                         values['index_columns'] = index_details['index_columns']
                         values['index_comment'] = index_details['index_comment']
-                        values['index_sql'] = self.target_connection.get_create_index_sql(values)
+                        # Set before the DDL is generated - the target connector needs to know
+                        # that the index columns are expressions, and against which columns of
+                        # the table their identifiers have to be resolved.
                         values['is_function_based'] = index_details.get('is_function_based', 'NO')
+                        values['index_sql'] = self.target_connection.get_create_index_sql(
+                            {**values, 'target_columns': target_columns})
                         self.migrator_tables.insert_indexes( values )
                         self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_tables: Processed index: {values}")
                 else:

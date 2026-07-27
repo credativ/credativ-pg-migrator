@@ -2022,9 +2022,13 @@ class Orchestrator:
             if object_type == 'view':
                 return target_conn.target_view_exists(schema, name)
             if object_type == 'funcproc':
-                # An Oracle package is migrated as one function per package routine, named
-                # <package>_<routine> - it is valid when at least one of them is present.
+                # A package is migrated as one function per package routine (migration.
+                # packages_as: <package>_<routine> in the target schema, or <routine> in a
+                # schema named after the package). It is valid when at least one is present.
                 if has_ddl and ddl.lstrip().startswith('-- Oracle package '):
+                    package_schema = self.config_parser.convert_names_case(name)
+                    if self.config_parser.get_packages_migration_style() == 'schemas':
+                        return target_conn.target_funcprocs_with_prefix_exist(package_schema, '')
                     return target_conn.target_funcprocs_with_prefix_exist(
                         schema, self.config_parser.convert_names_case(f"{name}_"))
                 return target_conn.target_funcproc_exists(schema, name)

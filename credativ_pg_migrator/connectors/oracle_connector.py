@@ -1664,9 +1664,31 @@ class OracleConnector(DatabaseConnector):
             position = routine_end
         return routines
 
+    def _package_target_schema(self, package_name, target_schema_name):
+        """
+        Schema the routines of the package are created in: a schema named after the package
+        with migration.packages_as = schemas, the migration target schema otherwise.
+        """
+        if self.config_parser.get_packages_migration_style() == 'schemas':
+            return self.config_parser.convert_names_case(package_name)
+        return target_schema_name
+
     def _package_routine_target_name(self, package_name, routine_name):
-        """ Package routines become standalone functions named <package>_<routine>. """
+        """
+        Name of the function a package routine is created as - <package>_<routine> in the
+        target schema, or the plain routine name when each package gets its own schema
+        (migration.packages_as).
+        """
+        if self.config_parser.get_packages_migration_style() == 'schemas':
+            return self.config_parser.convert_names_case(routine_name)
         return self.config_parser.convert_names_case(f"{package_name}_{routine_name}")
+
+    def _package_routine_call_name(self, package_name, routine_name):
+        """ How a call to the package routine is written in the generated PL/pgSQL. """
+        target_name = self._package_routine_target_name(package_name, routine_name)
+        if self.config_parser.get_packages_migration_style() == 'schemas':
+            return f'"{self.config_parser.convert_names_case(package_name)}"."{target_name}"'
+        return target_name
 
     def _source_package_names(self):
         """ Names of the packages in the source schema (read once, empty set on failure). """
@@ -1701,9 +1723,10 @@ class OracleConnector(DatabaseConnector):
 
     def _rewrite_package_calls(self, code):
         """
-        Rewrite calls into an Oracle package (pkg_audit.log_change(...)) to the standalone
-        function the package routine is migrated as (pkg_audit_log_change(...)), and add the
-        PERFORM that PL/pgSQL requires for a call used as a statement.
+        Rewrite calls into an Oracle package (pkg_audit.log_change(...)) to the function the
+        package routine is migrated as - pkg_audit_log_change(...) or "pkg_audit"."log_change"
+        (...) depending on migration.packages_as - and add the PERFORM that PL/pgSQL requires
+        for a call used as a statement.
         """
         package_names = self._source_package_names()
         if not package_names:
@@ -1712,9 +1735,9 @@ class OracleConnector(DatabaseConnector):
         called_routines = set()
 
         def replace_call(match):
-            target_name = self._package_routine_target_name(match.group(1), match.group(2))
-            called_routines.add(target_name)
-            return f"{target_name}("
+            call_name = self._package_routine_call_name(match.group(1), match.group(2))
+            called_routines.add(call_name)
+            return f"{call_name}("
 
         for package_name in package_names:
             pattern = re.compile(rf'(?i)\b({re.escape(package_name)})\s*\.\s*([A-Za-z_][\w$#]*)\s*\(')
@@ -1851,10 +1874,12 @@ class OracleConnector(DatabaseConnector):
     def _convert_package_code(self, code, funcproc_name, settings):
         """
         Convert an Oracle package into standalone PostgreSQL functions, one per package
-        routine, named <package>_<routine>. Calls into the package are rewritten to the same
-        names by _rewrite_package_calls, in this connector's routines, triggers and views.
-        Package state (variables, constants, cursors declared in the package) has no
-        PostgreSQL equivalent and is reported.
+        routine. Where they end up is controlled by migration.packages_as:
+          'functions' - <package>_<routine> in the migration target schema
+          'schemas'   - <routine> in a schema named after the package
+        Calls into the package are rewritten to match by _rewrite_package_calls, in this
+        connector's routines and triggers. Package state (variables, constants, cursors
+        declared in the package) has no PostgreSQL equivalent and is reported.
         """
         header_match = re.match(
             r'(?is)^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:EDITIONABLE\s+|NONEDITIONABLE\s+)?PACKAGE\s+(?:BODY\s+)?'
@@ -1866,28 +1891,32 @@ class OracleConnector(DatabaseConnector):
             self.config_parser.print_log_message('WARNING', f"oracle_connector: _convert_package_code: Package {package_name} contains no convertible routine (package body not available?); source preserved, nothing created.")
             return ''
 
+        packages_as = self.config_parser.get_packages_migration_style()
+        package_schema = self._package_target_schema(package_name, settings['target_schema_name'])
+
         # Sibling routines are called unqualified inside the package - rewrite those calls to
-        # the standalone names as well, before the shared substitutions run.
-        sibling_names = {}
+        # the way the routine is called on the target, before the shared substitutions run.
+        sibling_calls = {}
         for routine in routines:
-            sibling_names[routine['name'].upper()] = self._package_routine_target_name(package_name, routine['name'])
+            sibling_calls[routine['name'].upper()] = self._package_routine_call_name(package_name, routine['name'])
 
         converted_routines = []
         for routine in routines:
             routine_code = routine['code']
-            for source_name, target_name in sibling_names.items():
+            for source_name, call_name in sibling_calls.items():
                 routine_code = re.sub(rf'(?i)(?<![\w$#.]){re.escape(source_name)}\s*\(',
-                                      f'{target_name}(', routine_code)
+                                      f'{call_name}(', routine_code)
             # the routine's own header must keep its original name so it is parsed correctly
-            routine_code = re.sub(rf'(?i)^(\s*(?:PROCEDURE|FUNCTION)\s+){re.escape(sibling_names[routine["name"].upper()])}\s*\(',
+            routine_code = re.sub(rf'(?i)^(\s*(?:PROCEDURE|FUNCTION)\s+){re.escape(sibling_calls[routine["name"].upper()])}\s*\(',
                                   rf'\g<1>{routine["name"]}(', routine_code)
-            routine_code = self._add_perform_to_statement_calls(routine_code, set(sibling_names.values()))
+            routine_code = self._add_perform_to_statement_calls(routine_code, set(sibling_calls.values()))
 
             routine_sql = self._convert_plsql_routine(
                 f"CREATE OR REPLACE {routine_code}",
                 f"{package_name}.{routine['name']}",
                 settings,
                 target_name_override=self._package_routine_target_name(package_name, routine['name']),
+                target_schema_override=package_schema,
                 force_function=True)
             if routine_sql:
                 converted_routines.append(routine_sql)
@@ -1895,21 +1924,27 @@ class OracleConnector(DatabaseConnector):
         if not converted_routines:
             return ''
 
-        self.config_parser.print_log_message('INFO', f"oracle_connector: _convert_package_code: Package {package_name} split into {len(converted_routines)} standalone function(s): " + ', '.join(sorted(sibling_names.values())))
+        self.config_parser.print_log_message('INFO', f"oracle_connector: _convert_package_code: Package {package_name} split into {len(converted_routines)} function(s) (migration.packages_as={packages_as}): " + ', '.join(sorted(sibling_calls.values())))
         self.config_parser.print_log_message('WARNING', f"oracle_connector: _convert_package_code: Package {package_name} was split into standalone functions on a best-effort basis. Package state (package level variables, constants and cursors) has no PostgreSQL equivalent and is NOT migrated - review the generated functions before relying on them.")
 
-        return (f"-- Oracle package {package_name} migrated as standalone functions "
-                f"named {self._package_routine_target_name(package_name, '<routine>')}\n"
-                + '\n\n'.join(converted_routines))
+        if packages_as == 'schemas':
+            marker = (f'-- Oracle package {package_name} migrated into schema "{package_schema}"\n'
+                      f'CREATE SCHEMA IF NOT EXISTS "{package_schema}";\n')
+        else:
+            marker = (f"-- Oracle package {package_name} migrated as standalone functions "
+                      f"named {self._package_routine_target_name(package_name, '<routine>')}\n")
+        return marker + '\n'.join(converted_routines)
 
-    def _convert_plsql_routine(self, code, funcproc_name, settings, target_name_override=None, force_function=False):
+    def _convert_plsql_routine(self, code, funcproc_name, settings, target_name_override=None,
+                               target_schema_override=None, force_function=False):
         """
-        Convert one standalone PL/SQL function/procedure to PL/pgSQL. target_name_override
-        renames the created object (used for package routines); force_function creates a
-        procedure as a function, so every call site can use the same PERFORM form.
+        Convert one standalone PL/SQL function/procedure to PL/pgSQL. target_name_override /
+        target_schema_override place the created object elsewhere (used for package routines);
+        force_function creates a procedure as a function, so every call site can use the same
+        PERFORM form.
         """
         source_schema_name = settings.get('source_schema_name', '')
-        target_schema_name = settings['target_schema_name']
+        target_schema_name = target_schema_override or settings['target_schema_name']
 
         is_function = bool(re.match(r'(?is)^\s*CREATE\s+(OR\s+REPLACE\s+)?FUNCTION\b', code))
         is_procedure = bool(re.match(r'(?is)^\s*CREATE\s+(OR\s+REPLACE\s+)?PROCEDURE\b', code))
@@ -1999,9 +2034,14 @@ class OracleConnector(DatabaseConnector):
         result = self._apply_plsql_substitutions(result)
         result = self.apply_sql_functions_mapping(result, settings)
 
-        # Re-point source-schema-qualified references to the target schema
+        # Re-point source-schema-qualified references to the migration target schema - that is
+        # where the tables live, also for a routine created in a package schema. Both the
+        # quoted form DBMS_METADATA emits and the unquoted form found in ALL_SOURCE.
         if source_schema_name:
-            result = result.replace(f'"{source_schema_name.upper()}".', f'"{target_schema_name}".')
+            migration_target_schema = settings['target_schema_name']
+            result = result.replace(f'"{source_schema_name.upper()}".', f'"{migration_target_schema}".')
+            result = re.sub(rf'(?i)(?<![\w$#."]){re.escape(source_schema_name)}\s*\.',
+                            f'"{migration_target_schema}".', result)
 
         self.config_parser.print_log_message('WARNING', f"oracle_connector: convert_funcproc_code: {funcproc_name or bare_name} was converted from PL/SQL to PL/pgSQL on a best-effort basis - please review and test the generated function before relying on it.")
         return result

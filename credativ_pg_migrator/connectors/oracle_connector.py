@@ -303,8 +303,21 @@ class OracleConnector(DatabaseConnector):
                 self.config_parser.print_log_message('DEBUG', f"oracle_connector: fetch_table_columns: ALL_TAB_COLS virtual column info not available: {e_virtual}")
 
             cursor.execute(query, binds)
+            # Invisible columns (Oracle 12c+) have no COLUMN_ID. The query orders them last,
+            # and they get a synthetic position here so the returned dictionary stays keyed by
+            # integers - the protocol tables store it as JSON, where a None key would turn
+            # into the string "null" and break every consumer that orders columns numerically.
+            highest_column_id = 0
+            invisible_columns_seen = 0
             for row in cursor.fetchall():
                 column_id = row[0]
+                if column_id is None:
+                    invisible_columns_seen += 1
+                    column_id = highest_column_id + invisible_columns_seen
+                    self.config_parser.print_log_message('DEBUG', f"oracle_connector: fetch_table_columns: Column {row[1]} of {table_schema}.{table_name} has no COLUMN_ID (invisible column) - using position {column_id}.")
+                else:
+                    column_id = int(column_id)
+                    highest_column_id = max(highest_column_id, column_id)
                 column_name = row[1]
                 data_type = row[2]
                 character_maximum_length = row[3]

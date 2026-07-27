@@ -1628,6 +1628,21 @@ class PostgreSQLConnector(DatabaseConnector):
             return True
         return bool(value)
 
+    def sorted_column_keys(self, columns):
+        """
+        Column dictionaries are keyed by the source column position, but the protocol tables
+        store them as JSON, so a position the source could not provide (e.g. an Oracle
+        invisible column without COLUMN_ID) arrives as the string "null". Order numerically
+        where possible and keep such keys last instead of raising ValueError.
+        """
+        def sort_key(key):
+            try:
+                return (0, int(key), '')
+            except (TypeError, ValueError):
+                return (1, 0, str(key))
+
+        return sorted(columns.keys(), key=sort_key)
+
     def insert_batch(self, settings):
         target_schema_name = settings['target_schema_name']
         target_table_name = settings['target_table_name']
@@ -1642,7 +1657,7 @@ class PostgreSQLConnector(DatabaseConnector):
         # Generated columns are computed by PostgreSQL and reject inserted values, so they are
         # not part of the INSERT - the source connectors omit them from the payload as well.
         insertable_column_keys = [
-            col for col in sorted(columns.keys(), key=lambda x: int(x))
+            col for col in self.sorted_column_keys(columns)
             if columns[col].get('is_generated_virtual') != 'YES' and columns[col].get('is_generated_stored') != 'YES'
         ]
 

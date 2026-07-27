@@ -559,7 +559,12 @@ class PostgreSQLConnector(DatabaseConnector):
             if column_info['is_generated_virtual'] == 'YES' or column_info['is_generated_stored'] == 'YES':
                 generated_column_expression = self.convert_generation_expression(
                     column_info['stripped_generation_expression'], converted, column_data_type)
-                create_column_sql += f" GENERATED ALWAYS AS {generated_column_expression} STORED"
+                if generated_column_expression:
+                    create_column_sql += f" GENERATED ALWAYS AS {generated_column_expression} STORED"
+                else:
+                    # Without an expression the column cannot be generated - creating it as an
+                    # ordinary column is better than emitting "GENERATED ALWAYS AS  STORED".
+                    self.config_parser.print_log_message('WARNING', f"postgresql_connector: get_create_table_sql: Column {column_name} is marked as generated but carries no generation expression - created as an ordinary column.")
 
             column_default = ''
             if column_info['column_default_name'] != '' and column_info['column_default_value'] == '' and column_info['replaced_column_default_value'] == '':
@@ -2466,6 +2471,21 @@ class PostgreSQLConnector(DatabaseConnector):
         cursor.close()
         self.disconnect()
         return version
+
+    def get_server_version_num(self):
+        """ PostgreSQL server version as an integer, e.g. 120008 for 12.8, 170002 for 17.2. """
+        query = "SHOW server_version_num"
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            version_num = int(cursor.fetchone()[0])
+            cursor.close()
+            self.disconnect()
+            return version_num
+        except Exception as e:
+            self.config_parser.print_log_message('WARNING', f"postgresql_connector: get_server_version_num: Could not read the server version: {e}")
+            return None
 
     def get_database_size(self):
         query = "SELECT pg_database_size(current_database())"

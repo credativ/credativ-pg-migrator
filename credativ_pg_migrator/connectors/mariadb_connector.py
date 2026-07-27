@@ -1022,6 +1022,25 @@ class MariaDBConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', f"mariadb_connector: get_database_version: Error fetching database version: {e}")
             raise
 
+    def get_generated_columns_count(self, table_schema: str) -> int:
+        query = """
+            SELECT COUNT(*)
+            FROM information_schema.columns
+            WHERE table_schema = %s
+              AND generation_expression IS NOT NULL AND generation_expression <> ''
+        """
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query, (table_schema,))
+            count = cursor.fetchone()[0]
+            cursor.close()
+            self.disconnect()
+            return count or 0
+        except Exception as e:
+            self.config_parser.print_log_message('WARNING', f"mariadb_connector: get_generated_columns_count: Could not count generated columns: {e}")
+            return 0
+
     def get_database_size(self):
         query = "SELECT SUM(data_length + index_length) FROM information_schema.tables WHERE table_schema = DATABASE()"
         try:

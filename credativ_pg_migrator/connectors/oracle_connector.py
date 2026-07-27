@@ -371,8 +371,13 @@ class OracleConnector(DatabaseConnector):
                 # Virtual column -> PostgreSQL generated column. Oracle computes the value on
                 # read, PostgreSQL only supports STORED, so the value is materialized on the
                 # target; the expression must not stay behind as a column default.
-                if column_name in virtual_columns:
-                    generation_expression = (column_default or '').strip()
+                # Object type / nested table / VARRAY columns are also flagged VIRTUAL_COLUMN
+                # (their attributes are the stored columns) but have no expression - they are
+                # migrated through the USER-DEFINED path, not as generated columns.
+                generation_expression = (column_default or '').strip()
+                if (column_name in virtual_columns
+                        and generation_expression
+                        and result[column_id]['data_type'] != 'USER-DEFINED'):
                     result[column_id]['is_generated_virtual'] = 'YES'
                     result[column_id]['generation_expression'] = generation_expression
                     result[column_id]['stripped_generation_expression'] = generation_expression
@@ -2486,6 +2491,31 @@ class OracleConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', f"oracle_connector: get_database_version: Error executing query: {query}")
             self.config_parser.print_log_message('ERROR', e)
             raise
+
+    def get_generated_columns_count(self, table_schema: str) -> int:
+        # Object type / nested table / VARRAY columns are flagged VIRTUAL_COLUMN as well but
+        # carry no expression (DATA_TYPE_OWNER is set for them), so they are excluded here -
+        # the same rule fetch_table_columns applies. DATA_DEFAULT is a LONG column and cannot
+        # be used in a WHERE clause, hence the DATA_TYPE_OWNER test instead.
+        query = """
+            SELECT COUNT(*)
+            FROM all_tab_cols
+            WHERE owner = :owner
+              AND virtual_column = 'YES'
+              AND hidden_column = 'NO'
+              AND data_type_owner IS NULL
+        """
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query, {'owner': table_schema.upper()})
+            count = cursor.fetchone()[0]
+            cursor.close()
+            self.disconnect()
+            return count or 0
+        except Exception as e:
+            self.config_parser.print_log_message('WARNING', f"oracle_connector: get_generated_columns_count: Could not count virtual columns: {e}")
+            return 0
 
     def get_database_size(self):
         # DBA_DATA_FILES requires DBA privileges and has no ALL_* equivalent; this is a

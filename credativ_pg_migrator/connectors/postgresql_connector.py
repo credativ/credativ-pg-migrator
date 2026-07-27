@@ -308,36 +308,37 @@ class PostgreSQLConnector(DatabaseConnector):
             raise ValueError(f"Unsupported target database type: {target_db_type}")
         return types_mapping
 
-    def convert_generation_expression(self, expression, converted_columns, column_data_type):
+    def convert_expression_identifiers(self, expression, converted_columns=None, convert_plain_text=None):
         """
-        Rewrite a source generated-column expression for PostgreSQL.
+        Rewrite the identifiers of a source SQL expression for PostgreSQL.
 
-        Source engines store the expression with their own identifier quoting and case
-        (Oracle: "CREDIT_LIMIT", MySQL/MariaDB: `credit_limit`, others: bare names), so every
-        identifier that names a column of the same table is re-emitted with the configured
-        name-case handling and PostgreSQL quoting, while string literals and everything that
-        is not a column name (functions, keywords) are left untouched. The result is wrapped
-        in parentheses, which GENERATED ALWAYS AS (...) STORED requires.
+        Source engines write the expression with their own identifier quoting and case
+        (Oracle: "CREDIT_LIMIT", MySQL/MariaDB: `credit_limit`, others: bare names). Names
+        that match a column of the table are re-emitted with the configured name-case
+        handling and PostgreSQL quoting; when no column list is available, any quoted
+        identifier is treated as a column name (only identifiers are quoted in an
+        expression). String literals, function names and keywords are left untouched.
+
+        convert_plain_text, if given, is applied to everything between the tokens - use it
+        for operator translation that must not touch the inside of string literals.
         """
         if not expression:
             return expression
 
         column_names = {}
-        for other_col_info in converted_columns.values():
-            column_names[other_col_info['column_name'].upper()] = other_col_info['column_name']
+        for column_info in (converted_columns or {}).values():
+            column_names[column_info['column_name'].upper()] = column_info['column_name']
 
         # String literal | double-quoted identifier | backtick-quoted identifier | bare identifier
         token_pattern = re.compile(r"""('(?:''|[^'])*')|("(?:""|[^"])*")|(`[^`]*`)|([A-Za-z_][A-Za-z0-9_$#]*)""")
 
-        def convert_operators(text):
-            # Concatenation is '+' in some source engines, '||' in PostgreSQL. Applied only
-            # outside string literals, and only for string results (the same guard as before).
-            return text.replace('+', '||') if self.is_string_type(column_data_type) else text
+        def convert_plain(text):
+            return convert_plain_text(text) if convert_plain_text else text
 
         converted_parts = []
         last_end = 0
         for match in token_pattern.finditer(expression):
-            converted_parts.append(convert_operators(expression[last_end:match.start()]))
+            converted_parts.append(convert_plain(expression[last_end:match.start()]))
             last_end = match.end()
             literal, quoted_identifier, backtick_identifier, identifier = match.groups()
             if literal:
@@ -351,17 +352,70 @@ class PostgreSQLConnector(DatabaseConnector):
                 name = identifier
             if name.upper() in column_names:
                 converted_parts.append(f'"{self.config_parser.convert_names_case(column_names[name.upper()])}"')
+            elif (quoted_identifier or backtick_identifier) and not column_names:
+                # No column list to match against - a quoted name in an expression is a column
+                converted_parts.append(f'"{self.config_parser.convert_names_case(name)}"')
             elif backtick_identifier:
                 # Unknown backtick-quoted name - keep the name, drop the foreign quoting
                 converted_parts.append(f'"{name}"')
             else:
                 converted_parts.append(match.group(0))
-        converted_parts.append(convert_operators(expression[last_end:]))
+        converted_parts.append(convert_plain(expression[last_end:]))
 
-        converted_expression = ''.join(converted_parts).strip()
+        return ''.join(converted_parts).strip()
+
+    def convert_generation_expression(self, expression, converted_columns, column_data_type):
+        """
+        Rewrite a source generated-column expression for PostgreSQL. The result is wrapped in
+        parentheses, which GENERATED ALWAYS AS (...) STORED requires.
+        """
+        if not expression:
+            return expression
+
+        def convert_operators(text):
+            # Concatenation is '+' in some source engines, '||' in PostgreSQL. Applied only
+            # outside string literals, and only for string results (the same guard as before).
+            return text.replace('+', '||') if self.is_string_type(column_data_type) else text
+
+        converted_expression = self.convert_expression_identifiers(
+            expression, converted_columns, convert_plain_text=convert_operators)
         if not self.expression_is_parenthesized(converted_expression):
             converted_expression = f"({converted_expression})"
         return converted_expression
+
+    def split_top_level_commas(self, text):
+        """ Split on commas that are outside parentheses, string literals and quoted names. """
+        parts = []
+        current = []
+        depth = 0
+        in_literal = False
+        in_quoted_name = False
+        for char in text:
+            if in_literal:
+                current.append(char)
+                if char == "'":
+                    in_literal = False
+                continue
+            if in_quoted_name:
+                current.append(char)
+                if char == '"':
+                    in_quoted_name = False
+                continue
+            if char == "'":
+                in_literal = True
+            elif char == '"':
+                in_quoted_name = True
+            elif char == '(':
+                depth += 1
+            elif char == ')':
+                depth = max(depth - 1, 0)
+            elif char == ',' and depth == 0:
+                parts.append(''.join(current))
+                current = []
+                continue
+            current.append(char)
+        parts.append(''.join(current))
+        return [part for part in parts if part.strip()]
 
     def expression_is_parenthesized(self, expression):
         """ True when the whole expression is already wrapped in one pair of parentheses. """
@@ -730,13 +784,17 @@ class PostgreSQLConnector(DatabaseConnector):
         target_schema_name = settings['target_schema_name'] ## target schema is used as it is defined in config, not converted to upper/lower case
         target_table_name = self.config_parser.convert_names_case(settings['target_table_name'])
         index_columns = settings['index_columns']
+        target_columns = settings.get('target_columns')
+        is_function_based = str(settings.get('is_function_based', 'NO')).upper() == 'YES'
 
-        # Split index_columns by comma, clean up quotes, convert case, and re-quote.
+        # Split index_columns into elements, clean up quotes, convert case, and re-quote.
         # A column entry may carry an ASC/DESC ordering keyword (e.g. '"STORE_NAME" ASC')
         # which must be preserved but must NOT be quoted together with the column name -
         # otherwise the re-quoting produces a dangling quote ('"store_name" asc"').
+        # Splitting is on top-level commas only, because an element of a function-based index
+        # is a whole expression that may contain commas of its own, e.g. (NVL("CODE",'X')).
         column_names = []
-        for col in index_columns.split(','):
+        for col in self.split_top_level_commas(index_columns):
             col = col.strip()
             # Split off a trailing ASC/DESC ordering keyword (split on the last whitespace)
             order_direction = ''
@@ -744,6 +802,16 @@ class PostgreSQLConnector(DatabaseConnector):
             if len(parts) == 2 and parts[1].upper() in ('ASC', 'DESC'):
                 col = parts[0].strip()
                 order_direction = f' {parts[1].upper()}'
+            # An element of a function-based index is an expression (Oracle delivers it
+            # parenthesized), not a column name: its identifiers are rewritten, but the
+            # expression itself must stay unquoted - quoting it whole would produce
+            # '"(upper("last_name"))"' and fail with a syntax error.
+            if self.expression_is_parenthesized(col) or (is_function_based and '(' in col):
+                expression = self.convert_expression_identifiers(col, target_columns)
+                if not self.expression_is_parenthesized(expression):
+                    expression = f"({expression})"
+                column_names.append(f'{expression}{order_direction}')
+                continue
             # Remove backticks, single quotes, and double quotes
             col = col.strip('`').strip("'").strip('"')
             # Convert case using config parser function

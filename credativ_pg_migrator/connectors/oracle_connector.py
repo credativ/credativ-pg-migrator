@@ -957,6 +957,11 @@ class OracleConnector(DatabaseConnector):
                 hidden_columns_count += int(row[6])
 
                 if index_name not in table_indexes:
+                    # A function-based index is built on hidden expression columns
+                    # (ALL_INDEXES.INDEX_TYPE 'FUNCTION-BASED NORMAL' / 'FUNCTION-BASED
+                    # BITMAP'); their expressions are substituted for the hidden column names
+                    # below, and the target connector must emit them as expressions.
+                    is_function_based = 'YES' if (int(row[6]) > 0 or (index_type or '').upper().startswith('FUNCTION-BASED')) else 'NO'
                     table_indexes[order_num] = {
                         'index_name': index_name,
                         'index_type': 'PRIMARY KEY' if constraint_type == 'P' else 'UNIQUE' if uniqueness == 'UNIQUE' else 'INDEX',
@@ -965,6 +970,7 @@ class OracleConnector(DatabaseConnector):
                         'index_comment': '',
                         'index_sql': '',
                         'index_hidden_columns_count': int(row[6]),
+                        'is_function_based': is_function_based,
                     }
                 order_num += 1
 

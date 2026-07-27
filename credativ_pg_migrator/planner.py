@@ -782,8 +782,12 @@ class Planner:
                         values['target_alias_name'] = target_alias_name
                         values['index_columns'] = index_details['index_columns']
                         values['index_comment'] = index_details['index_comment']
-                        values['index_sql'] = self.target_connection.get_create_index_sql(values)
+                        # Set before the DDL is generated - the target connector needs to know
+                        # that the index columns are expressions, and against which columns of
+                        # the table their identifiers have to be resolved.
                         values['is_function_based'] = index_details.get('is_function_based', 'NO')
+                        values['index_sql'] = self.target_connection.get_create_index_sql(
+                            {**values, 'target_columns': target_columns})
                         self.migrator_tables.insert_indexes( values )
                         self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_tables: Processed index: {values}")
                 else:

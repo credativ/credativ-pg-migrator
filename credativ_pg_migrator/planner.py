@@ -203,10 +203,9 @@ class Planner:
             self.check_script_accessibility(self.pre_script)
             self.check_script_accessibility(self.post_script)
 
+            # connect() applies the session settings from the config file - incl. the role
+            # which becomes the owner of the created schema
             self.target_connection.connect()
-            if self.target_connection.session_settings:
-                self.config_parser.print_log_message( 'DEBUG', f"planner: pre_planning: CREATE SCHEMA - Executing session settings for target database: {self.target_connection.session_settings}")
-                self.target_connection.execute_query(self.target_connection.session_settings)
 
             if self.config_parser.should_drop_schema():
                 if self.target_schema_name.lower() == 'public':

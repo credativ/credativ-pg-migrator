@@ -706,8 +706,13 @@ class ConfigParser:
     def get_indent(self):
         return self.config.get('migrator', {}).get('indent', MigratorConstants.get_default_indent())
 
+    def get_db_session_settings(self, source_or_target):
+        if source_or_target not in ['source', 'target']:
+            raise ValueError(f"Invalid source_or_target: {source_or_target}")
+        return self.config.get(source_or_target, {}).get('settings', {}) or {}
+
     def get_target_db_session_settings(self):
-        return self.config['target'].get('settings', {})
+        return self.get_db_session_settings('target')
 
     def get_target_partitioning(self):
         return self.config.get('target_partitioning', {})

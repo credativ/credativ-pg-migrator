@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- 2026.07.27
+
+  - Fix - PostgreSQL Connector/Object Ownership: Session settings from the config file (`target` -> `settings`, e.g. `role`, `search_path`, `work_mem`) are now applied inside `connect()`, so they are active on **every** connection to the target database. Previously they were executed only in a few explicitly patched places (schema creation, table/index/constraint/view workers, functions/procedures, data batches), while all other connections creating objects - user defined types, domains, sequences, triggers, comments, default values, pre/post migration scripts and the whole `mapping` workflow - ran without them. Objects created by those connections were owned by the user used for the connection (typically `postgres`) instead of the configured `role`, which also left the migrated schema with mixed ownership.
+  - Fix - PostgreSQL Connector/Session Settings: Settings are read from the config section belonging to the given connection, so the settings of the target database (`role`, `search_path`) are no longer applied on a PostgreSQL **source** connection; a PostgreSQL source can now define its own `settings` section. Setting names are matched case insensitively against `pg_settings` (previously a key such as `Role` or `WORK_MEM` raised a `KeyError`), unknown names are reported as a warning instead of being silently dropped, and `role` is always applied as the last setting so that settings requiring higher privileges are not blocked by the role switch.
+
 ## 0.15.2 - 2026.07.24
 
 - 2026.07.24

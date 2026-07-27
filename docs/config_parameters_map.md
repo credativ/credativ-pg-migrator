@@ -34,7 +34,7 @@ This document provides a simplified overview and hierarchy of the configuration 
 
 ### Target Database (`target`)
 - `type`, `host`, `port`, `username`, `password`, `database`, `schema`: Connection details (must be PostgreSQL).
-- `settings`: Target database session configuration parameters (e.g., `work_mem`, `maintenance_work_mem`, `role`, `search_path`).
+- `settings`: Target database session configuration parameters (e.g., `work_mem`, `maintenance_work_mem`, `role`, `search_path`). They are applied on **every** connection opened to the target database, so `role` also defines the owner of all created objects (schema, tables, indexes, constraints, views, functions, triggers, sequences, types, domains). Unknown parameter names are ignored with a warning, `role` is always applied as the last setting. The same `settings` key can also be used in the `source` section - settings of one database are never applied on the connection to the other one.
 
 ## 4. Migration Recipe (`migration`)
 - `workflow`: Type of migration (`standard`, `mapping`, or `anonymization`).

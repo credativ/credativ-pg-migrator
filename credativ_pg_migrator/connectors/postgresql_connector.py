@@ -31,12 +31,33 @@ class PostgreSQLConnector(DatabaseConnector):
         self.config_parser = config_parser
         self.source_or_target = source_or_target
         self.logger = MigratorLogger(self.config_parser.get_log_file()).logger
+        # must be initialized before prepare_session_settings - it opens its own connection
+        # and connect() applies already prepared settings
+        self.session_settings = ""
         self.session_settings = self.prepare_session_settings()
 
     def connect(self):
         connection_string = self.config_parser.get_connect_string(self.source_or_target)
         self.connection = psycopg2.connect(connection_string, application_name=MigratorConstants.get_application_name())
         self.connection.autocommit = True
+        self.apply_session_settings()
+
+    def apply_session_settings(self):
+        """
+        Applies session settings from the config file to the current connection.
+        Called from connect() so every connection - including short lived ones used
+        for DDL of single objects - runs with the configured role, search_path etc.
+        Without this all objects would be owned by the user used for the connection.
+        """
+        if not self.session_settings:
+            return
+        try:
+            with self.connection.cursor() as cursor:
+                cursor.execute(self.session_settings)
+            self.config_parser.print_log_message('DEBUG3', f"postgresql_connector: apply_session_settings: Applied session settings for {self.source_or_target} connection: {self.session_settings}")
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"postgresql_connector: apply_session_settings: Error applying session settings '{self.session_settings}' on {self.source_or_target} connection: {e}")
+            raise
 
     def disconnect(self):
         try:
@@ -1557,8 +1578,7 @@ class PostgreSQLConnector(DatabaseConnector):
                 self.config_parser.print_log_message('DEBUG3', f"postgresql_connector: insert_batch: Worker {worker_id}: Insert query: {insert_query_str}")
                 self.connection.autocommit = False
                 try:
-                    if self.session_settings:
-                        cursor.execute(self.session_settings)
+                    # session settings are already applied by connect() for the whole session
                     self.config_parser.print_log_message('DEBUG3', f"postgresql_connector: insert_batch: Worker {worker_id}: Starting psycopg2.extras.execute_batch into {target_table_name} with {len(data)} rows")
 
                     psycopg2.extras.execute_batch(cursor, insert_query, data)
@@ -2169,32 +2189,44 @@ class PostgreSQLConnector(DatabaseConnector):
     def prepare_session_settings(self):
         """
         Prepare session settings for the database connection.
+        Settings are read from the section of the config file belonging to this connection
+        ('source' or 'target') - settings of the target database must never be applied
+        on the source database connection.
         """
         filtered_settings = ""
         try:
-            settings = self.config_parser.get_target_db_session_settings()
+            settings = self.config_parser.get_db_session_settings(self.source_or_target)
             if not settings:
-                self.config_parser.print_log_message('INFO', "postgresql_connector: prepare_session_settings: No session settings found in config file.")
+                self.config_parser.print_log_message('INFO', f"postgresql_connector: prepare_session_settings: No session settings found in config file for {self.source_or_target} database.")
                 return filtered_settings
             # self.config_parser.print_log_message('INFO', f"postgresql_connector: prepare_session_settings: Preparing session settings: {settings} / {settings.keys()} / {tuple(settings.keys())}")
             self.connect()
             cursor = self.connection.cursor()
             lower_keys = tuple(k.lower() for k in settings.keys())
             cursor.execute("SELECT name FROM (SELECT name FROM pg_settings UNION ALL SELECT name FROM (VALUES('role')) as t(name) ) a WHERE lower(a.name) IN %s", (lower_keys,))
-            matching_settings = cursor.fetchall()
+            matching_settings = [row[0].lower() for row in cursor.fetchall()]
             cursor.close()
             self.disconnect()
             if not matching_settings:
                 self.config_parser.print_log_message('INFO', "postgresql_connector: prepare_session_settings: No settings found to prepare.")
                 return filtered_settings
 
-            for setting in matching_settings:
-                setting_name = setting[0]
-                if setting_name in ['search_path']:
+            ignored_settings = [key for key in settings.keys() if key.lower() not in matching_settings]
+            if ignored_settings:
+                # INFO level - 'WARNING' is not printed with the default log level 'INFO'
+                self.config_parser.print_log_message('INFO', f"postgresql_connector: prepare_session_settings: WARNING: Unknown settings ignored for {self.source_or_target} database: {ignored_settings}")
+
+            # keep the order from the config file, but apply 'role' as the last one
+            # - settings requiring higher privileges must be set before the role is switched
+            accepted_settings = [key for key in settings.keys() if key.lower() in matching_settings]
+            accepted_settings.sort(key=lambda key: key.lower() == 'role')
+
+            for setting_name in accepted_settings:
+                if setting_name.lower() in ['search_path']:
                     filtered_settings += f"SET {setting_name} = {settings[setting_name]};"
                 else:
                     filtered_settings += f"SET {setting_name} = '{settings[setting_name]}';"
-            self.config_parser.print_log_message('INFO', f"postgresql_connector: prepare_session_settings: Session settings: {filtered_settings}")
+            self.config_parser.print_log_message('INFO', f"postgresql_connector: prepare_session_settings: Session settings for {self.source_or_target} database: {filtered_settings}")
             return filtered_settings
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"postgresql_connector: prepare_session_settings: Error preparing session settings: {e}")

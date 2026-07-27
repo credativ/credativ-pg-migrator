@@ -390,12 +390,6 @@ class Orchestrator:
             worker_source_connection.connect()
             worker_target_connection.connect()
 
-            if getattr(worker_source_connection, 'session_settings', None):
-                worker_source_connection.execute_query(worker_source_connection.session_settings)
-
-            if getattr(worker_target_connection, 'session_settings', None):
-                worker_target_connection.execute_query(worker_target_connection.session_settings)
-
             chunk_size = -1
             try:
                 chunk_size = self.config_parser.get_chunk_size()
@@ -915,10 +909,6 @@ class Orchestrator:
 
             part_name = 'connect target'
             worker_target_connection.connect()
-
-            if worker_target_connection.session_settings:
-                self.config_parser.print_log_message( 'DEBUG', f"orchestrator: table_worker: Worker {worker_id}: Executing session settings: {worker_target_connection.session_settings}")
-                worker_target_connection.execute_query(worker_target_connection.session_settings)
 
             if ((settings['create_tables'] and not settings['resume_after_crash'])
                 or (settings['resume_after_crash'] and settings['drop_unfinished_tables'])
@@ -1750,10 +1740,6 @@ class Orchestrator:
 
             worker_target_connection.connect()
 
-            if worker_target_connection.session_settings:
-                self.config_parser.print_log_message( 'DEBUG', f"orchestrator: index_worker: Worker {worker_id}: Executing session settings: {worker_target_connection.session_settings}")
-                worker_target_connection.execute_query(worker_target_connection.session_settings)
-
             worker_target_connection.execute_query(create_index_sql)
             self.config_parser.print_log_message('INFO', f"orchestrator: index_worker: Worker {worker_id}: Index '{index_name}' created successfully.")
 
@@ -1818,10 +1804,6 @@ class Orchestrator:
                 query = f'''SET SESSION search_path TO {constraint_data['target_schema_name']};'''
 
                 worker_target_connection.execute_query(query)
-
-                if worker_target_connection.session_settings:
-                    self.config_parser.print_log_message( 'DEBUG', f"orchestrator: constraint_worker: Worker {worker_id}: Executing session settings: {worker_target_connection.session_settings}")
-                    worker_target_connection.execute_query(worker_target_connection.session_settings)
 
                 creation_try = 0
                 while True:
@@ -1945,10 +1927,6 @@ class Orchestrator:
                             self.config_parser.print_log_message('INFO', f"orchestrator: run_migrate_funcprocs: Creating {funcproc_type} {funcproc_data['name']} in target database.")
                             self.target_connection.connect()
 
-                            if self.target_connection.session_settings:
-                                self.config_parser.print_log_message( 'DEBUG', f"orchestrator: run_migrate_funcprocs: Executing session settings: {self.target_connection.session_settings}")
-                                self.target_connection.execute_query(self.target_connection.session_settings)
-
                             self.target_connection.execute_query(converted_code)
                             self.config_parser.print_log_message( 'DEBUG', f"orchestrator: run_migrate_funcprocs: [OK] Source code for {funcproc_data['name']}: {funcproc_code_str}")
                             self.config_parser.print_log_message( 'DEBUG', f"orchestrator: run_migrate_funcprocs: [OK] Converted code for {funcproc_data['name']}: {converted_code}")
@@ -2045,10 +2023,6 @@ class Orchestrator:
             # Each worker uses its own separate connection to the target database
             worker_target_connection = self.load_connector('target')
             worker_target_connection.connect()
-
-            if worker_target_connection.session_settings:
-                self.config_parser.print_log_message( 'DEBUG', f"orchestrator: view_worker: Worker {worker_id}: Executing session settings for {view_type_str}: {worker_target_connection.session_settings}")
-                worker_target_connection.execute_query(worker_target_connection.session_settings)
 
             query = f'''SET SESSION search_path TO {view_detail['target_schema_name']};'''
             worker_target_connection.execute_query(query)

@@ -158,6 +158,11 @@ target:
   # are optional, if present they will override the default settings in every connection
   # key is the name of the setting, value is the value of the setting
   # key is checked against the list of allowed settings, if not present, it will be ignored
+  # settings are applied on every connection opened to this database, therefore "role"
+  # also defines the owner of all objects created in the target database
+  # - the user used for the connection must be a member of this role
+  # "role" is always applied as the last setting, so settings requiring higher privileges are not blocked by it
+  # the same "settings" section can also be used in the "source" section for a PostgreSQL source database
   settings:
     work_mem: '32MB'
     maintenance_work_mem: '512MB'

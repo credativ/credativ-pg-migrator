@@ -1185,6 +1185,16 @@ class PostgreSQLConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', f"postgresql_connector: fetch_mapping_target_sequences: Error fetching sequences for {schema_name}.{table_name}")
             self.config_parser.print_log_message('ERROR', e)
             return []
+    def convert_constraint_sql_case(self, sql_expr):
+        if not sql_expr:
+            return ''
+        # Pattern to match single-quoted string literals, allowing for doubled single quotes as escapes
+        pattern = r"('[^']*(?:''[^']*)*')"
+        parts = re.split(pattern, sql_expr)
+        for i in range(len(parts)):
+            if i % 2 == 0:  # Outside single quotes
+                parts[i] = self.config_parser.convert_names_case(parts[i])
+        return ''.join(parts)
 
     def get_create_constraint_sql(self, settings):
         create_constraint_query = ''
@@ -1205,7 +1215,7 @@ class PostgreSQLConnector(DatabaseConnector):
         delete_rule = settings['delete_rule'] if 'delete_rule' in settings else 'NO ACTION'
         update_rule = settings['update_rule'] if 'update_rule' in settings else 'NO ACTION'
         constraint_comment = settings['constraint_comment']
-        constraint_sql = self.config_parser.convert_names_case(settings['constraint_sql']) if settings.get('constraint_sql') else ''
+        constraint_sql = self.convert_constraint_sql_case(settings['constraint_sql']) if settings.get('constraint_sql') else ''
         constraint_status = settings['constraint_status'] if 'constraint_status' in settings else 'ENABLED'
 
         # Split constraint_columns by comma, clean up quotes, convert case, and re-quote

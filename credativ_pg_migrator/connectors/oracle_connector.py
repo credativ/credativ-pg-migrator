@@ -203,7 +203,11 @@ class OracleConnector(DatabaseConnector):
         # for which DBMS_METADATA.GET_DDL raises ORA-31603:
         #   - nested-table storage tables (NESTED='YES', e.g. OE's *_NESTEDTAB) - the nested
         #     collection is migrated via its parent table's column (VARRAY/nested table mapping);
-        #   - domain-index secondary tables (SECONDARY='Y') - internal to a domain index.
+        #   - domain-index secondary tables (SECONDARY='Y') - internal to a domain index;
+        #   - index-organized table overflow / mapping segments (IOT_TYPE 'IOT_OVERFLOW' /
+        #     'IOT_MAPPING', named SYS_IOT_OVER_<id>) - their columns are part of the parent
+        #     IOT, which is migrated as an ordinary table (IOT_TYPE 'IOT');
+        #   - tables sitting in the recycle bin (DROPPED='YES', named BIN$...).
         query = """
             SELECT t.table_name, tc.comments
             FROM all_tables t
@@ -212,6 +216,8 @@ class OracleConnector(DatabaseConnector):
             WHERE t.owner = :owner
                 AND t.nested = 'NO'
                 AND t.secondary = 'N'
+                AND (t.iot_type IS NULL OR t.iot_type = 'IOT')
+                AND t.dropped = 'NO'
                 AND NOT EXISTS (
                     SELECT 1 FROM all_mviews m
                     WHERE m.owner = t.owner AND m.mview_name = t.table_name
@@ -2454,8 +2460,11 @@ class OracleConnector(DatabaseConnector):
             cursor.close()
             self.disconnect()
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"oracle_connector: get_table_description: Error fetching table description for {table_schema}.{table_name}: {e}")
-            raise
+            # The description is only stored for observability - a table whose DDL
+            # DBMS_METADATA refuses to return (missing privileges, system-managed
+            # sub-object) must not abort the migration of that table.
+            self.config_parser.print_log_message('WARNING', f"oracle_connector: get_table_description: Error fetching table description for {table_schema}.{table_name} - continuing without it: {e}")
+            output = f"Table description not available: {e}"
 
         return { 'table_description': output.strip() }
 

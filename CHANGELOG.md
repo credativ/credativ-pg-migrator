@@ -1,6 +1,15 @@
 # Changelog
 
-## 0.16.0 - 2026.07.22
+## 0.16.0 - 2026.07.29
+
+- 2026.07.29
+
+  - Fix - MySQL / MariaDB Connectors: Prevented `TypeError: sequence item 0: expected str instance, NoneType found` in `fetch_indexes` and `fetch_constraints`. Expression-based functional indexes in MySQL 8.0+ store expressions in `INFORMATION_SCHEMA.STATISTICS` while `COLUMN_NAME` is `NULL` (`None` in Python); `None` column values are now safely filtered out when constructing index and constraint column strings.
+  - Feature - MySQL / MariaDB Connectors / Config: Configurable handling for MySQL all-zero date, datetime, and timestamp default values (e.g. `'0000-00-00'`, `'0000-00-00 00:00:00'`, `0000-00-00`). Added `migration.zero_datetime_default` configuration setting (`remove` / `null` / `''` by default to drop invalid zero default clauses in target PostgreSQL DDL, or a string replacement like `'1970-01-01'` or `'CURRENT_TIMESTAMP'`).
+  - Feature - MySQL / MariaDB Connectors / Config: Configurable zero-date data transformation and NOT NULL constraint relaxation.
+    - Added `migration.zero_datetime_value` config option (`null` by default or custom string fallback like `'1970-01-01'`) to transform fetched zero-date `None` values during data copy.
+    - Added `migration.relax_not_null_datetime` config option (`true` by default) to relax `NOT NULL` constraints on target PostgreSQL date/datetime columns when migrating from MySQL/MariaDB, preventing data insertion failures caused by MySQL's legacy behavior of allowing zero dates in `NOT NULL` columns.
+  - Fix - MySQL / MariaDB Connectors: Resolved `column "home_location" is of type point but expression is of type bytea` insertion cast errors when migrating spatial columns to PostgreSQL `POINT` columns. `ST_asText()` is now applied to all spatial data types (`point`, `geometry`, `linestring`, `polygon`, `multipoint`, `multilinestring`, `multipolygon`, `geometrycollection`) in source queries, and client-side conversion automatically unpacks both binary WKB bytes (`struct.unpack('<IBIdd')`) and WKT strings into PostgreSQL native `POINT` format `(x, y)`.
 
 - 2026.07.27
 

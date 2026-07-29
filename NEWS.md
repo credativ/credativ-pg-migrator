@@ -1,7 +1,7 @@
 credativ-pg-migrator Releases
 =============================
 
-0.16.0 - 22.07.2026
+0.16.0 - 29.07.2026
 -------------------
 
 * Major Oracle connector expansion: full schema and data migration including functions/procedures, triggers, standalone sequences, user-defined types and domains, CHECK constraints, and views/materialized views with real Oracle→PostgreSQL query conversion (including `(+)` outer joins)
@@ -13,6 +13,9 @@ credativ-pg-migrator Releases
 * Oracle packages are now migrated: each package is split into standalone functions and all calls into the package (in functions, procedures and triggers) are rewritten to them - either as `<package>_<routine>` functions in the target schema or as `<routine>` functions in a schema named after the package, selectable with `migration.packages_as`
 * New target capability check in the pre-migration analysis: the migrator now stops before creating any object if the target PostgreSQL version cannot support what the source schema requires (first case: generated columns need PostgreSQL 12+)
 * Oracle virtual (computed) columns are migrated as PostgreSQL generated columns, and Oracle-specific column defaults (`SYS_CONTEXT('USERENV', ...)`, `USER`, `SYSDATE`, `SYS_GUID()`) are translated to their PostgreSQL equivalents instead of producing invalid DDL
+* Fixed MySQL and MariaDB index and constraint fetching for expression-based functional indexes where column names are NULL
+* Added configurable MySQL zero-datetime handling ('0000-00-00') for DDL defaults (`zero_datetime_default`), data values (`zero_datetime_value`), and NOT NULL constraint relaxation (`relax_not_null_datetime`)
+* Fixed spatial data type migration (POINT, GEOMETRY, etc.) from MySQL/MariaDB to PostgreSQL with automatic WKB/WKT parsing and conversion to PostgreSQL native POINT format
 
 0.15.0 - 03.07.2026
 -------------------

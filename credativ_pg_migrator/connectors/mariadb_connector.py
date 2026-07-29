@@ -18,6 +18,8 @@ from credativ_pg_migrator.database_connector import DatabaseConnector
 from credativ_pg_migrator.migrator_logging import MigratorLogger
 # import mariadb  ## only for native connectivity - install mariadb-connector-python
 import traceback
+import re
+import struct
 from tabulate import tabulate
 import time
 import datetime
@@ -353,7 +355,7 @@ class MariaDBConnector(DatabaseConnector):
                         self.config_parser.print_log_message('DEBUG2',
                                                             f"Worker {worker_id}: Table {source_schema_name}.{source_table_name}: Processing column {col['column_name']} ({order_num}) with data type {col['data_type']}")
 
-                        if col['data_type'].lower() == 'geometry':
+                        if col['data_type'].lower() in ('geometry', 'point', 'linestring', 'polygon', 'multipoint', 'multilinestring', 'multipolygon', 'geometrycollection'):
                             select_columns_list.append(f"ST_asText(`{col['column_name']}`) as `{col['column_name']}`")
                         elif col['data_type'].lower() == 'set':
                             select_columns_list.append(f"cast(`{col['column_name']}` as char(4000)) as `{col['column_name']}`")
@@ -441,19 +443,43 @@ class MariaDBConnector(DatabaseConnector):
                                         record[column_name] = ''
                                     else:
                                         record[column_name] = str(record[column_name])
-                                elif column_type.lower() == 'geometry':
-                                    record[column_name] = f"{record[column_name]}"
-
-                                    # # Convert geometry to string representation if possible
-                                    # if record[column_name] is not None:
-                                    #     try:
-                                    #         # Try to decode as UTF-8 string (may work for some geometry types)
-                                    #         record[column_name] = record[column_name].decode('utf-8', errors='replace')
-                                    #     except Exception as e:
-                                    #         # Fallback: represent as string of bytes
-                                    #         record[column_name] = str(record[column_name])
-                                    # else:
-                                    #     record[column_name] = None
+                                elif column_type.lower() in ('geometry', 'point', 'linestring', 'polygon', 'multipoint', 'multilinestring', 'multipolygon', 'geometrycollection') or target_column_type.lower() in ('point', 'geometry'):
+                                    val = record[column_name]
+                                    if val is not None:
+                                        if target_column_type.lower() == 'point':
+                                            if isinstance(val, (bytes, bytearray)) and len(val) >= 25:
+                                                try:
+                                                    srid, byte_order, geom_type, x, y = struct.unpack('<IBIdd', val[:25])
+                                                    if geom_type == 1:
+                                                        record[column_name] = f"({x}, {y})"
+                                                    else:
+                                                        record[column_name] = str(val)
+                                                except Exception:
+                                                    record[column_name] = str(val)
+                                            else:
+                                                val_str = str(val).strip()
+                                                m = re.search(r'POINT\s*\(\s*([^\s,]+)\s+([^\s,]+)\s*\)', val_str, re.IGNORECASE)
+                                                if m:
+                                                    record[column_name] = f"({m.group(1)}, {m.group(2)})"
+                                                elif not val_str.startswith('(') and ',' in val_str:
+                                                    record[column_name] = f"({val_str})"
+                                                else:
+                                                    record[column_name] = val_str
+                                        else:
+                                            if isinstance(val, (bytes, bytearray)):
+                                                if len(val) >= 25:
+                                                    try:
+                                                        srid, byte_order, geom_type, x, y = struct.unpack('<IBIdd', val[:25])
+                                                        if geom_type == 1:
+                                                            record[column_name] = f"POINT({x} {y})"
+                                                        else:
+                                                            record[column_name] = str(val)
+                                                    except Exception:
+                                                        record[column_name] = str(val)
+                                                else:
+                                                    record[column_name] = str(val)
+                                            else:
+                                                record[column_name] = str(val)
                                 elif column_type.lower() in ['date', 'datetime', 'timestamp', 'time']:
                                     if record[column_name] is None:
                                         zero_val = self.config_parser.get_zero_datetime_data_value()

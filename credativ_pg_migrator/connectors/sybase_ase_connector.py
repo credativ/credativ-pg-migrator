@@ -689,6 +689,16 @@ class SybaseASEConnector(DatabaseConnector):
 
         types_mapping = {}
         if target_db_type == 'postgresql':
+            # Comment about 'TIMESTAMP': 'BYTEA', conversion:
+            #
+            # This is a big gotcha in Sybase ASE - "the TIMESTAMP data type does not store dates
+            # or times. Instead, it is a non-standard, automatically updating 8-byte binary value
+            # (VARBINARY(8)) used for row versioning and optimistic concurrency control."
+            # https://infocenter.sybase.com/help/index.jsp?topic=/com.sybase.infocenter.dc36271.1600/doc/html/san1393050392520.html
+            #
+            # Date and time data types in Sybase do not contain timestamp but datetime
+            # https://infocenter.sybase.com/help/index.jsp?topic=/com.sybase.infocenter.dc36271.1600/doc/html/san1393050393286.html
+            #
             types_mapping = {
                 'BIGDATETIME': 'TIMESTAMP',
                 'DATE': 'DATE',
@@ -762,7 +772,7 @@ class SybaseASEConnector(DatabaseConnector):
         migrator_tables = settings.get('migrator_tables') if settings else None
         if not migrator_tables and hasattr(self, 'migrator_tables'):
             migrator_tables = self.migrator_tables
-        
+
         if not migrator_tables:
             return decl_content
 
@@ -780,7 +790,7 @@ class SybaseASEConnector(DatabaseConnector):
         except Exception as e:
             if hasattr(self, 'config_parser') and self.config_parser:
                 self.config_parser.print_log_message('WARNING', f"sybase_ase_connector: _quote_udts_in_declaration: Failed to apply UDT quotes: {e}")
-        
+
         return decl_content
 
     def get_create_table_sql(self, settings):
@@ -1283,7 +1293,7 @@ class SybaseASEConnector(DatabaseConnector):
     def convert_funcproc_code(self, settings):
         try:
             funcproc_code_input = settings['funcproc_code']
-            
+
             if isinstance(funcproc_code_input, dict):
                 funcproc_code = funcproc_code_input.get('definition', '')
                 implicit_return_schema = funcproc_code_input.get('return_schema', [])
@@ -1356,7 +1366,7 @@ class SybaseASEConnector(DatabaseConnector):
                      explicit_func_return = self._apply_udt_to_base_type_substitutions(explicit_func_return, settings)
                      for syb, pg_tgt in types_mapping.items():
                           explicit_func_return = re.sub(rf'\b{re.escape(syb)}\b', pg_tgt, explicit_func_return, flags=re.IGNORECASE)
-                     
+
                      clean_params = clean_params[:explicit_func_return_match.start()] + clean_params[explicit_func_return_match.end():]
                      clean_params = clean_params.strip()
 
@@ -1403,7 +1413,7 @@ class SybaseASEConnector(DatabaseConnector):
 
             returns_clause = "RETURNS void"
             convert_to_scalar_return = False
-            
+
             if explicit_func_return:
                  returns_clause = f"RETURNS {explicit_func_return}"
             elif is_implicit_return:
@@ -1449,7 +1459,7 @@ class SybaseASEConnector(DatabaseConnector):
 
             # Re-run pass_11 with the customized header to let the parser cleanly merge it
             final_output = parser.pass_11_assemble_output(pg_header_str)
-            
+
             if is_implicit_return and not convert_to_scalar_return:
                  for line_obj in final_output:
                       content_line = line_obj.content
@@ -2088,7 +2098,7 @@ class SybaseASEConnector(DatabaseConnector):
                 self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: migrate_table: Worker {worker_id}: Migration stats: {migration_stats}")
                 # Sybase ASE does not support query chunking (LIMIT/OFFSET).
                 # Therefore, the query fetches all matching rows in a single pass.
-                # We must unconditionally mark the migration as finished to prevent the 
+                # We must unconditionally mark the migration as finished to prevent the
                 # orchestrator from looping and duplicating the entire dataset.
                 if True:
                     self.config_parser.print_log_message('DEBUG3', f"sybase_ase_connector: migrate_table: Worker {worker_id}: Setting migration status to finished for table {source_table_name} (chunk {chunk_number}/{total_chunks})")
@@ -2207,9 +2217,9 @@ class SybaseASEConnector(DatabaseConnector):
         # 5. Convert Statements using new 12-pass Parser
         # We wrap the body_content in a dummy header so the parser triggers properly
         fake_code = f"CREATE PROCEDURE dummy AS\n{body_content}"
-        
+
         fake_code = self._apply_types_mapping(fake_code, types_mapping)
-            
+
         parser = TsqlParser(fake_code, self.config_parser, view_converter=self.convert_view_code, settings=settings, functions_mapping_converter=self.apply_sql_functions_mapping)
         final_output = parser.run(pg_header_str=" ") # space prevents default header
 
@@ -3061,7 +3071,7 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_name}_func"();
                          new_left = sqlglot.exp.Cast(this=left.copy(), to=sqlglot.exp.DataType.build('text'))
                     else:
                          new_left = left.copy()
-                         
+
                     if not is_right_string:
                          new_right = sqlglot.exp.Cast(this=right.copy(), to=sqlglot.exp.DataType.build('text'))
                     else:
@@ -3177,9 +3187,9 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_name}_func"();
             FROM dbo.systypes t
             JOIN dbo.sysusers u ON t.uid = u.uid
             LEFT JOIN dbo.systypes bt ON t.type = bt.type AND bt.usertype < 100 AND bt.name IN (
-                'image', 'text', 'varbinary', 'varchar', 'binary', 'char', 'tinyint', 'date', 
-                'bit', 'time', 'smallint', 'decimal', 'int', 'smalldatetime', 'real', 'money', 
-                'datetime', 'float', 'numeric', 'usmallint', 'uint', 'ubigint', 'unichar', 
+                'image', 'text', 'varbinary', 'varchar', 'binary', 'char', 'tinyint', 'date',
+                'bit', 'time', 'smallint', 'decimal', 'int', 'smalldatetime', 'real', 'money',
+                'datetime', 'float', 'numeric', 'usmallint', 'uint', 'ubigint', 'unichar',
                 'univarchar', 'unitext', 'bigdatetime', 'bigtime', 'bigint'
             )
             WHERE t.usertype > 100
@@ -3524,17 +3534,17 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_name}_func"();
     def get_table_checksum(self, schema_name: str, table_name: str, columns: list):
         if not columns:
             return None
-            
+
         cols_list = []
         for col in columns:
             dtype = col.get('data_type', '').lower()
             if any(x in dtype for x in ['lob', 'bytea', 'xml', 'json', 'text', 'image', 'unitext']):
                 continue
             cols_list.append(f'"{col["column_name"]}"')
-            
+
         if not cols_list:
             return None
-            
+
         cols_str = ", ".join(cols_list)
         query = f'SELECT {cols_str} FROM "{schema_name}"."{table_name}"'
         return self._compute_python_table_checksum(query)
@@ -3545,20 +3555,20 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_name}_func"();
     def get_row_checksums(self, schema_name: str, table_name: str, pk_columns: list, pk_values_list: list, columns: list):
         if not columns or not pk_columns or not pk_values_list:
             return {}
-            
+
         cols_list = []
         for col in columns:
             dtype = col.get('data_type', '').lower()
             if any(x in dtype for x in ['lob', 'bytea', 'xml', 'json', 'text', 'image', 'unitext']):
                 continue
             cols_list.append(f'"{col["column_name"]}"')
-            
+
         if not cols_list:
             return {}
-            
+
         cols_str = ", ".join(cols_list)
         pk_cols_str = ", ".join([f'"{c}"' for c in pk_columns])
-        
+
         in_values = []
         for pk_dict in pk_values_list:
             vals = []
@@ -3572,11 +3582,11 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_name}_func"();
                 else:
                     vals.append(str(val))
             in_values.append(f"({', '.join(vals)})")
-        
+
         where_clause = f"({pk_cols_str}) IN ({', '.join(in_values)})"
         if len(pk_columns) == 1:
             where_clause = f"{pk_cols_str} IN ({', '.join([v.strip('()') for v in in_values])})"
-            
+
         query = f'SELECT {pk_cols_str}, {cols_str} FROM "{schema_name}"."{table_name}" WHERE {where_clause}'
         return self._compute_python_row_checksums(query, len(pk_columns))
 

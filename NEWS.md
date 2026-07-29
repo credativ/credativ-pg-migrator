@@ -16,6 +16,7 @@ credativ-pg-migrator Releases
 * Fixed MySQL and MariaDB index and constraint fetching for expression-based functional indexes where column names are NULL
 * Added configurable MySQL zero-datetime handling ('0000-00-00') for DDL defaults (`zero_datetime_default`), data values (`zero_datetime_value`), and NOT NULL constraint relaxation (`relax_not_null_datetime`)
 * Fixed spatial data type migration (POINT, GEOMETRY, etc.) from MySQL/MariaDB to PostgreSQL with automatic WKB/WKT parsing and conversion to PostgreSQL native POINT format
+* Fixed batch insertion formatting errors on tables with generated/computed columns by filtering generated columns from data migration payloads and aligning placeholder counts
 
 0.15.0 - 03.07.2026
 -------------------

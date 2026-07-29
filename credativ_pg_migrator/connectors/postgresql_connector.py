@@ -1761,7 +1761,13 @@ class PostgreSQLConnector(DatabaseConnector):
             insert_columns = [f'"{columns[col]["column_name"]}"' for col in insertable_column_keys]
 
         if not insert_values:
-            insert_values = ', '.join(['%s' for _ in insertable_column_keys])
+            if isinstance(insert_columns, str) and insert_columns.strip():
+                num_cols = len([c for c in insert_columns.split(',') if c.strip()])
+                insert_values = ', '.join(['%s'] * num_cols)
+            elif isinstance(insert_columns, list) and insert_columns:
+                insert_values = ', '.join(['%s'] * len(insert_columns))
+            else:
+                insert_values = ', '.join(['%s'] * len(insertable_column_keys))
 
         if isinstance(insert_columns, list):
             insert_columns = ', '.join(insert_columns)

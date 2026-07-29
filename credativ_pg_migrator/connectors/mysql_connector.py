@@ -343,7 +343,15 @@ class MySQLConnector(DatabaseConnector):
                     orderby_columns_list = []
                     insert_columns_list = []
 
-                    for order_num, col in source_columns.items():
+                    def is_generated_column(col):
+                        return col.get('is_generated_virtual') == 'YES' or col.get('is_generated_stored') == 'YES'
+
+                    migrated_source_columns = {
+                        order_num: col for order_num, col in source_columns.items()
+                        if not is_generated_column(col) and not is_generated_column(target_columns.get(order_num, {}))
+                    }
+
+                    for order_num, col in migrated_source_columns.items():
                         self.config_parser.print_log_message('DEBUG2',
                                                             f"Worker {worker_id}: Table {source_schema_name}.{source_table_name}: Processing column {col['column_name']} ({order_num}) with data type {col['data_type']}")
 
@@ -410,12 +418,12 @@ class MySQLConnector(DatabaseConnector):
 
                         transforming_start_time = time.time()
                         records = [
-                            {column['column_name']: value for column, value in zip(source_columns.values(), record)}
+                            {column['column_name']: value for column, value in zip(migrated_source_columns.values(), record)}
                             for record in records
                         ]
 
                         for record in records:
-                            for order_num, column in source_columns.items():
+                            for order_num, column in migrated_source_columns.items():
                                 column_name = column['column_name']
                                 column_type = column['data_type']
                                 target_column_type = target_columns[order_num]['data_type']

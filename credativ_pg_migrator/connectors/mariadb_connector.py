@@ -730,7 +730,7 @@ class MariaDBConnector(DatabaseConnector):
                     S.COLUMN_NAME,
                     S.SEQ_IN_INDEX,
                     S.NON_UNIQUE,
-                    coalesce(tC.CONSTRAINT_TYPE,'INDEX') as CONSTRAINT_TYPE,
+                    coalesce(tC.CONSTRAINT_TYPE, S.INDEX_TYPE, 'INDEX') as CONSTRAINT_TYPE,
                     S.INDEX_COMMENT,
                     {expression_clause}
                 FROM INFORMATION_SCHEMA.STATISTICS S

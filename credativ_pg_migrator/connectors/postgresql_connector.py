@@ -887,9 +887,22 @@ class PostgreSQLConnector(DatabaseConnector):
 
         # index_columns = ', '.join(f'"{col}"' for col in index_columns)
         # index_columns_count = row[2]
+        spatial_types = ('POINT', 'GEOMETRY', 'BOX', 'POLYGON', 'PATH', 'CIRCLE', 'LINESTRING', 'MULTIPOINT', 'MULTILINESTRING', 'MULTIPOLYGON', 'GEOMETRYCOLLECTION')
+        is_spatial = 'SPATIAL' in str(index_type).upper()
+        if not is_spatial and target_columns:
+            indexed_col_set = {c.strip('`').strip("'").strip('"').lower() for c in column_names}
+            for col_info in target_columns:
+                c_name = str(col_info.get('column_name', '')).strip().lower()
+                c_type = str(col_info.get('column_data_type', col_info.get('data_type', ''))).upper()
+                if c_name in indexed_col_set and any(st in c_type for st in spatial_types):
+                    is_spatial = True
+                    break
+
         create_index_query = ''
         if index_type == 'PRIMARY KEY':
             create_index_query = f"""ALTER TABLE "{target_schema_name}"."{target_table_name}" ADD CONSTRAINT "{index_name}_tab_{target_table_name}" PRIMARY KEY ({index_columns});"""
+        elif is_spatial:
+            create_index_query = f"""CREATE INDEX "{index_name}_tab_{target_table_name}" ON "{target_schema_name}"."{target_table_name}" USING gist ({index_columns});"""
         else:
             create_index_query = f"""CREATE {'UNIQUE' if index_type == 'UNIQUE' else ''} INDEX "{index_name}_tab_{target_table_name}" ON "{target_schema_name}"."{target_table_name}" ({index_columns});"""
 

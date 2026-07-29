@@ -215,6 +215,15 @@ migration:
   # If true (default), relaxes NOT NULL constraints on target PostgreSQL date/datetime columns when migrating from MySQL/MariaDB
   # so that zero-date rows (which MySQL allowed in NOT NULL columns) can be stored as NULL in PostgreSQL without constraint errors.
   relax_not_null_datetime: true
+  # SQL function used to generate default UUID values on the target PostgreSQL database (e.g. when migrating UUID/SYS_GUID/NEWID defaults).
+  # Automatically adapts based on target column data type (UUID vs TEXT/VARCHAR).
+  # Options:
+  #   gen_random_uuid() / gen_random_uuid  (default - PostgreSQL built-in random UUID v4)
+  #   uuidv7()                              (PostgreSQL 17+ or extension time-ordered UUID v7)
+  #   uuid_generate_v4()                    (uuid-ossp extension UUID v4)
+  #   uuid_generate_v7()                    (uuid-ossp / custom UUID v7)
+  #   '<custom_function()>'                 (any user-defined UUID function)
+  uuid_default_function: gen_random_uuid()
   # packages_as: how source packages (Oracle) are migrated - PostgreSQL has no packages,
   # so each package is split into standalone functions (a package procedure becomes a
   # function returning void). Calls into the package are rewritten accordingly in every

@@ -17,6 +17,7 @@ credativ-pg-migrator Releases
 * Added configurable MySQL zero-datetime handling ('0000-00-00') for DDL defaults (`zero_datetime_default`), data values (`zero_datetime_value`), and NOT NULL constraint relaxation (`relax_not_null_datetime`)
 * Fixed spatial data type migration (POINT, GEOMETRY, etc.) from MySQL/MariaDB to PostgreSQL with automatic WKB/WKT parsing and conversion to PostgreSQL native POINT format
 * Fixed batch insertion formatting errors on tables with generated/computed columns by filtering generated columns from data migration payloads and aligning placeholder counts
+* Added configurable target UUID generator function via `migration.uuid_default_function` (`gen_random_uuid()` by default, `uuidv7()`, `uuid_generate_v4()`, etc.) across MySQL, MariaDB, Oracle and MS SQL Server connectors, with automatic data-type awareness for native `UUID` vs `TEXT`/`VARCHAR` target columns
 
 0.15.0 - 03.07.2026
 -------------------

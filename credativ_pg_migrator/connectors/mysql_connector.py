@@ -79,15 +79,32 @@ class MySQLConnector(DatabaseConnector):
         target_db_type = settings['target_db_type']
         if target_db_type == 'postgresql':
             return {
-                'ifnull(': 'coalesce(',
-                'isnull(': 'coalesce(',
+                'uuid_to_bin(uuid(), 1)': 'gen_random_uuid()::text',
+                'uuid_to_bin(uuid(),1)': 'gen_random_uuid()::text',
+                'uuid_to_bin(uuid(), 0)': 'gen_random_uuid()::text',
+                'uuid_to_bin(uuid(),0)': 'gen_random_uuid()::text',
+                'uuid_to_bin(uuid())': 'gen_random_uuid()::text',
+                'uuid()': 'gen_random_uuid()',
                 'sysdate()': 'current_timestamp',
                 'now()': 'current_timestamp',
+                'current_timestamp()': 'current_timestamp',
                 'current_date()': 'current_date',
                 'current_time()': 'current_time',
+                'curdate()': 'current_date',
+                'curtime()': 'current_time',
+                'utc_timestamp()': "(now() at time zone 'utc')",
+                'utc_date()': "(current_date at time zone 'utc')",
+                'utc_time()': "(current_time at time zone 'utc')",
+                'unix_timestamp()': 'extract(epoch from now())::bigint',
+                'rand()': 'random()',
+                'ifnull(': 'coalesce(',
+                'isnull(': 'coalesce(',
+                'char_length(': 'length(',
+                'character_length(': 'length(',
                 'length(': 'length(',
                 'concat(': 'concat(',
                 'substring(': 'substring(',
+                'substr(': 'substring(',
                 'instr(': 'strpos(',
                 'replace(': 'replace(',
                 'upper(': 'upper(',
@@ -1189,7 +1206,23 @@ class MySQLConnector(DatabaseConnector):
                 return action_str
             return f"'{action_str}'"
 
-        return extracted_default_value
+        default_str = str(extracted_default_value).strip()
+
+        column_type = settings.get('column_type', '')
+
+        # Handle UUID functions explicitly
+        if re.search(r'uuid_to_bin\s*\(', default_str, re.IGNORECASE) or re.search(r'\buuid\s*\(\s*\)', default_str, re.IGNORECASE):
+            return self.config_parser.get_uuid_default_function(column_type)
+
+        # Apply function mapping
+        mapping = self.get_sql_functions_mapping({'target_db_type': 'postgresql'})
+        if mapping:
+            for k, v in mapping.items():
+                if k.lower() in default_str.lower():
+                    pattern = r'\b' + re.escape(k) if k[0].isalnum() else re.escape(k)
+                    default_str = re.sub(pattern, v, default_str, flags=re.IGNORECASE)
+
+        return default_str
 
     def get_table_checksum(self, schema_name: str, table_name: str, columns: list):
         if not columns:

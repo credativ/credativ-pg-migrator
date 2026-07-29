@@ -3016,10 +3016,8 @@ class OracleConnector(DatabaseConnector):
             return self.DEFAULT_FUNCTIONS_TO_POSTGRESQL[bare_value.upper()]
 
         if re.fullmatch(r"(?i)SYS_GUID\s*\(\s*\)", bare_value):
-            if column_type.startswith('UUID'):
-                return 'gen_random_uuid()'
-            if self.is_string_type(column_type) or column_type.startswith('TEXT'):
-                return 'gen_random_uuid()::text'
+            if column_type.startswith('UUID') or self.is_string_type(column_type) or column_type.startswith('TEXT'):
+                return self.config_parser.get_uuid_default_function(column_type)
             self.config_parser.print_log_message('WARNING', f"oracle_connector: convert_default_value: SYS_GUID() default on a {column_type} column has no PostgreSQL equivalent - default value is dropped.")
             return ''
 

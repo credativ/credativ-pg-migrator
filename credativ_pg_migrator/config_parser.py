@@ -348,6 +348,31 @@ class ConfigParser:
             return settings.get('relax_not_null_datetime')
         return True
 
+    def get_uuid_default_function(self, target_column_type=None):
+        settings = self.get_migration_settings() if 'migration' in self.config else {}
+        func = settings.get('uuid_default_function')
+        if not func:
+            func = settings.get('uuid_function', 'gen_random_uuid()')
+
+        func_str = str(func).strip()
+        if not func_str:
+            func_str = 'gen_random_uuid()'
+
+        if not func_str.endswith(')') and not func_str.endswith('::text'):
+            func_str += '()'
+
+        col_type_str = str(target_column_type).upper() if target_column_type else ''
+        is_string_type = any(t in col_type_str for t in ('TEXT', 'CHAR', 'VARCHAR', 'STRING'))
+
+        if is_string_type:
+            if not func_str.endswith('::text'):
+                return f"{func_str}::text"
+            return func_str
+        else:
+            if func_str.endswith('::text'):
+                return func_str[:-6].strip()
+            return func_str
+
     def get_table_mapping(self, source_schema, source_table):
         """Returns the mapping rule for a specific source table if it exists within its data_export settings."""
         table_data_export = self.get_table_data_export(source_schema, source_table)

@@ -891,12 +891,14 @@ class PostgreSQLConnector(DatabaseConnector):
         is_spatial = 'SPATIAL' in str(index_type).upper()
         if not is_spatial and target_columns:
             indexed_col_set = {c.strip('`').strip("'").strip('"').lower() for c in column_names}
-            for col_info in target_columns:
-                c_name = str(col_info.get('column_name', '')).strip().lower()
-                c_type = str(col_info.get('column_data_type', col_info.get('data_type', ''))).upper()
-                if c_name in indexed_col_set and any(st in c_type for st in spatial_types):
-                    is_spatial = True
-                    break
+            cols_list = target_columns.values() if isinstance(target_columns, dict) else target_columns
+            for col_info in cols_list:
+                if isinstance(col_info, dict):
+                    c_name = str(col_info.get('column_name', '')).strip().lower()
+                    c_type = str(col_info.get('column_data_type', col_info.get('data_type', col_info.get('type', '')))).upper()
+                    if c_name in indexed_col_set and any(st in c_type for st in spatial_types):
+                        is_spatial = True
+                        break
 
         create_index_query = ''
         if index_type == 'PRIMARY KEY':

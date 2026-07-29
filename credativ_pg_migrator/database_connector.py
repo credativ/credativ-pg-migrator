@@ -315,6 +315,59 @@ class DatabaseConnector(ABC):
 
         return sql_str
 
+    def convert_char_cast_to_varchar(self, sql_str: str) -> str:
+        if not sql_str:
+            return sql_str
+        import re
+        sql_str = re.sub(r'(?i)\bCAST\s*\((.*?)\s+AS\s+CHAR(?:ACTER)?\s*\(\s*(\d+)\s*\)\s*\)', r'CAST(\1 AS VARCHAR(\2))', sql_str)
+        sql_str = re.sub(r'(?i)\bCAST\s*\((.*?)\s+AS\s+CHAR(?:ACTER)?\s*\)', r'CAST(\1 AS VARCHAR)', sql_str)
+        return sql_str
+
+    def convert_grouping_boolean_in_case(self, sql_str: str) -> str:
+        if not sql_str:
+            return sql_str
+        import re
+        pos = 0
+        while True:
+            match = re.search(r'(?i)\bWHEN\s+GROUPING\s*\(', sql_str[pos:])
+            if not match:
+                break
+            when_start = pos + match.start()
+            open_paren_idx = pos + match.end() - 1
+
+            depth = 1
+            i = open_paren_idx + 1
+            in_s = False
+            in_d = False
+            while i < len(sql_str) and depth > 0:
+                char = sql_str[i]
+                if char == "'" and not in_d:
+                    in_s = not in_s
+                elif char == '"' and not in_s:
+                    in_d = not in_d
+                elif not in_s and not in_d:
+                    if char == '(':
+                        depth += 1
+                    elif char == ')':
+                        depth -= 1
+                i += 1
+
+            if depth == 0:
+                close_paren_idx = i - 1
+                grouping_expr = sql_str[when_start + 5:close_paren_idx + 1]
+                after_grouping = sql_str[close_paren_idx + 1:]
+                then_match = re.match(r'^\s+THEN\b', after_grouping, re.IGNORECASE)
+                if then_match:
+                    then_end = close_paren_idx + 1 + then_match.end()
+                    replacement = f"WHEN {grouping_expr} = 1 THEN"
+                    sql_str = sql_str[:when_start] + replacement + sql_str[then_end:]
+                    pos = when_start + len(replacement)
+                else:
+                    pos = close_paren_idx + 1
+            else:
+                pos = open_paren_idx + 1
+        return sql_str
+
     def apply_sql_functions_mapping(self, code: str, settings: dict) -> str:
         """
         Applies the SQL functions mapping to the provided code string using regular expressions.
@@ -331,6 +384,8 @@ class DatabaseConnector(ABC):
             code = self.convert_find_in_set(code)
             code = self.convert_date_extract_functions(code)
             code = self.convert_mysql_internal_rollup_functions(code)
+            code = self.convert_char_cast_to_varchar(code)
+            code = self.convert_grouping_boolean_in_case(code)
 
         sql_functions_mapping = self.get_sql_functions_mapping(settings)
         if sql_functions_mapping and code:

@@ -125,7 +125,67 @@ class MariaDBConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', f"mariadb_connector: get_sql_functions_mapping: Unsupported target database type: {target_db_type}")
 
     def migrate_sequences(self, target_connector, settings):
-        return True
+        """
+        Create a single sequence in the target database.
+        """
+        target_schema_name = settings['target_schema_name']
+        target_sequence_name = settings['target_sequence_name']
+
+        PG_BIGINT_MAX = 9223372036854775807
+        PG_BIGINT_MIN = -9223372036854775808
+
+        def _to_int(val):
+            try:
+                return int(val)
+            except (TypeError, ValueError):
+                return None
+
+        increment_by = _to_int(settings.get('source_increment_by')) or 1
+        minvalue = _to_int(settings.get('source_minvalue'))
+        maxvalue = _to_int(settings.get('source_maxvalue'))
+        start_value = _to_int(settings.get('source_start_value'))
+        cache = _to_int(settings.get('source_cache'))
+        is_cycled = str(settings.get('source_is_cycled') or '').upper() in ('Y', 'YES', 'TRUE', '1')
+
+        if maxvalue is not None and maxvalue >= PG_BIGINT_MAX:
+            maxvalue = None
+        if minvalue is not None and minvalue <= PG_BIGINT_MIN:
+            minvalue = None
+        if start_value is not None:
+            start_value = max(min(start_value, PG_BIGINT_MAX), PG_BIGINT_MIN)
+
+        try:
+            target_connector.connect()
+
+            parts = [f'CREATE SEQUENCE IF NOT EXISTS "{target_schema_name}"."{target_sequence_name}"']
+            parts.append(f"INCREMENT BY {increment_by}")
+            if minvalue is not None:
+                parts.append(f"MINVALUE {minvalue}")
+            if maxvalue is not None:
+                parts.append(f"MAXVALUE {maxvalue}")
+            if start_value is not None:
+                if minvalue is not None:
+                    start_value = max(start_value, minvalue)
+                if maxvalue is not None:
+                    start_value = min(start_value, maxvalue)
+                parts.append(f"START WITH {start_value}")
+            if cache is not None and cache > 1:
+                parts.append(f"CACHE {cache}")
+            parts.append("CYCLE" if is_cycled else "NO CYCLE")
+            create_sql = " ".join(parts) + ";"
+
+            self.config_parser.print_log_message('DEBUG', f"mariadb_connector: migrate_sequences: Creating sequence with SQL: {create_sql}")
+            target_connector.execute_query(create_sql)
+            target_connector.disconnect()
+            self.config_parser.print_log_message('INFO', f"mariadb_connector: migrate_sequences: Sequence \"{target_schema_name}\".\"{target_sequence_name}\" created successfully.")
+            return True
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"mariadb_connector: migrate_sequences: Error migrating sequence {target_sequence_name}: {e}")
+            try:
+                target_connector.disconnect()
+            except Exception:
+                pass
+            return False
 
     def fetch_table_names(self, table_schema: str):
         tables = {}
@@ -135,7 +195,7 @@ class MariaDBConnector(DatabaseConnector):
                 TABLE_COMMENT
             FROM INFORMATION_SCHEMA.TABLES
             WHERE TABLE_SCHEMA = '{table_schema}'
-            AND TABLE_TYPE not in ('VIEW', 'SYSTEM VIEW')
+            AND TABLE_TYPE not in ('VIEW', 'SYSTEM VIEW', 'SEQUENCE')
         """
         try:
             self.connect()
@@ -920,8 +980,55 @@ class MariaDBConnector(DatabaseConnector):
         return converted_code
 
     def fetch_sequences(self, schema_name: str):
-        # Placeholder for fetching sequences
-        return {}
+        sequences = {}
+        order_num = 1
+        query = f"""
+            SELECT TABLE_NAME
+            FROM INFORMATION_SCHEMA.TABLES
+            WHERE TABLE_SCHEMA = '{schema_name}'
+            AND (TABLE_TYPE = 'SEQUENCE' OR ENGINE = 'SEQUENCE')
+            ORDER BY TABLE_NAME
+        """
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            seq_names = [row[0] for row in cursor.fetchall()]
+            for seq_name in seq_names:
+                try:
+                    cursor.execute(f"SELECT next_not_cached_value, minimum_value, maximum_value, start_value, increment, cache_size, cycle_option FROM `{schema_name}`.`{seq_name}`")
+                    srow = cursor.fetchone()
+                    if srow:
+                        next_val, min_val, max_val, start_val, inc, cache, cycle = srow
+                        is_cycled = 'YES' if cycle in (1, '1', True) else 'NO'
+                        source_sequence_sql = (
+                            f'CREATE SEQUENCE "{schema_name}"."{seq_name}" '
+                            f'MINVALUE {min_val} MAXVALUE {max_val} '
+                            f'INCREMENT BY {inc} START WITH {next_val} '
+                            f'CACHE {cache} {"CYCLE" if is_cycled == "YES" else "NOCYCLE"}'
+                        )
+                        sequences[order_num] = {
+                            'sequence_name': seq_name,
+                            'id': order_num,
+                            'table_name': None,
+                            'column_name': None,
+                            'source_sequence_sql': source_sequence_sql,
+                            'source_start_value': next_val,
+                            'source_increment_by': inc,
+                            'source_minvalue': min_val,
+                            'source_maxvalue': max_val,
+                            'source_cache': cache,
+                            'source_is_cycled': is_cycled,
+                        }
+                        order_num += 1
+                except Exception as seq_err:
+                    self.config_parser.print_log_message('WARNING', f"mariadb_connector: fetch_sequences: Error reading sequence {seq_name}: {seq_err}")
+            cursor.close()
+            self.disconnect()
+            return sequences
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"mariadb_connector: fetch_sequences: Error fetching sequences: {e}")
+            return {}
 
     def get_sequence_details(self, sequence_owner, sequence_name):
         # Placeholder for fetching sequence details
@@ -1309,6 +1416,17 @@ class MariaDBConnector(DatabaseConnector):
         # Handle UUID functions explicitly
         if re.search(r'uuid_to_bin\s*\(', default_str, re.IGNORECASE) or re.search(r'\buuid\s*\(\s*\)', default_str, re.IGNORECASE):
             return self.config_parser.get_uuid_default_function(column_type)
+
+        # Handle sequence default expressions: nextval(...) or NEXT VALUE FOR ...
+        seq_match = re.search(r'(?i)\b(?:nextval\s*\(\s*|next\s+value\s+for\s+)(.+)', default_str)
+        if seq_match:
+            raw_seq = seq_match.group(1).rstrip(')').strip()
+            parts = [p.strip("`'\" ") for p in raw_seq.split('.') if p.strip("`'\" ")]
+            if parts:
+                seq_name = parts[-1]
+                if hasattr(self.config_parser, 'convert_names_case'):
+                    seq_name = self.config_parser.convert_names_case(seq_name)
+                return f"nextval('{seq_name}')"
 
         # Apply function mapping
         mapping = self.get_sql_functions_mapping({'target_db_type': 'postgresql'})

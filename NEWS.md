@@ -4,6 +4,7 @@ credativ-pg-migrator Releases
 0.16.0 - 29.07.2026
 -------------------
 
+* Fixed MariaDB sequence migration and column defaults (`nextval(`schema`.`seq_name`)` / `NEXT VALUE FOR ...`) converting to PostgreSQL `nextval('seq_name')`
 * Major Oracle connector expansion: full schema and data migration including functions/procedures, triggers, standalone sequences, user-defined types and domains, CHECK constraints, and views/materialized views with real Oracle→PostgreSQL query conversion (including `(+)` outer joins)
 * Much broader Oracle data-type coverage (BINARY_FLOAT/DOUBLE, RAW, XMLTYPE, JSON, INTERVAL, timestamps with time zone, SDO_GEOMETRY point geometries) plus table/column comments, and hardened connection handling
 * New final object-validity pass: after migration it re-attempts objects that failed only because a dependency did not yet exist, and reports which views, functions and triggers are valid at the end (configurable via `migration.validate_objects`)

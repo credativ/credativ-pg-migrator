@@ -4,6 +4,10 @@
 
 - 2026.07.29
 
+  - Fix - MariaDB / MySQL Connectors: Resolved sequence creation and column default syntax errors when migrating MariaDB 10.3+ / 12 native sequences to PostgreSQL.
+    - `mariadb_connector.convert_default_value` and `mysql_connector.convert_default_value` now recognize MariaDB sequence default expressions (e.g. `nextval(`schema`.`seq_name`)`, `NEXT VALUE FOR seq_name`, `nextval('seq_name')`) and convert them to PostgreSQL standard single-quoted sequence syntax `nextval('seq_name')`.
+    - `mariadb_connector.fetch_table_names` and `mysql_connector.fetch_table_names` now filter out `TABLE_TYPE = 'SEQUENCE'` so native MariaDB sequence objects are not erroneously migrated as base tables.
+    - Implemented `mariadb_connector.fetch_sequences` to extract sequence attributes (`start_value`, `minimum_value`, `maximum_value`, `increment`, `cache_size`, `cycle_option`) from MariaDB sequence objects, and `mariadb_connector.migrate_sequences` to generate and execute `CREATE SEQUENCE IF NOT EXISTS` DDL in target PostgreSQL database.
   - Fix - MySQL / MariaDB / PostgreSQL Connectors: Resolved index creation errors with empty list of columns
     - Added support for MySQL 8.0+ expression/functional indexes by querying `S.EXPRESSION` from `INFORMATION_SCHEMA.STATISTICS` when `COLUMN_NAME` is `NULL`, mapping backticks to double quotes (e.g. `lower("email")`) and flagging `is_function_based` for target PostgreSQL expression index creation.
     - Added empty index column guards in `mysql_connector.fetch_indexes`, `mariadb_connector.fetch_indexes`, `postgresql_connector.get_create_index_sql`, and `orchestrator.index_worker` to safely skip invalid index definitions with missing columns.

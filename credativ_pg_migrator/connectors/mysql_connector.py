@@ -127,7 +127,7 @@ class MySQLConnector(DatabaseConnector):
                 TABLE_COMMENT
             FROM INFORMATION_SCHEMA.TABLES
             WHERE TABLE_SCHEMA = '{table_schema}'
-            AND TABLE_TYPE not in ('VIEW', 'SYSTEM VIEW')
+            AND TABLE_TYPE not in ('VIEW', 'SYSTEM VIEW', 'SEQUENCE')
         """
         try:
             self.connect()
@@ -1285,6 +1285,17 @@ class MySQLConnector(DatabaseConnector):
         # Handle UUID functions explicitly
         if re.search(r'uuid_to_bin\s*\(', default_str, re.IGNORECASE) or re.search(r'\buuid\s*\(\s*\)', default_str, re.IGNORECASE):
             return self.config_parser.get_uuid_default_function(column_type)
+
+        # Handle sequence default expressions: nextval(...) or NEXT VALUE FOR ...
+        seq_match = re.search(r'(?i)\b(?:nextval\s*\(\s*|next\s+value\s+for\s+)(.+)', default_str)
+        if seq_match:
+            raw_seq = seq_match.group(1).rstrip(')').strip()
+            parts = [p.strip("`'\" ") for p in raw_seq.split('.') if p.strip("`'\" ")]
+            if parts:
+                seq_name = parts[-1]
+                if hasattr(self.config_parser, 'convert_names_case'):
+                    seq_name = self.config_parser.convert_names_case(seq_name)
+                return f"nextval('{seq_name}')"
 
         # Apply function mapping
         mapping = self.get_sql_functions_mapping({'target_db_type': 'postgresql'})

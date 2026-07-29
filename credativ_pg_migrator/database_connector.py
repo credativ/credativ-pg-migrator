@@ -32,6 +32,13 @@ class DatabaseConnector(ABC):
         """Establishes a connection to the database."""
         pass
 
+    def check_and_create_extension(self, extension_name: str) -> tuple:
+        """
+        Check if an extension exists on the target database, and attempt to create it if missing.
+        Returns (success: bool, message: str).
+        """
+        return True, f"Extension check for '{extension_name}' is not applicable for this database type."
+
     @abstractmethod
     def disconnect(self):
         """Closes the connection to the database."""

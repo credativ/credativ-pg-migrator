@@ -54,6 +54,43 @@ class PostgreSQLConnector(DatabaseConnector):
         else:
             self.config_parser.print_log_message('ERROR', f"postgresql_connector: get_sql_functions_mapping: Unsupported target database type: {target_db_type}")
 
+    def check_and_create_extension(self, extension_name: str) -> tuple:
+        """
+        Check if a PostgreSQL extension exists, attempt CREATE EXTENSION IF NOT EXISTS if missing.
+        Returns (success: bool, message: str).
+        """
+        ext_clean = extension_name.strip().lower()
+        if not ext_clean:
+            return True, ""
+
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute("SELECT 1 FROM pg_extension WHERE extname = %s", (ext_clean,))
+            row = cursor.fetchone()
+            if row:
+                cursor.close()
+                self.disconnect()
+                return True, f"Extension '{ext_clean}' is present on target PostgreSQL database."
+
+            self.config_parser.print_log_message('INFO', f"postgresql_connector: check_and_create_extension: Extension '{ext_clean}' missing on target database - attempting CREATE EXTENSION IF NOT EXISTS \"{ext_clean}\".")
+            cursor.execute(f'CREATE EXTENSION IF NOT EXISTS "{ext_clean}"')
+            self.connection.commit()
+            cursor.close()
+            self.disconnect()
+            self.config_parser.print_log_message('INFO', f"postgresql_connector: check_and_create_extension: Successfully created extension '{ext_clean}' on target database.")
+            return True, f"Extension '{ext_clean}' created successfully on target database."
+        except Exception as e:
+            if hasattr(self, 'connection') and self.connection:
+                try:
+                    self.connection.rollback()
+                except Exception:
+                    pass
+                self.disconnect()
+            err_msg = str(e).strip()
+            self.config_parser.print_log_message('WARNING', f"postgresql_connector: check_and_create_extension: Failed to create extension '{ext_clean}': {err_msg}")
+            return False, f"Required PostgreSQL extension '{ext_clean}' is missing and CREATE EXTENSION failed: {err_msg}"
+
     def fetch_table_names(self, schema: str = 'public'):
         query = f"""
             SELECT

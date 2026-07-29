@@ -224,6 +224,13 @@ migration:
   #   uuid_generate_v7()                    (uuid-ossp / custom UUID v7)
   #   '<custom_function()>'                 (any user-defined UUID function)
   uuid_default_function: gen_random_uuid()
+  # Required PostgreSQL extensions to check and create during pre-migration capability checks.
+  # The migrator verifies their existence on the target database, attempts CREATE EXTENSION IF NOT EXISTS,
+  # and stops with a blocking error before object creation if any extension is missing and cannot be created.
+  # Extensions used by uuid_default_function (e.g. uuid-ossp, pgcrypto) are also checked automatically.
+  required_extensions:
+    - uuid-ossp
+    - pgcrypto
   # packages_as: how source packages (Oracle) are migrated - PostgreSQL has no packages,
   # so each package is split into standalone functions (a package procedure becomes a
   # function returning void). Calls into the package are rewritten accordingly in every

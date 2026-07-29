@@ -373,6 +373,29 @@ class ConfigParser:
                 return func_str[:-6].strip()
             return func_str
 
+    def get_required_extensions(self) -> list:
+        settings = self.get_migration_settings() if 'migration' in self.config else {}
+        exts = settings.get('required_extensions', [])
+        if not exts:
+            exts = settings.get('extensions', [])
+        if isinstance(exts, str):
+            exts = [e.strip() for e in exts.split(',') if e.strip()]
+        elif not isinstance(exts, list):
+            exts = []
+
+        ext_list = [str(e).strip().lower() for e in exts if e]
+
+        # Auto-infer required extensions based on configuration
+        uuid_func = self.get_uuid_default_function()
+        if 'uuid_generate' in uuid_func.lower():
+            if 'uuid-ossp' not in ext_list:
+                ext_list.append('uuid-ossp')
+        elif 'pgcrypto' in uuid_func.lower():
+            if 'pgcrypto' not in ext_list:
+                ext_list.append('pgcrypto')
+
+        return list(dict.fromkeys(ext_list))
+
     def get_table_mapping(self, source_schema, source_table):
         """Returns the mapping rule for a specific source table if it exists within its data_export settings."""
         table_data_export = self.get_table_data_export(source_schema, source_table)

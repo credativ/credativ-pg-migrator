@@ -18,6 +18,7 @@ credativ-pg-migrator Releases
 * Fixed spatial data type migration (POINT, GEOMETRY, etc.) from MySQL/MariaDB to PostgreSQL with automatic WKB/WKT parsing and conversion to PostgreSQL native POINT format
 * Fixed batch insertion formatting errors on tables with generated/computed columns by filtering generated columns from data migration payloads and aligning placeholder counts
 * Added configurable target UUID generator function via `migration.uuid_default_function` (`gen_random_uuid()` by default, `uuidv7()`, `uuid_generate_v4()`, etc.) across MySQL, MariaDB, Oracle and MS SQL Server connectors, with automatic data-type awareness for native `UUID` vs `TEXT`/`VARCHAR` target columns
+* Added PostgreSQL extension checks and auto-creation (`CREATE EXTENSION IF NOT EXISTS`) during pre-migration analysis via `migration.required_extensions` and automatic function inference, stopping the migrator with a blocking report if a required extension is missing and cannot be created
 
 0.15.0 - 03.07.2026
 -------------------

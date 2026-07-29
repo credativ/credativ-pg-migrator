@@ -386,6 +386,7 @@ class DatabaseConnector(ABC):
             code = self.convert_mysql_internal_rollup_functions(code)
             code = self.convert_char_cast_to_varchar(code)
             code = self.convert_grouping_boolean_in_case(code)
+            code = self.convert_case_mixed_types(code)
 
         sql_functions_mapping = self.get_sql_functions_mapping(settings)
         if sql_functions_mapping and code:
@@ -393,6 +394,48 @@ class DatabaseConnector(ABC):
                 escaped_src_func = re.escape(src_func)
                 code = re.sub(rf"(?i){escaped_src_func}", tgt_func, code, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
         return code
+
+    def convert_case_mixed_types(self, sql_str: str) -> str:
+        if not sql_str:
+            return sql_str
+        import re
+
+        def is_str_literal(val: str) -> bool:
+            v = val.strip()
+            return (v.startswith("'") and v.endswith("'")) or (v.startswith("N'") and v.endswith("'"))
+
+        def is_cast_or_str(val: str) -> bool:
+            v = val.strip().lower()
+            return (
+                is_str_literal(v)
+                or v.startswith("cast(")
+                or v.endswith("::text")
+                or v.endswith("::varchar")
+                or v.startswith("concat(")
+                or v.startswith("to_char(")
+                or v.startswith("coalesce(")
+            )
+
+        def replace_case(match):
+            cond = match.group(1)
+            then_val = match.group(2).strip()
+            else_val = match.group(3).strip()
+
+            then_str = is_str_literal(then_val)
+            else_str = is_str_literal(else_val)
+
+            if then_str and not is_cast_or_str(else_val):
+                else_val = f"CAST({else_val} AS VARCHAR)"
+            elif else_str and not is_cast_or_str(then_val):
+                then_val = f"CAST({then_val} AS VARCHAR)"
+
+            return f"CASE WHEN {cond} THEN {then_val} ELSE {else_val} END"
+
+        pattern = re.compile(
+            r"""(?i)\bCASE\s+WHEN\s+(.+?)\s+THEN\s+(.+?)\s+ELSE\s+(.+?)\s+END""",
+            re.DOTALL
+        )
+        return pattern.sub(replace_case, sql_str)
 
     @abstractmethod
     def fetch_table_names(self, table_schema: str):

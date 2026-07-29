@@ -5,6 +5,7 @@ credativ-pg-migrator Releases
 -------------------
 
 * Fixed MariaDB sequence migration and column defaults (`nextval(`schema`.`seq_name`)` / `NEXT VALUE FOR ...`) converting to PostgreSQL `nextval('seq_name')`
+* Fixed MariaDB view transpilation for inline `IF(...)` functions and resolved PostgreSQL `CASE` expression mixed-type errors by auto-casting non-string arms (`CAST(expr AS VARCHAR)`) when paired with string literals
 * Fixed MySQL 9 native `VECTOR` data migration by converting Python `array.array` objects to JSON string representations for target PostgreSQL insertion
 * Major Oracle connector expansion: full schema and data migration including functions/procedures, triggers, standalone sequences, user-defined types and domains, CHECK constraints, and views/materialized views with real Oracle→PostgreSQL query conversion (including `(+)` outer joins)
 * Much broader Oracle data-type coverage (BINARY_FLOAT/DOUBLE, RAW, XMLTYPE, JSON, INTERVAL, timestamps with time zone, SDO_GEOMETRY point geometries) plus table/column comments, and hardened connection handling

@@ -736,7 +736,7 @@ class MariaDBConnector(DatabaseConnector):
 
         # 5. Transpile expression to PostgreSQL dialect via sqlglot if available
         try:
-            transpiled = sqlglot.transpile(expr, read="mariadb", write="postgres")
+            transpiled = sqlglot.transpile(expr, read="mysql", write="postgres")
             if transpiled and transpiled[0]:
                 expr = transpiled[0]
         except Exception:
@@ -1107,7 +1107,7 @@ class MariaDBConnector(DatabaseConnector):
 
         if target_db_type == 'postgresql':
             try:
-                transpiled = sqlglot.transpile(view_code, read="mariadb", write="postgres")
+                transpiled = sqlglot.transpile(view_code, read="mysql", write="postgres")
                 if transpiled:
                     view_code = transpiled[0]
             except Exception as e:

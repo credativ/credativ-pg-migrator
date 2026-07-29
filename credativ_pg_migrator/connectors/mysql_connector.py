@@ -1123,8 +1123,33 @@ class MySQLConnector(DatabaseConnector):
         cursor.close()
         return rows
 
+    def _is_zero_datetime(self, val) -> bool:
+        if val is None:
+            return False
+        val_str = str(val).strip().strip("'\"")
+        if val_str.startswith('0000-00-00') or val_str in ('0000-00-00', '0000-00-00 00:00:00', '0000-00-00 00:00:00.000000', '00:00:00'):
+            return True
+        return False
+
     def convert_default_value(self, settings) -> dict:
         extracted_default_value = settings['extracted_default_value']
+        if extracted_default_value is None:
+            return ''
+
+        if self._is_zero_datetime(extracted_default_value):
+            action = self.config_parser.get_zero_datetime_default()
+            if action is None:
+                return ''
+            action_str = str(action).strip()
+            if action_str.lower() in ('', 'none', 'null', 'remove', 'delete', 'disable'):
+                return ''
+            keywords = ('CURRENT_TIMESTAMP', 'NOW()', 'CURRENT_DATE', 'CLOCK_TIMESTAMP()', 'LOCALTIMESTAMP')
+            if action_str.upper() in keywords:
+                return action_str
+            if (action_str.startswith("'") and action_str.endswith("'")) or (action_str.startswith('"') and action_str.endswith('"')):
+                return action_str
+            return f"'{action_str}'"
+
         return extracted_default_value
 
     def get_table_checksum(self, schema_name: str, table_name: str, columns: list):

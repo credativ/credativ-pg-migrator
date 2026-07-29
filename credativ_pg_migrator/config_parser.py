@@ -323,6 +323,17 @@ class ConfigParser:
         settings = self.get_migration_settings()
         return settings.get('use_aliases_as_target_names', False)
 
+    def get_zero_datetime_default(self):
+        settings = self.get_migration_settings() if 'migration' in self.config else {}
+        if 'zero_datetime_default' in settings:
+            return settings.get('zero_datetime_default')
+        if 'mysql_zero_datetime_default' in settings:
+            return settings.get('mysql_zero_datetime_default')
+        source_config = self.get_source_config() if 'source' in self.config else {}
+        if 'zero_datetime_default' in source_config:
+            return source_config.get('zero_datetime_default')
+        return 'remove'
+
     def get_table_mapping(self, source_schema, source_table):
         """Returns the mapping rule for a specific source table if it exists within its data_export settings."""
         table_data_export = self.get_table_data_export(source_schema, source_table)

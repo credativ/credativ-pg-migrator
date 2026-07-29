@@ -639,41 +639,54 @@ class PostgreSQLConnector(DatabaseConnector):
                 if column_default.startswith('(') and column_default.endswith(')'):
                     column_default = column_default[1:-1].strip()
 
-                # Skip empty defaults
-                if not column_default:
-                    column_default = ''
-                # Niladic SQL keyword-functions have no parentheses (e.g. Oracle USER or
-                # Sybase suser_name() mapped to current_user), so they must NOT be quoted
-                # as string literals.
-                sql_keyword_defaults = (
-                    'current_user', 'current_role', 'session_user', 'user',
-                    'current_catalog', 'current_schema',
-                    'current_timestamp', 'current_date', 'current_time',
-                    'localtime', 'localtimestamp',
-                )
-                default_is_expression = (
-                    '||' in column_default or '(' in column_default
-                    or ')' in column_default or '::' in column_default
-                    or column_default.strip().lower() in sql_keyword_defaults
-                )
-                if (('CHAR' in column_data_type or column_data_type in ('TEXT'))
-                    and default_is_expression):
-                    # default value is here NOT quoted
-                    create_column_sql += f""" DEFAULT {column_default}""".replace("''", "'")
-                elif 'CHAR' in column_data_type or column_data_type in ('TEXT'):
-                    # here we must quote the default value
-                    create_column_sql += f""" DEFAULT '{column_default}'""".replace("''", "'")
-                elif column_data_type in ('BOOLEAN', 'BIT'):
-                    if column_default.lower() in ('0', '(0)', 'false'):
-                        create_column_sql += """ DEFAULT FALSE"""
-                    elif column_default.lower() in ('1', '(1)', 'true'):
-                        create_column_sql += """ DEFAULT TRUE"""
+                val_clean = column_default.strip().strip("'\"")
+                if val_clean.startswith('0000-00-00') or val_clean in ('0000-00-00', '0000-00-00 00:00:00', '0000-00-00 00:00:00.000000', '00:00:00'):
+                    action = self.config_parser.get_zero_datetime_default()
+                    if action is None or str(action).strip().lower() in ('', 'none', 'null', 'remove', 'delete', 'disable'):
+                        column_default = ''
                     else:
-                        create_column_sql += f""" DEFAULT {column_default}::BOOLEAN"""
-                elif column_data_type in ('BYTEA'):
-                    create_column_sql += f""" DEFAULT '{column_default}'::BYTEA"""
-                else:
-                    create_column_sql += f" DEFAULT {column_default}::{column_data_type}"
+                        action_str = str(action).strip()
+                        keywords = ('CURRENT_TIMESTAMP', 'NOW()', 'CURRENT_DATE', 'CLOCK_TIMESTAMP()', 'LOCALTIMESTAMP')
+                        if action_str.upper() in keywords:
+                            column_default = action_str
+                        elif (action_str.startswith("'") and action_str.endswith("'")) or (action_str.startswith('"') and action_str.endswith('"')):
+                            column_default = action_str
+                        else:
+                            column_default = f"'{action_str}'"
+
+                if column_default != '':
+                    # Niladic SQL keyword-functions have no parentheses (e.g. Oracle USER or
+                    # Sybase suser_name() mapped to current_user), so they must NOT be quoted
+                    # as string literals.
+                    sql_keyword_defaults = (
+                        'current_user', 'current_role', 'session_user', 'user',
+                        'current_catalog', 'current_schema',
+                        'current_timestamp', 'current_date', 'current_time',
+                        'localtime', 'localtimestamp',
+                    )
+                    default_is_expression = (
+                        '||' in column_default or '(' in column_default
+                        or ')' in column_default or '::' in column_default
+                        or column_default.strip().lower() in sql_keyword_defaults
+                    )
+                    if (('CHAR' in column_data_type or column_data_type in ('TEXT'))
+                        and default_is_expression):
+                        # default value is here NOT quoted
+                        create_column_sql += f""" DEFAULT {column_default}""".replace("''", "'")
+                    elif 'CHAR' in column_data_type or column_data_type in ('TEXT'):
+                        # here we must quote the default value
+                        create_column_sql += f""" DEFAULT '{column_default}'""".replace("''", "'")
+                    elif column_data_type in ('BOOLEAN', 'BIT'):
+                        if column_default.lower() in ('0', '(0)', 'false'):
+                            create_column_sql += """ DEFAULT FALSE"""
+                        elif column_default.lower() in ('1', '(1)', 'true'):
+                            create_column_sql += """ DEFAULT TRUE"""
+                        else:
+                            create_column_sql += f""" DEFAULT {column_default}::BOOLEAN"""
+                    elif column_data_type in ('BYTEA'):
+                        create_column_sql += f""" DEFAULT '{column_default}'::BYTEA"""
+                    else:
+                        create_column_sql += f" DEFAULT {column_default}::{column_data_type}"
 
             if domain_name:
                 domain_details = migrator_tables.get_domain_details({'source_domain_name': domain_name})

@@ -70,8 +70,12 @@ class DatabaseConnector(ABC):
         if 'target_db_type' not in settings:
             target_conn = self.config_parser.get_connectivity('target')
             settings['target_db_type'] = target_conn.get('db_type', 'postgresql') if target_conn else 'postgresql'
+        if settings.get('target_db_type') == 'postgresql' and code:
+            code = re.sub(r'(?i)\b(?:CHARACTER\s+SET|CHARSET)\s+[a-zA-Z0-9_]+', '', code)
+            code = re.sub(r'(?i)\bCOLLATE\s+[`\'"]?[a-zA-Z0-9_]+[`\'"]?', '', code)
+
         sql_functions_mapping = self.get_sql_functions_mapping(settings)
-        if sql_functions_mapping:
+        if sql_functions_mapping and code:
             for src_func, tgt_func in sql_functions_mapping.items():
                 escaped_src_func = re.escape(src_func)
                 code = re.sub(rf"(?i){escaped_src_func}", tgt_func, code, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)

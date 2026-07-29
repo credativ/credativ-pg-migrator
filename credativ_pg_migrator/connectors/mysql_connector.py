@@ -944,15 +944,20 @@ class MySQLConnector(DatabaseConnector):
 
     def convert_view_code(self, settings: dict):
         view_code = settings['view_code']
-        
-        target_db_type = settings.get('target_db_type', self.config_parser.get_target_db_type())
+        target_db_type = settings.get('target_db_type', self.config_parser.get_target_db_type() if getattr(self, 'config_parser', None) else 'postgresql')
+
+        if target_db_type == 'postgresql' and view_code:
+            view_code = re.sub(r'(?i)\b(?:CHARACTER\s+SET|CHARSET)\s+[a-zA-Z0-9_]+', '', view_code)
+            view_code = re.sub(r'(?i)\bCOLLATE\s+[`\'"]?[a-zA-Z0-9_]+[`\'"]?', '', view_code)
+
         if target_db_type == 'postgresql':
             try:
                 transpiled = sqlglot.transpile(view_code, read="mysql", write="postgres")
                 if transpiled:
                     view_code = transpiled[0]
             except Exception as e:
-                self.config_parser.print_log_message('WARNING', f"mysql_connector: convert_view_code: sqlglot transpilation failed: {e}")
+                if getattr(self, 'config_parser', None) and hasattr(self.config_parser, 'args'):
+                    self.config_parser.print_log_message('WARNING', f"mysql_connector: convert_view_code: sqlglot transpilation failed: {e}")
 
         converted_view_code = view_code
         converted_view_code = converted_view_code.replace('`', '"')

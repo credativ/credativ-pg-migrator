@@ -842,6 +842,10 @@ class PostgreSQLConnector(DatabaseConnector):
         target_columns = settings.get('target_columns')
         is_function_based = str(settings.get('is_function_based', 'NO')).upper() == 'YES'
 
+        if not index_columns or not index_columns.strip():
+            self.config_parser.print_log_message('WARNING', f"postgresql_connector: get_create_index_sql: Index '{index_name}' on table '{target_schema_name}.{target_table_name}' has empty columns list - skipping index creation.")
+            return ''
+
         # Split index_columns into elements, clean up quotes, convert case, and re-quote.
         # A column entry may carry an ASC/DESC ordering keyword (e.g. '"STORE_NAME" ASC')
         # which must be preserved but must NOT be quoted together with the column name -

@@ -4,7 +4,9 @@
 
 - 2026.07.29
 
-  - Fix - MySQL / MariaDB Connectors: Prevented `TypeError: sequence item 0: expected str instance, NoneType found` in `fetch_indexes` and `fetch_constraints`. Expression-based functional indexes in MySQL 8.0+ store expressions in `INFORMATION_SCHEMA.STATISTICS` while `COLUMN_NAME` is `NULL` (`None` in Python); `None` column values are now safely filtered out when constructing index and constraint column strings.
+  - Fix - MySQL / MariaDB / PostgreSQL Connectors: Resolved index creation errors with empty list of columns
+    - Added support for MySQL 8.0+ expression/functional indexes by querying `S.EXPRESSION` from `INFORMATION_SCHEMA.STATISTICS` when `COLUMN_NAME` is `NULL`, mapping backticks to double quotes (e.g. `lower("email")`) and flagging `is_function_based` for target PostgreSQL expression index creation.
+    - Added empty index column guards in `mysql_connector.fetch_indexes`, `mariadb_connector.fetch_indexes`, `postgresql_connector.get_create_index_sql`, and `orchestrator.index_worker` to safely skip invalid index definitions with missing columns.
   - Feature - MySQL / MariaDB Connectors / Config: Configurable handling for MySQL all-zero date, datetime, and timestamp default values (e.g. `'0000-00-00'`, `'0000-00-00 00:00:00'`, `0000-00-00`). Added `migration.zero_datetime_default` configuration setting (`remove` / `null` / `''` by default to drop invalid zero default clauses in target PostgreSQL DDL, or a string replacement like `'1970-01-01'` or `'CURRENT_TIMESTAMP'`).
   - Feature - MySQL / MariaDB Connectors / Config: Configurable zero-date data transformation and NOT NULL constraint relaxation.
     - Added `migration.zero_datetime_value` config option (`null` by default or custom string fallback like `'1970-01-01'`) to transform fetched zero-date `None` values during data copy.

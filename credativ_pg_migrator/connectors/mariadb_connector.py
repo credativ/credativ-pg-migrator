@@ -676,6 +676,42 @@ class MariaDBConnector(DatabaseConnector):
         try:
             self.connect()
             cursor = self.connection.cursor()
+
+            # Check if EXPRESSION column exists in INFORMATION_SCHEMA.STATISTICS
+            has_expression = False
+            try:
+                cursor.execute("""
+                    SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+                    WHERE TABLE_SCHEMA = 'information_schema'
+                      AND TABLE_NAME = 'STATISTICS'
+                      AND COLUMN_NAME = 'EXPRESSION'
+                """)
+                row = cursor.fetchone()
+                if row and row[0] > 0:
+                    has_expression = True
+            except Exception:
+                has_expression = False
+
+            expression_clause = "S.EXPRESSION" if has_expression else "NULL AS EXPRESSION"
+
+            query = f"""
+                SELECT
+                    DISTINCT
+                    S.INDEX_NAME,
+                    S.COLUMN_NAME,
+                    S.SEQ_IN_INDEX,
+                    S.NON_UNIQUE,
+                    coalesce(tC.CONSTRAINT_TYPE,'INDEX') as CONSTRAINT_TYPE,
+                    S.INDEX_COMMENT,
+                    {expression_clause}
+                FROM INFORMATION_SCHEMA.STATISTICS S
+                LEFT JOIN INFORMATION_SCHEMA.TABLE_CONSTRAINTS tC
+                ON S.TABLE_SCHEMA = tC.TABLE_SCHEMA AND S.TABLE_NAME = tC.TABLE_NAME
+                    AND S.INDEX_NAME = tC.CONSTRAINT_NAME
+                WHERE S.TABLE_SCHEMA = '{source_table_schema}'
+                    AND S.TABLE_NAME = '{source_table_name}'
+                ORDER BY S.INDEX_NAME, S.SEQ_IN_INDEX
+            """
             cursor.execute(query)
             for row in cursor.fetchall():
                 index_name = row[0]
@@ -684,6 +720,8 @@ class MariaDBConnector(DatabaseConnector):
                 non_unique = row[3]
                 constraint_type = row[4]
                 index_comment = row[5]
+                expression = row[6] if len(row) > 6 else None
+
                 if index_name not in table_indexes:
                     table_indexes[index_name] = {
                         'index_name': index_name,
@@ -691,16 +729,27 @@ class MariaDBConnector(DatabaseConnector):
                         'index_columns': [],
                         'index_type': constraint_type,
                         'index_comment': index_comment,
+                        'is_function_based': 'NO',
                     }
 
                 if column_name is not None:
                     table_indexes[index_name]['index_columns'].append(column_name)
+                elif expression is not None:
+                    expr_clean = str(expression).strip().replace('`', '"')
+                    table_indexes[index_name]['index_columns'].append(expr_clean)
+                    table_indexes[index_name]['is_function_based'] = 'YES'
 
             cursor.close()
             self.disconnect()
             returned_indexes = {}
             for index_name, index_info in table_indexes.items():
-                index_info['index_columns'] = ', '.join([c for c in index_info['index_columns'] if c is not None])
+                cols_joined = ', '.join([c for c in index_info['index_columns'] if c is not None and str(c).strip()])
+                if not cols_joined.strip():
+                    if getattr(self, 'config_parser', None):
+                        self.config_parser.print_log_message('WARNING', f"mariadb_connector: fetch_indexes: Index '{index_name}' on table '{source_table_name}' has no columns or supported expressions - skipping.")
+                    continue
+
+                index_info['index_columns'] = cols_joined
 
                 returned_indexes[order_num] = {
                     'index_name': index_info['index_name'],
@@ -708,11 +757,13 @@ class MariaDBConnector(DatabaseConnector):
                     'index_columns': index_info['index_columns'],
                     'index_type': index_info['index_type'],
                     'index_comment': index_info['index_comment'],
+                    'is_function_based': index_info.get('is_function_based', 'NO'),
                 }
                 order_num += 1
             return returned_indexes
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"mariadb_connector: fetch_indexes: Error fetching indexes: {e}")
+            if getattr(self, 'config_parser', None):
+                self.config_parser.print_log_message('ERROR', f"mariadb_connector: fetch_indexes: Error fetching indexes: {e}")
             raise
 
     def get_create_index_sql(self, settings):
@@ -801,7 +852,8 @@ class MariaDBConnector(DatabaseConnector):
             return returned_constraints
 
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"mariadb_connector: fetch_constraints: Error fetching constraints: {e}")
+            if getattr(self, 'config_parser', None):
+                self.config_parser.print_log_message('ERROR', f"mariadb_connector: fetch_constraints: Error fetching constraints: {e}")
             raise
 
     def get_create_constraint_sql(self, settings):

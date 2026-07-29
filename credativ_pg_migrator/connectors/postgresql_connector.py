@@ -505,7 +505,12 @@ class PostgreSQLConnector(DatabaseConnector):
             column_comment = column_info['column_comment']
             nullable_string = ''
             if column_info['is_nullable'] == 'NO':
-                nullable_string = 'NOT NULL'
+                is_mysql_db = self.config_parser.get_source_db_type() in ('mysql', 'mariadb')
+                is_datetime_col = any(t in column_data_type for t in ('DATE', 'TIME', 'TIMESTAMP'))
+                if is_mysql_db and is_datetime_col and self.config_parser.get_relax_not_null_datetime() and not self.config_parser.get_zero_datetime_data_value():
+                    nullable_string = ''
+                else:
+                    nullable_string = 'NOT NULL'
 
             numeric_precision = column_info.get('numeric_precision')
             numeric_scale = column_info.get('numeric_scale')

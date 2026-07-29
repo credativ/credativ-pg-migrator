@@ -446,6 +446,11 @@ class MySQLConnector(DatabaseConnector):
                                     #         record[column_name] = str(record[column_name])
                                     # else:
                                     #     record[column_name] = None
+                                elif column_type.lower() in ['date', 'datetime', 'timestamp', 'time']:
+                                    if record[column_name] is None:
+                                        zero_val = self.config_parser.get_zero_datetime_data_value()
+                                        if zero_val and str(zero_val).strip().lower() not in ('none', 'null', 'remove', ''):
+                                            record[column_name] = zero_val
                                 elif column_type.lower() in ['integer', 'smallint', 'tinyint', 'bit', 'boolean'] and target_column_type.lower() in ['boolean']:
                                     # Convert integer to boolean
                                     record[column_name] = bool(record[column_name])

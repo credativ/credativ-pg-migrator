@@ -334,6 +334,20 @@ class ConfigParser:
             return source_config.get('zero_datetime_default')
         return 'remove'
 
+    def get_zero_datetime_data_value(self):
+        settings = self.get_migration_settings() if 'migration' in self.config else {}
+        if 'zero_datetime_value' in settings:
+            return settings.get('zero_datetime_value')
+        if 'zero_datetime_data_value' in settings:
+            return settings.get('zero_datetime_data_value')
+        return None
+
+    def get_relax_not_null_datetime(self):
+        settings = self.get_migration_settings() if 'migration' in self.config else {}
+        if 'relax_not_null_datetime' in settings:
+            return settings.get('relax_not_null_datetime')
+        return True
+
     def get_table_mapping(self, source_schema, source_table):
         """Returns the mapping rule for a specific source table if it exists within its data_export settings."""
         table_data_export = self.get_table_data_export(source_schema, source_table)

@@ -867,6 +867,10 @@ class PostgreSQLConnector(DatabaseConnector):
             # '"(upper("last_name"))"' and fail with a syntax error.
             if self.expression_is_parenthesized(col) or (is_function_based and '(' in col):
                 expression = self.convert_expression_identifiers(col, target_columns)
+                expression = expression.replace(r"\'", "'").replace(r'\"', '"')
+                expression = re.sub(r'(?i)_[a-zA-Z0-9_]+(\'|")', r'\1', expression)
+                expression = re.sub(r'(?i)\b(?:CHARACTER\s+SET|CHARSET)\s+[a-zA-Z0-9_]+', '', expression)
+                expression = re.sub(r'(?i)\bCOLLATE\s+[`\'"]?[a-zA-Z0-9_]+[`\'"]?', '', expression)
                 if not self.expression_is_parenthesized(expression):
                     expression = f"({expression})"
                 column_names.append(f'{expression}{order_direction}')

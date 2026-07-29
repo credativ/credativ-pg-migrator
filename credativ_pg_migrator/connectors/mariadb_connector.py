@@ -650,6 +650,35 @@ class MariaDBConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', f"mariadb_connector: migrate_table: Worker {worker_id}: Full stack trace: {traceback.format_exc()}")
             raise e
 
+    def clean_index_expression(self, expr: str) -> str:
+        if not expr:
+            return ""
+        # 1. Clean backslash escapes on quotes and backticks
+        expr = expr.replace(r"\'", "'").replace(r'\"', '"').replace('`', '"')
+
+        # 2. Strip character set introducers (e.g. _utf8mb4'...' -> '...', _latin1"..." -> "...")
+        expr = re.sub(r'(?i)_[a-zA-Z0-9_]+(\'|")', r'\1', expr)
+
+        # 3. Strip CHARACTER SET / CHARSET <name>
+        expr = re.sub(r'(?i)\b(?:CHARACTER\s+SET|CHARSET)\s+[a-zA-Z0-9_]+', '', expr)
+
+        # 4. Strip COLLATE <name>
+        expr = re.sub(r'(?i)\bCOLLATE\s+[`\'"]?[a-zA-Z0-9_]+[`\'"]?', '', expr)
+
+        # 5. Transpile expression to PostgreSQL dialect via sqlglot if available
+        try:
+            transpiled = sqlglot.transpile(expr, read="mariadb", write="postgres")
+            if transpiled and transpiled[0]:
+                expr = transpiled[0]
+        except Exception:
+            pass
+
+        # 6. Apply standard function mapping
+        expr = self.apply_sql_functions_mapping(expr, {'target_db_type': 'postgresql'})
+
+        expr = re.sub(r'\s+', ' ', expr).strip()
+        return expr
+
     def fetch_indexes(self, settings):
         source_table_id = settings['source_table_id']
         source_table_schema = settings['source_table_schema']
@@ -735,9 +764,10 @@ class MariaDBConnector(DatabaseConnector):
                 if column_name is not None:
                     table_indexes[index_name]['index_columns'].append(column_name)
                 elif expression is not None:
-                    expr_clean = str(expression).strip().replace('`', '"')
-                    table_indexes[index_name]['index_columns'].append(expr_clean)
-                    table_indexes[index_name]['is_function_based'] = 'YES'
+                    expr_clean = self.clean_index_expression(str(expression))
+                    if expr_clean:
+                        table_indexes[index_name]['index_columns'].append(expr_clean)
+                        table_indexes[index_name]['is_function_based'] = 'YES'
 
             cursor.close()
             self.disconnect()

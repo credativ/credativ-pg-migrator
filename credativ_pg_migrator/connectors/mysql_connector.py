@@ -19,6 +19,7 @@ from credativ_pg_migrator.migrator_logging import MigratorLogger
 # import mysql.connector  ## only for native connectivity - install mysql-connector-python
 import traceback
 import re
+import json
 import struct
 from tabulate import tabulate
 import time
@@ -249,6 +250,7 @@ class MySQLConnector(DatabaseConnector):
                 'BIT': 'BOOLEAN',
                 'YEAR': 'INTEGER',
                 'POINT': 'POINT',
+                'VECTOR': 'TEXT',
                 # Add more type mappings as needed
             }
         else:
@@ -505,6 +507,13 @@ class MySQLConnector(DatabaseConnector):
                                 elif column_type.lower() in ['integer', 'smallint', 'tinyint', 'bit', 'boolean'] and target_column_type.lower() in ['boolean']:
                                     # Convert integer to boolean
                                     record[column_name] = bool(record[column_name])
+                                elif column_type.lower() == 'vector' or type(record[column_name]).__name__ == 'array' or hasattr(record[column_name], 'tolist'):
+                                    val = record[column_name]
+                                    if val is not None:
+                                        if hasattr(val, 'tolist'):
+                                            record[column_name] = json.dumps(val.tolist())
+                                        else:
+                                            record[column_name] = str(val)
 
                         # # Reorder columns in each record based on the order in source_columns
                         # ordered_column_names = [col['column_name'] for col in source_columns.values()]

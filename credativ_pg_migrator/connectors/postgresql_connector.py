@@ -23,6 +23,7 @@ from credativ_pg_migrator.migrator_logging import MigratorLogger
 from credativ_pg_migrator.constants import MigratorConstants
 import traceback
 import re
+import json
 import datetime
 from decimal import Decimal
 
@@ -1861,6 +1862,8 @@ class PostgreSQLConnector(DatabaseConnector):
                         value = item.get(col_name)
                         if col_name in boolean_columns:
                             value = self._coerce_boolean_value(value)
+                        elif value is not None and (type(value).__name__ == 'array' or hasattr(value, 'tolist')):
+                            value = json.dumps(value.tolist()) if hasattr(value, 'tolist') else str(value)
                         row.append(value)
                     formatted_data.append(tuple(row))
                 self.config_parser.print_log_message('DEBUG3', f"postgresql_connector: insert_batch: INSERT COLUMNS: {insert_columns}")

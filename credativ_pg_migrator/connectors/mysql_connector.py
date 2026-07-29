@@ -963,6 +963,7 @@ class MySQLConnector(DatabaseConnector):
         if target_db_type == 'postgresql' and view_code:
             view_code = re.sub(r'(?i)\b(?:CHARACTER\s+SET|CHARSET)\s+[a-zA-Z0-9_]+', '', view_code)
             view_code = re.sub(r'(?i)\bCOLLATE\s+[`\'"]?[a-zA-Z0-9_]+[`\'"]?', '', view_code)
+            view_code = re.sub(r'(?i)\bGROUP\s+BY\s+(.*?)\s+WITH\s+ROLLUP\b', r'GROUP BY ROLLUP (\1)', view_code, flags=re.DOTALL)
 
         if target_db_type == 'postgresql':
             try:

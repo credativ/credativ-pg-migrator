@@ -73,6 +73,7 @@ class DatabaseConnector(ABC):
         if settings.get('target_db_type') == 'postgresql' and code:
             code = re.sub(r'(?i)\b(?:CHARACTER\s+SET|CHARSET)\s+[a-zA-Z0-9_]+', '', code)
             code = re.sub(r'(?i)\bCOLLATE\s+[`\'"]?[a-zA-Z0-9_]+[`\'"]?', '', code)
+            code = re.sub(r'(?i)\bGROUP\s+BY\s+(.*?)\s+WITH\s+ROLLUP\b', r'GROUP BY ROLLUP (\1)', code, flags=re.DOTALL)
 
         sql_functions_mapping = self.get_sql_functions_mapping(settings)
         if sql_functions_mapping and code:

@@ -637,13 +637,14 @@ class MariaDBConnector(DatabaseConnector):
                         'index_comment': index_comment,
                     }
 
-                table_indexes[index_name]['index_columns'].append(column_name)
+                if column_name is not None:
+                    table_indexes[index_name]['index_columns'].append(column_name)
 
             cursor.close()
             self.disconnect()
             returned_indexes = {}
             for index_name, index_info in table_indexes.items():
-                index_info['index_columns'] = ', '.join(index_info['index_columns'])
+                index_info['index_columns'] = ', '.join([c for c in index_info['index_columns'] if c is not None])
 
                 returned_indexes[order_num] = {
                     'index_name': index_info['index_name'],
@@ -717,14 +718,16 @@ class MariaDBConnector(DatabaseConnector):
                         'constraint_comment': '',
                     }
 
-                table_constraints[foreign_key_name]['constraint_columns'].append(column_name)
-                table_constraints[foreign_key_name]['referenced_columns'].append(referenced_column_name)
+                if column_name is not None:
+                    table_constraints[foreign_key_name]['constraint_columns'].append(column_name)
+                if referenced_column_name is not None:
+                    table_constraints[foreign_key_name]['referenced_columns'].append(referenced_column_name)
 
             cursor.close()
             self.disconnect()
             for constraint_name, constraint_info in table_constraints.items():
-                constraint_info['constraint_columns'] = ', '.join(constraint_info['constraint_columns'])
-                constraint_info['referenced_columns'] = ', '.join(constraint_info['referenced_columns'])
+                constraint_info['constraint_columns'] = ', '.join([c for c in constraint_info['constraint_columns'] if c is not None])
+                constraint_info['referenced_columns'] = ', '.join([c for c in constraint_info['referenced_columns'] if c is not None])
 
                 returned_constraints[order_num] = {
                     'constraint_name': constraint_info['constraint_name'],

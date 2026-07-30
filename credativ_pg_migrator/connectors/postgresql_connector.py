@@ -537,6 +537,10 @@ class PostgreSQLConnector(DatabaseConnector):
                 character_maximum_length = column_info['character_maximum_length']
             if column_info['basic_character_maximum_length'] not in ('', None):
                 character_maximum_length = column_info['basic_character_maximum_length']
+            if str(character_maximum_length).startswith('-') or (isinstance(character_maximum_length, (int, float)) and character_maximum_length < 0):
+                character_maximum_length = ''
+                if 'CHAR' in column_data_type:
+                    column_data_type = 'TEXT'
 
             domain_name = column_info['domain_name']
 

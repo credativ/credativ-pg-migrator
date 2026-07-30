@@ -967,7 +967,10 @@ class Planner:
                         else:
                             coltype = types_mapping.get(coltype, coltype).upper()
 
-                    if self.config_parser.get_varchar_to_text_length() >= 0 or self.config_parser.get_char_to_text_length() >= 0:
+                    if character_maximum_length < 0:
+                        if self.source_connection.is_string_type(coltype) or any(t in coltype for t in ('CHAR', 'TEXT', 'STRING', 'CLOB', 'VARCHAR')):
+                            coltype = 'TEXT'
+                    elif self.config_parser.get_varchar_to_text_length() >= 0 or self.config_parser.get_char_to_text_length() >= 0:
                         if (self.source_connection.is_string_type(coltype)
                             and 'VARCHAR' in coltype.upper()
                             and character_maximum_length >= self.config_parser.get_varchar_to_text_length()):
@@ -989,7 +992,7 @@ class Planner:
                     'target_alias_name': settings.get('target_alias_name', ''),
                     'column_type': column_info['column_type'] if 'column_type' in column_info else '',
                     'column_type_substitution': column_info['column_type_substitution'] if 'column_type_substitution' in column_info else '',
-                    'character_maximum_length': '' if coltype == 'TEXT' else column_info['character_maximum_length'] if column_info['character_maximum_length'] is not None else '',
+                    'character_maximum_length': '' if coltype == 'TEXT' or character_maximum_length < 0 else column_info['character_maximum_length'] if column_info['character_maximum_length'] is not None else '',
                     'numeric_precision': column_info['numeric_precision'] if 'numeric_precision' in column_info else '',
                     'numeric_scale': column_info['numeric_scale'] if 'numeric_scale' in column_info else '',
                     'basic_data_type': column_info['basic_data_type'] if 'basic_data_type' in column_info else '',

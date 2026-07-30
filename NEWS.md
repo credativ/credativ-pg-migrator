@@ -4,6 +4,7 @@ credativ-pg-migrator Releases
 0.16.0 - 29.07.2026
 -------------------
 
+* Fixed MS SQL Server table creation failures for `VARCHAR(MAX)` / `NVARCHAR(MAX)` columns by mapping negative catalog lengths (`-1`) to PostgreSQL `TEXT` and extracting underlying default expressions from legacy `CREATE DEFAULT` bound objects
 * Fixed MariaDB sequence migration and column defaults (`nextval(`schema`.`seq_name`)` / `NEXT VALUE FOR ...`) converting to PostgreSQL `nextval('seq_name')`
 * Fixed MariaDB view transpilation for inline `IF(...)` functions and resolved PostgreSQL `CASE` expression mixed-type errors by auto-casting non-string arms (`CAST(expr AS VARCHAR)`) when paired with string literals
 * Fixed MySQL 9 native `VECTOR` data migration by converting Python `array.array` objects to JSON string representations for target PostgreSQL insertion

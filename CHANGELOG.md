@@ -2,6 +2,13 @@
 
 ## 0.16.0 - 2026.07.29
 
+- 2026.07.30
+
+  - Fix - MS SQL Server Connector / Planner / PostgreSQL Connector: Fixed table creation failures (`syntax error at or near "-"`) when migrating MS SQL Server tables containing `VARCHAR(MAX)`, `NVARCHAR(MAX)`, or `VARBINARY(MAX)` columns.
+    - `planner.convert_table_columns` now recognizes negative column length metadata (`character_maximum_length < 0`, returned as `-1` by MS SQL Server sys.columns / INFORMATION_SCHEMA for `MAX` types) and maps string/character columns to PostgreSQL `TEXT` while resetting `character_maximum_length` to an empty string, preventing target DDL generation from emitting invalid `VARCHAR(-1)` data types.
+    - `postgresql_connector.get_create_table_sql` now sanitizes negative `character_maximum_length` values, ensuring string columns with negative length metadata default cleanly to `TEXT`.
+    - `ms_sql_connector.convert_default_value` now handles legacy MS SQL Server default objects bound via `sp_bindefault` (`CREATE DEFAULT ... AS <val>`), extracting the underlying default expression instead of embedding the full `CREATE DEFAULT` DDL statement into column default clauses.
+
 - 2026.07.29
 
   - Fix - MariaDB / MySQL Connectors: Resolved sequence creation and column default syntax errors when migrating MariaDB 10.3+ / 12 native sequences to PostgreSQL.

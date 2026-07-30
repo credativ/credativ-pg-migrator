@@ -2638,6 +2638,10 @@ EXECUTE FUNCTION "{func_schema}"."{func_name}"();
             return ''
 
         default_value = self.strip_enclosing_parentheses(default_value)
+        create_def_match = re.search(r'(?i)^\s*CREATE\s+DEFAULT\s+.*?\s+AS\s+(.*?);?\s*$', default_value)
+        if create_def_match:
+            default_value = create_def_match.group(1).strip()
+            default_value = self.strip_enclosing_parentheses(default_value)
         if default_value == '' or default_value.upper() == 'NULL':
             # NULL is the PostgreSQL default anyway
             return ''

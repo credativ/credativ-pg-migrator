@@ -238,7 +238,7 @@ class MsSQLConnector(DatabaseConnector):
     def connect(self):
         if self.config_parser.get_connectivity(self.source_or_target) == 'odbc':
             connection_string = self.config_parser.get_connect_string(self.source_or_target)
-            self.connection = pyodbc.connect(connection_string)
+            self.connection = pyodbc.connect(connection_string, autocommit=True)
 
             def handle_datetimeoffset(value):
                 if value is None:
@@ -277,7 +277,10 @@ class MsSQLConnector(DatabaseConnector):
             )
         else:
             raise ValueError(f"Unsupported connectivity type: {self.config_parser.get_connectivity(self.source_or_target)}")
-        self.connection.autocommit = True
+        try:
+            self.connection.autocommit = True
+        except Exception:
+            pass
 
     def disconnect(self):
         try:

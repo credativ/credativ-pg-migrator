@@ -5,6 +5,7 @@ credativ-pg-migrator Releases
 -------------------
 
 * Fixed MS SQL Server table creation failures for `VARCHAR(MAX)` / `NVARCHAR(MAX)` columns by mapping negative catalog lengths (`-1`) to PostgreSQL `TEXT` and extracting underlying default expressions from legacy `CREATE DEFAULT` bound objects
+* Fixed MS SQL Server connection errors (`Connection is busy with results for another command`) by setting `autocommit=True` directly at `pyodbc.connect()` initialization
 * Fixed MS SQL Server data fetch error `ODBC SQL type -155 is not yet supported` on `DATETIMEOFFSET` columns by registering a pyodbc output converter that unpacks binary timestamp-with-offset structs into ISO format strings
 * Fixed MariaDB sequence migration and column defaults (`nextval(`schema`.`seq_name`)` / `NEXT VALUE FOR ...`) converting to PostgreSQL `nextval('seq_name')`
 * Fixed MariaDB view transpilation for inline `IF(...)` functions and resolved PostgreSQL `CASE` expression mixed-type errors by auto-casting non-string arms (`CAST(expr AS VARCHAR)`) when paired with string literals

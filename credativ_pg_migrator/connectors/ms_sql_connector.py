@@ -949,10 +949,10 @@ class MsSQLConnector(DatabaseConnector):
             for p in params_list:
                 p = p.strip()
                 if not p: continue
-                p_match = re.search(r'(?:@|locvar_)([\w]+)\s+([\w\(\)]+)(.*)', p, flags=re.IGNORECASE)
+                p_match = re.search(r'^\s*(?:@|locvar_)?([\w]+)\s+([A-Za-z_][\w\s\(\),]*?)(?:\s+(OUTPUT|OUT|=.*)|$)', p, flags=re.IGNORECASE)
                 if p_match:
                     p_name = p_match.group(1)
-                    p_type = p_match.group(2)
+                    p_type = p_match.group(2).strip()
                     p_rest = p_match.group(3) or ""
                     p_type = self._apply_data_type_substitutions(p_type)
                     p_type = self._apply_udt_to_base_type_substitutions(p_type, settings)

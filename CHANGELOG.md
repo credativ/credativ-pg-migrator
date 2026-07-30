@@ -10,6 +10,7 @@
     - `ms_sql_connector.convert_default_value` now handles legacy MS SQL Server default objects bound via `sp_bindefault` (`CREATE DEFAULT ... AS <val>`), extracting the underlying default expression instead of embedding the full `CREATE DEFAULT` DDL statement into column default clauses.
   - Fix - MS SQL Server Connector: Resolved connection errors (`Connection is busy with results for another command ... SQLSetConnectAttr(SQL_ATTR_AUTOCOMMIT)`) when workers open parallel ODBC connections. `ms_sql_connector.connect` now passes `autocommit=True` directly to `pyodbc.connect()` during connection initialization, preventing post-connect `SQLSetConnectAttr` calls while cursors or result sets are active.
   - Fix - MS SQL Server Connector: Resolved data fetch failures (`ODBC SQL type -155 is not yet supported`) when migrating tables with `DATETIMEOFFSET` columns. Registered a custom output converter for pyodbc SQL type `-155` (`SQL_SS_TIMESTAMPOFFSET`) in `ms_sql_connector.connect` to unpack binary 20-byte `SQL_SS_TIMESTAMPOFFSET_STRUCT` payloads into ISO 8601 timestamp-with-time-zone strings (`YYYY-MM-DD HH:MM:SS.ffffff+HH:MM`) for target PostgreSQL `TIMESTAMPTZ` insertion.
+  - Fix - MS SQL Server Connector: Fixed procedure and function header generation syntax errors (`syntax error at or near "AS"`) when parameters specify precision and scale (e.g. `@rate decimal(18,8)`). Updated `convert_funcproc_code` parameter parsing regex to support types containing commas and spaces inside parentheses.
 
 - 2026.07.29
 

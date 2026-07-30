@@ -814,8 +814,52 @@ class SQLAnywhereConnector(DatabaseConnector):
 
     def convert_view_code(self, settings: dict):
         view_code = settings.get('view_code')
-        if view_code:
-            view_code = self.apply_sql_functions_mapping(view_code, settings)
+        if not view_code:
+            return view_code
+
+        source_schema = settings.get('source_schema_name', '')
+        target_schema = settings.get('target_schema_name', 'public')
+
+        # 1. Strip source schema qualification: "DBA". -> ""
+        if source_schema:
+            view_code = re.sub(rf"(?i)\"{re.escape(source_schema)}\"\.", "", view_code)
+
+        # 2. Strip double quotes from function calls e.g. "COUNT"( -> count(
+        view_code = re.sub(r'"([A-Za-z0-9_]+)"\s*\(', r'\1(', view_code)
+
+        # 3. Convert empty COUNT() -> count(*)
+        view_code = re.sub(r"(?i)\bCOUNT\s*\(\s*\)", "count(*)", view_code)
+
+        # 4. Convert IF cond THEN val1 ELSE val2 ENDIF -> CASE WHEN cond THEN val1 ELSE val2 END
+        view_code = re.sub(r"(?i)\bIF\s+(.+?)\s+THEN\s+(.+?)\s+ELSE\s+(.+?)\s+ENDIF\b", r"CASE WHEN \1 THEN \2 ELSE \3 END", view_code)
+
+        # 5. Convert LIST(expr, sep ...) -> string_agg(expr::text, sep ...)
+        view_code = re.sub(r"(?i)\bLIST\s*\(\s*([^\s,]+)\s*,", r"string_agg(\1::text,", view_code)
+
+        # 6. Convert SELECT TOP N -> SELECT ... LIMIT N
+        def replace_top(match):
+            top_n = match.group(1)
+            rest = match.group(2)
+            return f"SELECT {rest} LIMIT {top_n}"
+
+        view_code = re.sub(r"(?i)\bSELECT\s+TOP\s+(\d+)\s+(.+?)(?=\)|\s*$)", replace_top, view_code, flags=re.DOTALL)
+
+        # 7. Convert boolean comparisons: "is_active" = 1 -> "is_active" = true
+        view_code = re.sub(r'is_active"\s*=\s*1\b', 'is_active" = true', view_code)
+        view_code = re.sub(r'is_active"\s*=\s*0\b', 'is_active" = false', view_code)
+
+        # 8. Fix recursive CTE string concatenation type matching
+        view_code = re.sub(r"as\s+varchar\s*\(\s*500\s*\)", "as text", view_code, flags=re.IGNORECASE)
+
+        # 9. Apply standard function mappings
+        view_code = self.apply_sql_functions_mapping(view_code, settings)
+
+        # 10. Ensure CREATE OR REPLACE VIEW
+        if not view_code.lower().startswith("create"):
+            view_code = "CREATE OR REPLACE VIEW " + view_code
+        else:
+            view_code = re.sub(r"(?i)^CREATE\s+(MATERIALIZED\s+)?VIEW", "CREATE OR REPLACE VIEW", view_code)
+
         return view_code
 
     def get_sequence_current_value(self, sequence_id: int):

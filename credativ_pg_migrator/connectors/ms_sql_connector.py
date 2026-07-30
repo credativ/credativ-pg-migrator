@@ -606,9 +606,16 @@ class MsSQLConnector(DatabaseConnector):
                      ORDER BY ic2.index_column_id
                      FOR XML PATH('')),
                     1, 2, ''
-                ) AS column_list
+                ) AS column_list,
+                (SELECT COUNT(*)
+                 FROM sys.index_columns ic3
+                 JOIN sys.columns c3 ON ic3.object_id = c3.object_id AND ic3.column_id = c3.column_id
+                 JOIN sys.types ty ON c3.user_type_id = ty.user_type_id
+                 WHERE ic3.object_id = {source_table_id} AND ic3.index_id = i.index_id
+                   AND ty.name IN ('xml', 'image', 'text', 'ntext', 'hierarchyid', 'geometry', 'geography')
+                ) AS has_unsupported_col
             FROM sys.indexes i
-            WHERE i.object_id = {source_table_id} AND i.type > 0
+            WHERE i.object_id = {source_table_id} AND i.type IN (1, 2)
             ORDER BY i.name
         """
         try:
@@ -626,7 +633,12 @@ class MsSQLConnector(DatabaseConnector):
                 index_unique = index[1]  ## integer 0 or 1
                 index_primary_key = index[2]  ## integer 0 or 1
                 index_columns = index[3].strip() if index[3] else ''
+                has_unsupported_col = index[4] or 0
                 index_owner = ''
+
+                if has_unsupported_col > 0 or not index_columns:
+                    self.config_parser.print_log_message('WARNING', f"ms_sql_connector: fetch_indexes: Skipping index {index_name} on table {source_table_name} as it contains unsupported column data types.")
+                    continue
 
                 table_indexes[order_num] = {
                     'index_name': index_name,

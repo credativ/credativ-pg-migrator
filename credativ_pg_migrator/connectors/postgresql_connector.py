@@ -678,9 +678,9 @@ class PostgreSQLConnector(DatabaseConnector):
                 # Remove SQL Server syntax artifacts like () around default values
                 column_default = column_default.strip()
 
-                # Remove outer parentheses if present (SQL Server specific)
-                if column_default.startswith('(') and column_default.endswith(')'):
-                    column_default = column_default[1:-1].strip()
+                # Remove outer parentheses if present (SQL Server specific) - SQL Server
+                # can wrap defaults in several layers, e.g. ((1000.0000))
+                column_default = self.strip_enclosing_parentheses(column_default)
 
                 val_clean = column_default.strip().strip("'\"")
                 if val_clean.startswith('0000-00-00') or val_clean in ('0000-00-00', '0000-00-00 00:00:00', '0000-00-00 00:00:00.000000', '00:00:00'):
@@ -712,13 +712,17 @@ class PostgreSQLConnector(DatabaseConnector):
                         or ')' in column_default or '::' in column_default
                         or column_default.strip().lower() in sql_keyword_defaults
                     )
+                    # value which already is a complete string literal ('ACTIVE', 'it''s')
+                    # must be used as it is - quoting it again would break embedded quotes
+                    default_is_string_literal = re.fullmatch(r"'(?:[^']|'')*'", column_default) is not None
                     if (('CHAR' in column_data_type or column_data_type in ('TEXT'))
-                        and default_is_expression):
+                        and (default_is_expression or default_is_string_literal)):
                         # default value is here NOT quoted
-                        create_column_sql += f""" DEFAULT {column_default}""".replace("''", "'")
+                        create_column_sql += f""" DEFAULT {column_default}"""
                     elif 'CHAR' in column_data_type or column_data_type in ('TEXT'):
                         # here we must quote the default value
-                        create_column_sql += f""" DEFAULT '{column_default}'""".replace("''", "'")
+                        escaped_default = column_default.replace("'", "''")
+                        create_column_sql += f""" DEFAULT '{escaped_default}'"""
                     elif column_data_type in ('BOOLEAN', 'BIT'):
                         if column_default.lower() in ('0', '(0)', 'false'):
                             create_column_sql += """ DEFAULT FALSE"""

@@ -572,6 +572,38 @@ class DatabaseConnector(ABC):
         """
         pass
 
+    def strip_enclosing_parentheses(self, text: str) -> str:
+        """
+        Removes parentheses which enclose the whole expression - some databases,
+        namely SQL Server, store defaults wrapped in several layers, e.g. ((1000.0000)).
+        Pairs which do not enclose everything are kept, so (a)+(b) stays untouched.
+        """
+        if not text:
+            return text
+        value = text.strip()
+        while len(value) >= 2 and value.startswith('(') and value.endswith(')'):
+            depth = 0
+            encloses_all = True
+            in_literal = False
+            for position, character in enumerate(value):
+                if in_literal:
+                    if character == "'":
+                        in_literal = False
+                    continue
+                if character == "'":
+                    in_literal = True
+                elif character == '(':
+                    depth += 1
+                elif character == ')':
+                    depth -= 1
+                    if depth == 0 and position < len(value) - 1:
+                        encloses_all = False
+                        break
+            if not encloses_all or depth != 0:
+                break
+            value = value[1:-1].strip()
+        return value
+
     @abstractmethod
     def is_string_type(self, column_type: str) -> bool:
         """

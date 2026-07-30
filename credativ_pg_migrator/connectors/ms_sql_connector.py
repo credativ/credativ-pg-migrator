@@ -2498,15 +2498,190 @@ EXECUTE FUNCTION "{func_schema}"."{func_name}"();
              text = re.sub(rf'\b{re.escape(udt)}\b', info['base_type'], text, flags=re.IGNORECASE)
         return text
 
+    # T-SQL niladic functions usable in DEFAULT constraints and their PostgreSQL counterparts.
+    # Keys are lower case function names without parentheses.
+    MSSQL_DEFAULT_FUNCTIONS_TO_POSTGRESQL = {
+        'getdate': 'current_timestamp',
+        'sysdatetime': 'current_timestamp',
+        'sysdatetimeoffset': 'current_timestamp',
+        'getutcdate': "timezone('UTC', now())",
+        'sysutcdatetime': "timezone('UTC', now())",
+        'current_timestamp': 'current_timestamp',
+        'suser_name': 'current_user',
+        'suser_sname': 'current_user',
+        'user_name': 'current_user',
+        'current_user': 'current_user',
+        'system_user': 'current_user',
+        'session_user': 'session_user',
+        'db_name': 'current_database()',
+        'original_db_name': 'current_database()',
+        'app_name': "current_setting('application_name')",
+    }
+
+    def _split_outside_string_literals(self, text: str) -> list:
+        """
+        Splits text so that even indexes are code fragments and odd indexes are
+        single quoted string literals (with doubled quotes handled).
+        Allows rewriting of SQL code without touching the content of literals.
+        """
+        return re.split(r"('(?:[^']|'')*')", text)
+
+    def _rewrite_outside_string_literals(self, text: str, rewriter) -> str:
+        parts = self._split_outside_string_literals(text)
+        for index in range(0, len(parts), 2):
+            parts[index] = rewriter(parts[index])
+        return ''.join(parts)
+
+    def _convert_money_literals(self, text: str) -> str:
+        """
+        MONEY / SMALLMONEY defaults are stored as currency literals - $1000.0000,
+        -$1,000.00, $-1000. PostgreSQL has no such literal and $1000 would even be
+        parsed as a positional parameter, so the value is reduced to a plain number.
+        """
+        def convert_fragment(fragment: str) -> str:
+            def replace(match):
+                negative = (match.group(1) == '-') != (match.group(2) == '-')
+                number = match.group(3).replace(',', '')
+                return f"{'-' if negative else ''}{number}"
+            return re.sub(r"(-?)\s*\$\s*(-?)\s*(\d[\d,]*(?:\.\d+)?)", replace, fragment)
+
+        return self._rewrite_outside_string_literals(text, convert_fragment)
+
+    def _split_top_level_arguments(self, text: str) -> list:
+        """ Splits a function argument list on commas which are not nested in parentheses or literals. """
+        arguments = []
+        current = ''
+        depth = 0
+        in_literal = False
+        for character in text:
+            if in_literal:
+                current += character
+                if character == "'":
+                    in_literal = False
+                continue
+            if character == "'":
+                in_literal = True
+                current += character
+            elif character == '(':
+                depth += 1
+                current += character
+            elif character == ')':
+                depth -= 1
+                current += character
+            elif character == ',' and depth == 0:
+                arguments.append(current.strip())
+                current = ''
+            else:
+                current += character
+        if current.strip() != '':
+            arguments.append(current.strip())
+        return arguments
+
+    def _convert_convert_calls(self, text: str, settings) -> str:
+        """
+        Rewrites T-SQL CONVERT(data_type, expression [, style]) into PostgreSQL
+        CAST(expression AS data_type). The optional style argument has no PostgreSQL
+        counterpart and is dropped with a warning.
+        """
+        target_db_type = settings.get('target_db_type', self.config_parser.get_target_db_type())
+        types_mapping = self.get_types_mapping({'target_db_type': target_db_type})
+
+        while True:
+            match = re.search(r'(?i)\bCONVERT\s*\(', text)
+            if not match:
+                return text
+            start = match.start()
+            arguments_start = match.end()
+            depth = 1
+            in_literal = False
+            position = arguments_start
+            while position < len(text) and depth > 0:
+                character = text[position]
+                if in_literal:
+                    if character == "'":
+                        in_literal = False
+                elif character == "'":
+                    in_literal = True
+                elif character == '(':
+                    depth += 1
+                elif character == ')':
+                    depth -= 1
+                position += 1
+            if depth != 0:
+                # unbalanced expression - leave it as it is
+                return text
+            arguments = self._split_top_level_arguments(text[arguments_start:position - 1])
+            if len(arguments) < 2:
+                return text
+            if len(arguments) > 2:
+                self.config_parser.print_log_message('WARNING', f"ms_sql_connector: convert_default_value: CONVERT style argument '{arguments[2]}' has no PostgreSQL equivalent and is dropped.")
+            data_type = self.strip_enclosing_parentheses(arguments[0]).strip()
+            type_length = ''
+            length_match = re.search(r'(\(\s*[^()]*\s*\))\s*$', data_type)
+            if length_match:
+                type_length = length_match.group(1)
+                data_type = data_type[:length_match.start()].strip()
+            data_type = data_type.strip('[]"').upper()
+            data_type = types_mapping.get(data_type, data_type)
+            if type_length and '(' not in data_type:
+                data_type += type_length
+            replacement = f"CAST({arguments[1]} AS {data_type})"
+            text = text[:start] + replacement + text[position:]
+
     def convert_default_value(self, settings) -> dict:
         extracted_default_value = settings['extracted_default_value']
         if extracted_default_value is None:
             return ''
-        column_type = settings.get('column_type', '')
-        default_str = str(extracted_default_value).strip().strip("()'\"")
-        if re.search(r'(?i)\b(?:newid|newsequentialid)\b', default_str):
+        column_type = str(settings.get('column_type', '') or '').upper()
+        default_value = str(extracted_default_value).strip()
+        if default_value == '':
+            return ''
+
+        default_value = self.strip_enclosing_parentheses(default_value)
+        if default_value == '' or default_value.upper() == 'NULL':
+            # NULL is the PostgreSQL default anyway
+            return ''
+
+        # unicode literals N'text' are plain literals in PostgreSQL
+        default_value = re.sub(r"(?i)(?<![\w])N('(?:[^']|'')*')", r"\1", default_value)
+
+        # MONEY / SMALLMONEY currency literals
+        default_value = self._convert_money_literals(default_value)
+
+        # quoted identifiers like [dbo].[my_function] or [varchar]
+        default_value = self._rewrite_outside_string_literals(
+            default_value, lambda fragment: re.sub(r'\[([^\[\]]+)\]', r'"\1"', fragment))
+
+        # binary literals - 0x1F2E is written as bytea escape literal, the target
+        # connector adds the quotes and the ::BYTEA cast
+        binary_match = re.fullmatch(r'(?i)0x([0-9a-f]*)', default_value)
+        if binary_match:
+            if column_type.startswith('BYTEA'):
+                return f"\\x{binary_match.group(1)}"
+            return str(int(binary_match.group(1) or '0', 16))
+
+        # UUID generators
+        if re.search(r'(?i)\b(?:newid|newsequentialid)\s*\(\s*\)', default_value):
             return self.config_parser.get_uuid_default_function(column_type)
-        return extracted_default_value
+
+        default_value = self._convert_convert_calls(default_value, settings)
+
+        # niladic functions - either as the whole default or nested in an expression
+        def convert_functions(fragment: str) -> str:
+            def replace(match):
+                function_name = match.group(1).lower()
+                mapped = self.MSSQL_DEFAULT_FUNCTIONS_TO_POSTGRESQL.get(function_name)
+                return mapped if mapped else match.group(0)
+            return re.sub(r'(?i)\b([a-z_][a-z0-9_]*)\s*\(\s*\)', replace, fragment)
+
+        default_value = self._rewrite_outside_string_literals(default_value, convert_functions)
+
+        # CURRENT_TIMESTAMP / SYSTEM_USER and friends are used without parentheses too
+        bare_value = default_value.strip()
+        if bare_value.lower() in self.MSSQL_DEFAULT_FUNCTIONS_TO_POSTGRESQL:
+            return self.MSSQL_DEFAULT_FUNCTIONS_TO_POSTGRESQL[bare_value.lower()]
+
+        return default_value.strip()
 
     def get_table_checksum(self, schema_name: str, table_name: str, columns: list):
         if not columns:

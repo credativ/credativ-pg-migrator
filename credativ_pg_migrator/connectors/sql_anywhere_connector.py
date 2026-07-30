@@ -1040,6 +1040,11 @@ class SQLAnywhereConnector(DatabaseConnector):
         # Clean double quotes around function names e.g. "LOWER"( -> LOWER(
         val = re.sub(r'"([A-Za-z0-9_]+)"\s*\(', r'\1(', val)
 
+        # UUID generators (e.g. NEWID(), newid(), uuid_generate_v4(), gen_random_uuid())
+        if re.search(r'(?i)\b(?:newid|newid\s*\(\s*\)|uuid_generate_v4|gen_random_uuid)\b', val):
+            column_type = settings.get('column_type', '')
+            return self.config_parser.get_uuid_default_function(column_type)
+
         # Convert simple double-quoted string literals e.g. "ACTIVE" -> 'ACTIVE'
         if re.fullmatch(r'"[^\"]*"', val):
             val = "'" + val[1:-1].replace("'", "''") + "'"

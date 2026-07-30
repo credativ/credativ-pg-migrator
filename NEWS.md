@@ -11,7 +11,7 @@ credativ-pg-migrator Releases
 * Fixed TSQL parser function conversion syntax errors on multi-line `CASE` / `RETURN` statements and string literal brackets
 * Fixed MS SQL Server data migration for `ROWVERSION` / `TIMESTAMP` columns (mapping binary rowversion to PostgreSQL `BYTEA`) and `XML` columns (decoding UTF-16 XML byte streams cleanly)
 * Fixed MS SQL Server index creation errors by filtering out XML/spatial indexes and indexes on unindexable column types (`xml`, `image`, `text`, UDTs)
-* Fixed SQL Anywhere column default values and view transpilation by populating `get_sql_functions_mapping` for SQL Anywhere date/time keywords (`current date`, `current timestamp`), converting double-quoted text literals (`"ACTIVE"` -> `'ACTIVE'`), and dropping column-referencing expressions from DEFAULT clauses
+* Fixed SQL Anywhere column default values and view transpilation by populating `get_sql_functions_mapping` for SQL Anywhere date/time keywords (`current date`, `current timestamp`), supporting `uuid_default_function` configuration for `NEWID()` defaults, converting double-quoted text literals (`"ACTIVE"` -> `'ACTIVE'`), and dropping column-referencing expressions from DEFAULT clauses
 * Fixed MariaDB sequence migration and column defaults (`nextval(`schema`.`seq_name`)` / `NEXT VALUE FOR ...`) converting to PostgreSQL `nextval('seq_name')`
 * Fixed MariaDB view transpilation for inline `IF(...)` functions and resolved PostgreSQL `CASE` expression mixed-type errors by auto-casting non-string arms (`CAST(expr AS VARCHAR)`) when paired with string literals
 * Fixed MySQL 9 native `VECTOR` data migration by converting Python `array.array` objects to JSON string representations for target PostgreSQL insertion

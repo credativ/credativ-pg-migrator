@@ -1037,7 +1037,20 @@ class SQLAnywhereConnector(DatabaseConnector):
             if not (inner.startswith('(') and not inner.endswith(')')):
                 val = inner
 
+        # Clean double quotes around function names e.g. "LOWER"( -> LOWER(
+        val = re.sub(r'"([A-Za-z0-9_]+)"\s*\(', r'\1(', val)
+
+        # Convert simple double-quoted string literals e.g. "ACTIVE" -> 'ACTIVE'
+        if re.fullmatch(r'"[^\"]*"', val):
+            val = "'" + val[1:-1].replace("'", "''") + "'"
+
         val = self.apply_sql_functions_mapping(val, settings)
+
+        # If val still contains double-quoted identifiers (column references), drop it as PostgreSQL DEFAULT cannot reference columns
+        if re.search(r'"[A-Za-z0-9_]+"', val):
+            self.config_parser.print_log_message('INFO', f"sql_anywhere_connector: convert_default_value: Default value '{extracted_default_value}' contains column reference - dropped for PostgreSQL target.")
+            return None
+
         return val
 
     def get_table_checksum(self, schema_name: str, table_name: str, columns: list):

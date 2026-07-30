@@ -876,7 +876,9 @@ class MsSQLConnector(DatabaseConnector):
 
         # Initialize TsqlParser
         # Standardize MS SQL bracket identifiers to PostgreSQL double quotes
-        funcproc_code = re.sub(r'\[([^\]]+)\]', r'"\1"', funcproc_code)
+        funcproc_code = self._rewrite_outside_string_literals(
+            funcproc_code, lambda fragment: re.sub(r'\[([^\]]+)\]', r'"\1"', fragment)
+        )
 
         parser = TsqlParser(funcproc_code, self.config_parser)
         final_output = parser.run()

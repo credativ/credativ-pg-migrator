@@ -22,6 +22,7 @@ import traceback
 from tabulate import tabulate
 import time
 import datetime
+import re
 
 class SQLAnywhereConnector(DatabaseConnector):
     def __init__(self, config_parser, source_or_target):
@@ -57,11 +58,56 @@ class SQLAnywhereConnector(DatabaseConnector):
 
     def get_sql_functions_mapping(self, settings):
         """ Returns a dictionary of SQL functions mapping for the target database """
-        target_db_type = settings['target_db_type']
+        target_db_type = settings.get('target_db_type', 'postgresql')
         if target_db_type == 'postgresql':
-            return {}
+            return {
+                'current timestamp': 'CURRENT_TIMESTAMP',
+                'current_timestamp': 'CURRENT_TIMESTAMP',
+                'timestamp': 'CURRENT_TIMESTAMP',
+                'current date': 'CURRENT_DATE',
+                'current_date': 'CURRENT_DATE',
+                'current time': 'CURRENT_TIME',
+                'current_time': 'CURRENT_TIME',
+                'current user': 'CURRENT_USER',
+                'current_user': 'CURRENT_USER',
+                'last user': 'CURRENT_USER',
+                'current publisher': 'CURRENT_USER',
+                'getutcdate()': "timezone('UTC', now())",
+                'getdate()': 'CURRENT_TIMESTAMP',
+                'now()': 'CURRENT_TIMESTAMP',
+                'today()': 'CURRENT_DATE',
+                'user_name()': 'CURRENT_USER',
+                'user_id()': 'CURRENT_USER',
+                'user': 'CURRENT_USER',
+                'year(': 'extract(year from ',
+                'month(': 'extract(month from ',
+                'day(': 'extract(day from ',
+                'len(': 'length(',
+                'length(': 'length(',
+                'isnull(': 'coalesce(',
+                'ifnull(': 'coalesce(',
+                'string(': 'concat(',
+                'charindex(': 'position(',
+                'locate(': 'position(',
+                'stuff(': 'overlay(',
+                'dateformat(': 'to_char(',
+                'datepart(yyyy,': "date_part('year',",
+                'datepart(year,': "date_part('year',",
+                'datepart(month,': "date_part('month',",
+                'datepart(yy,': "date_part('year',",
+                'datepart(qq,': "date_part('quarter',",
+                'datepart(mm,': "date_part('month',",
+                'datepart(dy,': "date_part('doy',",
+                'datepart(dd,': "date_part('day',",
+                'datepart(wk,': "date_part('week',",
+                'datepart(hh,': "date_part('hour',",
+                'datepart(mi,': "date_part('minute',",
+                'datepart(ss,': "date_part('second',",
+                'datepart(ms,': "date_part('milliseconds',",
+            }
         else:
             self.config_parser.print_log_message('ERROR', f"sql_anywhere_connector: get_sql_functions_mapping: Unsupported target database type: {target_db_type}")
+            return {}
 
     def migrate_sequences(self, target_connector, settings):
         return True
@@ -167,21 +213,40 @@ class SQLAnywhereConnector(DatabaseConnector):
         if target_db_type == 'postgresql':
             types_mapping = {
                 'INTEGER': 'INTEGER',
+                'INT': 'INTEGER',
+                'UNSIGNED INT': 'BIGINT',
+                'UNSIGNED INTEGER': 'BIGINT',
+                'UNSIGNED BIGINT': 'NUMERIC(20, 0)',
+                'UNSIGNED SMALLINT': 'INTEGER',
+                'UNSIGNED TINYINT': 'SMALLINT',
                 'VARCHAR': 'VARCHAR',
+                'NVARCHAR': 'VARCHAR',
                 'CHAR': 'CHAR',
+                'NCHAR': 'CHAR',
                 'DATE': 'DATE',
+                'TIME': 'TIME',
+                'DATETIME': 'TIMESTAMP',
+                'SMALLDATETIME': 'TIMESTAMP',
                 'TIMESTAMP': 'TIMESTAMP',
                 'DECIMAL': 'DECIMAL',
+                'NUMERIC': 'NUMERIC',
+                'MONEY': 'NUMERIC(19, 4)',
+                'SMALLMONEY': 'NUMERIC(10, 4)',
                 'BINARY': 'BYTEA',
+                'VARBINARY': 'BYTEA',
                 'LONG VARBINARY': 'BYTEA',
                 'LONG BINARY': 'BYTEA',
+                'IMAGE': 'BYTEA',
                 'BOOLEAN': 'BOOLEAN',
+                'BIT': 'BOOLEAN',
+                'VARBIT': 'BIT VARYING',
                 'FLOAT': 'REAL',
+                'DOUBLE': 'DOUBLE PRECISION',
                 'DOUBLE PRECISION': 'DOUBLE PRECISION',
+                'REAL': 'REAL',
                 'SMALLINT': 'SMALLINT',
                 'BIGINT': 'BIGINT',
                 'TINYINT': 'SMALLINT',
-                'NUMERIC': 'NUMERIC',
                 'TEXT': 'TEXT',
                 'LONG VARCHAR': 'TEXT',
                 'LONG NVARCHAR': 'TEXT',
@@ -192,6 +257,7 @@ class SQLAnywhereConnector(DatabaseConnector):
                 'XML': 'XML',
                 'JSON': 'JSON',
                 'UUID': 'UUID',
+                'UNIQUEIDENTIFIER': 'UUID',
             }
         else:
             raise ValueError(f"Unsupported target database type: {target_db_type}")
@@ -747,7 +813,53 @@ class SQLAnywhereConnector(DatabaseConnector):
             raise
 
     def convert_view_code(self, settings: dict):
-        view_code = settings['view_code']
+        view_code = settings.get('view_code')
+        if not view_code:
+            return view_code
+
+        source_schema = settings.get('source_schema_name', '')
+        target_schema = settings.get('target_schema_name', 'public')
+
+        # 1. Strip source schema qualification: "DBA". -> ""
+        if source_schema:
+            view_code = re.sub(rf"(?i)\"{re.escape(source_schema)}\"\.", "", view_code)
+
+        # 2. Strip double quotes from function calls e.g. "COUNT"( -> count(
+        view_code = re.sub(r'"([A-Za-z0-9_]+)"\s*\(', r'\1(', view_code)
+
+        # 3. Convert empty COUNT() -> count(*)
+        view_code = re.sub(r"(?i)\bCOUNT\s*\(\s*\)", "count(*)", view_code)
+
+        # 4. Convert IF cond THEN val1 ELSE val2 ENDIF -> CASE WHEN cond THEN val1 ELSE val2 END
+        view_code = re.sub(r"(?i)\bIF\s+(.+?)\s+THEN\s+(.+?)\s+ELSE\s+(.+?)\s+ENDIF\b", r"CASE WHEN \1 THEN \2 ELSE \3 END", view_code)
+
+        # 5. Convert LIST(expr, sep ...) -> string_agg(expr::text, sep ...)
+        view_code = re.sub(r"(?i)\bLIST\s*\(\s*([^\s,]+)\s*,", r"string_agg(\1::text,", view_code)
+
+        # 6. Convert SELECT TOP N -> SELECT ... LIMIT N
+        def replace_top(match):
+            top_n = match.group(1)
+            rest = match.group(2)
+            return f"SELECT {rest} LIMIT {top_n}"
+
+        view_code = re.sub(r"(?i)\bSELECT\s+TOP\s+(\d+)\s+(.+?)(?=\)|\s*$)", replace_top, view_code, flags=re.DOTALL)
+
+        # 7. Convert boolean comparisons: "is_active" = 1 -> "is_active" = true
+        view_code = re.sub(r'is_active"\s*=\s*1\b', 'is_active" = true', view_code)
+        view_code = re.sub(r'is_active"\s*=\s*0\b', 'is_active" = false', view_code)
+
+        # 8. Fix recursive CTE string concatenation type matching
+        view_code = re.sub(r"as\s+varchar\s*\(\s*500\s*\)", "as text", view_code, flags=re.IGNORECASE)
+
+        # 9. Apply standard function mappings
+        view_code = self.apply_sql_functions_mapping(view_code, settings)
+
+        # 10. Ensure CREATE OR REPLACE VIEW
+        if not view_code.lower().startswith("create"):
+            view_code = "CREATE OR REPLACE VIEW " + view_code
+        else:
+            view_code = re.sub(r"(?i)^CREATE\s+(MATERIALIZED\s+)?VIEW", "CREATE OR REPLACE VIEW", view_code)
+
         return view_code
 
     def get_sequence_current_value(self, sequence_id: int):
@@ -973,8 +1085,42 @@ class SQLAnywhereConnector(DatabaseConnector):
         return rows
 
     def convert_default_value(self, settings) -> dict:
-        extracted_default_value = settings['extracted_default_value']
-        return extracted_default_value
+        extracted_default_value = settings.get('extracted_default_value')
+        if not extracted_default_value:
+            return extracted_default_value
+
+        val = str(extracted_default_value).strip()
+
+        # Drop autoincrement / number(*) defaults handled by serial/identity in target database
+        if re.match(r'^(global\s+)?autoincrement|number\s*\(\s*\*\s*\)$', val, re.IGNORECASE):
+            return None
+
+        # Strip outer enclosing parentheses if present
+        if val.startswith('(') and val.endswith(')'):
+            inner = val[1:-1].strip()
+            if not (inner.startswith('(') and not inner.endswith(')')):
+                val = inner
+
+        # Clean double quotes around function names e.g. "LOWER"( -> LOWER(
+        val = re.sub(r'"([A-Za-z0-9_]+)"\s*\(', r'\1(', val)
+
+        # UUID generators (e.g. NEWID(), newid(), uuid_generate_v4(), gen_random_uuid())
+        if re.search(r'(?i)\b(?:newid|newid\s*\(\s*\)|uuid_generate_v4|gen_random_uuid)\b', val):
+            column_type = settings.get('column_type', '')
+            return self.config_parser.get_uuid_default_function(column_type)
+
+        # Convert simple double-quoted string literals e.g. "ACTIVE" -> 'ACTIVE'
+        if re.fullmatch(r'"[^\"]*"', val):
+            val = "'" + val[1:-1].replace("'", "''") + "'"
+
+        val = self.apply_sql_functions_mapping(val, settings)
+
+        # If val still contains double-quoted identifiers (column references), drop it as PostgreSQL DEFAULT cannot reference columns
+        if re.search(r'"[A-Za-z0-9_]+"', val):
+            self.config_parser.print_log_message('INFO', f"sql_anywhere_connector: convert_default_value: Default value '{extracted_default_value}' contains column reference - dropped for PostgreSQL target.")
+            return None
+
+        return val
 
     def get_table_checksum(self, schema_name: str, table_name: str, columns: list):
         if not columns:

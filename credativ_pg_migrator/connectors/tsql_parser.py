@@ -2316,6 +2316,15 @@ class TsqlParser:
 
             # Rule 121: RETURN (only or with value) -> add semicolon
             if re.match(r'^RETURN\b', content, re.IGNORECASE) and not content.endswith(';'):
+                upper_c = content.upper()
+                case_count = len(re.findall(r'\bCASE\b', upper_c))
+                end_count = len(re.findall(r'\bEND\b', upper_c))
+                paren_open = content.count('(')
+                paren_close = content.count(')')
+                if case_count > end_count or paren_open > paren_close:
+                    continue
+                if re.search(r'\b(WHEN|THEN|ELSE|AND|OR|\+|\-|\*|/)\s*$', content, re.IGNORECASE):
+                    continue
                 line.content = content + ";"
                 continue
 
@@ -2351,11 +2360,15 @@ class TsqlParser:
             if content.startswith('--') or content.startswith('/*'):
                 continue
 
-            # Rule 123: Anything else -> add TODO
-            # Check if it was modified by above rules?
+            # Clause continuation lines or lines already ending with ';' should not get a TODO tag or duplicate ';'
+            if content.endswith(';') or re.match(r'^(THEN|ELSE|WHEN|END|AND|OR|UPDATE|INSERT|DELETE|MERGE|SELECT)\b', content, re.IGNORECASE):
+                if not line.content.rstrip().endswith(';'):
+                    line.content = line.content.rstrip() + ";"
+                continue
 
+            # Rule 123: Anything else -> add TODO
             # If we are here, it's a TODO line.
-            line.content = line.content + "; /* TODO: not processed line - check syntax */"
+            line.content = line.content.rstrip(';') + "; /* TODO: not processed line - check syntax */"
 
     def pass_11_assemble_output(self, pg_header_str=None) -> List[OutputLine]:
         """

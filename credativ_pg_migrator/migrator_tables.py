@@ -3842,6 +3842,15 @@ class MigratorTables:
                             else:
                                 details.append(f"{val}: {c}")
 
+                if obj_name == 'Indexes' and not self.config_parser.is_dry_run():
+                    try:
+                        cursor.execute(f"""SELECT COUNT(*), COUNT(CASE WHEN success IS TRUE THEN 1 END) FROM "{self.protocol_schema}"."{table_name}" WHERE index_type LIKE '%[AUTO-FK]%' OR index_comment LIKE '%[AUTO-FK%'""")
+                        auto_fk_row = cursor.fetchone()
+                        if auto_fk_row and auto_fk_row[0] > 0:
+                            details.append(f"Auto-added Parent FK Indexes: {auto_fk_row[0]}/{auto_fk_row[1]}")
+                    except Exception:
+                        self.protocol_connection.connection.rollback()
+
                 if obj_name == 'Tables':
                     cursor.execute(f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{table_name}" WHERE source_table_rows_limited = 0 OR source_table_rows_limited IS NULL""")
                     empty_tables = cursor.fetchone()[0]
@@ -4339,6 +4348,23 @@ class MigratorTables:
         tables = cursor.fetchall()
         return tables
 
+    def fetch_all_decoded_tables(self):
+        raw_rows = self.fetch_all_tables()
+        return [self.decode_table_row(r) for r in raw_rows]
+
+    def update_table_target_columns_and_sql(self, table_id, target_columns_json, target_table_sql):
+        table_name = self.config_parser.get_protocol_name_tables()
+        query = f"""
+            UPDATE "{self.protocol_schema}"."{table_name}"
+            SET target_columns = %s,
+                target_table_sql = %s
+            WHERE id = %s
+        """
+        cursor = self.protocol_connection.connection.cursor()
+        cursor.execute(query, (target_columns_json, target_table_sql, table_id))
+        self.protocol_connection.connection.commit()
+        cursor.close()
+
     def fetch_all_sequences(self, only_unfinished=False):
         if only_unfinished:
             query = f"""SELECT * FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_sequences()}" WHERE success IS NOT TRUE ORDER BY sequence_id"""
@@ -4449,6 +4475,10 @@ class MigratorTables:
         indexes = cursor.fetchall()
         return indexes
 
+    def fetch_all_decoded_indexes(self):
+        raw_rows = self.fetch_all_indexes()
+        return [self.decode_index_row(r) for r in raw_rows]
+
     def fetch_all_constraints(self):
         query = f"""SELECT * FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_constraints()}" ORDER BY id"""
         # self.protocol_connection.connect()
@@ -4456,6 +4486,10 @@ class MigratorTables:
         cursor.execute(query)
         constraints = cursor.fetchall()
         return constraints
+
+    def fetch_all_decoded_constraints(self):
+        raw_rows = self.fetch_all_constraints()
+        return [self.decode_constraint_row(r) for r in raw_rows]
 
 
     def decode_source_table_partitioning_row(self, row):

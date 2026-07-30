@@ -4,6 +4,15 @@ credativ-pg-migrator Releases
 0.16.0 - 29.07.2026
 -------------------
 
+* Fixed MS SQL Server table creation failures for `VARCHAR(MAX)` / `NVARCHAR(MAX)` columns by mapping negative catalog lengths (`-1`) to PostgreSQL `TEXT` and extracting underlying default expressions from legacy `CREATE DEFAULT` bound objects
+* Fixed MS SQL Server connection errors (`Connection is busy with results for another command`) by setting `autocommit=True` directly at `pyodbc.connect()` initialization
+* Fixed MS SQL Server data fetch error `ODBC SQL type -155 is not yet supported` on `DATETIMEOFFSET` columns by registering a pyodbc output converter that unpacks binary timestamp-with-offset structs into ISO format strings
+* Fixed MS SQL Server function/procedure header conversion errors (`syntax error at or near "AS"`) for parameters with multi-argument type specs like `decimal(18,8)`
+* Fixed TSQL parser function conversion syntax errors on multi-line `CASE` / `RETURN` statements and string literal brackets
+* Fixed MS SQL Server data migration for `ROWVERSION` / `TIMESTAMP` columns (mapping binary rowversion to PostgreSQL `BYTEA`) and `XML` columns (decoding UTF-16 XML byte streams cleanly)
+* Fixed MS SQL Server index creation errors by filtering out XML/spatial indexes and indexes on unindexable column types (`xml`, `image`, `text`, UDTs)
+* Added systematic automatic creation of parent table `UNIQUE` indexes for Foreign Key constraints across all connectors (`planner.stdwf_ensure_parent_fk_indexes`), resolving PostgreSQL foreign key creation errors (`there is no unique constraint matching given keys for referenced table`)
+* Fixed SQL Anywhere column default values and view transpilation by populating `get_sql_functions_mapping` for SQL Anywhere date/time keywords (`current date`, `current timestamp`), transpiling `SELECT TOP <N>` constructs to `SELECT ... LIMIT <N>` (including inside `LATERAL` derived tables), converting Sybase `IF ... THEN ... ELSE ... ENDIF` expressions to ANSI `CASE WHEN`, translating `LIST()` string aggregates to `string_agg()`, supporting `uuid_default_function` configuration for `NEWID()` defaults, converting double-quoted text literals (`"ACTIVE"` -> `'ACTIVE'`), and dropping column-referencing expressions from DEFAULT clauses
 * Fixed MariaDB sequence migration and column defaults (`nextval(`schema`.`seq_name`)` / `NEXT VALUE FOR ...`) converting to PostgreSQL `nextval('seq_name')`
 * Fixed MariaDB view transpilation for inline `IF(...)` functions and resolved PostgreSQL `CASE` expression mixed-type errors by auto-casting non-string arms (`CAST(expr AS VARCHAR)`) when paired with string literals
 * Fixed MySQL 9 native `VECTOR` data migration by converting Python `array.array` objects to JSON string representations for target PostgreSQL insertion

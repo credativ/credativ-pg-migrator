@@ -918,7 +918,233 @@ class Planner:
                 self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_tables: Skipping trigger migration.")
 
             self.config_parser.print_log_message('INFO', f"planner: stdwf_prepare_tables: Table {table_info['table_name']} processed successfully.")
-        self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_tables: Tables processed successfully.")
+        self.stdwf_ensure_parent_fk_indexes()
+        self.stdwf_sync_fk_column_types()
+
+    def stdwf_sync_fk_column_types(self):
+        """
+        Ensures that child columns in Foreign Key constraints match the resolved
+        target data_type of their referenced parent table columns. If a parent column's
+        data_type differs (e.g. parent is BIGINT while child is TEXT/INTEGER), the child
+        column's data_type and the child table's DDL SQL are updated to match the parent.
+        """
+        if not self.config_parser.should_migrate_constraints():
+            return
+
+        self.config_parser.print_log_message('INFO', "planner: stdwf_sync_fk_column_types: Synchronizing Foreign Key child column data types with parent columns...")
+
+        all_constraints = self.migrator_tables.fetch_all_decoded_constraints()
+        if not all_constraints:
+            return
+
+        fk_constraints = [c for c in all_constraints if str(c.get('constraint_type', '')).upper() in ('FOREIGN KEY', 'FK')]
+        if not fk_constraints:
+            return
+
+        all_tables = self.migrator_tables.fetch_all_decoded_tables()
+        if not all_tables:
+            return
+
+        tables_by_target = {}
+        for t in all_tables:
+            tgt_name = t.get('target_alias_name') if self.config_parser.get_use_aliases_as_target_names() and t.get('target_alias_name') else t.get('target_table_name')
+            tables_by_target[tgt_name] = t
+            tables_by_target.setdefault(t.get('target_table_name'), t)
+
+        updated_tables = set()
+
+        def clean_col_list(cols_str):
+            if not cols_str:
+                return []
+            return [c.strip().strip('"').strip("'") for c in str(cols_str).split(',') if c.strip()]
+
+        for fk in fk_constraints:
+            parent_tbl_name = fk.get('referenced_table_name', '')
+            child_tbl_name = fk.get('target_table_name', '')
+            fk_name = fk.get('constraint_name', '')
+
+            parent_table_rec = tables_by_target.get(parent_tbl_name)
+            child_table_rec = tables_by_target.get(child_tbl_name)
+
+            if not parent_table_rec or not child_table_rec:
+                continue
+
+            parent_cols_json = parent_table_rec.get('target_columns', {})
+            child_cols_json = child_table_rec.get('target_columns', {})
+
+            if isinstance(parent_cols_json, str):
+                try: parent_cols_json = json.loads(parent_cols_json)
+                except Exception: parent_cols_json = {}
+
+            if isinstance(child_cols_json, str):
+                try: child_cols_json = json.loads(child_cols_json)
+                except Exception: child_cols_json = {}
+
+            parent_col_names = clean_col_list(fk.get('referenced_columns', ''))
+            child_col_names = clean_col_list(fk.get('constraint_columns', ''))
+
+            if len(parent_col_names) != len(child_col_names) or not parent_col_names:
+                continue
+
+            parent_col_map = {cinfo['column_name'].lower(): cinfo for cinfo in parent_cols_json.values() if isinstance(cinfo, dict) and 'column_name' in cinfo}
+            child_col_map = {cinfo['column_name'].lower(): (cid, cinfo) for cid, cinfo in child_cols_json.items() if isinstance(cinfo, dict) and 'column_name' in cinfo}
+
+            child_modified = False
+            for p_name, c_name in zip(parent_col_names, child_col_names):
+                p_info = parent_col_map.get(p_name.lower())
+                c_entry = child_col_map.get(c_name.lower())
+
+                if not p_info or not c_entry:
+                    continue
+
+                cid, c_info = c_entry
+                parent_type = p_info.get('data_type', '').upper()
+                child_type = c_info.get('data_type', '').upper()
+
+                if parent_type and child_type and parent_type != child_type:
+                    self.config_parser.print_log_message(
+                        'INFO',
+                        f"planner: stdwf_sync_fk_column_types: FK '{fk_name}' - Syncing child column '{child_tbl_name}.{c_name}' data_type from '{child_type}' to '{parent_type}' to match parent '{parent_tbl_name}.{p_name}'."
+                    )
+                    c_info['data_type'] = parent_type
+                    c_info['column_type_substitution'] = parent_type
+                    child_modified = True
+
+            if child_modified:
+                target_columns_json_str = json.dumps(child_cols_json)
+                new_table_sql = self.target_connection.get_create_table_sql({
+                    'source_schema_name': child_table_rec['source_schema_name'],
+                    'source_table_name': child_table_rec['source_table_name'],
+                    'source_table_id': child_table_rec['source_table_id'],
+                    'target_schema_name': child_table_rec['target_schema_name'],
+                    'target_table_name': child_table_rec['target_table_name'],
+                    'target_columns': child_cols_json,
+                    'migrator_tables': self.migrator_tables
+                })
+                self.migrator_tables.update_table_target_columns_and_sql(
+                    child_table_rec['id'],
+                    target_columns_json_str,
+                    new_table_sql
+                )
+                child_table_rec['target_columns'] = child_cols_json
+                child_table_rec['target_table_sql'] = new_table_sql
+                updated_tables.add(child_tbl_name)
+
+        if updated_tables:
+            self.config_parser.print_log_message('INFO', f"planner: stdwf_sync_fk_column_types: Successfully synchronized FK column data types for {len(updated_tables)} table(s): {', '.join(updated_tables)}.")
+
+    def stdwf_ensure_parent_fk_indexes(self):
+        """
+        Scans all Foreign Key constraints in protocol_constraints across all tables.
+        For any Foreign Key referencing a parent table on columns that lack a PRIMARY KEY,
+        UNIQUE constraint, or UNIQUE index, automatically generates and inserts a UNIQUE index
+        on the parent table into protocol_indexes.
+        """
+        if not self.config_parser.should_migrate_constraints() or not self.config_parser.should_migrate_indexes():
+            return
+
+        self.config_parser.print_log_message('INFO', "planner: stdwf_ensure_parent_fk_indexes: Checking Foreign Key constraints for missing parent table unique indexes...")
+
+        all_constraints = self.migrator_tables.fetch_all_decoded_constraints()
+        if not all_constraints:
+            return
+
+        fk_constraints = [c for c in all_constraints if str(c.get('constraint_type', '')).upper() in ('FOREIGN KEY', 'FK')]
+        if not fk_constraints:
+            return
+
+        def normalize_cols(cols_str):
+            if not cols_str:
+                return ()
+            parts = []
+            for c in str(cols_str).split(','):
+                cleaned = re.sub(r'(?i)\b(ASC|DESC|NULLS\s+FIRST|NULLS\s+LAST)\b', '', c)
+                cleaned = cleaned.strip().strip('"').strip("'").lower()
+                if cleaned:
+                    parts.append(cleaned)
+            return tuple(parts)
+
+        table_unique_cols = {}
+
+        all_indexes = self.migrator_tables.fetch_all_decoded_indexes()
+        for idx in all_indexes:
+            tgt_tbl = idx.get('target_table_name', '')
+            idx_type = str(idx.get('index_type', '')).upper()
+            idx_cols = normalize_cols(idx.get('index_columns', ''))
+            if tgt_tbl and idx_cols:
+                if 'UNIQUE' in idx_type or 'PRIMARY' in idx_type:
+                    table_unique_cols.setdefault(tgt_tbl, set()).add(idx_cols)
+
+        for c in all_constraints:
+            tgt_tbl = c.get('target_table_name', '')
+            c_type = str(c.get('constraint_type', '')).upper()
+            c_cols = normalize_cols(c.get('constraint_columns', ''))
+            if tgt_tbl and c_cols:
+                if 'PRIMARY' in c_type or 'UNIQUE' in c_type:
+                    table_unique_cols.setdefault(tgt_tbl, set()).add(c_cols)
+
+        added_count = 0
+        for fk in fk_constraints:
+            ref_tbl = fk.get('referenced_table_name', '')
+            ref_cols_str = fk.get('referenced_columns', '')
+            fk_name = fk.get('constraint_name', '')
+
+            if not ref_tbl or not ref_cols_str:
+                continue
+
+            ref_tbl_target = ref_tbl
+            if self.config_parser.get_use_aliases_as_target_names():
+                ref_schema = fk.get('referenced_table_schema', '') or self.source_schema_name
+                alias_dict = self.migrator_tables.get_alias_for_table(ref_schema, ref_tbl)
+                if alias_dict and alias_dict.get('target_alias_name'):
+                    ref_tbl_target = alias_dict.get('target_alias_name')
+
+            norm_ref_cols = normalize_cols(ref_cols_str)
+            if not norm_ref_cols:
+                continue
+
+            existing_uniques = table_unique_cols.get(ref_tbl_target, set())
+            has_matching_unique = False
+            for unique_cols in existing_uniques:
+                if norm_ref_cols == unique_cols or norm_ref_cols[:len(unique_cols)] == unique_cols:
+                    has_matching_unique = True
+                    break
+
+            if not has_matching_unique:
+                cols_suffix = "_".join(norm_ref_cols)
+                idx_name = f"idx_fk_parent_{ref_tbl_target}_{cols_suffix}"[:63]
+
+                clean_cols = [c.strip().strip('"').strip("'") for c in str(ref_cols_str).split(',')]
+                quoted_cols = ", ".join(f'"{c}"' for c in clean_cols if c)
+                index_sql = f'CREATE UNIQUE INDEX "{idx_name}" ON "{self.target_schema_name}"."{ref_tbl_target}" ({quoted_cols});'
+
+                index_record = {
+                    'source_schema_name': self.source_schema_name,
+                    'source_table_name': ref_tbl,
+                    'source_table_id': fk.get('source_table_id', 0),
+                    'index_owner': '',
+                    'index_name': idx_name,
+                    'index_type': 'UNIQUE [AUTO-FK]',
+                    'target_schema_name': self.target_schema_name,
+                    'target_table_name': ref_tbl_target,
+                    'target_alias_name': ref_tbl_target if ref_tbl_target != ref_tbl else '',
+                    'index_columns': quoted_cols,
+                    'index_comment': f'[AUTO-FK-PARENT-INDEX] Unique index added for FK constraint {fk_name}',
+                    'is_function_based': False,
+                    'index_sql': index_sql
+                }
+
+                self.migrator_tables.insert_indexes(index_record)
+                table_unique_cols.setdefault(ref_tbl_target, set()).add(norm_ref_cols)
+                added_count += 1
+
+                self.config_parser.print_log_message(
+                    'INFO',
+                    f"planner: stdwf_ensure_parent_fk_indexes: Auto-added UNIQUE index {idx_name} on parent table '{ref_tbl_target}' ({quoted_cols}) for Foreign Key constraint '{fk_name}'."
+                )
+
+        if added_count > 0:
+            self.config_parser.print_log_message('INFO', f"planner: stdwf_ensure_parent_fk_indexes: Successfully auto-added {added_count} unique index(es) on parent tables for foreign keys.")
 
     def convert_table_columns(self, settings):
         target_db_type = settings['target_db_type']
@@ -967,7 +1193,10 @@ class Planner:
                         else:
                             coltype = types_mapping.get(coltype, coltype).upper()
 
-                    if self.config_parser.get_varchar_to_text_length() >= 0 or self.config_parser.get_char_to_text_length() >= 0:
+                    if character_maximum_length < 0:
+                        if self.source_connection.is_string_type(coltype) or any(t in coltype for t in ('CHAR', 'TEXT', 'STRING', 'CLOB', 'VARCHAR')):
+                            coltype = 'TEXT'
+                    elif self.config_parser.get_varchar_to_text_length() >= 0 or self.config_parser.get_char_to_text_length() >= 0:
                         if (self.source_connection.is_string_type(coltype)
                             and 'VARCHAR' in coltype.upper()
                             and character_maximum_length >= self.config_parser.get_varchar_to_text_length()):
@@ -989,7 +1218,7 @@ class Planner:
                     'target_alias_name': settings.get('target_alias_name', ''),
                     'column_type': column_info['column_type'] if 'column_type' in column_info else '',
                     'column_type_substitution': column_info['column_type_substitution'] if 'column_type_substitution' in column_info else '',
-                    'character_maximum_length': '' if coltype == 'TEXT' else column_info['character_maximum_length'] if column_info['character_maximum_length'] is not None else '',
+                    'character_maximum_length': '' if coltype == 'TEXT' or character_maximum_length < 0 else column_info['character_maximum_length'] if column_info['character_maximum_length'] is not None else '',
                     'numeric_precision': column_info['numeric_precision'] if 'numeric_precision' in column_info else '',
                     'numeric_scale': column_info['numeric_scale'] if 'numeric_scale' in column_info else '',
                     'basic_data_type': column_info['basic_data_type'] if 'basic_data_type' in column_info else '',

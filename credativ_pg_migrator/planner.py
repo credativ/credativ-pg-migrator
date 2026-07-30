@@ -919,6 +919,115 @@ class Planner:
 
             self.config_parser.print_log_message('INFO', f"planner: stdwf_prepare_tables: Table {table_info['table_name']} processed successfully.")
         self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_tables: Tables processed successfully.")
+        self.stdwf_ensure_parent_fk_indexes()
+
+    def stdwf_ensure_parent_fk_indexes(self):
+        """
+        Scans all Foreign Key constraints in protocol_constraints across all tables.
+        For any Foreign Key referencing a parent table on columns that lack a PRIMARY KEY,
+        UNIQUE constraint, or UNIQUE index, automatically generates and inserts a UNIQUE index
+        on the parent table into protocol_indexes.
+        """
+        if not self.config_parser.should_migrate_constraints() or not self.config_parser.should_migrate_indexes():
+            return
+
+        self.config_parser.print_log_message('INFO', "planner: stdwf_ensure_parent_fk_indexes: Checking Foreign Key constraints for missing parent table unique indexes...")
+
+        all_constraints = self.migrator_tables.fetch_all_decoded_constraints()
+        if not all_constraints:
+            return
+
+        fk_constraints = [c for c in all_constraints if str(c.get('constraint_type', '')).upper() in ('FOREIGN KEY', 'FK')]
+        if not fk_constraints:
+            return
+
+        def normalize_cols(cols_str):
+            if not cols_str:
+                return ()
+            parts = [c.strip().strip('"').strip("'").lower() for c in str(cols_str).split(',')]
+            return tuple(p for p in parts if p)
+
+        table_unique_cols = {}
+
+        all_indexes = self.migrator_tables.fetch_all_decoded_indexes()
+        for idx in all_indexes:
+            tgt_tbl = idx.get('target_table_name', '')
+            idx_type = str(idx.get('index_type', '')).upper()
+            idx_cols = normalize_cols(idx.get('index_columns', ''))
+            if tgt_tbl and idx_cols:
+                if 'UNIQUE' in idx_type or 'PRIMARY' in idx_type:
+                    table_unique_cols.setdefault(tgt_tbl, set()).add(idx_cols)
+
+        for c in all_constraints:
+            tgt_tbl = c.get('target_table_name', '')
+            c_type = str(c.get('constraint_type', '')).upper()
+            c_cols = normalize_cols(c.get('constraint_columns', ''))
+            if tgt_tbl and c_cols:
+                if 'PRIMARY' in c_type or 'UNIQUE' in c_type:
+                    table_unique_cols.setdefault(tgt_tbl, set()).add(c_cols)
+
+        added_count = 0
+        for fk in fk_constraints:
+            ref_tbl = fk.get('referenced_table_name', '')
+            ref_cols_str = fk.get('referenced_columns', '')
+            fk_name = fk.get('constraint_name', '')
+
+            if not ref_tbl or not ref_cols_str:
+                continue
+
+            ref_tbl_target = ref_tbl
+            if self.config_parser.get_use_aliases_as_target_names():
+                ref_schema = fk.get('referenced_table_schema', '') or self.source_schema_name
+                alias_dict = self.migrator_tables.get_alias_for_table(ref_schema, ref_tbl)
+                if alias_dict and alias_dict.get('target_alias_name'):
+                    ref_tbl_target = alias_dict.get('target_alias_name')
+
+            norm_ref_cols = normalize_cols(ref_cols_str)
+            if not norm_ref_cols:
+                continue
+
+            existing_uniques = table_unique_cols.get(ref_tbl_target, set())
+            has_matching_unique = False
+            for unique_cols in existing_uniques:
+                if norm_ref_cols == unique_cols or norm_ref_cols[:len(unique_cols)] == unique_cols:
+                    has_matching_unique = True
+                    break
+
+            if not has_matching_unique:
+                cols_suffix = "_".join(norm_ref_cols)
+                idx_name = f"idx_fk_parent_{ref_tbl_target}_{cols_suffix}"[:63]
+
+                clean_cols = [c.strip().strip('"').strip("'") for c in str(ref_cols_str).split(',')]
+                quoted_cols = ", ".join(f'"{c}"' for c in clean_cols if c)
+                index_sql = f'CREATE UNIQUE INDEX "{idx_name}" ON "{self.target_schema_name}"."{ref_tbl_target}" ({quoted_cols});'
+
+                index_record = {
+                    'source_schema_name': self.source_schema_name,
+                    'source_table_name': ref_tbl,
+                    'source_table_id': fk.get('source_table_id', 0),
+                    'index_owner': '',
+                    'index_name': idx_name,
+                    'index_type': 'UNIQUE [AUTO-FK]',
+                    'target_schema_name': self.target_schema_name,
+                    'target_table_name': ref_tbl_target,
+                    'target_alias_name': ref_tbl_target if ref_tbl_target != ref_tbl else '',
+                    'index_columns': quoted_cols,
+                    'index_comment': f'[AUTO-FK-PARENT-INDEX] Unique index added for FK constraint {fk_name}',
+                    'is_function_based': False,
+                    'index_sql': index_sql
+                }
+
+                self.migrator_tables.insert_indexes(index_record)
+                table_unique_cols.setdefault(ref_tbl_target, set()).add(norm_ref_cols)
+                added_count += 1
+
+                self.config_parser.print_log_message(
+                    'INFO',
+                    f"planner: stdwf_ensure_parent_fk_indexes: Auto-added UNIQUE index {idx_name} on parent table '{ref_tbl_target}' ({quoted_cols}) for Foreign Key constraint '{fk_name}'."
+                )
+
+        if added_count > 0:
+            self.config_parser.print_log_message('INFO', f"planner: stdwf_ensure_parent_fk_indexes: Successfully auto-added {added_count} unique index(es) on parent tables for foreign keys.")
 
     def convert_table_columns(self, settings):
         target_db_type = settings['target_db_type']

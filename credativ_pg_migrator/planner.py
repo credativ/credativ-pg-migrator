@@ -944,8 +944,13 @@ class Planner:
         def normalize_cols(cols_str):
             if not cols_str:
                 return ()
-            parts = [c.strip().strip('"').strip("'").lower() for c in str(cols_str).split(',')]
-            return tuple(p for p in parts if p)
+            parts = []
+            for c in str(cols_str).split(','):
+                cleaned = re.sub(r'(?i)\b(ASC|DESC|NULLS\s+FIRST|NULLS\s+LAST)\b', '', c)
+                cleaned = cleaned.strip().strip('"').strip("'").lower()
+                if cleaned:
+                    parts.append(cleaned)
+            return tuple(parts)
 
         table_unique_cols = {}
 

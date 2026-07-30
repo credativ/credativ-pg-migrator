@@ -259,10 +259,34 @@ class MsSQLConnector(DatabaseConnector):
                         return str(value)
                 return str(value)
 
-            try:
-                self.connection.add_output_converter(-155, handle_datetimeoffset)
-            except Exception as e:
-                self.config_parser.print_log_message('DEBUG', f"ms_sql_connector: connect: Warning registering output converter for -155: {e}")
+            def handle_ss_udt(value):
+                if value is None:
+                    return None
+                if isinstance(value, bytes):
+                    return value
+                return str(value).encode('utf-8')
+
+            def handle_string_converter(value):
+                if value is None:
+                    return None
+                if isinstance(value, bytes):
+                    try:
+                        return value.decode('utf-8')
+                    except Exception:
+                        return str(value)
+                return str(value)
+
+            for type_code, converter in [
+                (-155, handle_datetimeoffset),
+                (-151, handle_ss_udt),
+                (-152, handle_string_converter),
+                (-150, handle_string_converter),
+                (-154, handle_string_converter),
+            ]:
+                try:
+                    self.connection.add_output_converter(type_code, converter)
+                except Exception as e:
+                    self.config_parser.print_log_message('DEBUG', f"ms_sql_connector: connect: Warning registering output converter for {type_code}: {e}")
         elif self.config_parser.get_connectivity(self.source_or_target) == 'jdbc':
             connection_string = self.config_parser.get_connect_string(self.source_or_target)
             username = self.config_parser.get_db_config(self.source_or_target)['username']
@@ -1444,7 +1468,7 @@ class MsSQLConnector(DatabaseConnector):
                             for order_num, column in source_columns.items():
                                 column_name = column['column_name']
                                 column_type = column['data_type']
-                                if column_type.lower() in ['binary', 'varbinary', 'image']:
+                                if column_type.lower() in ['binary', 'varbinary', 'image', 'hierarchyid', 'geometry', 'geography', 'udt']:
                                     record[column_name] = bytes(record[column_name]) if record[column_name] is not None else None
                                 elif column_type.lower() in ['datetime', 'smalldatetime', 'date', 'time', 'timestamp', 'datetime2', 'datetimeoffset']:
                                     record[column_name] = str(record[column_name]) if record[column_name] is not None else None

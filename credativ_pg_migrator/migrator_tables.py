@@ -4348,6 +4348,23 @@ class MigratorTables:
         tables = cursor.fetchall()
         return tables
 
+    def fetch_all_decoded_tables(self):
+        raw_rows = self.fetch_all_tables()
+        return [self.decode_table_row(r) for r in raw_rows]
+
+    def update_table_target_columns_and_sql(self, table_id, target_columns_json, target_table_sql):
+        table_name = self.config_parser.get_protocol_name_tables()
+        query = f"""
+            UPDATE "{self.protocol_schema}"."{table_name}"
+            SET target_columns = %s,
+                target_table_sql = %s
+            WHERE id = %s
+        """
+        cursor = self.protocol_connection.connection.cursor()
+        cursor.execute(query, (target_columns_json, target_table_sql, table_id))
+        self.protocol_connection.connection.commit()
+        cursor.close()
+
     def fetch_all_sequences(self, only_unfinished=False):
         if only_unfinished:
             query = f"""SELECT * FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_sequences()}" WHERE success IS NOT TRUE ORDER BY sequence_id"""

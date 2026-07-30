@@ -918,8 +918,120 @@ class Planner:
                 self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_tables: Skipping trigger migration.")
 
             self.config_parser.print_log_message('INFO', f"planner: stdwf_prepare_tables: Table {table_info['table_name']} processed successfully.")
-        self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_tables: Tables processed successfully.")
         self.stdwf_ensure_parent_fk_indexes()
+        self.stdwf_sync_fk_column_types()
+
+    def stdwf_sync_fk_column_types(self):
+        """
+        Ensures that child columns in Foreign Key constraints match the resolved
+        target data_type of their referenced parent table columns. If a parent column's
+        data_type differs (e.g. parent is BIGINT while child is TEXT/INTEGER), the child
+        column's data_type and the child table's DDL SQL are updated to match the parent.
+        """
+        if not self.config_parser.should_migrate_constraints():
+            return
+
+        self.config_parser.print_log_message('INFO', "planner: stdwf_sync_fk_column_types: Synchronizing Foreign Key child column data types with parent columns...")
+
+        all_constraints = self.migrator_tables.fetch_all_decoded_constraints()
+        if not all_constraints:
+            return
+
+        fk_constraints = [c for c in all_constraints if str(c.get('constraint_type', '')).upper() in ('FOREIGN KEY', 'FK')]
+        if not fk_constraints:
+            return
+
+        all_tables = self.migrator_tables.fetch_all_decoded_tables()
+        if not all_tables:
+            return
+
+        tables_by_target = {}
+        for t in all_tables:
+            tgt_name = t.get('target_alias_name') if self.config_parser.get_use_aliases_as_target_names() and t.get('target_alias_name') else t.get('target_table_name')
+            tables_by_target[tgt_name] = t
+            tables_by_target.setdefault(t.get('target_table_name'), t)
+
+        updated_tables = set()
+
+        def clean_col_list(cols_str):
+            if not cols_str:
+                return []
+            return [c.strip().strip('"').strip("'") for c in str(cols_str).split(',') if c.strip()]
+
+        for fk in fk_constraints:
+            parent_tbl_name = fk.get('referenced_table_name', '')
+            child_tbl_name = fk.get('target_table_name', '')
+            fk_name = fk.get('constraint_name', '')
+
+            parent_table_rec = tables_by_target.get(parent_tbl_name)
+            child_table_rec = tables_by_target.get(child_tbl_name)
+
+            if not parent_table_rec or not child_table_rec:
+                continue
+
+            parent_cols_json = parent_table_rec.get('target_columns', {})
+            child_cols_json = child_table_rec.get('target_columns', {})
+
+            if isinstance(parent_cols_json, str):
+                try: parent_cols_json = json.loads(parent_cols_json)
+                except Exception: parent_cols_json = {}
+
+            if isinstance(child_cols_json, str):
+                try: child_cols_json = json.loads(child_cols_json)
+                except Exception: child_cols_json = {}
+
+            parent_col_names = clean_col_list(fk.get('referenced_columns', ''))
+            child_col_names = clean_col_list(fk.get('constraint_columns', ''))
+
+            if len(parent_col_names) != len(child_col_names) or not parent_col_names:
+                continue
+
+            parent_col_map = {cinfo['column_name'].lower(): cinfo for cinfo in parent_cols_json.values() if isinstance(cinfo, dict) and 'column_name' in cinfo}
+            child_col_map = {cinfo['column_name'].lower(): (cid, cinfo) for cid, cinfo in child_cols_json.items() if isinstance(cinfo, dict) and 'column_name' in cinfo}
+
+            child_modified = False
+            for p_name, c_name in zip(parent_col_names, child_col_names):
+                p_info = parent_col_map.get(p_name.lower())
+                c_entry = child_col_map.get(c_name.lower())
+
+                if not p_info or not c_entry:
+                    continue
+
+                cid, c_info = c_entry
+                parent_type = p_info.get('data_type', '').upper()
+                child_type = c_info.get('data_type', '').upper()
+
+                if parent_type and child_type and parent_type != child_type:
+                    self.config_parser.print_log_message(
+                        'INFO',
+                        f"planner: stdwf_sync_fk_column_types: FK '{fk_name}' - Syncing child column '{child_tbl_name}.{c_name}' data_type from '{child_type}' to '{parent_type}' to match parent '{parent_tbl_name}.{p_name}'."
+                    )
+                    c_info['data_type'] = parent_type
+                    c_info['column_type_substitution'] = parent_type
+                    child_modified = True
+
+            if child_modified:
+                target_columns_json_str = json.dumps(child_cols_json)
+                new_table_sql = self.target_connection.get_create_table_sql({
+                    'source_schema_name': child_table_rec['source_schema_name'],
+                    'source_table_name': child_table_rec['source_table_name'],
+                    'source_table_id': child_table_rec['source_table_id'],
+                    'target_schema_name': child_table_rec['target_schema_name'],
+                    'target_table_name': child_table_rec['target_table_name'],
+                    'target_columns': child_cols_json,
+                    'migrator_tables': self.migrator_tables
+                })
+                self.migrator_tables.update_table_target_columns_and_sql(
+                    child_table_rec['id'],
+                    target_columns_json_str,
+                    new_table_sql
+                )
+                child_table_rec['target_columns'] = child_cols_json
+                child_table_rec['target_table_sql'] = new_table_sql
+                updated_tables.add(child_tbl_name)
+
+        if updated_tables:
+            self.config_parser.print_log_message('INFO', f"planner: stdwf_sync_fk_column_types: Successfully synchronized FK column data types for {len(updated_tables)} table(s): {', '.join(updated_tables)}.")
 
     def stdwf_ensure_parent_fk_indexes(self):
         """

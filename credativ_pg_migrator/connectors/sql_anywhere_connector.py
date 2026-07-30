@@ -22,6 +22,7 @@ import traceback
 from tabulate import tabulate
 import time
 import datetime
+import re
 
 class SQLAnywhereConnector(DatabaseConnector):
     def __init__(self, config_parser, source_or_target):
@@ -57,11 +58,53 @@ class SQLAnywhereConnector(DatabaseConnector):
 
     def get_sql_functions_mapping(self, settings):
         """ Returns a dictionary of SQL functions mapping for the target database """
-        target_db_type = settings['target_db_type']
+        target_db_type = settings.get('target_db_type', 'postgresql')
         if target_db_type == 'postgresql':
-            return {}
+            return {
+                'current date': 'CURRENT_DATE',
+                'current_date': 'CURRENT_DATE',
+                'current time': 'CURRENT_TIME',
+                'current_time': 'CURRENT_TIME',
+                'current timestamp': 'CURRENT_TIMESTAMP',
+                'current_timestamp': 'CURRENT_TIMESTAMP',
+                'current user': 'CURRENT_USER',
+                'current_user': 'CURRENT_USER',
+                'getdate()': 'CURRENT_TIMESTAMP',
+                'getutcdate()': "timezone('UTC', now())",
+                'now()': 'CURRENT_TIMESTAMP',
+                'today()': 'CURRENT_DATE',
+                'user_name()': 'CURRENT_USER',
+                'user_id()': 'CURRENT_USER',
+                'user': 'CURRENT_USER',
+                'year(': 'extract(year from ',
+                'month(': 'extract(month from ',
+                'day(': 'extract(day from ',
+                'len(': 'length(',
+                'length(': 'length(',
+                'isnull(': 'coalesce(',
+                'ifnull(': 'coalesce(',
+                'string(': 'concat(',
+                'charindex(': 'position(',
+                'locate(': 'position(',
+                'stuff(': 'overlay(',
+                'dateformat(': 'to_char(',
+                'datepart(yy,': "date_part('year',",
+                'datepart(yyyy,': "date_part('year',",
+                'datepart(year,': "date_part('year',",
+                'datepart(qq,': "date_part('quarter',",
+                'datepart(mm,': "date_part('month',",
+                'datepart(month,': "date_part('month',",
+                'datepart(dy,': "date_part('doy',",
+                'datepart(dd,': "date_part('day',",
+                'datepart(wk,': "date_part('week',",
+                'datepart(hh,': "date_part('hour',",
+                'datepart(mi,': "date_part('minute',",
+                'datepart(ss,': "date_part('second',",
+                'datepart(ms,': "date_part('milliseconds',",
+            }
         else:
             self.config_parser.print_log_message('ERROR', f"sql_anywhere_connector: get_sql_functions_mapping: Unsupported target database type: {target_db_type}")
+            return {}
 
     def migrate_sequences(self, target_connector, settings):
         return True
@@ -747,7 +790,9 @@ class SQLAnywhereConnector(DatabaseConnector):
             raise
 
     def convert_view_code(self, settings: dict):
-        view_code = settings['view_code']
+        view_code = settings.get('view_code')
+        if view_code:
+            view_code = self.apply_sql_functions_mapping(view_code, settings)
         return view_code
 
     def get_sequence_current_value(self, sequence_id: int):
@@ -973,8 +1018,24 @@ class SQLAnywhereConnector(DatabaseConnector):
         return rows
 
     def convert_default_value(self, settings) -> dict:
-        extracted_default_value = settings['extracted_default_value']
-        return extracted_default_value
+        extracted_default_value = settings.get('extracted_default_value')
+        if not extracted_default_value:
+            return extracted_default_value
+
+        val = str(extracted_default_value).strip()
+
+        # Drop autoincrement / number(*) defaults handled by serial/identity in target database
+        if re.match(r'^(global\s+)?autoincrement|number\s*\(\s*\*\s*\)$', val, re.IGNORECASE):
+            return None
+
+        # Strip outer enclosing parentheses if present
+        if val.startswith('(') and val.endswith(')'):
+            inner = val[1:-1].strip()
+            if not (inner.startswith('(') and not inner.endswith(')')):
+                val = inner
+
+        val = self.apply_sql_functions_mapping(val, settings)
+        return val
 
     def get_table_checksum(self, schema_name: str, table_name: str, columns: list):
         if not columns:

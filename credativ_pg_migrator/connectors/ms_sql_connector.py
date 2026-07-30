@@ -270,10 +270,18 @@ class MsSQLConnector(DatabaseConnector):
                 if value is None:
                     return None
                 if isinstance(value, bytes):
+                    if value.startswith(b'\xff\xfe') or value.startswith(b'\xfe\xff'):
+                        try:
+                            return value.decode('utf-16')
+                        except Exception:
+                            return value.decode('utf-16', errors='ignore')
                     try:
                         return value.decode('utf-8')
                     except Exception:
-                        return str(value)
+                        try:
+                            return value.decode('utf-16', errors='ignore')
+                        except Exception:
+                            return value.decode('latin1', errors='ignore')
                 return str(value)
 
             for type_code, converter in [
@@ -511,7 +519,7 @@ class MsSQLConnector(DatabaseConnector):
                 'BIGTIME': 'TIMESTAMP',
                 'SMALLDATETIME': 'TIMESTAMP',
                 'TIME': 'TIME',
-                'TIMESTAMP': 'TIMESTAMP',
+                'TIMESTAMP': 'BYTEA',
                 'BIGINT': 'BIGINT',
                 'UNSIGNED BIGINT': 'BIGINT',
                 'INTEGER': 'INTEGER',
@@ -1468,9 +1476,9 @@ class MsSQLConnector(DatabaseConnector):
                             for order_num, column in source_columns.items():
                                 column_name = column['column_name']
                                 column_type = column['data_type']
-                                if column_type.lower() in ['binary', 'varbinary', 'image', 'hierarchyid', 'geometry', 'geography', 'udt']:
+                                if column_type.lower() in ['binary', 'varbinary', 'image', 'hierarchyid', 'geometry', 'geography', 'udt', 'rowversion', 'timestamp']:
                                     record[column_name] = bytes(record[column_name]) if record[column_name] is not None else None
-                                elif column_type.lower() in ['datetime', 'smalldatetime', 'date', 'time', 'timestamp', 'datetime2', 'datetimeoffset']:
+                                elif column_type.lower() in ['datetime', 'smalldatetime', 'date', 'time', 'datetime2', 'datetimeoffset']:
                                     record[column_name] = str(record[column_name]) if record[column_name] is not None else None
 
                         # Insert batch into target table

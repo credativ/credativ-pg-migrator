@@ -392,7 +392,13 @@ class DatabaseConnector(ABC):
         if sql_functions_mapping and code:
             for src_func, tgt_func in sql_functions_mapping.items():
                 escaped_src_func = re.escape(src_func)
-                code = re.sub(rf"(?i){escaped_src_func}", tgt_func, code, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
+                if src_func and (src_func[0].isalnum() or src_func[0] == '_') and (src_func[-1].isalnum() or src_func[-1] == '_'):
+                    pattern = rf"(?i)\b{escaped_src_func}\b"
+                elif src_func and (src_func[0].isalnum() or src_func[0] == '_'):
+                    pattern = rf"(?i)\b{escaped_src_func}"
+                else:
+                    pattern = rf"(?i){escaped_src_func}"
+                code = re.sub(pattern, tgt_func, code, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
         return code
 
     def convert_case_mixed_types(self, sql_str: str) -> str:

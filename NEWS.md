@@ -1,9 +1,12 @@
 credativ-pg-migrator Releases
 =============================
 
-0.16.0 - 22.07.2026
+0.16.0 - 29.07.2026
 -------------------
 
+* Fixed MariaDB sequence migration and column defaults (`nextval(`schema`.`seq_name`)` / `NEXT VALUE FOR ...`) converting to PostgreSQL `nextval('seq_name')`
+* Fixed MariaDB view transpilation for inline `IF(...)` functions and resolved PostgreSQL `CASE` expression mixed-type errors by auto-casting non-string arms (`CAST(expr AS VARCHAR)`) when paired with string literals
+* Fixed MySQL 9 native `VECTOR` data migration by converting Python `array.array` objects to JSON string representations for target PostgreSQL insertion
 * Major Oracle connector expansion: full schema and data migration including functions/procedures, triggers, standalone sequences, user-defined types and domains, CHECK constraints, and views/materialized views with real Oracle→PostgreSQL query conversion (including `(+)` outer joins)
 * Much broader Oracle data-type coverage (BINARY_FLOAT/DOUBLE, RAW, XMLTYPE, JSON, INTERVAL, timestamps with time zone, SDO_GEOMETRY point geometries) plus table/column comments, and hardened connection handling
 * New final object-validity pass: after migration it re-attempts objects that failed only because a dependency did not yet exist, and reports which views, functions and triggers are valid at the end (configurable via `migration.validate_objects`)
@@ -13,6 +16,13 @@ credativ-pg-migrator Releases
 * Oracle packages are now migrated: each package is split into standalone functions and all calls into the package (in functions, procedures and triggers) are rewritten to them - either as `<package>_<routine>` functions in the target schema or as `<routine>` functions in a schema named after the package, selectable with `migration.packages_as`
 * New target capability check in the pre-migration analysis: the migrator now stops before creating any object if the target PostgreSQL version cannot support what the source schema requires (first case: generated columns need PostgreSQL 12+)
 * Oracle virtual (computed) columns are migrated as PostgreSQL generated columns, and Oracle-specific column defaults (`SYS_CONTEXT('USERENV', ...)`, `USER`, `SYSDATE`, `SYS_GUID()`) are translated to their PostgreSQL equivalents instead of producing invalid DDL
+* Fixed MySQL and MariaDB index and constraint fetching for expression-based functional indexes where column names are NULL
+* Fixed index creation errors by adding MySQL 8.0+ expression/functional index extraction (`S.EXPRESSION`) and adding guards against empty index column lists across connectors and orchestrator
+* Fixed spatial data type migration (POINT, GEOMETRY, etc.) from MySQL/MariaDB to PostgreSQL with automatic WKB/WKT parsing and automatic `USING gist` index generation for spatial indexes and columns
+* Fixed batch insertion formatting errors on tables with generated/computed columns by filtering generated columns from data migration payloads and aligning placeholder counts
+* Added configurable target UUID generator function via `migration.uuid_default_function` (`gen_random_uuid()` by default, `uuidv7()`, `uuid_generate_v4()`, etc.) across MySQL, MariaDB, Oracle and MS SQL Server connectors, with automatic data-type awareness for native `UUID` vs `TEXT`/`VARCHAR` target columns
+* Added automatic stripping of MySQL/MariaDB `CHARACTER SET` and `COLLATE` specifications, `WITH ROLLUP` to `ROLLUP (...)` conversion, `FIND_IN_SET` to native array functions, and `YEAR`/`MONTH`/`DAY` date extract conversion when transpiling to PostgreSQL
+* Enhanced the migration summary report `[ OBJECTS MIGRATION RESULTS ]` to display `total / success` breakdown counts in the details column for Indexes and Constraints (e.g. `INDEX migtest: 21/20`, `FOREIGN KEY: 10/10`)
 
 0.15.0 - 03.07.2026
 -------------------

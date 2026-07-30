@@ -18,6 +18,9 @@ from credativ_pg_migrator.database_connector import DatabaseConnector
 from credativ_pg_migrator.migrator_logging import MigratorLogger
 # import mariadb  ## only for native connectivity - install mariadb-connector-python
 import traceback
+import re
+import json
+import struct
 from tabulate import tabulate
 import time
 import datetime
@@ -85,15 +88,32 @@ class MariaDBConnector(DatabaseConnector):
         target_db_type = settings['target_db_type']
         if target_db_type == 'postgresql':
             return {
-                'ifnull(': 'coalesce(',
-                'isnull(': 'coalesce(',
+                'uuid_to_bin(uuid(), 1)': 'gen_random_uuid()::text',
+                'uuid_to_bin(uuid(),1)': 'gen_random_uuid()::text',
+                'uuid_to_bin(uuid(), 0)': 'gen_random_uuid()::text',
+                'uuid_to_bin(uuid(),0)': 'gen_random_uuid()::text',
+                'uuid_to_bin(uuid())': 'gen_random_uuid()::text',
+                'uuid()': 'gen_random_uuid()',
                 'sysdate()': 'current_timestamp',
                 'now()': 'current_timestamp',
+                'current_timestamp()': 'current_timestamp',
                 'current_date()': 'current_date',
                 'current_time()': 'current_time',
+                'curdate()': 'current_date',
+                'curtime()': 'current_time',
+                'utc_timestamp()': "(now() at time zone 'utc')",
+                'utc_date()': "(current_date at time zone 'utc')",
+                'utc_time()': "(current_time at time zone 'utc')",
+                'unix_timestamp()': 'extract(epoch from now())::bigint',
+                'rand()': 'random()',
+                'ifnull(': 'coalesce(',
+                'isnull(': 'coalesce(',
+                'char_length(': 'length(',
+                'character_length(': 'length(',
                 'length(': 'length(',
                 'concat(': 'concat(',
                 'substring(': 'substring(',
+                'substr(': 'substring(',
                 'instr(': 'strpos(',
                 'replace(': 'replace(',
                 'upper(': 'upper(',
@@ -106,7 +126,67 @@ class MariaDBConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', f"mariadb_connector: get_sql_functions_mapping: Unsupported target database type: {target_db_type}")
 
     def migrate_sequences(self, target_connector, settings):
-        return True
+        """
+        Create a single sequence in the target database.
+        """
+        target_schema_name = settings['target_schema_name']
+        target_sequence_name = settings['target_sequence_name']
+
+        PG_BIGINT_MAX = 9223372036854775807
+        PG_BIGINT_MIN = -9223372036854775808
+
+        def _to_int(val):
+            try:
+                return int(val)
+            except (TypeError, ValueError):
+                return None
+
+        increment_by = _to_int(settings.get('source_increment_by')) or 1
+        minvalue = _to_int(settings.get('source_minvalue'))
+        maxvalue = _to_int(settings.get('source_maxvalue'))
+        start_value = _to_int(settings.get('source_start_value'))
+        cache = _to_int(settings.get('source_cache'))
+        is_cycled = str(settings.get('source_is_cycled') or '').upper() in ('Y', 'YES', 'TRUE', '1')
+
+        if maxvalue is not None and maxvalue >= PG_BIGINT_MAX:
+            maxvalue = None
+        if minvalue is not None and minvalue <= PG_BIGINT_MIN:
+            minvalue = None
+        if start_value is not None:
+            start_value = max(min(start_value, PG_BIGINT_MAX), PG_BIGINT_MIN)
+
+        try:
+            target_connector.connect()
+
+            parts = [f'CREATE SEQUENCE IF NOT EXISTS "{target_schema_name}"."{target_sequence_name}"']
+            parts.append(f"INCREMENT BY {increment_by}")
+            if minvalue is not None:
+                parts.append(f"MINVALUE {minvalue}")
+            if maxvalue is not None:
+                parts.append(f"MAXVALUE {maxvalue}")
+            if start_value is not None:
+                if minvalue is not None:
+                    start_value = max(start_value, minvalue)
+                if maxvalue is not None:
+                    start_value = min(start_value, maxvalue)
+                parts.append(f"START WITH {start_value}")
+            if cache is not None and cache > 1:
+                parts.append(f"CACHE {cache}")
+            parts.append("CYCLE" if is_cycled else "NO CYCLE")
+            create_sql = " ".join(parts) + ";"
+
+            self.config_parser.print_log_message('DEBUG', f"mariadb_connector: migrate_sequences: Creating sequence with SQL: {create_sql}")
+            target_connector.execute_query(create_sql)
+            target_connector.disconnect()
+            self.config_parser.print_log_message('INFO', f"mariadb_connector: migrate_sequences: Sequence \"{target_schema_name}\".\"{target_sequence_name}\" created successfully.")
+            return True
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"mariadb_connector: migrate_sequences: Error migrating sequence {target_sequence_name}: {e}")
+            try:
+                target_connector.disconnect()
+            except Exception:
+                pass
+            return False
 
     def fetch_table_names(self, table_schema: str):
         tables = {}
@@ -116,7 +196,7 @@ class MariaDBConnector(DatabaseConnector):
                 TABLE_COMMENT
             FROM INFORMATION_SCHEMA.TABLES
             WHERE TABLE_SCHEMA = '{table_schema}'
-            AND TABLE_TYPE not in ('VIEW', 'SYSTEM VIEW')
+            AND TABLE_TYPE not in ('VIEW', 'SYSTEM VIEW', 'SEQUENCE')
         """
         try:
             self.connect()
@@ -238,6 +318,7 @@ class MariaDBConnector(DatabaseConnector):
                 'BIT': 'BOOLEAN',
                 'YEAR': 'INTEGER',
                 'POINT': 'POINT',
+                'VECTOR': 'TEXT',
                 # Add more type mappings as needed
             }
         else:
@@ -349,11 +430,19 @@ class MariaDBConnector(DatabaseConnector):
                     orderby_columns_list = []
                     insert_columns_list = []
 
-                    for order_num, col in source_columns.items():
+                    def is_generated_column(col):
+                        return col.get('is_generated_virtual') == 'YES' or col.get('is_generated_stored') == 'YES'
+
+                    migrated_source_columns = {
+                        order_num: col for order_num, col in source_columns.items()
+                        if not is_generated_column(col) and not is_generated_column(target_columns.get(order_num, {}))
+                    }
+
+                    for order_num, col in migrated_source_columns.items():
                         self.config_parser.print_log_message('DEBUG2',
                                                             f"Worker {worker_id}: Table {source_schema_name}.{source_table_name}: Processing column {col['column_name']} ({order_num}) with data type {col['data_type']}")
 
-                        if col['data_type'].lower() == 'geometry':
+                        if col['data_type'].lower() in ('geometry', 'point', 'linestring', 'polygon', 'multipoint', 'multilinestring', 'multipolygon', 'geometrycollection'):
                             select_columns_list.append(f"ST_asText(`{col['column_name']}`) as `{col['column_name']}`")
                         elif col['data_type'].lower() == 'set':
                             select_columns_list.append(f"cast(`{col['column_name']}` as char(4000)) as `{col['column_name']}`")
@@ -416,12 +505,12 @@ class MariaDBConnector(DatabaseConnector):
 
                         transforming_start_time = time.time()
                         records = [
-                            {column['column_name']: value for column, value in zip(source_columns.values(), record)}
+                            {column['column_name']: value for column, value in zip(migrated_source_columns.values(), record)}
                             for record in records
                         ]
 
                         for record in records:
-                            for order_num, column in source_columns.items():
+                            for order_num, column in migrated_source_columns.items():
                                 column_name = column['column_name']
                                 column_type = column['data_type']
                                 target_column_type = target_columns[order_num]['data_type']
@@ -441,22 +530,58 @@ class MariaDBConnector(DatabaseConnector):
                                         record[column_name] = ''
                                     else:
                                         record[column_name] = str(record[column_name])
-                                elif column_type.lower() == 'geometry':
-                                    record[column_name] = f"{record[column_name]}"
-
-                                    # # Convert geometry to string representation if possible
-                                    # if record[column_name] is not None:
-                                    #     try:
-                                    #         # Try to decode as UTF-8 string (may work for some geometry types)
-                                    #         record[column_name] = record[column_name].decode('utf-8', errors='replace')
-                                    #     except Exception as e:
-                                    #         # Fallback: represent as string of bytes
-                                    #         record[column_name] = str(record[column_name])
-                                    # else:
-                                    #     record[column_name] = None
+                                elif column_type.lower() in ('geometry', 'point', 'linestring', 'polygon', 'multipoint', 'multilinestring', 'multipolygon', 'geometrycollection') or target_column_type.lower() in ('point', 'geometry'):
+                                    val = record[column_name]
+                                    if val is not None:
+                                        if target_column_type.lower() == 'point':
+                                            if isinstance(val, (bytes, bytearray)) and len(val) >= 25:
+                                                try:
+                                                    srid, byte_order, geom_type, x, y = struct.unpack('<IBIdd', val[:25])
+                                                    if geom_type == 1:
+                                                        record[column_name] = f"({x}, {y})"
+                                                    else:
+                                                        record[column_name] = str(val)
+                                                except Exception:
+                                                    record[column_name] = str(val)
+                                            else:
+                                                val_str = str(val).strip()
+                                                m = re.search(r'POINT\s*\(\s*([^\s,]+)\s+([^\s,]+)\s*\)', val_str, re.IGNORECASE)
+                                                if m:
+                                                    record[column_name] = f"({m.group(1)}, {m.group(2)})"
+                                                elif not val_str.startswith('(') and ',' in val_str:
+                                                    record[column_name] = f"({val_str})"
+                                                else:
+                                                    record[column_name] = val_str
+                                        else:
+                                            if isinstance(val, (bytes, bytearray)):
+                                                if len(val) >= 25:
+                                                    try:
+                                                        srid, byte_order, geom_type, x, y = struct.unpack('<IBIdd', val[:25])
+                                                        if geom_type == 1:
+                                                            record[column_name] = f"POINT({x} {y})"
+                                                        else:
+                                                            record[column_name] = str(val)
+                                                    except Exception:
+                                                        record[column_name] = str(val)
+                                                else:
+                                                    record[column_name] = str(val)
+                                            else:
+                                                record[column_name] = str(val)
+                                elif column_type.lower() in ['date', 'datetime', 'timestamp', 'time']:
+                                    if record[column_name] is None:
+                                        zero_val = self.config_parser.get_zero_datetime_data_value()
+                                        if zero_val and str(zero_val).strip().lower() not in ('none', 'null', 'remove', ''):
+                                            record[column_name] = zero_val
                                 elif column_type.lower() in ['integer', 'smallint', 'tinyint', 'bit', 'boolean'] and target_column_type.lower() in ['boolean']:
                                     # Convert integer to boolean
                                     record[column_name] = bool(record[column_name])
+                                elif column_type.lower() == 'vector' or type(record[column_name]).__name__ == 'array' or hasattr(record[column_name], 'tolist'):
+                                    val = record[column_name]
+                                    if val is not None:
+                                        if hasattr(val, 'tolist'):
+                                            record[column_name] = json.dumps(val.tolist())
+                                        else:
+                                            record[column_name] = str(val)
 
                         # # Reorder columns in each record based on the order in source_columns
                         # ordered_column_names = [col['column_name'] for col in source_columns.values()]
@@ -594,6 +719,35 @@ class MariaDBConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', f"mariadb_connector: migrate_table: Worker {worker_id}: Full stack trace: {traceback.format_exc()}")
             raise e
 
+    def clean_index_expression(self, expr: str) -> str:
+        if not expr:
+            return ""
+        # 1. Clean backslash escapes on quotes and backticks
+        expr = expr.replace(r"\'", "'").replace(r'\"', '"').replace('`', '"')
+
+        # 2. Strip character set introducers (e.g. _utf8mb4'...' -> '...', _latin1"..." -> "...")
+        expr = re.sub(r'(?i)_[a-zA-Z0-9_]+(\'|")', r'\1', expr)
+
+        # 3. Strip CHARACTER SET / CHARSET <name>
+        expr = re.sub(r'(?i)\b(?:CHARACTER\s+SET|CHARSET)\s+[a-zA-Z0-9_]+', '', expr)
+
+        # 4. Strip COLLATE <name>
+        expr = re.sub(r'(?i)\bCOLLATE\s+[`\'"]?[a-zA-Z0-9_]+[`\'"]?', '', expr)
+
+        # 5. Transpile expression to PostgreSQL dialect via sqlglot if available
+        try:
+            transpiled = sqlglot.transpile(expr, read="mysql", write="postgres")
+            if transpiled and transpiled[0]:
+                expr = transpiled[0]
+        except Exception:
+            pass
+
+        # 6. Apply standard function mapping
+        expr = self.apply_sql_functions_mapping(expr, {'target_db_type': 'postgresql'})
+
+        expr = re.sub(r'\s+', ' ', expr).strip()
+        return expr
+
     def fetch_indexes(self, settings):
         source_table_id = settings['source_table_id']
         source_table_schema = settings['source_table_schema']
@@ -620,6 +774,42 @@ class MariaDBConnector(DatabaseConnector):
         try:
             self.connect()
             cursor = self.connection.cursor()
+
+            # Check if EXPRESSION column exists in INFORMATION_SCHEMA.STATISTICS
+            has_expression = False
+            try:
+                cursor.execute("""
+                    SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+                    WHERE TABLE_SCHEMA = 'information_schema'
+                      AND TABLE_NAME = 'STATISTICS'
+                      AND COLUMN_NAME = 'EXPRESSION'
+                """)
+                row = cursor.fetchone()
+                if row and row[0] > 0:
+                    has_expression = True
+            except Exception:
+                has_expression = False
+
+            expression_clause = "S.EXPRESSION" if has_expression else "NULL AS EXPRESSION"
+
+            query = f"""
+                SELECT
+                    DISTINCT
+                    S.INDEX_NAME,
+                    S.COLUMN_NAME,
+                    S.SEQ_IN_INDEX,
+                    S.NON_UNIQUE,
+                    coalesce(tC.CONSTRAINT_TYPE, S.INDEX_TYPE, 'INDEX') as CONSTRAINT_TYPE,
+                    S.INDEX_COMMENT,
+                    {expression_clause}
+                FROM INFORMATION_SCHEMA.STATISTICS S
+                LEFT JOIN INFORMATION_SCHEMA.TABLE_CONSTRAINTS tC
+                ON S.TABLE_SCHEMA = tC.TABLE_SCHEMA AND S.TABLE_NAME = tC.TABLE_NAME
+                    AND S.INDEX_NAME = tC.CONSTRAINT_NAME
+                WHERE S.TABLE_SCHEMA = '{source_table_schema}'
+                    AND S.TABLE_NAME = '{source_table_name}'
+                ORDER BY S.INDEX_NAME, S.SEQ_IN_INDEX
+            """
             cursor.execute(query)
             for row in cursor.fetchall():
                 index_name = row[0]
@@ -628,6 +818,8 @@ class MariaDBConnector(DatabaseConnector):
                 non_unique = row[3]
                 constraint_type = row[4]
                 index_comment = row[5]
+                expression = row[6] if len(row) > 6 else None
+
                 if index_name not in table_indexes:
                     table_indexes[index_name] = {
                         'index_name': index_name,
@@ -635,15 +827,28 @@ class MariaDBConnector(DatabaseConnector):
                         'index_columns': [],
                         'index_type': constraint_type,
                         'index_comment': index_comment,
+                        'is_function_based': 'NO',
                     }
 
-                table_indexes[index_name]['index_columns'].append(column_name)
+                if column_name is not None:
+                    table_indexes[index_name]['index_columns'].append(column_name)
+                elif expression is not None:
+                    expr_clean = self.clean_index_expression(str(expression))
+                    if expr_clean:
+                        table_indexes[index_name]['index_columns'].append(expr_clean)
+                        table_indexes[index_name]['is_function_based'] = 'YES'
 
             cursor.close()
             self.disconnect()
             returned_indexes = {}
             for index_name, index_info in table_indexes.items():
-                index_info['index_columns'] = ', '.join(index_info['index_columns'])
+                cols_joined = ', '.join([c for c in index_info['index_columns'] if c is not None and str(c).strip()])
+                if not cols_joined.strip():
+                    if getattr(self, 'config_parser', None):
+                        self.config_parser.print_log_message('WARNING', f"mariadb_connector: fetch_indexes: Index '{index_name}' on table '{source_table_name}' has no columns or supported expressions - skipping.")
+                    continue
+
+                index_info['index_columns'] = cols_joined
 
                 returned_indexes[order_num] = {
                     'index_name': index_info['index_name'],
@@ -651,11 +856,13 @@ class MariaDBConnector(DatabaseConnector):
                     'index_columns': index_info['index_columns'],
                     'index_type': index_info['index_type'],
                     'index_comment': index_info['index_comment'],
+                    'is_function_based': index_info.get('is_function_based', 'NO'),
                 }
                 order_num += 1
             return returned_indexes
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"mariadb_connector: fetch_indexes: Error fetching indexes: {e}")
+            if getattr(self, 'config_parser', None):
+                self.config_parser.print_log_message('ERROR', f"mariadb_connector: fetch_indexes: Error fetching indexes: {e}")
             raise
 
     def get_create_index_sql(self, settings):
@@ -717,14 +924,16 @@ class MariaDBConnector(DatabaseConnector):
                         'constraint_comment': '',
                     }
 
-                table_constraints[foreign_key_name]['constraint_columns'].append(column_name)
-                table_constraints[foreign_key_name]['referenced_columns'].append(referenced_column_name)
+                if column_name is not None:
+                    table_constraints[foreign_key_name]['constraint_columns'].append(column_name)
+                if referenced_column_name is not None:
+                    table_constraints[foreign_key_name]['referenced_columns'].append(referenced_column_name)
 
             cursor.close()
             self.disconnect()
             for constraint_name, constraint_info in table_constraints.items():
-                constraint_info['constraint_columns'] = ', '.join(constraint_info['constraint_columns'])
-                constraint_info['referenced_columns'] = ', '.join(constraint_info['referenced_columns'])
+                constraint_info['constraint_columns'] = ', '.join([c for c in constraint_info['constraint_columns'] if c is not None])
+                constraint_info['referenced_columns'] = ', '.join([c for c in constraint_info['referenced_columns'] if c is not None])
 
                 returned_constraints[order_num] = {
                     'constraint_name': constraint_info['constraint_name'],
@@ -742,7 +951,8 @@ class MariaDBConnector(DatabaseConnector):
             return returned_constraints
 
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"mariadb_connector: fetch_constraints: Error fetching constraints: {e}")
+            if getattr(self, 'config_parser', None):
+                self.config_parser.print_log_message('ERROR', f"mariadb_connector: fetch_constraints: Error fetching constraints: {e}")
             raise
 
     def get_create_constraint_sql(self, settings):
@@ -779,8 +989,55 @@ class MariaDBConnector(DatabaseConnector):
         return converted_code
 
     def fetch_sequences(self, schema_name: str):
-        # Placeholder for fetching sequences
-        return {}
+        sequences = {}
+        order_num = 1
+        query = f"""
+            SELECT TABLE_NAME
+            FROM INFORMATION_SCHEMA.TABLES
+            WHERE TABLE_SCHEMA = '{schema_name}'
+            AND (TABLE_TYPE = 'SEQUENCE' OR ENGINE = 'SEQUENCE')
+            ORDER BY TABLE_NAME
+        """
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            seq_names = [row[0] for row in cursor.fetchall()]
+            for seq_name in seq_names:
+                try:
+                    cursor.execute(f"SELECT next_not_cached_value, minimum_value, maximum_value, start_value, increment, cache_size, cycle_option FROM `{schema_name}`.`{seq_name}`")
+                    srow = cursor.fetchone()
+                    if srow:
+                        next_val, min_val, max_val, start_val, inc, cache, cycle = srow
+                        is_cycled = 'YES' if cycle in (1, '1', True) else 'NO'
+                        source_sequence_sql = (
+                            f'CREATE SEQUENCE "{schema_name}"."{seq_name}" '
+                            f'MINVALUE {min_val} MAXVALUE {max_val} '
+                            f'INCREMENT BY {inc} START WITH {next_val} '
+                            f'CACHE {cache} {"CYCLE" if is_cycled == "YES" else "NOCYCLE"}'
+                        )
+                        sequences[order_num] = {
+                            'sequence_name': seq_name,
+                            'id': order_num,
+                            'table_name': None,
+                            'column_name': None,
+                            'source_sequence_sql': source_sequence_sql,
+                            'source_start_value': next_val,
+                            'source_increment_by': inc,
+                            'source_minvalue': min_val,
+                            'source_maxvalue': max_val,
+                            'source_cache': cache,
+                            'source_is_cycled': is_cycled,
+                        }
+                        order_num += 1
+                except Exception as seq_err:
+                    self.config_parser.print_log_message('WARNING', f"mariadb_connector: fetch_sequences: Error reading sequence {seq_name}: {seq_err}")
+            cursor.close()
+            self.disconnect()
+            return sequences
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"mariadb_connector: fetch_sequences: Error fetching sequences: {e}")
+            return {}
 
     def get_sequence_details(self, sequence_owner, sequence_name):
         # Placeholder for fetching sequence details
@@ -841,15 +1098,21 @@ class MariaDBConnector(DatabaseConnector):
 
     def convert_view_code(self, settings: dict):
         view_code = settings['view_code']
-        
-        target_db_type = settings.get('target_db_type', self.config_parser.get_target_db_type())
+        target_db_type = settings.get('target_db_type', self.config_parser.get_target_db_type() if getattr(self, 'config_parser', None) else 'postgresql')
+
+        if target_db_type == 'postgresql' and view_code:
+            view_code = re.sub(r'(?i)\b(?:CHARACTER\s+SET|CHARSET)\s+[a-zA-Z0-9_]+', '', view_code)
+            view_code = re.sub(r'(?i)\bCOLLATE\s+[`\'"]?[a-zA-Z0-9_]+[`\'"]?', '', view_code)
+            view_code = re.sub(r'(?i)\bGROUP\s+BY\s+(.*?)\s+WITH\s+ROLLUP\b', r'GROUP BY ROLLUP (\1)', view_code, flags=re.DOTALL)
+
         if target_db_type == 'postgresql':
             try:
-                transpiled = sqlglot.transpile(view_code, read="mariadb", write="postgres")
+                transpiled = sqlglot.transpile(view_code, read="mysql", write="postgres")
                 if transpiled:
                     view_code = transpiled[0]
             except Exception as e:
-                self.config_parser.print_log_message('WARNING', f"mariadb_connector: convert_view_code: sqlglot transpilation failed: {e}")
+                if getattr(self, 'config_parser', None) and hasattr(self.config_parser, 'args'):
+                    self.config_parser.print_log_message('WARNING', f"mariadb_connector: convert_view_code: sqlglot transpilation failed: {e}")
 
         converted_view_code = view_code
         converted_view_code = converted_view_code.replace('`', '"')
@@ -1128,9 +1391,61 @@ class MariaDBConnector(DatabaseConnector):
         cursor.close()
         return rows
 
+    def _is_zero_datetime(self, val) -> bool:
+        if val is None:
+            return False
+        val_str = str(val).strip().strip("'\"")
+        if val_str.startswith('0000-00-00') or val_str in ('0000-00-00', '0000-00-00 00:00:00', '0000-00-00 00:00:00.000000', '00:00:00'):
+            return True
+        return False
+
     def convert_default_value(self, settings) -> dict:
         extracted_default_value = settings['extracted_default_value']
-        return extracted_default_value
+        if extracted_default_value is None:
+            return ''
+
+        if self._is_zero_datetime(extracted_default_value):
+            action = self.config_parser.get_zero_datetime_default()
+            if action is None:
+                return ''
+            action_str = str(action).strip()
+            if action_str.lower() in ('', 'none', 'null', 'remove', 'delete', 'disable'):
+                return ''
+            keywords = ('CURRENT_TIMESTAMP', 'NOW()', 'CURRENT_DATE', 'CLOCK_TIMESTAMP()', 'LOCALTIMESTAMP')
+            if action_str.upper() in keywords:
+                return action_str
+            if (action_str.startswith("'") and action_str.endswith("'")) or (action_str.startswith('"') and action_str.endswith('"')):
+                return action_str
+            return f"'{action_str}'"
+
+        default_str = str(extracted_default_value).strip()
+
+        column_type = settings.get('column_type', '')
+
+        # Handle UUID functions explicitly
+        if re.search(r'uuid_to_bin\s*\(', default_str, re.IGNORECASE) or re.search(r'\buuid\s*\(\s*\)', default_str, re.IGNORECASE):
+            return self.config_parser.get_uuid_default_function(column_type)
+
+        # Handle sequence default expressions: nextval(...) or NEXT VALUE FOR ...
+        seq_match = re.search(r'(?i)\b(?:nextval\s*\(\s*|next\s+value\s+for\s+)(.+)', default_str)
+        if seq_match:
+            raw_seq = seq_match.group(1).rstrip(')').strip()
+            parts = [p.strip("`'\" ") for p in raw_seq.split('.') if p.strip("`'\" ")]
+            if parts:
+                seq_name = parts[-1]
+                if hasattr(self.config_parser, 'convert_names_case'):
+                    seq_name = self.config_parser.convert_names_case(seq_name)
+                return f"nextval('{seq_name}')"
+
+        # Apply function mapping
+        mapping = self.get_sql_functions_mapping({'target_db_type': 'postgresql'})
+        if mapping:
+            for k, v in mapping.items():
+                if k.lower() in default_str.lower():
+                    pattern = r'\b' + re.escape(k) if k[0].isalnum() else re.escape(k)
+                    default_str = re.sub(pattern, v, default_str, flags=re.IGNORECASE)
+
+        return default_str
 
     def get_table_checksum(self, schema_name: str, table_name: str, columns: list):
         if not columns:

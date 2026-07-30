@@ -1648,6 +1648,11 @@ class Orchestrator:
             index_name = index_data['index_name']
             create_index_sql = index_data['index_sql']
 
+            if not create_index_sql or not create_index_sql.strip():
+                self.migrator_tables.update_protocol_task_finished('indexes', index_data['id'], 'skipped (empty index)')
+                self.config_parser.print_log_message('WARNING', f"orchestrator: index_worker: Worker {worker_id}: Skipping creation of index {index_name} because its SQL is empty.")
+                return True
+
             self.migrator_tables.update_protocol_task_started('indexes', index_data['id'])
             self.config_parser.print_log_message('INFO', f"orchestrator: index_worker: Worker {worker_id}: Creating index {index_name} in target database.")
 

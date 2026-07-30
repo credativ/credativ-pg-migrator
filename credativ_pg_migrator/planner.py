@@ -453,6 +453,15 @@ class Planner:
                 f"This requires PostgreSQL 12 or newer, but the target runs version {target_version_num // 10000}. "
                 f"Upgrade the target database, or exclude the affected tables from the migration.")
 
+        # Check and attempt creation of required PostgreSQL extensions
+        required_extensions = self.config_parser.get_required_extensions()
+        if required_extensions:
+            self.config_parser.print_log_message('INFO', f"planner: check_target_capabilities: Checking required PostgreSQL extensions: {required_extensions}")
+            for ext in required_extensions:
+                success, msg = self.target_connection.check_and_create_extension(ext)
+                if not success:
+                    blocking_issues.append(msg)
+
         return blocking_issues
 
     def stdwf_prepare_sequences(self):

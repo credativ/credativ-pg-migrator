@@ -23,6 +23,7 @@ from credativ_pg_migrator.migrator_logging import MigratorLogger
 from credativ_pg_migrator.constants import MigratorConstants
 import traceback
 import re
+import json
 import datetime
 from decimal import Decimal
 
@@ -53,6 +54,43 @@ class PostgreSQLConnector(DatabaseConnector):
             return {}
         else:
             self.config_parser.print_log_message('ERROR', f"postgresql_connector: get_sql_functions_mapping: Unsupported target database type: {target_db_type}")
+
+    def check_and_create_extension(self, extension_name: str) -> tuple:
+        """
+        Check if a PostgreSQL extension exists, attempt CREATE EXTENSION IF NOT EXISTS if missing.
+        Returns (success: bool, message: str).
+        """
+        ext_clean = extension_name.strip().lower()
+        if not ext_clean:
+            return True, ""
+
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute("SELECT 1 FROM pg_extension WHERE extname = %s", (ext_clean,))
+            row = cursor.fetchone()
+            if row:
+                cursor.close()
+                self.disconnect()
+                return True, f"Extension '{ext_clean}' is present on target PostgreSQL database."
+
+            self.config_parser.print_log_message('INFO', f"postgresql_connector: check_and_create_extension: Extension '{ext_clean}' missing on target database - attempting CREATE EXTENSION IF NOT EXISTS \"{ext_clean}\".")
+            cursor.execute(f'CREATE EXTENSION IF NOT EXISTS "{ext_clean}"')
+            self.connection.commit()
+            cursor.close()
+            self.disconnect()
+            self.config_parser.print_log_message('INFO', f"postgresql_connector: check_and_create_extension: Successfully created extension '{ext_clean}' on target database.")
+            return True, f"Extension '{ext_clean}' created successfully on target database."
+        except Exception as e:
+            if hasattr(self, 'connection') and self.connection:
+                try:
+                    self.connection.rollback()
+                except Exception:
+                    pass
+                self.disconnect()
+            err_msg = str(e).strip()
+            self.config_parser.print_log_message('WARNING', f"postgresql_connector: check_and_create_extension: Failed to create extension '{ext_clean}': {err_msg}")
+            return False, f"Required PostgreSQL extension '{ext_clean}' is missing and CREATE EXTENSION failed: {err_msg}"
 
     def fetch_table_names(self, schema: str = 'public'):
         query = f"""
@@ -505,7 +543,12 @@ class PostgreSQLConnector(DatabaseConnector):
             column_comment = column_info['column_comment']
             nullable_string = ''
             if column_info['is_nullable'] == 'NO':
-                nullable_string = 'NOT NULL'
+                is_mysql_db = self.config_parser.get_source_db_type() in ('mysql', 'mariadb')
+                is_datetime_col = any(t in column_data_type for t in ('DATE', 'TIME', 'TIMESTAMP'))
+                if is_mysql_db and is_datetime_col and self.config_parser.get_relax_not_null_datetime() and not self.config_parser.get_zero_datetime_data_value():
+                    nullable_string = ''
+                else:
+                    nullable_string = 'NOT NULL'
 
             numeric_precision = column_info.get('numeric_precision')
             numeric_scale = column_info.get('numeric_scale')
@@ -639,41 +682,54 @@ class PostgreSQLConnector(DatabaseConnector):
                 if column_default.startswith('(') and column_default.endswith(')'):
                     column_default = column_default[1:-1].strip()
 
-                # Skip empty defaults
-                if not column_default:
-                    column_default = ''
-                # Niladic SQL keyword-functions have no parentheses (e.g. Oracle USER or
-                # Sybase suser_name() mapped to current_user), so they must NOT be quoted
-                # as string literals.
-                sql_keyword_defaults = (
-                    'current_user', 'current_role', 'session_user', 'user',
-                    'current_catalog', 'current_schema',
-                    'current_timestamp', 'current_date', 'current_time',
-                    'localtime', 'localtimestamp',
-                )
-                default_is_expression = (
-                    '||' in column_default or '(' in column_default
-                    or ')' in column_default or '::' in column_default
-                    or column_default.strip().lower() in sql_keyword_defaults
-                )
-                if (('CHAR' in column_data_type or column_data_type in ('TEXT'))
-                    and default_is_expression):
-                    # default value is here NOT quoted
-                    create_column_sql += f""" DEFAULT {column_default}""".replace("''", "'")
-                elif 'CHAR' in column_data_type or column_data_type in ('TEXT'):
-                    # here we must quote the default value
-                    create_column_sql += f""" DEFAULT '{column_default}'""".replace("''", "'")
-                elif column_data_type in ('BOOLEAN', 'BIT'):
-                    if column_default.lower() in ('0', '(0)', 'false'):
-                        create_column_sql += """ DEFAULT FALSE"""
-                    elif column_default.lower() in ('1', '(1)', 'true'):
-                        create_column_sql += """ DEFAULT TRUE"""
+                val_clean = column_default.strip().strip("'\"")
+                if val_clean.startswith('0000-00-00') or val_clean in ('0000-00-00', '0000-00-00 00:00:00', '0000-00-00 00:00:00.000000', '00:00:00'):
+                    action = self.config_parser.get_zero_datetime_default()
+                    if action is None or str(action).strip().lower() in ('', 'none', 'null', 'remove', 'delete', 'disable'):
+                        column_default = ''
                     else:
-                        create_column_sql += f""" DEFAULT {column_default}::BOOLEAN"""
-                elif column_data_type in ('BYTEA'):
-                    create_column_sql += f""" DEFAULT '{column_default}'::BYTEA"""
-                else:
-                    create_column_sql += f" DEFAULT {column_default}::{column_data_type}"
+                        action_str = str(action).strip()
+                        keywords = ('CURRENT_TIMESTAMP', 'NOW()', 'CURRENT_DATE', 'CLOCK_TIMESTAMP()', 'LOCALTIMESTAMP')
+                        if action_str.upper() in keywords:
+                            column_default = action_str
+                        elif (action_str.startswith("'") and action_str.endswith("'")) or (action_str.startswith('"') and action_str.endswith('"')):
+                            column_default = action_str
+                        else:
+                            column_default = f"'{action_str}'"
+
+                if column_default != '':
+                    # Niladic SQL keyword-functions have no parentheses (e.g. Oracle USER or
+                    # Sybase suser_name() mapped to current_user), so they must NOT be quoted
+                    # as string literals.
+                    sql_keyword_defaults = (
+                        'current_user', 'current_role', 'session_user', 'user',
+                        'current_catalog', 'current_schema',
+                        'current_timestamp', 'current_date', 'current_time',
+                        'localtime', 'localtimestamp',
+                    )
+                    default_is_expression = (
+                        '||' in column_default or '(' in column_default
+                        or ')' in column_default or '::' in column_default
+                        or column_default.strip().lower() in sql_keyword_defaults
+                    )
+                    if (('CHAR' in column_data_type or column_data_type in ('TEXT'))
+                        and default_is_expression):
+                        # default value is here NOT quoted
+                        create_column_sql += f""" DEFAULT {column_default}""".replace("''", "'")
+                    elif 'CHAR' in column_data_type or column_data_type in ('TEXT'):
+                        # here we must quote the default value
+                        create_column_sql += f""" DEFAULT '{column_default}'""".replace("''", "'")
+                    elif column_data_type in ('BOOLEAN', 'BIT'):
+                        if column_default.lower() in ('0', '(0)', 'false'):
+                            create_column_sql += """ DEFAULT FALSE"""
+                        elif column_default.lower() in ('1', '(1)', 'true'):
+                            create_column_sql += """ DEFAULT TRUE"""
+                        else:
+                            create_column_sql += f""" DEFAULT {column_default}::BOOLEAN"""
+                    elif column_data_type in ('BYTEA'):
+                        create_column_sql += f""" DEFAULT '{column_default}'::BYTEA"""
+                    else:
+                        create_column_sql += f" DEFAULT {column_default}::{column_data_type}"
 
             if domain_name:
                 domain_details = migrator_tables.get_domain_details({'source_domain_name': domain_name})
@@ -787,6 +843,10 @@ class PostgreSQLConnector(DatabaseConnector):
         target_columns = settings.get('target_columns')
         is_function_based = str(settings.get('is_function_based', 'NO')).upper() == 'YES'
 
+        if not index_columns or not index_columns.strip():
+            self.config_parser.print_log_message('WARNING', f"postgresql_connector: get_create_index_sql: Index '{index_name}' on table '{target_schema_name}.{target_table_name}' has empty columns list - skipping index creation.")
+            return ''
+
         # Split index_columns into elements, clean up quotes, convert case, and re-quote.
         # A column entry may carry an ASC/DESC ordering keyword (e.g. '"STORE_NAME" ASC')
         # which must be preserved but must NOT be quoted together with the column name -
@@ -808,6 +868,10 @@ class PostgreSQLConnector(DatabaseConnector):
             # '"(upper("last_name"))"' and fail with a syntax error.
             if self.expression_is_parenthesized(col) or (is_function_based and '(' in col):
                 expression = self.convert_expression_identifiers(col, target_columns)
+                expression = expression.replace(r"\'", "'").replace(r'\"', '"')
+                expression = re.sub(r'(?i)_[a-zA-Z0-9_]+(\'|")', r'\1', expression)
+                expression = re.sub(r'(?i)\b(?:CHARACTER\s+SET|CHARSET)\s+[a-zA-Z0-9_]+', '', expression)
+                expression = re.sub(r'(?i)\bCOLLATE\s+[`\'"]?[a-zA-Z0-9_]+[`\'"]?', '', expression)
                 if not self.expression_is_parenthesized(expression):
                     expression = f"({expression})"
                 column_names.append(f'{expression}{order_direction}')
@@ -824,9 +888,24 @@ class PostgreSQLConnector(DatabaseConnector):
 
         # index_columns = ', '.join(f'"{col}"' for col in index_columns)
         # index_columns_count = row[2]
+        spatial_types = ('POINT', 'GEOMETRY', 'BOX', 'POLYGON', 'PATH', 'CIRCLE', 'LINESTRING', 'MULTIPOINT', 'MULTILINESTRING', 'MULTIPOLYGON', 'GEOMETRYCOLLECTION')
+        is_spatial = 'SPATIAL' in str(index_type).upper()
+        if not is_spatial and target_columns:
+            indexed_col_set = {c.strip('`').strip("'").strip('"').lower() for c in column_names}
+            cols_list = target_columns.values() if isinstance(target_columns, dict) else target_columns
+            for col_info in cols_list:
+                if isinstance(col_info, dict):
+                    c_name = str(col_info.get('column_name', '')).strip().lower()
+                    c_type = str(col_info.get('column_data_type', col_info.get('data_type', col_info.get('type', '')))).upper()
+                    if c_name in indexed_col_set and any(st in c_type for st in spatial_types):
+                        is_spatial = True
+                        break
+
         create_index_query = ''
         if index_type == 'PRIMARY KEY':
             create_index_query = f"""ALTER TABLE "{target_schema_name}"."{target_table_name}" ADD CONSTRAINT "{index_name}_tab_{target_table_name}" PRIMARY KEY ({index_columns});"""
+        elif is_spatial:
+            create_index_query = f"""CREATE INDEX "{index_name}_tab_{target_table_name}" ON "{target_schema_name}"."{target_table_name}" USING gist ({index_columns});"""
         else:
             create_index_query = f"""CREATE {'UNIQUE' if index_type == 'UNIQUE' else ''} INDEX "{index_name}_tab_{target_table_name}" ON "{target_schema_name}"."{target_table_name}" ({index_columns});"""
 
@@ -1743,7 +1822,13 @@ class PostgreSQLConnector(DatabaseConnector):
             insert_columns = [f'"{columns[col]["column_name"]}"' for col in insertable_column_keys]
 
         if not insert_values:
-            insert_values = ', '.join(['%s' for _ in insertable_column_keys])
+            if isinstance(insert_columns, str) and insert_columns.strip():
+                num_cols = len([c for c in insert_columns.split(',') if c.strip()])
+                insert_values = ', '.join(['%s'] * num_cols)
+            elif isinstance(insert_columns, list) and insert_columns:
+                insert_values = ', '.join(['%s'] * len(insert_columns))
+            else:
+                insert_values = ', '.join(['%s'] * len(insertable_column_keys))
 
         if isinstance(insert_columns, list):
             insert_columns = ', '.join(insert_columns)
@@ -1777,6 +1862,8 @@ class PostgreSQLConnector(DatabaseConnector):
                         value = item.get(col_name)
                         if col_name in boolean_columns:
                             value = self._coerce_boolean_value(value)
+                        elif value is not None and (type(value).__name__ == 'array' or hasattr(value, 'tolist')):
+                            value = json.dumps(value.tolist()) if hasattr(value, 'tolist') else str(value)
                         row.append(value)
                     formatted_data.append(tuple(row))
                 self.config_parser.print_log_message('DEBUG3', f"postgresql_connector: insert_batch: INSERT COLUMNS: {insert_columns}")

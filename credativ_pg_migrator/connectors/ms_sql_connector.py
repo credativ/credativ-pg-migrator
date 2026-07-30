@@ -2500,6 +2500,12 @@ EXECUTE FUNCTION "{func_schema}"."{func_name}"();
 
     def convert_default_value(self, settings) -> dict:
         extracted_default_value = settings['extracted_default_value']
+        if extracted_default_value is None:
+            return ''
+        column_type = settings.get('column_type', '')
+        default_str = str(extracted_default_value).strip().strip("()'\"")
+        if re.search(r'(?i)\b(?:newid|newsequentialid)\b', default_str):
+            return self.config_parser.get_uuid_default_function(column_type)
         return extracted_default_value
 
     def get_table_checksum(self, schema_name: str, table_name: str, columns: list):

@@ -323,6 +323,79 @@ class ConfigParser:
         settings = self.get_migration_settings()
         return settings.get('use_aliases_as_target_names', False)
 
+    def get_zero_datetime_default(self):
+        settings = self.get_migration_settings() if 'migration' in self.config else {}
+        if 'zero_datetime_default' in settings:
+            return settings.get('zero_datetime_default')
+        if 'mysql_zero_datetime_default' in settings:
+            return settings.get('mysql_zero_datetime_default')
+        source_config = self.get_source_config() if 'source' in self.config else {}
+        if 'zero_datetime_default' in source_config:
+            return source_config.get('zero_datetime_default')
+        return 'remove'
+
+    def get_zero_datetime_data_value(self):
+        settings = self.get_migration_settings() if 'migration' in self.config else {}
+        if 'zero_datetime_value' in settings:
+            return settings.get('zero_datetime_value')
+        if 'zero_datetime_data_value' in settings:
+            return settings.get('zero_datetime_data_value')
+        return None
+
+    def get_relax_not_null_datetime(self):
+        settings = self.get_migration_settings() if 'migration' in self.config else {}
+        if 'relax_not_null_datetime' in settings:
+            return settings.get('relax_not_null_datetime')
+        return True
+
+    def get_uuid_default_function(self, target_column_type=None):
+        settings = self.get_migration_settings() if 'migration' in self.config else {}
+        func = settings.get('uuid_default_function')
+        if not func:
+            func = settings.get('uuid_function', 'gen_random_uuid()')
+
+        func_str = str(func).strip()
+        if not func_str:
+            func_str = 'gen_random_uuid()'
+
+        if not func_str.endswith(')') and not func_str.endswith('::text'):
+            func_str += '()'
+
+        col_type_str = str(target_column_type).upper() if target_column_type else ''
+        is_string_type = any(t in col_type_str for t in ('TEXT', 'CHAR', 'VARCHAR', 'STRING'))
+
+        if is_string_type:
+            if not func_str.endswith('::text'):
+                return f"{func_str}::text"
+            return func_str
+        else:
+            if func_str.endswith('::text'):
+                return func_str[:-6].strip()
+            return func_str
+
+    def get_required_extensions(self) -> list:
+        settings = self.get_migration_settings() if 'migration' in self.config else {}
+        exts = settings.get('required_extensions', [])
+        if not exts:
+            exts = settings.get('extensions', [])
+        if isinstance(exts, str):
+            exts = [e.strip() for e in exts.split(',') if e.strip()]
+        elif not isinstance(exts, list):
+            exts = []
+
+        ext_list = [str(e).strip().lower() for e in exts if e]
+
+        # Auto-infer required extensions based on configuration
+        uuid_func = self.get_uuid_default_function()
+        if 'uuid_generate' in uuid_func.lower():
+            if 'uuid-ossp' not in ext_list:
+                ext_list.append('uuid-ossp')
+        elif 'pgcrypto' in uuid_func.lower():
+            if 'pgcrypto' not in ext_list:
+                ext_list.append('pgcrypto')
+
+        return list(dict.fromkeys(ext_list))
+
     def get_table_mapping(self, source_schema, source_table):
         """Returns the mapping rule for a specific source table if it exists within its data_export settings."""
         table_data_export = self.get_table_data_export(source_schema, source_table)

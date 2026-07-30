@@ -2263,6 +2263,33 @@ class TsqlParser:
                     "content": "locvar_rowcount INTEGER;"
                 })
 
+
+    def pass_9b_process_rowcount(self):
+        self.log("Running Pass 9b: Process @@rowcount")
+        import re
+        used_rowcount = False
+        for if_cmd in self.if_commands:
+            if re.search(r'@@rowcount', if_cmd['content'], re.IGNORECASE):
+                used_rowcount = True
+                if_cmd['content'] = re.sub(r'@@rowcount', 'locvar_rowcount', if_cmd['content'], flags=re.IGNORECASE)
+                self.exec_commands.append({
+                    "line": if_cmd['line'] - 0.1,
+                    "content": "GET DIAGNOSTICS locvar_rowcount = ROW_COUNT;"
+                })
+        
+        if used_rowcount:
+            # Check if locvar_rowcount is already in variables
+            found = False
+            for v in self.variables:
+                if 'locvar_rowcount' in v['content']:
+                    found = True
+                    break
+            if not found:
+                self.variables.append({
+                    "line": 0,
+                    "content": "locvar_rowcount INTEGER;"
+                })
+
     def pass_10_add_semicolons(self):
         """
         Pass 10 (New): Checks remaining body lines.
@@ -2752,6 +2779,9 @@ class TsqlParser:
 
         # Pass 8d
         self.pass_8d_convert_selects()
+
+        # Pass 9b
+        self.pass_9b_process_rowcount()
 
         # Pass 9b
         self.pass_9b_process_rowcount()

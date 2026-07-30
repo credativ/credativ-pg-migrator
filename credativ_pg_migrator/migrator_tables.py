@@ -3830,12 +3830,17 @@ class MigratorTables:
                 details = []
                 if add_cols and not self.config_parser.is_dry_run():
                     cols_count = len(add_cols.split(','))
-                    cols_enum = ", ".join(str(i+2) for i in range(cols_count))
-                    cursor.execute(f"""SELECT COUNT(*), {add_cols} FROM "{self.protocol_schema}"."{table_name}" GROUP BY {cols_enum} ORDER BY {cols_enum}""")
+                    cols_enum = ", ".join(str(i+3) for i in range(cols_count))
+                    cursor.execute(f"""SELECT COUNT(*), COUNT(CASE WHEN success IS TRUE THEN 1 END), {add_cols} FROM "{self.protocol_schema}"."{table_name}" GROUP BY {cols_enum} ORDER BY {cols_enum}""")
                     for r in cursor.fetchall():
                         c = r[0]
-                        val = " ".join(str(x) for x in r[1:] if x)
-                        if val: details.append(f"{val}: {c}")
+                        succ_c = r[1]
+                        val = " ".join(str(x) for x in r[2:] if x)
+                        if val:
+                            if obj_name in ('Indexes', 'Constraints'):
+                                details.append(f"{val}: {c}/{succ_c}")
+                            else:
+                                details.append(f"{val}: {c}")
 
                 if obj_name == 'Tables':
                     cursor.execute(f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{table_name}" WHERE source_table_rows_limited = 0 OR source_table_rows_limited IS NULL""")

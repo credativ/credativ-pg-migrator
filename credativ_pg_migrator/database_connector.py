@@ -32,6 +32,13 @@ class DatabaseConnector(ABC):
         """Establishes a connection to the database."""
         pass
 
+    def check_and_create_extension(self, extension_name: str) -> tuple:
+        """
+        Check if an extension exists on the target database, and attempt to create it if missing.
+        Returns (success: bool, message: str).
+        """
+        return True, f"Extension check for '{extension_name}' is not applicable for this database type."
+
     @abstractmethod
     def disconnect(self):
         """Closes the connection to the database."""
@@ -54,6 +61,313 @@ class DatabaseConnector(ABC):
         """
         pass
 
+    def convert_find_in_set(self, sql_str: str) -> str:
+        if not sql_str or 'find_in_set' not in sql_str.lower():
+            return sql_str
+        import re
+        pos = 0
+        while True:
+            match = re.search(r'(?i)\bFIND_IN_SET\s*\(', sql_str[pos:])
+            if not match:
+                break
+            
+            start_idx = pos + match.start()
+            open_paren_idx = pos + match.end() - 1
+
+            depth = 1
+            i = open_paren_idx + 1
+            in_single_quote = False
+            in_double_quote = False
+            
+            while i < len(sql_str) and depth > 0:
+                char = sql_str[i]
+                if char == "'" and not in_double_quote:
+                    in_single_quote = not in_single_quote
+                elif char == '"' and not in_single_quote:
+                    in_double_quote = not in_double_quote
+                elif not in_single_quote and not in_double_quote:
+                    if char == '(':
+                        depth += 1
+                    elif char == ')':
+                        depth -= 1
+                i += 1
+
+            if depth == 0:
+                close_paren_idx = i - 1
+                args_str = sql_str[open_paren_idx + 1:close_paren_idx]
+
+                parts = []
+                current = []
+                depth = 0
+                in_s_quote = False
+                in_d_quote = False
+                for c in args_str:
+                    if c == "'" and not in_d_quote:
+                        in_s_quote = not in_s_quote
+                    elif c == '"' and not in_s_quote:
+                        in_d_quote = not in_d_quote
+                    elif not in_s_quote and not in_d_quote:
+                        if c == '(':
+                            depth += 1
+                        elif c == ')':
+                            depth -= 1
+                        elif c == ',' and depth == 0:
+                            parts.append(''.join(current).strip())
+                            current = []
+                            continue
+                    current.append(c)
+                if current:
+                    parts.append(''.join(current).strip())
+
+                if len(parts) == 2:
+                    arg1, arg2 = parts[0], parts[1]
+                    replacement = f"coalesce(array_position(string_to_array({arg2}, ','), {arg1}), 0)"
+                    sql_str = sql_str[:start_idx] + replacement + sql_str[close_paren_idx + 1:]
+                    pos = start_idx + len(replacement)
+                else:
+                    pos = close_paren_idx + 1
+            else:
+                pos = open_paren_idx + 1
+        return sql_str
+
+    def convert_date_extract_functions(self, sql_str: str) -> str:
+        if not sql_str:
+            return sql_str
+        import re
+        funcs = [
+            ('YEAR', 'YEAR'),
+            ('MONTH', 'MONTH'),
+            ('DAY', 'DAY'),
+            ('DAYOFMONTH', 'DAY'),
+            ('HOUR', 'HOUR'),
+            ('MINUTE', 'MINUTE'),
+            ('SECOND', 'SECOND'),
+            ('QUARTER', 'QUARTER'),
+            ('WEEK', 'WEEK'),
+        ]
+        for func_name, extract_field in funcs:
+            if func_name.lower() not in sql_str.lower():
+                continue
+            pos = 0
+            pattern = rf'(?i)\b{func_name}\s*\('
+            while True:
+                match = re.search(pattern, sql_str[pos:])
+                if not match:
+                    break
+                
+                start_idx = pos + match.start()
+                open_paren_idx = pos + match.end() - 1
+
+                depth = 1
+                i = open_paren_idx + 1
+                in_single_quote = False
+                in_double_quote = False
+                
+                while i < len(sql_str) and depth > 0:
+                    char = sql_str[i]
+                    if char == "'" and not in_double_quote:
+                        in_single_quote = not in_single_quote
+                    elif char == '"' and not in_single_quote:
+                        in_double_quote = not in_double_quote
+                    elif not in_single_quote and not in_double_quote:
+                        if char == '(':
+                            depth += 1
+                        elif char == ')':
+                            depth -= 1
+                    i += 1
+
+                if depth == 0:
+                    close_paren_idx = i - 1
+                    arg_str = sql_str[open_paren_idx + 1:close_paren_idx].strip()
+                    parts = []
+                    current = []
+                    arg_depth = 0
+                    in_s = False
+                    in_d = False
+                    for c in arg_str:
+                        if c == "'" and not in_d:
+                            in_s = not in_s
+                        elif c == '"' and not in_s:
+                            in_d = not in_d
+                        elif not in_s and not in_d:
+                            if c == '(':
+                                arg_depth += 1
+                            elif c == ')':
+                                arg_depth -= 1
+                            elif c == ',' and arg_depth == 0:
+                                parts.append(''.join(current))
+                                current = []
+                                continue
+                        current.append(c)
+                    if current:
+                        parts.append(''.join(current))
+
+                    if len(parts) == 1 and arg_str:
+                        replacement = f"EXTRACT({extract_field} FROM {arg_str})"
+                        sql_str = sql_str[:start_idx] + replacement + sql_str[close_paren_idx + 1:]
+                        pos = start_idx + len(replacement)
+                    else:
+                        pos = close_paren_idx + 1
+                else:
+                    pos = open_paren_idx + 1
+        return sql_str
+
+    def convert_mysql_internal_rollup_functions(self, sql_str: str) -> str:
+        if not sql_str:
+            return sql_str
+        import re
+        # 1. Convert rollup_group_item(arg1, arg2) -> arg1
+        pos = 0
+        while True:
+            match = re.search(r'(?i)\brollup_group_item\s*\(', sql_str[pos:])
+            if not match:
+                break
+            start_idx = pos + match.start()
+            open_paren_idx = pos + match.end() - 1
+
+            depth = 1
+            i = open_paren_idx + 1
+            in_single_quote = False
+            in_double_quote = False
+            while i < len(sql_str) and depth > 0:
+                char = sql_str[i]
+                if char == "'" and not in_double_quote:
+                    in_single_quote = not in_single_quote
+                elif char == '"' and not in_single_quote:
+                    in_double_quote = not in_double_quote
+                elif not in_single_quote and not in_double_quote:
+                    if char == '(':
+                        depth += 1
+                    elif char == ')':
+                        depth -= 1
+                i += 1
+
+            if depth == 0:
+                close_paren_idx = i - 1
+                args_str = sql_str[open_paren_idx + 1:close_paren_idx]
+                parts = []
+                current = []
+                arg_depth = 0
+                in_s = False
+                in_d = False
+                for c in args_str:
+                    if c == "'" and not in_d:
+                        in_s = not in_s
+                    elif c == '"' and not in_s:
+                        in_d = not in_d
+                    elif not in_s and not in_d:
+                        if c == '(':
+                            arg_depth += 1
+                        elif c == ')':
+                            arg_depth -= 1
+                        elif c == ',' and arg_depth == 0:
+                            parts.append(''.join(current).strip())
+                            current = []
+                            continue
+                    current.append(c)
+                if current:
+                    parts.append(''.join(current).strip())
+
+                if len(parts) >= 1:
+                    arg1 = parts[0]
+                    replacement = arg1
+                    sql_str = sql_str[:start_idx] + replacement + sql_str[close_paren_idx + 1:]
+                    pos = start_idx + len(replacement)
+                else:
+                    pos = close_paren_idx + 1
+            else:
+                pos = open_paren_idx + 1
+
+        # 2. Convert rollup_sum_switcher(arg) -> arg
+        pos = 0
+        while True:
+            match = re.search(r'(?i)\brollup_sum_switcher\s*\(', sql_str[pos:])
+            if not match:
+                break
+            start_idx = pos + match.start()
+            open_paren_idx = pos + match.end() - 1
+
+            depth = 1
+            i = open_paren_idx + 1
+            in_single_quote = False
+            in_double_quote = False
+            while i < len(sql_str) and depth > 0:
+                char = sql_str[i]
+                if char == "'" and not in_double_quote:
+                    in_single_quote = not in_single_quote
+                elif char == '"' and not in_single_quote:
+                    in_double_quote = not in_double_quote
+                elif not in_single_quote and not in_double_quote:
+                    if char == '(':
+                        depth += 1
+                    elif char == ')':
+                        depth -= 1
+                i += 1
+
+            if depth == 0:
+                close_paren_idx = i - 1
+                arg_str = sql_str[open_paren_idx + 1:close_paren_idx].strip()
+                replacement = arg_str
+                sql_str = sql_str[:start_idx] + replacement + sql_str[close_paren_idx + 1:]
+                pos = start_idx + len(replacement)
+            else:
+                pos = open_paren_idx + 1
+
+        return sql_str
+
+    def convert_char_cast_to_varchar(self, sql_str: str) -> str:
+        if not sql_str:
+            return sql_str
+        import re
+        sql_str = re.sub(r'(?i)\bCAST\s*\((.*?)\s+AS\s+CHAR(?:ACTER)?\s*\(\s*(\d+)\s*\)\s*\)', r'CAST(\1 AS VARCHAR(\2))', sql_str)
+        sql_str = re.sub(r'(?i)\bCAST\s*\((.*?)\s+AS\s+CHAR(?:ACTER)?\s*\)', r'CAST(\1 AS VARCHAR)', sql_str)
+        return sql_str
+
+    def convert_grouping_boolean_in_case(self, sql_str: str) -> str:
+        if not sql_str:
+            return sql_str
+        import re
+        pos = 0
+        while True:
+            match = re.search(r'(?i)\bWHEN\s+GROUPING\s*\(', sql_str[pos:])
+            if not match:
+                break
+            when_start = pos + match.start()
+            open_paren_idx = pos + match.end() - 1
+
+            depth = 1
+            i = open_paren_idx + 1
+            in_s = False
+            in_d = False
+            while i < len(sql_str) and depth > 0:
+                char = sql_str[i]
+                if char == "'" and not in_d:
+                    in_s = not in_s
+                elif char == '"' and not in_s:
+                    in_d = not in_d
+                elif not in_s and not in_d:
+                    if char == '(':
+                        depth += 1
+                    elif char == ')':
+                        depth -= 1
+                i += 1
+
+            if depth == 0:
+                close_paren_idx = i - 1
+                grouping_expr = sql_str[when_start + 5:close_paren_idx + 1]
+                after_grouping = sql_str[close_paren_idx + 1:]
+                then_match = re.match(r'^\s+THEN\b', after_grouping, re.IGNORECASE)
+                if then_match:
+                    then_end = close_paren_idx + 1 + then_match.end()
+                    replacement = f"WHEN {grouping_expr} = 1 THEN"
+                    sql_str = sql_str[:when_start] + replacement + sql_str[then_end:]
+                    pos = when_start + len(replacement)
+                else:
+                    pos = close_paren_idx + 1
+            else:
+                pos = open_paren_idx + 1
+        return sql_str
+
     def apply_sql_functions_mapping(self, code: str, settings: dict) -> str:
         """
         Applies the SQL functions mapping to the provided code string using regular expressions.
@@ -63,12 +377,65 @@ class DatabaseConnector(ABC):
         if 'target_db_type' not in settings:
             target_conn = self.config_parser.get_connectivity('target')
             settings['target_db_type'] = target_conn.get('db_type', 'postgresql') if target_conn else 'postgresql'
+        if settings.get('target_db_type') == 'postgresql' and code:
+            code = re.sub(r'(?i)\b(?:CHARACTER\s+SET|CHARSET)\s+[a-zA-Z0-9_]+', '', code)
+            code = re.sub(r'(?i)\bCOLLATE\s+[`\'"]?[a-zA-Z0-9_]+[`\'"]?', '', code)
+            code = re.sub(r'(?i)\bGROUP\s+BY\s+(.*?)\s+WITH\s+ROLLUP\b', r'GROUP BY ROLLUP (\1)', code, flags=re.DOTALL)
+            code = self.convert_find_in_set(code)
+            code = self.convert_date_extract_functions(code)
+            code = self.convert_mysql_internal_rollup_functions(code)
+            code = self.convert_char_cast_to_varchar(code)
+            code = self.convert_grouping_boolean_in_case(code)
+            code = self.convert_case_mixed_types(code)
+
         sql_functions_mapping = self.get_sql_functions_mapping(settings)
-        if sql_functions_mapping:
+        if sql_functions_mapping and code:
             for src_func, tgt_func in sql_functions_mapping.items():
                 escaped_src_func = re.escape(src_func)
                 code = re.sub(rf"(?i){escaped_src_func}", tgt_func, code, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
         return code
+
+    def convert_case_mixed_types(self, sql_str: str) -> str:
+        if not sql_str:
+            return sql_str
+        import re
+
+        def is_str_literal(val: str) -> bool:
+            v = val.strip()
+            return (v.startswith("'") and v.endswith("'")) or (v.startswith("N'") and v.endswith("'"))
+
+        def is_cast_or_str(val: str) -> bool:
+            v = val.strip().lower()
+            return (
+                is_str_literal(v)
+                or v.startswith("cast(")
+                or v.endswith("::text")
+                or v.endswith("::varchar")
+                or v.startswith("concat(")
+                or v.startswith("to_char(")
+                or v.startswith("coalesce(")
+            )
+
+        def replace_case(match):
+            cond = match.group(1)
+            then_val = match.group(2).strip()
+            else_val = match.group(3).strip()
+
+            then_str = is_str_literal(then_val)
+            else_str = is_str_literal(else_val)
+
+            if then_str and not is_cast_or_str(else_val):
+                else_val = f"CAST({else_val} AS VARCHAR)"
+            elif else_str and not is_cast_or_str(then_val):
+                then_val = f"CAST({then_val} AS VARCHAR)"
+
+            return f"CASE WHEN {cond} THEN {then_val} ELSE {else_val} END"
+
+        pattern = re.compile(
+            r"""(?i)\bCASE\s+WHEN\s+(.+?)\s+THEN\s+(.+?)\s+ELSE\s+(.+?)\s+END""",
+            re.DOTALL
+        )
+        return pattern.sub(replace_case, sql_str)
 
     @abstractmethod
     def fetch_table_names(self, table_schema: str):

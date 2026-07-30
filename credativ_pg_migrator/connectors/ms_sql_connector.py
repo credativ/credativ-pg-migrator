@@ -22,6 +22,7 @@ from credativ_pg_migrator.database_connector import DatabaseConnector
 from credativ_pg_migrator.migrator_logging import MigratorLogger
 from credativ_pg_migrator.connectors.tsql_parser import TsqlParser
 import re
+import struct
 import traceback
 import time
 import datetime
@@ -238,6 +239,30 @@ class MsSQLConnector(DatabaseConnector):
         if self.config_parser.get_connectivity(self.source_or_target) == 'odbc':
             connection_string = self.config_parser.get_connect_string(self.source_or_target)
             self.connection = pyodbc.connect(connection_string)
+
+            def handle_datetimeoffset(value):
+                if value is None:
+                    return None
+                if isinstance(value, bytes) and len(value) == 20:
+                    year, month, day, hour, minute, second, fraction, tz_hour, tz_minute = struct.unpack("<hhhhhhIhh", value)
+                    sec_frac = fraction // 1000
+                    tz_total_min = tz_hour * 60 + (tz_minute if tz_hour >= 0 else -tz_minute)
+                    tz_sign = "+" if tz_total_min >= 0 else "-"
+                    abs_tz_min = abs(tz_total_min)
+                    abs_tz_h = abs_tz_min // 60
+                    abs_tz_m = abs_tz_min % 60
+                    return f"{year:04d}-{month:02d}-{day:02d} {hour:02d}:{minute:02d}:{second:02d}.{sec_frac:06d}{tz_sign}{abs_tz_h:02d}:{abs_tz_m:02d}"
+                elif isinstance(value, bytes):
+                    try:
+                        return value.decode('utf-8')
+                    except Exception:
+                        return str(value)
+                return str(value)
+
+            try:
+                self.connection.add_output_converter(-155, handle_datetimeoffset)
+            except Exception as e:
+                self.config_parser.print_log_message('DEBUG', f"ms_sql_connector: connect: Warning registering output converter for -155: {e}")
         elif self.config_parser.get_connectivity(self.source_or_target) == 'jdbc':
             connection_string = self.config_parser.get_connect_string(self.source_or_target)
             username = self.config_parser.get_db_config(self.source_or_target)['username']
@@ -1416,7 +1441,7 @@ class MsSQLConnector(DatabaseConnector):
                                 column_type = column['data_type']
                                 if column_type.lower() in ['binary', 'varbinary', 'image']:
                                     record[column_name] = bytes(record[column_name]) if record[column_name] is not None else None
-                                elif column_type.lower() in ['datetime', 'smalldatetime', 'date', 'time', 'timestamp']:
+                                elif column_type.lower() in ['datetime', 'smalldatetime', 'date', 'time', 'timestamp', 'datetime2', 'datetimeoffset']:
                                     record[column_name] = str(record[column_name]) if record[column_name] is not None else None
 
                         # Insert batch into target table

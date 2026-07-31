@@ -1600,8 +1600,12 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
         return rows
 
     def convert_default_value(self, settings) -> dict:
-        extracted_default_value = settings['extracted_default_value']
-        return extracted_default_value
+        extracted_default_value = settings.get('extracted_default_value')
+        if not extracted_default_value:
+            return extracted_default_value
+        val = str(extracted_default_value).strip()
+        val = self.apply_sql_functions_mapping(val, settings)
+        return val
 
     def get_table_checksum(self, schema_name: str, table_name: str, columns: list):
         if not columns:

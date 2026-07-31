@@ -303,7 +303,7 @@ class MigratorTables:
                 WHERE (lower(trim(column_name)) = '' OR lower(trim(%s)) ILIKE lower(trim(column_name)) OR lower(trim(%s)) ~ NULLIF(lower(trim(column_name)), ''))
                 AND (lower(trim(source_column_data_type)) = '' OR lower(trim(%s)) ILIKE lower(trim(source_column_data_type)) OR lower(trim(%s)) ~ NULLIF(lower(trim(source_column_data_type)), ''))
                 AND (lower(trim(%s::TEXT)) ILIKE lower(trim(default_value_value::TEXT)) OR lower(trim(%s::TEXT)) ~ NULLIF(lower(trim(default_value_value::TEXT)), ''))
-                ORDER BY CASE WHEN default_value_value LIKE '%%(?i)%%' THEN 1 ELSE 2 END
+                ORDER BY CASE WHEN default_value_value LIKE '%%(?i)%%' THEN 1 ELSE 2 END, char_length(default_value_value) DESC
             """
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, (check_column_name, check_column_name, check_column_data_type, check_column_data_type,  check_default_value, check_default_value))

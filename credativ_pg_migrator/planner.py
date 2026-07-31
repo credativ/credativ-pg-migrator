@@ -233,10 +233,18 @@ class Planner:
                 for src_func, tgt_func in self.sql_functions_mapping.items():
                     # Escape parentheses in src_func for regex usage
                     escaped_src_func = re.escape(src_func)
+                    if src_func and (src_func[0].isalnum() or src_func[0] == '_') and (src_func[-1].isalnum() or src_func[-1] == '_'):
+                        pattern = rf"(?i)\b{escaped_src_func}\b"
+                    elif src_func and (src_func[0].isalnum() or src_func[0] == '_'):
+                        pattern = rf"(?i)\b{escaped_src_func}"
+                    elif src_func and (src_func[-1].isalnum() or src_func[-1] == '_'):
+                        pattern = rf"(?i){escaped_src_func}\b"
+                    else:
+                        pattern = rf"(?i){escaped_src_func}"
                     self.migrator_tables.insert_default_values_substitution({
                         'column_name': '',
                         'source_column_data_type': '',
-                        'default_value_value': rf"(?i){escaped_src_func}",
+                        'default_value_value': pattern,
                         'target_default_value': tgt_func
                     })
 

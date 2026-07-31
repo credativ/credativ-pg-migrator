@@ -621,12 +621,16 @@ class IbmDb2LuwConnector(DatabaseConnector):
                 C.COLNAME,
                 C.COLORDER,
                 C.TEXT,
-                C.VIRTUAL
+                C.VIRTUAL,
+                SC.TYPENAME
             FROM SYSCAT.INDEXES I
             JOIN SYSCAT.INDEXCOLUSE C
               ON I.INDSCHEMA = C.INDSCHEMA AND I.INDNAME = C.INDNAME
+            LEFT JOIN SYSCAT.COLUMNS SC
+              ON I.TABSCHEMA = SC.TABSCHEMA AND I.TABNAME = SC.TABNAME AND C.COLNAME = SC.COLNAME
             WHERE I.TABSCHEMA = upper('{source_table_schema}')
               AND I.TABNAME = '{source_table_name}'
+              AND I.INDEXTYPE = 'REG'
             ORDER BY I.INDNAME, C.COLSEQ
         """
         try:
@@ -635,6 +639,8 @@ class IbmDb2LuwConnector(DatabaseConnector):
             cursor.execute(query)
 
             indexes_dict = {}
+            unsupported_indexes = set()
+
             for row in cursor.fetchall():
                 index_name = row[0]
                 uniquerule = row[1]
@@ -643,6 +649,11 @@ class IbmDb2LuwConnector(DatabaseConnector):
                 col_order = row[4]
                 expr_text = row[5]
                 is_virtual = row[6]
+                col_typename = str(row[7] or '').upper()
+
+                if col_typename in ('XML', 'CLOB', 'BLOB', 'DBCLOB', 'LONG VARCHAR', 'LONG VARGRAPHIC'):
+                    unsupported_indexes.add(index_name)
+                    continue
 
                 if index_name not in indexes_dict:
                     indexes_dict[index_name] = {
@@ -665,6 +676,10 @@ class IbmDb2LuwConnector(DatabaseConnector):
                 indexes_dict[index_name]['cols'].append(col_expr)
 
             for index_name, idx_info in indexes_dict.items():
+                if index_name in unsupported_indexes or not idx_info['cols']:
+                    self.config_parser.print_log_message('INFO', f"ibm_db2_luw_connector: fetch_indexes: Skipping index '{index_name}' on table '{source_table_name}' because it contains unindexable column type(s) or has empty columns.")
+                    continue
+
                 uniquerule = idx_info['uniquerule']
                 table_indexes[order_num] = {
                     'index_name': index_name,

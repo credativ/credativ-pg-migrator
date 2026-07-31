@@ -8,8 +8,8 @@
     - Updated `planner.py` to enforce regex word boundaries (`\b`) when inserting `sql_functions_mapping` into `default_values_substitution`, preventing `CURRENT TIME` from matching inside `CURRENT TIMESTAMP`.
     - Updated `migrator_tables.check_default_values_substitution` to order substitution query matches by pattern length descending (`char_length(default_value_value) DESC`), prioritizing longer and more specific keywords.
     - Updated `ibm_db2_luw_connector.convert_default_value` to apply `apply_sql_functions_mapping`.
-  - Fix - IBM DB2 LUW Connector: Fixed function-based / expression index creation failures (`column "K00" does not exist`).
-    - Updated `ibm_db2_luw_connector.fetch_indexes` to JOIN `SYSCAT.INDEXES` with `SYSCAT.INDEXCOLUSE`.
+  - Fix - IBM DB2 LUW Connector: Fixed function-based / expression index creation failures (`column "K00" does not exist`) and internal XML index unique constraint violations (`could not create unique index` on `SPEC_XML`).
+    - Updated `ibm_db2_luw_connector.fetch_indexes` to JOIN `SYSCAT.INDEXES` with `SYSCAT.INDEXCOLUSE`, filtering out internal Db2 XML/block index types (`INDEXTYPE != 'REG'`, such as `XPTH` / `XRGN` indexes on XML columns) and skipping unindexable column types (`XML`, `CLOB`, `BLOB`, `DBCLOB`, `LONG VARCHAR`, `LONG VARGRAPHIC`).
     - Extracted index expression definitions from `SYSCAT.INDEXCOLUSE.TEXT` when `VIRTUAL == 'S'`, applied `apply_sql_functions_mapping`, and flagged `is_function_based = 'YES'` for correct target PostgreSQL DDL generation (`CREATE INDEX ... ON "table" ((expression));`).
 
 - 2026.07.30

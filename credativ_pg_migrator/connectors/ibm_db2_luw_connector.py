@@ -608,7 +608,6 @@ class IbmDb2LuwConnector(DatabaseConnector):
             raise e
 
     def fetch_indexes(self, settings):
-        source_table_id = settings['source_table_id']
         source_table_schema = settings['source_table_schema']
         source_table_name = settings['source_table_name']
 
@@ -616,43 +615,74 @@ class IbmDb2LuwConnector(DatabaseConnector):
         order_num = 1
         query = f"""
             SELECT
-                INDNAME,
-                COLNAMES,
-                COLCOUNT,
-                UNIQUERULE,
-                REMARKS
+                I.INDNAME,
+                I.UNIQUERULE,
+                I.REMARKS,
+                C.COLNAME,
+                C.COLORDER,
+                C.TEXT,
+                C.VIRTUAL
             FROM SYSCAT.INDEXES I
+            JOIN SYSCAT.INDEXCOLUSE C
+              ON I.INDSCHEMA = C.INDSCHEMA AND I.INDNAME = C.INDNAME
             WHERE I.TABSCHEMA = upper('{source_table_schema}')
-            AND I.TABNAME = '{source_table_name}'
-            ORDER BY INDNAME
+              AND I.TABNAME = '{source_table_name}'
+            ORDER BY I.INDNAME, C.COLSEQ
         """
         try:
             self.connect()
             cursor = self.connection.cursor()
             cursor.execute(query)
+
+            indexes_dict = {}
             for row in cursor.fetchall():
                 index_name = row[0]
-                index_columns = ', '.join(f'"{col}"' for col in row[1].lstrip('+').split('+') if col)
-                columns_count = row[2]
-                index_type = row[3]
-                index_comment = row[4]
+                uniquerule = row[1]
+                index_comment = row[2]
+                col_name = row[3]
+                col_order = row[4]
+                expr_text = row[5]
+                is_virtual = row[6]
 
+                if index_name not in indexes_dict:
+                    indexes_dict[index_name] = {
+                        'uniquerule': uniquerule,
+                        'index_comment': index_comment,
+                        'cols': [],
+                        'is_function_based': 'NO',
+                    }
+
+                if (expr_text and expr_text.strip()) or is_virtual == 'S':
+                    col_expr = expr_text.strip() if (expr_text and expr_text.strip()) else col_name
+                    col_expr = self.apply_sql_functions_mapping(col_expr, settings)
+                    indexes_dict[index_name]['is_function_based'] = 'YES'
+                else:
+                    col_expr = f'"{col_name}"'
+
+                if col_order == 'D':
+                    col_expr += ' DESC'
+
+                indexes_dict[index_name]['cols'].append(col_expr)
+
+            for index_name, idx_info in indexes_dict.items():
+                uniquerule = idx_info['uniquerule']
                 table_indexes[order_num] = {
                     'index_name': index_name,
-                    'index_type': 'PRIMARY KEY' if index_type == 'P' else 'UNIQUE' if index_type == 'U' else 'INDEX',
+                    'index_type': 'PRIMARY KEY' if uniquerule == 'P' else 'UNIQUE' if uniquerule == 'U' else 'INDEX',
                     'index_owner': source_table_schema,
-                    'index_columns': index_columns,
-                    'index_comment': index_comment,
+                    'index_columns': ', '.join(idx_info['cols']),
+                    'index_comment': idx_info['index_comment'],
+                    'is_function_based': idx_info['is_function_based'],
                 }
                 order_num += 1
 
             cursor.close()
             self.disconnect()
-            self.config_parser.print_log_message( 'DEBUG2', f"ibm_db2_luw_connector: fetch_indexes: Indexes for table {source_table_name} ({source_table_schema}): {table_indexes}")
+            self.config_parser.print_log_message('DEBUG2', f"ibm_db2_luw_connector: fetch_indexes: Indexes for table {source_table_name} ({source_table_schema}): {table_indexes}")
             return table_indexes
         except Exception as e:
-            self.config_parser.print_log_message( 'ERROR', f"ibm_db2_luw_connector: fetch_indexes: Error executing query: {query}")
-            self.config_parser.print_log_message( 'ERROR', str(e))
+            self.config_parser.print_log_message('ERROR', f"ibm_db2_luw_connector: fetch_indexes: Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', str(e))
             raise
 
     def get_create_index_sql(self, settings):

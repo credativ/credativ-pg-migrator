@@ -2,6 +2,16 @@
 
 ## 0.16.0 - 2026.07.29
 
+- 2026.07.31
+
+  - Fix - IBM DB2 LUW Connector / Planner / Migrator Tables: Resolved table creation failures (`cannot cast type time with time zone to timestamp without time zone`) caused by improper SQL function keyword default substitution.
+    - Updated `planner.py` to enforce regex word boundaries (`\b`) when inserting `sql_functions_mapping` into `default_values_substitution`, preventing `CURRENT TIME` from matching inside `CURRENT TIMESTAMP`.
+    - Updated `migrator_tables.check_default_values_substitution` to order substitution query matches by pattern length descending (`char_length(default_value_value) DESC`), prioritizing longer and more specific keywords.
+    - Updated `ibm_db2_luw_connector.convert_default_value` to apply `apply_sql_functions_mapping`.
+  - Fix - IBM DB2 LUW Connector: Fixed function-based / expression index creation failures (`column "K00" does not exist`).
+    - Updated `ibm_db2_luw_connector.fetch_indexes` to JOIN `SYSCAT.INDEXES` with `SYSCAT.INDEXCOLUSE`.
+    - Extracted index expression definitions from `SYSCAT.INDEXCOLUSE.TEXT` when `VIRTUAL == 'S'`, applied `apply_sql_functions_mapping`, and flagged `is_function_based = 'YES'` for correct target PostgreSQL DDL generation (`CREATE INDEX ... ON "table" ((expression));`).
+
 - 2026.07.30
 
   - Fix - MS SQL Server Connector / Planner / PostgreSQL Connector: Fixed table creation failures (`syntax error at or near "-"`) when migrating MS SQL Server tables containing `VARCHAR(MAX)`, `NVARCHAR(MAX)`, or `VARBINARY(MAX)` columns.

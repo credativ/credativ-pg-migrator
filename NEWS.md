@@ -4,6 +4,8 @@ credativ-pg-migrator Releases
 0.16.0 - 29.07.2026
 -------------------
 
+* Fixed IBM DB2 LUW table creation failures for `CURRENT TIMESTAMP` column defaults by enforcing word boundaries in `default_values_substitution` patterns and sorting matches by length descending, preventing `CURRENT TIME` from matching inside `CURRENT TIMESTAMP` (`cannot cast type time with time zone to timestamp without time zone`)
+* Fixed IBM DB2 LUW function-based / expression index creation by joining `SYSCAT.INDEXES` with `SYSCAT.INDEXCOLUSE`, extracting expressions from `SYSCAT.INDEXCOLUSE.TEXT` and setting `is_function_based`, resolving PostgreSQL index creation errors on Db2 internal virtual key columns (`column "K00" does not exist`)
 * Fixed MS SQL Server table creation failures for `VARCHAR(MAX)` / `NVARCHAR(MAX)` columns by mapping negative catalog lengths (`-1`) to PostgreSQL `TEXT` and extracting underlying default expressions from legacy `CREATE DEFAULT` bound objects
 * Fixed MS SQL Server connection errors (`Connection is busy with results for another command`) by setting `autocommit=True` directly at `pyodbc.connect()` initialization
 * Fixed MS SQL Server data fetch error `ODBC SQL type -155 is not yet supported` on `DATETIMEOFFSET` columns by registering a pyodbc output converter that unpacks binary timestamp-with-offset structs into ISO format strings

@@ -651,7 +651,7 @@ class IbmDb2LuwConnector(DatabaseConnector):
                 is_virtual = row[6]
                 col_typename = str(row[7] or '').upper()
 
-                if col_typename in ('XML', 'CLOB', 'BLOB', 'DBCLOB', 'LONG VARCHAR', 'LONG VARGRAPHIC'):
+                if col_typename in ('XML', 'CLOB', 'BLOB', 'DBCLOB', 'LONG VARCHAR', 'LONG VARGRAPHIC') or str(col_name or '').upper() == 'SQLNOTAPPLICABLE':
                     unsupported_indexes.add(index_name)
                     continue
 

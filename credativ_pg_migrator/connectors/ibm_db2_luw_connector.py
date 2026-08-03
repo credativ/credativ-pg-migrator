@@ -1000,7 +1000,7 @@ class IbmDb2LuwConnector(DatabaseConnector):
         converted_trigger_name = self.config_parser.convert_names_case(trigger_name)
         func_name = f"{converted_trigger_name}_func"
 
-        if for_each_scope == 'STATEMENT':
+        if for_each_scope == 'STATEMENT' or timing == 'AFTER':
             return_stmt = "RETURN NULL;"
         elif timing == 'BEFORE' and event == 'DELETE':
             return_stmt = "RETURN OLD;"

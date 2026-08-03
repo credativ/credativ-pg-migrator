@@ -1347,13 +1347,14 @@ class PostgreSQLConnector(DatabaseConnector):
                     create_constraint_query += f" COMMENT '{constraint_comment}'"
             elif constraint_type == 'CHECK':
                 # Replace column names in constraint_sql with double-quoted names using precise match
-
                 if constraint_sql and target_columns:
                     for col_info in target_columns.values():
                         col_name = col_info['column_name']
-                        # Use word boundary for precise match, preserve case
-                        pattern = r'\b{}\b'.format(re.escape(col_name))
+                        # Use word boundary and negative lookbehind/lookahead for precise match without double-quoting already-quoted identifiers
+                        pattern = r'(?<!["`\'])\b{}\b(?!["`\'])'.format(re.escape(col_name))
                         constraint_sql = re.sub(pattern, f'"{col_name}"', constraint_sql)
+                    # Clean up any accidental consecutive double quotes
+                    constraint_sql = re.sub(r'""+', '"', constraint_sql)
                 create_constraint_query = f"""ALTER TABLE "{target_schema_name}"."{target_table_name}" ADD CONSTRAINT "{constraint_name}_tab_{target_table_name}" CHECK ({constraint_sql})"""
         else:
             create_constraint_query = f"""ALTER TABLE "{target_schema_name}"."{target_table_name}" ADD CONSTRAINT "{constraint_name}" {constraint_sql}"""

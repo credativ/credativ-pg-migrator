@@ -4,6 +4,8 @@
 
 - 2026.08.03
 
+  - Fix - PostgreSQL Connector: Resolved CHECK constraint creation syntax errors (`zero-length delimited identifier at or near """"`) caused by double-quoting identifiers that were already quoted in source CHECK expressions (e.g. `""BT_END""`).
+    - Updated `postgresql_connector.get_create_constraint_sql` to use negative lookbehind/lookahead (`(?<!["\`'])\bcol\b(?!["\`'])`) when quoting column names in CHECK expressions, and added deduplication sanitization for consecutive double quotes.
   - Fix - IBM DB2 LUW Connector: Resolved composite key column parsing errors (`column "ORDER_ID            ORDER_DATE" does not exist`) during foreign key constraint and auto-generated parent index creation.
     - Updated `ibm_db2_luw_connector.fetch_constraints` to replace `+` with spaces and split space-delimited column names in `SYSCAT.REFERENCES.FK_COLNAMES` and `PK_COLNAMES`, correctly separating composite column names (e.g. `"ORDER_ID", "ORDER_DATE"` instead of treating space-padded string `"ORDER_ID            ORDER_DATE"` as a single column name).
   - Fix - IBM DB2 LUW Connector: Resolved query and row count execution errors (`SQL1668N` reason code `5`) when accessing column-organized (`ORGANIZE BY COLUMN`, BLU Acceleration) tables with intra-partition parallelism disabled.

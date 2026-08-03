@@ -4,6 +4,8 @@
 
 - 2026.08.03
 
+  - Fix - IBM DB2 LUW Connector: Resolved CTE view creation failures (`column T.DEPTH does not exist`) caused by unquoted lowercase column alias lists in CTE `WITH` header definitions.
+    - Updated `quote_schema_and_table_names` and `quote_column_names` in `ibm_db2_luw_connector.convert_view_code` to convert case and quote column alias lists (`columns`) in `TableAlias` and `CTE` nodes (e.g. `WITH "TREE"("CATEGORY_ID", "DEPTH")` instead of `WITH "TREE"(category_id, depth)`).
   - Fix - IBM DB2 LUW Connector: Resolved view creation failures (`function listagg(...) does not exist`) by mapping DB2 `LISTAGG(...) WITHIN GROUP (ORDER BY ...)` to PostgreSQL `STRING_AGG(...)`, and expanded SQL function mappings (`VARCHAR_FORMAT` $\rightarrow$ `TO_CHAR`, `TIMESTAMP_FORMAT` $\rightarrow$ `TO_TIMESTAMP`, `LISTAGG` $\rightarrow$ `STRING_AGG`).
     - Updated `ibm_db2_luw_connector.get_sql_functions_mapping` and `convert_view_code` to convert DB2 `LISTAGG(expr, delim) WITHIN GROUP (ORDER BY sort_cols)` syntax into PostgreSQL `STRING_AGG(expr::text, delim ORDER BY sort_cols)`.
   - Fix - IBM DB2 LUW Connector: Resolved MQT (Materialized Query Table) view migration errors (`relation "customers" does not exist` / syntax errors on DB2 storage clauses).

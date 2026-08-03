@@ -1270,6 +1270,18 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
                         expr.set("this", converted_name)
                         if not expr.args.get("quoted"):
                             expr.set("quoted", True)
+            if isinstance(node, sqlglot.exp.CTE):
+                alias = node.args.get("alias")
+                if isinstance(alias, sqlglot.exp.TableAlias):
+                    columns = alias.args.get("columns")
+                    if columns:
+                        for col_id in columns:
+                            if isinstance(col_id, sqlglot.exp.Identifier):
+                                base_col = col_id.name.upper() if not col_id.args.get("quoted") else col_id.name
+                                converted_col = self.config_parser.convert_names_case(base_col)
+                                col_id.set("this", converted_col)
+                                if not col_id.args.get("quoted"):
+                                    col_id.set("quoted", True)
             return node
 
         def replace_schema_names(node):
@@ -1288,6 +1300,15 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
                     alias_id.set("this", converted_alias)
                     if not alias_id.args.get("quoted"):
                         alias_id.set("quoted", True)
+                columns = node.args.get("columns")
+                if columns:
+                    for col_id in columns:
+                        if isinstance(col_id, sqlglot.exp.Identifier):
+                            base_col = col_id.name.upper() if not col_id.args.get("quoted") else col_id.name
+                            converted_col = self.config_parser.convert_names_case(base_col)
+                            col_id.set("this", converted_col)
+                            if not col_id.args.get("quoted"):
+                                col_id.set("quoted", True)
             if isinstance(node, sqlglot.exp.Table):
                 schema = node.args.get("db")
                 schema_name_for_lookup = schema.name.strip() if schema else settings['source_schema_name']

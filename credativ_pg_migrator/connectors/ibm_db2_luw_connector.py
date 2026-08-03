@@ -1426,6 +1426,12 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
                         converted_code = re.sub(rf"(?i)\b{escaped_src_func}\b", tgt_func, converted_code, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
 
             try:
+                # Convert DB2 MQT DDL (CREATE TABLE <name> AS ... DATA INITIALLY DEFERRED ...)
+                if re.search(r'(?i)\bDATA\s+INITIALLY\s+DEFERRED\b', converted_code) or re.search(r'(?i)^\s*CREATE\s+TABLE\b.*\bAS\b', converted_code):
+                    converted_code = re.sub(r'(?i)\bDATA\s+INITIALLY\s+DEFERRED\b.*', '', converted_code)
+                    converted_code = re.sub(r'(?i)\b(REFRESH\s+(?:IMMEDIATE|DEFERRED)|ENABLE\s+QUERY\s+OPTIMIZATION|DISABLE\s+QUERY\s+OPTIMIZATION|MAINTAINED\s+BY\s+(?:SYSTEM|USER|FEDERATED_TOOL))\b', '', converted_code)
+                    converted_code = re.sub(r'(?i)^\s*CREATE\s+TABLE\b', 'CREATE MATERIALIZED VIEW', converted_code.strip())
+
                 # Clean trailing whitespace inside quoted identifiers (e.g. "MIGTEST ")
                 converted_code = re.sub(r'"([^"\s]+)\s+"', r'"\1"', converted_code)
                 # Use default sqlglot dialect because 'db2' dialect is not supported

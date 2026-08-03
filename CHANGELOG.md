@@ -4,6 +4,8 @@
 
 - 2026.08.03
 
+  - Fix - IBM DB2 LUW Connector: Resolved MQT (Materialized Query Table) view migration errors (`relation "customers" does not exist` / syntax errors on DB2 storage clauses).
+    - Updated `ibm_db2_luw_connector.convert_view_code` to strip DB2 MQT clauses (`DATA INITIALLY DEFERRED`, `REFRESH IMMEDIATE` / `DEFERRED`, `ENABLE QUERY OPTIMIZATION`, `MAINTAINED BY SYSTEM` / `USER`), convert `CREATE TABLE ... AS` to `CREATE MATERIALIZED VIEW ... AS`, and properly schema-qualify referenced underlying tables for target PostgreSQL.
   - Fix - IBM DB2 LUW Connector: Resolved recursive CTE view creation failures (`relation "TREE" does not exist` / `HINT: Use WITH RECURSIVE`) and invalid numeric string literals in view expressions (e.g. `"T"."DEPTH" + '1'`).
     - Added `convert_recursive_with` AST transformation in `ibm_db2_luw_connector.convert_view_code` to detect self-referencing CTEs and set `WITH RECURSIVE` for target PostgreSQL syntax.
     - Removed `convert_numeric_literals_to_strings` transformation that incorrectly converted numeric literals (`+ 1`, `< 10`) into string literals (`+ '1'`, `< '10'`).

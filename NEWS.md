@@ -4,6 +4,7 @@ credativ-pg-migrator Releases
 0.16.0 - 03.08.2026
 -------------------
 
+* Fixed IBM DB2 LUW MQT (Materialized Query Table) view migration by stripping DB2 storage/refresh clauses (`DATA INITIALLY DEFERRED REFRESH IMMEDIATE`), converting to `CREATE MATERIALIZED VIEW`, and schema-qualifying referenced underlying tables for target PostgreSQL
 * Fixed IBM DB2 LUW recursive CTE view transpilation (`relation "TREE" does not exist` / `HINT: Use WITH RECURSIVE`) by detecting self-referencing CTEs and emitting `WITH RECURSIVE` in target PostgreSQL SQL, and removed incorrect numeric-to-string literal conversion
 * Fixed IBM DB2 LUW view conversion errors (`relation "MIGTEST .CUSTOMERS" does not exist`) by sanitizing trailing whitespace inside catalog quoted schema identifiers, and excluded DB2 internal expression-index statistical views from view migration
 * Fixed CHECK constraint DDL double-quoting errors (`zero-length delimited identifier at or near """"`) by preventing re-quoting of already quoted identifiers in CHECK expressions

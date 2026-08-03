@@ -4,6 +4,7 @@ credativ-pg-migrator Releases
 0.16.0 - 03.08.2026
 -------------------
 
+* Fixed IBM DB2 LUW recursive CTE view transpilation (`column 5 has type character varying(500)... but type character varying overall`) by aligning and wrapping un-casted `UNION` / `UNION ALL` term expressions with matching `CAST(... AS VARCHAR(N))` types
 * Fixed IBM DB2 LUW trigger conversion by rewriting DB2 `VARCHAR(expr)` scalar casting functions to `CAST(expr AS VARCHAR)`, adding transition table support (`REFERENCING OLD/NEW TABLE AS`), preserving `FOR EACH STATEMENT` scope, and emitting `RETURN NULL;` for statement trigger functions
 * Fixed IBM DB2 LUW lateral subquery view conversion (`syntax error at or near "TABLE"`) by rewriting DB2 `TABLE(SELECT ...)` constructs into PostgreSQL `LATERAL (SELECT ...)` syntax
 * Fixed IBM DB2 LUW CTE view transpilation (`column T.DEPTH does not exist`) by double-quoting and converting case for CTE column alias lists in `WITH` header definitions (e.g. `WITH "TREE"("DEPTH")`)

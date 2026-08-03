@@ -1428,6 +1428,21 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
                     return sqlglot.exp.DPipe(this=new_left, expression=new_right)
             return node
 
+        def align_union_types(union_node):
+            if isinstance(union_node, sqlglot.exp.Union):
+                select1 = union_node.this
+                select2 = union_node.expression
+                if isinstance(select1, sqlglot.exp.Select) and isinstance(select2, sqlglot.exp.Select):
+                    exprs1 = select1.expressions
+                    exprs2 = select2.expressions
+                    for i in range(min(len(exprs1), len(exprs2))):
+                        e1 = exprs1[i]
+                        e2 = exprs2[i]
+                        if isinstance(e1, sqlglot.exp.Cast) and not isinstance(e2, sqlglot.exp.Cast):
+                            select2.expressions[i] = sqlglot.exp.Cast(this=e2, to=e1.to.copy())
+                        elif isinstance(e2, sqlglot.exp.Cast) and not isinstance(e1, sqlglot.exp.Cast):
+                            select1.expressions[i] = sqlglot.exp.Cast(this=e1, to=e2.to.copy())
+
         def convert_recursive_with(node):
             if isinstance(node, sqlglot.exp.With):
                 is_recursive = False
@@ -1439,6 +1454,9 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
                             if table_ref.name and table_ref.name.upper() == cte_name:
                                 is_recursive = True
                                 break
+                        # Align column data types across UNION / UNION ALL arms
+                        for union_node in cte.this.find_all(sqlglot.exp.Union):
+                            align_union_types(union_node)
                     if is_recursive:
                         break
                 if is_recursive:

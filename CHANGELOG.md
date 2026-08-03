@@ -4,6 +4,8 @@
 
 - 2026.08.03
 
+  - Fix - IBM DB2 LUW Connector: Resolved recursive CTE view creation failures (`recursive query "TREE" column 5 has type character varying(500) in non-recursive term but type character varying overall`).
+    - Added `align_union_types` in `ibm_db2_luw_connector.convert_view_code` to automatically align and wrap un-casted expressions across `UNION` / `UNION ALL` arms in recursive CTEs with matching `CAST(... AS VARCHAR(N))` expressions.
   - Fix - IBM DB2 LUW Connector: Resolved trigger creation syntax and execution errors on statement-level triggers and scalar type casting expressions (e.g. `VARCHAR(COUNT(*))`).
     - Updated `ibm_db2_luw_connector.convert_trigger` to convert DB2 `VARCHAR(expr)` scalar function calls into PostgreSQL `CAST(expr AS VARCHAR)`.
     - Added support for statement-level triggers (`FOR EACH STATEMENT`), transition table clauses (`REFERENCING OLD/NEW TABLE AS`), and returning `RETURN NULL;` in PL/pgSQL function bodies for statement triggers.

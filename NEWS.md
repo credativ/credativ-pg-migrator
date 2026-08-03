@@ -1,9 +1,10 @@
 credativ-pg-migrator Releases
 =============================
 
-0.16.0 - 29.07.2026
+0.16.0 - 03.08.2026
 -------------------
 
+* Fixed IBM DB2 LUW query and row count errors (`SQL1668N` reason code `5`) on column-organized (`ORGANIZE BY COLUMN`) tables by adding diagnostic error logging instructing users to enable intra-partition parallelism (`db2 update dbm cfg using INTRA_PARALLEL YES`) in DB2 LUW, and corrected `BLU: "true"` environment setting in the DB2 test container configuration
 * Fixed IBM DB2 LUW table creation failures for `CURRENT TIMESTAMP` column defaults by enforcing word boundaries in `default_values_substitution` patterns and sorting matches by length descending, preventing `CURRENT TIME` from matching inside `CURRENT TIMESTAMP` (`cannot cast type time with time zone to timestamp without time zone`)
 * Fixed IBM DB2 LUW function-based and XML/columnar index migration by joining `SYSCAT.INDEXES` with `SYSCAT.INDEXCOLUSE`, filtering out internal Db2 XML/block/columnar index types (`XPTH`, `XRGN`, `CPMA`, etc.), skipping unindexable column types (`XML`, `CLOB`, `BLOB`, `DBCLOB`) and placeholder columns (`SQLNOTAPPLICABLE`), and extracting expression definitions from `SYSCAT.INDEXCOLUSE.TEXT` with `is_function_based` set, resolving PostgreSQL index creation errors on Db2 internal virtual key columns (`column "K00" does not exist`, `column "SQLNOTAPPLICABLE" does not exist`) and duplicate XML index creation errors (`could not create unique index` on `SPEC_XML`)
 * Fixed MS SQL Server table creation failures for `VARCHAR(MAX)` / `NVARCHAR(MAX)` columns by mapping negative catalog lengths (`-1`) to PostgreSQL `TEXT` and extracting underlying default expressions from legacy `CREATE DEFAULT` bound objects

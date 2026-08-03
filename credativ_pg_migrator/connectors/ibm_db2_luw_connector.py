@@ -1455,6 +1455,13 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
             cursor.close()
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"ibm_db2_luw_connector: execute_query: Error executing query: {query}")
+            if "SQL1668N" in str(e) and "5" in str(e):
+                self.config_parser.print_log_message(
+                    'ERROR',
+                    "ibm_db2_luw_connector: Operation failed because the query accesses a column-organized (BLU) table "
+                    "while intra-partition parallelism is disabled in DB2 LUW. "
+                    "Run 'db2 update dbm cfg using INTRA_PARALLEL YES' and restart DB2."
+                )
             self.config_parser.print_log_message('ERROR', e)
             raise
 
@@ -1492,6 +1499,13 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
             return count
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"ibm_db2_luw_connector: get_rows_count: Error executing query: {query}")
+            if "SQL1668N" in str(e) and "5" in str(e):
+                self.config_parser.print_log_message(
+                    'ERROR',
+                    f"ibm_db2_luw_connector: Table {table_schema.upper()}.{table_name} is a column-organized (BLU) table, "
+                    "which requires intra-partition parallelism to be enabled in DB2 LUW. "
+                    "Run 'db2 update dbm cfg using INTRA_PARALLEL YES' and restart DB2."
+                )
             self.config_parser.print_log_message('ERROR', e)
             raise
 

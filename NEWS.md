@@ -4,6 +4,7 @@ credativ-pg-migrator Releases
 0.16.0 - 03.08.2026
 -------------------
 
+* Fixed IBM DB2 LUW lateral subquery view conversion (`syntax error at or near "TABLE"`) by rewriting DB2 `TABLE(SELECT ...)` constructs into PostgreSQL `LATERAL (SELECT ...)` syntax
 * Fixed IBM DB2 LUW CTE view transpilation (`column T.DEPTH does not exist`) by double-quoting and converting case for CTE column alias lists in `WITH` header definitions (e.g. `WITH "TREE"("DEPTH")`)
 * Fixed IBM DB2 LUW string aggregation view conversion (`function listagg(...) does not exist`) by mapping `LISTAGG(...) WITHIN GROUP (ORDER BY ...)` to PostgreSQL `STRING_AGG(...)` and expanded SQL function mappings in `get_sql_functions_mapping`
 * Fixed IBM DB2 LUW MQT (Materialized Query Table) view migration by stripping DB2 storage/refresh clauses (`DATA INITIALLY DEFERRED REFRESH IMMEDIATE`), converting to `CREATE MATERIALIZED VIEW`, and schema-qualifying referenced underlying tables for target PostgreSQL

@@ -4,6 +4,8 @@
 
 - 2026.08.03
 
+  - Fix - IBM DB2 LUW Connector: Resolved view creation syntax errors (`syntax error at or near "TABLE"`) caused by DB2 `TABLE(SELECT ...)` lateral derived table syntax.
+    - Updated `ibm_db2_luw_connector.convert_view_code` to rewrite DB2 `TABLE(SELECT ...)` and `TABLE(WITH ...)` lateral subqueries into PostgreSQL standard `LATERAL (SELECT ...)` syntax.
   - Fix - IBM DB2 LUW Connector: Resolved CTE view creation failures (`column T.DEPTH does not exist`) caused by unquoted lowercase column alias lists in CTE `WITH` header definitions.
     - Updated `quote_schema_and_table_names` and `quote_column_names` in `ibm_db2_luw_connector.convert_view_code` to convert case and quote column alias lists (`columns`) in `TableAlias` and `CTE` nodes (e.g. `WITH "TREE"("CATEGORY_ID", "DEPTH")` instead of `WITH "TREE"(category_id, depth)`).
   - Fix - IBM DB2 LUW Connector: Resolved view creation failures (`function listagg(...) does not exist`) by mapping DB2 `LISTAGG(...) WITHIN GROUP (ORDER BY ...)` to PostgreSQL `STRING_AGG(...)`, and expanded SQL function mappings (`VARCHAR_FORMAT` $\rightarrow$ `TO_CHAR`, `TIMESTAMP_FORMAT` $\rightarrow$ `TO_TIMESTAMP`, `LISTAGG` $\rightarrow$ `STRING_AGG`).

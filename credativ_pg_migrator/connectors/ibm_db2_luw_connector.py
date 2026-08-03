@@ -1468,6 +1468,13 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
                     converted_code = re.sub(r'(?i)\b(REFRESH\s+(?:IMMEDIATE|DEFERRED)|ENABLE\s+QUERY\s+OPTIMIZATION|DISABLE\s+QUERY\s+OPTIMIZATION|MAINTAINED\s+BY\s+(?:SYSTEM|USER|FEDERATED_TOOL))\b', '', converted_code)
                     converted_code = re.sub(r'(?i)^\s*CREATE\s+TABLE\b', 'CREATE MATERIALIZED VIEW', converted_code.strip())
 
+                # Convert DB2 TABLE(SELECT ...) or TABLE(WITH ...) lateral subqueries to PostgreSQL LATERAL (SELECT ...)
+                converted_code = re.sub(
+                    r'(?i)\bTABLE\s*\(\s*(SELECT\b|WITH\b)',
+                    r'LATERAL (\1',
+                    converted_code
+                )
+
                 # Clean trailing whitespace inside quoted identifiers (e.g. "MIGTEST ")
                 converted_code = re.sub(r'"([^"\s]+)\s+"', r'"\1"', converted_code)
                 # Use default sqlglot dialect because 'db2' dialect is not supported

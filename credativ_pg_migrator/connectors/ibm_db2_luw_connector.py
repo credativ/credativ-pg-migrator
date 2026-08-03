@@ -861,7 +861,8 @@ class IbmDb2LuwConnector(DatabaseConnector):
                 if c.upper().endswith(' ON'):
                     c = c[:-3].strip()
                 if c:
-                    actual_cols.append(c)
+                    converted_c = self.config_parser.convert_names_case(c)
+                    actual_cols.append(f'"{converted_c}"')
             if actual_cols:
                 pg_event += f" OF {', '.join(actual_cols)}"
 
@@ -924,6 +925,14 @@ class IbmDb2LuwConnector(DatabaseConnector):
                 text = re.sub(rf'\b{re.escape(old_alias)}\.', 'OLD.', text, flags=re.IGNORECASE)
             if new_alias.upper() != 'NEW':
                 text = re.sub(rf'\b{re.escape(new_alias)}\.', 'NEW.', text, flags=re.IGNORECASE)
+
+            def replace_record_field(match):
+                prefix = match.group(1).upper()
+                field_name = match.group(2)
+                converted_field = self.config_parser.convert_names_case(field_name)
+                return f'{prefix}."{converted_field}"'
+
+            text = re.sub(r'\b(OLD|NEW)\.([a-zA-Z0-9_]+)\b', replace_record_field, text, flags=re.IGNORECASE)
             return text
 
         when_clause = replace_aliases(when_clause)
@@ -964,7 +973,9 @@ class IbmDb2LuwConnector(DatabaseConnector):
             body += ';'
 
         # Target Generation
-        func_name = f"{trigger_name}_func"
+        target_table_name = self.config_parser.convert_names_case(target_table_name)
+        converted_trigger_name = self.config_parser.convert_names_case(trigger_name)
+        func_name = f"{converted_trigger_name}_func"
 
         if for_each_scope == 'STATEMENT':
             return_stmt = "RETURN NULL;"
@@ -989,7 +1000,7 @@ $$ LANGUAGE plpgsql;
         referencing_sql = f"\nREFERENCING {' '.join(ref_parts)}" if ref_parts else ""
 
         when_sql = f"\nWHEN ({when_clause})" if when_clause else ""
-        pg_trigger = f"""CREATE TRIGGER "{trigger_name}"
+        pg_trigger = f"""CREATE TRIGGER "{converted_trigger_name}"
 {timing} {pg_event} ON "{target_schema_name}"."{target_table_name}"{referencing_sql}
 FOR EACH {for_each_scope}{when_sql}
 EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();

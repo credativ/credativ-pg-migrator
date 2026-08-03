@@ -744,12 +744,16 @@ class IbmDb2LuwConnector(DatabaseConnector):
                     cursor.execute(query_fk)
                     fk_row = cursor.fetchone()
                     if fk_row:
-                        pk_columns = fk_row[0].strip().lstrip('+').split('+')
-                        pk_columns = ', '.join(f'"{col}"' for col in pk_columns)
-                        ref_table_name = fk_row[1]
-                        fk_columns = fk_row[2].strip().lstrip('+').split('+')
-                        fk_columns = ', '.join(f'"{col}"' for col in fk_columns)
+                        raw_pk_cols = fk_row[0] if fk_row[0] else ''
+                        ref_table_name = fk_row[1].strip() if fk_row[1] else ''
+                        raw_fk_cols = fk_row[2] if fk_row[2] else ''
                         ref_table_schema = fk_row[3].strip() if fk_row[3] else source_table_schema
+
+                        pk_col_list = [c.strip('+"\' ') for c in raw_pk_cols.replace('+', ' ').split() if c.strip('+"\' ')]
+                        fk_col_list = [c.strip('+"\' ') for c in raw_fk_cols.replace('+', ' ').split() if c.strip('+"\' ')]
+
+                        pk_columns = ', '.join(f'"{col}"' for col in pk_col_list)
+                        fk_columns = ', '.join(f'"{col}"' for col in fk_col_list)
                     else:
                         ref_table_schema = source_table_schema
 

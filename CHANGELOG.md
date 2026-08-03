@@ -4,6 +4,8 @@
 
 - 2026.08.03
 
+  - Fix - IBM DB2 LUW Connector: Resolved composite key column parsing errors (`column "ORDER_ID            ORDER_DATE" does not exist`) during foreign key constraint and auto-generated parent index creation.
+    - Updated `ibm_db2_luw_connector.fetch_constraints` to replace `+` with spaces and split space-delimited column names in `SYSCAT.REFERENCES.FK_COLNAMES` and `PK_COLNAMES`, correctly separating composite column names (e.g. `"ORDER_ID", "ORDER_DATE"` instead of treating space-padded string `"ORDER_ID            ORDER_DATE"` as a single column name).
   - Fix - IBM DB2 LUW Connector: Resolved query and row count execution errors (`SQL1668N` reason code `5`) when accessing column-organized (`ORGANIZE BY COLUMN`, BLU Acceleration) tables with intra-partition parallelism disabled.
     - Updated `ibm_db2_luw_connector.get_rows_count` and `ibm_db2_luw_connector.execute_query` to catch `SQL1668N` with reason code `5` and log a diagnostic error message explaining that DB2 LUW requires intra-partition parallelism to be enabled (`db2 update dbm cfg using INTRA_PARALLEL YES` followed by restarting DB2).
     - Corrected `BLU` environment variable syntax in `tests/ibm_db2_luw/docker-compose.yaml` to `BLU: "true"` to properly enable BLU Acceleration and intra-partition parallelism in the test DB2 container environment.

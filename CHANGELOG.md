@@ -4,6 +4,9 @@
 
 - 2026.08.03
 
+  - Fix - IBM DB2 LUW Connector: Resolved trigger creation syntax and execution errors on statement-level triggers and scalar type casting expressions (e.g. `VARCHAR(COUNT(*))`).
+    - Updated `ibm_db2_luw_connector.convert_trigger` to convert DB2 `VARCHAR(expr)` scalar function calls into PostgreSQL `CAST(expr AS VARCHAR)`.
+    - Added support for statement-level triggers (`FOR EACH STATEMENT`), transition table clauses (`REFERENCING OLD/NEW TABLE AS`), and returning `RETURN NULL;` in PL/pgSQL function bodies for statement triggers.
   - Fix - IBM DB2 LUW Connector: Resolved view creation syntax errors (`syntax error at or near "TABLE"`) caused by DB2 `TABLE(SELECT ...)` lateral derived table syntax.
     - Updated `ibm_db2_luw_connector.convert_view_code` to rewrite DB2 `TABLE(SELECT ...)` and `TABLE(WITH ...)` lateral subqueries into PostgreSQL standard `LATERAL (SELECT ...)` syntax.
   - Fix - IBM DB2 LUW Connector: Resolved CTE view creation failures (`column T.DEPTH does not exist`) caused by unquoted lowercase column alias lists in CTE `WITH` header definitions.

@@ -865,17 +865,26 @@ class IbmDb2LuwConnector(DatabaseConnector):
             if actual_cols:
                 pg_event += f" OF {', '.join(actual_cols)}"
 
-        # 3. Referencing Aliases
+        # 3. Referencing Aliases & Transition Tables
         old_alias, new_alias = 'OLD', 'NEW'
+        old_table_alias, new_table_alias = None, None
+
         old_match = re.search(r'\bOLD\s+AS\s+([a-zA-Z0-9_]+)\b', trigger_sql, re.IGNORECASE)
         if old_match: old_alias = old_match.group(1)
 
         new_match = re.search(r'\bNEW\s+AS\s+([a-zA-Z0-9_]+)\b', trigger_sql, re.IGNORECASE)
         if new_match: new_alias = new_match.group(1)
 
+        old_table_match = re.search(r'\bOLD\s+TABLE\s+(?:AS\s+)?([a-zA-Z0-9_]+)\b', trigger_sql, re.IGNORECASE)
+        if old_table_match: old_table_alias = old_table_match.group(1)
+
+        new_table_match = re.search(r'\bNEW\s+TABLE\s+(?:AS\s+)?([a-zA-Z0-9_]+)\b', trigger_sql, re.IGNORECASE)
+        if new_table_match: new_table_alias = new_table_match.group(1)
+
         # 4. Extract WHEN and Body
         mode_match = re.search(r'\bMODE\s+DB2SQL\b', trigger_sql, re.IGNORECASE)
         for_each_match = re.search(r'\bFOR\s+EACH\s+(ROW|STATEMENT)\b', trigger_sql, re.IGNORECASE)
+        for_each_scope = for_each_match.group(1).upper() if for_each_match else 'ROW'
 
         start_pos = 0
         if mode_match:
@@ -920,6 +929,9 @@ class IbmDb2LuwConnector(DatabaseConnector):
         when_clause = replace_aliases(when_clause)
         body = replace_aliases(body)
 
+        # Replace DB2 VARCHAR(expr) scalar function conversion
+        body = re.sub(r'(?i)\bVARCHAR\s*\(\s*(COUNT\s*\([^()]*\)|[a-zA-Z0-9_.]+\s*[+*/|-]\s*[^()]+|[a-zA-Z0-9_.]+\.[a-zA-Z0-9_.]+|[a-zA-Z_][a-zA-Z0-9_]*\([^()]*\))\s*\)', r'CAST(\1 AS VARCHAR)', body)
+
         # Replace CURRENT DATE / TIMESTAMP
         body = re.sub(r'\bCURRENT\s+DATE\b', 'CURRENT_DATE', body, flags=re.IGNORECASE)
         body = re.sub(r'\bCURRENT\s+TIMESTAMP\b', 'CURRENT_TIMESTAMP', body, flags=re.IGNORECASE)
@@ -954,18 +966,32 @@ class IbmDb2LuwConnector(DatabaseConnector):
         # Target Generation
         func_name = f"{trigger_name}_func"
 
+        if for_each_scope == 'STATEMENT':
+            return_stmt = "RETURN NULL;"
+        elif timing == 'BEFORE' and event == 'DELETE':
+            return_stmt = "RETURN OLD;"
+        else:
+            return_stmt = "RETURN NEW;"
+
         pg_func = f"""CREATE OR REPLACE FUNCTION "{target_schema_name}"."{func_name}"()
 RETURNS TRIGGER AS $$
 BEGIN
 {body}
-RETURN NEW;
+{return_stmt}
 END;
 $$ LANGUAGE plpgsql;
 """
+        ref_parts = []
+        if old_table_alias:
+            ref_parts.append(f"OLD TABLE AS {old_table_alias}")
+        if new_table_alias:
+            ref_parts.append(f"NEW TABLE AS {new_table_alias}")
+        referencing_sql = f"\nREFERENCING {' '.join(ref_parts)}" if ref_parts else ""
+
         when_sql = f"\nWHEN ({when_clause})" if when_clause else ""
         pg_trigger = f"""CREATE TRIGGER "{trigger_name}"
-{timing} {pg_event} ON "{target_schema_name}"."{target_table_name}"
-FOR EACH ROW{when_sql}
+{timing} {pg_event} ON "{target_schema_name}"."{target_table_name}"{referencing_sql}
+FOR EACH {for_each_scope}{when_sql}
 EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
 """
 

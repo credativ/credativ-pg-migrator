@@ -1388,18 +1388,21 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
                     return sqlglot.exp.DPipe(this=new_left, expression=new_right)
             return node
 
-        def convert_numeric_literals_to_strings(node):
-            if isinstance(node, sqlglot.exp.Binary):
-                left, right = node.left, node.right
-                if isinstance(left, sqlglot.exp.Column) and isinstance(right, sqlglot.exp.Literal) and not right.args.get("is_string"):
-                    right.args["is_string"] = True
-                elif isinstance(right, sqlglot.exp.Column) and isinstance(left, sqlglot.exp.Literal) and not left.args.get("is_string"):
-                    left.args["is_string"] = True
-            elif isinstance(node, sqlglot.exp.DecodeCase):
-                for i in range(1, len(node.expressions) - 1, 2):
-                    search_val = node.expressions[i]
-                    if isinstance(search_val, sqlglot.exp.Literal) and not search_val.args.get("is_string"):
-                        search_val.args["is_string"] = True
+        def convert_recursive_with(node):
+            if isinstance(node, sqlglot.exp.With):
+                is_recursive = False
+                for cte in node.expressions:
+                    if isinstance(cte, sqlglot.exp.CTE):
+                        cte_name = cte.alias_or_name.upper()
+                        # Check if the CTE references itself inside its own query definition
+                        for table_ref in cte.this.find_all(sqlglot.exp.Table):
+                            if table_ref.name and table_ref.name.upper() == cte_name:
+                                is_recursive = True
+                                break
+                    if is_recursive:
+                        break
+                if is_recursive:
+                    node.set("recursive", True)
             return node
 
         view_code = settings['view_code']
@@ -1437,7 +1440,7 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
             parsed_code = parsed_code.transform(quote_schema_and_table_names)
             parsed_code = parsed_code.transform(replace_schema_names)
             parsed_code = parsed_code.transform(replace_functions)
-            parsed_code = parsed_code.transform(convert_numeric_literals_to_strings)
+            parsed_code = parsed_code.transform(convert_recursive_with)
 
             converted_code = parsed_code.sql(dialect="postgres")
             converted_code = converted_code.replace("()()", "()")

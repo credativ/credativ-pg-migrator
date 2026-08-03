@@ -4,6 +4,9 @@
 
 - 2026.08.03
 
+  - Fix - IBM DB2 LUW Connector: Resolved recursive CTE view creation failures (`relation "TREE" does not exist` / `HINT: Use WITH RECURSIVE`) and invalid numeric string literals in view expressions (e.g. `"T"."DEPTH" + '1'`).
+    - Added `convert_recursive_with` AST transformation in `ibm_db2_luw_connector.convert_view_code` to detect self-referencing CTEs and set `WITH RECURSIVE` for target PostgreSQL syntax.
+    - Removed `convert_numeric_literals_to_strings` transformation that incorrectly converted numeric literals (`+ 1`, `< 10`) into string literals (`+ '1'`, `< '10'`).
   - Fix - IBM DB2 LUW Connector: Resolved view creation failures (`relation "MIGTEST .CUSTOMERS" does not exist`) caused by trailing whitespace inside DB2 catalog quoted schema identifiers, and excluded DB2 internal expression-index statistical views from view migration.
     - Updated `ibm_db2_luw_connector.fetch_views_names` to filter out internal Db2 statistical and expression-index views (`SUBSTR(T.PROPERTY, 13, 1) != 'Y'` and `SUBSTR(T.PROPERTY, 19, 1) != 'Y'`).
     - Updated `ibm_db2_luw_connector.convert_view_code` to sanitize trailing whitespace inside double-quoted identifiers (e.g. `"MIGTEST "` $\rightarrow$ `"MIGTEST"`) and strip whitespace when matching/replacing schema names.

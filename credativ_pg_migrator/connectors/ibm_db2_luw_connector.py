@@ -1183,6 +1183,7 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
             FROM SYSCAT.VIEWS V
             LEFT JOIN SYSCAT.TABLES T ON V.VIEWSCHEMA = T.TABSCHEMA AND V.VIEWNAME = T.TABNAME
             WHERE V.VIEWSCHEMA = upper('{source_schema_name}') AND V.VALID = 'Y'
+              AND (T.PROPERTY IS NULL OR (SUBSTR(T.PROPERTY, 13, 1) != 'Y' AND SUBSTR(T.PROPERTY, 19, 1) != 'Y'))
             ORDER BY V.VIEWNAME
         """
         try:
@@ -1281,7 +1282,7 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
         def replace_schema_names(node):
             if isinstance(node, sqlglot.exp.Table):
                 schema = node.args.get("db")
-                if schema and schema.name.upper() == settings['source_schema_name'].upper():
+                if schema and schema.name.strip().upper() == settings['source_schema_name'].strip().upper():
                     node.set("db", sqlglot.exp.Identifier(this=settings['target_schema_name'], quoted=False))
             return node
 
@@ -1296,10 +1297,10 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
                         alias_id.set("quoted", True)
             if isinstance(node, sqlglot.exp.Table):
                 schema = node.args.get("db")
-                schema_name_for_lookup = schema.name if schema else settings['source_schema_name']
+                schema_name_for_lookup = schema.name.strip() if schema else settings['source_schema_name']
                 if schema:
-                    base_schema = schema.name.upper() if not schema.args.get("quoted") else schema.name
-                    converted_schema = self.config_parser.convert_names_case(base_schema)
+                    base_schema = schema.name.strip().upper() if not schema.args.get("quoted") else schema.name.strip()
+                    converted_schema = self.config_parser.convert_names_case(base_schema).strip()
                     schema.set("this", converted_schema)
                     if not schema.args.get("quoted"):
                         schema.set("quoted", True)
@@ -1422,6 +1423,8 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
                         converted_code = re.sub(rf"(?i)\b{escaped_src_func}\b", tgt_func, converted_code, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
 
             try:
+                # Clean trailing whitespace inside quoted identifiers (e.g. "MIGTEST ")
+                converted_code = re.sub(r'"([^"\s]+)\s+"', r'"\1"', converted_code)
                 # Use default sqlglot dialect because 'db2' dialect is not supported
                 parsed_code = sqlglot.parse_one(converted_code)
             except Exception as e:

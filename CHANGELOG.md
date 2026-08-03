@@ -4,6 +4,9 @@
 
 - 2026.08.03
 
+  - Fix - IBM DB2 LUW Connector: Resolved view creation failures (`relation "MIGTEST .CUSTOMERS" does not exist`) caused by trailing whitespace inside DB2 catalog quoted schema identifiers, and excluded DB2 internal expression-index statistical views from view migration.
+    - Updated `ibm_db2_luw_connector.fetch_views_names` to filter out internal Db2 statistical and expression-index views (`SUBSTR(T.PROPERTY, 13, 1) != 'Y'` and `SUBSTR(T.PROPERTY, 19, 1) != 'Y'`).
+    - Updated `ibm_db2_luw_connector.convert_view_code` to sanitize trailing whitespace inside double-quoted identifiers (e.g. `"MIGTEST "` $\rightarrow$ `"MIGTEST"`) and strip whitespace when matching/replacing schema names.
   - Fix - PostgreSQL Connector: Resolved CHECK constraint creation syntax errors (`zero-length delimited identifier at or near """"`) caused by double-quoting identifiers that were already quoted in source CHECK expressions (e.g. `""BT_END""`).
     - Updated `postgresql_connector.get_create_constraint_sql` to use negative lookbehind/lookahead (`(?<!["\`'])\bcol\b(?!["\`'])`) when quoting column names in CHECK expressions, and added deduplication sanitization for consecutive double quotes.
   - Fix - IBM DB2 LUW Connector: Resolved composite key column parsing errors (`column "ORDER_ID            ORDER_DATE" does not exist`) during foreign key constraint and auto-generated parent index creation.

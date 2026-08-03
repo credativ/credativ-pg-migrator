@@ -4,6 +4,7 @@ credativ-pg-migrator Releases
 0.16.0 - 03.08.2026
 -------------------
 
+* Fixed IBM DB2 LUW view conversion errors (`relation "MIGTEST .CUSTOMERS" does not exist`) by sanitizing trailing whitespace inside catalog quoted schema identifiers, and excluded DB2 internal expression-index statistical views from view migration
 * Fixed CHECK constraint DDL double-quoting errors (`zero-length delimited identifier at or near """"`) by preventing re-quoting of already quoted identifiers in CHECK expressions
 * Fixed IBM DB2 LUW foreign key composite column name parsing (`column "ORDER_ID            ORDER_DATE" does not exist`) by properly splitting space-delimited column name strings in `SYSCAT.REFERENCES.FK_COLNAMES` and `PK_COLNAMES`
 * Fixed IBM DB2 LUW query and row count errors (`SQL1668N` reason code `5`) on column-organized (`ORGANIZE BY COLUMN`) tables by adding diagnostic error logging instructing users to enable intra-partition parallelism (`db2 update dbm cfg using INTRA_PARALLEL YES`) in DB2 LUW, and corrected `BLU: "true"` environment setting in the DB2 test container configuration

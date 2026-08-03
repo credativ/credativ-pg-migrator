@@ -861,7 +861,9 @@ class IbmDb2LuwConnector(DatabaseConnector):
                 if c.upper().endswith(' ON'):
                     c = c[:-3].strip()
                 if c:
-                    converted_c = self.config_parser.convert_names_case(c)
+                    is_quoted = c.startswith('"') and c.endswith('"')
+                    base_c = c.strip('"') if is_quoted else c.upper()
+                    converted_c = self.config_parser.convert_names_case(base_c)
                     actual_cols.append(f'"{converted_c}"')
             if actual_cols:
                 pg_event += f" OF {', '.join(actual_cols)}"
@@ -929,10 +931,12 @@ class IbmDb2LuwConnector(DatabaseConnector):
             def replace_record_field(match):
                 prefix = match.group(1).upper()
                 field_name = match.group(2)
-                converted_field = self.config_parser.convert_names_case(field_name)
+                is_quoted = field_name.startswith('"') and field_name.endswith('"')
+                base_field = field_name.strip('"') if is_quoted else field_name.upper()
+                converted_field = self.config_parser.convert_names_case(base_field)
                 return f'{prefix}."{converted_field}"'
 
-            text = re.sub(r'\b(OLD|NEW)\.([a-zA-Z0-9_]+)\b', replace_record_field, text, flags=re.IGNORECASE)
+            text = re.sub(r'\b(OLD|NEW)\.([a-zA-Z0-9_"]+)\b', replace_record_field, text, flags=re.IGNORECASE)
             return text
 
         when_clause = replace_aliases(when_clause)
@@ -983,7 +987,7 @@ class IbmDb2LuwConnector(DatabaseConnector):
                     # Multi-assignment
                     body = "\n".join([f"{c} := {v};" for c, v in zip(cols, vals)])
             else:
-                body = re.sub(r'(?i)^([A-Za-z0-9_.]+)\s*=', r'\1 := ', body)
+                body = re.sub(r'(?i)^([A-Za-z0-9_."]+)\s*=', r'\1 := ', body)
             if not body.strip().endswith(';'):
                 body += ';'
 

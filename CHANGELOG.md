@@ -4,6 +4,9 @@
 
 - 2026.08.03
 
+  - Feature - IBM DB2 for i Connector: Introduced new `ibm_db2_i` source connector supporting structure migration from DDL SQL files and data migration from CSV files.
+    - Added `ibm_db2_i_connector.py` supporting DB2 for i (IBM i / AS/400) syntax specifics (`FOR SYSTEM NAME`, `FOR COLUMN`, `CCSID`, `RECORD FORMAT`, `LABEL ON`).
+    - Registered `ibm_db2_i` in `constants.py`, `config_sample.yaml`, `migrator_tables.py`, `planner.py`, and `orchestrator.py`.
   - Fix - IBM DB2 LUW Connector: Resolved view creation failures (`relation "customers" does not exist`) by ensuring all view DDL statement view names, referenced tables, and CTE identifiers are schema-qualified (`target_schema_name`), double-quoted, and case-converted (`convert_names_case`).
     - Updated `ibm_db2_luw_connector.convert_view_code` to attach `target_schema_name` to un-schema-qualified table references in view definitions, double-quote AST table/schema/column identifiers, and exclude internal CTE references from schema qualification.
   - Fix - IBM DB2 LUW Connector: Resolved recursive CTE view creation failures (`recursive query "TREE" column 5 has type character varying(500) in non-recursive term but type character varying overall`).

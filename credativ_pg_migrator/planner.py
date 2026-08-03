@@ -1587,7 +1587,7 @@ class Planner:
                     data_migration_info = self.migrator_tables.decode_data_migration_row(record)
 
                     part_name = 'check row counts for table ' + data_migration_info['source_table_name']
-                    if self.config_parser.get_source_db_type() == 'ibm_db2_zos':
+                    if self.config_parser.get_source_db_type() in ('ibm_db2_zos', 'ibm_db2_i'):
                         source_table_rows_all = data_migration_info.get('source_table_rows_all', 0)
                         source_table_rows_limited = data_migration_info.get('source_table_rows_limited', 0)
                     else:

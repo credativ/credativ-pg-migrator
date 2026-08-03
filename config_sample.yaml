@@ -41,7 +41,7 @@ migrator:
   schema: "migration"
 
 # source database connection
-# type: "informix", "sybase_ase", "mssql", "ibm_db2_luw", "ibm_db2_zos", "mysql", "mariadb", "sql_anywhere", "postgresql", "oracle"
+# type: "informix", "sybase_ase", "mssql", "ibm_db2_luw", "ibm_db2_zos", "ibm_db2_i", "mysql", "mariadb", "sql_anywhere", "postgresql", "oracle"
 source:
   type: "sybase_ase"
   host: "localhost"
@@ -77,7 +77,8 @@ source:
     path: "/path/to/ddl/directory" # either directory, or directory with mask for files or one specific file - currently no placeholders are supported here
   # system catalog is used only for some database
   # ibm_db2_luw - SYSCAT or SYSIBM - sysibm simulates the information_schema
-  # ibm_db2_zos - currently implements only DDL connectivity
+  # ibm_db2_zos - currently implements DDL connectivity and CSV data source
+  # ibm_db2_i   - implements DDL connectivity (parsing DB2 for i DDL) and CSV data source
   # mssql - SYS or INFORMATION_SCHEMA
   system_catalog: "SYSIBM"
 

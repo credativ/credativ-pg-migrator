@@ -3321,7 +3321,7 @@ class MigratorTables:
                 view_row = self.decode_view_row(row)
                 self.config_parser.print_log_message('DEBUG3', f"migrator_tables: update_view_status: ({func_run_id}): Returned row: {view_row}")
                 self.update_protocol({'object_type': 'view', 'object_protocol_id': view_row['id'], 'execution_success': success, 'execution_error_message': message, 'execution_results': None})
-                if view_row.get('alias_view') and self.config_parser.get_source_db_type() == 'ibm_db2_zos':
+                if view_row.get('alias_view') and self.config_parser.get_source_db_type() in ('ibm_db2_zos', 'ibm_db2_i'):
                     source_alias_id = view_row.get('source_view_id') - 1000000
                     cursor = self.protocol_connection.connection.cursor()
                     cursor.execute(f'SELECT id FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_aliases()}" WHERE source_alias_id = %s', (source_alias_id,))

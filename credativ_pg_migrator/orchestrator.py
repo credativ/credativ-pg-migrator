@@ -1241,7 +1241,7 @@ class Orchestrator:
 
                                         target_table_rows = worker_target_connection.get_rows_count(target_schema_name, target_table_name)
                                         rows_migrated = target_table_rows
-                                        if self.config_parser.get_source_db_type() == 'ibm_db2_zos':
+                                        if self.config_parser.get_source_db_type() in ('ibm_db2_zos', 'ibm_db2_i'):
                                             source_table_rows_all = target_table_rows
                                             source_table_rows_limited = target_table_rows
                                             migrator_tables.update_data_migration_rows({

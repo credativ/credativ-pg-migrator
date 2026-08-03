@@ -1312,6 +1312,8 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
 
     def convert_view_code(self, settings: dict):
 
+        cte_names = set()
+
         def quote_column_names(node):
             if isinstance(node, sqlglot.exp.Column):
                 if node.name:
@@ -1324,34 +1326,35 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
                     base_table = table_id.name.upper() if not table_id.args.get("quoted") else table_id.name
                     converted_table = self.config_parser.convert_names_case(base_table)
                     table_id.set("this", converted_table)
-                    if not table_id.args.get("quoted"):
-                        table_id.set("quoted", True)
+                    table_id.set("quoted", True)
                         
                 db_id = node.args.get("db")
                 if isinstance(db_id, sqlglot.exp.Identifier):
-                    base_db = db_id.name.upper() if not db_id.args.get("quoted") else db_id.name
-                    converted_db = self.config_parser.convert_names_case(base_db)
-                    db_id.set("this", converted_db)
-                    if not db_id.args.get("quoted"):
-                        db_id.set("quoted", True)
+                    target_schema = settings.get('target_schema_name') or 'public'
+                    db_id.set("this", target_schema)
+                    db_id.set("quoted", True)
             if isinstance(node, sqlglot.exp.Alias) and isinstance(node.args.get("alias"), sqlglot.exp.Identifier):
                 alias = node.args["alias"]
                 base_name = alias.name.upper() if not alias.args.get("quoted") else alias.name
                 converted_alias = self.config_parser.convert_names_case(base_name)
                 alias.set("this", converted_alias)
-                if not alias.args.get("quoted"):
-                    alias.set("quoted", True)
+                alias.set("quoted", True)
             if isinstance(node, sqlglot.exp.Schema):
                 for expr in node.expressions:
                     if isinstance(expr, sqlglot.exp.Identifier):
                         base_name = expr.name.upper() if not expr.args.get("quoted") else expr.name
                         converted_name = self.config_parser.convert_names_case(base_name)
                         expr.set("this", converted_name)
-                        if not expr.args.get("quoted"):
-                            expr.set("quoted", True)
+                        expr.set("quoted", True)
             if isinstance(node, sqlglot.exp.CTE):
                 alias = node.args.get("alias")
                 if isinstance(alias, sqlglot.exp.TableAlias):
+                    alias_this = alias.args.get("this")
+                    if isinstance(alias_this, sqlglot.exp.Identifier):
+                        base_cte = alias_this.name.upper() if not alias_this.args.get("quoted") else alias_this.name
+                        converted_cte = self.config_parser.convert_names_case(base_cte)
+                        alias_this.set("this", converted_cte)
+                        alias_this.set("quoted", True)
                     columns = alias.args.get("columns")
                     if columns:
                         for col_id in columns:
@@ -1359,15 +1362,7 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
                                 base_col = col_id.name.upper() if not col_id.args.get("quoted") else col_id.name
                                 converted_col = self.config_parser.convert_names_case(base_col)
                                 col_id.set("this", converted_col)
-                                if not col_id.args.get("quoted"):
-                                    col_id.set("quoted", True)
-            return node
-
-        def replace_schema_names(node):
-            if isinstance(node, sqlglot.exp.Table):
-                schema = node.args.get("db")
-                if schema and schema.name.strip().upper() == settings['source_schema_name'].strip().upper():
-                    node.set("db", sqlglot.exp.Identifier(this=settings['target_schema_name'], quoted=False))
+                                col_id.set("quoted", True)
             return node
 
         def quote_schema_and_table_names(node):
@@ -1377,8 +1372,7 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
                     base_alias = alias_id.name.upper() if not alias_id.args.get("quoted") else alias_id.name
                     converted_alias = self.config_parser.convert_names_case(base_alias)
                     alias_id.set("this", converted_alias)
-                    if not alias_id.args.get("quoted"):
-                        alias_id.set("quoted", True)
+                    alias_id.set("quoted", True)
                 columns = node.args.get("columns")
                 if columns:
                     for col_id in columns:
@@ -1386,22 +1380,30 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
                             base_col = col_id.name.upper() if not col_id.args.get("quoted") else col_id.name
                             converted_col = self.config_parser.convert_names_case(base_col)
                             col_id.set("this", converted_col)
-                            if not col_id.args.get("quoted"):
-                                col_id.set("quoted", True)
+                            col_id.set("quoted", True)
             if isinstance(node, sqlglot.exp.Table):
+                table = node.args.get("this")
                 schema = node.args.get("db")
                 schema_name_for_lookup = schema.name.strip() if schema else settings['source_schema_name']
-                if schema:
-                    base_schema = schema.name.strip().upper() if not schema.args.get("quoted") else schema.name.strip()
-                    converted_schema = self.config_parser.convert_names_case(base_schema).strip()
-                    schema.set("this", converted_schema)
-                    if not schema.args.get("quoted"):
-                        schema.set("quoted", True)
-                table = node.args.get("this")
+
+                is_create_view_table = isinstance(node.parent, sqlglot.exp.Create) or isinstance(node.parent, sqlglot.exp.Schema)
+
                 if table:
-                    # Lookup alias if enabled
-                    table_name_to_use = table.name.upper() if not table.args.get("quoted") else table.name
-                    if not isinstance(node.parent, sqlglot.exp.Create):
+                    if isinstance(table, sqlglot.exp.Identifier):
+                        table_name_to_use = table.name.upper() if not table.args.get("quoted") else table.name
+                    else:
+                        table_name_to_use = str(table).upper()
+
+                    target_schema = settings.get('target_schema_name') or 'public'
+
+                    if is_create_view_table:
+                        view_target = settings.get('target_view_name') or table_name_to_use
+                        converted_table = self.config_parser.convert_names_case(view_target)
+                        node.set("db", sqlglot.exp.Identifier(this=target_schema, quoted=True))
+                    elif table_name_to_use in cte_names:
+                        converted_table = self.config_parser.convert_names_case(table_name_to_use)
+                        node.set("db", None)
+                    else:
                         if self.config_parser.get_use_aliases_as_target_names() and settings.get('migrator_tables'):
                             alias_dict = settings['migrator_tables'].get_alias_for_table(schema_name_for_lookup, table_name_to_use)
                             if alias_dict and not settings.get('alias_view'):
@@ -1414,13 +1416,11 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
                                     else:
                                         self.config_parser.print_log_message('INFO', f"ibm_db2_luw_connector: convert_view_code: Replaced referenced table '{table_name_to_use}' with alias '{alias_name}' inside view generation. Settings: {settings}")
                                         table_name_to_use = alias_name
-                                else:
-                                    self.config_parser.print_log_message('DEBUG', f"ibm_db2_luw_connector: convert_view_code: Skipped replacing '{table_name_to_use}' with alias '{alias_name}' because alias points to a {alias_target_type}, not a TABLE.")
 
-                    converted_table = self.config_parser.convert_names_case(table_name_to_use)
-                    table.set("this", converted_table)
-                    if not table.args.get("quoted"):
-                        table.set("quoted", True)
+                        converted_table = self.config_parser.convert_names_case(table_name_to_use)
+                        node.set("db", sqlglot.exp.Identifier(this=target_schema, quoted=True))
+
+                    node.set("this", sqlglot.exp.Identifier(this=converted_table, quoted=True))
             return node
 
         def replace_functions(node):
@@ -1576,6 +1576,11 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
                 converted_code = re.sub(r'"([^"\s]+)\s+"', r'"\1"', converted_code)
                 # Use default sqlglot dialect because 'db2' dialect is not supported
                 parsed_code = sqlglot.parse_one(converted_code)
+
+                # Collect all CTE names in query to avoid schema-qualifying CTE references
+                for cte_node in parsed_code.find_all(sqlglot.exp.CTE):
+                    if cte_node.alias_or_name:
+                        cte_names.add(cte_node.alias_or_name.upper())
             except Exception as e:
                 self.config_parser.print_log_message('ERROR', f"ibm_db2_luw_connector: convert_view_code: Error parsing View code: {e}")
                 # Fallback to the unparsed converted_code instead of empty string to avoid crashes
@@ -1584,7 +1589,6 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
             parsed_code = parsed_code.transform(quote_column_names)
             parsed_code = parsed_code.transform(convert_string_concatenation)
             parsed_code = parsed_code.transform(quote_schema_and_table_names)
-            parsed_code = parsed_code.transform(replace_schema_names)
             parsed_code = parsed_code.transform(replace_functions)
             parsed_code = parsed_code.transform(convert_recursive_with)
 

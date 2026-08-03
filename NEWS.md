@@ -4,6 +4,7 @@ credativ-pg-migrator Releases
 0.16.0 - 03.08.2026
 -------------------
 
+* Fixed IBM DB2 LUW view transpilation (`relation "customers" does not exist`) by schema-qualifying un-qualified table references (`target_schema_name`), double-quoting AST identifiers, and converting case according to `migration.names_case_handling`
 * Fixed IBM DB2 LUW recursive CTE view transpilation (`column 5 has type character varying(500)... but type character varying overall`) by aligning and wrapping un-casted `UNION` / `UNION ALL` term expressions with matching `CAST(... AS VARCHAR(N))` types
 * Enforced `migration.names_case_handling` case conversion consistently across the whole IBM DB2 LUW connector for all database objects and attributes (tables, columns, indexes, PK/FK columns, referenced tables, constraints, triggers, sequences, aliases, views)
 * Fixed IBM DB2 LUW trigger and procedure error signaling (`SIGNAL SQLSTATE 'code' SET MESSAGE_TEXT = 'msg'`) by rewriting into PostgreSQL `RAISE EXCEPTION 'msg' USING ERRCODE = 'code'`

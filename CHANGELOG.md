@@ -4,6 +4,8 @@
 
 - 2026.08.03
 
+  - Fix - IBM DB2 LUW Connector: Resolved view creation failures (`relation "customers" does not exist`) by ensuring all view DDL statement view names, referenced tables, and CTE identifiers are schema-qualified (`target_schema_name`), double-quoted, and case-converted (`convert_names_case`).
+    - Updated `ibm_db2_luw_connector.convert_view_code` to attach `target_schema_name` to un-schema-qualified table references in view definitions, double-quote AST table/schema/column identifiers, and exclude internal CTE references from schema qualification.
   - Fix - IBM DB2 LUW Connector: Resolved recursive CTE view creation failures (`recursive query "TREE" column 5 has type character varying(500) in non-recursive term but type character varying overall`).
     - Added `align_union_types` in `ibm_db2_luw_connector.convert_view_code` to automatically align and wrap un-casted expressions across `UNION` / `UNION ALL` arms in recursive CTEs with matching `CAST(... AS VARCHAR(N))` expressions.
   - Fix - IBM DB2 LUW Connector: Comprehensive audit and enforcement of `migration.names_case_handling` configuration across all metadata fetching and object conversion methods.

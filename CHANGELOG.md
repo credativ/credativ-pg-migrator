@@ -6,6 +6,8 @@
 
   - Fix - IBM DB2 LUW Connector: Resolved recursive CTE view creation failures (`recursive query "TREE" column 5 has type character varying(500) in non-recursive term but type character varying overall`).
     - Added `align_union_types` in `ibm_db2_luw_connector.convert_view_code` to automatically align and wrap un-casted expressions across `UNION` / `UNION ALL` arms in recursive CTEs with matching `CAST(... AS VARCHAR(N))` expressions.
+  - Fix - IBM DB2 LUW Connector: Resolved trigger and routine creation syntax errors caused by DB2 `SIGNAL SQLSTATE 'code' SET MESSAGE_TEXT = 'msg'` error signaling statements.
+    - Updated `ibm_db2_luw_connector.convert_trigger` and `convert_funcproc_code` to rewrite DB2 `SIGNAL SQLSTATE [VALUE] 'code' SET MESSAGE_TEXT = 'msg'` statements to PostgreSQL `RAISE EXCEPTION 'msg' USING ERRCODE = 'code'`.
   - Fix - IBM DB2 LUW Connector: Resolved trigger creation and execution failures (`column old.status does not exist`) by enforcing consistent case handling (`migration.names_case_handling`) and double quoting for `OLD`/`NEW` record fields, `UPDATE OF` column lists, and trigger/table names.
     - Updated `ibm_db2_luw_connector.convert_trigger` to convert DB2 `VARCHAR(expr)` scalar function calls into PostgreSQL `CAST(expr AS VARCHAR)`, apply `convert_names_case` and double quotes to `OLD."<COL>"` / `NEW."<COL>"` record fields, `UPDATE OF` column lists, and trigger/table names.
     - Added support for statement-level triggers (`FOR EACH STATEMENT`), transition table clauses (`REFERENCING OLD/NEW TABLE AS`), and returning `RETURN NULL;` in PL/pgSQL function bodies for statement triggers.

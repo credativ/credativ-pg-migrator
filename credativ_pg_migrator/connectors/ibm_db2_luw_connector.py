@@ -948,8 +948,27 @@ class IbmDb2LuwConnector(DatabaseConnector):
         when_clause = re.sub(r'\bCURRENT\s+TIMESTAMP\b', 'CURRENT_TIMESTAMP', when_clause, flags=re.IGNORECASE)
 
         # Handle SIGNAL SQLSTATE and RAISE_ERROR
-        body = re.sub(r"(?i)SIGNAL\s+SQLSTATE\s+'([^']+)'\s*\(\s*('[^']+')\s*\);?", r"RAISE EXCEPTION \2 USING ERRCODE = '\1';", body)
-        body = re.sub(r"(?i)RAISE_ERROR\s*\(\s*'([^']+)'\s*,\s*('[^']+')\s*\)", r"RAISE EXCEPTION \2 USING ERRCODE = '\1';", body)
+        body = re.sub(
+            r"(?i)\bSIGNAL\s+SQLSTATE\s+(?:VALUE\s+)?'([^']+)'\s+SET\s+MESSAGE_TEXT\s*=\s*('[^']+'|[a-zA-Z0-9_.]+);?",
+            r"RAISE EXCEPTION \2 USING ERRCODE = '\1';",
+            body,
+            flags=re.MULTILINE | re.DOTALL
+        )
+        body = re.sub(
+            r"(?i)\bSIGNAL\s+SQLSTATE\s+'([^']+)'\s*\(\s*('[^']+'|[a-zA-Z0-9_.]+)\s*\);?",
+            r"RAISE EXCEPTION \2 USING ERRCODE = '\1';",
+            body
+        )
+        body = re.sub(
+            r"(?i)\bSIGNAL\s+SQLSTATE\s+'([^']+)';?",
+            r"RAISE EXCEPTION 'Error %', '\1' USING ERRCODE = '\1';",
+            body
+        )
+        body = re.sub(
+            r"(?i)\bRAISE_ERROR\s*\(\s*'([^']+)'\s*,\s*('[^']+'|[a-zA-Z0-9_.]+)\s*\)",
+            r"RAISE EXCEPTION \2 USING ERRCODE = '\1';",
+            body
+        )
 
         # Handle assignments: SET a = b or SET (a,b) = (c,d)
         if body.upper().startswith('SET'):
@@ -1035,6 +1054,29 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
                         converted_code = re.sub(rf"(?i)\b{escaped_src_func}", tgt_func, converted_code, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
                     else:
                         converted_code = re.sub(rf"(?i)\b{escaped_src_func}\b", tgt_func, converted_code, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
+
+            # Handle SIGNAL SQLSTATE and RAISE_ERROR
+            converted_code = re.sub(
+                r"(?i)\bSIGNAL\s+SQLSTATE\s+(?:VALUE\s+)?'([^']+)'\s+SET\s+MESSAGE_TEXT\s*=\s*('[^']+'|[a-zA-Z0-9_.]+);?",
+                r"RAISE EXCEPTION \2 USING ERRCODE = '\1';",
+                converted_code,
+                flags=re.MULTILINE | re.DOTALL
+            )
+            converted_code = re.sub(
+                r"(?i)\bSIGNAL\s+SQLSTATE\s+'([^']+)'\s*\(\s*('[^']+'|[a-zA-Z0-9_.]+)\s*\);?",
+                r"RAISE EXCEPTION \2 USING ERRCODE = '\1';",
+                converted_code
+            )
+            converted_code = re.sub(
+                r"(?i)\bSIGNAL\s+SQLSTATE\s+'([^']+)';?",
+                r"RAISE EXCEPTION 'Error %', '\1' USING ERRCODE = '\1';",
+                converted_code
+            )
+            converted_code = re.sub(
+                r"(?i)\bRAISE_ERROR\s*\(\s*'([^']+)'\s*,\s*('[^']+'|[a-zA-Z0-9_.]+)\s*\)",
+                r"RAISE EXCEPTION \2 USING ERRCODE = '\1';",
+                converted_code
+            )
 
         return converted_code
 

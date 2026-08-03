@@ -6,6 +6,8 @@
 
   - Fix - IBM DB2 LUW Connector: Resolved recursive CTE view creation failures (`recursive query "TREE" column 5 has type character varying(500) in non-recursive term but type character varying overall`).
     - Added `align_union_types` in `ibm_db2_luw_connector.convert_view_code` to automatically align and wrap un-casted expressions across `UNION` / `UNION ALL` arms in recursive CTEs with matching `CAST(... AS VARCHAR(N))` expressions.
+  - Fix - IBM DB2 LUW Connector: Comprehensive audit and enforcement of `migration.names_case_handling` configuration across all metadata fetching and object conversion methods.
+    - Updated `fetch_table_names`, `fetch_table_columns`, `fetch_indexes`, `fetch_constraints`, `fetch_triggers`, `fetch_sequences`, `get_aliases`, and `fetch_views_names` to apply `self.config_parser.convert_names_case(...)` to all object names (tables, columns, indexes, PK/FK columns, referenced tables, constraints, triggers, sequences, aliases, views) and their attributes.
   - Fix - IBM DB2 LUW Connector: Resolved trigger and routine creation syntax errors caused by DB2 `SIGNAL SQLSTATE 'code' SET MESSAGE_TEXT = 'msg'` error signaling statements.
     - Updated `ibm_db2_luw_connector.convert_trigger` and `convert_funcproc_code` to rewrite DB2 `SIGNAL SQLSTATE [VALUE] 'code' SET MESSAGE_TEXT = 'msg'` statements to PostgreSQL `RAISE EXCEPTION 'msg' USING ERRCODE = 'code'`.
   - Fix - IBM DB2 LUW Connector: Resolved trigger creation and execution failures (`column old.status does not exist`) by enforcing consistent case handling (`migration.names_case_handling`) and double quoting for `OLD`/`NEW` record fields, `UPDATE OF` column lists, and trigger/table names.

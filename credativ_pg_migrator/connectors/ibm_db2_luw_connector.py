@@ -71,17 +71,19 @@ class IbmDb2LuwConnector(DatabaseConnector):
                 "VALUE(": "COALESCE(",
                 "IFNULL(": "COALESCE(",
                 "NVL(": "COALESCE(",
-                ## "DECODE(expr, search, result, default)": "CASE expr WHEN search THEN result ELSE default END",
 
                 # --- String Functions ---
                 "SUBSTR(": "SUBSTRING(",
                 "POSSTR(": "STRPOS(",       # DB2's POSSTR takes (source, search)
-                "LOCATE(": "POSITION(", # DB2's LOCATE takes (search, source)
+                "LOCATE(": "POSITION(",     # DB2's LOCATE takes (search, source)
                 "UCASE(": "UPPER(",
                 "LCASE(": "LOWER(",
                 "STRIP(": "TRIM(",
                 "LENGTH(": "LENGTH(",
-                "CONCAT(": "CONCAT(",                 # Or simply use the str1 || str2 operator
+                "CONCAT(": "CONCAT(",
+                "VARCHAR_FORMAT(": "TO_CHAR(",
+                "TIMESTAMP_FORMAT(": "TO_TIMESTAMP(",
+                "LISTAGG(": "STRING_AGG(",
 
                 # --- Date and Time Functions ---
                 "YEAR(": "EXTRACT(YEAR FROM ",
@@ -91,20 +93,11 @@ class IbmDb2LuwConnector(DatabaseConnector):
                 "MINUTE(": "EXTRACT(MINUTE FROM ",
                 "SECOND(": "EXTRACT(SECOND FROM ",
 
-                # Db2 DAYS() returns the integer number of days since Jan 1, 0001.
-                # To replicate this exact integer in Postgres, you subtract that date from your column.
-                ## "DAYS(date_col)": "(date_col::DATE - '0001-01-01'::DATE)",
-
-                # "DATE(expr)": "expr::DATE",                                 # Or CAST(expr AS DATE)
-                # "TIMESTAMP(expr)": "expr::TIMESTAMP",                       # Or CAST(expr AS TIMESTAMP)
-                # "ADD_DAYS(date_col, n)": "date_col + (n || ' days')::INTERVAL",
-                # "ADD_MONTHS(date_col, n)": "date_col + (n || ' months')::INTERVAL",
-
                 # --- Math & Numeric Functions ---
                 "CEILING(": "CEIL(",
                 "TRUNCATE(": "TRUNC(",
                 "RAND()": "RANDOM()",
-                "DECFLOAT(": "num::NUMERIC",                            # PostgreSQL uses NUMERIC for arbitrary precision
+                "DECFLOAT(": "NUMERIC(",
             }
         else:
             self.config_parser.print_log_message('ERROR', f"ibm_db2_luw_connector: get_sql_functions_mapping: Unsupported target database type: {target_db_type}")
@@ -1416,6 +1409,28 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
                     converted_code = re.sub(re.escape(source_obj), target_obj, converted_code, flags=re.IGNORECASE)
 
         if settings['target_db_type'] == 'postgresql':
+            # Convert DB2 LISTAGG(...) WITHIN GROUP (ORDER BY ...) to PostgreSQL STRING_AGG(...)
+            converted_code = re.sub(
+                r"(?i)\bLISTAGG\s*\(\s*([^,()]+?)\s*,\s*('[^']*'|[^()]+?)\s*\)\s*WITHIN\s+GROUP\s*\(\s*ORDER\s+BY\s+([^()]+?)\s*\)",
+                r"STRING_AGG(\1::text, \2 ORDER BY \3)",
+                converted_code,
+            )
+            converted_code = re.sub(
+                r"(?i)\bLISTAGG\s*\(\s*([^,()]+?)\s*,\s*('[^']*'|[^()]+?)\s*\)",
+                r"STRING_AGG(\1::text, \2)",
+                converted_code,
+            )
+            converted_code = re.sub(
+                r"(?i)\bLISTAGG\s*\(\s*([^,()]+?)\s*\)\s*WITHIN\s+GROUP\s*\(\s*ORDER\s+BY\s+([^()]+?)\s*\)",
+                r"STRING_AGG(\1::text, '' ORDER BY \2)",
+                converted_code,
+            )
+            converted_code = re.sub(
+                r"(?i)\bLISTAGG\s*\(\s*([^,()]+?)\s*\)",
+                r"STRING_AGG(\1::text, '')",
+                converted_code,
+            )
+
             sql_functions_mapping = self.get_sql_functions_mapping({ 'target_db_type': settings['target_db_type'] })
             if sql_functions_mapping:
                 for src_func, tgt_func in sql_functions_mapping.items():

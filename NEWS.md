@@ -4,6 +4,7 @@ credativ-pg-migrator Releases
 0.16.0 - 03.08.2026
 -------------------
 
+* Fixed IBM DB2 LUW string aggregation view conversion (`function listagg(...) does not exist`) by mapping `LISTAGG(...) WITHIN GROUP (ORDER BY ...)` to PostgreSQL `STRING_AGG(...)` and expanded SQL function mappings in `get_sql_functions_mapping`
 * Fixed IBM DB2 LUW MQT (Materialized Query Table) view migration by stripping DB2 storage/refresh clauses (`DATA INITIALLY DEFERRED REFRESH IMMEDIATE`), converting to `CREATE MATERIALIZED VIEW`, and schema-qualifying referenced underlying tables for target PostgreSQL
 * Fixed IBM DB2 LUW recursive CTE view transpilation (`relation "TREE" does not exist` / `HINT: Use WITH RECURSIVE`) by detecting self-referencing CTEs and emitting `WITH RECURSIVE` in target PostgreSQL SQL, and removed incorrect numeric-to-string literal conversion
 * Fixed IBM DB2 LUW view conversion errors (`relation "MIGTEST .CUSTOMERS" does not exist`) by sanitizing trailing whitespace inside catalog quoted schema identifiers, and excluded DB2 internal expression-index statistical views from view migration

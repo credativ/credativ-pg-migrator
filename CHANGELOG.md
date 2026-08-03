@@ -4,6 +4,8 @@
 
 - 2026.08.03
 
+  - Fix - IBM DB2 LUW Connector: Resolved view creation failures (`function listagg(...) does not exist`) by mapping DB2 `LISTAGG(...) WITHIN GROUP (ORDER BY ...)` to PostgreSQL `STRING_AGG(...)`, and expanded SQL function mappings (`VARCHAR_FORMAT` $\rightarrow$ `TO_CHAR`, `TIMESTAMP_FORMAT` $\rightarrow$ `TO_TIMESTAMP`, `LISTAGG` $\rightarrow$ `STRING_AGG`).
+    - Updated `ibm_db2_luw_connector.get_sql_functions_mapping` and `convert_view_code` to convert DB2 `LISTAGG(expr, delim) WITHIN GROUP (ORDER BY sort_cols)` syntax into PostgreSQL `STRING_AGG(expr::text, delim ORDER BY sort_cols)`.
   - Fix - IBM DB2 LUW Connector: Resolved MQT (Materialized Query Table) view migration errors (`relation "customers" does not exist` / syntax errors on DB2 storage clauses).
     - Updated `ibm_db2_luw_connector.convert_view_code` to strip DB2 MQT clauses (`DATA INITIALLY DEFERRED`, `REFRESH IMMEDIATE` / `DEFERRED`, `ENABLE QUERY OPTIMIZATION`, `MAINTAINED BY SYSTEM` / `USER`), convert `CREATE TABLE ... AS` to `CREATE MATERIALIZED VIEW ... AS`, and properly schema-qualify referenced underlying tables for target PostgreSQL.
   - Fix - IBM DB2 LUW Connector: Resolved recursive CTE view creation failures (`relation "TREE" does not exist` / `HINT: Use WITH RECURSIVE`) and invalid numeric string literals in view expressions (e.g. `"T"."DEPTH" + '1'`).

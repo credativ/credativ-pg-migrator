@@ -255,8 +255,9 @@ class IbmDb2ZosConnector(DatabaseConnector):
             # Remove the extracted triggers from content so they aren't parsed again
             content = trigger_pattern.sub("", content)
 
-            # Split statements by ';' or by '@' if it appears at the end of the line
-            statements = re.split(r';|@(?=\s*(?:\n|$))', content)
+            # Split statements by ';' or by '@' at the end of a line, but not inside comments
+            # and string literals
+            statements = self.split_sql_statements(content)
             for stmt in statements:
                 stmt = stmt.strip()
                 if not stmt:
@@ -942,6 +943,78 @@ class IbmDb2ZosConnector(DatabaseConnector):
             cursor.close()
         return triggers
 
+    def split_sql_statements(self, content: str) -> list:
+        """
+        Splits the content of a DDL file into single statements. Statement terminators inside
+        string literals, line comments and block comments are ignored - DDL exports regularly
+        contain prose comments with a semicolon in them ("... unloaded HEX-converted; NOTES"),
+        which would otherwise cut the following statement in half. Comments are kept in the
+        returned statements, the caller extracts the object comments from them.
+        """
+        statements = []
+        current = []
+        in_literal = False
+        in_line_comment = False
+        in_block_comment = False
+        length = len(content)
+        i = 0
+        while i < length:
+            char = content[i]
+            next_char = content[i+1] if i + 1 < length else ''
+
+            if in_line_comment:
+                current.append(char)
+                if char == '\n':
+                    in_line_comment = False
+            elif in_block_comment:
+                current.append(char)
+                if char == '*' and next_char == '/':
+                    current.append(next_char)
+                    i += 1
+                    in_block_comment = False
+            elif in_literal:
+                current.append(char)
+                if char == "'":
+                    # '' inside a literal is an escaped quote, not its end
+                    if next_char == "'":
+                        current.append(next_char)
+                        i += 1
+                    else:
+                        in_literal = False
+            elif char == '-' and next_char == '-':
+                current.append(char)
+                current.append(next_char)
+                i += 1
+                in_line_comment = True
+            elif char == '/' and next_char == '*':
+                current.append(char)
+                current.append(next_char)
+                i += 1
+                in_block_comment = True
+            elif char == "'":
+                in_literal = True
+                current.append(char)
+            elif char == ';':
+                statements.append("".join(current))
+                current = []
+            elif char == '@':
+                # '@' terminates a statement only when it stands alone at the end of a line
+                j = i + 1
+                while j < length and content[j] in ' \t\r':
+                    j += 1
+                if j >= length or content[j] == '\n':
+                    statements.append("".join(current))
+                    current = []
+                else:
+                    current.append(char)
+            else:
+                current.append(char)
+            i += 1
+
+        if current:
+            statements.append("".join(current))
+        return statements
+
     def replace_outside_string_literals(self, code: str, pattern: str, replacement: str) -> str:
         """
         Applies re.sub only to the parts of the code which are not inside a string literal,
@@ -1467,23 +1540,46 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
 
     def convert_view_code(self, settings: dict):
 
+        def convert_identifier_case(name, quoted):
+            """
+            An identifier which is not delimited by double quotes is folded to upper case by
+            DB2, so it has to be normalized before migration.names_case_handling is applied -
+            otherwise 'keep' would preserve the case in which the DDL happens to be written
+            instead of the case in which the object really exists.
+            """
+            return self.config_parser.convert_names_case(name if quoted else name.upper())
+
         def quote_column_names(node):
             if isinstance(node, sqlglot.exp.Column) and node.name:
-                converted_name = self.config_parser.convert_names_case(node.name)
+                identifier = node.args.get("this")
+                converted_name = convert_identifier_case(node.name, bool(identifier.args.get("quoted")) if identifier else False)
                 node.set("this", sqlglot.exp.Identifier(this=converted_name, quoted=True))
+                # the table qualifier of the column (O.STATUS) is an alias or a table name
+                table_id = node.args.get("table")
+                if isinstance(table_id, sqlglot.exp.Identifier):
+                    table_id.set("this", convert_identifier_case(table_id.name, bool(table_id.args.get("quoted"))))
+                    table_id.set("quoted", True)
             if isinstance(node, sqlglot.exp.Alias) and isinstance(node.args.get("alias"), sqlglot.exp.Identifier):
                 alias = node.args["alias"]
-                converted_alias = self.config_parser.convert_names_case(alias.name)
-                alias.set("this", converted_alias)
-                if not alias.args.get("quoted"):
-                    alias.set("quoted", True)
+                alias.set("this", convert_identifier_case(alias.name, bool(alias.args.get("quoted"))))
+                alias.set("quoted", True)
             if isinstance(node, sqlglot.exp.Schema):
                 for expr in node.expressions:
                     if isinstance(expr, sqlglot.exp.Identifier):
-                        converted_name = self.config_parser.convert_names_case(expr.name)
-                        expr.set("this", converted_name)
-                        if not expr.args.get("quoted"):
-                            expr.set("quoted", True)
+                        expr.set("this", convert_identifier_case(expr.name, bool(expr.args.get("quoted"))))
+                        expr.set("quoted", True)
+            if isinstance(node, sqlglot.exp.CTE):
+                alias = node.args.get("alias")
+                if isinstance(alias, sqlglot.exp.TableAlias):
+                    alias_this = alias.args.get("this")
+                    if isinstance(alias_this, sqlglot.exp.Identifier):
+                        alias_this.set("this", convert_identifier_case(alias_this.name, bool(alias_this.args.get("quoted"))))
+                        alias_this.set("quoted", True)
+                    # the column list of the CTE header (WITH TREE (CATEGORY_ID, DEPTH) AS ...)
+                    for col_id in alias.args.get("columns") or []:
+                        if isinstance(col_id, sqlglot.exp.Identifier):
+                            col_id.set("this", convert_identifier_case(col_id.name, bool(col_id.args.get("quoted"))))
+                            col_id.set("quoted", True)
             return node
 
         def replace_schema_names(node):
@@ -1494,6 +1590,16 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
             return node
 
         def quote_schema_and_table_names(node):
+            if isinstance(node, sqlglot.exp.TableAlias):
+                # alias of a table in the FROM clause and its optional column list
+                alias_id = node.args.get("this")
+                if isinstance(alias_id, sqlglot.exp.Identifier):
+                    alias_id.set("this", convert_identifier_case(alias_id.name, bool(alias_id.args.get("quoted"))))
+                    alias_id.set("quoted", True)
+                for col_id in node.args.get("columns") or []:
+                    if isinstance(col_id, sqlglot.exp.Identifier):
+                        col_id.set("this", convert_identifier_case(col_id.name, bool(col_id.args.get("quoted"))))
+                        col_id.set("quoted", True)
             if isinstance(node, sqlglot.exp.Table):
                 schema = node.args.get("db")
                 schema_name_for_lookup = schema.name if schema else settings['source_schema_name']
@@ -1522,10 +1628,9 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
                                 else:
                                     self.config_parser.print_log_message('DEBUG', f"ibm_db2_zos_connector: convert_view_code: Skipped replacing '{table.name}' with alias '{alias_name}' because alias points to a {alias_target_type}, not a TABLE.")
 
-                    converted_table = self.config_parser.convert_names_case(table_name_to_use)
+                    converted_table = convert_identifier_case(table_name_to_use, bool(table.args.get("quoted")))
                     table.set("this", converted_table)
-                    if not table.args.get("quoted"):
-                        table.set("quoted", True)
+                    table.set("quoted", True)
             return node
 
         def replace_functions(node):

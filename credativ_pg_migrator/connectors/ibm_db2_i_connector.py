@@ -633,6 +633,24 @@ class IbmDb2IConnector(DatabaseConnector):
                             })
                     continue
 
+                # Parse Global Variables (CREATE VARIABLE ... FOR SYSTEM NAME ... <type> DEFAULT <value>)
+                match_variable = re.search(
+                    r"^CREATE\s+(?:OR\s+REPLACE\s+)?VARIABLE\s+\"?([A-Za-z0-9_$#@]+)\"?\.\"?([A-Za-z0-9_$#@]+)\"?"
+                    r"(?:\s+FOR\s+SYSTEM\s+NAME\s+[A-Za-z0-9_$#@]+)?"
+                    r"\s+([A-Za-z0-9_]+(?:\s*\([^)]*\))?)"
+                    r"(?:\s+DEFAULT\s+(.+?))?\s*$", clean_stmt, re.IGNORECASE | re.DOTALL)
+                if match_variable:
+                    self.config_parser.print_log_message('DEBUG3', f"ibm_db2_i_connector: parse_ddl_files: Found global variable: {match_variable.group(2)}")
+                    migrator_tables.insert_ddl_variables({
+                        'source_schema_name': match_variable.group(1).upper(),
+                        'source_variable_name': match_variable.group(2).upper(),
+                        'source_data_type': match_variable.group(3).strip().upper(),
+                        'source_default_value': match_variable.group(4).strip() if match_variable.group(4) else None,
+                        'source_variable_sql': stmt,
+                        'source_variable_comment': comment_text
+                    })
+                    continue
+
                 # Parse Sequences
                 match_seq = re.search(r"^CREATE\s+SEQUENCE\s+\"?([A-Za-z0-9_]+)\"?\.\"?([A-Za-z0-9_]+)\"?", clean_stmt, re.IGNORECASE)
                 if match_seq:
@@ -1164,6 +1182,90 @@ class IbmDb2IConnector(DatabaseConnector):
             cursor.close()
         return triggers
 
+    def fetch_global_variables(self, schema_name: str) -> dict:
+        """
+        Returns the global variables of the schema as {name: {data_type, default_value}}.
+        The result is cached, it is read once per connector instance.
+        """
+        if getattr(self, 'global_variables_cache', None) is None:
+            self.global_variables_cache = {}
+        cache_key = (schema_name or '').upper()
+        if cache_key in self.global_variables_cache:
+            return self.global_variables_cache[cache_key]
+
+        variables = {}
+        if self.connectivity == self.config_parser.const_connectivity_ddl():
+            query = f"""SELECT source_variable_name, source_data_type, source_default_value
+                        FROM "{self.protocol_schema}"."ddl_variables"
+                        WHERE trim(source_schema_name) = trim(%s) ORDER BY id"""
+            try:
+                cursor = self.migrator_tables.protocol_connection.connection.cursor()
+                cursor.execute(query, (schema_name,))
+                for row in cursor.fetchall():
+                    variables[row[0].upper()] = {'data_type': row[1], 'default_value': row[2]}
+                cursor.close()
+            except Exception as e:
+                self.config_parser.print_log_message('WARNING', f"ibm_db2_i_connector: fetch_global_variables: ({schema_name}): {e}")
+
+        self.global_variables_cache[cache_key] = variables
+        return variables
+
+    def convert_global_variables(self, code: str, schema_name: str) -> str:
+        """
+        Converts references to DB2 global variables into PostgreSQL session settings, which have
+        the same session scope: an assignment becomes set_config(), a read becomes
+        current_setting() falling back to the default declared with the variable.
+            SET MIGTEST.G_CASCADE = 1   ->  PERFORM set_config('migtest.g_cascade', (1)::text, false);
+            MIGTEST.G_CASCADE           ->  COALESCE(NULLIF(current_setting('migtest.g_cascade', true), ''), '0')::INTEGER
+        """
+        if not code or not schema_name:
+            return code
+
+        variables = self.fetch_global_variables(schema_name)
+        if not variables:
+            return code
+
+        types_mapping = self.get_types_mapping({'target_db_type': 'postgresql'})
+        for variable_name, variable_info in variables.items():
+            setting_name = f"{schema_name.lower()}.{variable_name.lower()}"
+
+            source_type = (variable_info.get('data_type') or '').upper()
+            base_type = source_type.split('(')[0].strip()
+            target_type = types_mapping.get(base_type, 'TEXT')
+            if '(' in source_type and target_type not in ('TEXT', 'BYTEA'):
+                target_type += source_type[source_type.find('('):]
+
+            default_value = variable_info.get('default_value')
+            default_literal = None
+            if default_value is not None:
+                default_value = str(default_value).strip()
+                if default_value.upper() != 'NULL':
+                    if default_value.startswith("'") and default_value.endswith("'"):
+                        default_literal = default_value
+                    else:
+                        default_literal = "'" + default_value.replace("'", "''") + "'"
+
+            current_value = f"current_setting('{setting_name}', true)"
+            if default_literal:
+                read_expression = f"COALESCE(NULLIF({current_value}, ''), {default_literal})::{target_type}"
+            else:
+                read_expression = f"NULLIF({current_value}, '')::{target_type}"
+
+            qualified_name = rf"{re.escape(schema_name)}\s*\.\s*{re.escape(variable_name)}"
+
+            # an assignment first - it consumes the whole SET statement
+            code = self.replace_outside_string_literals(
+                code,
+                rf"(?im)^([^\S\n]*)SET\s+{qualified_name}\s*=\s*([^;\n]+?)\s*;?[^\S\n]*$",
+                rf"\1PERFORM set_config('{setting_name}', (\2)::text, false);")
+            # everything left is a read
+            code = self.replace_outside_string_literals(
+                code,
+                rf"(?i)(?<![A-Za-z0-9_.\"]){qualified_name}\b",
+                read_expression.replace('\\', '\\\\'))
+
+        return code
+
     def convert_trigger(self, settings: dict):
         trigger_sql = settings.get('trigger_sql', '')
         trigger_name = settings.get('trigger_name', '')
@@ -1287,11 +1389,16 @@ class IbmDb2IConnector(DatabaseConnector):
         when_clause = replace_aliases(when_clause)
         body = replace_aliases(body)
 
+        # global variables have to be resolved before the schema names are rewritten,
+        # they are addressed by the source schema name as well
+        body = self.convert_global_variables(body, source_schema_name)
+        when_clause = self.convert_global_variables(when_clause, source_schema_name)
+
         # objects addressed by the source schema name have to be addressed by the target one
         if source_schema_name and target_schema_name:
             schema_pattern = rf'(?i)(?<![A-Za-z0-9_."]){re.escape(source_schema_name)}\s*\.'
-            body = re.sub(schema_pattern, f'"{target_schema_name}".', body)
-            when_clause = re.sub(schema_pattern, f'"{target_schema_name}".', when_clause)
+            body = self.replace_outside_string_literals(body, schema_pattern, f'"{target_schema_name}".')
+            when_clause = self.replace_outside_string_literals(when_clause, schema_pattern, f'"{target_schema_name}".')
 
         # VARCHAR(<expression>) is a conversion function in DB2 and a data type in PostgreSQL -
         # the identifiers of the expression are already quoted at this point (OLD."order_id")

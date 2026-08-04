@@ -4877,7 +4877,7 @@ class MigratorTables:
 
     def create_ddl_tables(self):
         self.config_parser.print_log_message('DEBUG3', f"migrator_tables: create_ddl_tables: starting")
-        self.protocol_connection.execute_query("DROP TABLE IF EXISTS ddl_tables, ddl_columns, ddl_indexes, ddl_foreign_keys, ddl_sequences, ddl_views, ddl_aliases, ddl_triggers CASCADE")
+        self.protocol_connection.execute_query("DROP TABLE IF EXISTS ddl_tables, ddl_columns, ddl_indexes, ddl_foreign_keys, ddl_sequences, ddl_views, ddl_aliases, ddl_triggers, ddl_variables CASCADE")
 
         self.protocol_connection.execute_query(f"""
             CREATE TABLE IF NOT EXISTS "{self.protocol_schema}".ddl_tables (
@@ -5003,6 +5003,19 @@ class MigratorTables:
                 source_ddl_text VARCHAR,
                 source_trigger_sql TEXT,
                 source_trigger_comment TEXT
+            )
+        """)
+
+        self.protocol_connection.execute_query(f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}".ddl_variables (
+                id SERIAL PRIMARY KEY,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                source_schema_name VARCHAR,
+                source_variable_name VARCHAR,
+                source_data_type VARCHAR,
+                source_default_value TEXT,
+                source_variable_sql TEXT,
+                source_variable_comment TEXT
             )
         """)
 
@@ -5195,6 +5208,26 @@ class MigratorTables:
             return row_id
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_ddl_triggers: ({func_run_id}): Exception: {e}")
+            raise
+
+    def insert_ddl_variables(self, settings):
+        func_run_id = uuid.uuid4()
+        query = f"""
+            INSERT INTO "{self.protocol_schema}"."ddl_variables"
+            (source_schema_name, source_variable_name, source_data_type, source_default_value, source_variable_sql, source_variable_comment)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            RETURNING id
+        """
+        params = (settings.get('source_schema_name'), settings.get('source_variable_name'), settings.get('source_data_type'), settings.get('source_default_value'), settings.get('source_variable_sql'), settings.get('source_variable_comment'))
+        self.config_parser.print_log_message('DEBUG3', f"migrator_tables: insert_ddl_variables: inserting: {params}")
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row_id = cursor.fetchone()[0]
+            cursor.close()
+            return row_id
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_ddl_variables: ({func_run_id}): Exception: {e}")
             raise
 
     def update_ddl_comment(self, settings):

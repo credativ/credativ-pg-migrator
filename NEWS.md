@@ -1,10 +1,17 @@
 credativ-pg-migrator Releases
 =============================
 
-0.16.0 - 03.08.2026
+0.16.0 - 04.08.2026
 -------------------
 
 * Added new source database connector `ibm_db2_i` for IBM DB2 for i (IBM i / AS/400) supporting structure migration from DDL SQL files (parsing `FOR SYSTEM NAME`, `FOR COLUMN`, `CCSID`, `RECORD FORMAT`, `LABEL ON`) and data migration from CSV files
+* Fixed IBM DB2 for i migration startup failure (`Can't instantiate abstract class IbmDb2IConnector without an implementation for abstract methods ...`) by completing the connector interface and aligning method signatures and exchanged dictionary keys with the planner and orchestrator
+* Fixed IBM DB2 for i view conversion (`syntax error at or near "RCDFMT"`) by stripping DB2 for i only clauses (`FOR SYSTEM NAME`, `RCDFMT`, `CCSID`) while preserving `WITH CASCADED CHECK OPTION`
+* Fixed IBM DB2 for i view conversion of the infix operator `A CONCAT B` (converted to `A || B`) and of correlated table functions `TABLE (SELECT ...)` (converted to `LATERAL (SELECT ...)`)
+* Fixed IBM DB2 for i recursive CTE views by emitting `WITH RECURSIVE` and aligning column types across `UNION ALL` arms
+* Fixed IBM DB2 for i materialized query tables (MQT), which were migrated as ordinary tables with unusable columns, and are now migrated as PostgreSQL materialized views
+* Views which cannot be converted are now reported as an error right away instead of silently passing the untranslated source code on to the target database
+* Fixed inverted `NULL` ordering (`NULLS FIRST` / `NULLS LAST`) in views migrated by all IBM DB2 connectors (for i, z/OS, LUW)
 * Fixed IBM DB2 LUW view transpilation (`relation "customers" does not exist`) by schema-qualifying un-qualified table references (`target_schema_name`), double-quoting AST identifiers, and converting case according to `migration.names_case_handling`
 * Fixed IBM DB2 LUW recursive CTE view transpilation (`column 5 has type character varying(500)... but type character varying overall`) by aligning and wrapping un-casted `UNION` / `UNION ALL` term expressions with matching `CAST(... AS VARCHAR(N))` types
 * Enforced `migration.names_case_handling` case conversion consistently across the whole IBM DB2 LUW connector for all database objects and attributes (tables, columns, indexes, PK/FK columns, referenced tables, constraints, triggers, sequences, aliases, views)

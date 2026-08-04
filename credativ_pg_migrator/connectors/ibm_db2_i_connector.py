@@ -486,6 +486,20 @@ class IbmDb2IConnector(DatabaseConnector):
                 if not match_table:
                     continue
 
+                # Materialized query tables (CREATE TABLE ... AS (<query>) DATA INITIALLY DEFERRED ...)
+                # are stored as views - they are migrated as PostgreSQL materialized views,
+                # their body is a query and not a list of column definitions.
+                if re.search(r"(?i)\bDATA\s+INITIALLY\s+DEFERRED\b", clean_stmt):
+                    self.config_parser.print_log_message('DEBUG3', f"ibm_db2_i_connector: parse_ddl_files: Found materialized query table: {match_table.group(2)}")
+                    migrator_tables.insert_ddl_views({
+                        'source_schema_name': match_table.group(1).upper(),
+                        'source_view_name': match_table.group(2).upper(),
+                        'source_view_sql': clean_stmt,
+                        'source_view_comment': comment_text,
+                        'source_view_type': 'MATERIALIZED VIEW'
+                    })
+                    continue
+
                 schema_name = match_table.group(1).upper()
                 table_name = match_table.group(2).upper()
 
@@ -717,76 +731,142 @@ class IbmDb2IConnector(DatabaseConnector):
         else:
             raise ValueError(f"Unsupported target database type: {target_db_type}")
 
+    def fetch_table_names(self, table_schema: str):
+        return self.fetch_all_tables(table_schema)
+
+    def get_table_description(self, settings) -> dict:
+        return {}
+
+    def fetch_default_values(self, settings) -> dict:
+        return {}
+
+    def is_string_type(self, column_type: str) -> bool:
+        string_types = ['CHAR', 'VARCHAR', 'CLOB', 'GRAPHIC', 'VARGRAPHIC', 'DBCLOB',
+                        'NCHAR', 'NVARCHAR', 'TEXT', 'LONG VARCHAR', 'LONG VARGRAPHIC']
+        return column_type.upper() in string_types
+
+    def is_numeric_type(self, column_type: str) -> bool:
+        numeric_types = ['SMALLINT', 'INTEGER', 'INT', 'BIGINT', 'DECIMAL', 'NUMERIC',
+                         'PACKED', 'ZONED', 'DECFLOAT', 'REAL', 'FLOAT', 'DOUBLE', 'DOUBLE PRECISION']
+        return column_type.upper() in numeric_types
+
+    def get_create_table_sql(self, settings):
+        pass
+
+    def migrate_table(self, migrate_target_connection, settings):
+        return {'finished': True, 'rows_migrated': 0, 'source_table_rows_limited': 0, 'target_table_rows': 0, 'chunk_number': 1, 'total_chunks': 1}
+
     def fetch_indexes(self, settings) -> dict:
-        table_schema = settings.get('table_schema')
-        table_name = settings.get('table_name')
-        pk_columns_list = settings.get('pk_columns_list', [])
+        table_schema = settings.get('source_table_schema')
+        table_name = settings.get('source_table_name')
         indexes = {}
         if self.connectivity == self.config_parser.const_connectivity_ddl():
+            # Primary key columns are not stored as a separate index in the DDL protocol tables,
+            # they are reconstructed here from the PK indicator of the columns
+            pk_query = f"""SELECT source_column_name
+                           FROM "{self.protocol_schema}"."ddl_columns"
+                           WHERE trim(source_schema_name) = trim(%s) AND trim(source_table_name) = trim(%s)
+                             AND source_pk_indicator = TRUE ORDER BY id"""
+            cursor = self.migrator_tables.protocol_connection.connection.cursor()
+            cursor.execute(pk_query, (table_schema, table_name))
+            pk_cols = [row[0] for row in cursor.fetchall()]
+
+            order_num = 1
+            pk_cols_set = set()
+            if pk_cols:
+                indexes[order_num] = {
+                    'index_name': f"{table_name}_PK",
+                    'index_type': 'PRIMARY KEY',
+                    'index_owner': table_schema,
+                    'index_columns': ', '.join(pk_cols),
+                    'index_comment': None,
+                    'index_sql': None,
+                    'is_function_based': 'NO'
+                }
+                order_num += 1
+                pk_cols_set = set(c.strip().upper() for c in pk_cols)
+
             query = f"""SELECT source_index_name, source_is_unique, source_columns_list, source_index_comment
                         FROM "{self.protocol_schema}"."ddl_indexes"
                         WHERE trim(source_schema_name) = trim(%s) AND trim(source_table_name) = trim(%s) ORDER BY id"""
-            cursor = self.migrator_tables.protocol_connection.connection.cursor()
             cursor.execute(query, (table_schema, table_name))
             rows = cursor.fetchall()
-            for i, row in enumerate(rows, 1):
-                idx_name = self.config_parser.convert_names_case(row[0])
+            self.config_parser.print_log_message('DEBUG3', f"ibm_db2_i_connector: fetch_indexes: ({table_schema}.{table_name}): {rows}")
+            for row in rows:
+                idx_name = row[0]
                 is_unique = row[1]
-                col_expr = ', '.join([self.config_parser.convert_names_case(c.strip()) for c in row[2].split(',')]) if row[2] else ''
+                cols = row[2]
                 comment = row[3]
 
-                if pk_columns_list and is_unique:
-                    idx_cols = [c.strip().upper() for c in col_expr.split(',')]
-                    pk_cols = [c.strip().upper() for c in pk_columns_list]
-                    if idx_cols == pk_cols:
-                        continue
+                # Skip the unique index backing the primary key - it is already covered above
+                idx_cols_set = set(c.strip().upper() for c in cols.split(',')) if cols else set()
+                if pk_cols_set and is_unique and pk_cols_set == idx_cols_set:
+                    self.config_parser.print_log_message('DEBUG3', f"ibm_db2_i_connector: fetch_indexes: Skipping index {idx_name} as it matches primary key columns.")
+                    continue
 
-                indexes[i] = {
+                indexes[order_num] = {
                     'index_name': idx_name,
-                    'is_unique': is_unique,
-                    'is_primary': False,
-                    'is_clustered': False,
-                    'column_expression': col_expr,
-                    'index_comment': comment
+                    'index_type': 'UNIQUE' if is_unique else 'INDEX',
+                    'index_owner': table_schema,
+                    'index_columns': cols,
+                    'index_comment': comment,
+                    'index_sql': None,
+                    'is_function_based': 'NO'
                 }
+                order_num += 1
             cursor.close()
         return indexes
 
+    def get_create_index_sql(self, settings):
+        pass
+
     def fetch_constraints(self, settings) -> dict:
-        table_schema = settings.get('table_schema')
-        table_name = settings.get('table_name')
+        table_schema = settings.get('source_table_schema')
+        table_name = settings.get('source_table_name')
         constraints = {}
         if self.connectivity == self.config_parser.const_connectivity_ddl():
-            query = f"""SELECT source_fk_name, source_columns_list, source_ref_schema_name, source_ref_table_name, source_ref_columns_list
+            query = f"""SELECT source_fk_name, source_columns_list, source_ref_schema_name, source_ref_table_name, source_ref_columns_list, source_fk_comment
                         FROM "{self.protocol_schema}"."ddl_foreign_keys"
                         WHERE trim(source_schema_name) = trim(%s) AND trim(source_table_name) = trim(%s) ORDER BY id"""
             cursor = self.migrator_tables.protocol_connection.connection.cursor()
             cursor.execute(query, (table_schema, table_name))
             rows = cursor.fetchall()
+            self.config_parser.print_log_message('DEBUG3', f"ibm_db2_i_connector: fetch_constraints: ({table_schema}.{table_name}): {rows}")
             for i, row in enumerate(rows, 1):
-                fk_name = self.config_parser.convert_names_case(row[0])
-                pk_cols = ', '.join([self.config_parser.convert_names_case(c.strip()) for c in row[1].split(',')]) if row[1] else ''
-                ref_schema = row[2]
-                ref_table = self.config_parser.convert_names_case(row[3])
-                fk_cols = ', '.join([self.config_parser.convert_names_case(c.strip()) for c in row[4].split(',')]) if row[4] else ''
-
                 constraints[i] = {
-                    'constraint_name': fk_name,
+                    'constraint_name': row[0],
                     'constraint_type': 'FOREIGN KEY',
-                    'check_clause': None,
-                    'referenced_schema_name': ref_schema,
-                    'referenced_table_name': ref_table,
-                    'pk_columns': pk_cols,
-                    'fk_columns': fk_cols,
-                    'fk_delete_rule': 'NO ACTION',
-                    'fk_update_rule': 'NO ACTION',
-                    'constraint_comment': None
+                    'constraint_owner': table_schema,
+                    'constraint_columns': self.deduplicate_columns_list(row[1]),
+                    'referenced_table_schema': row[2],
+                    'referenced_table_name': row[3],
+                    'referenced_columns': self.deduplicate_columns_list(row[4]),
+                    'constraint_sql': None,
+                    'delete_rule': 'NO ACTION',
+                    'update_rule': 'NO ACTION',
+                    'constraint_comment': row[5],
+                    'constraint_status': 'ENABLED'
                 }
             cursor.close()
         return constraints
 
-    def fetch_triggers(self, settings) -> dict:
-        table_schema = settings.get('table_schema')
+    def deduplicate_columns_list(self, columns_list: str):
+        """Normalizes a comma separated columns list and removes duplicates, preserving order."""
+        if not columns_list:
+            return columns_list
+        seen = set()
+        deduped = []
+        for col in columns_list.split(','):
+            col = col.strip()
+            if col and col not in seen:
+                seen.add(col)
+                deduped.append(col)
+        return ', '.join(deduped)
+
+    def get_create_constraint_sql(self, settings):
+        pass
+
+    def fetch_triggers(self, table_id: int, table_schema: str, table_name: str) -> dict:
         triggers = {}
         if self.connectivity == self.config_parser.const_connectivity_ddl():
             query = f"""SELECT id, source_trigger_name, source_ddl_text, source_trigger_comment
@@ -795,13 +875,22 @@ class IbmDb2IConnector(DatabaseConnector):
             cursor = self.migrator_tables.protocol_connection.connection.cursor()
             cursor.execute(query, (table_schema,))
             rows = cursor.fetchall()
-            for i, row in enumerate(rows, 1):
-                triggers[i] = {
+            self.config_parser.print_log_message('DEBUG3', f"ibm_db2_i_connector: fetch_triggers: ({table_schema}): {rows}")
+            order_num = 1
+            for row in rows:
+                # triggers are stored per schema - keep only those referencing the requested table
+                if table_name and row[2] and table_name.upper() not in row[2].upper():
+                    continue
+                triggers[order_num] = {
                     'id': row[0],
-                    'name': self.config_parser.convert_names_case(row[1]),
+                    'name': row[1],
+                    'event': 'UNKNOWN',
+                    'new': None,
+                    'old': None,
                     'sql': row[2],
                     'comment': row[3]
                 }
+                order_num += 1
             cursor.close()
         return triggers
 
@@ -961,112 +1050,166 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
 """
         return pg_func + '\n' + pg_trigger
 
-    def fetch_sequences(self, settings) -> dict:
-        table_schema = settings.get('table_schema')
+    def fetch_funcproc_names(self, schema: str):
+        return {}
+
+    def fetch_funcproc_code(self, funcproc_id: int):
+        return ""
+
+    def fetch_sequences(self, schema_name: str) -> dict:
         sequences = {}
         if self.connectivity == self.config_parser.const_connectivity_ddl():
+            ## sequences attached to a table are migrated as identity columns, not as standalone sequences
             query = f"""SELECT id, source_seq_name, source_table_name, source_column_name, source_start_value, source_increment_by, source_minvalue, source_maxvalue, source_cache, source_is_cycled, source_ddl_text
                         FROM "{self.protocol_schema}"."ddl_sequences"
-                        WHERE trim(source_schema_name) = trim(%s) ORDER BY id"""
+                        WHERE trim(source_schema_name) = trim(%s)
+                          AND source_table_name IS NULL AND source_column_name IS NULL
+                        ORDER BY id"""
             cursor = self.migrator_tables.protocol_connection.connection.cursor()
-            cursor.execute(query, (table_schema,))
+            cursor.execute(query, (schema_name,))
             rows = cursor.fetchall()
+            self.config_parser.print_log_message('DEBUG3', f"ibm_db2_i_connector: fetch_sequences: ({schema_name}): {rows}")
             for i, row in enumerate(rows, 1):
                 sequences[i] = {
                     'id': row[0],
-                    'sequence_name': self.config_parser.convert_names_case(row[1]),
-                    'table_name': self.config_parser.convert_names_case(row[2]) if row[2] else None,
-                    'column_name': self.config_parser.convert_names_case(row[3]) if row[3] else None,
-                    'start_value': row[4],
-                    'increment_by': row[5],
-                    'min_value': row[6],
-                    'max_value': row[7],
-                    'cache_size': row[8],
-                    'is_cycled': row[9],
-                    'ddl_text': row[10]
+                    'sequence_name': row[1],
+                    'table_name': row[2],
+                    'column_name': row[3],
+                    'source_start_value': row[4],
+                    'source_increment_by': row[5],
+                    'source_minvalue': row[6],
+                    'source_maxvalue': row[7],
+                    'source_cache': row[8],
+                    'source_is_cycled': row[9],
+                    'source_sequence_sql': row[10]
                 }
             cursor.close()
         return sequences
 
-    def migrate_sequences(self, settings):
-        sequence_info = settings.get('sequence_info', {})
+    def get_sequence_details(self, sequence_owner, sequence_name):
+        return {}
+
+    def migrate_sequences(self, target_connector, settings):
         target_schema_name = settings.get('target_schema_name', '')
-        source_seq_name = sequence_info.get('sequence_name')
-        target_sequence_name = self.config_parser.convert_names_case(source_seq_name)
+        target_sequence_name = settings.get('target_sequence_name', '')
+        source_start_value = settings.get('source_start_value')
+        source_increment_by = settings.get('source_increment_by')
+        source_minvalue = settings.get('source_minvalue')
+        source_maxvalue = settings.get('source_maxvalue')
+        source_cache = settings.get('source_cache')
+        source_is_cycled = settings.get('source_is_cycled')
 
-        target_connection = settings.get('target_connection')
-        ddl_text = sequence_info.get('ddl_text')
-        if not ddl_text:
-            ddl_text = f'CREATE SEQUENCE "{target_schema_name}"."{target_sequence_name}"'
+        if not target_sequence_name:
+            return True
 
-        ddl_text = re.sub(r'CREATE\s+SEQUENCE\s+"[^"]+"\."[^"]+"', f'CREATE SEQUENCE "{target_schema_name}"."{target_sequence_name}"', ddl_text, flags=re.IGNORECASE)
+        if self.connectivity == self.config_parser.const_connectivity_ddl():
+            try:
+                sql_parts = [f'CREATE SEQUENCE "{target_schema_name}"."{target_sequence_name}"']
+                if source_increment_by is not None:
+                    sql_parts.append(f"INCREMENT BY {source_increment_by}")
+                if source_minvalue is not None:
+                    sql_parts.append(f"MINVALUE {source_minvalue}")
+                if source_maxvalue is not None:
+                    sql_parts.append(f"MAXVALUE {source_maxvalue}")
+                if source_start_value is not None:
+                    sql_parts.append(f"START WITH {source_start_value}")
+                if source_cache is not None:
+                    sql_parts.append(f"CACHE {source_cache}")
+                if source_is_cycled:
+                    sql_parts.append("CYCLE")
 
-        try:
-            target_connection.execute_query(ddl_text)
-            self.config_parser.print_log_message('INFO', f"ibm_db2_i_connector: migrate_sequences: Created sequence {target_sequence_name}")
-        except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"ibm_db2_i_connector: migrate_sequences: Error creating sequence {target_sequence_name}: {e}")
-            raise
+                target_sequence_sql = " ".join(sql_parts)
 
-    def fetch_views_names(self, settings) -> dict:
-        source_schema_name = settings.get('source_schema_name')
+                self.config_parser.print_log_message('INFO', f"ibm_db2_i_connector: migrate_sequences: Creating sequence {target_sequence_name} ...")
+                target_connector.execute_query(target_sequence_sql)
+                return True
+            except Exception as e:
+                self.config_parser.print_log_message('ERROR', f"ibm_db2_i_connector: migrate_sequences: Error creating sequence {target_sequence_name}: {e}")
+                return False
+
+        return True
+
+    def fetch_views_names(self, source_schema_name: str) -> dict:
         views = {}
         if self.connectivity == self.config_parser.const_connectivity_ddl():
-            query = f"""SELECT source_view_name, source_view_comment
+            query = f"""SELECT id, source_schema_name, source_view_name, source_view_comment, source_view_type
                         FROM "{self.protocol_schema}"."ddl_views"
                         WHERE trim(source_schema_name) = trim(%s) ORDER BY id"""
             cursor = self.migrator_tables.protocol_connection.connection.cursor()
             cursor.execute(query, (source_schema_name,))
             rows = cursor.fetchall()
+            self.config_parser.print_log_message('DEBUG3', f"ibm_db2_i_connector: fetch_views_names: ({source_schema_name}): {rows}")
             for i, row in enumerate(rows, 1):
+                # target_schema_name / target_view_name are deliberately not set here -
+                # the planner then derives the target name from the source view name
                 views[i] = {
-                    'view_name': self.config_parser.convert_names_case(row[0]),
-                    'view_comment': row[1]
+                    'id': row[0],
+                    'schema_name': row[1],
+                    'view_name': row[2],
+                    'comment': row[3],
+                    'view_type': row[4] or 'VIEW',
+                    'is_alias': False
                 }
-            cursor.close()
 
-            query_aliases = f"""SELECT source_alias_name, source_alias_comment, alias_target_type
-                                FROM "{self.protocol_schema}"."ddl_aliases"
-                                WHERE trim(source_schema_name) = trim(%s) ORDER BY id"""
-            cursor = self.migrator_tables.protocol_connection.connection.cursor()
+            # Aliases pointing to a TABLE are exposed as views "SELECT * FROM <target table>",
+            # aliases pointing to a VIEW are skipped - the view itself is migrated anyway.
+            query_aliases = f"""SELECT a.id, a.source_schema_name, a.source_alias_name, a.source_target_schema, a.source_target_name, a.source_alias_comment
+                                FROM "{self.protocol_schema}"."ddl_aliases" a
+                                INNER JOIN "{self.protocol_schema}"."ddl_tables" t
+                                    ON trim(a.source_target_schema) = trim(t.source_schema_name)
+                                    AND trim(a.source_target_name) = trim(t.source_table_name)
+                                WHERE trim(a.source_schema_name) = trim(%s) ORDER BY a.id"""
             cursor.execute(query_aliases, (source_schema_name,))
             alias_rows = cursor.fetchall()
             cursor.close()
+            self.config_parser.print_log_message('DEBUG3', f"ibm_db2_i_connector: fetch_views_names (aliases): ({source_schema_name}): {alias_rows}")
 
-            idx = len(views) + 1
-            for row in alias_rows:
-                alias_name = self.config_parser.convert_names_case(row[0])
-                alias_comment = row[1]
-                alias_target_type = row[2]
-
-                if alias_target_type == 'TABLE':
-                    self.config_parser.print_log_message('INFO', f"ibm_db2_i_connector: fetch_views_names: Database Alias '{alias_name}' points to a TABLE. Creating SQL VIEW to expose target table pointers.")
-                    views[idx] = {
-                        'view_name': alias_name,
-                        'view_comment': alias_comment,
-                        'alias_view': True
-                    }
-                    idx += 1
-                else:
-                    self.config_parser.print_log_message('DEBUG', f"ibm_db2_i_connector: fetch_views_names: Database Alias '{alias_name}' points to a VIEW. Skipping alias view wrapper.")
+            offset = len(views)
+            for j, row in enumerate(alias_rows, 1):
+                self.config_parser.print_log_message('INFO', f"ibm_db2_i_connector: fetch_views_names: Database Alias '{row[2]}' points to a TABLE. Creating SQL VIEW to expose target table pointers.")
+                views[offset + j] = {
+                    'id': row[0] + 1000000,  # shifted to avoid collision with actual view IDs
+                    'schema_name': row[1],
+                    'view_name': row[2],
+                    'aliased_schema_name': row[3],
+                    'aliased_table_name': row[4],
+                    'comment': row[5],
+                    'view_type': 'VIEW',
+                    'is_alias': True
+                }
         return views
 
     def get_aliases(self, settings) -> dict:
         source_schema_name = settings.get('source_schema_name')
         aliases = {}
         if self.connectivity == self.config_parser.const_connectivity_ddl():
-            query = f"""SELECT source_alias_name, source_target_schema, source_target_name, alias_target_type
-                        FROM "{self.protocol_schema}"."ddl_aliases"
-                        WHERE trim(source_schema_name) = trim(%s) ORDER BY id"""
+            query = f"""SELECT a.id, a.source_schema_name, a.source_alias_name, a.source_target_schema, a.source_target_name, a.source_alias_sql, a.source_alias_comment,
+                            CASE
+                                WHEN t.source_table_name IS NOT NULL THEN 'TABLE'
+                                WHEN v.source_view_name IS NOT NULL THEN 'VIEW'
+                                ELSE 'UNKNOWN'
+                            END as alias_target_type
+                        FROM "{self.protocol_schema}"."ddl_aliases" a
+                        LEFT JOIN "{self.protocol_schema}"."ddl_tables" t
+                            ON trim(a.source_target_schema) = trim(t.source_schema_name) AND trim(a.source_target_name) = trim(t.source_table_name)
+                        LEFT JOIN "{self.protocol_schema}"."ddl_views" v
+                            ON trim(a.source_target_schema) = trim(v.source_schema_name) AND trim(a.source_target_name) = trim(v.source_view_name)
+                        WHERE trim(a.source_schema_name) = trim(%s) ORDER BY a.id"""
             cursor = self.migrator_tables.protocol_connection.connection.cursor()
             cursor.execute(query, (source_schema_name,))
             rows = cursor.fetchall()
+            self.config_parser.print_log_message('DEBUG3', f"ibm_db2_i_connector: get_aliases: ({source_schema_name}): {rows}")
             for i, row in enumerate(rows, 1):
                 aliases[i] = {
-                    'alias_name': self.config_parser.convert_names_case(row[0]),
-                    'aliased_table_schema': row[1],
-                    'aliased_table_name': self.config_parser.convert_names_case(row[2]),
-                    'alias_target_type': row[3] if len(row) > 3 and row[3] else 'UNKNOWN'
+                    'id': row[0],
+                    'alias_schema_name': row[1],
+                    'alias_name': row[2],
+                    'aliased_schema_name': row[3],
+                    'aliased_table_name': row[4],
+                    'alias_owner': row[1],
+                    'alias_sql': row[5],
+                    'alias_comment': row[6],
+                    'alias_target_type': row[7]
                 }
             cursor.close()
         return aliases
@@ -1093,11 +1236,84 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
             alias_row = cursor.fetchone()
             cursor.close()
             if alias_row:
-                target_schema = alias_row[0]
-                target_name = self.config_parser.convert_names_case(alias_row[1])
-                target_schema_name = settings.get('target_schema_name', target_schema)
-                return f'CREATE VIEW "{target_schema_name}"."{self.config_parser.convert_names_case(source_view_name)}" AS SELECT * FROM "{target_schema_name}"."{target_name}"'
+                # source object names are used here on purpose - schema, view and table names
+                # are translated to their target counterparts later in convert_view_code
+                return f'CREATE VIEW "{source_schema_name}"."{source_view_name}" AS SELECT * FROM "{alias_row[0]}"."{alias_row[1]}"'
         return ""
+
+    def strip_db2i_specific_clauses(self, code: str) -> str:
+        """
+        Removes DB2 for i specific clauses which have no PostgreSQL counterpart and which
+        the SQL parser does not understand:
+          - FOR SYSTEM NAME <system-name>  - the short system name of the object
+          - RCDFMT <format-name>           - the record format name, always the last clause
+          - CCSID <n>                      - the coded character set of a string column
+        """
+        if not code:
+            return code
+
+        # FOR SYSTEM NAME <system-name> - system names may contain $, # and @
+        code = re.sub(r"(?i)\s*\bFOR\s+SYSTEM\s+NAME\s+\"?[A-Za-z0-9_$#@]+\"?", "", code)
+
+        # RCDFMT <format-name> - closes the statement, optionally followed by
+        # WITH [CASCADED|LOCAL] CHECK OPTION and/or the statement terminator
+        code = re.sub(
+            r"(?i)\s*\b(?:RCDFMT|RECORD\s+FORMAT)\s+\"?[A-Za-z0-9_$#@]+\"?"
+            r"(?=(?:\s*WITH\s+(?:CASCADED\s+|LOCAL\s+)?CHECK\s+OPTION)?\s*;?\s*$)",
+            "",
+            code,
+        )
+
+        # CCSID <n> of individual columns
+        code = re.sub(r"(?i)\s*\bCCSID\s+\d+\b", "", code)
+
+        return code.strip()
+
+    def replace_outside_string_literals(self, code: str, pattern: str, replacement: str) -> str:
+        """
+        Applies re.sub only to the parts of the code which are not inside a string literal,
+        so that identifiers/keywords are rewritten but the content of literals stays untouched.
+        """
+        if not code:
+            return code
+        # re.split with a capturing group returns [code, literal, code, literal, ..., code],
+        # so all even indexes are the parts outside of string literals
+        parts = re.split(r"('(?:[^']|'')*')", code)
+        for i in range(0, len(parts), 2):
+            parts[i] = re.sub(pattern, replacement, parts[i])
+        return ''.join(parts)
+
+    def convert_db2i_operators(self, code: str) -> str:
+        """
+        Converts DB2 for i specific operators which the SQL parser does not understand.
+        DB2 for i allows CONCAT to be used as an infix operator ("A CONCAT B"), which is
+        equivalent to the standard "A || B". The function form "CONCAT(A, B)" is left as it is.
+        The correlated table function "TABLE (SELECT ...)" becomes "LATERAL (SELECT ...)".
+        """
+        code = self.replace_outside_string_literals(code, r"(?i)\bCONCAT\b(?!\s*\()", "||")
+        code = self.replace_outside_string_literals(code, r"(?i)\bTABLE\s*\(\s*(SELECT\b|WITH\b)", r"LATERAL (\1")
+        return code
+
+    def convert_mqt_to_materialized_view(self, code: str) -> str:
+        """
+        A DB2 for i materialized query table (MQT) is declared as
+        "CREATE TABLE <name> AS (<query>) DATA INITIALLY DEFERRED REFRESH DEFERRED ..."
+        and is migrated as a PostgreSQL materialized view. The MQT specific clauses have no
+        PostgreSQL counterpart and are removed. Code of other objects is returned unchanged.
+        """
+        if not code or not re.search(r"(?i)\bDATA\s+INITIALLY\s+DEFERRED\b", code):
+            return code
+
+        code = re.sub(
+            r"(?i)\s*\b(?:DATA\s+INITIALLY\s+DEFERRED"
+            r"|REFRESH\s+(?:DEFERRED|IMMEDIATE)"
+            r"|(?:ENABLE|DISABLE)\s+QUERY\s+OPTIMIZATION"
+            r"|MAINTAINED\s+BY\s+(?:SYSTEM|USER|FEDERATED_TOOL))\b",
+            "",
+            code,
+        )
+        code = re.sub(r"(?i)\bCREATE\s+(?:OR\s+REPLACE\s+)?TABLE\b", "CREATE MATERIALIZED VIEW", code, count=1)
+        return code
 
     def convert_view_code(self, settings: dict):
         cte_names = set()
@@ -1205,10 +1421,62 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
                     node.set("this", sqlglot.exp.Identifier(this=mapped.strip('('), quoted=False))
             return node
 
-        view_code = settings['view_code']
-        converted_code = view_code
+        def align_union_types(union_node):
+            """
+            PostgreSQL requires the column types of the non-recursive and the recursive term
+            of a recursive CTE to be identical, DB2 for i resolves them on its own. Where one
+            arm casts a column explicitly, the same cast is applied to the other arm.
+            """
+            if isinstance(union_node, sqlglot.exp.Union):
+                select1 = union_node.this
+                select2 = union_node.expression
+                if isinstance(select1, sqlglot.exp.Select) and isinstance(select2, sqlglot.exp.Select):
+                    exprs1 = select1.expressions
+                    exprs2 = select2.expressions
+                    for i in range(min(len(exprs1), len(exprs2))):
+                        e1 = exprs1[i]
+                        e2 = exprs2[i]
+                        if isinstance(e1, sqlglot.exp.Cast) and not isinstance(e2, sqlglot.exp.Cast):
+                            select2.expressions[i] = sqlglot.exp.Cast(this=e2, to=e1.to.copy())
+                        elif isinstance(e2, sqlglot.exp.Cast) and not isinstance(e1, sqlglot.exp.Cast):
+                            select1.expressions[i] = sqlglot.exp.Cast(this=e1, to=e2.to.copy())
 
-        converted_code = re.sub(r"(?i)\bFOR\s+SYSTEM\s+NAME\s+[A-Za-z0-9_]+\b", "", converted_code)
+        def convert_recursive_with(node):
+            """
+            DB2 for i derives the recursion from the CTE referencing itself, PostgreSQL requires
+            the RECURSIVE keyword to be stated explicitly - without it the self-reference fails
+            with 'relation ... does not exist'.
+            """
+            if isinstance(node, sqlglot.exp.With):
+                is_recursive = False
+                for cte in node.expressions:
+                    if isinstance(cte, sqlglot.exp.CTE):
+                        cte_name = cte.alias_or_name.upper()
+                        # the CTE is recursive if it references itself in its own query definition
+                        for table_ref in cte.this.find_all(sqlglot.exp.Table):
+                            if table_ref.name and table_ref.name.upper() == cte_name:
+                                is_recursive = True
+                                break
+                        for union_node in cte.this.find_all(sqlglot.exp.Union):
+                            align_union_types(union_node)
+                    if is_recursive:
+                        break
+                if is_recursive:
+                    node.set("recursive", True)
+            return node
+
+        view_code = settings['view_code']
+        converted_code = self.convert_mqt_to_materialized_view(view_code)
+        converted_code = self.strip_db2i_specific_clauses(converted_code)
+
+        # WITH [CASCADED|LOCAL] CHECK OPTION is valid in PostgreSQL as well, but the SQL parser
+        # does not understand it - it is cut off here and appended back to the converted code.
+        check_option = ''
+        check_option_match = re.search(r"(?i)\s*\bWITH\s+(CASCADED\s+|LOCAL\s+)?CHECK\s+OPTION\s*;?\s*$", converted_code)
+        if check_option_match:
+            scope = check_option_match.group(1).strip().upper() + ' ' if check_option_match.group(1) else ''
+            check_option = f" WITH {scope}CHECK OPTION"
+            converted_code = converted_code[:check_option_match.start()].rstrip()
 
         if settings['target_db_type'] == 'postgresql':
             converted_code = re.sub(
@@ -1222,22 +1490,37 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
                 converted_code,
             )
 
+            converted_code = self.convert_db2i_operators(converted_code)
+
             try:
-                parsed_code = sqlglot.parse_one(converted_code)
-                for cte_node in parsed_code.find_all(sqlglot.exp.CTE):
-                    if cte_node.alias_or_name:
-                        cte_names.add(cte_node.alias_or_name.upper())
+                # The 'db2' dialect is not supported by sqlglot, the code is read as 'postgres':
+                # DB2 for i sorts NULL values as the largest ones, exactly like PostgreSQL, while
+                # the default sqlglot dialect assumes the opposite and would compensate for it by
+                # adding explicit NULLS FIRST / NULLS LAST which inverts the original ordering.
+                parsed_code = sqlglot.parse_one(converted_code, read="postgres")
             except Exception as e:
                 self.config_parser.print_log_message('ERROR', f"ibm_db2_i_connector: convert_view_code: Error parsing View code: {e}")
-                return converted_code
+                return converted_code + check_option
+
+            # sqlglot does not raise on unknown syntax - it silently falls back to a plain
+            # Command node. All transformations below would then be no-ops and the untranslated
+            # DB2 for i code would be handed over to the target database, so this is reported here.
+            if isinstance(parsed_code, sqlglot.exp.Command):
+                self.config_parser.print_log_message('ERROR', f"ibm_db2_i_connector: convert_view_code: View code contains syntax unsupported by the SQL parser, it is left unconverted: {converted_code}")
+                return converted_code + check_option
+
+            for cte_node in parsed_code.find_all(sqlglot.exp.CTE):
+                if cte_node.alias_or_name:
+                    cte_names.add(cte_node.alias_or_name.upper())
 
             parsed_code = parsed_code.transform(quote_column_names)
             parsed_code = parsed_code.transform(quote_schema_and_table_names)
             parsed_code = parsed_code.transform(replace_functions)
+            parsed_code = parsed_code.transform(convert_recursive_with)
 
             converted_code = parsed_code.sql(dialect="postgres")
             converted_code = converted_code.replace("()()", "()")
-            return converted_code
+            return converted_code + check_option
         return view_code
 
     def convert_funcproc_code(self, settings: dict):
@@ -1271,20 +1554,74 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
 
         return extracted_default_value
 
-    def get_rows_count(self, schema_name: str, table_name: str, settings: dict = None):
+    def get_sequence_current_value(self, sequence_id: int):
+        return 0
+
+    def execute_query(self, query: str, params=None):
+        pass
+
+    def execute_sql_script(self, script_path: str):
+        pass
+
+    def begin_transaction(self):
+        pass
+
+    def commit_transaction(self):
+        pass
+
+    def rollback_transaction(self):
+        pass
+
+    def get_rows_count(self, table_schema: str, table_name: str, migration_limitation: str = None):
         return 0
 
     def get_table_size(self, table_schema: str, table_name: str):
         return 0
 
-    def target_table_exists(self, target_schema_name, target_table_name):
-        return False
+    def get_table_next_identity(self, table_schema: str, table_name: str):
+        return None
+
+    def fetch_user_defined_types(self, schema: str):
+        return {}
+
+    def fetch_domains(self, schema: str):
+        return {}
+
+    def get_create_domain_sql(self, settings):
+        pass
+
+    def testing_select(self):
+        pass
 
     def get_database_version(self):
         return "IBM DB2 for i (DDL/CSV)"
 
     def get_database_size(self):
         return 0
+
+    def get_top_n_tables(self, settings):
+        return {}
+
+    def get_top_fk_dependencies(self, settings):
+        return {}
+
+    def target_table_exists(self, target_schema_name, target_table_name):
+        return False
+
+    def fetch_all_rows(self, query):
+        return []
+
+    def get_table_checksum(self, schema_name: str, table_name: str, columns: list):
+        return None
+
+    def get_random_pks(self, schema_name: str, table_name: str, pk_columns: list, sample_size: int):
+        return []
+
+    def get_row_checksums(self, schema_name: str, table_name: str, pk_columns: list, pk_values_list: list, columns: list):
+        return {}
+
+    def get_lob_sizes(self, schema_name: str, table_name: str, pk_columns: list, pk_values_list: list, lob_columns: list):
+        return {}
 
 if __name__ == "__main__":
     print("This script is not meant to be run directly")

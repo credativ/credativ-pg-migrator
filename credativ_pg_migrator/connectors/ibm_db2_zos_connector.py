@@ -1397,8 +1397,11 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
                         converted_code = re.sub(rf"(?i)\b{escaped_src_func}\b", tgt_func, converted_code, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
 
             try:
-                # Use default sqlglot dialect because 'db2' dialect is not supported
-                parsed_code = sqlglot.parse_one(converted_code)
+                # The 'db2' dialect is not supported by sqlglot, the code is read as 'postgres':
+                # DB2 sorts NULL values as the largest ones, exactly like PostgreSQL, while the
+                # default sqlglot dialect assumes the opposite and would compensate for it by
+                # adding explicit NULLS FIRST / NULLS LAST which inverts the original ordering.
+                parsed_code = sqlglot.parse_one(converted_code, read="postgres")
             except Exception as e:
                 self.config_parser.print_log_message('ERROR', f"ibm_db2_zos_connector: convert_view_code: Error parsing View code: {e}")
                 # Fallback to the unparsed converted_code instead of empty string to avoid crashes

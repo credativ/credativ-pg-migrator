@@ -4965,7 +4965,8 @@ class MigratorTables:
                 source_schema_name VARCHAR,
                 source_view_name VARCHAR,
                 source_view_sql TEXT,
-                source_view_comment TEXT
+                source_view_comment TEXT,
+                source_view_type VARCHAR DEFAULT 'VIEW'
             )
         """)
 
@@ -5131,11 +5132,11 @@ class MigratorTables:
         func_run_id = uuid.uuid4()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."ddl_views"
-            (source_schema_name, source_view_name, source_view_sql, source_view_comment)
-            VALUES (%s, %s, %s, %s)
+            (source_schema_name, source_view_name, source_view_sql, source_view_comment, source_view_type)
+            VALUES (%s, %s, %s, %s, %s)
             RETURNING id
         """
-        params = (settings.get('source_schema_name'), settings.get('source_view_name'), settings.get('source_view_sql'), settings.get('source_view_comment'))
+        params = (settings.get('source_schema_name'), settings.get('source_view_name'), settings.get('source_view_sql'), settings.get('source_view_comment'), settings.get('source_view_type') or 'VIEW')
         self.config_parser.print_log_message('DEBUG3', f"migrator_tables: insert_ddl_views: ({func_run_id}): inserting: {params}")
         try:
             self.config_parser.print_log_message('DEBUG3', f"migrator_tables: insert_ddl_views: ({func_run_id}): open cursor")

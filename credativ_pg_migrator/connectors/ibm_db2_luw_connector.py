@@ -1578,8 +1578,11 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
 
                 # Clean trailing whitespace inside quoted identifiers (e.g. "MIGTEST ")
                 converted_code = re.sub(r'"([^"\s]+)\s+"', r'"\1"', converted_code)
-                # Use default sqlglot dialect because 'db2' dialect is not supported
-                parsed_code = sqlglot.parse_one(converted_code)
+                # The 'db2' dialect is not supported by sqlglot, the code is read as 'postgres':
+                # DB2 sorts NULL values as the largest ones, exactly like PostgreSQL, while the
+                # default sqlglot dialect assumes the opposite and would compensate for it by
+                # adding explicit NULLS FIRST / NULLS LAST which inverts the original ordering.
+                parsed_code = sqlglot.parse_one(converted_code, read="postgres")
 
                 # Collect all CTE names in query to avoid schema-qualifying CTE references
                 for cte_node in parsed_code.find_all(sqlglot.exp.CTE):

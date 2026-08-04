@@ -224,12 +224,26 @@ class IbmDb2ZosConnector(DatabaseConnector):
                 content = f.read()
 
             # Extract triggers first to avoid splitting by semicolons inside their bodies
-            trigger_pattern = re.compile(r"(CREATE\s+TRIGGER\s+\"?([A-Za-z0-9_]+)\"?\.\"?([A-Za-z0-9_]+)\"?[\s\S]*?(?=(?:CREATE\s+(?:TABLE|VIEW|INDEX|UNIQUE\s+INDEX|ALIAS|SEQUENCE|TRIGGER))|(?:ALTER\s+TABLE)|(?:SET\s+CURRENT\s+SCHEMA)|$))", re.IGNORECASE)
+            # A trigger ends at the '@' statement terminator (DDL files with compound statement
+            # bodies switch the terminator to '@' because ';' separates the statements of the
+            # body), otherwise at the next object or at the end of the file.
+            trigger_pattern = re.compile(
+                r"(CREATE\s+TRIGGER\s+\"?([A-Za-z0-9_$#@]+)\"?\.\"?([A-Za-z0-9_$#@]+)\"?"
+                r"[\s\S]*?)"
+                r"(?:@[^\S\n]*(?=\n|$)"
+                r"|(?=(?:CREATE\s+(?:TABLE|VIEW|INDEX|UNIQUE\s+INDEX|ALIAS|SEQUENCE|TRIGGER))"
+                r"|(?:ALTER\s+TABLE)|(?:SET\s+CURRENT\s+SCHEMA)|$))", re.IGNORECASE)
             for match in trigger_pattern.finditer(content):
                 self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: parse_ddl_files: Found trigger: {match.group(1)}")
                 schema_name = match.group(2).upper()
                 trigger_name = match.group(3).upper()
                 ddl_text = match.group(1).strip()
+                # a trigger not closed by '@' reaches up to the next object - the comment lines
+                # in front of that object are not part of the trigger
+                ddl_lines = ddl_text.split('\n')
+                while ddl_lines and (not ddl_lines[-1].strip() or ddl_lines[-1].strip().startswith('--')):
+                    ddl_lines.pop()
+                ddl_text = '\n'.join(ddl_lines).strip()
                 migrator_tables.insert_ddl_triggers({
                     'source_schema_name': schema_name,
                     'source_trigger_name': trigger_name,
@@ -324,6 +338,23 @@ class IbmDb2ZosConnector(DatabaseConnector):
                                 'source_index_sql': stmt,
                                 'source_index_comment': comment_text
                             })
+                    continue
+
+                # Parse Global Variables (CREATE VARIABLE <schema>.<name> <type> DEFAULT <value>)
+                match_variable = re.search(
+                    r"^CREATE\s+(?:OR\s+REPLACE\s+)?VARIABLE\s+\"?([A-Za-z0-9_$#@]+)\"?\.\"?([A-Za-z0-9_$#@]+)\"?"
+                    r"\s+([A-Za-z0-9_]+(?:\s*\([^)]*\))?)"
+                    r"(?:\s+DEFAULT\s+(.+?))?\s*$", clean_stmt, re.IGNORECASE | re.DOTALL)
+                if match_variable:
+                    self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: parse_ddl_files: Found global variable: {match_variable.group(2)}")
+                    migrator_tables.insert_ddl_variables({
+                        'source_schema_name': match_variable.group(1).upper(),
+                        'source_variable_name': match_variable.group(2).upper(),
+                        'source_data_type': match_variable.group(3).strip().upper(),
+                        'source_default_value': match_variable.group(4).strip() if match_variable.group(4) else None,
+                        'source_variable_sql': stmt,
+                        'source_variable_comment': comment_text
+                    })
                     continue
 
                 # Parse Sequences
@@ -891,8 +922,13 @@ class IbmDb2ZosConnector(DatabaseConnector):
             self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: fetch_triggers: ({table_schema}): {rows}")
             order_num = 1
             for row in rows:
-                if table_name and table_name.upper() not in row[2].upper():
-                    continue
+                # Triggers are stored per schema - keep only those defined ON the requested
+                # table. The table is taken from the trigger definition, a plain substring
+                # search would also match every other table named in the trigger body.
+                if table_name and row[2]:
+                    match_on = re.search(r"(?i)\bON\s+(?:\"?[A-Za-z0-9_$#@]+\"?\.)?\"?([A-Za-z0-9_$#@]+)\"?", row[2])
+                    if not match_on or match_on.group(1).upper() != table_name.upper():
+                        continue
                 triggers[order_num] = {
                     'id': row[0],
                     'name': row[1],
@@ -906,55 +942,173 @@ class IbmDb2ZosConnector(DatabaseConnector):
             cursor.close()
         return triggers
 
+    def replace_outside_string_literals(self, code: str, pattern: str, replacement: str) -> str:
+        """
+        Applies re.sub only to the parts of the code which are not inside a string literal,
+        so that identifiers/keywords are rewritten but the content of literals stays untouched.
+        """
+        if not code:
+            return code
+        # re.split with a capturing group returns [code, literal, code, literal, ..., code],
+        # so all even indexes are the parts outside of string literals
+        parts = re.split(r"('(?:[^']|'')*')", code)
+        for i in range(0, len(parts), 2):
+            parts[i] = re.sub(pattern, replacement, parts[i])
+        return ''.join(parts)
+
+    def fetch_global_variables(self, schema_name: str) -> dict:
+        """
+        Returns the global variables of the schema as {name: {data_type, default_value}}.
+        The result is cached, it is read once per connector instance.
+        """
+        if getattr(self, 'global_variables_cache', None) is None:
+            self.global_variables_cache = {}
+        cache_key = (schema_name or '').upper()
+        if cache_key in self.global_variables_cache:
+            return self.global_variables_cache[cache_key]
+
+        variables = {}
+        if self.connectivity == self.config_parser.const_connectivity_ddl():
+            query = f"""SELECT source_variable_name, source_data_type, source_default_value
+                        FROM "{self.protocol_schema}"."ddl_variables"
+                        WHERE trim(source_schema_name) = trim(%s) ORDER BY id"""
+            try:
+                cursor = self.migrator_tables.protocol_connection.connection.cursor()
+                cursor.execute(query, (schema_name,))
+                for row in cursor.fetchall():
+                    variables[row[0].upper()] = {'data_type': row[1], 'default_value': row[2]}
+                cursor.close()
+            except Exception as e:
+                self.config_parser.print_log_message('WARNING', f"ibm_db2_zos_connector: fetch_global_variables: ({schema_name}): {e}")
+
+        self.global_variables_cache[cache_key] = variables
+        return variables
+
+    def convert_global_variables(self, code: str, schema_name: str) -> str:
+        """
+        Converts references to DB2 global variables into PostgreSQL session settings, which have
+        the same session scope: an assignment becomes set_config(), a read becomes
+        current_setting() falling back to the default declared with the variable.
+            SET MIGTEST.G_CASCADE = 1   ->  PERFORM set_config('migtest.g_cascade', (1)::text, false);
+            MIGTEST.G_CASCADE           ->  COALESCE(NULLIF(current_setting('migtest.g_cascade', true), ''), '0')::INTEGER
+        """
+        if not code or not schema_name:
+            return code
+
+        variables = self.fetch_global_variables(schema_name)
+        if not variables:
+            return code
+
+        types_mapping = self.get_types_mapping({'target_db_type': 'postgresql'})
+        for variable_name, variable_info in variables.items():
+            setting_name = f"{schema_name.lower()}.{variable_name.lower()}"
+
+            source_type = (variable_info.get('data_type') or '').upper()
+            base_type = source_type.split('(')[0].strip()
+            target_type = types_mapping.get(base_type, 'TEXT')
+            if '(' in source_type and target_type not in ('TEXT', 'BYTEA'):
+                target_type += source_type[source_type.find('('):]
+
+            default_value = variable_info.get('default_value')
+            default_literal = None
+            if default_value is not None:
+                default_value = str(default_value).strip()
+                if default_value.upper() != 'NULL':
+                    if default_value.startswith("'") and default_value.endswith("'"):
+                        default_literal = default_value
+                    else:
+                        default_literal = "'" + default_value.replace("'", "''") + "'"
+
+            current_value = f"current_setting('{setting_name}', true)"
+            if default_literal:
+                read_expression = f"COALESCE(NULLIF({current_value}, ''), {default_literal})::{target_type}"
+            else:
+                read_expression = f"NULLIF({current_value}, '')::{target_type}"
+
+            qualified_name = rf"{re.escape(schema_name)}\s*\.\s*{re.escape(variable_name)}"
+
+            # an assignment first - it consumes the whole SET statement
+            code = self.replace_outside_string_literals(
+                code,
+                rf"(?im)^([^\S\n]*)SET\s+{qualified_name}\s*=\s*([^;\n]+?)\s*;?[^\S\n]*$",
+                rf"\1PERFORM set_config('{setting_name}', (\2)::text, false);")
+            # everything left is a read
+            code = self.replace_outside_string_literals(
+                code,
+                rf"(?i)(?<![A-Za-z0-9_.\"]){qualified_name}\b",
+                read_expression.replace('\\', '\\\\'))
+
+        return code
+
     def convert_trigger(self, settings: dict):
         trigger_sql = settings.get('trigger_sql', '')
         trigger_name = settings.get('trigger_name', '')
+        source_schema_name = settings.get('source_schema_name', '')
         target_schema_name = settings.get('target_schema_name', '')
         target_table_name = settings.get('target_table_name', '')
 
         # Basic cleanup
         trigger_sql = re.sub(r'--([^\n]*)', r'/*\1*/', trigger_sql)
 
+        # '@' statement terminator of the DDL file
+        trigger_sql = re.sub(r"@[^\S\n]*$", "", trigger_sql.rstrip())
+
+        # DB2 for z/OS only clauses without a PostgreSQL counterpart: the VERSION identifier of
+        # an advanced (V12+) trigger, the mandatory MODE DB2SQL of a basic trigger and the
+        # NO CASCADE of a BEFORE trigger, which PostgreSQL enforces on its own.
+        trigger_sql = re.sub(r"(?im)^[^\S\n]*VERSION\s+[A-Za-z0-9_$#@]+[^\S\n]*$", "", trigger_sql)
+        trigger_sql = re.sub(r"(?i)\s*\bMODE\s+DB2SQL\b", "", trigger_sql)
+        trigger_sql = re.sub(r"(?i)\bNO\s+CASCADE\s+(?=BEFORE\b)", "", trigger_sql)
+
         # 1. Timing (BEFORE, AFTER, INSTEAD OF)
         timing_match = re.search(r'\b(BEFORE|AFTER|INSTEAD\s+OF)\b', trigger_sql, re.IGNORECASE)
         timing = timing_match.group(1).upper() if timing_match else 'BEFORE'
 
-        # 2. Event
-        event_match = re.search(r'\b(INSERT|UPDATE|DELETE)(?:\s+OF\s+([a-zA-Z0-9_,\s]+))?\b', trigger_sql[timing_match.end():] if timing_match else trigger_sql, re.IGNORECASE)
+        # 2. Event - the column list of UPDATE OF ends at the ON keyword of the trigger,
+        # it regularly continues on the next line
+        event_text = trigger_sql[timing_match.end():] if timing_match else trigger_sql
+        event_match = re.search(r'\b(INSERT|UPDATE|DELETE)(?:\s+OF\s+([\s\S]*?))?\s*\bON\b', event_text, re.IGNORECASE)
+        if not event_match:
+            event_match = re.search(r'\b(INSERT|UPDATE|DELETE)(?:\s+OF\s+([a-zA-Z0-9_,\s"]+))?\b', event_text, re.IGNORECASE)
         event = event_match.group(1).upper() if event_match else 'UPDATE'
         of_cols = event_match.group(2) if event_match and event_match.group(2) else None
 
         pg_event = event
         if of_cols and event == 'UPDATE':
-            cols = [c.strip() for c in of_cols.split(',')]
-            # Discard any matches that leaked to 'ON'
-            cols = [c for c in cols if c and c.upper() != 'ON']
-            # Reconstruct list safely
             actual_cols = []
-            for c in cols:
-                if ' ON ' in c.upper():
-                    c = c.upper().split(' ON ')[0].strip()
-                if c.upper().endswith(' ON'):
-                    c = c[:-3].strip()
+            for c in of_cols.split(','):
+                c = c.strip()
                 if c:
-                    actual_cols.append(c)
+                    is_quoted = c.startswith('"') and c.endswith('"')
+                    base_c = c.strip('"') if is_quoted else c.upper()
+                    actual_cols.append(f'"{self.config_parser.convert_names_case(base_c)}"')
             if actual_cols:
                 pg_event += f" OF {', '.join(actual_cols)}"
 
         # 3. Referencing Aliases
         old_alias, new_alias = 'OLD', 'NEW'
+        old_table_alias, new_table_alias = None, None
+
         old_match = re.search(r'\bOLD\s+AS\s+([a-zA-Z0-9_]+)\b', trigger_sql, re.IGNORECASE)
         if old_match: old_alias = old_match.group(1)
 
         new_match = re.search(r'\bNEW\s+AS\s+([a-zA-Z0-9_]+)\b', trigger_sql, re.IGNORECASE)
         if new_match: new_alias = new_match.group(1)
 
-        # 4. Extract WHEN and Body
-        mode_match = re.search(r'\bMODE\s+DB2SQL\b', trigger_sql, re.IGNORECASE)
+        # transition tables of a statement level trigger (REFERENCING OLD/NEW TABLE AS ...)
+        old_table_match = re.search(r'\bOLD\s+TABLE\s+AS\s+([a-zA-Z0-9_]+)\b', trigger_sql, re.IGNORECASE)
+        if old_table_match: old_table_alias = old_table_match.group(1)
+
+        new_table_match = re.search(r'\bNEW\s+TABLE\s+AS\s+([a-zA-Z0-9_]+)\b', trigger_sql, re.IGNORECASE)
+        if new_table_match: new_table_alias = new_table_match.group(1)
+
+        # 4. Extract WHEN and Body - everything behind FOR EACH ROW / FOR EACH STATEMENT
+        for_each_match = re.search(r'\bFOR\s+EACH\s+(ROW|STATEMENT)\b', trigger_sql, re.IGNORECASE)
+        for_each_scope = for_each_match.group(1).upper() if for_each_match else 'ROW'
+        remainder = trigger_sql[for_each_match.end():].strip() if for_each_match else trigger_sql
+
         when_clause = ""
         body = ""
-        remainder = trigger_sql[mode_match.end():].strip() if mode_match else trigger_sql
-
         if remainder.upper().startswith('WHEN'):
             when_text = remainder[4:].lstrip()
             if when_text.startswith('('):
@@ -969,8 +1123,9 @@ class IbmDb2ZosConnector(DatabaseConnector):
         else:
             body = remainder
 
-        # Strip BEGIN ATOMIC / END
-        body = re.sub(r'(?i)^BEGIN\s+ATOMIC', '', body).strip()
+        # Strip BEGIN ATOMIC / BEGIN ... END
+        body = re.sub(r'(?i)^BEGIN\s+ATOMIC\s+', '', body).strip()
+        body = re.sub(r'(?i)^BEGIN\s+', '', body).strip()
         body = re.sub(r'(?i)END;?\s*$', '', body).strip()
 
         # 5. Replacements
@@ -980,10 +1135,34 @@ class IbmDb2ZosConnector(DatabaseConnector):
                 text = re.sub(rf'\b{re.escape(old_alias)}\.', 'OLD.', text, flags=re.IGNORECASE)
             if new_alias.upper() != 'NEW':
                 text = re.sub(rf'\b{re.escape(new_alias)}\.', 'NEW.', text, flags=re.IGNORECASE)
+
+            def replace_record_field(match):
+                prefix = match.group(1).upper()
+                field_name = match.group(2)
+                is_quoted = field_name.startswith('"') and field_name.endswith('"')
+                base_field = field_name.strip('"') if is_quoted else field_name.upper()
+                return f'{prefix}."{self.config_parser.convert_names_case(base_field)}"'
+
+            text = re.sub(r'\b(OLD|NEW)\.([a-zA-Z0-9_"]+)\b', replace_record_field, text, flags=re.IGNORECASE)
             return text
 
         when_clause = replace_aliases(when_clause)
         body = replace_aliases(body)
+
+        # global variables have to be resolved before the schema names are rewritten,
+        # they are addressed by the source schema name as well
+        body = self.convert_global_variables(body, source_schema_name)
+        when_clause = self.convert_global_variables(when_clause, source_schema_name)
+
+        # objects addressed by the source schema name have to be addressed by the target one
+        if source_schema_name and target_schema_name:
+            schema_pattern = rf'(?i)(?<![A-Za-z0-9_."]){re.escape(source_schema_name)}\s*\.'
+            body = self.replace_outside_string_literals(body, schema_pattern, f'"{target_schema_name}".')
+            when_clause = self.replace_outside_string_literals(when_clause, schema_pattern, f'"{target_schema_name}".')
+
+        # VARCHAR(<expression>) is a conversion function in DB2 and a data type in PostgreSQL -
+        # the identifiers of the expression are already quoted at this point (OLD."order_id")
+        body = re.sub(r'(?i)\bVARCHAR\s*\(\s*(COUNT\s*\([^()]*\)|[a-zA-Z0-9_."]+\s*[+*/|-]\s*[^()]+|[a-zA-Z0-9_."]+\.[a-zA-Z0-9_."]+|[a-zA-Z_][a-zA-Z0-9_]*\([^()]*\))\s*\)', r'CAST(\1 AS VARCHAR)', body)
 
         # Replace CURRENT DATE / TIMESTAMP
         body = re.sub(r'\bCURRENT\s+DATE\b', 'CURRENT_DATE', body, flags=re.IGNORECASE)
@@ -991,9 +1170,19 @@ class IbmDb2ZosConnector(DatabaseConnector):
         when_clause = re.sub(r'\bCURRENT\s+DATE\b', 'CURRENT_DATE', when_clause, flags=re.IGNORECASE)
         when_clause = re.sub(r'\bCURRENT\s+TIMESTAMP\b', 'CURRENT_TIMESTAMP', when_clause, flags=re.IGNORECASE)
 
-        # Handle SIGNAL SQLSTATE and RAISE_ERROR
-        body = re.sub(r"(?i)SIGNAL\s+SQLSTATE\s+'([^']+)'\s*\(\s*('[^']+')\s*\);?", r"RAISE EXCEPTION \2 USING ERRCODE = '\1';", body)
+        # Handle SIGNAL SQLSTATE (both the z/OS parenthesised form and the SET MESSAGE_TEXT form)
+        body = re.sub(r"(?i)\bSIGNAL\s+SQLSTATE\s+(?:VALUE\s+)?'([^']+)'\s+SET\s+MESSAGE_TEXT\s*=\s*('[^']+'|[a-zA-Z0-9_.\"]+);?", r"RAISE EXCEPTION \2 USING ERRCODE = '\1';", body)
+        body = re.sub(r"(?i)\bSIGNAL\s+SQLSTATE\s+'([^']+)'\s*\(\s*('[^']+'|[a-zA-Z0-9_.\"]+)\s*\);?", r"RAISE EXCEPTION \2 USING ERRCODE = '\1';", body)
         body = re.sub(r"(?i)RAISE_ERROR\s*\(\s*'([^']+)'\s*,\s*('[^']+')\s*\)", r"RAISE EXCEPTION \2 USING ERRCODE = '\1';", body)
+
+        # DECLARE of a local variable belongs into the declaration section of a PL/pgSQL block
+        declarations = []
+        declared_variables = []
+        def collect_declaration(match):
+            declared_variables.append(match.group(1))
+            declarations.append(f"{match.group(1)} {match.group(2).strip()};")
+            return ''
+        body = re.sub(r'(?im)^[^\S\n]*DECLARE\s+([A-Za-z0-9_]+)\s+([^;\n]+);[^\S\n]*$', collect_declaration, body).strip()
 
         # Handle assignments: SET a = b or SET (a,b) = (c,d)
         if body.upper().startswith('SET'):
@@ -1008,29 +1197,50 @@ class IbmDb2ZosConnector(DatabaseConnector):
                     # Multi-assignment
                     body = "\n".join([f"{c} := {v};" for c, v in zip(cols, vals)])
             else:
-                body = re.sub(r'(?i)^([A-Za-z0-9_.]+)\s*=', r'\1 := ', body)
+                body = re.sub(r'(?i)^([A-Za-z0-9_."]+)\s*=', r'\1 := ', body)
             if not body.strip().endswith(';'):
                 body += ';'
+        # assignments to a declared local variable inside a compound body - only those, the SET
+        # of an UPDATE statement in the body must not be touched
+        for declared_variable in declared_variables:
+            body = re.sub(rf'(?im)^([^\S\n]*)SET\s+({re.escape(declared_variable)})\s*=', r'\1\2 :=', body)
 
         # Handle plain updates
         if not body.strip().endswith(';'):
             body += ';'
 
         # Target Generation
-        func_name = f"{trigger_name}_func"
+        target_table_name = self.config_parser.convert_names_case(target_table_name)
+        converted_trigger_name = self.config_parser.convert_names_case(trigger_name)
+        func_name = f"{converted_trigger_name}_func"
 
+        if for_each_scope == 'STATEMENT' or timing == 'AFTER':
+            return_stmt = "RETURN NULL;"
+        elif timing == 'BEFORE' and event == 'DELETE':
+            return_stmt = "RETURN OLD;"
+        else:
+            return_stmt = "RETURN NEW;"
+
+        declare_sql = ("DECLARE\n" + "\n".join(declarations) + "\n") if declarations else ""
         pg_func = f"""CREATE OR REPLACE FUNCTION "{target_schema_name}"."{func_name}"()
 RETURNS TRIGGER AS $$
-BEGIN
+{declare_sql}BEGIN
 {body}
-RETURN NEW;
+{return_stmt}
 END;
 $$ LANGUAGE plpgsql;
 """
+        ref_parts = []
+        if old_table_alias:
+            ref_parts.append(f"OLD TABLE AS {old_table_alias}")
+        if new_table_alias:
+            ref_parts.append(f"NEW TABLE AS {new_table_alias}")
+        referencing_sql = f"\nREFERENCING {' '.join(ref_parts)}" if ref_parts else ""
+
         when_sql = f"\nWHEN ({when_clause})" if when_clause else ""
-        pg_trigger = f"""CREATE TRIGGER "{trigger_name}"
-{timing} {pg_event} ON "{target_schema_name}"."{target_table_name}"
-FOR EACH ROW{when_sql}
+        pg_trigger = f"""CREATE TRIGGER "{converted_trigger_name}"
+{timing} {pg_event} ON "{target_schema_name}"."{target_table_name}"{referencing_sql}
+FOR EACH {for_each_scope}{when_sql}
 EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
 """
 

@@ -770,7 +770,7 @@ class IbmDb2IConnector(DatabaseConnector):
                     continue
 
                 # Parse CREATE TABLE / CREATE OR REPLACE TABLE (with FOR SYSTEM NAME, RECORD FORMAT, CCSID)
-                match_table = re.search(r"^CREATE\s+(?:OR\s+REPLACE\s+)?TABLE\s+\"?([A-Za-z0-9_]+)\"?\.\"?([A-Za-z0-9_]+)\"?(?:\s+FOR\s+SYSTEM\s+NAME\s+[A-Za-z0-9_]+)?", clean_stmt, re.IGNORECASE)
+                match_table = re.search(r"^CREATE\s+(?:OR\s+REPLACE\s+)?TABLE\s+\"?([A-Za-z0-9_$#@]+)\"?\.\"?([A-Za-z0-9_$#@]+)\"?(?:\s+FOR\s+SYSTEM\s+NAME\s+\"?([A-Za-z0-9_$#@]+)\"?)?", clean_stmt, re.IGNORECASE)
                 if not match_table:
                     continue
 
@@ -830,6 +830,23 @@ class IbmDb2IConnector(DatabaseConnector):
                     'source_table_sql': stmt,
                     'source_table_comment': comment_text
                 })
+
+                # The 10 character system name of the table (FOR SYSTEM NAME) is registered as an
+                # alias: the unload files are named after it, so it resolves the placeholder
+                # {{source_alias_name}} of the data source file name, and the native RPG / CL
+                # side of the estate knows the tables only under these names.
+                system_name = match_table.group(3).upper() if match_table.group(3) else None
+                if system_name:
+                    self.config_parser.print_log_message('DEBUG3', f"ibm_db2_i_connector: parse_ddl_files: Found system name {system_name} of table {table_name}")
+                    migrator_tables.insert_ddl_aliases({
+                        'source_schema_name': schema_name,
+                        'source_alias_name': system_name,
+                        'source_target_schema': schema_name,
+                        'source_target_name': table_name,
+                        'source_alias_sql': None,
+                        'source_alias_comment': f"System name of table {table_name}",
+                        'alias_target_type': 'SYSTEM NAME'
+                    })
 
                 # Table level constraints - DB2 for i declares primary keys, unique constraints,
                 # foreign keys and check constraints inside the CREATE TABLE, usually named
@@ -1575,12 +1592,15 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
 
             # Aliases pointing to a TABLE are exposed as views "SELECT * FROM <target table>",
             # aliases pointing to a VIEW are skipped - the view itself is migrated anyway.
+            # the system name of a table is not a separate object, it does not get its own view
             query_aliases = f"""SELECT a.id, a.source_schema_name, a.source_alias_name, a.source_target_schema, a.source_target_name, a.source_alias_comment
                                 FROM "{self.protocol_schema}"."ddl_aliases" a
                                 INNER JOIN "{self.protocol_schema}"."ddl_tables" t
                                     ON trim(a.source_target_schema) = trim(t.source_schema_name)
                                     AND trim(a.source_target_name) = trim(t.source_table_name)
-                                WHERE trim(a.source_schema_name) = trim(%s) ORDER BY a.id"""
+                                WHERE trim(a.source_schema_name) = trim(%s)
+                                  AND a.alias_target_type IS DISTINCT FROM 'SYSTEM NAME'
+                                ORDER BY a.id"""
             cursor.execute(query_aliases, (source_schema_name,))
             alias_rows = cursor.fetchall()
             cursor.close()
@@ -1606,11 +1626,12 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
         aliases = {}
         if self.connectivity == self.config_parser.const_connectivity_ddl():
             query = f"""SELECT a.id, a.source_schema_name, a.source_alias_name, a.source_target_schema, a.source_target_name, a.source_alias_sql, a.source_alias_comment,
+                            COALESCE(NULLIF(a.alias_target_type, ''),
                             CASE
                                 WHEN t.source_table_name IS NOT NULL THEN 'TABLE'
                                 WHEN v.source_view_name IS NOT NULL THEN 'VIEW'
                                 ELSE 'UNKNOWN'
-                            END as alias_target_type
+                            END) as alias_target_type
                         FROM "{self.protocol_schema}"."ddl_aliases" a
                         LEFT JOIN "{self.protocol_schema}"."ddl_tables" t
                             ON trim(a.source_target_schema) = trim(t.source_schema_name) AND trim(a.source_target_name) = trim(t.source_table_name)

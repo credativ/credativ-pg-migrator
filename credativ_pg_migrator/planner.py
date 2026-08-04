@@ -1710,6 +1710,9 @@ class Planner:
                             valid_alias_name = table_info['source_table_name']
                             aliases = self.migrator_tables.fetch_all_aliases({'source_schema_name': table_info['source_schema_name']})
                             # self.config_parser.print_log_message('DEBUG3', f"planner: stdwf_prepare_data_sources: Aliases found: {aliases}")
+                            # A table can have several aliases (on IBM i also its short system
+                            # name) - every one of them is tried against the template, which must
+                            # therefore not be overwritten before a matching file was found.
                             for row in aliases:
                                 alias_info = self.migrator_tables.decode_aliases_row(row)
                                 # self.config_parser.print_log_message('DEBUG3', f"planner: stdwf_prepare_data_sources: Processing alias: {alias_info}")
@@ -1719,8 +1722,10 @@ class Planner:
                                     if ((ref_table == table_info['source_table_name'].lower() or ref_table == table_info['source_table_name'].upper()) and
                                         (ref_schema == table_info['source_schema_name'].lower() or ref_schema == table_info['source_schema_name'].upper())):
                                         valid_alias_name = alias_info['source_alias_name']
-                                        table_file_name = replace_placeholder(table_file_name, '{{source_alias_name}}', valid_alias_name)
-                                        if os.path.exists(table_file_name):
+                                        candidate_file_name = replace_placeholder(table_file_name, '{{source_alias_name}}', valid_alias_name)
+                                        self.config_parser.print_log_message('DEBUG3', f"planner: stdwf_prepare_data_sources: Testing alias {valid_alias_name} of table {table_info['source_table_name']} - data source file name {candidate_file_name}")
+                                        if os.path.exists(candidate_file_name):
+                                            table_file_name = candidate_file_name
                                             break
 
                     if os.path.exists(table_file_name):

@@ -540,7 +540,7 @@ class IbmDb2ZosConnector(DatabaseConnector):
                 # Second pass for extracting column metrics
                 for col_def in col_defs:
                     col_def_u = col_def.upper()
-                    if col_def_u.startswith("PRIMARY KEY") or col_def_u.startswith("CONSTRAINT") or col_def_u.startswith("FOREIGN KEY") or col_def_u.startswith("UNIQUE"):
+                    if col_def_u.startswith("PRIMARY KEY") or col_def_u.startswith("CONSTRAINT") or col_def_u.startswith("FOREIGN KEY") or col_def_u.startswith("UNIQUE") or col_def_u.startswith("CHECK") or col_def_u.startswith("PERIOD"):
                         continue
 
                     parts = col_def.split(maxsplit=1)
@@ -1441,6 +1441,12 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
         pass
 
     def get_rows_count(self, table_schema: str, table_name: str, migration_limitation: str = None):
+        if self.connectivity == self.config_parser.const_connectivity_ddl():
+            # there is no source database to count in - the structure comes from the DDL files
+            # and the data from the unload files, the number of rows is the one loaded into the target
+            self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: get_rows_count: ({table_schema}.{table_name}): not counted, source is a set of DDL and data files.")
+            return 0
+
         query = f"""SELECT COUNT(*) FROM {table_schema.upper()}."{table_name}" """
         if migration_limitation:
             query += f" WHERE {migration_limitation}"
@@ -1459,6 +1465,9 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
         return 0
 
     def get_table_next_identity(self, table_schema: str, table_name: str):
+        if self.connectivity == self.config_parser.const_connectivity_ddl():
+            # the catalog of the source database is not available with DDL connectivity
+            return None
         try:
             query = f"""
                 SELECT MAXASSIGNEDVAL + 1
@@ -1507,9 +1516,12 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
         return []
 
     def get_table_checksum(self, schema_name: str, table_name: str, columns: list):
+        if self.connectivity == self.config_parser.const_connectivity_ddl():
+            # a checksum of the source cannot be computed without a source database
+            return None
         if not columns:
             return None
-            
+
         cols_list = []
         for col in columns:
             dtype = col.get('data_type', '').lower()
@@ -1528,6 +1540,9 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
         return []
 
     def get_row_checksums(self, schema_name: str, table_name: str, pk_columns: list, pk_values_list: list, columns: list):
+        if self.connectivity == self.config_parser.const_connectivity_ddl():
+            # row checksums of the source cannot be computed without a source database
+            return {}
         if not columns or not pk_columns or not pk_values_list:
             return {}
             

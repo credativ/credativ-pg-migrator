@@ -35,9 +35,12 @@ the config file is honoured only when it matches an attached database.
 
 import os
 import re
+import glob
 import time
+import hashlib
 import sqlite3
 import datetime
+import tempfile
 import traceback
 import urllib.parse
 from decimal import Decimal
@@ -71,10 +74,229 @@ class SQLiteConnector(DatabaseConnector):
         self.source_or_target = source_or_target
         self.on_error_action = self.config_parser.get_on_error_action()
         self.logger = MigratorLogger(self.config_parser.get_log_file()).logger
+        self.source_db_config = self.config_parser.get_source_config()
         # Cache of parsed CREATE TABLE statements, keyed by (schema, table)
         self._ddl_cache = {}
+        # The connectivity has to be resolved here and not only in connect(): with
+        # connectivity 'ddl' the planner skips the connection check and the pre-migration
+        # analysis entirely and goes straight to parse_ddl_files(), so an unusable value
+        # would only surface much later as an unrelated looking error.
+        self.connectivity = self._check_connectivity()
+
+        self.ddl_files = []
+        self._ddl_database_path = None
+        if self.connectivity == self.config_parser.const_connectivity_ddl():
+            self._prepare_ddl_files()
 
     ## ---------------------------------------------------------------- connection
+
+    def _check_connectivity(self):
+        """
+        SQLite supports two connectivity modes:
+          native - the source is a SQLite database file, read through the sqlite3 module
+          ddl    - the source objects are read from SQL script files, and the data usually
+                   comes from CSV files configured under data_export
+        """
+        connectivity = self.config_parser.get_connectivity(self.source_or_target)
+        if connectivity is None or str(connectivity).strip() == '':
+            return 'native'
+        connectivity = str(connectivity).strip().lower()
+        if connectivity not in ('native', self.config_parser.const_connectivity_ddl()):
+            raise ValueError(
+                f"sqlite_connector: unsupported connectivity '{connectivity}' for the SQLite "
+                f"{self.source_or_target} database. Supported values are \"native\" (read the "
+                f"objects and the data from a SQLite database file given by 'database') and "
+                f"\"ddl\" (read the objects from the SQL script files given by 'ddl: path:', "
+                f"with the data usually coming from CSV files configured under 'data_export'). "
+                f"The setting may also be left out, which means \"native\".")
+        return connectivity
+
+    ## ---------------------------------------------------------------- DDL connectivity
+
+    def _prepare_ddl_files(self):
+        """
+        Resolve 'ddl: path:' into the list of SQL script files, exactly like the other
+        DDL based connectors: the path can be a directory, a file mask or a single file.
+        """
+        try:
+            self.ddl_path = self.source_db_config['ddl']['path']
+        except (KeyError, TypeError):
+            raise ValueError(
+                "sqlite_connector: connectivity is \"ddl\", so the source section must contain "
+                "a 'ddl:' block with a 'path:' pointing to the SQL script file(s) holding the "
+                "CREATE statements - a directory, a file mask or one specific file.")
+
+        ddl_path = os.path.expanduser(str(self.ddl_path))
+        if not os.path.isabs(ddl_path):
+            ddl_path = os.path.join(os.path.dirname(os.path.abspath(self.config_parser.args.config)), ddl_path)
+        self.ddl_path = os.path.normpath(ddl_path)
+
+        if os.path.isdir(self.ddl_path):
+            self.ddl_files = sorted(glob.glob(os.path.join(self.ddl_path, '*.*')))
+        else:
+            self.ddl_files = sorted(glob.glob(self.ddl_path))
+        self.ddl_files = [path for path in self.ddl_files if os.path.isfile(path)]
+
+        if not self.ddl_files:
+            raise ValueError(f"sqlite_connector: No DDL files found for path or mask: '{self.ddl_path}'")
+
+        self.config_parser.print_log_message('INFO', f"sqlite_connector: DDL path valid: '{self.ddl_path}', found {len(self.ddl_files)} file(s)")
+        for filepath in self.ddl_files:
+            self.config_parser.print_log_message('DEBUG', f"sqlite_connector: DDL file: {filepath} ({os.path.getsize(filepath)} bytes)")
+
+        # The scripts are replayed into a real SQLite database, which is then introspected
+        # exactly like a database given with native connectivity. SQLite is the only parser
+        # that understands its own DDL completely, so nothing is lost in a hand-written one.
+        # The path is derived from the script list so that every connector instance - the
+        # planner and each orchestrator worker - resolves it to the same file.
+        digest = hashlib.sha1('|'.join(self.ddl_files).encode('utf-8')).hexdigest()[:12]
+        base_dir = None
+        try:
+            if self.config_parser.get_source_data_export():
+                base_dir = self.config_parser.get_source_data_export_conversion_path()
+        except Exception:
+            base_dir = None
+        if not base_dir or not os.path.isdir(base_dir):
+            base_dir = tempfile.gettempdir()
+        self._ddl_database_path = os.path.join(base_dir, f"credativ_pg_migrator_sqlite_ddl_{digest}.sqlite")
+
+    def _database_path(self):
+        """ The SQLite file this connector reads from, for both connectivity modes. """
+        if self.connectivity == self.config_parser.const_connectivity_ddl():
+            return self._ddl_database_path
+        return self.config_parser.get_connect_string(self.source_or_target)
+
+    @staticmethod
+    def _read_script(filepath):
+        """ Read a SQL script; a legacy dump is not necessarily valid UTF-8. """
+        with open(filepath, 'rb') as script_file:
+            raw = script_file.read()
+        for encoding in ('utf-8', 'utf-8-sig', 'latin-1'):
+            try:
+                return raw.decode(encoding)
+            except UnicodeDecodeError:
+                continue
+        return raw.decode('utf-8', errors='replace')
+
+    def _execute_script(self, connection, script, filepath):
+        """
+        Replay one SQL script into the staging database.
+
+        The fast path is executescript(), which hands the whole file to SQLite at once.
+        It is all-or-nothing though, so when it fails the script is replayed statement by
+        statement - that isolates the offending statement, reports it, and lets the rest of
+        the file through instead of losing every object in it.
+        """
+        try:
+            connection.executescript(script)
+            return 0
+        except sqlite3.Error as e:
+            self.config_parser.print_log_message('WARNING', f"sqlite_connector: _execute_script: {os.path.basename(filepath)}: {e} - replaying the file statement by statement to isolate the problem.")
+
+        try:
+            connection.rollback()
+        except sqlite3.Error:
+            pass
+
+        failed = 0
+        statement = ''
+        cursor = connection.cursor()
+        for line in script.splitlines(keepends=True):
+            statement += line
+            # sqlite3_complete() knows about string literals and about the BEGIN ... END
+            # body of a trigger, so a trigger is not cut apart at its inner semicolons.
+            if not sqlite3.complete_statement(statement):
+                continue
+            text = statement.strip()
+            statement = ''
+            if not text or text.startswith('--'):
+                continue
+            try:
+                cursor.execute(text)
+            except sqlite3.Error as e:
+                failed += 1
+                preview = re.sub(r'\s+', ' ', text)[:200]
+                self.config_parser.print_log_message('WARNING', f"sqlite_connector: _execute_script: {os.path.basename(filepath)}: skipped statement ({e}): {preview}")
+        if statement.strip():
+            try:
+                cursor.execute(statement)
+            except sqlite3.Error as e:
+                failed += 1
+                self.config_parser.print_log_message('WARNING', f"sqlite_connector: _execute_script: {os.path.basename(filepath)}: skipped trailing statement ({e}).")
+        cursor.close()
+        connection.commit()
+        return failed
+
+    def _build_ddl_database(self, force=False):
+        """
+        Create the staging SQLite database from the configured SQL scripts. The database is
+        built under a temporary name and moved into place atomically, so that orchestrator
+        workers running in parallel either see the previous complete file or the new one.
+        """
+        if not force and self._ddl_database_path and os.path.isfile(self._ddl_database_path):
+            return self._ddl_database_path
+
+        build_path = f"{self._ddl_database_path}.{os.getpid()}.tmp"
+        for leftover in (build_path,):
+            if os.path.exists(leftover):
+                os.remove(leftover)
+
+        self.config_parser.print_log_message('INFO', f"sqlite_connector: _build_ddl_database: Replaying {len(self.ddl_files)} DDL script(s) into the staging database {self._ddl_database_path}")
+        failed_statements = 0
+        build_connection = sqlite3.connect(build_path)
+        build_connection.text_factory = self._decode_text
+        try:
+            # A dump normally switches these off itself; doing it here as well keeps a
+            # schema-only script from failing on a forward reference between tables.
+            build_connection.execute("PRAGMA foreign_keys=OFF")
+            build_connection.execute("PRAGMA legacy_alter_table=ON")
+            for filepath in self.ddl_files:
+                script = self._read_script(filepath)
+                if not script.strip():
+                    self.config_parser.print_log_message('WARNING', f"sqlite_connector: _build_ddl_database: {filepath} is empty - skipped.")
+                    continue
+                failed_statements += self._execute_script(build_connection, script, filepath)
+            build_connection.commit()
+            objects = build_connection.execute(
+                "SELECT type, count(*) FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' GROUP BY type ORDER BY type").fetchall()
+        except Exception:
+            build_connection.close()
+            if os.path.exists(build_path):
+                os.remove(build_path)
+            raise
+        build_connection.close()
+
+        plurals = {'table': 'tables', 'index': 'indexes', 'view': 'views', 'trigger': 'triggers'}
+        summary = ', '.join(f"{count} {plurals.get(kind, kind + 's') if count != 1 else kind}" for kind, count in objects) or 'no objects'
+        if not objects:
+            os.remove(build_path)
+            raise ValueError(
+                f"sqlite_connector: the DDL script(s) under '{self.ddl_path}' produced no database "
+                f"objects. Check that the files contain SQLite CREATE statements"
+                + (f" - {failed_statements} statement(s) could not be executed, run with --log-level=WARNING to see them." if failed_statements else "."))
+
+        os.replace(build_path, self._ddl_database_path)
+        self.config_parser.print_log_message('INFO', f"sqlite_connector: _build_ddl_database: Staging database created from DDL: {summary}")
+        if failed_statements:
+            # Reported at INFO because a skipped CREATE statement means a missing object -
+            # the per statement detail is logged at WARNING, which this tool ranks as more
+            # verbose than INFO and therefore does not show by default.
+            self.config_parser.print_log_message('INFO', f"sqlite_connector: _build_ddl_database: ATTENTION: {failed_statements} statement(s) of the DDL script(s) could not be executed and were SKIPPED - the objects they create are missing from the migration. Run with --log-level=WARNING to see each skipped statement.")
+        return self._ddl_database_path
+
+    def parse_ddl_files(self, settings):
+        """
+        Entry point called by the planner for DDL connectivity. For SQLite "parsing" means
+        replaying the SQL scripts into a staging SQLite database - after that every object
+        (tables, columns, indexes, constraints, views, triggers) is read with exactly the
+        same code as for a native connection.
+        """
+        self._ddl_cache = {}
+        self._build_ddl_database(force=True)
+        # SQLite has no schemas, so whatever the config named the schema, the objects of the
+        # staging database live in 'main'.
+        self.config_parser.set_source_schema('main')
+        self.config_parser.print_log_message('INFO', "sqlite_connector: parse_ddl_files: DDL scripts loaded - source schema set to 'main'.")
 
     @staticmethod
     def _decode_text(value):
@@ -90,11 +312,12 @@ class SQLiteConnector(DatabaseConnector):
             return value.decode('utf-8', errors='replace')
 
     def connect(self):
-        connectivity = self.config_parser.get_connectivity(self.source_or_target)
-        if connectivity not in (None, '', 'native'):
-            raise ValueError(f"Unsupported SQLite connectivity: {connectivity}")
+        if self.connectivity == self.config_parser.const_connectivity_ddl():
+            # Every orchestrator worker builds its own connector, and only the planner runs
+            # parse_ddl_files(), so the staging database is (re)built here when it is missing.
+            self._build_ddl_database()
 
-        database_path = self.config_parser.get_connect_string(self.source_or_target)
+        database_path = self._database_path()
         if not os.path.isfile(database_path):
             raise FileNotFoundError(f"sqlite_connector: connect: SQLite database file not found: {database_path}")
 
@@ -2037,7 +2260,7 @@ class SQLiteConnector(DatabaseConnector):
     def get_database_size(self):
         """ Size of the database file including its WAL / journal side files. """
         try:
-            database_path = self.config_parser.get_connect_string(self.source_or_target)
+            database_path = self._database_path()
             size = 0
             for suffix in ('', '-wal', '-shm', '-journal'):
                 candidate = database_path + suffix

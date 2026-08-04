@@ -227,7 +227,20 @@ class ConfigParser:
             else:
                 raise ValueError(f"Unsupported SQL Anywhere connectivity: {connectivity}")
         elif db_config['type'] == 'sqlite':
-            if connectivity in ('native', None, ''):
+            # SQLite is read from a file with the sqlite3 module of the standard library.
+            # "native" (the default when the value is left out) reads the database file given
+            # by 'database'; "ddl" reads the objects from the SQL scripts under 'ddl: path:',
+            # which the connector replays into a staging database of its own.
+            normalized_connectivity = str(connectivity).strip().lower() if connectivity else 'native'
+            if normalized_connectivity == 'ddl':
+                ddl_path = (db_config.get('ddl') or {}).get('path')
+                if not ddl_path:
+                    raise ValueError("SQLite connection with connectivity 'ddl' requires 'ddl: path:' with the SQL script file(s)")
+                ddl_path = os.path.expanduser(str(ddl_path))
+                if not os.path.isabs(ddl_path):
+                    ddl_path = os.path.join(os.path.dirname(os.path.abspath(self.args.config)), ddl_path)
+                return os.path.normpath(ddl_path)
+            if normalized_connectivity == 'native':
                 # SQLite is a single file - "database" holds the path to it, and there is
                 # no host, port, user or password. A relative path is resolved against the
                 # directory of the config file, so that a config file can be moved together
@@ -240,7 +253,11 @@ class ConfigParser:
                     database_path = os.path.join(os.path.dirname(os.path.abspath(self.args.config)), database_path)
                 return os.path.normpath(database_path)
             else:
-                raise ValueError(f"Unsupported SQLite connectivity: {connectivity}")
+                raise ValueError(
+                    f"Unsupported SQLite connectivity: '{connectivity}'. SQLite supports "
+                    f"\"native\" (or no value at all) - read the database file given by "
+                    f"'database' - and \"ddl\" - read the objects from the SQL scripts given "
+                    f"by 'ddl: path:'.")
         elif db_config['type'] == 'oracle':
             # if connectivity == 'native':
             #     return f"oracle://{db_config['username']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"

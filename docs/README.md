@@ -286,12 +286,14 @@ Functions, procedures and triggers are converted (T-SQL → PL/pgSQL, via the sh
 
 ### 4.7 SQLite
 
-- **Mode**: Native, local file — there is no server, no network connection and no authentication.
+- **Mode**: local file — there is no server, no network connection and no authentication.
 - **Python Module**: `sqlite3` from the Python standard library. **No driver has to be installed**, which makes SQLite the only source engine with no external prerequisites.
-- **Configuration**: Set `connectivity: "native"` (it may also be omitted — `native` is assumed).
 - **Tested version**: SQLite 3.46 (see `FEATURE_MATRIX.md`).
+- **Connectivity**: two modes,
+  - `native` — the objects *and* the data are read from a SQLite database file (`database:`). This is the default when `connectivity` is left out.
+  - `ddl` — the objects are read from SQL script files (`ddl: path:`), and the data usually comes from CSV files configured under `data_export`. Use it when you were given a schema dump instead of the database file.
 
-The whole source section for a SQLite migration is:
+#### 4.7.1 Native connectivity — migrating from a database file
 
 ```yaml
 source:
@@ -311,15 +313,65 @@ Notes on the connection parameters:
 - The file is opened **read-only** whenever possible, so a migration cannot modify the source. If the read-only open fails — which happens when the file carries a hot journal or a WAL that needs recovery — the connector logs a `WARNING` and reopens read-write, because SQLite must be able to replay the journal before it can read consistently.
 - TEXT values that are not valid UTF-8 (common in old databases, since SQLite does not enforce the encoding of what is stored) are decoded with replacement characters instead of aborting the batch.
 
-#### 4.7.1 Why SQLite needs a different approach
+#### 4.7.2 DDL connectivity — migrating from SQL script files
+
+When the source is a set of `.sql` scripts rather than a database file — a `sqlite3 db .schema`
+or `sqlite3 db .dump` output, or hand-maintained schema scripts — set `connectivity: "ddl"`:
+
+```yaml
+source:
+  type: "sqlite"
+  connectivity: "ddl"
+  schema: "main"
+  ddl:
+    # a directory, a file mask, or one specific file
+    path: "/path/to/ddl/*.sql"
+
+  # data usually comes from CSV exports; omit this block when the scripts
+  # themselves contain the INSERT statements (a full .dump)
+  data_export:
+    format: "CSV"
+    file: "/path/to/data/{{source_table_name}}.csv"
+    delimiter: ","
+    header: true
+```
+
+`path` accepts a directory (all files in it), a mask, or a single file, and a relative path is
+resolved against the directory of the config file. Files are processed in sorted order.
+
+**How it works.** Rather than re-implementing a SQLite parser, the connector replays the scripts
+into a **staging SQLite database** and then introspects that database with exactly the same code
+used for native connectivity. SQLite is the only parser that understands its own DDL completely,
+so nothing is lost in translation: CHECK constraints, generated columns, `AUTOINCREMENT`,
+functional and partial indexes, views and triggers are all recognized the same way as from a live
+file. Consequences worth knowing:
+
+- The staging database is created once by the planner and reused by every parallel worker. Its path
+  is derived from the list of script files and is logged at `INFO`; it is placed in
+  `data_export.conversion_path` when that is configured, otherwise in the system temp directory. It
+  is written atomically, so workers never observe a half-built file. It is **not** deleted after the
+  run — it is useful for inspecting what the scripts actually produced.
+- The scripts are first executed in one go; if that fails, they are replayed **statement by
+  statement** so that one bad statement does not cost you every object in the file. Skipped
+  statements are counted and reported at `INFO` (`ATTENTION: n statement(s) ... were SKIPPED`), with
+  each individual statement logged at `WARNING`. Because this tool ranks `WARNING` as *more* verbose
+  than `INFO`, run with `--log-level=WARNING` to see them.
+- **If the scripts contain `INSERT` statements** (i.e. a full `.dump`), that data lands in the
+  staging database and is migrated from there — no `data_export` block is needed. When a CSV data
+  source *is* configured for a table, the CSV takes precedence, exactly as for the other DDL based
+  connectors.
+- `database` is ignored in this mode; `host`, `port`, `username` and `password` remain unused.
+- As with the other DDL based connectors, the planner skips the pre-migration analysis in this mode.
+
+#### 4.7.3 Why SQLite needs a different approach
 
 Two properties of SQLite shape this connector and explain most of its behavior:
 
 **1. There is no data dictionary.** SQLite exposes columns, indexes and foreign keys through `PRAGMA` statements, but a number of things exist *only* inside the original `CREATE` statements kept in `sqlite_master`: CHECK constraints, generated-column expressions, the `AUTOINCREMENT` marker, the expressions of a functional index, and the `WHERE` condition of a partial index. The connector therefore contains a small **DDL parser** that reads those statements back. The parser is quote- and parenthesis-aware, so commas inside string defaults (`DEFAULT 'a,b'`), nested function calls and all four identifier quoting styles SQLite accepts (`"name"`, `` `name` ``, `[name]`, bare) are handled correctly, and `--` / `/* */` comments are stripped first.
 
-**2. SQLite is dynamically typed.** A column has a *declared type* and a *type affinity*, but any row may store any storage class — a column declared `TEXT` can hold an integer, and a column declared `DATE` can hold an ISO string, a Unix timestamp or a Julian day number. The connector uses the **declared type to choose the PostgreSQL column type**, and then **coerces every value to what the target column actually expects** while the data is migrated (see 4.7.4). A column declared with no type at all is migrated as `TEXT`.
+**2. SQLite is dynamically typed.** A column has a *declared type* and a *type affinity*, but any row may store any storage class — a column declared `TEXT` can hold an integer, and a column declared `DATE` can hold an ISO string, a Unix timestamp or a Julian day number. The connector uses the **declared type to choose the PostgreSQL column type**, and then **coerces every value to what the target column actually expects** while the data is migrated (see 4.7.6). A column declared with no type at all is migrated as `TEXT`.
 
-#### 4.7.2 Current status (SQLite as source)
+#### 4.7.4 Current status (SQLite as source)
 
 - **Tables and data** are migrated, with the usual batching, chunking, parallel workers and resume-after-crash support.
 - **Primary keys** are always taken from the column metadata, because SQLite does not create an index for an `INTEGER PRIMARY KEY` on a rowid table. Composite primary keys and `WITHOUT ROWID` tables are handled.
@@ -334,7 +386,7 @@ Two properties of SQLite shape this connector and explain most of its behavior:
 - **Pre-migration analysis** is fully supported for all five metrics (`by_rows`, `by_size`, `by_columns`, `by_indexes`, `by_constraints`).
 - **Post-migration validation** (`--validate`) is supported: row counts, table checksums, random row sampling and LOB byte sizes.
 
-#### 4.7.3 Data type mapping
+#### 4.7.5 Data type mapping
 
 SQLite accepts *any* declared type, so the mapping deliberately covers the type names of the dialects SQLite databases are commonly created from, not just SQLite's own five storage classes. The main entries:
 
@@ -361,7 +413,7 @@ SQLite accepts *any* declared type, so the mapping deliberately covers the type 
 
 Any of these can be overridden per table/column with the usual `data_types_substitution` rules.
 
-#### 4.7.4 Value conversion during data migration
+#### 4.7.6 Value conversion during data migration
 
 Because the declared type is not a guarantee, values are converted on the way out based on the **target** column type:
 
@@ -375,7 +427,7 @@ Because the declared type is not a guarantee, values are converted on the way ou
 
 When `migration.migrate_lob_values` is `false`, `BLOB`-backed columns are migrated as `NULL`.
 
-#### 4.7.5 Known limitations (SQLite)
+#### 4.7.7 Known limitations (SQLite)
 
 - **Partial indexes lose their condition.** The migrator's internal index model carries only a column list, with no way for a source connector to supply a complete `CREATE INDEX` statement. A partial index is therefore created **over the whole table**, and a **partial `UNIQUE` index is degraded to a non-unique index** — keeping it unique would reject rows that SQLite legitimately accepted. Both cases are logged as a `WARNING`, and the original `WHERE` condition is stored in the index comment in the migration database so the index can be recreated by hand afterwards.
 - **Virtual tables are skipped.** Virtual tables (FTS3/4/5, RTREE, and any other module) have no PostgreSQL equivalent and are skipped with a `WARNING`, together with their shadow tables (`<name>_data`, `<name>_idx`, …), which would otherwise be migrated as meaningless internal data. Full-text search on the target has to be rebuilt with `tsvector`/GIN indexes. Hidden columns of a virtual table are likewise not migrated.
@@ -385,7 +437,7 @@ When `migration.migrate_lob_values` is `false`, `BLOB`-backed columns are migrat
 - **View, trigger and expression conversion is best-effort.** Translation is done by `sqlglot` plus a SQLite-specific function mapping. Constructs without a clean equivalent should be reviewed: `strftime()` and the other date/time functions have only partial counterparts, `group_concat()` differs from `string_agg()` in its argument handling, `last_insert_rowid()` is mapped to `lastval()`, and `changes()` has no equivalent. When `sqlglot` cannot parse a fragment, the original text is kept and a `DEBUG` message is logged, so the resulting object may fail to create. Every generated statement is stored in the migration database, so failures can be inspected and fixed there.
 - **Trigger bodies** are limited to what SQLite itself allows (`INSERT`/`UPDATE`/`DELETE`/`SELECT` plus `RAISE`), which maps cleanly, but a trigger whose header cannot be parsed is skipped with a `WARNING` and must be migrated manually.
 - **Table sizes** are only available when the SQLite library was compiled with `SQLITE_ENABLE_DBSTAT_VTAB` (the `dbstat` virtual table). Otherwise the pre-migration analysis reports a size of `0`; row counts are always accurate, but note that they are obtained with a real `count(*)` per table, since SQLite keeps no row estimates.
-- **File-based data ingest** (`data_export` with CSV/UNL/SQL files) is not implemented for SQLite — it is not needed, because the source is already a local file.
+- **File-based ingest**: supported through `connectivity: "ddl"` (section 4.7.2) — objects from SQL scripts, data from CSV via `data_export`, or from the scripts themselves when they are a full dump. The Informix `UNL` format and the `big_files_split` parallel chunking are not implemented for SQLite.
 - **Attached databases** are not migrated automatically. Only one schema is migrated per run; to move several attached databases, run the migrator once per database.
 
 ### 4.8 MS SQL Server
@@ -603,7 +655,7 @@ Treat the migration database as read‑only metadata. You can query it freely fo
 - Sequences on the target can be set to match the highest existing values in migrated tables.
 - View migration depth differs per connector: PostgreSQL takes definitions straight from the catalog, Oracle, SQLite, MySQL/MariaDB, MS SQL Server, Sybase ASE and the DB2 connectors transpile the defining query to PostgreSQL SQL (with `sqlglot` or the shared T-SQL parser), while for Informix and SQL Anywhere only the schema name inside the definition is replaced.
 - Beyond the common set, some connectors reach further: PostgreSQL migrates partitioned tables, domains and user-defined types; Sybase ASE migrates named default objects, rules/domains and user-defined types; Oracle migrates packages, object/collection types and 23ai domains.
-- Not every source feature has a PostgreSQL counterpart. Where a construct cannot be reproduced exactly, the connector degrades it deliberately, logs a `WARNING`, and records what was changed in the migration database — for example SQLite partial indexes (section 4.7.5) or Oracle package state (section 4.3).
+- Not every source feature has a PostgreSQL counterpart. Where a construct cannot be reproduced exactly, the connector degrades it deliberately, logs a `WARNING`, and records what was changed in the migration database — for example SQLite partial indexes (section 4.7.7) or Oracle package state (section 4.3).
 - The per-connector, per-feature status is maintained in `FEATURE_MATRIX.md`.
 
 ### 8.2 PL/SQL / procedural code
@@ -667,6 +719,7 @@ Checklist:
   - For Sybase ASE, double‑check FreeTDS and unixODBC configuration (odbcinst -j, odbcinst.ini, odbc.ini).
   - For Informix, ensure the JAR paths in the libraries setting are correct and readable.
   - For SQLite there is no driver at all. A failure here means the file itself: the migrator stops with `SQLite database file not found` when `database` does not point at an existing file — remember that a relative path is resolved against the directory of the **config file**, not the current working directory. A `WARNING` about opening the file read-write instead of read-only means a leftover journal/WAL had to be recovered; verify that the file is not in use by a running application. `file is not a database` means the file is not SQLite (or is encrypted — SQLCipher and other encrypted variants are not supported).
+  - Also for SQLite: the valid `connectivity` values are `"native"` (a database file, the default) and `"ddl"` (SQL script files). Anything else is rejected at start-up with an explanatory message. With `"ddl"`, a missing `ddl: path:` block, a path matching no file, and scripts that produce no objects at all are each reported with their own message; if objects *are* created but some statements failed, look for `ATTENTION: n statement(s) ... were SKIPPED` in the log and re-run with `--log-level=WARNING` to see which ones.
 - Check YAML formatting
   - YAML is whitespace‑sensitive; wrong indentation or quoting can cause subtle errors.
   - Validate your config with a YAML linter if you suspect a formatting issue.

@@ -43,8 +43,10 @@ migrator:
 # source database connection
 # type: "informix", "sybase_ase", "mssql", "ibm_db2_luw", "ibm_db2_zos", "ibm_db2_i", "mysql", "mariadb", "sql_anywhere", "postgresql", "oracle", "sqlite"
 #
-# SQLite source example - SQLite is a single file, so it needs no host, port, username or password.
-# The whole section for a SQLite source consists of:
+# SQLite source example - SQLite is a local file, so it needs no host, port, username or password.
+# It supports two connectivity modes.
+#
+# 1) "native" - objects AND data are read from a SQLite database file (default when omitted):
 #
 # source:
 #   type: "sqlite"
@@ -53,12 +55,37 @@ migrator:
 #   # SQLite has no schemas - the only valid values are "main" (default) and the name of a
 #   # database attached to the file. Any other value is treated as "main".
 #   schema: "main"
-#   # only "native" connectivity is supported - it uses the sqlite3 module of the Python
-#   # standard library, so no driver has to be installed. Can be omitted.
+#   # uses the sqlite3 module of the Python standard library, so no driver has to be installed
 #   connectivity: "native"
 #
+# 2) "ddl" - objects are read from SQL script files, data from CSV files:
+#
+# source:
+#   type: "sqlite"
+#   connectivity: "ddl"
+#   schema: "main"
+#   ddl:
+#     # a directory, a file mask, or one specific file - relative paths are resolved
+#     # against the directory of this config file
+#     path: "/path/to/ddl/*.sql"
+#   # data_export can be omitted when the scripts contain the INSERT statements themselves
+#   # (a full "sqlite3 db .dump"); then the data is taken from the scripts
+#   data_export:
+#     format: "CSV"
+#     file: "/path/to/data/{{source_table_name}}.csv"
+#     delimiter: ","
+#     header: true
+#
+# With "ddl" connectivity the scripts are replayed into a staging SQLite database, which is then
+# read exactly like a real one - SQLite is the only parser which fully understands its own DDL,
+# so CHECK constraints, generated columns, functional indexes, views and triggers are all
+# recognized. The staging database is created once and reused by all workers; its location is
+# logged (data_export.conversion_path if set, otherwise the system temp directory).
+# If a statement of a script cannot be executed it is skipped and counted - the summary is logged
+# at INFO, each skipped statement at WARNING (use --log-level=WARNING to see them).
+#
 # Notes for SQLite sources:
-# - The file is opened read-only whenever possible.
+# - With "native" connectivity the file is opened read-only whenever possible.
 # - SQLite is dynamically typed. The declared type of a column decides the PostgreSQL type,
 #   and the values are converted to that type during the data migration (e.g. 0/1 to boolean,
 #   Unix timestamps and Julian days to timestamp).

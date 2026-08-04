@@ -356,12 +356,21 @@ class IbmDb2ZosConnector(DatabaseConnector):
                                     break
 
                         if end_idx != -1:
-                            cols_str = stmt[start_idx+1:end_idx]
                             cols_list = []
-                            for c in cols_str.split(','):
-                                col_stmt = c.strip().split()
-                                if col_stmt:
-                                    cols_list.append(col_stmt[0].upper())
+                            is_function_based = False
+                            for col_entry in self.split_top_level_commas(stmt[start_idx+1:end_idx]):
+                                # an ordering keyword is dropped, PostgreSQL defaults to ASC and
+                                # DB2 sorts NULL values as the largest ones just like PostgreSQL
+                                col_entry = re.sub(r"(?i)\s+(ASC|DESC)\s*$", "", col_entry).strip()
+                                if not col_entry:
+                                    continue
+                                if '(' in col_entry:
+                                    # an expression (e.g. UPPER(EMAIL)) has to be handed over as
+                                    # such, otherwise the target quotes it as a column name
+                                    is_function_based = True
+                                    cols_list.append(col_entry)
+                                else:
+                                    cols_list.append(col_entry.strip('"').upper())
 
                             migrator_tables.insert_ddl_indexes({
                                 'source_schema_name': tbl_schema,
@@ -370,7 +379,8 @@ class IbmDb2ZosConnector(DatabaseConnector):
                                 'source_is_unique': is_unique,
                                 'source_columns_list': ', '.join(cols_list),
                                 'source_index_sql': stmt,
-                                'source_index_comment': comment_text
+                                'source_index_comment': comment_text,
+                                'source_is_function_based': is_function_based
                             })
                     continue
 
@@ -860,7 +870,7 @@ class IbmDb2ZosConnector(DatabaseConnector):
                 order_num += 1
                 pk_cols_set = set(c.upper() for c in pk_cols)
 
-            query = f"""SELECT source_index_name, source_is_unique, source_columns_list
+            query = f"""SELECT source_index_name, source_is_unique, source_columns_list, source_is_function_based
                         FROM "{self.protocol_schema}"."ddl_indexes"
                         WHERE source_schema_name = %s AND source_table_name = %s ORDER BY id"""
             cursor.execute(query, (table_schema, table_name))
@@ -870,10 +880,11 @@ class IbmDb2ZosConnector(DatabaseConnector):
                 idx_name = row[0]
                 is_unique = row[1]
                 cols = row[2]
-                
+                is_function_based = row[3]
+
                 # Check if this unique index is effectively the primary key backing index
                 idx_cols_set = set(c.strip().upper() for c in cols.split(',')) if cols else set()
-                if pk_cols_set and is_unique and pk_cols_set == idx_cols_set:
+                if pk_cols_set and is_unique and not is_function_based and pk_cols_set == idx_cols_set:
                     self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: fetch_indexes: Skipping index {idx_name} as it matches primary key columns.")
                     continue
 
@@ -884,7 +895,7 @@ class IbmDb2ZosConnector(DatabaseConnector):
                     'index_columns': cols,
                     'index_comment': None,
                     'index_sql': None,
-                    'is_function_based': 'NO'
+                    'is_function_based': 'YES' if is_function_based else 'NO'
                 }
                 order_num += 1
             cursor.close()
@@ -898,7 +909,8 @@ class IbmDb2ZosConnector(DatabaseConnector):
         table_name = settings.get('source_table_name')
         constraints = {}
         if self.connectivity == self.config_parser.const_connectivity_ddl():
-            query = f"""SELECT source_fk_name, source_columns_list, source_ref_schema_name, source_ref_table_name, source_ref_columns_list
+            query = f"""SELECT source_fk_name, source_columns_list, source_ref_schema_name, source_ref_table_name, source_ref_columns_list,
+                               source_constraint_type, source_check_clause, source_delete_rule, source_update_rule
                         FROM "{self.protocol_schema}"."ddl_foreign_keys"
                         WHERE source_schema_name = %s AND source_table_name = %s ORDER BY id"""
             cursor = self.migrator_tables.protocol_connection.connection.cursor()
@@ -926,17 +938,19 @@ class IbmDb2ZosConnector(DatabaseConnector):
                 else:
                     constraint_columns = raw_constraint_cols
 
+                constraint_type = row[5] or 'FOREIGN KEY'
                 constraints[i] = {
                     'constraint_name': row[0],
-                    'constraint_type': 'FOREIGN KEY',
+                    'constraint_type': constraint_type,
                     'constraint_owner': table_schema,
                     'constraint_columns': constraint_columns,
                     'referenced_table_schema': row[2],
                     'referenced_table_name': row[3],
                     'referenced_columns': referenced_columns,
-                    'constraint_sql': None,
-                    'delete_rule': 'NO ACTION',
-                    'update_rule': 'NO ACTION',
+                    # the target connector wraps the clause of a check constraint in CHECK (...)
+                    'constraint_sql': row[6] if constraint_type == 'CHECK' else None,
+                    'delete_rule': row[7] or 'NO ACTION',
+                    'update_rule': row[8] or 'NO ACTION',
                     'constraint_comment': None,
                     'constraint_status': 'ENABLED'
                 }
@@ -1049,6 +1063,135 @@ class IbmDb2ZosConnector(DatabaseConnector):
         if current:
             statements.append("".join(current))
         return statements
+
+    def parse_table_constraint(self, constraint_def: str, settings: dict) -> list:
+        """
+        Parses one table level constraint of a CREATE TABLE statement. DB2 allows all of them
+        to be named, so the plain and the named form are handled alike:
+            [CONSTRAINT <name>] PRIMARY KEY (<columns>)
+            [CONSTRAINT <name>] UNIQUE (<columns>)
+            [CONSTRAINT <name>] FOREIGN KEY (<columns>) REFERENCES <schema>.<table> (<columns>)
+                                [ON DELETE <rule>] [ON UPDATE <rule>]
+            [CONSTRAINT <name>] CHECK (<expression>)
+        Unique constraints are registered as unique indexes and primary keys are returned as a
+        list of column names, because the target connector builds both of them from the indexes
+        (`index_type` 'PRIMARY KEY' / 'UNIQUE'). Foreign key and check constraints are stored in
+        the constraints protocol table. Returns the list of primary key columns (empty otherwise).
+        """
+        migrator_tables = settings['migrator_tables']
+        schema_name = settings['schema_name']
+        table_name = settings['table_name']
+        comment_text = settings.get('comment_text')
+
+        definition = constraint_def.strip()
+        constraint_name = None
+        match_name = re.match(r"(?i)^CONSTRAINT\s+\"?([A-Za-z0-9_$#@]+)\"?\s+(.*)$", definition, re.DOTALL)
+        if match_name:
+            constraint_name = match_name.group(1).upper()
+            definition = match_name.group(2).strip()
+
+        definition_upper = definition.upper()
+
+        if definition_upper.startswith("PRIMARY KEY"):
+            match_cols = re.match(r"(?i)^PRIMARY\s+KEY\s*\((.*?)\)\s*$", definition, re.DOTALL)
+            if not match_cols:
+                return []
+            return [c.strip().strip('"').upper() for c in match_cols.group(1).split(',') if c.strip()]
+
+        if definition_upper.startswith("UNIQUE"):
+            match_cols = re.match(r"(?i)^UNIQUE\s*\((.*?)\)\s*$", definition, re.DOTALL)
+            if not match_cols:
+                return []
+            columns_list = [c.strip().strip('"').upper() for c in match_cols.group(1).split(',') if c.strip()]
+            index_name = constraint_name or f"{table_name}_{'_'.join(columns_list)}_KEY"
+            self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: parse_table_constraint: Found unique constraint: {index_name}")
+            migrator_tables.insert_ddl_indexes({
+                'source_schema_name': schema_name,
+                'source_table_name': table_name,
+                'source_index_name': index_name,
+                'source_is_unique': True,
+                'source_columns_list': ', '.join(columns_list),
+                'source_index_sql': constraint_def,
+                'source_index_comment': comment_text
+            })
+            return []
+
+        if definition_upper.startswith("FOREIGN KEY"):
+            match_fk = re.match(
+                r"(?i)^FOREIGN\s+KEY\s*\(([^)]*)\)\s*REFERENCES\s+(?:\"?([A-Za-z0-9_$#@]+)\"?\.)?\"?([A-Za-z0-9_$#@]+)\"?\s*(?:\(([^)]*)\))?(.*)$",
+                definition, re.DOTALL)
+            if not match_fk:
+                return []
+            columns_list = [c.strip().strip('"').upper() for c in match_fk.group(1).split(',') if c.strip()]
+            ref_schema = match_fk.group(2).upper() if match_fk.group(2) else schema_name
+            ref_table = match_fk.group(3).upper()
+            ref_columns_list = [c.strip().strip('"').upper() for c in match_fk.group(4).split(',')] if match_fk.group(4) else []
+            rules = match_fk.group(5) or ''
+
+            delete_rule = 'NO ACTION'
+            update_rule = 'NO ACTION'
+            match_delete = re.search(r"(?i)\bON\s+DELETE\s+(CASCADE|SET\s+NULL|SET\s+DEFAULT|NO\s+ACTION|RESTRICT)", rules)
+            if match_delete:
+                delete_rule = ' '.join(match_delete.group(1).upper().split())
+            match_update = re.search(r"(?i)\bON\s+UPDATE\s+(CASCADE|SET\s+NULL|SET\s+DEFAULT|NO\s+ACTION|RESTRICT)", rules)
+            if match_update:
+                update_rule = ' '.join(match_update.group(1).upper().split())
+
+            fk_name = constraint_name or f"{table_name}_{'_'.join(columns_list)}_FKEY"
+            self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: parse_table_constraint: Found foreign key: {fk_name}")
+            migrator_tables.insert_ddl_foreign_keys({
+                'source_schema_name': schema_name,
+                'source_table_name': table_name,
+                'source_fk_name': fk_name,
+                'source_columns_list': ', '.join(columns_list),
+                'source_ref_schema_name': ref_schema,
+                'source_ref_table_name': ref_table,
+                'source_ref_columns_list': ', '.join(ref_columns_list),
+                'source_fk_sql': constraint_def,
+                'source_fk_comment': comment_text,
+                'source_constraint_type': 'FOREIGN KEY',
+                'source_check_clause': None,
+                'source_delete_rule': delete_rule,
+                'source_update_rule': update_rule
+            })
+            return []
+
+        if definition_upper.startswith("CHECK"):
+            start_idx = definition.find('(')
+            if start_idx == -1:
+                return []
+            depth = 0
+            end_idx = -1
+            for i in range(start_idx, len(definition)):
+                if definition[i] == '(':
+                    depth += 1
+                elif definition[i] == ')':
+                    depth -= 1
+                    if depth == 0:
+                        end_idx = i
+                        break
+            if end_idx == -1:
+                return []
+            check_name = constraint_name or f"{table_name}_CHECK"
+            self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: parse_table_constraint: Found check constraint: {check_name}")
+            migrator_tables.insert_ddl_foreign_keys({
+                'source_schema_name': schema_name,
+                'source_table_name': table_name,
+                'source_fk_name': check_name,
+                'source_columns_list': None,
+                'source_ref_schema_name': None,
+                'source_ref_table_name': None,
+                'source_ref_columns_list': None,
+                'source_fk_sql': constraint_def,
+                'source_fk_comment': comment_text,
+                'source_constraint_type': 'CHECK',
+                'source_check_clause': definition[start_idx+1:end_idx].strip(),
+                'source_delete_rule': None,
+                'source_update_rule': None
+            })
+            return []
+
+        return []
 
     def split_top_level_commas(self, text: str) -> list:
         """

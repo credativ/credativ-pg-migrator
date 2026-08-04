@@ -2079,11 +2079,19 @@ class PostgreSQLConnector(DatabaseConnector):
             for row in cursor.fetchall():
                 sequence_details = self.get_sequence_details(table_schema, row[0])
 
+                # The sequence has to continue behind the data which was just loaded. The source
+                # database does not always know its next value (with DDL connectivity there is no
+                # source database at all), so it is derived from the migrated rows themselves.
+                set_sequence_sql = row[3] or (
+                    f"""SELECT setval('"{table_schema}"."{row[0]}"', """
+                    f"""COALESCE((SELECT MAX("{row[2]}") FROM "{table_schema}"."{table_name}"), 0) + 1, false);"""
+                )
+
                 sequence_data[order_num] = {
                     'name': row[0],
                     'id': row[1],
                     'column_name': row[2],
-                    'set_sequence_sql': row[3],
+                    'set_sequence_sql': set_sequence_sql,
                     'details': sequence_details # Embed details
                 }
             cursor.close()

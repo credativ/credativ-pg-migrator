@@ -1241,7 +1241,7 @@ class Orchestrator:
 
                                         target_table_rows = worker_target_connection.get_rows_count(target_schema_name, target_table_name)
                                         rows_migrated = target_table_rows
-                                        if self.config_parser.get_source_db_type() == 'ibm_db2_zos':
+                                        if self.config_parser.get_source_db_type() in ('ibm_db2_zos', 'ibm_db2_i'):
                                             source_table_rows_all = target_table_rows
                                             source_table_rows_limited = target_table_rows
                                             migrator_tables.update_data_migration_rows({
@@ -2240,8 +2240,14 @@ class Orchestrator:
                     target_table_name = constraint_data['target_alias_name'] if use_aliases_as_target_names and constraint_data.get('target_alias_name') else constraint_data['target_table_name']
                     # Escape single quotes in the comment to prevent SQL injection
                     safe_constraint_comment = constraint_data['constraint_comment'].replace("'", "''")
+                    # Constraints migrated from another database are created with the name
+                    # suffixed by the table name (see get_create_constraint_sql), the comment
+                    # has to be set on that name - like it is already done for indexes above.
+                    constraint_name = constraint_data['constraint_name']
+                    if self.config_parser.get_source_db_type() != 'postgresql':
+                        constraint_name = f"{constraint_name}_tab_{target_table_name}"
                     query = f"""COMMENT ON CONSTRAINT
-                    "{self.config_parser.convert_names_case(constraint_data['constraint_name'])}"
+                    "{self.config_parser.convert_names_case(constraint_name)}"
                     ON "{constraint_data['target_schema_name']}"."{self.config_parser.convert_names_case(target_table_name)}"
                     IS '{safe_constraint_comment}'"""
                     self.config_parser.print_log_message('INFO', f"orchestrator: run_migrate_comments: Setting comment for constraint {constraint_data['constraint_name']} in target database.")
@@ -2265,11 +2271,16 @@ class Orchestrator:
             for view_detail in all_views:
                 view_data = self.migrator_tables.decode_view_row(view_detail)
                 if view_data['view_comment']:
-                    # target_view_name = view_data['target_view_alias'] if use_aliases_as_target_names and view_data.get('target_view_alias') else view_data['target_view_name']
+                    target_view_name = view_data['target_view_alias'] if use_aliases_as_target_names and view_data.get('target_view_alias') else view_data['target_view_name']
                     target_view_name = self.config_parser.convert_names_case(target_view_name)
                     # Escape single quotes in the comment to prevent SQL injection
                     safe_view_comment = view_data['view_comment'].replace("'", "''")
-                    query = f"""COMMENT ON VIEW
+                    # A materialized view is not a view for COMMENT ON - the object type of the
+                    # comment has to match the object type which was created for it.
+                    view_object_type = 'VIEW'
+                    if re.search(r'(?i)^\s*CREATE\s+(?:OR\s+REPLACE\s+)?MATERIALIZED\s+VIEW\b', view_data['target_view_sql'] or ''):
+                        view_object_type = 'MATERIALIZED VIEW'
+                    query = f"""COMMENT ON {view_object_type}
                     "{view_data['target_schema_name']}"."{target_view_name}"
                     IS '{safe_view_comment}'"""
                     self.config_parser.print_log_message('INFO', f"orchestrator: run_migrate_comments: Setting comment for view {target_view_name} in target database.")

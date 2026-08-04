@@ -233,10 +233,18 @@ class Planner:
                 for src_func, tgt_func in self.sql_functions_mapping.items():
                     # Escape parentheses in src_func for regex usage
                     escaped_src_func = re.escape(src_func)
+                    if src_func and (src_func[0].isalnum() or src_func[0] == '_') and (src_func[-1].isalnum() or src_func[-1] == '_'):
+                        pattern = rf"(?i)\b{escaped_src_func}\b"
+                    elif src_func and (src_func[0].isalnum() or src_func[0] == '_'):
+                        pattern = rf"(?i)\b{escaped_src_func}"
+                    elif src_func and (src_func[-1].isalnum() or src_func[-1] == '_'):
+                        pattern = rf"(?i){escaped_src_func}\b"
+                    else:
+                        pattern = rf"(?i){escaped_src_func}"
                     self.migrator_tables.insert_default_values_substitution({
                         'column_name': '',
                         'source_column_data_type': '',
-                        'default_value_value': rf"(?i){escaped_src_func}",
+                        'default_value_value': pattern,
                         'target_default_value': tgt_func
                     })
 
@@ -1579,7 +1587,7 @@ class Planner:
                     data_migration_info = self.migrator_tables.decode_data_migration_row(record)
 
                     part_name = 'check row counts for table ' + data_migration_info['source_table_name']
-                    if self.config_parser.get_source_db_type() == 'ibm_db2_zos':
+                    if self.config_parser.get_source_db_type() in ('ibm_db2_zos', 'ibm_db2_i'):
                         source_table_rows_all = data_migration_info.get('source_table_rows_all', 0)
                         source_table_rows_limited = data_migration_info.get('source_table_rows_limited', 0)
                     else:
@@ -1686,22 +1694,55 @@ class Planner:
                     file_name = table_data_export['file']
 
                 if file_name:
-                    def replace_placeholder(text, placeholder, value):
-                        def replacer(match):
-                            return value.upper() if match.group(0).isupper() else value.lower()
-                        return re.sub(re.escape(placeholder), replacer, text, flags=re.IGNORECASE)
+                    def replace_placeholders(text, replacements, case_mode='configured'):
+                        """
+                        Replaces the placeholders of a data file name by their values. With
+                        case_mode 'configured' the value follows the case in which the
+                        placeholder is written in the configuration, the other modes use the
+                        value as it is, in upper case or in lower case - the export tool decides
+                        how the files are named, which the configuration cannot always express.
+                        """
+                        for placeholder, value in replacements.items():
+                            if value is None:
+                                continue
+                            def replacer(match, replacement=value):
+                                if case_mode == 'asis':
+                                    return replacement
+                                if case_mode == 'upper':
+                                    return replacement.upper()
+                                if case_mode == 'lower':
+                                    return replacement.lower()
+                                return replacement.upper() if match.group(0).isupper() else replacement.lower()
+                            text = re.sub(re.escape(placeholder), replacer, text, flags=re.IGNORECASE)
+                        return text
 
-                    table_file_name = file_name
-                    table_file_name = replace_placeholder(table_file_name, '{{source_schema_name}}', table_info['source_schema_name'])
-                    table_file_name = replace_placeholder(table_file_name, '{{source_table_name}}', table_info['source_table_name'])
+                    def resolve_file_name(replacements):
+                        """Returns the file name which exists, trying the case of the values as
+                        they are, in upper case and in lower case, or None when none of them does."""
+                        for case_mode in ('configured', 'asis', 'upper', 'lower'):
+                            candidate_file_name = replace_placeholders(file_name, replacements, case_mode)
+                            if '{{' not in candidate_file_name and os.path.exists(candidate_file_name):
+                                return candidate_file_name
+                        return None
 
-                    if os.path.exists(table_file_name):
+                    table_replacements = {
+                        '{{source_schema_name}}': table_info['source_schema_name'],
+                        '{{source_table_name}}': table_info['source_table_name'],
+                    }
+                    table_file_name = replace_placeholders(file_name, table_replacements)
+
+                    resolved_file_name = resolve_file_name(table_replacements)
+                    if resolved_file_name:
+                        table_file_name = resolved_file_name
                         data_file_found = True
                     else:
                         if re.search(re.escape('{{source_alias_name}}'), table_file_name, flags=re.IGNORECASE):
                             valid_alias_name = table_info['source_table_name']
                             aliases = self.migrator_tables.fetch_all_aliases({'source_schema_name': table_info['source_schema_name']})
                             # self.config_parser.print_log_message('DEBUG3', f"planner: stdwf_prepare_data_sources: Aliases found: {aliases}")
+                            # A table can have several aliases (on IBM i also its short system
+                            # name) - every one of them is tried against the template, which must
+                            # therefore not be overwritten before a matching file was found.
                             for row in aliases:
                                 alias_info = self.migrator_tables.decode_aliases_row(row)
                                 # self.config_parser.print_log_message('DEBUG3', f"planner: stdwf_prepare_data_sources: Processing alias: {alias_info}")
@@ -1711,8 +1752,12 @@ class Planner:
                                     if ((ref_table == table_info['source_table_name'].lower() or ref_table == table_info['source_table_name'].upper()) and
                                         (ref_schema == table_info['source_schema_name'].lower() or ref_schema == table_info['source_schema_name'].upper())):
                                         valid_alias_name = alias_info['source_alias_name']
-                                        table_file_name = replace_placeholder(table_file_name, '{{source_alias_name}}', valid_alias_name)
-                                        if os.path.exists(table_file_name):
+                                        alias_replacements = dict(table_replacements)
+                                        alias_replacements['{{source_alias_name}}'] = valid_alias_name
+                                        candidate_file_name = resolve_file_name(alias_replacements)
+                                        self.config_parser.print_log_message('DEBUG3', f"planner: stdwf_prepare_data_sources: Testing alias {valid_alias_name} of table {table_info['source_table_name']} - data source file name {candidate_file_name or replace_placeholders(file_name, alias_replacements)}")
+                                        if candidate_file_name:
+                                            table_file_name = candidate_file_name
                                             break
 
                     if os.path.exists(table_file_name):

@@ -1343,17 +1343,18 @@ class PostgreSQLConnector(DatabaseConnector):
                     create_constraint_query += " ON DELETE CASCADE"
                 if update_rule == 'CASCADE':
                     create_constraint_query += " ON UPDATE CASCADE"
-                if constraint_comment:
-                    create_constraint_query += f" COMMENT '{constraint_comment}'"
+                # A comment of the constraint is not part of ALTER TABLE ... ADD CONSTRAINT in
+                # PostgreSQL, it is set by the comments migration with COMMENT ON CONSTRAINT.
             elif constraint_type == 'CHECK':
                 # Replace column names in constraint_sql with double-quoted names using precise match
-
                 if constraint_sql and target_columns:
                     for col_info in target_columns.values():
                         col_name = col_info['column_name']
-                        # Use word boundary for precise match, preserve case
-                        pattern = r'\b{}\b'.format(re.escape(col_name))
+                        # Use word boundary and negative lookbehind/lookahead for precise match without double-quoting already-quoted identifiers
+                        pattern = r'(?<!["`\'])\b{}\b(?!["`\'])'.format(re.escape(col_name))
                         constraint_sql = re.sub(pattern, f'"{col_name}"', constraint_sql)
+                    # Clean up any accidental consecutive double quotes
+                    constraint_sql = re.sub(r'""+', '"', constraint_sql)
                 create_constraint_query = f"""ALTER TABLE "{target_schema_name}"."{target_table_name}" ADD CONSTRAINT "{constraint_name}_tab_{target_table_name}" CHECK ({constraint_sql})"""
         else:
             create_constraint_query = f"""ALTER TABLE "{target_schema_name}"."{target_table_name}" ADD CONSTRAINT "{constraint_name}" {constraint_sql}"""
@@ -2078,11 +2079,19 @@ class PostgreSQLConnector(DatabaseConnector):
             for row in cursor.fetchall():
                 sequence_details = self.get_sequence_details(table_schema, row[0])
 
+                # The sequence has to continue behind the data which was just loaded. The source
+                # database does not always know its next value (with DDL connectivity there is no
+                # source database at all), so it is derived from the migrated rows themselves.
+                set_sequence_sql = row[3] or (
+                    f"""SELECT setval('"{table_schema}"."{row[0]}"', """
+                    f"""COALESCE((SELECT MAX("{row[2]}") FROM "{table_schema}"."{table_name}"), 0) + 1, false);"""
+                )
+
                 sequence_data[order_num] = {
                     'name': row[0],
                     'id': row[1],
                     'column_name': row[2],
-                    'set_sequence_sql': row[3],
+                    'set_sequence_sql': set_sequence_sql,
                     'details': sequence_details # Embed details
                 }
             cursor.close()

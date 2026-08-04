@@ -303,7 +303,7 @@ class MigratorTables:
                 WHERE (lower(trim(column_name)) = '' OR lower(trim(%s)) ILIKE lower(trim(column_name)) OR lower(trim(%s)) ~ NULLIF(lower(trim(column_name)), ''))
                 AND (lower(trim(source_column_data_type)) = '' OR lower(trim(%s)) ILIKE lower(trim(source_column_data_type)) OR lower(trim(%s)) ~ NULLIF(lower(trim(source_column_data_type)), ''))
                 AND (lower(trim(%s::TEXT)) ILIKE lower(trim(default_value_value::TEXT)) OR lower(trim(%s::TEXT)) ~ NULLIF(lower(trim(default_value_value::TEXT)), ''))
-                ORDER BY CASE WHEN default_value_value LIKE '%%(?i)%%' THEN 1 ELSE 2 END
+                ORDER BY CASE WHEN default_value_value LIKE '%%(?i)%%' THEN 1 ELSE 2 END, char_length(default_value_value) DESC
             """
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, (check_column_name, check_column_name, check_column_data_type, check_column_data_type,  check_default_value, check_default_value))
@@ -3321,7 +3321,7 @@ class MigratorTables:
                 view_row = self.decode_view_row(row)
                 self.config_parser.print_log_message('DEBUG3', f"migrator_tables: update_view_status: ({func_run_id}): Returned row: {view_row}")
                 self.update_protocol({'object_type': 'view', 'object_protocol_id': view_row['id'], 'execution_success': success, 'execution_error_message': message, 'execution_results': None})
-                if view_row.get('alias_view') and self.config_parser.get_source_db_type() == 'ibm_db2_zos':
+                if view_row.get('alias_view') and self.config_parser.get_source_db_type() in ('ibm_db2_zos', 'ibm_db2_i'):
                     source_alias_id = view_row.get('source_view_id') - 1000000
                     cursor = self.protocol_connection.connection.cursor()
                     cursor.execute(f'SELECT id FROM "{self.protocol_schema}"."{self.config_parser.get_protocol_name_aliases()}" WHERE source_alias_id = %s', (source_alias_id,))
@@ -4877,7 +4877,7 @@ class MigratorTables:
 
     def create_ddl_tables(self):
         self.config_parser.print_log_message('DEBUG3', f"migrator_tables: create_ddl_tables: starting")
-        self.protocol_connection.execute_query("DROP TABLE IF EXISTS ddl_tables, ddl_columns, ddl_indexes, ddl_foreign_keys, ddl_sequences, ddl_views, ddl_aliases, ddl_triggers CASCADE")
+        self.protocol_connection.execute_query("DROP TABLE IF EXISTS ddl_tables, ddl_columns, ddl_indexes, ddl_foreign_keys, ddl_sequences, ddl_views, ddl_aliases, ddl_triggers, ddl_variables, ddl_funcprocs CASCADE")
 
         self.protocol_connection.execute_query(f"""
             CREATE TABLE IF NOT EXISTS "{self.protocol_schema}".ddl_tables (
@@ -4919,7 +4919,8 @@ class MigratorTables:
                 source_is_unique BOOLEAN,
                 source_columns_list VARCHAR,
                 source_index_sql TEXT,
-                source_index_comment TEXT
+                source_index_comment TEXT,
+                source_is_function_based BOOLEAN DEFAULT FALSE
             )
         """)
 
@@ -4935,7 +4936,11 @@ class MigratorTables:
                 source_ref_table_name VARCHAR,
                 source_ref_columns_list VARCHAR,
                 source_fk_sql TEXT,
-                source_fk_comment TEXT
+                source_fk_comment TEXT,
+                source_constraint_type VARCHAR DEFAULT 'FOREIGN KEY',
+                source_check_clause TEXT,
+                source_delete_rule VARCHAR DEFAULT 'NO ACTION',
+                source_update_rule VARCHAR DEFAULT 'NO ACTION'
             )
         """)
 
@@ -4965,7 +4970,8 @@ class MigratorTables:
                 source_schema_name VARCHAR,
                 source_view_name VARCHAR,
                 source_view_sql TEXT,
-                source_view_comment TEXT
+                source_view_comment TEXT,
+                source_view_type VARCHAR DEFAULT 'VIEW'
             )
         """)
 
@@ -4997,6 +5003,31 @@ class MigratorTables:
                 source_ddl_text VARCHAR,
                 source_trigger_sql TEXT,
                 source_trigger_comment TEXT
+            )
+        """)
+
+        self.protocol_connection.execute_query(f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}".ddl_funcprocs (
+                id SERIAL PRIMARY KEY,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                source_schema_name VARCHAR,
+                source_funcproc_name VARCHAR,
+                source_funcproc_type VARCHAR,
+                source_ddl_text TEXT,
+                source_funcproc_comment TEXT
+            )
+        """)
+
+        self.protocol_connection.execute_query(f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}".ddl_variables (
+                id SERIAL PRIMARY KEY,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                source_schema_name VARCHAR,
+                source_variable_name VARCHAR,
+                source_data_type VARCHAR,
+                source_default_value TEXT,
+                source_variable_sql TEXT,
+                source_variable_comment TEXT
             )
         """)
 
@@ -5063,11 +5094,11 @@ class MigratorTables:
         func_run_id = uuid.uuid4()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."ddl_indexes"
-            (source_schema_name, source_table_name, source_index_name, source_is_unique, source_columns_list, source_index_sql, source_index_comment)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            (source_schema_name, source_table_name, source_index_name, source_is_unique, source_columns_list, source_index_sql, source_index_comment, source_is_function_based)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
         """
-        params = (settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_index_name'), settings.get('source_is_unique'), settings.get('source_columns_list'), settings.get('source_index_sql'), settings.get('source_index_comment'))
+        params = (settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_index_name'), settings.get('source_is_unique'), settings.get('source_columns_list'), settings.get('source_index_sql'), settings.get('source_index_comment'), bool(settings.get('source_is_function_based')))
         self.config_parser.print_log_message('DEBUG3', f"migrator_tables: insert_ddl_indexes: inserting: {params}")
         try:
             cursor = self.protocol_connection.connection.cursor()
@@ -5083,11 +5114,11 @@ class MigratorTables:
         func_run_id = uuid.uuid4()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."ddl_foreign_keys"
-            (source_schema_name, source_table_name, source_fk_name, source_columns_list, source_ref_schema_name, source_ref_table_name, source_ref_columns_list, source_fk_sql, source_fk_comment)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (source_schema_name, source_table_name, source_fk_name, source_columns_list, source_ref_schema_name, source_ref_table_name, source_ref_columns_list, source_fk_sql, source_fk_comment, source_constraint_type, source_check_clause, source_delete_rule, source_update_rule)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
         """
-        params = (settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_fk_name'), settings.get('source_columns_list'), settings.get('source_ref_schema_name'), settings.get('source_ref_table_name'), settings.get('source_ref_columns_list'), settings.get('source_fk_sql'), settings.get('source_fk_comment'))
+        params = (settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_fk_name'), settings.get('source_columns_list'), settings.get('source_ref_schema_name'), settings.get('source_ref_table_name'), settings.get('source_ref_columns_list'), settings.get('source_fk_sql'), settings.get('source_fk_comment'), settings.get('source_constraint_type') or 'FOREIGN KEY', settings.get('source_check_clause'), settings.get('source_delete_rule') or 'NO ACTION', settings.get('source_update_rule') or 'NO ACTION')
         self.config_parser.print_log_message('DEBUG3', f"migrator_tables: insert_ddl_foreign_keys: inserting: {params}")
         try:
             cursor = self.protocol_connection.connection.cursor()
@@ -5131,11 +5162,11 @@ class MigratorTables:
         func_run_id = uuid.uuid4()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."ddl_views"
-            (source_schema_name, source_view_name, source_view_sql, source_view_comment)
-            VALUES (%s, %s, %s, %s)
+            (source_schema_name, source_view_name, source_view_sql, source_view_comment, source_view_type)
+            VALUES (%s, %s, %s, %s, %s)
             RETURNING id
         """
-        params = (settings.get('source_schema_name'), settings.get('source_view_name'), settings.get('source_view_sql'), settings.get('source_view_comment'))
+        params = (settings.get('source_schema_name'), settings.get('source_view_name'), settings.get('source_view_sql'), settings.get('source_view_comment'), settings.get('source_view_type') or 'VIEW')
         self.config_parser.print_log_message('DEBUG3', f"migrator_tables: insert_ddl_views: ({func_run_id}): inserting: {params}")
         try:
             self.config_parser.print_log_message('DEBUG3', f"migrator_tables: insert_ddl_views: ({func_run_id}): open cursor")
@@ -5189,6 +5220,46 @@ class MigratorTables:
             return row_id
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_ddl_triggers: ({func_run_id}): Exception: {e}")
+            raise
+
+    def insert_ddl_funcprocs(self, settings):
+        func_run_id = uuid.uuid4()
+        query = f"""
+            INSERT INTO "{self.protocol_schema}"."ddl_funcprocs"
+            (source_schema_name, source_funcproc_name, source_funcproc_type, source_ddl_text, source_funcproc_comment)
+            VALUES (%s, %s, %s, %s, %s)
+            RETURNING id
+        """
+        params = (settings.get('source_schema_name'), settings.get('source_funcproc_name'), settings.get('source_funcproc_type'), settings.get('source_ddl_text'), settings.get('source_funcproc_comment'))
+        self.config_parser.print_log_message('DEBUG3', f"migrator_tables: insert_ddl_funcprocs: inserting: {params}")
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row_id = cursor.fetchone()[0]
+            cursor.close()
+            return row_id
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_ddl_funcprocs: ({func_run_id}): Exception: {e}")
+            raise
+
+    def insert_ddl_variables(self, settings):
+        func_run_id = uuid.uuid4()
+        query = f"""
+            INSERT INTO "{self.protocol_schema}"."ddl_variables"
+            (source_schema_name, source_variable_name, source_data_type, source_default_value, source_variable_sql, source_variable_comment)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            RETURNING id
+        """
+        params = (settings.get('source_schema_name'), settings.get('source_variable_name'), settings.get('source_data_type'), settings.get('source_default_value'), settings.get('source_variable_sql'), settings.get('source_variable_comment'))
+        self.config_parser.print_log_message('DEBUG3', f"migrator_tables: insert_ddl_variables: inserting: {params}")
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row_id = cursor.fetchone()[0]
+            cursor.close()
+            return row_id
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_ddl_variables: ({func_run_id}): Exception: {e}")
             raise
 
     def update_ddl_comment(self, settings):

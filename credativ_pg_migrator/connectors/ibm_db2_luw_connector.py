@@ -71,17 +71,19 @@ class IbmDb2LuwConnector(DatabaseConnector):
                 "VALUE(": "COALESCE(",
                 "IFNULL(": "COALESCE(",
                 "NVL(": "COALESCE(",
-                ## "DECODE(expr, search, result, default)": "CASE expr WHEN search THEN result ELSE default END",
 
                 # --- String Functions ---
                 "SUBSTR(": "SUBSTRING(",
                 "POSSTR(": "STRPOS(",       # DB2's POSSTR takes (source, search)
-                "LOCATE(": "POSITION(", # DB2's LOCATE takes (search, source)
+                "LOCATE(": "POSITION(",     # DB2's LOCATE takes (search, source)
                 "UCASE(": "UPPER(",
                 "LCASE(": "LOWER(",
                 "STRIP(": "TRIM(",
                 "LENGTH(": "LENGTH(",
-                "CONCAT(": "CONCAT(",                 # Or simply use the str1 || str2 operator
+                "CONCAT(": "CONCAT(",
+                "VARCHAR_FORMAT(": "TO_CHAR(",
+                "TIMESTAMP_FORMAT(": "TO_TIMESTAMP(",
+                "LISTAGG(": "STRING_AGG(",
 
                 # --- Date and Time Functions ---
                 "YEAR(": "EXTRACT(YEAR FROM ",
@@ -91,20 +93,11 @@ class IbmDb2LuwConnector(DatabaseConnector):
                 "MINUTE(": "EXTRACT(MINUTE FROM ",
                 "SECOND(": "EXTRACT(SECOND FROM ",
 
-                # Db2 DAYS() returns the integer number of days since Jan 1, 0001.
-                # To replicate this exact integer in Postgres, you subtract that date from your column.
-                ## "DAYS(date_col)": "(date_col::DATE - '0001-01-01'::DATE)",
-
-                # "DATE(expr)": "expr::DATE",                                 # Or CAST(expr AS DATE)
-                # "TIMESTAMP(expr)": "expr::TIMESTAMP",                       # Or CAST(expr AS TIMESTAMP)
-                # "ADD_DAYS(date_col, n)": "date_col + (n || ' days')::INTERVAL",
-                # "ADD_MONTHS(date_col, n)": "date_col + (n || ' months')::INTERVAL",
-
                 # --- Math & Numeric Functions ---
                 "CEILING(": "CEIL(",
                 "TRUNCATE(": "TRUNC(",
                 "RAND()": "RANDOM()",
-                "DECFLOAT(": "num::NUMERIC",                            # PostgreSQL uses NUMERIC for arbitrary precision
+                "DECFLOAT(": "NUMERIC(",
             }
         else:
             self.config_parser.print_log_message('ERROR', f"ibm_db2_luw_connector: get_sql_functions_mapping: Unsupported target database type: {target_db_type}")
@@ -132,7 +125,7 @@ class IbmDb2LuwConnector(DatabaseConnector):
                 tables[order_num] = {
                     'id': row[0],
                     'schema_name': table_schema,
-                    'table_name': row[1],
+                    'table_name': self.config_parser.convert_names_case(row[1]),
                     'comment': row[2]
                 }
                 order_num += 1
@@ -214,7 +207,7 @@ class IbmDb2LuwConnector(DatabaseConnector):
                     column_type = f"{data_type}({numeric_precision})"
 
                 result[ordinal_position] = {
-                    'column_name': column_name,
+                    'column_name': self.config_parser.convert_names_case(column_name),
                     'data_type': data_type,
                     'column_type': column_type,
                     'character_maximum_length': character_maximum_length,
@@ -608,7 +601,6 @@ class IbmDb2LuwConnector(DatabaseConnector):
             raise e
 
     def fetch_indexes(self, settings):
-        source_table_id = settings['source_table_id']
         source_table_schema = settings['source_table_schema']
         source_table_name = settings['source_table_name']
 
@@ -616,43 +608,89 @@ class IbmDb2LuwConnector(DatabaseConnector):
         order_num = 1
         query = f"""
             SELECT
-                INDNAME,
-                COLNAMES,
-                COLCOUNT,
-                UNIQUERULE,
-                REMARKS
+                I.INDNAME,
+                I.UNIQUERULE,
+                I.REMARKS,
+                C.COLNAME,
+                C.COLORDER,
+                C.TEXT,
+                C.VIRTUAL,
+                SC.TYPENAME
             FROM SYSCAT.INDEXES I
+            JOIN SYSCAT.INDEXCOLUSE C
+              ON I.INDSCHEMA = C.INDSCHEMA AND I.INDNAME = C.INDNAME
+            LEFT JOIN SYSCAT.COLUMNS SC
+              ON I.TABSCHEMA = SC.TABSCHEMA AND I.TABNAME = SC.TABNAME AND C.COLNAME = SC.COLNAME
             WHERE I.TABSCHEMA = upper('{source_table_schema}')
-            AND I.TABNAME = '{source_table_name}'
-            ORDER BY INDNAME
+              AND I.TABNAME = '{source_table_name}'
+              AND I.INDEXTYPE = 'REG'
+            ORDER BY I.INDNAME, C.COLSEQ
         """
         try:
             self.connect()
             cursor = self.connection.cursor()
             cursor.execute(query)
+
+            indexes_dict = {}
+            unsupported_indexes = set()
+
             for row in cursor.fetchall():
                 index_name = row[0]
-                index_columns = ', '.join(f'"{col}"' for col in row[1].lstrip('+').split('+') if col)
-                columns_count = row[2]
-                index_type = row[3]
-                index_comment = row[4]
+                uniquerule = row[1]
+                index_comment = row[2]
+                col_name = row[3]
+                col_order = row[4]
+                expr_text = row[5]
+                is_virtual = row[6]
+                col_typename = str(row[7] or '').upper()
 
+                if col_typename in ('XML', 'CLOB', 'BLOB', 'DBCLOB', 'LONG VARCHAR', 'LONG VARGRAPHIC') or str(col_name or '').upper() == 'SQLNOTAPPLICABLE':
+                    unsupported_indexes.add(index_name)
+                    continue
+
+                if index_name not in indexes_dict:
+                    indexes_dict[index_name] = {
+                        'uniquerule': uniquerule,
+                        'index_comment': index_comment,
+                        'cols': [],
+                        'is_function_based': 'NO',
+                    }
+
+                if (expr_text and expr_text.strip()) or is_virtual == 'S':
+                    col_expr = expr_text.strip() if (expr_text and expr_text.strip()) else col_name
+                    col_expr = self.apply_sql_functions_mapping(col_expr, settings)
+                    indexes_dict[index_name]['is_function_based'] = 'YES'
+                else:
+                    col_expr = f'"{self.config_parser.convert_names_case(col_name)}"'
+
+                if col_order == 'D':
+                    col_expr += ' DESC'
+
+                indexes_dict[index_name]['cols'].append(col_expr)
+
+            for index_name, idx_info in indexes_dict.items():
+                if index_name in unsupported_indexes or not idx_info['cols']:
+                    self.config_parser.print_log_message('INFO', f"ibm_db2_luw_connector: fetch_indexes: Skipping index '{index_name}' on table '{source_table_name}' because it contains unindexable column type(s) or has empty columns.")
+                    continue
+
+                uniquerule = idx_info['uniquerule']
                 table_indexes[order_num] = {
-                    'index_name': index_name,
-                    'index_type': 'PRIMARY KEY' if index_type == 'P' else 'UNIQUE' if index_type == 'U' else 'INDEX',
+                    'index_name': self.config_parser.convert_names_case(index_name),
+                    'index_type': 'PRIMARY KEY' if uniquerule == 'P' else 'UNIQUE' if uniquerule == 'U' else 'INDEX',
                     'index_owner': source_table_schema,
-                    'index_columns': index_columns,
-                    'index_comment': index_comment,
+                    'index_columns': ', '.join(idx_info['cols']),
+                    'index_comment': idx_info['index_comment'],
+                    'is_function_based': idx_info['is_function_based'],
                 }
                 order_num += 1
 
             cursor.close()
             self.disconnect()
-            self.config_parser.print_log_message( 'DEBUG2', f"ibm_db2_luw_connector: fetch_indexes: Indexes for table {source_table_name} ({source_table_schema}): {table_indexes}")
+            self.config_parser.print_log_message('DEBUG2', f"ibm_db2_luw_connector: fetch_indexes: Indexes for table {source_table_name} ({source_table_schema}): {table_indexes}")
             return table_indexes
         except Exception as e:
-            self.config_parser.print_log_message( 'ERROR', f"ibm_db2_luw_connector: fetch_indexes: Error executing query: {query}")
-            self.config_parser.print_log_message( 'ERROR', str(e))
+            self.config_parser.print_log_message('ERROR', f"ibm_db2_luw_connector: fetch_indexes: Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', str(e))
             raise
 
     def get_create_index_sql(self, settings):
@@ -699,22 +737,26 @@ class IbmDb2LuwConnector(DatabaseConnector):
                     cursor.execute(query_fk)
                     fk_row = cursor.fetchone()
                     if fk_row:
-                        pk_columns = fk_row[0].strip().lstrip('+').split('+')
-                        pk_columns = ', '.join(f'"{col}"' for col in pk_columns)
-                        ref_table_name = fk_row[1]
-                        fk_columns = fk_row[2].strip().lstrip('+').split('+')
-                        fk_columns = ', '.join(f'"{col}"' for col in fk_columns)
+                        raw_pk_cols = fk_row[0] if fk_row[0] else ''
+                        ref_table_name = fk_row[1].strip() if fk_row[1] else ''
+                        raw_fk_cols = fk_row[2] if fk_row[2] else ''
                         ref_table_schema = fk_row[3].strip() if fk_row[3] else source_table_schema
+
+                        pk_col_list = [c.strip('+"\' ') for c in raw_pk_cols.replace('+', ' ').split() if c.strip('+"\' ')]
+                        fk_col_list = [c.strip('+"\' ') for c in raw_fk_cols.replace('+', ' ').split() if c.strip('+"\' ')]
+
+                        pk_columns = ', '.join(f'"{self.config_parser.convert_names_case(col)}"' for col in pk_col_list)
+                        fk_columns = ', '.join(f'"{self.config_parser.convert_names_case(col)}"' for col in fk_col_list)
                     else:
                         ref_table_schema = source_table_schema
 
                     table_constraints[order_num] = {
-                        'constraint_name': constraint_name,
+                        'constraint_name': self.config_parser.convert_names_case(constraint_name),
                         'constraint_type': constraint_type,
                         'constraint_owner': source_table_schema,
                         'constraint_columns': fk_columns,
                         'referenced_table_schema': ref_table_schema,
-                        'referenced_table_name': ref_table_name,
+                        'referenced_table_name': self.config_parser.convert_names_case(ref_table_name),
                         'referenced_columns': pk_columns,
                         'constraint_sql': '',
                         'constraint_comment': '',
@@ -734,7 +776,7 @@ class IbmDb2LuwConnector(DatabaseConnector):
                     constraint_sql = chk_row[0].strip() if chk_row else ''
 
                     table_constraints[order_num] = {
-                        'constraint_name': constraint_name,
+                        'constraint_name': self.config_parser.convert_names_case(constraint_name),
                         'constraint_type': constraint_type,
                         'constraint_owner': source_table_schema,
                         'constraint_columns': '',
@@ -772,7 +814,7 @@ class IbmDb2LuwConnector(DatabaseConnector):
             for row in cursor.fetchall():
                 triggers[order_num] = {
                     'id': order_num,
-                    'name': row[0].strip() if row[0] else row[0],
+                    'name': self.config_parser.convert_names_case(row[0].strip() if row[0] else row[0]),
                     'event': 'UPDATE', # dummy, parsed in convert_trigger
                     'new': '',
                     'old': '',
@@ -819,21 +861,33 @@ class IbmDb2LuwConnector(DatabaseConnector):
                 if c.upper().endswith(' ON'):
                     c = c[:-3].strip()
                 if c:
-                    actual_cols.append(c)
+                    is_quoted = c.startswith('"') and c.endswith('"')
+                    base_c = c.strip('"') if is_quoted else c.upper()
+                    converted_c = self.config_parser.convert_names_case(base_c)
+                    actual_cols.append(f'"{converted_c}"')
             if actual_cols:
                 pg_event += f" OF {', '.join(actual_cols)}"
 
-        # 3. Referencing Aliases
+        # 3. Referencing Aliases & Transition Tables
         old_alias, new_alias = 'OLD', 'NEW'
+        old_table_alias, new_table_alias = None, None
+
         old_match = re.search(r'\bOLD\s+AS\s+([a-zA-Z0-9_]+)\b', trigger_sql, re.IGNORECASE)
         if old_match: old_alias = old_match.group(1)
 
         new_match = re.search(r'\bNEW\s+AS\s+([a-zA-Z0-9_]+)\b', trigger_sql, re.IGNORECASE)
         if new_match: new_alias = new_match.group(1)
 
+        old_table_match = re.search(r'\bOLD\s+TABLE\s+(?:AS\s+)?([a-zA-Z0-9_]+)\b', trigger_sql, re.IGNORECASE)
+        if old_table_match: old_table_alias = old_table_match.group(1)
+
+        new_table_match = re.search(r'\bNEW\s+TABLE\s+(?:AS\s+)?([a-zA-Z0-9_]+)\b', trigger_sql, re.IGNORECASE)
+        if new_table_match: new_table_alias = new_table_match.group(1)
+
         # 4. Extract WHEN and Body
         mode_match = re.search(r'\bMODE\s+DB2SQL\b', trigger_sql, re.IGNORECASE)
         for_each_match = re.search(r'\bFOR\s+EACH\s+(ROW|STATEMENT)\b', trigger_sql, re.IGNORECASE)
+        for_each_scope = for_each_match.group(1).upper() if for_each_match else 'ROW'
 
         start_pos = 0
         if mode_match:
@@ -873,10 +927,23 @@ class IbmDb2LuwConnector(DatabaseConnector):
                 text = re.sub(rf'\b{re.escape(old_alias)}\.', 'OLD.', text, flags=re.IGNORECASE)
             if new_alias.upper() != 'NEW':
                 text = re.sub(rf'\b{re.escape(new_alias)}\.', 'NEW.', text, flags=re.IGNORECASE)
+
+            def replace_record_field(match):
+                prefix = match.group(1).upper()
+                field_name = match.group(2)
+                is_quoted = field_name.startswith('"') and field_name.endswith('"')
+                base_field = field_name.strip('"') if is_quoted else field_name.upper()
+                converted_field = self.config_parser.convert_names_case(base_field)
+                return f'{prefix}."{converted_field}"'
+
+            text = re.sub(r'\b(OLD|NEW)\.([a-zA-Z0-9_"]+)\b', replace_record_field, text, flags=re.IGNORECASE)
             return text
 
         when_clause = replace_aliases(when_clause)
         body = replace_aliases(body)
+
+        # Replace DB2 VARCHAR(expr) scalar function conversion
+        body = re.sub(r'(?i)\bVARCHAR\s*\(\s*(COUNT\s*\([^()]*\)|[a-zA-Z0-9_.]+\s*[+*/|-]\s*[^()]+|[a-zA-Z0-9_.]+\.[a-zA-Z0-9_.]+|[a-zA-Z_][a-zA-Z0-9_]*\([^()]*\))\s*\)', r'CAST(\1 AS VARCHAR)', body)
 
         # Replace CURRENT DATE / TIMESTAMP
         body = re.sub(r'\bCURRENT\s+DATE\b', 'CURRENT_DATE', body, flags=re.IGNORECASE)
@@ -885,8 +952,27 @@ class IbmDb2LuwConnector(DatabaseConnector):
         when_clause = re.sub(r'\bCURRENT\s+TIMESTAMP\b', 'CURRENT_TIMESTAMP', when_clause, flags=re.IGNORECASE)
 
         # Handle SIGNAL SQLSTATE and RAISE_ERROR
-        body = re.sub(r"(?i)SIGNAL\s+SQLSTATE\s+'([^']+)'\s*\(\s*('[^']+')\s*\);?", r"RAISE EXCEPTION \2 USING ERRCODE = '\1';", body)
-        body = re.sub(r"(?i)RAISE_ERROR\s*\(\s*'([^']+)'\s*,\s*('[^']+')\s*\)", r"RAISE EXCEPTION \2 USING ERRCODE = '\1';", body)
+        body = re.sub(
+            r"(?i)\bSIGNAL\s+SQLSTATE\s+(?:VALUE\s+)?'([^']+)'\s+SET\s+MESSAGE_TEXT\s*=\s*('[^']+'|[a-zA-Z0-9_.]+);?",
+            r"RAISE EXCEPTION \2 USING ERRCODE = '\1';",
+            body,
+            flags=re.MULTILINE | re.DOTALL
+        )
+        body = re.sub(
+            r"(?i)\bSIGNAL\s+SQLSTATE\s+'([^']+)'\s*\(\s*('[^']+'|[a-zA-Z0-9_.]+)\s*\);?",
+            r"RAISE EXCEPTION \2 USING ERRCODE = '\1';",
+            body
+        )
+        body = re.sub(
+            r"(?i)\bSIGNAL\s+SQLSTATE\s+'([^']+)';?",
+            r"RAISE EXCEPTION 'Error %', '\1' USING ERRCODE = '\1';",
+            body
+        )
+        body = re.sub(
+            r"(?i)\bRAISE_ERROR\s*\(\s*'([^']+)'\s*,\s*('[^']+'|[a-zA-Z0-9_.]+)\s*\)",
+            r"RAISE EXCEPTION \2 USING ERRCODE = '\1';",
+            body
+        )
 
         # Handle assignments: SET a = b or SET (a,b) = (c,d)
         if body.upper().startswith('SET'):
@@ -901,7 +987,7 @@ class IbmDb2LuwConnector(DatabaseConnector):
                     # Multi-assignment
                     body = "\n".join([f"{c} := {v};" for c, v in zip(cols, vals)])
             else:
-                body = re.sub(r'(?i)^([A-Za-z0-9_.]+)\s*=', r'\1 := ', body)
+                body = re.sub(r'(?i)^([A-Za-z0-9_."]+)\s*=', r'\1 := ', body)
             if not body.strip().endswith(';'):
                 body += ';'
 
@@ -910,20 +996,36 @@ class IbmDb2LuwConnector(DatabaseConnector):
             body += ';'
 
         # Target Generation
-        func_name = f"{trigger_name}_func"
+        target_table_name = self.config_parser.convert_names_case(target_table_name)
+        converted_trigger_name = self.config_parser.convert_names_case(trigger_name)
+        func_name = f"{converted_trigger_name}_func"
+
+        if for_each_scope == 'STATEMENT' or timing == 'AFTER':
+            return_stmt = "RETURN NULL;"
+        elif timing == 'BEFORE' and event == 'DELETE':
+            return_stmt = "RETURN OLD;"
+        else:
+            return_stmt = "RETURN NEW;"
 
         pg_func = f"""CREATE OR REPLACE FUNCTION "{target_schema_name}"."{func_name}"()
 RETURNS TRIGGER AS $$
 BEGIN
 {body}
-RETURN NEW;
+{return_stmt}
 END;
 $$ LANGUAGE plpgsql;
 """
+        ref_parts = []
+        if old_table_alias:
+            ref_parts.append(f"OLD TABLE AS {old_table_alias}")
+        if new_table_alias:
+            ref_parts.append(f"NEW TABLE AS {new_table_alias}")
+        referencing_sql = f"\nREFERENCING {' '.join(ref_parts)}" if ref_parts else ""
+
         when_sql = f"\nWHEN ({when_clause})" if when_clause else ""
-        pg_trigger = f"""CREATE TRIGGER "{trigger_name}"
-{timing} {pg_event} ON "{target_schema_name}"."{target_table_name}"
-FOR EACH ROW{when_sql}
+        pg_trigger = f"""CREATE TRIGGER "{converted_trigger_name}"
+{timing} {pg_event} ON "{target_schema_name}"."{target_table_name}"{referencing_sql}
+FOR EACH {for_each_scope}{when_sql}
 EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
 """
 
@@ -956,6 +1058,29 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
                         converted_code = re.sub(rf"(?i)\b{escaped_src_func}", tgt_func, converted_code, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
                     else:
                         converted_code = re.sub(rf"(?i)\b{escaped_src_func}\b", tgt_func, converted_code, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
+
+            # Handle SIGNAL SQLSTATE and RAISE_ERROR
+            converted_code = re.sub(
+                r"(?i)\bSIGNAL\s+SQLSTATE\s+(?:VALUE\s+)?'([^']+)'\s+SET\s+MESSAGE_TEXT\s*=\s*('[^']+'|[a-zA-Z0-9_.]+);?",
+                r"RAISE EXCEPTION \2 USING ERRCODE = '\1';",
+                converted_code,
+                flags=re.MULTILINE | re.DOTALL
+            )
+            converted_code = re.sub(
+                r"(?i)\bSIGNAL\s+SQLSTATE\s+'([^']+)'\s*\(\s*('[^']+'|[a-zA-Z0-9_.]+)\s*\);?",
+                r"RAISE EXCEPTION \2 USING ERRCODE = '\1';",
+                converted_code
+            )
+            converted_code = re.sub(
+                r"(?i)\bSIGNAL\s+SQLSTATE\s+'([^']+)';?",
+                r"RAISE EXCEPTION 'Error %', '\1' USING ERRCODE = '\1';",
+                converted_code
+            )
+            converted_code = re.sub(
+                r"(?i)\bRAISE_ERROR\s*\(\s*'([^']+)'\s*,\s*('[^']+'|[a-zA-Z0-9_.]+)\s*\)",
+                r"RAISE EXCEPTION \2 USING ERRCODE = '\1';",
+                converted_code
+            )
 
         return converted_code
 
@@ -999,9 +1124,9 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
                 cursor.execute(query)
                 for row in cursor.fetchall():
                     sequences[order_num] = {
-                        'sequence_name': row[0].strip() if row[0] else row[0],
-                        'table_name': row[1].strip() if row[1] else row[1],
-                        'column_name': row[2].strip() if row[2] else row[2],
+                        'sequence_name': self.config_parser.convert_names_case(row[0].strip() if row[0] else row[0]),
+                        'table_name': self.config_parser.convert_names_case(row[1].strip()) if row[1] else row[1],
+                        'column_name': self.config_parser.convert_names_case(row[2].strip()) if row[2] else row[2],
                         'source_start_value': int(row[3]) if row[3] is not None else None,
                         'source_increment_by': int(row[4]) if row[4] is not None else None,
                         'source_minvalue': int(row[5]) if row[5] is not None else None,
@@ -1023,7 +1148,7 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
 
     def migrate_sequences(self, target_connector, settings):
         target_schema_name = settings.get('target_schema_name', '')
-        target_sequence_name = settings.get('target_sequence_name', '')
+        target_sequence_name = self.config_parser.convert_names_case(settings.get('target_sequence_name', ''))
         source_table_name = settings.get('source_table_name', None)
         source_start_value = settings.get('source_start_value')
         source_increment_by = settings.get('source_increment_by')
@@ -1060,7 +1185,7 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
             return True
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"ibm_db2_luw_connector: migrate_sequences: Error creating sequence {target_sequence_name}: {e}")
-            return False
+            raise
 
     def get_aliases(self, settings):
         source_schema_name = settings.get('source_schema_name')
@@ -1099,9 +1224,9 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
             cursor = self.connection.cursor()
             cursor.execute(query)
             for row in cursor.fetchall():
-                alias_name = row[0]
+                alias_name = self.config_parser.convert_names_case(row[0])
                 aliased_schema_name = row[1] if row[1] else ''
-                aliased_table_name = row[2] if row[2] else ''
+                aliased_table_name = self.config_parser.convert_names_case(row[2]) if row[2] else ''
                 alias_owner = row[3] if row[3] else source_schema_name
                 alias_comment = row[4]
                 aliases[order_num] = {
@@ -1134,6 +1259,7 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
             FROM SYSCAT.VIEWS V
             LEFT JOIN SYSCAT.TABLES T ON V.VIEWSCHEMA = T.TABSCHEMA AND V.VIEWNAME = T.TABNAME
             WHERE V.VIEWSCHEMA = upper('{source_schema_name}') AND V.VALID = 'Y'
+              AND (T.PROPERTY IS NULL OR (SUBSTR(T.PROPERTY, 13, 1) != 'Y' AND SUBSTR(T.PROPERTY, 19, 1) != 'Y'))
             ORDER BY V.VIEWNAME
         """
         try:
@@ -1141,7 +1267,7 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
             cursor = self.connection.cursor()
             cursor.execute(query)
             for row in cursor.fetchall():
-                view_name = row[0].strip() if row[0] else row[0]
+                view_name = self.config_parser.convert_names_case(row[0].strip() if row[0] else row[0])
                 view_schema = row[1].strip() if row[1] else row[1]
                 comment = row[2]
                 views[order_num] = {
@@ -1190,6 +1316,8 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
 
     def convert_view_code(self, settings: dict):
 
+        cte_names = set()
+
         def quote_column_names(node):
             if isinstance(node, sqlglot.exp.Column):
                 if node.name:
@@ -1202,38 +1330,43 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
                     base_table = table_id.name.upper() if not table_id.args.get("quoted") else table_id.name
                     converted_table = self.config_parser.convert_names_case(base_table)
                     table_id.set("this", converted_table)
-                    if not table_id.args.get("quoted"):
-                        table_id.set("quoted", True)
+                    table_id.set("quoted", True)
                         
                 db_id = node.args.get("db")
                 if isinstance(db_id, sqlglot.exp.Identifier):
-                    base_db = db_id.name.upper() if not db_id.args.get("quoted") else db_id.name
-                    converted_db = self.config_parser.convert_names_case(base_db)
-                    db_id.set("this", converted_db)
-                    if not db_id.args.get("quoted"):
-                        db_id.set("quoted", True)
+                    target_schema = settings.get('target_schema_name') or 'public'
+                    db_id.set("this", target_schema)
+                    db_id.set("quoted", True)
             if isinstance(node, sqlglot.exp.Alias) and isinstance(node.args.get("alias"), sqlglot.exp.Identifier):
                 alias = node.args["alias"]
                 base_name = alias.name.upper() if not alias.args.get("quoted") else alias.name
                 converted_alias = self.config_parser.convert_names_case(base_name)
                 alias.set("this", converted_alias)
-                if not alias.args.get("quoted"):
-                    alias.set("quoted", True)
+                alias.set("quoted", True)
             if isinstance(node, sqlglot.exp.Schema):
                 for expr in node.expressions:
                     if isinstance(expr, sqlglot.exp.Identifier):
                         base_name = expr.name.upper() if not expr.args.get("quoted") else expr.name
                         converted_name = self.config_parser.convert_names_case(base_name)
                         expr.set("this", converted_name)
-                        if not expr.args.get("quoted"):
-                            expr.set("quoted", True)
-            return node
-
-        def replace_schema_names(node):
-            if isinstance(node, sqlglot.exp.Table):
-                schema = node.args.get("db")
-                if schema and schema.name.upper() == settings['source_schema_name'].upper():
-                    node.set("db", sqlglot.exp.Identifier(this=settings['target_schema_name'], quoted=False))
+                        expr.set("quoted", True)
+            if isinstance(node, sqlglot.exp.CTE):
+                alias = node.args.get("alias")
+                if isinstance(alias, sqlglot.exp.TableAlias):
+                    alias_this = alias.args.get("this")
+                    if isinstance(alias_this, sqlglot.exp.Identifier):
+                        base_cte = alias_this.name.upper() if not alias_this.args.get("quoted") else alias_this.name
+                        converted_cte = self.config_parser.convert_names_case(base_cte)
+                        alias_this.set("this", converted_cte)
+                        alias_this.set("quoted", True)
+                    columns = alias.args.get("columns")
+                    if columns:
+                        for col_id in columns:
+                            if isinstance(col_id, sqlglot.exp.Identifier):
+                                base_col = col_id.name.upper() if not col_id.args.get("quoted") else col_id.name
+                                converted_col = self.config_parser.convert_names_case(base_col)
+                                col_id.set("this", converted_col)
+                                col_id.set("quoted", True)
             return node
 
         def quote_schema_and_table_names(node):
@@ -1243,22 +1376,38 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
                     base_alias = alias_id.name.upper() if not alias_id.args.get("quoted") else alias_id.name
                     converted_alias = self.config_parser.convert_names_case(base_alias)
                     alias_id.set("this", converted_alias)
-                    if not alias_id.args.get("quoted"):
-                        alias_id.set("quoted", True)
+                    alias_id.set("quoted", True)
+                columns = node.args.get("columns")
+                if columns:
+                    for col_id in columns:
+                        if isinstance(col_id, sqlglot.exp.Identifier):
+                            base_col = col_id.name.upper() if not col_id.args.get("quoted") else col_id.name
+                            converted_col = self.config_parser.convert_names_case(base_col)
+                            col_id.set("this", converted_col)
+                            col_id.set("quoted", True)
             if isinstance(node, sqlglot.exp.Table):
-                schema = node.args.get("db")
-                schema_name_for_lookup = schema.name if schema else settings['source_schema_name']
-                if schema:
-                    base_schema = schema.name.upper() if not schema.args.get("quoted") else schema.name
-                    converted_schema = self.config_parser.convert_names_case(base_schema)
-                    schema.set("this", converted_schema)
-                    if not schema.args.get("quoted"):
-                        schema.set("quoted", True)
                 table = node.args.get("this")
+                schema = node.args.get("db")
+                schema_name_for_lookup = schema.name.strip() if schema else settings['source_schema_name']
+
+                is_create_view_table = isinstance(node.parent, sqlglot.exp.Create) or isinstance(node.parent, sqlglot.exp.Schema)
+
                 if table:
-                    # Lookup alias if enabled
-                    table_name_to_use = table.name.upper() if not table.args.get("quoted") else table.name
-                    if not isinstance(node.parent, sqlglot.exp.Create):
+                    if isinstance(table, sqlglot.exp.Identifier):
+                        table_name_to_use = table.name.upper() if not table.args.get("quoted") else table.name
+                    else:
+                        table_name_to_use = str(table).upper()
+
+                    target_schema = settings.get('target_schema_name') or 'public'
+
+                    if is_create_view_table:
+                        view_target = settings.get('target_view_name') or table_name_to_use
+                        converted_table = self.config_parser.convert_names_case(view_target)
+                        node.set("db", sqlglot.exp.Identifier(this=target_schema, quoted=True))
+                    elif table_name_to_use in cte_names:
+                        converted_table = self.config_parser.convert_names_case(table_name_to_use)
+                        node.set("db", None)
+                    else:
                         if self.config_parser.get_use_aliases_as_target_names() and settings.get('migrator_tables'):
                             alias_dict = settings['migrator_tables'].get_alias_for_table(schema_name_for_lookup, table_name_to_use)
                             if alias_dict and not settings.get('alias_view'):
@@ -1271,13 +1420,11 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
                                     else:
                                         self.config_parser.print_log_message('INFO', f"ibm_db2_luw_connector: convert_view_code: Replaced referenced table '{table_name_to_use}' with alias '{alias_name}' inside view generation. Settings: {settings}")
                                         table_name_to_use = alias_name
-                                else:
-                                    self.config_parser.print_log_message('DEBUG', f"ibm_db2_luw_connector: convert_view_code: Skipped replacing '{table_name_to_use}' with alias '{alias_name}' because alias points to a {alias_target_type}, not a TABLE.")
 
-                    converted_table = self.config_parser.convert_names_case(table_name_to_use)
-                    table.set("this", converted_table)
-                    if not table.args.get("quoted"):
-                        table.set("quoted", True)
+                        converted_table = self.config_parser.convert_names_case(table_name_to_use)
+                        node.set("db", sqlglot.exp.Identifier(this=target_schema, quoted=True))
+
+                    node.set("this", sqlglot.exp.Identifier(this=converted_table, quoted=True))
             return node
 
         def replace_functions(node):
@@ -1338,18 +1485,39 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
                     return sqlglot.exp.DPipe(this=new_left, expression=new_right)
             return node
 
-        def convert_numeric_literals_to_strings(node):
-            if isinstance(node, sqlglot.exp.Binary):
-                left, right = node.left, node.right
-                if isinstance(left, sqlglot.exp.Column) and isinstance(right, sqlglot.exp.Literal) and not right.args.get("is_string"):
-                    right.args["is_string"] = True
-                elif isinstance(right, sqlglot.exp.Column) and isinstance(left, sqlglot.exp.Literal) and not left.args.get("is_string"):
-                    left.args["is_string"] = True
-            elif isinstance(node, sqlglot.exp.DecodeCase):
-                for i in range(1, len(node.expressions) - 1, 2):
-                    search_val = node.expressions[i]
-                    if isinstance(search_val, sqlglot.exp.Literal) and not search_val.args.get("is_string"):
-                        search_val.args["is_string"] = True
+        def align_union_types(union_node):
+            if isinstance(union_node, sqlglot.exp.Union):
+                select1 = union_node.this
+                select2 = union_node.expression
+                if isinstance(select1, sqlglot.exp.Select) and isinstance(select2, sqlglot.exp.Select):
+                    exprs1 = select1.expressions
+                    exprs2 = select2.expressions
+                    for i in range(min(len(exprs1), len(exprs2))):
+                        e1 = exprs1[i]
+                        e2 = exprs2[i]
+                        if isinstance(e1, sqlglot.exp.Cast) and not isinstance(e2, sqlglot.exp.Cast):
+                            select2.expressions[i] = sqlglot.exp.Cast(this=e2, to=e1.to.copy())
+                        elif isinstance(e2, sqlglot.exp.Cast) and not isinstance(e1, sqlglot.exp.Cast):
+                            select1.expressions[i] = sqlglot.exp.Cast(this=e1, to=e2.to.copy())
+
+        def convert_recursive_with(node):
+            if isinstance(node, sqlglot.exp.With):
+                is_recursive = False
+                for cte in node.expressions:
+                    if isinstance(cte, sqlglot.exp.CTE):
+                        cte_name = cte.alias_or_name.upper()
+                        # Check if the CTE references itself inside its own query definition
+                        for table_ref in cte.this.find_all(sqlglot.exp.Table):
+                            if table_ref.name and table_ref.name.upper() == cte_name:
+                                is_recursive = True
+                                break
+                        # Align column data types across UNION / UNION ALL arms
+                        for union_node in cte.this.find_all(sqlglot.exp.Union):
+                            align_union_types(union_node)
+                    if is_recursive:
+                        break
+                if is_recursive:
+                    node.set("recursive", True)
             return node
 
         view_code = settings['view_code']
@@ -1363,6 +1531,28 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
                     converted_code = re.sub(re.escape(source_obj), target_obj, converted_code, flags=re.IGNORECASE)
 
         if settings['target_db_type'] == 'postgresql':
+            # Convert DB2 LISTAGG(...) WITHIN GROUP (ORDER BY ...) to PostgreSQL STRING_AGG(...)
+            converted_code = re.sub(
+                r"(?i)\bLISTAGG\s*\(\s*([^,()]+?)\s*,\s*('[^']*'|[^()]+?)\s*\)\s*WITHIN\s+GROUP\s*\(\s*ORDER\s+BY\s+([^()]+?)\s*\)",
+                r"STRING_AGG(\1::text, \2 ORDER BY \3)",
+                converted_code,
+            )
+            converted_code = re.sub(
+                r"(?i)\bLISTAGG\s*\(\s*([^,()]+?)\s*,\s*('[^']*'|[^()]+?)\s*\)",
+                r"STRING_AGG(\1::text, \2)",
+                converted_code,
+            )
+            converted_code = re.sub(
+                r"(?i)\bLISTAGG\s*\(\s*([^,()]+?)\s*\)\s*WITHIN\s+GROUP\s*\(\s*ORDER\s+BY\s+([^()]+?)\s*\)",
+                r"STRING_AGG(\1::text, '' ORDER BY \2)",
+                converted_code,
+            )
+            converted_code = re.sub(
+                r"(?i)\bLISTAGG\s*\(\s*([^,()]+?)\s*\)",
+                r"STRING_AGG(\1::text, '')",
+                converted_code,
+            )
+
             sql_functions_mapping = self.get_sql_functions_mapping({ 'target_db_type': settings['target_db_type'] })
             if sql_functions_mapping:
                 for src_func, tgt_func in sql_functions_mapping.items():
@@ -1373,8 +1563,31 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
                         converted_code = re.sub(rf"(?i)\b{escaped_src_func}\b", tgt_func, converted_code, flags=re.IGNORECASE | re.MULTILINE | re.DOTALL)
 
             try:
-                # Use default sqlglot dialect because 'db2' dialect is not supported
-                parsed_code = sqlglot.parse_one(converted_code)
+                # Convert DB2 MQT DDL (CREATE TABLE <name> AS ... DATA INITIALLY DEFERRED ...)
+                if re.search(r'(?i)\bDATA\s+INITIALLY\s+DEFERRED\b', converted_code) or re.search(r'(?i)^\s*CREATE\s+TABLE\b.*\bAS\b', converted_code):
+                    converted_code = re.sub(r'(?i)\bDATA\s+INITIALLY\s+DEFERRED\b.*', '', converted_code)
+                    converted_code = re.sub(r'(?i)\b(REFRESH\s+(?:IMMEDIATE|DEFERRED)|ENABLE\s+QUERY\s+OPTIMIZATION|DISABLE\s+QUERY\s+OPTIMIZATION|MAINTAINED\s+BY\s+(?:SYSTEM|USER|FEDERATED_TOOL))\b', '', converted_code)
+                    converted_code = re.sub(r'(?i)^\s*CREATE\s+TABLE\b', 'CREATE MATERIALIZED VIEW', converted_code.strip())
+
+                # Convert DB2 TABLE(SELECT ...) or TABLE(WITH ...) lateral subqueries to PostgreSQL LATERAL (SELECT ...)
+                converted_code = re.sub(
+                    r'(?i)\bTABLE\s*\(\s*(SELECT\b|WITH\b)',
+                    r'LATERAL (\1',
+                    converted_code
+                )
+
+                # Clean trailing whitespace inside quoted identifiers (e.g. "MIGTEST ")
+                converted_code = re.sub(r'"([^"\s]+)\s+"', r'"\1"', converted_code)
+                # The 'db2' dialect is not supported by sqlglot, the code is read as 'postgres':
+                # DB2 sorts NULL values as the largest ones, exactly like PostgreSQL, while the
+                # default sqlglot dialect assumes the opposite and would compensate for it by
+                # adding explicit NULLS FIRST / NULLS LAST which inverts the original ordering.
+                parsed_code = sqlglot.parse_one(converted_code, read="postgres")
+
+                # Collect all CTE names in query to avoid schema-qualifying CTE references
+                for cte_node in parsed_code.find_all(sqlglot.exp.CTE):
+                    if cte_node.alias_or_name:
+                        cte_names.add(cte_node.alias_or_name.upper())
             except Exception as e:
                 self.config_parser.print_log_message('ERROR', f"ibm_db2_luw_connector: convert_view_code: Error parsing View code: {e}")
                 # Fallback to the unparsed converted_code instead of empty string to avoid crashes
@@ -1383,9 +1596,8 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
             parsed_code = parsed_code.transform(quote_column_names)
             parsed_code = parsed_code.transform(convert_string_concatenation)
             parsed_code = parsed_code.transform(quote_schema_and_table_names)
-            parsed_code = parsed_code.transform(replace_schema_names)
             parsed_code = parsed_code.transform(replace_functions)
-            parsed_code = parsed_code.transform(convert_numeric_literals_to_strings)
+            parsed_code = parsed_code.transform(convert_recursive_with)
 
             converted_code = parsed_code.sql(dialect="postgres")
             converted_code = converted_code.replace("()()", "()")
@@ -1410,6 +1622,13 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
             cursor.close()
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"ibm_db2_luw_connector: execute_query: Error executing query: {query}")
+            if "SQL1668N" in str(e) and "5" in str(e):
+                self.config_parser.print_log_message(
+                    'ERROR',
+                    "ibm_db2_luw_connector: Operation failed because the query accesses a column-organized (BLU) table "
+                    "while intra-partition parallelism is disabled in DB2 LUW. "
+                    "Run 'db2 update dbm cfg using INTRA_PARALLEL YES' and restart DB2."
+                )
             self.config_parser.print_log_message('ERROR', e)
             raise
 
@@ -1447,6 +1666,13 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
             return count
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"ibm_db2_luw_connector: get_rows_count: Error executing query: {query}")
+            if "SQL1668N" in str(e) and "5" in str(e):
+                self.config_parser.print_log_message(
+                    'ERROR',
+                    f"ibm_db2_luw_connector: Table {table_schema.upper()}.{table_name} is a column-organized (BLU) table, "
+                    "which requires intra-partition parallelism to be enabled in DB2 LUW. "
+                    "Run 'db2 update dbm cfg using INTRA_PARALLEL YES' and restart DB2."
+                )
             self.config_parser.print_log_message('ERROR', e)
             raise
 
@@ -1600,8 +1826,12 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
         return rows
 
     def convert_default_value(self, settings) -> dict:
-        extracted_default_value = settings['extracted_default_value']
-        return extracted_default_value
+        extracted_default_value = settings.get('extracted_default_value')
+        if not extracted_default_value:
+            return extracted_default_value
+        val = str(extracted_default_value).strip()
+        val = self.apply_sql_functions_mapping(val, settings)
+        return val
 
     def get_table_checksum(self, schema_name: str, table_name: str, columns: list):
         if not columns:

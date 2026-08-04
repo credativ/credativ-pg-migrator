@@ -2240,8 +2240,14 @@ class Orchestrator:
                     target_table_name = constraint_data['target_alias_name'] if use_aliases_as_target_names and constraint_data.get('target_alias_name') else constraint_data['target_table_name']
                     # Escape single quotes in the comment to prevent SQL injection
                     safe_constraint_comment = constraint_data['constraint_comment'].replace("'", "''")
+                    # Constraints migrated from another database are created with the name
+                    # suffixed by the table name (see get_create_constraint_sql), the comment
+                    # has to be set on that name - like it is already done for indexes above.
+                    constraint_name = constraint_data['constraint_name']
+                    if self.config_parser.get_source_db_type() != 'postgresql':
+                        constraint_name = f"{constraint_name}_tab_{target_table_name}"
                     query = f"""COMMENT ON CONSTRAINT
-                    "{self.config_parser.convert_names_case(constraint_data['constraint_name'])}"
+                    "{self.config_parser.convert_names_case(constraint_name)}"
                     ON "{constraint_data['target_schema_name']}"."{self.config_parser.convert_names_case(target_table_name)}"
                     IS '{safe_constraint_comment}'"""
                     self.config_parser.print_log_message('INFO', f"orchestrator: run_migrate_comments: Setting comment for constraint {constraint_data['constraint_name']} in target database.")

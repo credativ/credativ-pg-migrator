@@ -1343,8 +1343,8 @@ class PostgreSQLConnector(DatabaseConnector):
                     create_constraint_query += " ON DELETE CASCADE"
                 if update_rule == 'CASCADE':
                     create_constraint_query += " ON UPDATE CASCADE"
-                if constraint_comment:
-                    create_constraint_query += f" COMMENT '{constraint_comment}'"
+                # A comment of the constraint is not part of ALTER TABLE ... ADD CONSTRAINT in
+                # PostgreSQL, it is set by the comments migration with COMMENT ON CONSTRAINT.
             elif constraint_type == 'CHECK':
                 # Replace column names in constraint_sql with double-quoted names using precise match
                 if constraint_sql and target_columns:

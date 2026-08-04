@@ -806,11 +806,13 @@ class IbmDb2IConnector(DatabaseConnector):
                 for col_def in col_defs:
                     if not re.match(r"(?i)^(CONSTRAINT\s|PRIMARY\s+KEY\b|FOREIGN\s+KEY\b|UNIQUE\b|CHECK\b)", col_def):
                         continue
+                    # comment_text of a CREATE TABLE statement describes the table, it is not
+                    # the comment of the individual constraints declared inside of it
                     pk_columns.update(self.parse_table_constraint(col_def, {
                         'migrator_tables': migrator_tables,
                         'schema_name': schema_name,
                         'table_name': table_name,
-                        'comment_text': comment_text
+                        'comment_text': None
                     }))
 
                 for col_def in col_defs:

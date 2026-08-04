@@ -16,12 +16,12 @@ It is is written in Python in multiple classes and modules.
   - Oracle
   - PostgreSQL (mainly for special use cases)
   - SQL Anywhere
-  - SQLite
+  - SQLite (a plain local file - the only source engine needing no driver installation)
   - Sybase ASE
 - Supports migration of tables, column constraints and defaults, data, primary keys, secondary indexes, foreign keys, functions/procedures, triggers and views from source to target database
 - If tables have sequences, migrator sets current values of sequences on the target database
-- Migration of views is currently only in rudimentary version, just replacing source schema names in code with target schema names
-- Conversion and migration of functions, procedures, triggers currently fully works for Informix. Can be added on demand for other databases too.
+- Migration of views is currently only in rudimentary version, just replacing source schema names in code with target schema names. The Oracle and SQLite connectors additionally transpile the view query to PostgreSQL SQL.
+- Conversion and migration of functions, procedures, triggers currently fully works for Informix. Oracle PL/SQL and SQLite triggers are converted on a best-effort basis. Can be added on demand for other databases too.
 - Migrator allows customizable substitutions of data types, default values of columns, calls of remote objects.
 - Supports offline, file-based data ingestion for restricted environments (e.g., using offline DDL SQL scripts for schema discovery and CSV files for data migrations from IBM DB2 z/OS, or proactively processing Informix `.unl` export files).
 - User can also define limitations for migration of data - as where conditions for tables. This option requires good analysis of dependencies in the source database. Missing data can break Foreign Key constraints in the target database. See further in the documentation.

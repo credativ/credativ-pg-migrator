@@ -4919,7 +4919,8 @@ class MigratorTables:
                 source_is_unique BOOLEAN,
                 source_columns_list VARCHAR,
                 source_index_sql TEXT,
-                source_index_comment TEXT
+                source_index_comment TEXT,
+                source_is_function_based BOOLEAN DEFAULT FALSE
             )
         """)
 
@@ -5068,11 +5069,11 @@ class MigratorTables:
         func_run_id = uuid.uuid4()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."ddl_indexes"
-            (source_schema_name, source_table_name, source_index_name, source_is_unique, source_columns_list, source_index_sql, source_index_comment)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            (source_schema_name, source_table_name, source_index_name, source_is_unique, source_columns_list, source_index_sql, source_index_comment, source_is_function_based)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
         """
-        params = (settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_index_name'), settings.get('source_is_unique'), settings.get('source_columns_list'), settings.get('source_index_sql'), settings.get('source_index_comment'))
+        params = (settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_index_name'), settings.get('source_is_unique'), settings.get('source_columns_list'), settings.get('source_index_sql'), settings.get('source_index_comment'), bool(settings.get('source_is_function_based')))
         self.config_parser.print_log_message('DEBUG3', f"migrator_tables: insert_ddl_indexes: inserting: {params}")
         try:
             cursor = self.protocol_connection.connection.cursor()

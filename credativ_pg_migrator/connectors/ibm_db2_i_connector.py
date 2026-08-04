@@ -558,36 +558,54 @@ class IbmDb2IConnector(DatabaseConnector):
                             })
                     continue
 
-                # Parse Indexes (CREATE INDEX ... FOR SYSTEM NAME ...)
-                match_index = re.search(r"^CREATE\s+(UNIQUE\s+)?INDEX\s+(?:\"?([A-Za-z0-9_]+)\"?\.)?\"?([A-Za-z0-9_]+)\"?(?:\s+FOR\s+SYSTEM\s+NAME\s+[A-Za-z0-9_]+)?\s+ON\s+\"?([A-Za-z0-9_]+)\"?\.\"?([A-Za-z0-9_]+)\"?", clean_stmt, re.IGNORECASE)
+                # Parse Indexes - besides the plain and the UNIQUE index DB2 for i knows
+                # UNIQUE WHERE NOT NULL indexes and ENCODED VECTOR indexes (EVI)
+                match_index = re.search(
+                    r"^CREATE\s+(?:(UNIQUE)(?:\s+WHERE\s+NOT\s+NULL)?\s+|(ENCODED\s+VECTOR)\s+)?INDEX\s+"
+                    r"(?:\"?([A-Za-z0-9_$#@]+)\"?\.)?\"?([A-Za-z0-9_$#@]+)\"?"
+                    r"(?:\s+FOR\s+SYSTEM\s+NAME\s+[A-Za-z0-9_$#@]+)?\s+ON\s+"
+                    r"\"?([A-Za-z0-9_$#@]+)\"?\.\"?([A-Za-z0-9_$#@]+)\"?", clean_stmt, re.IGNORECASE)
                 if match_index:
-                    self.config_parser.print_log_message('DEBUG3', f"ibm_db2_i_connector: parse_ddl_files: Found index: {match_index.group(3)}")
                     is_unique = bool(match_index.group(1))
-                    idx_schema = match_index.group(2).upper() if match_index.group(2) else match_index.group(4).upper()
-                    idx_name = match_index.group(3).upper()
-                    tbl_schema = match_index.group(4).upper()
-                    tbl_name = match_index.group(5).upper()
+                    is_evi = bool(match_index.group(2))
+                    idx_name = match_index.group(4).upper()
+                    tbl_schema = match_index.group(5).upper()
+                    tbl_name = match_index.group(6).upper()
+                    self.config_parser.print_log_message('DEBUG3', f"ibm_db2_i_connector: parse_ddl_files: Found index: {idx_name}")
+                    if is_evi:
+                        # An encoded vector index has no PostgreSQL counterpart, it is migrated
+                        # as a regular index on the same columns to keep the access path
+                        self.config_parser.print_log_message('INFO', f"ibm_db2_i_connector: parse_ddl_files: Encoded vector index {tbl_schema}.{idx_name} is migrated as a regular index.")
 
-                    start_idx = stmt.find('(', match_index.end())
+                    start_idx = clean_stmt.find('(', match_index.end())
                     if start_idx != -1:
                         depth = 0
                         end_idx = -1
-                        for i in range(start_idx, len(stmt)):
-                            if stmt[i] == '(':
+                        for i in range(start_idx, len(clean_stmt)):
+                            if clean_stmt[i] == '(':
                                 depth += 1
-                            elif stmt[i] == ')':
+                            elif clean_stmt[i] == ')':
                                 depth -= 1
                                 if depth == 0:
                                     end_idx = i
                                     break
 
                         if end_idx != -1:
-                            cols_str = stmt[start_idx+1:end_idx]
                             cols_list = []
-                            for c in cols_str.split(','):
-                                col_stmt = c.strip().split()
-                                if col_stmt:
-                                    cols_list.append(col_stmt[0].strip('"').upper())
+                            is_function_based = False
+                            for col_entry in self.split_top_level_commas(clean_stmt[start_idx+1:end_idx]):
+                                # an ordering keyword is dropped, PostgreSQL defaults to ASC and
+                                # DB2 for i sorts NULL values as the largest ones just like PostgreSQL
+                                col_entry = re.sub(r"(?i)\s+(ASC|DESC)\s*$", "", col_entry).strip()
+                                if not col_entry:
+                                    continue
+                                if '(' in col_entry:
+                                    # an expression (e.g. UPPER(EMAIL)) has to be handed over as
+                                    # such, otherwise the target quotes it as a column name
+                                    is_function_based = True
+                                    cols_list.append(col_entry)
+                                else:
+                                    cols_list.append(col_entry.strip('"').upper())
 
                             migrator_tables.insert_ddl_indexes({
                                 'source_schema_name': tbl_schema,
@@ -596,7 +614,8 @@ class IbmDb2IConnector(DatabaseConnector):
                                 'source_is_unique': is_unique,
                                 'source_columns_list': ', '.join(cols_list),
                                 'source_index_sql': stmt,
-                                'source_index_comment': comment_text
+                                'source_index_comment': comment_text,
+                                'source_is_function_based': is_function_based
                             })
                     continue
 
@@ -1011,7 +1030,7 @@ class IbmDb2IConnector(DatabaseConnector):
                 order_num += 1
                 pk_cols_set = set(c.strip().upper() for c in pk_cols)
 
-            query = f"""SELECT source_index_name, source_is_unique, source_columns_list, source_index_comment
+            query = f"""SELECT source_index_name, source_is_unique, source_columns_list, source_index_comment, source_is_function_based
                         FROM "{self.protocol_schema}"."ddl_indexes"
                         WHERE trim(source_schema_name) = trim(%s) AND trim(source_table_name) = trim(%s) ORDER BY id"""
             cursor.execute(query, (table_schema, table_name))
@@ -1022,10 +1041,11 @@ class IbmDb2IConnector(DatabaseConnector):
                 is_unique = row[1]
                 cols = row[2]
                 comment = row[3]
+                is_function_based = row[4]
 
                 # Skip the unique index backing the primary key - it is already covered above
                 idx_cols_set = set(c.strip().upper() for c in cols.split(',')) if cols else set()
-                if pk_cols_set and is_unique and pk_cols_set == idx_cols_set:
+                if pk_cols_set and is_unique and not is_function_based and pk_cols_set == idx_cols_set:
                     self.config_parser.print_log_message('DEBUG3', f"ibm_db2_i_connector: fetch_indexes: Skipping index {idx_name} as it matches primary key columns.")
                     continue
 
@@ -1036,7 +1056,7 @@ class IbmDb2IConnector(DatabaseConnector):
                     'index_columns': cols,
                     'index_comment': comment,
                     'index_sql': None,
-                    'is_function_based': 'NO'
+                    'is_function_based': 'YES' if is_function_based else 'NO'
                 }
                 order_num += 1
             cursor.close()

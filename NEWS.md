@@ -6,6 +6,9 @@ credativ-pg-migrator Releases
 
 * Added new source database connector `ibm_db2_i` for IBM DB2 for i (IBM i / AS/400) supporting structure migration from DDL SQL files (parsing `FOR SYSTEM NAME`, `FOR COLUMN`, `CCSID`, `RECORD FORMAT`, `LABEL ON`) and data migration from CSV files
 * Fixed IBM DB2 for i migration startup failure (`Can't instantiate abstract class IbmDb2IConnector without an implementation for abstract methods ...`) by completing the connector interface and aligning method signatures and exchanged dictionary keys with the planner and orchestrator
+* Fixed IBM DB2 for i tables being created without any columns (`CREATE TABLE "public"."regions" ()`) and the resulting view errors (`column "customer_id" does not exist`) - `migration.names_case_handling` was applied to source names used as the lookup key for the parsed DDL metadata, and is now applied only when the target DDL is built
+* Fixed complete loss of IBM DB2 for i primary keys, foreign keys, unique and check constraints, which are declared as named table level constraints inside `CREATE TABLE` (`CONSTRAINT PK_REGIONS PRIMARY KEY (REGION_ID)`) - including the `ON DELETE` / `ON UPDATE` referential rules
+* Fixed IBM DB2 for i tables silently missing from the migration because the DDL files were split into statements on semicolons inside comments and string literals
 * Fixed IBM DB2 for i view conversion (`syntax error at or near "RCDFMT"`) by stripping DB2 for i only clauses (`FOR SYSTEM NAME`, `RCDFMT`, `CCSID`) while preserving `WITH CASCADED CHECK OPTION`
 * Fixed IBM DB2 for i view conversion of the infix operator `A CONCAT B` (converted to `A || B`) and of correlated table functions `TABLE (SELECT ...)` (converted to `LATERAL (SELECT ...)`)
 * Fixed IBM DB2 for i recursive CTE views by emitting `WITH RECURSIVE` and aligning column types across `UNION ALL` arms

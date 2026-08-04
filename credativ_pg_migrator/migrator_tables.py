@@ -4935,7 +4935,11 @@ class MigratorTables:
                 source_ref_table_name VARCHAR,
                 source_ref_columns_list VARCHAR,
                 source_fk_sql TEXT,
-                source_fk_comment TEXT
+                source_fk_comment TEXT,
+                source_constraint_type VARCHAR DEFAULT 'FOREIGN KEY',
+                source_check_clause TEXT,
+                source_delete_rule VARCHAR DEFAULT 'NO ACTION',
+                source_update_rule VARCHAR DEFAULT 'NO ACTION'
             )
         """)
 
@@ -5084,11 +5088,11 @@ class MigratorTables:
         func_run_id = uuid.uuid4()
         query = f"""
             INSERT INTO "{self.protocol_schema}"."ddl_foreign_keys"
-            (source_schema_name, source_table_name, source_fk_name, source_columns_list, source_ref_schema_name, source_ref_table_name, source_ref_columns_list, source_fk_sql, source_fk_comment)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (source_schema_name, source_table_name, source_fk_name, source_columns_list, source_ref_schema_name, source_ref_table_name, source_ref_columns_list, source_fk_sql, source_fk_comment, source_constraint_type, source_check_clause, source_delete_rule, source_update_rule)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
         """
-        params = (settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_fk_name'), settings.get('source_columns_list'), settings.get('source_ref_schema_name'), settings.get('source_ref_table_name'), settings.get('source_ref_columns_list'), settings.get('source_fk_sql'), settings.get('source_fk_comment'))
+        params = (settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_fk_name'), settings.get('source_columns_list'), settings.get('source_ref_schema_name'), settings.get('source_ref_table_name'), settings.get('source_ref_columns_list'), settings.get('source_fk_sql'), settings.get('source_fk_comment'), settings.get('source_constraint_type') or 'FOREIGN KEY', settings.get('source_check_clause'), settings.get('source_delete_rule') or 'NO ACTION', settings.get('source_update_rule') or 'NO ACTION')
         self.config_parser.print_log_message('DEBUG3', f"migrator_tables: insert_ddl_foreign_keys: inserting: {params}")
         try:
             cursor = self.protocol_connection.connection.cursor()

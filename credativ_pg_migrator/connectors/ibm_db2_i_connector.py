@@ -96,10 +96,13 @@ class IbmDb2IConnector(DatabaseConnector):
                 rows = cursor.fetchall()
                 self.config_parser.print_log_message('DEBUG3', f"ibm_db2_i_connector: fetch_all_tables: ({schema_name}): {rows}")
                 for i, row in enumerate(rows, 1):
+                    # source names are returned as they are stored in the source DDL - they are
+                    # the key for all following lookups in the ddl_* protocol tables, the
+                    # migration.names_case_handling conversion is applied by the target connector
                     tables[i] = {
                         'id': i,
-                        'schema_name': self.config_parser.convert_names_case(row[0]),
-                        'table_name': self.config_parser.convert_names_case(row[1]),
+                        'schema_name': row[0],
+                        'table_name': row[1],
                         'comment': f"Partition: {row[2]}, Ranges: {row[3]}" if row[2] else None
                     }
                 cursor.close()
@@ -122,7 +125,9 @@ class IbmDb2IConnector(DatabaseConnector):
             rows = cursor.fetchall()
             self.config_parser.print_log_message('DEBUG3', f"ibm_db2_i_connector: fetch_table_columns: ({table_schema}.{table_name}): {rows}")
             for i, row in enumerate(rows, 1):
-                col_name = self.config_parser.convert_names_case(row[0])
+                # source column names are returned unchanged, the target connector applies
+                # the migration.names_case_handling conversion when it builds the target DDL
+                col_name = row[0]
                 col_type = row[1]
                 is_nullable = 'YES' if row[2] else 'NO'
                 default_val = row[3]
@@ -217,6 +222,249 @@ class IbmDb2IConnector(DatabaseConnector):
             raise ValueError(f"Unsupported target database type: {target_db_type}")
         return types_mapping
 
+    def split_sql_statements(self, content: str) -> list:
+        """
+        Splits the content of a DDL file into single statements. Statement terminators inside
+        string literals, line comments and block comments are ignored - DDL exports regularly
+        contain prose comments with a semicolon in them ("... does not contain them; the"),
+        which would otherwise cut the following statement in half. Comments are kept in the
+        returned statements, the caller extracts the object comments from them.
+        """
+        statements = []
+        current = []
+        in_literal = False
+        in_line_comment = False
+        in_block_comment = False
+        length = len(content)
+        i = 0
+        while i < length:
+            char = content[i]
+            next_char = content[i+1] if i + 1 < length else ''
+
+            if in_line_comment:
+                current.append(char)
+                if char == '\n':
+                    in_line_comment = False
+            elif in_block_comment:
+                current.append(char)
+                if char == '*' and next_char == '/':
+                    current.append(next_char)
+                    i += 1
+                    in_block_comment = False
+            elif in_literal:
+                current.append(char)
+                if char == "'":
+                    # '' inside a literal is an escaped quote, not its end
+                    if next_char == "'":
+                        current.append(next_char)
+                        i += 1
+                    else:
+                        in_literal = False
+            elif char == '-' and next_char == '-':
+                current.append(char)
+                current.append(next_char)
+                i += 1
+                in_line_comment = True
+            elif char == '/' and next_char == '*':
+                current.append(char)
+                current.append(next_char)
+                i += 1
+                in_block_comment = True
+            elif char == "'":
+                in_literal = True
+                current.append(char)
+            elif char == ';':
+                statements.append("".join(current))
+                current = []
+            elif char == '@':
+                # '@' terminates a statement only when it stands alone at the end of a line
+                j = i + 1
+                while j < length and content[j] in ' \t\r':
+                    j += 1
+                if j >= length or content[j] == '\n':
+                    statements.append("".join(current))
+                    current = []
+                else:
+                    current.append(char)
+            else:
+                current.append(char)
+            i += 1
+
+        if current:
+            statements.append("".join(current))
+        return statements
+
+    def split_top_level_commas(self, text: str) -> list:
+        """
+        Splits a CREATE TABLE body on commas which are neither nested in parentheses nor
+        placed inside a string literal, so that column definitions and table level
+        constraints such as CHECK (STATUS IN ('A','D','P')) stay in one piece.
+        """
+        parts = []
+        current = []
+        depth = 0
+        in_literal = False
+        i = 0
+        while i < len(text):
+            char = text[i]
+            if in_literal:
+                current.append(char)
+                if char == "'":
+                    # '' inside a literal is an escaped quote, not its end
+                    if i + 1 < len(text) and text[i+1] == "'":
+                        current.append(text[i+1])
+                        i += 1
+                    else:
+                        in_literal = False
+            elif char == "'":
+                in_literal = True
+                current.append(char)
+            elif char == '(':
+                depth += 1
+                current.append(char)
+            elif char == ')':
+                depth -= 1
+                current.append(char)
+            elif char == ',' and depth == 0:
+                parts.append("".join(current).strip())
+                current = []
+            else:
+                current.append(char)
+            i += 1
+        if current:
+            parts.append("".join(current).strip())
+        return [p for p in parts if p]
+
+    def parse_table_constraint(self, constraint_def: str, settings: dict) -> list:
+        """
+        Parses one table level constraint of a CREATE TABLE statement. DB2 for i allows all of
+        them to be named, so the plain and the named form are handled alike:
+            [CONSTRAINT <name>] PRIMARY KEY (<columns>)
+            [CONSTRAINT <name>] UNIQUE (<columns>)
+            [CONSTRAINT <name>] FOREIGN KEY (<columns>) REFERENCES <schema>.<table> (<columns>)
+                                [ON DELETE <rule>] [ON UPDATE <rule>]
+            [CONSTRAINT <name>] CHECK (<expression>)
+        Unique constraints are registered as unique indexes and primary keys are returned as a
+        list of column names, because the target connector builds both of them from the indexes
+        (`index_type` 'PRIMARY KEY' / 'UNIQUE'). Foreign key and check constraints are stored in
+        the constraints protocol table. Returns the list of primary key columns (empty otherwise).
+        """
+        migrator_tables = settings['migrator_tables']
+        schema_name = settings['schema_name']
+        table_name = settings['table_name']
+        comment_text = settings.get('comment_text')
+
+        definition = constraint_def.strip()
+        constraint_name = None
+        match_name = re.match(r"(?i)^CONSTRAINT\s+\"?([A-Za-z0-9_$#@]+)\"?\s+(.*)$", definition, re.DOTALL)
+        if match_name:
+            constraint_name = match_name.group(1).upper()
+            definition = match_name.group(2).strip()
+
+        definition_upper = definition.upper()
+
+        if definition_upper.startswith("PRIMARY KEY"):
+            match_cols = re.match(r"(?i)^PRIMARY\s+KEY\s*\((.*?)\)\s*$", definition, re.DOTALL)
+            if not match_cols:
+                return []
+            return [c.strip().strip('"').upper() for c in match_cols.group(1).split(',') if c.strip()]
+
+        if definition_upper.startswith("UNIQUE"):
+            match_cols = re.match(r"(?i)^UNIQUE\s*\((.*?)\)\s*$", definition, re.DOTALL)
+            if not match_cols:
+                return []
+            columns_list = [c.strip().strip('"').upper() for c in match_cols.group(1).split(',') if c.strip()]
+            index_name = constraint_name or f"{table_name}_{'_'.join(columns_list)}_KEY"
+            self.config_parser.print_log_message('DEBUG3', f"ibm_db2_i_connector: parse_table_constraint: Found unique constraint: {index_name}")
+            migrator_tables.insert_ddl_indexes({
+                'source_schema_name': schema_name,
+                'source_table_name': table_name,
+                'source_index_name': index_name,
+                'source_is_unique': True,
+                'source_columns_list': ', '.join(columns_list),
+                'source_index_sql': constraint_def,
+                'source_index_comment': comment_text
+            })
+            return []
+
+        if definition_upper.startswith("FOREIGN KEY"):
+            match_fk = re.match(
+                r"(?i)^FOREIGN\s+KEY\s*\(([^)]*)\)\s*REFERENCES\s+(?:\"?([A-Za-z0-9_$#@]+)\"?\.)?\"?([A-Za-z0-9_$#@]+)\"?\s*(?:\(([^)]*)\))?(.*)$",
+                definition, re.DOTALL)
+            if not match_fk:
+                return []
+            columns_list = [c.strip().strip('"').upper() for c in match_fk.group(1).split(',') if c.strip()]
+            ref_schema = match_fk.group(2).upper() if match_fk.group(2) else schema_name
+            ref_table = match_fk.group(3).upper()
+            ref_columns_list = [c.strip().strip('"').upper() for c in match_fk.group(4).split(',')] if match_fk.group(4) else []
+            rules = match_fk.group(5) or ''
+
+            delete_rule = 'NO ACTION'
+            update_rule = 'NO ACTION'
+            match_delete = re.search(r"(?i)\bON\s+DELETE\s+(CASCADE|SET\s+NULL|SET\s+DEFAULT|NO\s+ACTION|RESTRICT)", rules)
+            if match_delete:
+                delete_rule = ' '.join(match_delete.group(1).upper().split())
+            match_update = re.search(r"(?i)\bON\s+UPDATE\s+(CASCADE|SET\s+NULL|SET\s+DEFAULT|NO\s+ACTION|RESTRICT)", rules)
+            if match_update:
+                update_rule = ' '.join(match_update.group(1).upper().split())
+
+            fk_name = constraint_name or f"{table_name}_{'_'.join(columns_list)}_FKEY"
+            self.config_parser.print_log_message('DEBUG3', f"ibm_db2_i_connector: parse_table_constraint: Found foreign key: {fk_name}")
+            migrator_tables.insert_ddl_foreign_keys({
+                'source_schema_name': schema_name,
+                'source_table_name': table_name,
+                'source_fk_name': fk_name,
+                'source_columns_list': ', '.join(columns_list),
+                'source_ref_schema_name': ref_schema,
+                'source_ref_table_name': ref_table,
+                'source_ref_columns_list': ', '.join(ref_columns_list),
+                'source_fk_sql': constraint_def,
+                'source_fk_comment': comment_text,
+                'source_constraint_type': 'FOREIGN KEY',
+                'source_check_clause': None,
+                'source_delete_rule': delete_rule,
+                'source_update_rule': update_rule
+            })
+            return []
+
+        if definition_upper.startswith("CHECK"):
+            start_idx = definition.find('(')
+            if start_idx == -1:
+                return []
+            depth = 0
+            end_idx = -1
+            for i in range(start_idx, len(definition)):
+                if definition[i] == '(':
+                    depth += 1
+                elif definition[i] == ')':
+                    depth -= 1
+                    if depth == 0:
+                        end_idx = i
+                        break
+            if end_idx == -1:
+                return []
+            check_clause = definition[start_idx+1:end_idx].strip()
+            check_name = constraint_name or f"{table_name}_CHECK"
+            self.config_parser.print_log_message('DEBUG3', f"ibm_db2_i_connector: parse_table_constraint: Found check constraint: {check_name}")
+            migrator_tables.insert_ddl_foreign_keys({
+                'source_schema_name': schema_name,
+                'source_table_name': table_name,
+                'source_fk_name': check_name,
+                'source_columns_list': None,
+                'source_ref_schema_name': None,
+                'source_ref_table_name': None,
+                'source_ref_columns_list': None,
+                'source_fk_sql': constraint_def,
+                'source_fk_comment': comment_text,
+                'source_constraint_type': 'CHECK',
+                'source_check_clause': check_clause,
+                'source_delete_rule': None,
+                'source_update_rule': None
+            })
+            return []
+
+        return []
+
     def parse_ddl_files(self, settings):
         self.config_parser.print_log_message('DEBUG3', f"ibm_db2_i_connector: parse_ddl_files: Starting DDL parser - self.ddl_files: {self.ddl_files}")
         migrator_tables = settings['migrator_tables']
@@ -246,7 +494,7 @@ class IbmDb2IConnector(DatabaseConnector):
 
             content = trigger_pattern.sub("", content)
 
-            statements = re.split(r';|@(?=\s*(?:\n|$))', content)
+            statements = self.split_sql_statements(content)
             for stmt in statements:
                 stmt = stmt.strip()
                 if not stmt:
@@ -453,32 +701,21 @@ class IbmDb2IConnector(DatabaseConnector):
                     })
                     continue
 
-                # Parse Foreign Keys
-                match_fk = re.search(r"^ALTER\s+TABLE\s+\"?([A-Za-z0-9_]+)\"?\.\"?([A-Za-z0-9_]+)\"?\s+ADD\s+CONSTRAINT\s+\"?([A-Za-z0-9_]+)\"?\s+FOREIGN\s+KEY\s*\(([^)]+)\)\s*REFERENCES\s+\"?([A-Za-z0-9_]+)\"?\.\"?([A-Za-z0-9_]+)\"?\s*\(([^)]+)\)", clean_stmt, re.IGNORECASE)
-                if match_fk:
-                    self.config_parser.print_log_message('DEBUG3', f"ibm_db2_i_connector: parse_ddl_files: Found foreign key: {match_fk.group(3)}")
-                    tbl_schema = match_fk.group(1).upper()
-                    tbl_name = match_fk.group(2).upper()
-                    fk_name = match_fk.group(3).upper()
-                    cols_str = match_fk.group(4)
-                    ref_schema = match_fk.group(5).upper()
-                    ref_name = match_fk.group(6).upper()
-                    ref_cols_str = match_fk.group(7)
-
-                    cols_list = [c.strip().strip('"').upper() for c in cols_str.split(',')]
-                    ref_cols_list = [c.strip().strip('"').upper() for c in ref_cols_str.split(',')]
-
-                    migrator_tables.insert_ddl_foreign_keys({
-                        'source_schema_name': tbl_schema,
-                        'source_table_name': tbl_name,
-                        'source_fk_name': fk_name,
-                        'source_columns_list': ', '.join(cols_list),
-                        'source_ref_schema_name': ref_schema,
-                        'source_ref_table_name': ref_name,
-                        'source_ref_columns_list': ', '.join(ref_cols_list),
-                        'source_fk_sql': stmt,
-                        'source_fk_comment': comment_text
+                # Parse constraints added by a standalone ALTER TABLE statement
+                match_alter_constraint = re.search(
+                    r"^ALTER\s+TABLE\s+\"?([A-Za-z0-9_$#@]+)\"?\.\"?([A-Za-z0-9_$#@]+)\"?\s+ADD\s+((?:CONSTRAINT\s+|PRIMARY\s+KEY|FOREIGN\s+KEY|UNIQUE|CHECK)[\s\S]*)$",
+                    clean_stmt, re.IGNORECASE)
+                if match_alter_constraint:
+                    alter_pk_columns = self.parse_table_constraint(match_alter_constraint.group(3).strip(), {
+                        'migrator_tables': migrator_tables,
+                        'schema_name': match_alter_constraint.group(1).upper(),
+                        'table_name': match_alter_constraint.group(2).upper(),
+                        'comment_text': comment_text
                     })
+                    if alter_pk_columns:
+                        # The primary key indicator lives on the already inserted columns of the
+                        # table, a primary key added later by ALTER TABLE cannot be applied here.
+                        self.config_parser.print_log_message('WARNING', f"ibm_db2_i_connector: parse_ddl_files: Primary key added by ALTER TABLE on {match_alter_constraint.group(1)}.{match_alter_constraint.group(2)} ({', '.join(alter_pk_columns)}) is not migrated - declare it in the CREATE TABLE statement.")
                     continue
 
                 # Parse CREATE TABLE / CREATE OR REPLACE TABLE (with FOR SYSTEM NAME, RECORD FORMAT, CCSID)
@@ -522,34 +759,7 @@ class IbmDb2IConnector(DatabaseConnector):
                     continue
 
                 columns_str = clean_stmt[start_idx+1:end_idx]
-
-                cols = []
-                current = []
-                depth = 0
-                for char in columns_str:
-                    if char == '(':
-                        depth += 1
-                        current.append(char)
-                    elif char == ')':
-                        depth -= 1
-                        current.append(char)
-                    elif char == ',' and depth == 0:
-                        cols.append("".join(current).strip())
-                        current = []
-                    else:
-                        current.append(char)
-                if current:
-                    cols.append("".join(current).strip())
-
-                col_defs = [c for c in cols if c]
-
-                pk_columns = set()
-                for col_def in col_defs:
-                    if col_def.upper().startswith("PRIMARY KEY"):
-                        match_pk = re.search(r"\((.*)\)", col_def)
-                        if match_pk:
-                            pks = [p.strip().strip('"').upper() for p in match_pk.group(1).split(',')]
-                            pk_columns.update(pks)
+                col_defs = self.split_top_level_commas(columns_str)
 
                 trailing_str = clean_stmt[end_idx+1:]
                 partition_col = None
@@ -570,9 +780,24 @@ class IbmDb2IConnector(DatabaseConnector):
                     'source_table_comment': comment_text
                 })
 
+                # Table level constraints - DB2 for i declares primary keys, unique constraints,
+                # foreign keys and check constraints inside the CREATE TABLE, usually named
+                # ("CONSTRAINT PK_REGIONS PRIMARY KEY (REGION_ID)")
+                pk_columns = set()
                 for col_def in col_defs:
-                    col_def_u = col_def.upper()
-                    if col_def_u.startswith("PRIMARY KEY") or col_def_u.startswith("CONSTRAINT") or col_def_u.startswith("FOREIGN KEY") or col_def_u.startswith("UNIQUE"):
+                    if not re.match(r"(?i)^(CONSTRAINT\s|PRIMARY\s+KEY\b|FOREIGN\s+KEY\b|UNIQUE\b|CHECK\b)", col_def):
+                        continue
+                    pk_columns.update(self.parse_table_constraint(col_def, {
+                        'migrator_tables': migrator_tables,
+                        'schema_name': schema_name,
+                        'table_name': table_name,
+                        'comment_text': comment_text
+                    }))
+
+                for col_def in col_defs:
+                    # table level constraints are already processed above, PERIOD SYSTEM_TIME
+                    # of a temporal table is not a column definition either
+                    if re.match(r"(?i)^(CONSTRAINT\s|PRIMARY\s+KEY\b|FOREIGN\s+KEY\b|UNIQUE\b|CHECK\b|PERIOD\s)", col_def):
                         continue
 
                     # Handle DB2 for i system column name syntax: <long_col_name> FOR COLUMN <sys_col_name> <data_type> ...
@@ -825,7 +1050,8 @@ class IbmDb2IConnector(DatabaseConnector):
         table_name = settings.get('source_table_name')
         constraints = {}
         if self.connectivity == self.config_parser.const_connectivity_ddl():
-            query = f"""SELECT source_fk_name, source_columns_list, source_ref_schema_name, source_ref_table_name, source_ref_columns_list, source_fk_comment
+            query = f"""SELECT source_fk_name, source_columns_list, source_ref_schema_name, source_ref_table_name, source_ref_columns_list, source_fk_comment,
+                               source_constraint_type, source_check_clause, source_delete_rule, source_update_rule
                         FROM "{self.protocol_schema}"."ddl_foreign_keys"
                         WHERE trim(source_schema_name) = trim(%s) AND trim(source_table_name) = trim(%s) ORDER BY id"""
             cursor = self.migrator_tables.protocol_connection.connection.cursor()
@@ -833,17 +1059,19 @@ class IbmDb2IConnector(DatabaseConnector):
             rows = cursor.fetchall()
             self.config_parser.print_log_message('DEBUG3', f"ibm_db2_i_connector: fetch_constraints: ({table_schema}.{table_name}): {rows}")
             for i, row in enumerate(rows, 1):
+                constraint_type = row[6] or 'FOREIGN KEY'
                 constraints[i] = {
                     'constraint_name': row[0],
-                    'constraint_type': 'FOREIGN KEY',
+                    'constraint_type': constraint_type,
                     'constraint_owner': table_schema,
                     'constraint_columns': self.deduplicate_columns_list(row[1]),
                     'referenced_table_schema': row[2],
                     'referenced_table_name': row[3],
                     'referenced_columns': self.deduplicate_columns_list(row[4]),
-                    'constraint_sql': None,
-                    'delete_rule': 'NO ACTION',
-                    'update_rule': 'NO ACTION',
+                    # the target connector wraps the clause of a check constraint in CHECK (...)
+                    'constraint_sql': row[7] if constraint_type == 'CHECK' else None,
+                    'delete_rule': row[8] or 'NO ACTION',
+                    'update_rule': row[9] or 'NO ACTION',
                     'constraint_comment': row[5],
                     'constraint_status': 'ENABLED'
                 }

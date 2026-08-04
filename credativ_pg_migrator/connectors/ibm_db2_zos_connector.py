@@ -255,6 +255,39 @@ class IbmDb2ZosConnector(DatabaseConnector):
             # Remove the extracted triggers from content so they aren't parsed again
             content = trigger_pattern.sub("", content)
 
+            # Functions and procedures are extracted the same way - a compound body contains
+            # semicolons, so such a DDL file switches the statement terminator to '@'
+            funcproc_pattern = re.compile(
+                r"(CREATE\s+(?:OR\s+REPLACE\s+)?(FUNCTION|PROCEDURE)\s+\"?([A-Za-z0-9_$#@]+)\"?\.\"?([A-Za-z0-9_$#@]+)\"?"
+                r"[\s\S]*?)"
+                r"(?:@[^\S\n]*(?=\n|$)"
+                r"|(?=(?:CREATE\s+(?:OR\s+REPLACE\s+)?(?:TABLE|VIEW|INDEX|ALIAS|SEQUENCE|TRIGGER|FUNCTION|PROCEDURE))"
+                r"|(?:ALTER\s+(?:TABLE|PROCEDURE|FUNCTION))|(?:SET\s+CURRENT\s+SQLID)|$))", re.IGNORECASE)
+            for match in funcproc_pattern.finditer(content):
+                funcproc_type = match.group(2).upper()
+                funcproc_schema = match.group(3).upper()
+                funcproc_name = match.group(4).upper()
+                ddl_text = match.group(1).strip()
+                ddl_lines = ddl_text.split('\n')
+                while ddl_lines and (not ddl_lines[-1].strip() or ddl_lines[-1].strip().startswith('--')):
+                    ddl_lines.pop()
+                ddl_text = '\n'.join(ddl_lines).strip()
+                self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: parse_ddl_files: Found {funcproc_type}: {funcproc_name}")
+                migrator_tables.insert_ddl_funcprocs({
+                    'source_schema_name': funcproc_schema,
+                    'source_funcproc_name': funcproc_name,
+                    'source_funcproc_type': funcproc_type,
+                    'source_ddl_text': ddl_text,
+                    'source_funcproc_comment': None
+                })
+
+            content = funcproc_pattern.sub("", content)
+
+            # A routine can carry several versions, the dump contains all of them but only the
+            # active one is in effect - an additional version cannot be migrated as its own object
+            for match in re.finditer(r"(?i)ALTER\s+(FUNCTION|PROCEDURE)\s+\"?([A-Za-z0-9_$#@]+)\"?\.\"?([A-Za-z0-9_$#@]+)\"?\s+ADD\s+VERSION\s+([A-Za-z0-9_$#@]+)", content):
+                self.config_parser.print_log_message('WARNING', f"ibm_db2_zos_connector: parse_ddl_files: {match.group(1)} {match.group(2)}.{match.group(3)} has an additional version {match.group(4)} which is not migrated - only the version of the CREATE statement is used.")
+
             # Split statements by ';' or by '@' at the end of a line, but not inside comments
             # and string literals
             statements = self.split_sql_statements(content)
@@ -497,6 +530,20 @@ class IbmDb2ZosConnector(DatabaseConnector):
                 schema_name = match_table.group(1).upper()
                 table_name = match_table.group(2).upper()
 
+                # Materialized query tables (CREATE TABLE ... AS (<query>) DATA INITIALLY DEFERRED ...)
+                # are stored as views - they are migrated as PostgreSQL materialized views,
+                # their body is a query and not a list of column definitions.
+                if re.search(r"(?i)\bDATA\s+INITIALLY\s+DEFERRED\b", clean_stmt):
+                    self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: parse_ddl_files: Found materialized query table: {table_name}")
+                    migrator_tables.insert_ddl_views({
+                        'source_schema_name': schema_name,
+                        'source_view_name': table_name,
+                        'source_view_sql': clean_stmt,
+                        'source_view_comment': comment_text,
+                        'source_view_type': 'MATERIALIZED VIEW'
+                    })
+                    continue
+
                 # Extract block inside parenthesis
                 start_idx = clean_stmt.find('(', match_table.end())
                 if start_idx == -1:
@@ -517,36 +564,9 @@ class IbmDb2ZosConnector(DatabaseConnector):
                     continue
 
                 columns_str = clean_stmt[start_idx+1:end_idx]
-
-                # Split columns correctly ignoring commas inside parenthesis
-                cols = []
-                current = []
-                depth = 0
-                for char in columns_str:
-                    if char == '(':
-                        depth += 1
-                        current.append(char)
-                    elif char == ')':
-                        depth -= 1
-                        current.append(char)
-                    elif char == ',' and depth == 0:
-                        cols.append("".join(current).strip())
-                        current = []
-                    else:
-                        current.append(char)
-                if current:
-                    cols.append("".join(current).strip())
-
-                col_defs = [c for c in cols if c]
-
-                pk_columns = set()
-                # First pass for Primary Key constraints within the table block
-                for col_def in col_defs:
-                    if col_def.upper().startswith("PRIMARY KEY"):
-                        match_pk = re.search(r"\((.*)\)", col_def)
-                        if match_pk:
-                            pks = [p.strip().upper() for p in match_pk.group(1).split(',')]
-                            pk_columns.update(pks)
+                # Split on the commas outside of parentheses and string literals, so that a
+                # constraint like CHECK (STATUS IN ('A','D')) stays in one piece
+                col_defs = self.split_top_level_commas(columns_str)
 
                 # Extract Partitioning parameters from the trailing text
                 trailing_str = clean_stmt[end_idx+1:]
@@ -568,6 +588,21 @@ class IbmDb2ZosConnector(DatabaseConnector):
                     'source_table_sql': stmt,
                     'source_table_comment': comment_text
                 })
+
+                # Table level constraints - DB2 declares primary keys, unique constraints,
+                # foreign keys and check constraints inside the CREATE TABLE, usually named
+                # ("CONSTRAINT PK_REGIONS PRIMARY KEY (REGION_ID)"). comment_text describes the
+                # table and is not the comment of the individual constraints.
+                pk_columns = set()
+                for col_def in col_defs:
+                    if not re.match(r"(?i)^(CONSTRAINT\s|PRIMARY\s+KEY\b|FOREIGN\s+KEY\b|UNIQUE\b|CHECK\b)", col_def):
+                        continue
+                    pk_columns.update(self.parse_table_constraint(col_def, {
+                        'migrator_tables': migrator_tables,
+                        'schema_name': schema_name,
+                        'table_name': table_name,
+                        'comment_text': None
+                    }))
 
                 # Second pass for extracting column metrics
                 for col_def in col_defs:
@@ -1015,6 +1050,45 @@ class IbmDb2ZosConnector(DatabaseConnector):
             statements.append("".join(current))
         return statements
 
+    def split_top_level_commas(self, text: str) -> list:
+        """
+        Splits on commas which are neither nested in parentheses nor placed inside a string
+        literal, so that a parameter like P_NET DECIMAL(12,2) stays in one piece.
+        """
+        parts = []
+        current = []
+        depth = 0
+        in_literal = False
+        i = 0
+        while i < len(text):
+            char = text[i]
+            if in_literal:
+                current.append(char)
+                if char == "'":
+                    if i + 1 < len(text) and text[i+1] == "'":
+                        current.append(text[i+1])
+                        i += 1
+                    else:
+                        in_literal = False
+            elif char == "'":
+                in_literal = True
+                current.append(char)
+            elif char == '(':
+                depth += 1
+                current.append(char)
+            elif char == ')':
+                depth -= 1
+                current.append(char)
+            elif char == ',' and depth == 0:
+                parts.append("".join(current).strip())
+                current = []
+            else:
+                current.append(char)
+            i += 1
+        if current:
+            parts.append("".join(current).strip())
+        return [p for p in parts if p]
+
     def replace_outside_string_literals(self, code: str, pattern: str, replacement: str) -> str:
         """
         Applies re.sub only to the parts of the code which are not inside a string literal,
@@ -1028,6 +1102,36 @@ class IbmDb2ZosConnector(DatabaseConnector):
         for i in range(0, len(parts), 2):
             parts[i] = re.sub(pattern, replacement, parts[i])
         return ''.join(parts)
+
+    def convert_db2_operators(self, code: str) -> str:
+        """
+        Converts DB2 constructs which the SQL parser does not understand: the correlated table
+        function "TABLE (SELECT ...)" becomes "LATERAL (SELECT ...)".
+        """
+        return self.replace_outside_string_literals(code, r"(?i)\bTABLE\s*\(\s*(SELECT\b|WITH\b)", r"LATERAL (\1")
+
+    def convert_mqt_to_materialized_view(self, code: str) -> str:
+        """
+        A DB2 materialized query table (MQT) is declared as
+        "CREATE TABLE <name> AS (<query>) DATA INITIALLY DEFERRED REFRESH DEFERRED ..."
+        and is migrated as a PostgreSQL materialized view. The MQT specific clauses have no
+        PostgreSQL counterpart. Code of other objects is returned unchanged.
+        """
+        if not code or not re.search(r"(?i)\bDATA\s+INITIALLY\s+DEFERRED\b", code):
+            return code
+
+        code = re.sub(
+            r"(?i)\s*\b(?:DATA\s+INITIALLY\s+DEFERRED"
+            r"|REFRESH\s+(?:DEFERRED|IMMEDIATE)"
+            r"|(?:ENABLE|DISABLE)\s+QUERY\s+OPTIMIZATION"
+            r"|MAINTAINED\s+BY\s+(?:SYSTEM|USER|FEDERATED_TOOL))\b",
+            "",
+            code,
+        )
+        # the tablespace the MQT lives in
+        code = re.sub(r"(?i)\s*\bIN\s+[A-Za-z0-9_$#@]+(?:\.[A-Za-z0-9_$#@]+)?\s*;?\s*$", "", code.rstrip())
+        code = re.sub(r"(?i)\bCREATE\s+TABLE\b", "CREATE MATERIALIZED VIEW", code, count=1)
+        return code
 
     def fetch_global_variables(self, schema_name: str) -> dict:
         """
@@ -1321,13 +1425,348 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
         return pg_func + '\n' + pg_trigger
 
     def fetch_funcproc_names(self, schema: str):
-        return {}
+        funcprocs = {}
+        if self.connectivity == self.config_parser.const_connectivity_ddl():
+            query = f"""SELECT id, source_funcproc_name, source_funcproc_type, source_funcproc_comment
+                        FROM "{self.protocol_schema}"."ddl_funcprocs"
+                        WHERE trim(source_schema_name) = trim(%s) ORDER BY id"""
+            cursor = self.migrator_tables.protocol_connection.connection.cursor()
+            cursor.execute(query, (schema,))
+            rows = cursor.fetchall()
+            self.config_parser.print_log_message('DEBUG3', f"ibm_db2_zos_connector: fetch_funcproc_names: ({schema}): {rows}")
+            for i, row in enumerate(rows, 1):
+                funcprocs[i] = {
+                    'id': row[0],
+                    'name': row[1],
+                    'type': row[2] or 'FUNCTION',
+                    'comment': row[3],
+                }
+            cursor.close()
+        return funcprocs
 
     def fetch_funcproc_code(self, funcproc_id: int):
+        if self.connectivity == self.config_parser.const_connectivity_ddl():
+            query = f"""SELECT source_ddl_text FROM "{self.protocol_schema}"."ddl_funcprocs" WHERE id = %s"""
+            cursor = self.migrator_tables.protocol_connection.connection.cursor()
+            cursor.execute(query, (funcproc_id,))
+            row = cursor.fetchone()
+            cursor.close()
+            if row:
+                return row[0]
         return ""
 
+    def replace_function_call(self, code: str, function_name: str, build_replacement) -> str:
+        """
+        Replaces every call of the function by what build_replacement(argument) returns. The
+        argument is read with balanced parentheses, so a nested expression is handled as well.
+        build_replacement may return None to leave that occurrence untouched.
+        """
+        if not code:
+            return code
+        result = code
+        search_from = 0
+        pattern = re.compile(rf"(?i)\b{re.escape(function_name)}\s*\(")
+        while True:
+            match_call = pattern.search(result, search_from)
+            if not match_call:
+                break
+            open_paren = match_call.end() - 1
+            depth = 0
+            end = -1
+            for i in range(open_paren, len(result)):
+                if result[i] == '(':
+                    depth += 1
+                elif result[i] == ')':
+                    depth -= 1
+                    if depth == 0:
+                        end = i
+                        break
+            if end == -1:
+                break
+            replacement = build_replacement(result[open_paren+1:end].strip())
+            if replacement is None:
+                search_from = end + 1
+                continue
+            result = result[:match_call.start()] + replacement + result[end+1:]
+            search_from = match_call.start() + len(replacement)
+        return result
+
+    def convert_varchar_function(self, code: str) -> str:
+        """
+        VARCHAR(<expression>) is a conversion function in DB2 and a data type in PostgreSQL.
+        A plain number is a length specification of the data type and stays untouched.
+        """
+        def build(argument):
+            if re.match(r"^\d+(\s*,\s*\d+)?$", argument):
+                return None
+            return f"CAST({argument} AS VARCHAR)"
+        return self.replace_function_call(code, 'VARCHAR', build)
+
+    def convert_date_part_functions(self, code: str) -> str:
+        """
+        YEAR(), MONTH() and DAY() return an INTEGER in DB2, while EXTRACT() returns a numeric
+        in PostgreSQL - without the cast an integer division like (MONTH(D) + 2) / 3 silently
+        becomes a division with a fraction.
+        """
+        for function_name, part in (('YEAR', 'YEAR'), ('MONTH', 'MONTH'), ('DAY', 'DAY')):
+            code = self.replace_function_call(
+                code, function_name,
+                lambda argument, _part=part: f"EXTRACT({_part} FROM {argument})::integer")
+        return code
+
+    def convert_data_type(self, source_type: str) -> str:
+        """Maps a DB2 data type of a routine parameter or return value to the target type,
+        the length / precision specification is kept."""
+        source_type = (source_type or '').strip()
+        if not source_type:
+            return 'TEXT'
+        base_type = source_type.split('(')[0].strip().upper()
+        types_mapping = self.get_types_mapping({'target_db_type': 'postgresql'})
+        target_type = types_mapping.get(base_type, base_type)
+        if '(' in source_type and target_type.upper() not in ('TEXT', 'BYTEA', 'XML', 'DATE'):
+            target_type += source_type[source_type.find('('):source_type.find(')')+1]
+        return target_type
+
+    def convert_funcproc_parameters(self, parameters: str) -> str:
+        """
+        Converts the parameter list of a routine. DB2 writes the mode in front of the name
+        (IN P_QTY INTEGER), PostgreSQL in front of the parameter (IN p_qty integer), and an
+        OUT parameter of a PostgreSQL procedure has to be INOUT to be callable the same way.
+        The name of a parameter is a variable of the routine and not a database object, so it is
+        neither quoted nor case converted - it has to keep matching the references in the body,
+        which PostgreSQL folds the same way.
+        """
+        converted = []
+        for parameter in self.split_top_level_commas(parameters or ''):
+            match_parameter = re.match(r"(?i)^\s*(IN|OUT|INOUT)?\s*([A-Za-z0-9_$#@]+)\s+(.+?)\s*$", parameter, re.DOTALL)
+            if not match_parameter:
+                continue
+            mode = (match_parameter.group(1) or 'IN').upper()
+            if mode == 'OUT':
+                mode = 'INOUT'
+            converted.append(f'{mode} {match_parameter.group(2)} {self.convert_data_type(match_parameter.group(3))}')
+        return ', '.join(converted)
+
+    def convert_funcproc_body(self, body: str, settings: dict) -> tuple:
+        """
+        Converts the SQL PL statements of a routine body into PL/pgSQL. Returns the converted
+        body, the declarations of its local variables and the exception handlers.
+        """
+        source_schema_name = settings.get('source_schema_name', '')
+        target_schema_name = settings.get('target_schema_name', '')
+
+        declarations = []
+        declared_variables = []
+        handlers = []
+
+        # DECLARE <condition> HANDLER FOR <condition> <statement> - taken out before the plain
+        # variable declarations, it is a handler and not a variable
+        def collect_handler(match):
+            handlers.append((match.group(2).upper(), match.group(3).strip()))
+            return ''
+        body = re.sub(r'(?is)\bDECLARE\s+(EXIT|CONTINUE|UNDO)\s+HANDLER\s+FOR\s+(NOT\s+FOUND|SQLEXCEPTION|SQLWARNING)\s+(.*?);(?=\s*(?:DECLARE|SELECT|SET|INSERT|UPDATE|DELETE|IF|VALUES|CALL|GET|EXECUTE|BEGIN|END|$))',
+                      collect_handler, body)
+
+        def collect_declaration(match):
+            declared_variables.append(match.group(1))
+            declarations.append(f"{match.group(1)} {self.convert_data_type(match.group(2))};")
+            return ''
+        body = re.sub(r'(?im)^[^\S\n]*DECLARE\s+([A-Za-z0-9_$#@]+)\s+([^;\n]+);[^\S\n]*$', collect_declaration, body)
+
+        # global variables and the schema of the referenced objects
+        body = self.convert_global_variables(body, source_schema_name)
+        if source_schema_name and target_schema_name:
+            schema_pattern = rf'(?i)(?<![A-Za-z0-9_."]){re.escape(source_schema_name)}\s*\.'
+            body = self.replace_outside_string_literals(body, schema_pattern, f'"{target_schema_name}".')
+
+            # A string literal is normally left alone, but a routine assembles its dynamic SQL
+            # in one - the objects addressed there have to be renamed as well.
+            def convert_dynamic_sql(match):
+                literal = match.group(0)
+                if not re.search(r"(?i)\b(SELECT|INSERT\s+INTO|UPDATE|DELETE\s+FROM|FROM|JOIN|CALL)\b", literal):
+                    return literal
+                converted_literal = re.sub(schema_pattern, f'{target_schema_name}.', literal)
+                if converted_literal != literal:
+                    self.config_parser.print_log_message('DEBUG', f"ibm_db2_zos_connector: convert_funcproc_body: Renamed the schema in the dynamic SQL statement {literal.strip()}")
+                return converted_literal
+            body = re.sub(r"'(?:[^']|'')*'", convert_dynamic_sql, body)
+
+        # VALUES NEXT VALUE FOR <sequence> INTO <variable> is the DB2 way to draw a sequence value
+        body = re.sub(r'(?is)\bVALUES\s+NEXT\s+VALUE\s+FOR\s+("?[A-Za-z0-9_$#@.]+"?(?:\."?[A-Za-z0-9_$#@]+"?)?)\s+INTO\s+([A-Za-z0-9_$#@]+)\s*;',
+                      lambda m: f"{m.group(2)} := nextval('{m.group(1).replace(chr(34), '')}');", body)
+        body = re.sub(r'(?i)\bNEXT\s+VALUE\s+FOR\s+("?[A-Za-z0-9_$#@.]+"?)', lambda m: f"nextval('{m.group(1).replace(chr(34), '')}')", body)
+
+        # SIGNAL SQLSTATE in both the SET MESSAGE_TEXT and the parenthesised z/OS form
+        body = re.sub(r"(?is)\bSIGNAL\s+SQLSTATE\s+(?:VALUE\s+)?'([^']+)'\s+SET\s+MESSAGE_TEXT\s*=\s*('[^']*'|[A-Za-z0-9_.\"]+)\s*;?",
+                      r"RAISE EXCEPTION \2 USING ERRCODE = '\1';", body)
+        body = re.sub(r"(?is)\bSIGNAL\s+SQLSTATE\s+'([^']+)'\s*\(\s*('[^']*'|[A-Za-z0-9_.\"]+)\s*\)\s*;?",
+                      r"RAISE EXCEPTION \2 USING ERRCODE = '\1';", body)
+
+        # EXECUTE IMMEDIATE <variable> is EXECUTE <variable> in PL/pgSQL
+        body = re.sub(r'(?i)\bEXECUTE\s+IMMEDIATE\b', 'EXECUTE', body)
+
+        # VARCHAR(<expression>) is a conversion function in DB2 and a data type in PostgreSQL
+        body = self.convert_varchar_function(body)
+        # YEAR() / MONTH() / DAY() keep their integer result
+        body = self.convert_date_part_functions(body)
+
+        # the DB2 functions without a PostgreSQL counterpart (NVL(), DECODE(), ...)
+        sql_functions_mapping = self.get_sql_functions_mapping({'target_db_type': 'postgresql'})
+        for source_function, target_function in (sql_functions_mapping or {}).items():
+            escaped_function = re.escape(source_function)
+            if escaped_function.endswith(r'\(') or escaped_function.endswith(r'\)'):
+                body = re.sub(rf"(?i)\b{escaped_function}", target_function, body)
+            else:
+                body = re.sub(rf"(?i)\b{escaped_function}\b", target_function, body)
+
+        body = re.sub(r'\bCURRENT\s+DATE\b', 'CURRENT_DATE', body, flags=re.IGNORECASE)
+        body = re.sub(r'\bCURRENT\s+TIMESTAMP\b', 'CURRENT_TIMESTAMP', body, flags=re.IGNORECASE)
+
+        # assignments to a declared local variable or to an output parameter
+        for declared_variable in declared_variables + [p for p in settings.get('out_parameters', [])]:
+            body = re.sub(rf'(?im)^([^\S\n]*)SET\s+({re.escape(declared_variable)})\s*=', r'\1\2 :=', body)
+
+        # a NOT FOUND handler corresponds to NO_DATA_FOUND, which PostgreSQL only raises for
+        # SELECT INTO STRICT - without STRICT a missing row leaves the variables NULL
+        exception_sql = ''
+        if handlers:
+            handler_map = {'NOT FOUND': 'NO_DATA_FOUND', 'SQLEXCEPTION': 'OTHERS', 'SQLWARNING': 'OTHERS'}
+            handler_parts = []
+            for condition, statement in handlers:
+                statement = re.sub(r"(?is)\bSIGNAL\s+SQLSTATE\s+(?:VALUE\s+)?'([^']+)'\s+SET\s+MESSAGE_TEXT\s*=\s*('[^']*'|[A-Za-z0-9_.\"]+)\s*;?",
+                                   r"RAISE EXCEPTION \2 USING ERRCODE = '\1';", statement)
+                if not statement.strip().endswith(';'):
+                    statement += ';'
+                handler_parts.append(f"WHEN {handler_map.get(condition, 'OTHERS')} THEN\n{statement}")
+                if condition == 'NOT FOUND':
+                    body = re.sub(r'(?i)\bSELECT\b(?![\s\S]*?\bINTO\s+STRICT\b)((?:(?!\bSELECT\b)[\s\S])*?)\bINTO\b', r'SELECT\1INTO STRICT', body)
+            exception_sql = "EXCEPTION\n" + "\n".join(handler_parts) + "\n"
+
+        return body.strip(), declarations, exception_sql
+
     def convert_funcproc_code(self, settings):
-        pass
+        funcproc_code = settings.get('funcproc_code', '')
+        if isinstance(funcproc_code, dict):
+            funcproc_code = funcproc_code.get('definition', '') or ''
+        funcproc_name = settings.get('funcproc_name', '')
+        target_db_type = settings.get('target_db_type', 'postgresql')
+        source_schema_name = settings.get('source_schema_name', '')
+        target_schema_name = settings.get('target_schema_name', '')
+
+        if not funcproc_code or target_db_type != 'postgresql':
+            if target_db_type != 'postgresql':
+                self.config_parser.print_log_message('ERROR', f"ibm_db2_zos_connector: convert_funcproc_code: Unsupported target database type: {target_db_type}")
+            return ''
+
+        code = re.sub(r'--([^\n]*)', r'/*\1*/', funcproc_code)
+        code = re.sub(r"@[^\S\n]*$", "", code.rstrip())
+
+        match_header = re.match(
+            r"(?is)^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(FUNCTION|PROCEDURE)\s+"
+            r"\"?([A-Za-z0-9_$#@]+)\"?\.\"?([A-Za-z0-9_$#@]+)\"?\s*\(", code)
+        if not match_header:
+            self.config_parser.print_log_message('ERROR', f"ibm_db2_zos_connector: convert_funcproc_code: Cannot parse the header of {funcproc_name} - not migrated.")
+            return ''
+
+        routine_type = match_header.group(1).upper()
+        routine_name = match_header.group(3).upper()
+
+        # parameter list
+        start_idx = code.find('(', match_header.end() - 1)
+        depth = 0
+        end_idx = -1
+        for i in range(start_idx, len(code)):
+            if code[i] == '(':
+                depth += 1
+            elif code[i] == ')':
+                depth -= 1
+                if depth == 0:
+                    end_idx = i
+                    break
+        if end_idx == -1:
+            self.config_parser.print_log_message('ERROR', f"ibm_db2_zos_connector: convert_funcproc_code: Cannot parse the parameters of {funcproc_name} - not migrated.")
+            return ''
+        parameters = code[start_idx+1:end_idx]
+        remainder = code[end_idx+1:]
+
+        # An external routine is a load module written in another language, its code is not
+        # part of the DDL and there is nothing which could be translated.
+        match_language = re.search(r"(?i)\bLANGUAGE\s+([A-Za-z0-9_]+)", remainder)
+        language = match_language.group(1).upper() if match_language else 'SQL'
+        if language != 'SQL' or re.search(r"(?i)\bEXTERNAL\s+NAME\b", remainder):
+            self.config_parser.print_log_message('WARNING', f"ibm_db2_zos_connector: convert_funcproc_code: {routine_type} {routine_name} is an external routine (LANGUAGE {language}) - its load module is not part of the DDL and it is not migrated.")
+            return ''
+
+        # return type of a function - a scalar type or a table
+        returns_sql = ''
+        match_returns_table = None
+        table_columns = []
+        if routine_type == 'FUNCTION':
+            match_returns_table = re.search(r"(?is)\bRETURNS\s+TABLE\s*\((.*?)\)\s*(?=\b(?:LANGUAGE|SPECIFIC|DETERMINISTIC|NOT\s+DETERMINISTIC|READS|MODIFIES|CONTAINS|NO\s+SQL|EXTERNAL|PARAMETER|RETURN|BEGIN)\b)", remainder)
+            if match_returns_table:
+                for column in self.split_top_level_commas(match_returns_table.group(1)):
+                    match_column = re.match(r"(?i)^\s*([A-Za-z0-9_$#@]+)\s+(.+?)\s*$", column, re.DOTALL)
+                    if match_column:
+                        table_columns.append((self.config_parser.convert_names_case(match_column.group(1).upper()),
+                                              self.convert_data_type(match_column.group(2))))
+                returns_sql = f"RETURNS TABLE({', '.join(f'{chr(34)}{n}{chr(34)} {t}' for n, t in table_columns)})"
+            else:
+                match_returns = re.search(r"(?is)\bRETURNS\s+([A-Za-z0-9_]+(?:\s*\([^)]*\))?)", remainder)
+                returns_sql = f"RETURNS {self.convert_data_type(match_returns.group(1))}" if match_returns else "RETURNS TEXT"
+
+        # the body starts at BEGIN or at the RETURN of a simple SQL function
+        match_body = re.search(r"(?is)\bBEGIN(?:\s+ATOMIC)?\b", remainder)
+        is_compound = bool(match_body)
+        if is_compound:
+            body = remainder[match_body.end():]
+            body = re.sub(r'(?is)\bEND\s*;?\s*$', '', body).strip()
+        else:
+            match_return = re.search(r"(?is)\bRETURN\b", remainder)
+            if not match_return:
+                self.config_parser.print_log_message('ERROR', f"ibm_db2_zos_connector: convert_funcproc_code: Cannot find the body of {routine_type} {routine_name} - not migrated.")
+                return ''
+            body = remainder[match_return.end():].strip().rstrip(';')
+            if match_returns_table:
+                # A table function returns a result set. PostgreSQL demands that the types of
+                # RETURN QUERY match the declared ones exactly (DB2 converts them silently), so
+                # the query is wrapped and its columns are cast by position.
+                if table_columns:
+                    inner_names = [f'"mig_col_{i}"' for i in range(1, len(table_columns) + 1)]
+                    cast_list = ', '.join(f'CAST({inner} AS {column_type})'
+                                          for inner, (_, column_type) in zip(inner_names, table_columns))
+                    body = f'RETURN QUERY SELECT {cast_list} FROM (\n{body}\n) AS "mig_result"({", ".join(inner_names)});'
+                else:
+                    body = f"RETURN QUERY {body};"
+            elif re.match(r"(?is)^\s*(SELECT|WITH)\b", body):
+                # RETURN <subselect> has to be parenthesised in PL/pgSQL
+                body = f"RETURN ({body});"
+            else:
+                body = f"RETURN {body};"
+
+        out_parameters = [m.group(1) for m in re.finditer(r"(?i)\b(?:OUT|INOUT)\s+([A-Za-z0-9_$#@]+)\s+", parameters)]
+        body, declarations, exception_sql = self.convert_funcproc_body(body, {
+            'source_schema_name': source_schema_name,
+            'target_schema_name': target_schema_name,
+            'out_parameters': out_parameters,
+        })
+
+        converted_parameters = self.convert_funcproc_parameters(parameters)
+        converted_name = self.config_parser.convert_names_case(routine_name)
+        declare_sql = ("DECLARE\n" + "\n".join(declarations) + "\n") if declarations else ""
+        if not body.strip().endswith(';'):
+            body += ';'
+
+        # The output columns of a table function are PL/pgSQL variables of the same name as the
+        # columns its query selects - without this directive every such reference is ambiguous.
+        variable_conflict_sql = "#variable_conflict use_column\n" if match_returns_table else ""
+
+        converted_code = f'CREATE OR REPLACE {routine_type} "{target_schema_name}"."{converted_name}"({converted_parameters})\n'
+        if returns_sql:
+            converted_code += f'{returns_sql}\n'
+        converted_code += f'LANGUAGE plpgsql\nAS $$\n{variable_conflict_sql}{declare_sql}BEGIN\n{body}\n{exception_sql}END;\n$$;\n'
+
+        self.config_parser.print_log_message('DEBUG', f"ibm_db2_zos_connector: convert_funcproc_code: Converted {routine_type} {routine_name}")
+        return converted_code
 
     def fetch_sequences(self, schema_name: str):
         seqs = {}
@@ -1404,7 +1843,7 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
     def fetch_views_names(self, source_schema_name: str):
         views = {}
         if self.connectivity == self.config_parser.const_connectivity_ddl():
-            query = f"""SELECT id, source_schema_name, source_view_name
+            query = f"""SELECT id, source_schema_name, source_view_name, source_view_type
                         FROM "{self.protocol_schema}"."ddl_views"
                         WHERE source_schema_name = %s ORDER BY id"""
             cursor = self.migrator_tables.protocol_connection.connection.cursor()
@@ -1419,6 +1858,7 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
                     'target_schema_name': '',
                     'target_view_name': '',
                     'comment': None,
+                    'view_type': row[3] or 'VIEW',
                     'is_alias': False
                 }
 
@@ -1691,8 +2131,51 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
                     return sqlglot.exp.DPipe(this=new_left, expression=new_right)
             return node
 
+        def align_union_types(union_node):
+            """
+            PostgreSQL requires the column types of the non-recursive and the recursive term
+            of a recursive CTE to be identical, DB2 resolves them on its own. Where one arm
+            casts a column explicitly, the same cast is applied to the other arm.
+            """
+            if isinstance(union_node, sqlglot.exp.Union):
+                select1 = union_node.this
+                select2 = union_node.expression
+                if isinstance(select1, sqlglot.exp.Select) and isinstance(select2, sqlglot.exp.Select):
+                    exprs1 = select1.expressions
+                    exprs2 = select2.expressions
+                    for i in range(min(len(exprs1), len(exprs2))):
+                        e1 = exprs1[i]
+                        e2 = exprs2[i]
+                        if isinstance(e1, sqlglot.exp.Cast) and not isinstance(e2, sqlglot.exp.Cast):
+                            select2.expressions[i] = sqlglot.exp.Cast(this=e2, to=e1.to.copy())
+                        elif isinstance(e2, sqlglot.exp.Cast) and not isinstance(e1, sqlglot.exp.Cast):
+                            select1.expressions[i] = sqlglot.exp.Cast(this=e1, to=e2.to.copy())
+
+        def convert_recursive_with(node):
+            """
+            DB2 derives the recursion from the CTE referencing itself, PostgreSQL requires the
+            RECURSIVE keyword to be stated explicitly - without it the self-reference fails
+            with 'relation ... does not exist'.
+            """
+            if isinstance(node, sqlglot.exp.With):
+                is_recursive = False
+                for cte in node.expressions:
+                    if isinstance(cte, sqlglot.exp.CTE):
+                        cte_name = cte.alias_or_name.upper()
+                        for table_ref in cte.this.find_all(sqlglot.exp.Table):
+                            if table_ref.name and table_ref.name.upper() == cte_name:
+                                is_recursive = True
+                                break
+                        for union_node in cte.this.find_all(sqlglot.exp.Union):
+                            align_union_types(union_node)
+                    if is_recursive:
+                        break
+                if is_recursive:
+                    node.set("recursive", True)
+            return node
+
         view_code = settings['view_code']
-        converted_code = view_code
+        converted_code = self.convert_mqt_to_materialized_view(view_code)
 
         remote_subs = self.config_parser.get_remote_objects_substitution()
         if remote_subs:
@@ -1701,7 +2184,29 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
                 if source_obj and target_obj:
                     converted_code = re.sub(re.escape(source_obj), target_obj, converted_code, flags=re.IGNORECASE)
 
+        # WITH [CASCADED|LOCAL] CHECK OPTION is valid in PostgreSQL as well, but the SQL parser
+        # does not understand it - it is cut off here and appended back to the converted code.
+        check_option = ''
+        check_option_match = re.search(r"(?i)\s*\bWITH\s+(CASCADED\s+|LOCAL\s+)?CHECK\s+OPTION\s*;?\s*$", converted_code)
+        if check_option_match:
+            scope = check_option_match.group(1).strip().upper() + ' ' if check_option_match.group(1) else ''
+            check_option = f" WITH {scope}CHECK OPTION"
+            converted_code = converted_code[:check_option_match.start()].rstrip()
+
         if settings['target_db_type'] == 'postgresql':
+            # DB2 LISTAGG(...) [WITHIN GROUP (ORDER BY ...)] has no PostgreSQL counterpart
+            converted_code = re.sub(
+                r"(?i)\bLISTAGG\s*\(\s*([^,()]+?)\s*,\s*('[^']*'|[^()]+?)\s*\)\s*WITHIN\s+GROUP\s*\(\s*ORDER\s+BY\s+([^()]+?)\s*\)",
+                r"STRING_AGG(\1::text, \2 ORDER BY \3)",
+                converted_code,
+            )
+            converted_code = re.sub(
+                r"(?i)\bLISTAGG\s*\(\s*([^,()]+?)\s*,\s*('[^']*'|[^()]+?)\s*\)",
+                r"STRING_AGG(\1::text, \2)",
+                converted_code,
+            )
+            converted_code = self.convert_db2_operators(converted_code)
+
             sql_functions_mapping = self.get_sql_functions_mapping({ 'target_db_type': settings['target_db_type'] })
             if sql_functions_mapping:
                 for src_func, tgt_func in sql_functions_mapping.items():
@@ -1720,16 +2225,24 @@ EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
             except Exception as e:
                 self.config_parser.print_log_message('ERROR', f"ibm_db2_zos_connector: convert_view_code: Error parsing View code: {e}")
                 # Fallback to the unparsed converted_code instead of empty string to avoid crashes
-                return converted_code
+                return converted_code + check_option
+
+            # sqlglot does not raise on unknown syntax - it silently falls back to a plain
+            # Command node. All transformations below would then be no-ops and the untranslated
+            # DB2 code would be handed over to the target database, so this is reported here.
+            if isinstance(parsed_code, sqlglot.exp.Command):
+                self.config_parser.print_log_message('ERROR', f"ibm_db2_zos_connector: convert_view_code: View code contains syntax unsupported by the SQL parser, it is left unconverted: {converted_code}")
+                return converted_code + check_option
 
             parsed_code = parsed_code.transform(quote_column_names)
             parsed_code = parsed_code.transform(convert_string_concatenation)
             parsed_code = parsed_code.transform(quote_schema_and_table_names)
             parsed_code = parsed_code.transform(replace_schema_names)
             parsed_code = parsed_code.transform(replace_functions)
+            parsed_code = parsed_code.transform(convert_recursive_with)
 
             converted_code = parsed_code.sql(dialect="postgres")
-            converted_code = converted_code.replace("()()", "()")
+            converted_code = converted_code.replace("()()", "()") + check_option
 
             self.config_parser.print_log_message('DEBUG', f"ibm_db2_zos_connector: convert_view_code: Converted view: {converted_code}")
         else:

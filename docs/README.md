@@ -4,16 +4,19 @@
 
 credativ-pg-migrator is an offline migration tool for moving schemas and data from legacy or proprietary databases into PostgreSQL. It is written in Python and uses modular connectors for different source databases.
 
-Supported source databases:
-- IBM DB2 LUW and DB2 z/OS
+Supported source databases (one connector each):
+- IBM DB2 LUW (live connection), IBM DB2 z/OS and IBM DB2 for i (both offline, from DDL + CSV extracts)
 - Informix
 - MS SQL Server
-- MySQL / MariaDB (engines with INFORMATION_SCHEMA)
+- MySQL and MariaDB (engines with INFORMATION_SCHEMA; separate connectors)
 - Oracle
 - PostgreSQL (special use cases)
 - SQL Anywhere
-- SQLite
+- SQLite (a local file; no driver installation needed)
 - Sybase ASE
+
+How complete each connector is differs considerably — `FEATURE_MATRIX.md` in the repo carries the
+per-connector, per-feature status and is reconciled against the connector sources.
 
 Target database: PostgreSQL only.
 
@@ -25,9 +28,9 @@ High‑level features:
   - defaults & check constraints
   - secondary indexes
   - foreign keys
-  - functions / procedures (fully implemented for Informix; best-effort for Oracle)
-  - triggers (Informix, Sybase ASE; best-effort for Oracle and SQLite)
-  - views (currently simple parsing and schema-name replacement; SQL-level transpilation for Oracle and SQLite)
+  - functions / procedures (complete for Informix; best-effort for Oracle, Sybase ASE, MS SQL Server and DB2 z/OS; not implemented for MySQL, MariaDB, SQL Anywhere, DB2 LUW and DB2 for i)
+  - triggers (complete for Informix; best-effort for Oracle, Sybase ASE, MS SQL Server, all three DB2 connectors and SQLite; not implemented for MySQL, MariaDB and SQL Anywhere)
+  - views (schema-name replacement only for Informix and SQL Anywhere; SQL-level transpilation for the other engines)
   - Adjusts sequences on the target to match the imported data (with robust fetch routines across all supported engines).
   - Schema Mapping Workflow handling data normalization, renaming/matching functions, and managed target index/constraint creation.
 - Validates:
@@ -111,6 +114,23 @@ The package depends on:
 
 These are installed automatically when using pip.
 
+Some connectors additionally need a vendor driver which is **not** a declared dependency of the
+package — install it only for the source engine you actually migrate from:
+
+| Source engine | Additional Python package | Imported |
+|---|---|---|
+| IBM DB2 LUW | `ibm_db` (provides `ibm_db_dbi`) | at connector import |
+| Oracle | `oracledb` | at connector import |
+| SQL Anywhere | `sqlanydb` | at connector import |
+| MySQL (native connectivity only) | `mysql-connector-python` | on connect |
+| MariaDB (native connectivity only) | `mariadb` — needs `libmariadb-dev` on Debian/Ubuntu first | on connect |
+
+The first three are imported when the connector module is loaded, so a missing package produces an
+`ImportError` at start-up rather than a connection error. The two native MySQL/MariaDB drivers are
+imported only when `connectivity: "native"` is actually used; with JDBC or ODBC they are not needed.
+Informix, MS SQL Server, Sybase ASE, IBM DB2 z/OS, IBM DB2 for i, PostgreSQL and SQLite need nothing
+beyond the packages listed above (SQLite uses the `sqlite3` module of the standard library).
+
 ### 3.2 Debian/Ubuntu packages
 
 credativ-pg-migrator is available via the PostgreSQL community APT repository (apt.postgresql.org).
@@ -144,14 +164,27 @@ IBM DB2 is supported via two fundamentally different connectors, heavily dependi
 
 #### 4.2.1 DB2 LUW (Linux, UNIX, Windows)
 - **Mode**: Native Connection
-- **Python Module**: `ibm_db` (using `ibm_db_dbi`)
+- **Python Module**: `ibm_db` (using `ibm_db_dbi`) — install separately, see section 3.1.
 - **Configuration**: Uses native connect strings. Set `connectivity: "native"`.
+- **Migrated**: tables and data, primary keys, indexes, foreign keys, CHECK constraints, identity columns, table and column comments, sequences, views and triggers (converted to a PL/pgSQL trigger function + `CREATE TRIGGER`).
+- **Not migrated**: functions and procedures — the connector can convert routine code, but it has no way to read the routines out of the catalog yet (`fetch_funcproc_names` is a placeholder), so nothing is ever fetched. Generated/computed columns and foreign-key `ON DELETE` actions are not handled either.
 
 #### 4.2.2 DB2 z/OS (Mainframe)
 - **Mode**: DDL Parsing and File-Based Integration (Offline Connectivity)
 - **Python Module**: `psycopg2`
 - **Configuration**: Uses `connectivity: "ddl"`. Unlike LUW, the z/OS connector does not connect directly to the mainframe instance. Instead, it reads provided `.sql`/DDL schema extracts offline to discover structure. Data migration is handled purely offline using source-generated `.csv` exports. It uses the `psycopg2` connection strictly to interact with the PostgreSQL `migrator_tables` for protocol persistence and mapping.
 - **Usage**: You must define a `ddl:` -> `path:` attribute pointing to the directory containing your source schema DDL files and your data CSV exports.
+- **Migrated**: tables and data (from CSV), primary keys, indexes (including expression-based ones), foreign keys with their `ON DELETE` / `ON UPDATE` rules, CHECK constraints, identity columns, sequences, aliases, views (including `WITH CHECK OPTION` views, recursive CTEs, `LISTAGG`, `TABLE (SELECT ...)` and materialized query tables), functions and procedures (SQL routines converted to PL/pgSQL), triggers and DB2 global variables (mapped to PostgreSQL session settings).
+- **Not migrated**: table and column comments — `COMMENT ON` / `LABEL ON` statements are parsed out of the DDL and stored in the protocol tables, but they are not yet returned as comments, so none reaches the target. Generated/computed columns are not handled. External routines (COBOL, Assembler) are reported and skipped, because their load module is not part of the DDL.
+- **Not available offline**: pre-migration analysis (there is no live source to measure) and the random-sample / LOB-size validation checks. Row counts and table checksums do work.
+
+#### 4.2.3 DB2 for i (IBM i / AS/400)
+- **Mode**: DDL Parsing and File-Based Integration (Offline Connectivity), like z/OS
+- **Configuration**: `connectivity: "ddl"` with a `ddl:` -> `path:` attribute. Data is migrated from source-generated CSV files.
+- **DB2 for i specifics**: the DDL parser understands `FOR SYSTEM NAME`, `FOR COLUMN`, `CCSID`, `RECORD FORMAT` and `LABEL ON`. The 10-character system name of a table is registered as an alias, which is what the `{{source_alias_name}}` placeholder resolves when the unload files are named after it.
+- **Migrated**: tables and data, primary keys, indexes, foreign keys with their referential rules, CHECK constraints, identity columns, sequences, aliases, views, triggers and global variables.
+- **Not migrated**: functions and procedures (the routine code converter exists, but `fetch_funcproc_names` is a placeholder, so nothing is fetched), table/column comments (parsed but not surfaced — same as z/OS), and generated/computed columns.
+- **Not available offline**: pre-migration analysis and all validation checks.
 
 ### 4.3 Oracle
 - **Mode**: Native Connection
@@ -186,6 +219,15 @@ IBM DB2 is supported via two fundamentally different connectors, heavily dependi
 - **Mode**: Native Connection
 - **Python Module**: `psycopg2`
 - **Configuration**: Set `connectivity: "native"`. Utilized for migrations between PostgreSQL instances.
+- **Tested versions**: PostgreSQL 14, 17.
+
+Because source and target speak the same dialect, this is the most complete connector: no type
+mapping, default-value rewriting or SQL function mapping is needed, and object definitions are taken
+from the catalog with `pg_get_viewdef`, `pg_get_functiondef`, `pg_get_triggerdef`,
+`pg_get_constraintdef` and `pg_get_indexdef`, so they are already valid PostgreSQL.
+
+- **Migrated**: tables (including **partitioned tables** — a partitioned parent is recreated with its `PARTITION BY` clause and each partition as `PARTITION OF ... FOR VALUES ...`), data, primary keys, indexes, foreign keys with their `ON DELETE`/`ON UPDATE` rules, CHECK constraints, identity columns, generated columns, domains, user-defined types (enums, composite types, range types), sequences (`CREATE SEQUENCE` + `setval`, continuing from the source position), views and materialized views, functions and procedures, triggers, and table/column comments.
+- **Mostly used for**: moving a schema between instances, re-homing a schema into a different schema name, and the mapping workflow.
 
 ### 4.5 Informix (JDBC example)
 
@@ -206,6 +248,10 @@ See more on the “Connection to Informix” wiki page:
 Host, port, database name, and credentials are specified in other fields of the same source‑DB section (see config_sample.yaml in the repo for the exact parameter names). Informix also supports ODBC connectivity via `pyodbc`.
 
 **File-based Import (UNL):** For environments where direct connectivity is limited, the Informix connector supports offline file-based ingest using native `.unl` export files via the `data_export` configuration.
+
+**Current status (Informix as source):** Informix is the reference connector for procedural code — it is the only engine whose functions, procedures and triggers are converted completely rather than best-effort, and the only one whose pre-migration analysis fills all five TOP-N metrics (rows, size, columns, indexes, constraints) including foreign-key dependency ranking. Tables, data, primary keys, indexes, foreign keys, CHECK constraints and SERIAL/identity columns are migrated.
+
+**Known limitations (Informix):** views are migrated in the rudimentary way — only the schema name inside the definition is replaced, with no SQL transpilation, so view bodies using Informix-specific syntax need review. Column defaults are passed through unchanged (no implicit rewriting of Informix-specific default expressions). Foreign-key `ON DELETE` actions, standalone sequences, user-defined types, domains, generated columns and comments are not migrated.
 
 ### 4.6 Sybase ASE (ODBC example)
 
@@ -228,6 +274,15 @@ See more at the “Connection to Sybase ASE” wiki page:
     - driver: "FreeTDS"
 
 Other ODBC parameters such as DSN or connection string are configured alongside the driver (see config_sample.yaml in the repo for the exact parameter names). Sybase ASE also supports JDBC connectivity via `jaydebeapi`.
+
+**Current status (Sybase ASE as source):** the richest connector after PostgreSQL for schema objects. Besides tables, data, primary keys, indexes, foreign keys and CHECK constraints it is the **only** connector implementing:
+- **Named default objects** (`CREATE DEFAULT ... AS ...`, bound to several columns by name, note [4] in `FEATURE_MATRIX.md`). PostgreSQL has no such object, so the underlying default expression is attached directly to each target column.
+- **Rules / domains** (note [3]) — externally defined checks bound to a column or data type, migrated as PostgreSQL domains or CHECK constraints depending on `migrate_domains_as`.
+- User-defined types, and **hidden computed columns** that Sybase creates for function-based indexes (note [5]) — the index is rewritten to use the underlying expression instead of the internal `sybfi*` column.
+
+Functions, procedures and triggers are converted (T-SQL → PL/pgSQL, via the shared T-SQL parser), as are views.
+
+**Known limitations (Sybase ASE):** foreign-key `ON DELETE` actions, table/column comments and standalone sequences have no Sybase counterpart or are not migrated. Note that older ASE versions do not support `LIMIT ... OFFSET`, so the migrator always drops and reloads unfinished tables when resuming after a crash for this source (it cannot skip already-loaded rows reliably).
 
 ### 4.7 SQLite
 
@@ -333,15 +388,41 @@ When `migration.migrate_lob_values` is `false`, `BLOB`-backed columns are migrat
 - **File-based data ingest** (`data_export` with CSV/UNL/SQL files) is not implemented for SQLite — it is not needed, because the source is already a local file.
 - **Attached databases** are not migrated automatically. Only one schema is migrated per run; to move several attached databases, run the migrator once per database.
 
-### 4.8 Other databases
+### 4.8 MS SQL Server
 
-Other supported engines (MS SQL Server, MySQL, MariaDB, SQL Anywhere) are accessed via their respective connectors utilizing:
-- **MS SQL**: JDBC (`jaydebeapi`) or ODBC (`pyodbc`)
-- **MySQL**: Native (`mysql-connector-python`), JDBC (`jaydebeapi`), or ODBC (`pyodbc`)
-- **MariaDB**: Native (`mariadb`), JDBC (`jaydebeapi`), or ODBC (`pyodbc`). Note: For native connectivity on Debian/Ubuntu systems, the C development headers are required before installing the Python package (`sudo apt install libmariadb-dev` followed by `pip install mariadb`).
-- **SQL Anywhere**: ODBC (`pyodbc`)
+- **Connectivity**: JDBC (`jaydebeapi`) or ODBC (`pyodbc`). `connection_string_options` is appended to the JDBC URL and is where `encrypt`, `trustServerCertificate`, `integratedSecurity`, `domain` and similar options go.
+- **Configuration**: `system_catalog` selects the metadata source — `SYS` (the `sys.*` catalog views) or `INFORMATION_SCHEMA`.
+- **Tested version**: MS SQL Server 2022.
+- **Migrated**: tables and data, primary keys, indexes, foreign keys, IDENTITY columns, sequences (SQL Server 2012+ standalone sequence objects), user-defined types, aliases/synonyms, views, functions, procedures and triggers (T-SQL converted to PL/pgSQL through the shared T-SQL parser).
+- **Not migrated**: CHECK constraints, foreign-key `ON DELETE` actions, table and column comments (extended properties such as `MS_Description`), computed columns and domains/rules.
 
-The exact features supported per connector (e.g. whether stored procedures or triggers are handled) are summarized in FEATURE_MATRIX.md in the repo.
+### 4.9 MySQL and MariaDB
+
+MySQL and MariaDB have **separate connectors** with almost the same behavior; the differences are noted below.
+
+- **Connectivity**:
+  - **MySQL**: Native (`mysql-connector-python`), JDBC (`jaydebeapi`) or ODBC (`pyodbc`)
+  - **MariaDB**: Native (`mariadb`), JDBC (`jaydebeapi`) or ODBC (`pyodbc`). For native connectivity on Debian/Ubuntu the C development headers are required first: `sudo apt install libmariadb-dev`, then `pip install mariadb`.
+- **Tested version**: MySQL 5.7. MariaDB has not yet been validated against a live instance.
+- **Migrated**: tables and data, primary keys, indexes (including **function-based** indexes, whose expressions are transpiled with `sqlglot`), foreign keys, `AUTO_INCREMENT` as identity columns, generated columns (`STORED` and `VIRTUAL`), table and column comments, and views (transpiled from the MySQL dialect to PostgreSQL, with `CHARACTER SET` / `COLLATE` clauses stripped and `GROUP BY ... WITH ROLLUP` rewritten to `GROUP BY ROLLUP (...)`).
+- **MariaDB only**: standalone `SEQUENCE` objects (MariaDB 10.3+) are migrated as PostgreSQL sequences. MySQL has no sequences.
+- **Not migrated**: functions, procedures and triggers — the connectors contain placeholders only, so nothing is fetched or converted. CHECK constraints, foreign-key `ON DELETE` actions, user-defined types and domains are not handled either.
+- **Zero dates**: MySQL/MariaDB accept `'0000-00-00'`, which PostgreSQL rejects. Three settings control this: `migration.zero_datetime_default` (what happens to such a *default*), `migration.zero_datetime_value` (what such a *value* becomes; `NULL` by default) and `migration.relax_not_null_datetime` (drop `NOT NULL` on target date/time columns so the `NULL`s can be stored). See section 5.
+
+### 4.10 SQL Anywhere
+
+- **Connectivity**: Native (`sqlanydb`, install separately — see section 3.1) or ODBC (`pyodbc`).
+- **Tested version**: SQL Anywhere 17.
+- **Migrated**: tables and data, primary keys, indexes, foreign keys, `AUTOINCREMENT` columns as identity columns, and views.
+- **Not migrated**: functions, procedures and triggers (placeholders only), CHECK constraints, foreign-key `ON DELETE` actions, sequences, user-defined types, domains, generated columns and comments. This is currently the least complete of the live-connection connectors.
+
+### 4.11 Feature status per connector
+
+How complete each connector is differs a lot, and the summary above is deliberately short. The
+authoritative, per-feature overview is `FEATURE_MATRIX.md` in the repo — it lists every connector
+against every feature (identity columns, generated columns, CHECK constraints, comments, sequences,
+views, routines, triggers, validation depth, …), is reconciled against the connector sources, and
+carries numbered notes for the engine-specific caveats.
 
 ---
 
@@ -506,7 +587,7 @@ The migration database is one of the key strengths of credativ‑pg‑migrator: 
 
 This allows you to:
 - Audit exactly what was migrated and how.
-- Compare source vs generated PL/pgSQL for functions/procedures where conversion is supported (currently Informix only).
+- Compare source vs generated PL/pgSQL for functions/procedures and triggers wherever conversion is supported (see section 8.2 for which engines those are) — this is the practical way to review the best-effort conversions before trusting them.
 - Rerun or manually fix individual objects without redoing the entire migration.
 
 Treat the migration database as read‑only metadata. You can query it freely for analysis, but avoid modifying its tables directly unless instructed by the tool’s maintainers.
@@ -517,17 +598,22 @@ Treat the migration database as read‑only metadata. You can query it freely fo
 
 ### 8.1 Schema & data migration
 
-- Tables, constraints, indexes, foreign keys are migrated.
-- Sequences are created for serial/identity columns.
+- Tables, constraints, indexes, foreign keys are migrated by every connector.
+- Sequences are created for serial/identity columns. Standalone sequence *objects* are additionally migrated for Oracle, MS SQL Server, MariaDB, PostgreSQL and the three DB2 connectors; MySQL, SQLite and Sybase ASE have no such objects, and they are not implemented for Informix or SQL Anywhere.
 - Sequences on the target can be set to match the highest existing values in migrated tables.
-- Views are migrated in a rudimentary way: the tool makes basic parsing and replaces schema names inside the view definition; deeper semantic rewrites are not yet implemented. The Oracle and SQLite connectors go further and transpile the defining query to PostgreSQL SQL with `sqlglot`.
+- View migration depth differs per connector: PostgreSQL takes definitions straight from the catalog, Oracle, SQLite, MySQL/MariaDB, MS SQL Server, Sybase ASE and the DB2 connectors transpile the defining query to PostgreSQL SQL (with `sqlglot` or the shared T-SQL parser), while for Informix and SQL Anywhere only the schema name inside the definition is replaced.
+- Beyond the common set, some connectors reach further: PostgreSQL migrates partitioned tables, domains and user-defined types; Sybase ASE migrates named default objects, rules/domains and user-defined types; Oracle migrates packages, object/collection types and 23ai domains.
 - Not every source feature has a PostgreSQL counterpart. Where a construct cannot be reproduced exactly, the connector degrades it deliberately, logs a `WARNING`, and records what was changed in the migration database — for example SQLite partial indexes (section 4.7.5) or Oracle package state (section 4.3).
+- The per-connector, per-feature status is maintained in `FEATURE_MATRIX.md`.
 
 ### 8.2 PL/SQL / procedural code
 
-- Complete conversion and migration of functions, procedures, and triggers is currently implemented for Informix.
-- Oracle PL/SQL (functions, procedures, packages, triggers) is converted on a best-effort basis — see section 4.3.
-- SQLite has no stored functions or procedures; its triggers are converted to a PL/pgSQL trigger function plus a `CREATE TRIGGER` — see section 4.7.
+Conversion of functions, procedures and triggers is the feature that varies most between connectors:
+
+- **Complete**: Informix — the reference implementation, converted and validated.
+- **Native**: PostgreSQL — definitions come from `pg_get_functiondef` / `pg_get_triggerdef`, so only schema names are rewritten.
+- **Best-effort, implemented but not fully validated**: Oracle (functions, procedures, packages split into standalone functions, triggers — section 4.3), Sybase ASE and MS SQL Server (T-SQL through the shared parser), IBM DB2 z/OS (SQL routines and triggers), IBM DB2 LUW and DB2 for i (**triggers only** — routine conversion code exists but the routines are never fetched), and SQLite (**triggers only**; it has no stored routines — section 4.7).
+- **Not implemented**: MySQL, MariaDB and SQL Anywhere — these connectors contain placeholders only, so neither routines nor triggers are migrated.
 - Support for other engines can be added based on real‑world migration projects.
 
 ### 8.3 Customization

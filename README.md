@@ -9,24 +9,25 @@ It is is written in Python in multiple classes and modules.
 
 - Pure python solution, uses only standard libraries, structured in modules, written in object-oriented style in classes
 - Currently supported source databases are:
-  - IBM DB2 LUW, DB2 z/OS, DB2 i
+  - IBM DB2 LUW (live connection), DB2 z/OS and DB2 i (offline, from DDL + CSV extracts)
   - Informix
   - MS SQL Server
-  - MySQL/MariaDB (engines with INFORMATION_SCHEMA)
+  - MySQL and MariaDB (engines with INFORMATION_SCHEMA; separate connectors)
   - Oracle
   - PostgreSQL (mainly for special use cases)
   - SQL Anywhere
   - SQLite (a plain local file - the only source engine needing no driver installation)
   - Sybase ASE
 - Supports migration of tables, column constraints and defaults, data, primary keys, secondary indexes, foreign keys, functions/procedures, triggers and views from source to target database
-- If tables have sequences, migrator sets current values of sequences on the target database
-- Migration of views is currently only in rudimentary version, just replacing source schema names in code with target schema names. The Oracle and SQLite connectors additionally transpile the view query to PostgreSQL SQL.
-- Conversion and migration of functions, procedures, triggers currently fully works for Informix. Oracle PL/SQL and SQLite triggers are converted on a best-effort basis. Can be added on demand for other databases too.
+- If tables have sequences, migrator sets current values of sequences on the target database. Standalone sequence objects are additionally migrated for Oracle, MS SQL Server, MariaDB, PostgreSQL and the DB2 connectors.
+- Migration of views is in a rudimentary version for Informix and SQL Anywhere, just replacing source schema names in code with target schema names. The other connectors transpile the view query into PostgreSQL SQL (using `sqlglot` or the shared T-SQL parser).
+- Conversion and migration of functions, procedures and triggers fully works for Informix. It is best-effort for Oracle, Sybase ASE, MS SQL Server and DB2 z/OS, triggers-only for DB2 LUW, DB2 i and SQLite, and not implemented for MySQL, MariaDB and SQL Anywhere. Can be added on demand for other databases too.
+- **How complete each connector is differs considerably - see [FEATURE_MATRIX.md](FEATURE_MATRIX.md) for the per-connector, per-feature status.**
 - Migrator allows customizable substitutions of data types, default values of columns, calls of remote objects.
 - Supports offline, file-based data ingestion for restricted environments (e.g., using offline DDL SQL scripts for schema discovery and CSV files for data migrations from IBM DB2 z/OS, or proactively processing Informix `.unl` export files).
 - User can also define limitations for migration of data - as where conditions for tables. This option requires good analysis of dependencies in the source database. Missing data can break Foreign Key constraints in the target database. See further in the documentation.
 - Migrator features an advanced Mapping Workflow directed by the central orchestrator, enabling complex schema matching, application of customizable normalization rules, and automated dropping and recreating of target indexes and constraints during mapped data migrations.
-- Migrator supports strict post-migration verification utilizing discrete parallel tests measuring row counts, table checksums, random row hashes, and explicit byte-size telemetry. The enhanced validation engine includes detailed validation summaries, structured error handling, and built-in log size monitoring.
+- Migrator supports strict post-migration verification utilizing discrete parallel tests measuring row counts, table checksums, random row hashes, and explicit byte-size telemetry. The enhanced validation engine includes detailed validation summaries, structured error handling, and built-in log size monitoring. Row counts and table checksums work for every live-connection source; the random-sample and LOB-size checks currently require Oracle, PostgreSQL or SQLite as the source.
 - Migrator provides reach logging and error handling, has 2 levels of logging - INFO and DEBUG, in case of error, detailed error message is printed.
 - By default logging messages are printed both to console and to log file, name of the log file is configurable in command line arguments.
 - Rich information is also logged to the migration database - see below.
@@ -34,7 +35,8 @@ It is is written in Python in multiple classes and modules.
 ## Documentation
 
 Detailed documentation and technical insights are available in the `docs/` directory:
-- [User Guide & Connectivity Options](docs/README.md)
+- [User Guide & Connectivity Options](docs/README.md) - per-connector status, connectivity and limitations
+- [Feature Matrix](FEATURE_MATRIX.md) - which feature is supported by which connector
 - [Standard Migration Workflow](docs/workflow/standard/migration_workflow.md)
 - [Configuration Parameters Map](docs/config_parameters_map.md)
 

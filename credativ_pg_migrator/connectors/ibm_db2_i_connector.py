@@ -477,13 +477,27 @@ class IbmDb2IConnector(DatabaseConnector):
             with open(filepath, 'r', encoding='utf-8') as f:
                 content = f.read()
 
-            # Extract triggers first to avoid splitting by semicolons inside trigger bodies
-            trigger_pattern = re.compile(r"(CREATE\s+(?:OR\s+REPLACE\s+)?TRIGGER\s+\"?([A-Za-z0-9_]+)\"?\.\"?([A-Za-z0-9_]+)\"?[\s\S]*?(?=(?:CREATE\s+(?:OR\s+REPLACE\s+)?(?:TABLE|VIEW|INDEX|UNIQUE\s+INDEX|ALIAS|SEQUENCE|TRIGGER))|(?:ALTER\s+TABLE)|(?:SET\s+CURRENT\s+SCHEMA)|$))", re.IGNORECASE)
+            # Extract triggers first to avoid splitting by semicolons inside trigger bodies.
+            # A trigger ends at the '@' statement terminator (DDL files with compound statement
+            # bodies switch the terminator to '@' because ';' separates the statements of the
+            # body), otherwise at the next object or at the end of the file.
+            trigger_pattern = re.compile(
+                r"(CREATE\s+(?:OR\s+REPLACE\s+)?TRIGGER\s+\"?([A-Za-z0-9_$#@]+)\"?\.\"?([A-Za-z0-9_$#@]+)\"?"
+                r"[\s\S]*?)"
+                r"(?:@[^\S\n]*(?=\n|$)"
+                r"|(?=(?:CREATE\s+(?:OR\s+REPLACE\s+)?(?:TABLE|VIEW|INDEX|UNIQUE\s+INDEX|ALIAS|SEQUENCE|TRIGGER))"
+                r"|(?:ALTER\s+TABLE)|(?:SET\s+CURRENT\s+SCHEMA)|$))", re.IGNORECASE)
             for match in trigger_pattern.finditer(content):
                 self.config_parser.print_log_message('DEBUG3', f"ibm_db2_i_connector: parse_ddl_files: Found trigger: {match.group(1)}")
                 schema_name = match.group(2).upper()
                 trigger_name = match.group(3).upper()
                 ddl_text = match.group(1).strip()
+                # a trigger not closed by '@' reaches up to the next object - the comment lines
+                # in front of that object are not part of the trigger
+                ddl_lines = ddl_text.split('\n')
+                while ddl_lines and (not ddl_lines[-1].strip() or ddl_lines[-1].strip().startswith('--')):
+                    ddl_lines.pop()
+                ddl_text = '\n'.join(ddl_lines).strip()
                 migrator_tables.insert_ddl_triggers({
                     'source_schema_name': schema_name,
                     'source_trigger_name': trigger_name,
@@ -1128,9 +1142,15 @@ class IbmDb2IConnector(DatabaseConnector):
             self.config_parser.print_log_message('DEBUG3', f"ibm_db2_i_connector: fetch_triggers: ({table_schema}): {rows}")
             order_num = 1
             for row in rows:
-                # triggers are stored per schema - keep only those referencing the requested table
-                if table_name and row[2] and table_name.upper() not in row[2].upper():
-                    continue
+                # Triggers are stored per schema - keep only those defined ON the requested
+                # table. The table is taken from the trigger definition, a plain substring
+                # search would also match every other table named in the trigger body.
+                if table_name and row[2]:
+                    match_on = re.search(r"(?i)\bON\s+(?:\"?[A-Za-z0-9_$#@]+\"?\.)?\"?([A-Za-z0-9_$#@]+)\"?", row[2])
+                    if match_on and match_on.group(1).upper() != table_name.upper():
+                        continue
+                    if not match_on:
+                        continue
                 triggers[order_num] = {
                     'id': row[0],
                     'name': row[1],
@@ -1147,15 +1167,38 @@ class IbmDb2IConnector(DatabaseConnector):
     def convert_trigger(self, settings: dict):
         trigger_sql = settings.get('trigger_sql', '')
         trigger_name = settings.get('trigger_name', '')
+        source_schema_name = settings.get('source_schema_name', '')
         target_schema_name = settings.get('target_schema_name', '')
         target_table_name = settings.get('target_table_name', '')
 
         trigger_sql = re.sub(r'--([^\n]*)', r'/*\1*/', trigger_sql)
 
+        # '@' statement terminator of the DDL file
+        trigger_sql = re.sub(r"@[^\S\n]*$", "", trigger_sql.rstrip())
+
+        # MODE DB2ROW / MODE DB2SQL has no PostgreSQL counterpart. A DB2ROW trigger fires
+        # immediately after each row operation, before the rest of the statement completes,
+        # while PostgreSQL evaluates a row trigger like MODE DB2SQL does.
+        match_mode = re.search(r"(?i)\bMODE\s+DB2(ROW|SQL)\b", trigger_sql)
+        if match_mode and match_mode.group(1).upper() == 'ROW':
+            self.config_parser.print_log_message('WARNING', f"ibm_db2_i_connector: convert_trigger: Trigger {trigger_name} is declared MODE DB2ROW - PostgreSQL row triggers see the intermediate state of a statement differently, the behaviour has to be verified.")
+        trigger_sql = re.sub(r"(?i)\s*\bMODE\s+DB2(?:ROW|SQL)\b", "", trigger_sql)
+
+        # SET OPTION <option> = <value>, ... applies to the whole trigger and is IBM i specific
+        trigger_sql = re.sub(r"(?im)^[^\S\n]*SET\s+OPTION\s+[^\n]*$", "", trigger_sql)
+
+        # infix CONCAT and the correlated table function are not PostgreSQL syntax
+        trigger_sql = self.convert_db2i_operators(trigger_sql)
+
         timing_match = re.search(r'\b(BEFORE|AFTER|INSTEAD\s+OF)\b', trigger_sql, re.IGNORECASE)
         timing = timing_match.group(1).upper() if timing_match else 'BEFORE'
 
-        event_match = re.search(r'\b(INSERT|UPDATE|DELETE)(?:\s+OF\s+([a-zA-Z0-9_,\s"]+))?\b', trigger_sql[timing_match.end():] if timing_match else trigger_sql, re.IGNORECASE)
+        # the column list of UPDATE OF ends at the ON keyword of the trigger - it regularly
+        # continues on the next line, so it cannot be delimited by the end of the line
+        event_text = trigger_sql[timing_match.end():] if timing_match else trigger_sql
+        event_match = re.search(r'\b(INSERT|UPDATE|DELETE)(?:\s+OF\s+([\s\S]*?))?\s*\bON\b', event_text, re.IGNORECASE)
+        if not event_match:
+            event_match = re.search(r'\b(INSERT|UPDATE|DELETE)(?:\s+OF\s+([a-zA-Z0-9_,\s"]+))?\b', event_text, re.IGNORECASE)
         event = event_match.group(1).upper() if event_match else 'UPDATE'
         of_cols = event_match.group(2) if event_match and event_match.group(2) else None
 
@@ -1185,6 +1228,13 @@ class IbmDb2IConnector(DatabaseConnector):
 
         new_match = re.search(r'\bNEW\s+AS\s+([a-zA-Z0-9_]+)\b', trigger_sql, re.IGNORECASE)
         if new_match: new_alias = new_match.group(1)
+
+        # transition tables of a statement level trigger (REFERENCING OLD/NEW TABLE AS ...)
+        old_table_match = re.search(r'\bOLD\s+TABLE\s+AS\s+([a-zA-Z0-9_]+)\b', trigger_sql, re.IGNORECASE)
+        if old_table_match: old_table_alias = old_table_match.group(1)
+
+        new_table_match = re.search(r'\bNEW\s+TABLE\s+AS\s+([a-zA-Z0-9_]+)\b', trigger_sql, re.IGNORECASE)
+        if new_table_match: new_table_alias = new_table_match.group(1)
 
         for_each_match = re.search(r'\bFOR\s+EACH\s+(ROW|STATEMENT)\b', trigger_sql, re.IGNORECASE)
         for_each_scope = for_each_match.group(1).upper() if for_each_match else 'ROW'
@@ -1237,7 +1287,15 @@ class IbmDb2IConnector(DatabaseConnector):
         when_clause = replace_aliases(when_clause)
         body = replace_aliases(body)
 
-        body = re.sub(r'(?i)\bVARCHAR\s*\(\s*(COUNT\s*\([^()]*\)|[a-zA-Z0-9_.]+\s*[+*/|-]\s*[^()]+|[a-zA-Z0-9_.]+\.[a-zA-Z0-9_.]+|[a-zA-Z_][a-zA-Z0-9_]*\([^()]*\))\s*\)', r'CAST(\1 AS VARCHAR)', body)
+        # objects addressed by the source schema name have to be addressed by the target one
+        if source_schema_name and target_schema_name:
+            schema_pattern = rf'(?i)(?<![A-Za-z0-9_."]){re.escape(source_schema_name)}\s*\.'
+            body = re.sub(schema_pattern, f'"{target_schema_name}".', body)
+            when_clause = re.sub(schema_pattern, f'"{target_schema_name}".', when_clause)
+
+        # VARCHAR(<expression>) is a conversion function in DB2 and a data type in PostgreSQL -
+        # the identifiers of the expression are already quoted at this point (OLD."order_id")
+        body = re.sub(r'(?i)\bVARCHAR\s*\(\s*(COUNT\s*\([^()]*\)|[a-zA-Z0-9_."]+\s*[+*/|-]\s*[^()]+|[a-zA-Z0-9_."]+\.[a-zA-Z0-9_."]+|[a-zA-Z_][a-zA-Z0-9_]*\([^()]*\))\s*\)', r'CAST(\1 AS VARCHAR)', body)
         body = re.sub(r'\bCURRENT\s+DATE\b', 'CURRENT_DATE', body, flags=re.IGNORECASE)
         body = re.sub(r'\bCURRENT\s+TIMESTAMP\b', 'CURRENT_TIMESTAMP', body, flags=re.IGNORECASE)
         when_clause = re.sub(r'\bCURRENT\s+DATE\b', 'CURRENT_DATE', when_clause, flags=re.IGNORECASE)
@@ -1292,9 +1350,16 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 """
+        ref_parts = []
+        if old_table_alias:
+            ref_parts.append(f"OLD TABLE AS {old_table_alias}")
+        if new_table_alias:
+            ref_parts.append(f"NEW TABLE AS {new_table_alias}")
+        referencing_sql = f"\nREFERENCING {' '.join(ref_parts)}" if ref_parts else ""
+
         when_sql = f"\nWHEN ({when_clause})" if when_clause else ""
         pg_trigger = f"""CREATE TRIGGER "{converted_trigger_name}"
-{timing} {pg_event} ON "{target_schema_name}"."{target_table_name}"
+{timing} {pg_event} ON "{target_schema_name}"."{target_table_name}"{referencing_sql}
 FOR EACH {for_each_scope}{when_sql}
 EXECUTE FUNCTION "{target_schema_name}"."{func_name}"();
 """

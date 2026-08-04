@@ -533,40 +533,34 @@ class ConfigParser:
     def should_create_tables(self):
         return (self.config.get('migration') or {}).get('create_tables', False)
 
-    def should_migrate_data(self, table_name=None):
+    def get_table_migration_switch(self, switch_name: str, table_name=None):
+        """
+        Returns the value of one of the migrate_* switches for a single table. A table_settings
+        entry overrides the global migration setting only when it really contains the switch -
+        a table listed in table_settings for a completely different reason (character set,
+        delimiter, header, ...) keeps the global setting instead of silently losing its data,
+        indexes, constraints or triggers.
+        """
+        global_value = (self.config.get('migration') or {}).get(switch_name, False)
         if table_name:
             table_settings = (self.config.get('table_settings') or {})
             # table_settings is expected to be a list of dicts with 'table_name' and settings
             if isinstance(table_settings, list):
                 for entry in table_settings:
                     pattern = entry.get('table_name')
-                    # self.print_log_message('DEBUG3', f"config_parser: should_migrate_data: checking table {table_name} with pattern {pattern}, setting is {entry.get('migrate_data', False)}")
-                    if self._match_table_name(table_name, pattern):
-                        # self.print_log_message('DEBUG3', f"config_parser: should_migrate_data: table {table_name} matched pattern {pattern}, setting is {entry.get('migrate_data', False)}")
-                        return entry.get('migrate_data', False)
-        # self.print_log_message('DEBUG3', f"config_parser: should_migrate_data: table {table_name} returned default setting {(self.config.get('migration') or {}).get('migrate_data', False)}")
-        return (self.config.get('migration') or {}).get('migrate_data', False)
+                    if switch_name in entry and self._match_table_name(table_name, pattern):
+                        self.print_log_message('DEBUG3', f"config_parser: get_table_migration_switch: table {table_name} matched pattern {pattern}, {switch_name} is {entry.get(switch_name)}")
+                        return entry.get(switch_name)
+        return global_value
+
+    def should_migrate_data(self, table_name=None):
+        return self.get_table_migration_switch('migrate_data', table_name)
 
     def should_migrate_indexes(self, table_name=None):
-        if table_name:
-            table_settings = (self.config.get('table_settings') or {})
-            if isinstance(table_settings, list):
-                for entry in table_settings:
-                    pattern = entry.get('table_name')
-                    if self._match_table_name(table_name, pattern):
-                        return entry.get('migrate_indexes', False)
-        return (self.config.get('migration') or {}).get('migrate_indexes', False)
+        return self.get_table_migration_switch('migrate_indexes', table_name)
 
     def should_migrate_constraints(self, table_name=None):
-        if table_name:
-            table_settings = (self.config.get('table_settings') or {})
-            # table_settings is expected to be a list of dicts with 'table_name' and settings
-            if isinstance(table_settings, list):
-                for entry in table_settings:
-                    pattern = entry.get('table_name')
-                    if self._match_table_name(table_name, pattern):
-                        return entry.get('migrate_constraints', False)
-        return (self.config.get('migration') or {}).get('migrate_constraints', False)
+        return self.get_table_migration_switch('migrate_constraints', table_name)
 
     def should_migrate_funcprocs(self):
         return (self.config.get('migration') or {}).get('migrate_funcprocs', False)
@@ -575,15 +569,7 @@ class ConfigParser:
         return (self.config.get('migration') or {}).get('set_sequences', False)
 
     def should_migrate_triggers(self, table_name=None):
-        if table_name:
-            table_settings = (self.config.get('table_settings') or {})
-            # table_settings is expected to be a list of dicts with 'table_name' and settings
-            if isinstance(table_settings, list):
-                for entry in table_settings:
-                    pattern = entry.get('table_name')
-                    if self._match_table_name(table_name, pattern):
-                        return entry.get('migrate_triggers', False)
-        return (self.config.get('migration') or {}).get('migrate_triggers', False)
+        return self.get_table_migration_switch('migrate_triggers', table_name)
 
     def should_migrate_views(self):
         return (self.config.get('migration') or {}).get('migrate_views', False)

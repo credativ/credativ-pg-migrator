@@ -12,6 +12,7 @@ Supported source databases:
 - Oracle
 - PostgreSQL (special use cases)
 - SQL Anywhere
+- SQLite
 - Sybase ASE
 
 Target database: PostgreSQL only.
@@ -229,11 +230,12 @@ Other ODBC parameters such as DSN or connection string are configured alongside 
 
 ### 4.7 Other databases
 
-Other supported engines (MS SQL Server, MySQL, MariaDB, SQL Anywhere) are accessed via their respective connectors utilizing:
+Other supported engines (MS SQL Server, MySQL, MariaDB, SQL Anywhere, SQLite) are accessed via their respective connectors utilizing:
 - **MS SQL**: JDBC (`jaydebeapi`) or ODBC (`pyodbc`)
 - **MySQL**: Native (`mysql-connector-python`), JDBC (`jaydebeapi`), or ODBC (`pyodbc`)
 - **MariaDB**: Native (`mariadb`), JDBC (`jaydebeapi`), or ODBC (`pyodbc`). Note: For native connectivity on Debian/Ubuntu systems, the C development headers are required before installing the Python package (`sudo apt install libmariadb-dev` followed by `pip install mariadb`).
 - **SQL Anywhere**: ODBC (`pyodbc`)
+- **SQLite**: Native, using the `sqlite3` module of the Python standard library - no driver installation is needed. The `database` setting holds the path to the database file (relative paths are resolved against the directory of the config file) and there is no host, port, username or password. SQLite has no schemas, so `schema` must be `main` (the default) or the name of an attached database.
 
 The exact features supported per connector (e.g. whether stored procedures or triggers are handled) are summarized in FEATURE_MATRIX.md in the repo.
 

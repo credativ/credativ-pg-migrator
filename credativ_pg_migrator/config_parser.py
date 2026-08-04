@@ -226,6 +226,21 @@ class ConfigParser:
             #     return f"jdbc:sqlanywhere://{db_config['host']}:{db_config['port']}/{db_config['database']};UID={db_config['username']};PWD={db_config['password']}"
             else:
                 raise ValueError(f"Unsupported SQL Anywhere connectivity: {connectivity}")
+        elif db_config['type'] == 'sqlite':
+            if connectivity in ('native', None, ''):
+                # SQLite is a single file - "database" holds the path to it, and there is
+                # no host, port, user or password. A relative path is resolved against the
+                # directory of the config file, so that a config file can be moved together
+                # with the database it describes.
+                database_path = db_config.get('database') or db_config.get('file') or db_config.get('path')
+                if not database_path:
+                    raise ValueError("SQLite connection requires 'database' with the path to the SQLite database file")
+                database_path = os.path.expanduser(str(database_path))
+                if not os.path.isabs(database_path):
+                    database_path = os.path.join(os.path.dirname(os.path.abspath(self.args.config)), database_path)
+                return os.path.normpath(database_path)
+            else:
+                raise ValueError(f"Unsupported SQLite connectivity: {connectivity}")
         elif db_config['type'] == 'oracle':
             # if connectivity == 'native':
             #     return f"oracle://{db_config['username']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"

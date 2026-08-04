@@ -9,13 +9,14 @@ It is is written in Python in multiple classes and modules.
 
 - Pure python solution, uses only standard libraries, structured in modules, written in object-oriented style in classes
 - Currently supported source databases are:
-  - IBM DB2 LUW and DB2 z/OS
+  - IBM DB2 LUW, DB2 z/OS, DB2 i
   - Informix
   - MS SQL Server
   - MySQL/MariaDB (engines with INFORMATION_SCHEMA)
   - Oracle
   - PostgreSQL (mainly for special use cases)
   - SQL Anywhere
+  - SQLite
   - Sybase ASE
 - Supports migration of tables, column constraints and defaults, data, primary keys, secondary indexes, foreign keys, functions/procedures, triggers and views from source to target database
 - If tables have sequences, migrator sets current values of sequences on the target database

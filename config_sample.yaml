@@ -41,7 +41,37 @@ migrator:
   schema: "migration"
 
 # source database connection
-# type: "informix", "sybase_ase", "mssql", "ibm_db2_luw", "ibm_db2_zos", "ibm_db2_i", "mysql", "mariadb", "sql_anywhere", "postgresql", "oracle"
+# type: "informix", "sybase_ase", "mssql", "ibm_db2_luw", "ibm_db2_zos", "ibm_db2_i", "mysql", "mariadb", "sql_anywhere", "postgresql", "oracle", "sqlite"
+#
+# SQLite source example - SQLite is a single file, so it needs no host, port, username or password.
+# The whole section for a SQLite source consists of:
+#
+# source:
+#   type: "sqlite"
+#   # path to the SQLite database file - absolute, or relative to the directory of this config file
+#   database: "/path/to/database.sqlite"
+#   # SQLite has no schemas - the only valid values are "main" (default) and the name of a
+#   # database attached to the file. Any other value is treated as "main".
+#   schema: "main"
+#   # only "native" connectivity is supported - it uses the sqlite3 module of the Python
+#   # standard library, so no driver has to be installed. Can be omitted.
+#   connectivity: "native"
+#
+# Notes for SQLite sources:
+# - The file is opened read-only whenever possible.
+# - SQLite is dynamically typed. The declared type of a column decides the PostgreSQL type,
+#   and the values are converted to that type during the data migration (e.g. 0/1 to boolean,
+#   Unix timestamps and Julian days to timestamp).
+# - An INTEGER PRIMARY KEY column (the rowid alias) and AUTOINCREMENT columns are migrated
+#   as PostgreSQL identity columns.
+# - CHECK constraints and generated columns are read from the stored CREATE TABLE statements,
+#   because SQLite does not expose them through its PRAGMAs.
+# - Triggers are converted into a PL/pgSQL trigger function plus a CREATE TRIGGER statement.
+# - Virtual tables (FTS, RTREE, ...) and their shadow tables are skipped - they have no
+#   PostgreSQL equivalent.
+# - Partial indexes are migrated without their WHERE condition, and a partial UNIQUE index is
+#   migrated as a non-unique index. The original condition is recorded in the index comment.
+# - SQLite has no sequences, functions, procedures, user defined types or domains.
 source:
   type: "sybase_ase"
   host: "localhost"

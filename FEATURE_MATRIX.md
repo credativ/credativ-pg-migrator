@@ -15,33 +15,33 @@ Legend:
 Note to the unclear status - the biggest issue is to find reasonable testing database with the features properly used.
 
 ```
-| Feature                                   | IBM DB2 | Informix | MSSQL  | MySQL | Oracle | PostgreSQL | SQL      | Sybase |
-| description                               | LUW     |          | Server |       |        |            | Anywhere | ASE    |
-|-------------------------------------------|---------|----------|--------|-------|--------|------------|----------|--------|
-| Pre-migration analysis                    | WIP     | WIP      | WIP    | WIP   | WIP    | WIP        | WIP      | WIP    |
-| Migration of data                         | yes     | yes      | yes    | yes   | yes    | yes        | yes      | yes    |
-| NOT NULL constraints                      | yes     | yes      | yes    | yes   | yes    | yes        | yes      | yes    |
-| Default values on columns                 | WIP     | WIP      | WIP    | WIP   | WIP    | WIP        | WIP      | yes[4] |
-| IDENTITY columns                          | --      | yes      | ?      | ?     | yes[1] | WIP        | ?        | yes    |
-| Computed(generated) columns               | --      | --       | --     | --    | --     | WIP        | --       | yes[5] |
-| Custom defined replacements of data types | yes     | yes      | yes    | yes   | yes    | yes        | yes      | yes    |
-| Implicit default values replacements[6]   | --      | --       | --     | --    | --     | --         | --       | yes    |
-| Custom repl. of default values            | yes     | yes      | yes    | yes   | yes    | yes        | yes      | yes    |
-| Primary Keys                              | yes     | yes      | yes    | yes   | yes    | yes        | yes      | yes    |
-| Secondary Indexes                         | yes     | yes      | yes    | yes   | yes    | yes        | yes      | yes    |
-| Foreign Keys                              | yes     | yes      | yes    | yes   | yes    | yes        | yes      | yes    |
-| FK on delete action                       | --      | --       | --     | --    | yes    | WIP        | --       | N/A*   |
-| Check Constraints                         | --      | yes      | --     | --    | ?      | WIP        | --       | yes    |
-| Check Rules/Domains[3]                    | --      | --       | --     | --    | ?[7]   | --         | --       | yes    |
-| User-defined types                        | --      | --       | ?      | --    | ?[7]   | yes        | --       | yes    |
-| Comments on columns                       | --      | --       | --     | --    | ?[7]   | WIP        | --       | N/A*   |
-| Comments on tables                        | --      | --       | --     | --    | ?[7]   | WIP        | --       | N/A*   |
-| Migration of views                        | WIP     | WIP      | WIP    | WIP   | WIP    | WIP        | WIP      | WIP    |
-| Conversion of user defined funcs/procs    | --      | yes      | --     | --    | ?[7]   | yes        | --       | --     |
-| Conversion of user defined triggers       | --      | yes      | --     | --    | ?[7]   | yes        | --       | --     |
-| Sequences[2]                              | --      | --       | --     | --    | ?[7]   | --         | --       | N/A*   |
-| SQL functions mapping                     | WIP     | WIP      | WIP    | WIP   | WIP    | WIP        | WIP      | WIP    |
-| ....                                      | --      | --       | --     | --    | --     | --         | --       | --     |
+| Feature                                   | IBM DB2 | Informix | MSSQL  | MySQL | Oracle | PostgreSQL | SQL      | SQLite | Sybase |
+| description                               | LUW     |          | Server |       |        |            | Anywhere |        | ASE    |
+|-------------------------------------------|---------|----------|--------|-------|--------|------------|----------|--------|--------|
+| Pre-migration analysis                    | WIP     | WIP      | WIP    | WIP   | WIP    | WIP        | WIP      | yes    | WIP    |
+| Migration of data                         | yes     | yes      | yes    | yes   | yes    | yes        | yes      | yes    | yes    |
+| NOT NULL constraints                      | yes     | yes      | yes    | yes   | yes    | yes        | yes      | yes    | yes    |
+| Default values on columns                 | WIP     | WIP      | WIP    | WIP   | WIP    | WIP        | WIP      | yes    | yes[4] |
+| IDENTITY columns                          | --      | yes      | ?      | ?     | yes[1] | WIP        | ?        | yes[8] | yes    |
+| Computed(generated) columns               | --      | --       | --     | --    | --     | WIP        | --       | yes    | yes[5] |
+| Custom defined replacements of data types | yes     | yes      | yes    | yes   | yes    | yes        | yes      | yes    | yes    |
+| Implicit default values replacements[6]   | --      | --       | --     | --    | --     | --         | --       | yes    | yes    |
+| Custom repl. of default values            | yes     | yes      | yes    | yes   | yes    | yes        | yes      | yes    | yes    |
+| Primary Keys                              | yes     | yes      | yes    | yes   | yes    | yes        | yes      | yes    | yes    |
+| Secondary Indexes                         | yes     | yes      | yes    | yes   | yes    | yes        | yes      | yes[8] | yes    |
+| Foreign Keys                              | yes     | yes      | yes    | yes   | yes    | yes        | yes      | yes    | yes    |
+| FK on delete action                       | --      | --       | --     | --    | yes    | WIP        | --       | yes    | N/A*   |
+| Check Constraints                         | --      | yes      | --     | --    | ?      | WIP        | --       | yes[8] | yes    |
+| Check Rules/Domains[3]                    | --      | --       | --     | --    | ?[7]   | --         | --       | N/A    | yes    |
+| User-defined types                        | --      | --       | ?      | --    | ?[7]   | yes        | --       | N/A    | yes    |
+| Comments on columns                       | --      | --       | --     | --    | ?[7]   | WIP        | --       | N/A    | N/A*   |
+| Comments on tables                        | --      | --       | --     | --    | ?[7]   | WIP        | --       | N/A    | N/A*   |
+| Migration of views                        | WIP     | WIP      | WIP    | WIP   | WIP    | WIP        | WIP      | ?[8]   | WIP    |
+| Conversion of user defined funcs/procs    | --      | yes      | --     | --    | ?[7]   | yes        | --       | N/A    | --     |
+| Conversion of user defined triggers       | --      | yes      | --     | --    | ?[7]   | yes        | --       | ?[8]   | --     |
+| Sequences[2]                              | --      | --       | --     | --    | ?[7]   | --         | --       | N/A    | N/A*   |
+| SQL functions mapping                     | WIP     | WIP      | WIP    | WIP   | WIP    | WIP        | WIP      | ?[8]   | WIP    |
+| ....                                      | --      | --       | --     | --    | --     | --         | --       | --     | --     |
 
 ```
 
@@ -54,6 +54,7 @@ Notes:
 - [5]: Sybase ASE in some cases creates internal computed columns, not visible in selects, but documented in system tables. One example is column for this index: CREATE NONCLUSTERED INDEX IX_Products_LowerProductName ON dbo.Products (LOWER(ProductName)) - Sybase created internal calculated materialized column "sybfi4_1" with computation formula "AS LOWER(ProductName) MATERIALIZED". There internal computed columns have status3 = 1 – Indicates a hidden computed column for a function-based index key. This feature also means that the index has different DDL command in system tables - uses the hidden column: CREATE INDEX IX_Products_LowerProductName_608002166_4 ON Products (sybfi4_1);
 - [6]: Typical most commonly used default values not compatible with target PostgreSQL syntax are replaced implicitly during migration.
 - [7]: Oracle - CHECK constraints, standalone sequences, user-defined types, domains, table/column comments, views/materialized views and best-effort PL/SQL function/procedure/trigger conversion are implemented but not yet validated against a live database. PL/SQL conversion is heuristic (packages are split into standalone `<package>_<routine>` functions with their call sites rewritten, but package state is not migrated; triggers are split into a PL/pgSQL trigger function + CREATE TRIGGER; complex constructs are flagged for manual review). Standalone sequences (`ALL_SEQUENCES`) are migrated as independent PostgreSQL sequences, with bounds clamped to PostgreSQL's `bigint` range. Oracle object types are migrated as PostgreSQL composite types and collection types (VARRAY / nested tables) as array-based domains; SQL domains exist only in Oracle 23ai (`ALL_DOMAINS`) and that path is best-effort. See section 4.3 of `docs/README.md` for the full list of Oracle limitations.
+- [8]: SQLite has no data dictionary for these objects - CHECK constraints, generated column expressions, AUTOINCREMENT markers and the expressions of functional indexes are parsed out of the CREATE statements stored in `sqlite_master`. Views, triggers and expressions are translated to PostgreSQL with `sqlglot` plus a SQLite specific function mapping; a SQLite trigger becomes a PL/pgSQL trigger function + CREATE TRIGGER. Partial indexes are migrated without their WHERE condition (a partial UNIQUE index is degraded to a non-unique index) and the original condition is recorded in the index comment. An INTEGER PRIMARY KEY (rowid alias) and AUTOINCREMENT columns become PostgreSQL identity columns. Virtual tables (FTS, RTREE, ...) and their shadow tables are skipped. SQLite is dynamically typed, so values are coerced to the target column type during data migration (0/1 to boolean, Unix timestamps and Julian days to timestamp).
 
 ## Tested versions of databases
 
@@ -64,6 +65,7 @@ Notes:
 - Oracle: 21.3
 - PostgreSQL: 14, 17
 - SQL Anywhere: 17
+- SQLite: 3.46
 - Sybase ASE: 16.0
 
 ## Strange findings during testing

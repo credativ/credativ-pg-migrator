@@ -2271,11 +2271,16 @@ class Orchestrator:
             for view_detail in all_views:
                 view_data = self.migrator_tables.decode_view_row(view_detail)
                 if view_data['view_comment']:
-                    # target_view_name = view_data['target_view_alias'] if use_aliases_as_target_names and view_data.get('target_view_alias') else view_data['target_view_name']
+                    target_view_name = view_data['target_view_alias'] if use_aliases_as_target_names and view_data.get('target_view_alias') else view_data['target_view_name']
                     target_view_name = self.config_parser.convert_names_case(target_view_name)
                     # Escape single quotes in the comment to prevent SQL injection
                     safe_view_comment = view_data['view_comment'].replace("'", "''")
-                    query = f"""COMMENT ON VIEW
+                    # A materialized view is not a view for COMMENT ON - the object type of the
+                    # comment has to match the object type which was created for it.
+                    view_object_type = 'VIEW'
+                    if re.search(r'(?i)^\s*CREATE\s+(?:OR\s+REPLACE\s+)?MATERIALIZED\s+VIEW\b', view_data['target_view_sql'] or ''):
+                        view_object_type = 'MATERIALIZED VIEW'
+                    query = f"""COMMENT ON {view_object_type}
                     "{view_data['target_schema_name']}"."{target_view_name}"
                     IS '{safe_view_comment}'"""
                     self.config_parser.print_log_message('INFO', f"orchestrator: run_migrate_comments: Setting comment for view {target_view_name} in target database.")

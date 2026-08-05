@@ -39,6 +39,17 @@ class PostgreSQLConnector(DatabaseConnector):
         connection_string = self.config_parser.get_connect_string(self.source_or_target)
         self.connection = psycopg2.connect(connection_string, application_name=MigratorConstants.get_application_name())
         self.connection.autocommit = True
+        self._register_type_casters()
+
+    def _register_type_casters(self):
+        try:
+            def cast_str(val, cur):
+                return val
+            oids = (1082, 1114, 1184, 1083, 1266, 1186)
+            caster = psycopg2.extensions.new_type(oids, "DATE_STR_CASTER", cast_str)
+            psycopg2.extensions.register_type(caster, self.connection)
+        except Exception:
+            pass
 
     def disconnect(self):
         try:

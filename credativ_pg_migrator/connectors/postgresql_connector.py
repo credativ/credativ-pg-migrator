@@ -317,7 +317,7 @@ class PostgreSQLConnector(DatabaseConnector):
                     column_type = data_type
                 else:
                     column_type = data_type
-                    if self.is_string_type(data_type) and character_maximum_length:
+                    if (self.is_string_type(data_type) or data_type.upper() in ('BIT', 'VARBIT', 'BIT VARYING')) and character_maximum_length:
                         column_type = f"{data_type}({character_maximum_length})"
                     elif self.is_numeric_type(data_type) and numeric_precision and numeric_scale:
                         column_type = f"{data_type}({numeric_precision},{numeric_scale})"
@@ -643,7 +643,7 @@ class PostgreSQLConnector(DatabaseConnector):
                 create_column_sql = f""""{column_name}" {altered_data_type}"""
                 self.config_parser.print_log_message('DEBUG', f"postgresql_connector: get_create_table_sql: Column {column_name} is NUMBER with precision 19, scale 0, altered data type to {altered_data_type}")
             else:
-                if (character_maximum_length != '' and 'CHAR' in column_data_type):
+                if (character_maximum_length != '' and ('CHAR' in column_data_type or 'BIT' in column_data_type)):
                     create_column_sql = f""""{column_name}" {column_data_type}({character_maximum_length})"""
                 elif self.is_numeric_type(column_data_type) and column_data_type in ('DECIMAL', 'NUMERIC'):
                     if numeric_precision not in (None, '') and numeric_scale not in (None, ''):

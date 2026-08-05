@@ -889,16 +889,22 @@ class PostgreSQLConnector(DatabaseConnector):
         column_names = []
         for col in self.split_top_level_commas(index_columns):
             col = col.strip()
-            # Split off a trailing ASC/DESC ordering keyword (split on the last whitespace)
+
+            # Split off trailing NULLS FIRST / NULLS LAST ordering keyword
+            nulls_direction = ''
+            parts_nulls = col.rsplit(None, 2)
+            if len(parts_nulls) == 3 and parts_nulls[1].upper() == 'NULLS' and parts_nulls[2].upper() in ('FIRST', 'LAST'):
+                col = parts_nulls[0].strip()
+                nulls_direction = f' {parts_nulls[1].upper()} {parts_nulls[2].upper()}'
+
+            # Split off trailing ASC/DESC ordering keyword
             order_direction = ''
-            parts = col.rsplit(None, 1)
-            if len(parts) == 2 and parts[1].upper() in ('ASC', 'DESC'):
-                col = parts[0].strip()
-                order_direction = f' {parts[1].upper()}'
-            # An element of a function-based index is an expression (Oracle delivers it
-            # parenthesized), not a column name: its identifiers are rewritten, but the
-            # expression itself must stay unquoted - quoting it whole would produce
-            # '"(upper("last_name"))"' and fail with a syntax error.
+            parts_order = col.rsplit(None, 1)
+            if len(parts_order) == 2 and parts_order[1].upper() in ('ASC', 'DESC'):
+                col = parts_order[0].strip()
+                order_direction = f' {parts_order[1].upper()}'
+
+            # An element of a function-based index is an expression
             if self.expression_is_parenthesized(col) or (is_function_based and '(' in col):
                 expression = self.convert_expression_identifiers(col, target_columns)
                 expression = expression.replace(r"\'", "'").replace(r'\"', '"')
@@ -907,14 +913,40 @@ class PostgreSQLConnector(DatabaseConnector):
                 expression = re.sub(r'(?i)\bCOLLATE\s+[`\'"]?[a-zA-Z0-9_]+[`\'"]?', '', expression)
                 if not self.expression_is_parenthesized(expression):
                     expression = f"({expression})"
-                column_names.append(f'{expression}{order_direction}')
+                column_names.append(f'{expression}{order_direction}{nulls_direction}')
                 continue
-            # Remove backticks, single quotes, and double quotes
+
+            # Split off COLLATE clause if present
+            collation_clause = ''
+            collate_match = re.search(r'\s+(?i:COLLATE)\s+(.+)$', col)
+            if collate_match:
+                raw_collation = collate_match.group(1).strip()
+                col = col[:collate_match.start()].strip()
+                coll_parts = raw_collation.split('.')
+                converted_coll_parts = []
+                for cp in coll_parts:
+                    cp_clean = cp.strip('`').strip("'").strip('"')
+                    cp_conv = self.config_parser.convert_names_case(cp_clean)
+                    converted_coll_parts.append(f'"{cp_conv}"' if cp_conv else cp)
+                collation_clause = f' COLLATE {".".join(converted_coll_parts)}'
+
+            # Split off operator class if present (e.g. 'event_type gin_trgm_ops')
+            opclass_clause = ''
+            col_parts = col.split()
+            if len(col_parts) == 2:
+                col = col_parts[0].strip()
+                opclass = col_parts[1].strip()
+                opc_parts = opclass.split('.')
+                conv_opc = []
+                for opc in opc_parts:
+                    opc_clean = opc.strip('`').strip("'").strip('"')
+                    opc_conv = self.config_parser.convert_names_case(opc_clean)
+                    conv_opc.append(f'"{opc_conv}"' if opc_conv else opc)
+                opclass_clause = f' {".".join(conv_opc)}'
+
             col = col.strip('`').strip("'").strip('"')
-            # Convert case using config parser function
             col = self.config_parser.convert_names_case(col)
-            # Add to list with double quotes, preserving the (unquoted) ordering keyword
-            column_names.append(f'"{col}"{order_direction}')
+            column_names.append(f'"{col}"{collation_clause}{opclass_clause}{order_direction}{nulls_direction}')
         # Join back with comma
         index_columns = ', '.join(column_names)
         # index_comment = settings['index_comment']

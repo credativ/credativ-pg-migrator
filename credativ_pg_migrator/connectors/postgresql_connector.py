@@ -2678,7 +2678,7 @@ class PostgreSQLConnector(DatabaseConnector):
             if domain_default is not None:
                 sql_parts.append(f"DEFAULT {domain_default}")
 
-            if domain_not_null:
+            if domain_not_null and not (domain_check_sql and 'NOT NULL' in domain_check_sql.upper()):
                 sql_parts.append("NOT NULL")
 
             if domain_check_sql:

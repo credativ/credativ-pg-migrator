@@ -1888,11 +1888,43 @@ class PostgreSQLConnector(DatabaseConnector):
                     if str(col_info.get('data_type', '')).strip().lower() in ('json', 'jsonb')
                 }
 
+                columns_by_name = {
+                    col_info['column_name']: col_info
+                    for col_info in columns.values()
+                    if 'column_name' in col_info
+                }
+
                 formatted_data = []
                 for item in data:
                     row = []
                     for col_name in extract_keys:
                         value = item.get(col_name)
+                        if value is None and col_name not in item:
+                            for k, v in item.items():
+                                if str(k).lower() == str(col_name).lower():
+                                    value = v
+                                    break
+
+                        col_info = columns_by_name.get(col_name)
+                        if not col_info:
+                            for c_k, c_v in columns_by_name.items():
+                                if str(c_k).lower() == str(col_name).lower():
+                                    col_info = c_v
+                                    break
+
+                        if value is None and col_info and col_info.get('is_nullable') == 'NO':
+                            default_val = col_info.get('column_default_value')
+                            if default_val is not None and str(default_val).strip() != '' and not str(default_val).lower().startswith('nextval'):
+                                value = default_val
+                            else:
+                                data_type_lower = str(col_info.get('data_type', '')).strip().lower()
+                                if self.is_string_type(data_type_lower) or any(t in data_type_lower for t in ('text', 'char', 'varchar', 'string')):
+                                    value = ''
+                                elif self.is_numeric_type(data_type_lower) or any(t in data_type_lower for t in ('int', 'numeric', 'decimal', 'float', 'double', 'real')):
+                                    value = 0
+                                elif data_type_lower in ('boolean', 'bool'):
+                                    value = False
+
                         if col_name in boolean_columns:
                             value = self._coerce_boolean_value(value)
                         elif col_name in json_columns and value is not None:

@@ -8,7 +8,7 @@ credativ-pg-migrator Releases
   - Corrected execution order so domains are created before composite user-defined types (resolving `type "iso_currency" does not exist`), and added topological dependency sorting for composite types
   - Fixed range type DDL syntax by changing `SUBDIFF` to `SUBTYPE_DIFF` (resolving syntax errors when creating range types like `weight_range`)
   - Deduplicated `NOT NULL` in domain creation DDL when check constraints already contain `NOT NULL` (resolving `redundant NOT NULL constraint definition` on `non_empty_text`)
-  - Aligned column key extraction order in `insert_batch` and added automatic JSON serialization for `json`/`jsonb` target columns (resolving `can't adapt type 'dict'` and `column "value" is of type jsonb but expression is of type boolean` on `app_settings`)
+  - Aligned column key extraction order in `insert_batch` and added automatic JSON serialization for `json`/`jsonb` target columns including Python dicts, lists, booleans, numbers, JSON `null` (`None` → `'null'`), and raw strings (resolving `can't adapt type 'dict'`, `column "value" is of type jsonb but expression is of type boolean`, and NOT NULL violations on `app_settings`)
   - Implemented `fetch_sequences` in the PostgreSQL connector to discover and migrate standalone sequences before table creation (resolving `relation "..._seq" does not exist` on `customer_events`)
   - Resolved `syntax error at or near "ARRAY"` by using `pg_catalog.format_type` to resolve array element types (e.g. `text[]`) in `fetch_table_columns`
   - Fixed `cannot cast type bit to boolean` by checking `source_db_type` so PostgreSQL `BIT` default expressions (`'00000000'::"bit"`) are emitted without illegal `::BOOLEAN` casts while preserving MySQL/MSSQL bit-to-boolean mappings

@@ -1918,7 +1918,9 @@ class PostgreSQLConnector(DatabaseConnector):
                                 value = default_val
                             else:
                                 data_type_lower = str(col_info.get('data_type', '')).strip().lower()
-                                if self.is_string_type(data_type_lower) or any(t in data_type_lower for t in ('text', 'char', 'varchar', 'string')):
+                                if data_type_lower in ('json', 'jsonb'):
+                                    value = 'null'
+                                elif self.is_string_type(data_type_lower) or any(t in data_type_lower for t in ('text', 'char', 'varchar', 'string')):
                                     value = ''
                                 elif self.is_numeric_type(data_type_lower) or any(t in data_type_lower for t in ('int', 'numeric', 'decimal', 'float', 'double', 'real')):
                                     value = 0
@@ -1927,8 +1929,16 @@ class PostgreSQLConnector(DatabaseConnector):
 
                         if col_name in boolean_columns:
                             value = self._coerce_boolean_value(value)
-                        elif col_name in json_columns and value is not None:
-                            if not isinstance(value, str):
+                        elif col_name in json_columns:
+                            if value is None:
+                                if col_info and col_info.get('is_nullable') == 'NO':
+                                    value = 'null'
+                            elif isinstance(value, str):
+                                try:
+                                    json.loads(value)
+                                except Exception:
+                                    value = json.dumps(value)
+                            else:
                                 value = json.dumps(value)
                         elif value is not None and (type(value).__name__ == 'array' or hasattr(value, 'tolist')):
                             value = json.dumps(value.tolist()) if hasattr(value, 'tolist') else str(value)

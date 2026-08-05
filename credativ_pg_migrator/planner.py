@@ -75,8 +75,8 @@ class Planner:
                         self.source_connection.parse_ddl_files({ 'migrator_tables': self.migrator_tables})
                         self.source_schema_name = self.config_parser.get_source_schema()
 
-                    self.stdwf_prepare_user_defined_types()
                     self.stdwf_prepare_domains()
+                    self.stdwf_prepare_user_defined_types()
                     self.stdwf_prepare_defaults()
 
                     self.check_pausing_resuming()
@@ -129,8 +129,8 @@ class Planner:
                         self.source_connection.parse_ddl_files({ 'migrator_tables': self.migrator_tables})
                         self.source_schema_name = self.config_parser.get_source_schema()
 
-                    self.stdwf_prepare_user_defined_types()
                     self.stdwf_prepare_domains()
+                    self.stdwf_prepare_user_defined_types()
                     self.stdwf_prepare_defaults()
 
                     self.check_pausing_resuming()

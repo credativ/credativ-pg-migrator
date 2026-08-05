@@ -58,13 +58,15 @@ class Orchestrator:
                 if self.config_parser.is_resume_after_crash():
                     self.config_parser.print_log_message('INFO', "orchestrator: run: In current version of crash recovery we assume user defined types and domains already exist, so we skip them.")
                 else:
-                    self.run_create_user_defined_types()
+                    ## Migration of domains:
+                    ## Domains in PostgreSQL are special data types (e.g. domains/scalar types).
+                    ## Composite user-defined types often depend on domains (e.g. money_amount -> iso_currency).
+                    ## Therefore, domains must be created BEFORE user defined types.
+                    self.run_create_domains()
                     self.check_pausing_resuming()
 
-                    ## migration of domains is a bit unclear currently
-                    ## domains in PostgreSQL are special data types
-                    ## But in Sybase ASE they are defined as sort of additional check constraint on the column
-                    self.run_create_domains()
+                    self.run_create_user_defined_types()
+                    self.check_pausing_resuming()
 
                 # In case of crash recovery, we currently continue from this point as in normal migration
                 if not self.config_parser.is_dry_run():

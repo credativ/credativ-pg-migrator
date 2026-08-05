@@ -2450,6 +2450,7 @@ class PostgreSQLConnector(DatabaseConnector):
             # 2. Composite Types
             query_composite = f"""
                 SELECT
+                    t.oid,
                     n.nspname,
                     t.typname,
                     pg_catalog.obj_description(t.oid, 'pg_type'),
@@ -2457,7 +2458,13 @@ class PostgreSQLConnector(DatabaseConnector):
                         SELECT string_agg('"'||a.attname||'" '||pg_catalog.format_type(a.atttypid, a.atttypmod), ', ' ORDER BY a.attnum)
                         FROM pg_attribute a
                         WHERE a.attrelid = t.typrelid AND a.attnum > 0 AND NOT a.attisdropped
-                    ) as attributes
+                    ) as attributes,
+                    (
+                        SELECT ARRAY_AGG(DISTINCT COALESCE(NULLIF(elem.typelem, 0), a.atttypid))
+                        FROM pg_attribute a
+                        JOIN pg_type elem ON elem.oid = a.atttypid
+                        WHERE a.attrelid = t.typrelid AND a.attnum > 0 AND NOT a.attisdropped
+                    ) as attr_type_oids
                 FROM pg_type t
                 JOIN pg_namespace n ON t.typnamespace = n.oid
                 JOIN pg_class c ON t.typrelid = c.oid
@@ -2467,18 +2474,54 @@ class PostgreSQLConnector(DatabaseConnector):
                 ORDER BY t.typname
             """
             cursor.execute(query_composite)
-            for row in cursor.fetchall():
-                schema_name = row[0]
-                type_name = row[1]
-                comment = row[2]
-                attributes = row[3]
+            composite_rows = cursor.fetchall()
+            composite_items = []
+            for row in composite_rows:
+                oid = row[0]
+                schema_name = row[1]
+                type_name = row[2]
+                comment = row[3]
+                attributes = row[4]
+                attr_type_oids = row[5] or []
                 sql = f'CREATE TYPE "{schema_name}"."{type_name}" AS ({attributes});'
-
-                user_defined_types[order_num] = {
+                composite_items.append({
+                    'oid': oid,
                     'schema_name': schema_name,
                     'type_name': type_name,
+                    'comment': comment,
                     'sql': sql,
-                    'comment': comment
+                    'attr_type_oids': attr_type_oids
+                })
+
+            known_oids = {item['oid'] for item in composite_items}
+            item_by_oid = {item['oid']: item for item in composite_items}
+            sorted_composites = []
+            visited = set()
+            visiting = set()
+
+            def visit_composite(item):
+                if item['oid'] in visiting:
+                    return
+                if item['oid'] not in visited:
+                    visiting.add(item['oid'])
+                    dep_oids = set(item['attr_type_oids'] or []) & known_oids - {item['oid']}
+                    for dep_oid in dep_oids:
+                        if dep_oid in item_by_oid:
+                            visit_composite(item_by_oid[dep_oid])
+                    visiting.remove(item['oid'])
+                    visited.add(item['oid'])
+                    sorted_composites.append(item)
+
+            for item in composite_items:
+                if item['oid'] not in visited:
+                    visit_composite(item)
+
+            for item in sorted_composites:
+                user_defined_types[order_num] = {
+                    'schema_name': item['schema_name'],
+                    'type_name': item['type_name'],
+                    'sql': item['sql'],
+                    'comment': item['comment']
                 }
                 order_num += 1
 
@@ -2514,7 +2557,7 @@ class PostgreSQLConnector(DatabaseConnector):
                 if canonical and canonical != '-':
                     parts.append(f"CANONICAL = {canonical}")
                 if subdiff and subdiff != '-':
-                    parts.append(f"SUBDIFF = {subdiff}")
+                    parts.append(f"SUBTYPE_DIFF = {subdiff}")
 
                 sql = f'CREATE TYPE "{schema_name}"."{type_name}" AS RANGE ({", ".join(parts)});'
 

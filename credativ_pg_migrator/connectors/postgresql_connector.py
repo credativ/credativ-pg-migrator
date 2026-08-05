@@ -265,7 +265,7 @@ class PostgreSQLConnector(DatabaseConnector):
         table_name = settings['table_name']
         result = {}
         try:
-            query =f"""
+            query = f"""
                     SELECT
                         c.ordinal_position,
                         c.column_name,
@@ -279,13 +279,18 @@ class PostgreSQLConnector(DatabaseConnector):
                         u.udt_schema,
                         u.udt_name,
                         col_description((c.table_schema||'.'||c.table_name)::regclass::oid, c.ordinal_position) as column_comment,
-                        is_generated
+                        is_generated,
+                        pg_catalog.format_type(a.atttypid, a.atttypmod) as format_type
                     FROM information_schema.columns c
+                    JOIN pg_namespace n ON c.table_schema = n.nspname
+                    JOIN pg_class cl ON cl.relname = c.table_name AND cl.relnamespace = n.oid
+                    JOIN pg_attribute a ON a.attrelid = cl.oid AND a.attname = c.column_name AND NOT a.attisdropped
                     LEFT JOIN information_schema.column_udt_usage u ON c.table_schema = u.table_schema
                         AND c.table_name = u.table_name
                         AND c.column_name = u.column_name
                         AND c.udt_name = u.udt_name
                     WHERE c.table_name = '{table_name}' AND c.table_schema = '{table_schema}'
+                    ORDER BY c.ordinal_position
                 """
             self.connect()
             cursor = self.connection.cursor()
@@ -305,13 +310,19 @@ class PostgreSQLConnector(DatabaseConnector):
                 udt_name = row[10]
                 column_comment = row[11]
                 is_generated = row[12]
-                column_type = data_type
-                if self.is_string_type(data_type) and character_maximum_length:
-                    column_type = f"{data_type}({character_maximum_length})"
-                elif self.is_numeric_type(data_type) and numeric_precision and numeric_scale:
-                    column_type = f"{data_type}({numeric_precision},{numeric_scale})"
-                elif self.is_numeric_type(data_type) and numeric_precision and not numeric_scale:
-                    column_type = f"{data_type}({numeric_precision})"
+                format_type = row[13] if len(row) > 13 and row[13] else ''
+
+                if data_type.upper() == 'ARRAY' or (format_type and '[]' in format_type):
+                    data_type = format_type if format_type else data_type
+                    column_type = data_type
+                else:
+                    column_type = data_type
+                    if self.is_string_type(data_type) and character_maximum_length:
+                        column_type = f"{data_type}({character_maximum_length})"
+                    elif self.is_numeric_type(data_type) and numeric_precision and numeric_scale:
+                        column_type = f"{data_type}({numeric_precision},{numeric_scale})"
+                    elif self.is_numeric_type(data_type) and numeric_precision and not numeric_scale:
+                        column_type = f"{data_type}({numeric_precision})"
                 result[ordinal_position] = {
                     'column_name': column_name,
                     'is_nullable': is_nullable,
@@ -719,25 +730,28 @@ class PostgreSQLConnector(DatabaseConnector):
                     # value which already is a complete string literal ('ACTIVE', 'it''s')
                     # must be used as it is - quoting it again would break embedded quotes
                     default_is_string_literal = re.fullmatch(r"'(?:[^']|'')*'", column_default) is not None
-                    if (('CHAR' in column_data_type or column_data_type in ('TEXT'))
-                        and (default_is_expression or default_is_string_literal)):
-                        # default value is here NOT quoted
+                    source_db_type = self.config_parser.get_source_db_type()
+                    if default_is_expression or default_is_string_literal:
                         create_column_sql += f""" DEFAULT {column_default}"""
                     elif 'CHAR' in column_data_type or column_data_type in ('TEXT'):
                         # here we must quote the default value
                         escaped_default = column_default.replace("'", "''")
                         create_column_sql += f""" DEFAULT '{escaped_default}'"""
-                    elif column_data_type in ('BOOLEAN', 'BIT'):
-                        if column_default.lower() in ('0', '(0)', 'false'):
+                    elif column_data_type in ('BOOLEAN', 'BOOL') or (source_db_type != 'postgresql' and column_data_type == 'BIT'):
+                        clean_default = column_default.lower().strip()
+                        if clean_default in ('0', '(0)', 'false', "b'0'"):
                             create_column_sql += """ DEFAULT FALSE"""
-                        elif column_default.lower() in ('1', '(1)', 'true'):
+                        elif clean_default in ('1', '(1)', 'true', "b'1'"):
                             create_column_sql += """ DEFAULT TRUE"""
                         else:
-                            create_column_sql += f""" DEFAULT {column_default}::BOOLEAN"""
+                            if source_db_type != 'postgresql':
+                                create_column_sql += f""" DEFAULT {column_default}::BOOLEAN"""
+                            else:
+                                create_column_sql += f""" DEFAULT {column_default}"""
                     elif column_data_type in ('BYTEA'):
                         create_column_sql += f""" DEFAULT '{column_default}'::BYTEA"""
                     else:
-                        create_column_sql += f" DEFAULT {column_default}::{column_data_type}"
+                        create_column_sql += f" DEFAULT {column_default}"
 
             if domain_name:
                 domain_details = migrator_tables.get_domain_details({'source_domain_name': domain_name})
@@ -2061,7 +2075,76 @@ class PostgreSQLConnector(DatabaseConnector):
             self.config_parser.print_log_message('WARNING', f"postgresql_connector: handle_error: Error caught, but continuing as requested by configuration (on_error_action='{self.on_error_action}').")
 
     def fetch_sequences(self, schema_name: str):
-        return {}
+        sequences = {}
+        order_num = 1
+        query = f"""
+            SELECT
+                c.relname::text AS sequence_name,
+                c.oid AS sequence_id
+            FROM pg_class c
+            JOIN pg_namespace n ON c.relnamespace = n.oid
+            WHERE c.relkind = 'S'
+              AND n.nspname = '{schema_name}'
+            ORDER BY c.relname
+        """
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            cursor.close()
+
+            for row in rows:
+                sequence_name = row[0]
+                sequence_id = row[1]
+                details = self.get_sequence_details(schema_name, sequence_name)
+                min_value = details['min_value'] if details and details.get('min_value') is not None else 1
+                max_value = details['max_value'] if details and details.get('max_value') is not None else 9223372036854775807
+                increment_by = details['increment_by'] if details and details.get('increment_by') is not None else 1
+                cycle = details['cycle'] if details and details.get('cycle') is not None else False
+                cache_size = details['cache_size'] if details and details.get('cache_size') is not None else 1
+                start_value = details['start_value'] if details and details.get('start_value') is not None else 1
+                is_cycled = 'YES' if cycle else 'NO'
+
+                last_number = start_value
+                try:
+                    last_val_query = f'SELECT last_value FROM "{schema_name}"."{sequence_name}"'
+                    cursor = self.connection.cursor()
+                    cursor.execute(last_val_query)
+                    curr_val_row = cursor.fetchone()
+                    cursor.close()
+                    if curr_val_row and curr_val_row[0] is not None:
+                        last_number = curr_val_row[0]
+                except Exception:
+                    pass
+
+                source_sequence_sql = (
+                    f'CREATE SEQUENCE "{schema_name}"."{sequence_name}" '
+                    f'INCREMENT BY {increment_by} MINVALUE {min_value} MAXVALUE {max_value} '
+                    f'START WITH {start_value} CACHE {cache_size} {"CYCLE" if is_cycled == "YES" else "NO CYCLE"};'
+                )
+
+                sequences[order_num] = {
+                    'sequence_name': sequence_name,
+                    'id': sequence_id,
+                    'table_name': None,
+                    'column_name': None,
+                    'source_sequence_sql': source_sequence_sql,
+                    'source_start_value': last_number,
+                    'source_increment_by': increment_by,
+                    'source_minvalue': min_value,
+                    'source_maxvalue': max_value,
+                    'source_cache': cache_size,
+                    'source_is_cycled': is_cycled,
+                }
+                self.config_parser.print_log_message('DEBUG', f"postgresql_connector: fetch_sequences: Found sequence {sequence_name} (start {last_number}, increment {increment_by}).")
+                order_num += 1
+
+            self.disconnect()
+            return sequences
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"postgresql_connector: fetch_sequences: Error fetching sequences for schema {schema_name}: {e}")
+            return sequences
 
     def fetch_table_sequences(self, table_schema: str, table_name: str):
         sequence_data = {}

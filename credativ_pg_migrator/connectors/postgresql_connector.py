@@ -1849,8 +1849,10 @@ class PostgreSQLConnector(DatabaseConnector):
             self.config_parser.print_log_message('DEBUG2', f"postgresql_connector: insert_batch: Worker {worker_id}: Started insert batch into {target_schema_name}.{target_table_name} with {len(data)} rows")
             if isinstance(data, list) and all(isinstance(item, dict) for item in data):
 
-                # Symmetrically unpack the payload values
-                if insert_columns_provided and len(data) > 0:
+                # Match extract_keys order exactly to insert_columns
+                if isinstance(insert_columns, str) and insert_columns.strip():
+                    extract_keys = [c.strip().strip('"') for c in insert_columns.split(',')]
+                elif insert_columns_provided and len(data) > 0:
                     extract_keys = list(data[0].keys())
                 else:
                     extract_keys = [columns[col]['column_name'] for col in insertable_column_keys]
@@ -1864,6 +1866,14 @@ class PostgreSQLConnector(DatabaseConnector):
                     if str(col_info.get('data_type', '')).strip().lower() in ('boolean', 'bool')
                 }
 
+                # Target columns of type JSON or JSONB need Python objects (dict, list, bool, etc.)
+                # serialized to JSON strings so psycopg2 and PostgreSQL accept them properly.
+                json_columns = {
+                    col_info['column_name']
+                    for col_info in columns.values()
+                    if str(col_info.get('data_type', '')).strip().lower() in ('json', 'jsonb')
+                }
+
                 formatted_data = []
                 for item in data:
                     row = []
@@ -1871,6 +1881,9 @@ class PostgreSQLConnector(DatabaseConnector):
                         value = item.get(col_name)
                         if col_name in boolean_columns:
                             value = self._coerce_boolean_value(value)
+                        elif col_name in json_columns and value is not None:
+                            if not isinstance(value, str):
+                                value = json.dumps(value)
                         elif value is not None and (type(value).__name__ == 'array' or hasattr(value, 'tolist')):
                             value = json.dumps(value.tolist()) if hasattr(value, 'tolist') else str(value)
                         row.append(value)

@@ -843,6 +843,8 @@ class PostgreSQLConnector(DatabaseConnector):
                 index_name = row[0]
                 index_type = row[2]
                 index_sql = row[1]
+                using_match = re.search(r'\b(?i:USING)\s+([a-zA-Z0-9_]+)', index_sql)
+                using_method = using_match.group(1) if using_match else ''
 
                 table_indexes[order_num] = {
                     'index_name': index_name,
@@ -850,7 +852,8 @@ class PostgreSQLConnector(DatabaseConnector):
                     'index_owner': source_table_schema,
                     'index_columns': index_columns,
                     'index_sql': index_sql,
-                    'index_comment': row[3]
+                    'index_comment': row[3],
+                    'using_method': using_method
                 }
                 order_num += 1
             cursor.close()
@@ -863,29 +866,25 @@ class PostgreSQLConnector(DatabaseConnector):
 
     def get_create_index_sql(self, settings):
 
-        # source_schema_name = settings['source_schema_name']
-        # source_table_name = settings['source_table_name']
-        # source_table_id = settings['source_table_id']
-        # index_owner = settings['index_owner']
         index_name = self.config_parser.convert_names_case(settings['index_name'])
         index_type = settings['index_type']
-        # target_schema_name = self.config_parser.convert_names_case(settings['target_schema_name'])
-        target_schema_name = settings['target_schema_name'] ## target schema is used as it is defined in config, not converted to upper/lower case
+        target_schema_name = settings['target_schema_name']
         target_table_name = self.config_parser.convert_names_case(settings['target_table_name'])
         index_columns = settings['index_columns']
         target_columns = settings.get('target_columns')
         is_function_based = str(settings.get('is_function_based', 'NO')).upper() == 'YES'
+        index_sql = settings.get('index_sql', '')
+        using_method = settings.get('using_method', '')
+
+        if not using_method and index_sql:
+            using_match = re.search(r'\b(?i:USING)\s+([a-zA-Z0-9_]+)', index_sql)
+            if using_match:
+                using_method = using_match.group(1)
 
         if not index_columns or not index_columns.strip():
             self.config_parser.print_log_message('WARNING', f"postgresql_connector: get_create_index_sql: Index '{index_name}' on table '{target_schema_name}.{target_table_name}' has empty columns list - skipping index creation.")
             return ''
 
-        # Split index_columns into elements, clean up quotes, convert case, and re-quote.
-        # A column entry may carry an ASC/DESC ordering keyword (e.g. '"STORE_NAME" ASC')
-        # which must be preserved but must NOT be quoted together with the column name -
-        # otherwise the re-quoting produces a dangling quote ('"store_name" asc"').
-        # Splitting is on top-level commas only, because an element of a function-based index
-        # is a whole expression that may contain commas of its own, e.g. (NVL("CODE",'X')).
         column_names = []
         for col in self.split_top_level_commas(index_columns):
             col = col.strip()
@@ -949,10 +948,7 @@ class PostgreSQLConnector(DatabaseConnector):
             column_names.append(f'"{col}"{collation_clause}{opclass_clause}{order_direction}{nulls_direction}')
         # Join back with comma
         index_columns = ', '.join(column_names)
-        # index_comment = settings['index_comment']
 
-        # index_columns = ', '.join(f'"{col}"' for col in index_columns)
-        # index_columns_count = row[2]
         spatial_types = ('POINT', 'GEOMETRY', 'BOX', 'POLYGON', 'PATH', 'CIRCLE', 'LINESTRING', 'MULTIPOINT', 'MULTILINESTRING', 'MULTIPOLYGON', 'GEOMETRYCOLLECTION')
         is_spatial = 'SPATIAL' in str(index_type).upper()
         if not is_spatial and target_columns:
@@ -966,13 +962,17 @@ class PostgreSQLConnector(DatabaseConnector):
                         is_spatial = True
                         break
 
+        using_clause = ''
+        if using_method and using_method.lower() != 'btree':
+            using_clause = f" USING {using_method.lower()}"
+        elif is_spatial:
+            using_clause = " USING gist"
+
         create_index_query = ''
         if index_type == 'PRIMARY KEY':
             create_index_query = f"""ALTER TABLE "{target_schema_name}"."{target_table_name}" ADD CONSTRAINT "{index_name}_tab_{target_table_name}" PRIMARY KEY ({index_columns});"""
-        elif is_spatial:
-            create_index_query = f"""CREATE INDEX "{index_name}_tab_{target_table_name}" ON "{target_schema_name}"."{target_table_name}" USING gist ({index_columns});"""
         else:
-            create_index_query = f"""CREATE {'UNIQUE' if index_type == 'UNIQUE' else ''} INDEX "{index_name}_tab_{target_table_name}" ON "{target_schema_name}"."{target_table_name}" ({index_columns});"""
+            create_index_query = f"""CREATE {'UNIQUE' if index_type == 'UNIQUE' else ''} INDEX "{index_name}_tab_{target_table_name}" ON "{target_schema_name}"."{target_table_name}"{using_clause} ({index_columns});"""
 
         return create_index_query
 

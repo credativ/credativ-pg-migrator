@@ -1,6 +1,19 @@
 # Changelog
 
-## 0.16.0 - 2026.08.04
+## 0.16.0 - 2026.08.05
+
+- 2026.08.05
+
+  - Fix - PostgreSQL Connector: Resolved multiple errors during PostgreSQL-to-PostgreSQL schema and data migration:
+    - **UDT & Domain Execution Ordering**: Updated `orchestrator.py` (`run()`) and `planner.py` (`create_plan()`) to execute domain creation (`run_create_domains`) BEFORE user-defined type creation (`run_create_user_defined_types`), ensuring composite types depending on domains (such as `money_amount` referencing domain `iso_currency`) find their dependent types created on the target database. Added topological dependency sorting for composite types in `postgresql_connector.fetch_user_defined_types()` using attribute type OIDs (`attr_type_oids`).
+    - **Range Type DDL Syntax**: Fixed `fetch_user_defined_types()` in `postgresql_connector.py` to emit `SUBTYPE_DIFF = ...` instead of `SUBDIFF = ...` for range types (`CREATE TYPE ... AS RANGE`), fixing syntax errors when migrating range types (such as `weight_range`).
+    - **Domain `NOT NULL` Deduplication**: Updated `get_create_domain_sql()` in `postgresql_connector.py` to verify whether `source_domain_check_sql` already contains `NOT NULL` before appending `NOT NULL`, preventing invalid `NOT NULL NOT NULL` DDL syntax errors when creating domains (such as `non_empty_text`).
+    - **`insert_batch` Column Alignment & JSON/JSONB Serialization**: Fixed `insert_batch()` in `postgresql_connector.py` to align payload dictionary keys directly with `insert_columns` ordering 1-to-1, and added automatic JSON serialization (`json.dumps()`) for Python objects (`dict`, `list`, `bool`, `int`, `float`) destined for `json` and `jsonb` target columns, resolving `can't adapt type 'dict'` and PostgreSQL type mismatch errors (e.g., boolean `false` into `jsonb`).
+    - **Sequence Introspection & Migration**: Implemented full `fetch_sequences()` in `postgresql_connector.py` to query sequence catalog metadata from `pg_class` (`relkind = 'S'`) and runtime `last_value` state, enabling sequence planning (`stdwf_prepare_sequences()`) and target creation prior to table creation (`stdwf_migrate_sequences()`), resolving `relation "..._seq" does not exist` errors when tables reference sequences in column default expressions.
+    - **ARRAY Column Type Resolution**: Updated `fetch_table_columns()` in `postgresql_connector.py` to query `pg_catalog.format_type(a.atttypid, a.atttypmod)`. When `data_type` is `'ARRAY'`, the exact element array type (e.g. `text[]`, `integer[]`, `varchar(50)[]`, `udt[]`) is used instead of the raw `information_schema.columns` string `'ARRAY'`, resolving `syntax error at or near "ARRAY"` during table creation.
+    - **Source-Aware BIT Column Defaults**: Updated `get_create_table_sql()` in `postgresql_connector.py` to check `source_db_type`. For PostgreSQL sources, `BIT` default expressions (such as `'00000000'::"bit"`) are emitted directly without appending illegal `::BOOLEAN` casts, resolving `cannot cast type bit to boolean` errors, while non-PostgreSQL source databases (MySQL, MSSQL) retain bit-to-boolean default mappings.
+    - **Null Value Fallback for `NOT NULL` Columns in `insert_batch`**: Added case-insensitive key lookup and `NULL` fallback handling in `insert_batch()` for target columns with `is_nullable == 'NO'`: when source rows contain `None` for a `NOT NULL` target column (e.g. legacy NULL data in source table), it uses the column default value or type-specific fallback (`''` for text/string, `0` for numeric, `False` for boolean), preventing `null value in column "..." violates not-null constraint` errors during row migration.
+    - **Single-Sequence Migration Worker Execution**: Rewrote `migrate_sequences()` in `postgresql_connector.py` to create and set parameters for the single target sequence passed in `settings` rather than executing an unconstrained schema-wide loop across parallel worker threads, resolving `duplicate key value violates unique constraint "pg_class_relname_nsp_index"` errors during parallel sequence migration.
 
 - 2026.08.04
 

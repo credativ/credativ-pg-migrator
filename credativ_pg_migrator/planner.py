@@ -815,6 +815,9 @@ class Planner:
                         values['index_sql'] = self.target_connection.get_create_index_sql(
                             {**values, 'target_columns': target_columns,
                              'source_index_sql': index_details.get('index_sql', ''),
+                             # Definition of the constraint implemented by the index, when
+                             # the object is a constraint rather than a plain index
+                             'constraint_def': index_details.get('constraint_def', ''),
                              'user_collations': self.migrated_collations})
                         self.migrator_tables.insert_indexes( values )
                         self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_tables: Processed index: {values}")

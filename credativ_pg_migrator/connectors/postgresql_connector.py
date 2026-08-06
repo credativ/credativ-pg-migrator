@@ -1005,7 +1005,9 @@ class PostgreSQLConnector(DatabaseConnector):
                 i.indexdef,
                 coalesce(c.constraint_type, 'INDEX') as type,
                 obj_description(('"'||i.schemaname||'"."'||i.indexname||'"')::regclass::oid, 'pg_class') as index_comment,
-                (x.indexprs IS NOT NULL) as is_expression_index
+                (x.indexprs IS NOT NULL) as is_expression_index,
+                con.contype as constraint_kind,
+                CASE WHEN con.oid IS NOT NULL THEN pg_get_constraintdef(con.oid) END as constraint_def
             FROM pg_indexes i
             JOIN pg_class t
             ON t.relnamespace::regnamespace::text = i.schemaname
@@ -1014,6 +1016,10 @@ class PostgreSQLConnector(DatabaseConnector):
             ON ic.relname = i.indexname
                 AND ic.relnamespace = t.relnamespace
             LEFT JOIN pg_index x ON x.indexrelid = ic.oid
+            LEFT JOIN pg_constraint con
+            ON con.conindid = ic.oid
+                AND con.conrelid = t.oid
+                AND con.contype IN ('p', 'u', 'x')
             LEFT JOIN information_schema.table_constraints c
             ON i.schemaname = c.table_schema
                 and i.tablename = c.table_name
@@ -1028,12 +1034,24 @@ class PostgreSQLConnector(DatabaseConnector):
                 index_name = row[0]
                 index_type = row[2]
                 index_sql = row[1]
+                constraint_kind = row[5]
+                constraint_def = row[6]
                 using_match = re.search(r'\b(?i:USING)\s+([a-zA-Z0-9_]+)', index_sql)
                 using_method = using_match.group(1) if using_match else ''
                 index_columns = self.extract_index_key_list(index_sql)
                 # pg_index.indexprs tells us reliably that at least one key is an expression -
                 # there is no need to recognize function names in the DDL text.
                 is_function_based = 'YES' if row[4] else 'NO'
+
+                # UNIQUE and EXCLUDE constraints are implemented by an index, but they are
+                # objects of their own and are migrated by the constraints migration, which
+                # uses the constraint definition. Recreating them here as a bare index is
+                # both a duplicate and lossy - a temporal UNIQUE (... WITHOUT OVERLAPS) is
+                # backed by a gist index, and "CREATE UNIQUE INDEX ... USING gist" is not
+                # even a legal statement.
+                if constraint_kind in ('u', 'x'):
+                    self.config_parser.print_log_message('DEBUG', f"postgresql_connector: fetch_indexes: Index {index_name} implements constraint '{constraint_def}' - skipped here, it is created by the constraints migration.")
+                    continue
 
                 table_indexes[order_num] = {
                     'index_name': index_name,
@@ -1043,7 +1061,10 @@ class PostgreSQLConnector(DatabaseConnector):
                     'index_sql': index_sql,
                     'index_comment': row[3],
                     'using_method': using_method,
-                    'is_function_based': is_function_based
+                    'is_function_based': is_function_based,
+                    # Definition of the constraint the index implements (primary keys are
+                    # created here, not by the constraints migration)
+                    'constraint_def': constraint_def if constraint_kind == 'p' else '',
                 }
                 order_num += 1
             cursor.close()
@@ -1066,6 +1087,7 @@ class PostgreSQLConnector(DatabaseConnector):
         index_sql = settings.get('source_index_sql') or settings.get('index_sql', '')
         using_method = settings.get('using_method', '')
         user_collations = settings.get('user_collations') or {}
+        constraint_def = settings.get('constraint_def') or ''
 
         # Last resort when the connector did not report the access method separately.
         # Only for a PostgreSQL source - the USING keyword of the other engines does not
@@ -1173,7 +1195,13 @@ class PostgreSQLConnector(DatabaseConnector):
             using_clause = " USING gist"
 
         create_index_query = ''
-        if index_type == 'PRIMARY KEY':
+        if constraint_def:
+            # The index implements a table constraint - the constraint definition from the
+            # source catalog is authoritative and carries what a key list cannot express
+            # (WITHOUT OVERLAPS of a temporal key, NULLS NOT DISTINCT, INCLUDE columns,
+            # DEFERRABLE).
+            create_index_query = f"""ALTER TABLE "{target_schema_name}"."{target_table_name}" ADD CONSTRAINT "{index_name}_tab_{target_table_name}" {self.convert_constraint_sql_case(constraint_def)};"""
+        elif index_type == 'PRIMARY KEY':
             create_index_query = f"""ALTER TABLE "{target_schema_name}"."{target_table_name}" ADD CONSTRAINT "{index_name}_tab_{target_table_name}" PRIMARY KEY ({index_columns});"""
         else:
             create_index_query = f"""CREATE {'UNIQUE' if index_type == 'UNIQUE' else ''} INDEX "{index_name}_tab_{target_table_name}" ON "{target_schema_name}"."{target_table_name}"{using_clause} ({index_columns});"""

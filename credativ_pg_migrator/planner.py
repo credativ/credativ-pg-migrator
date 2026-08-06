@@ -809,8 +809,12 @@ class Planner:
                         # that the index columns are expressions, and against which columns of
                         # the table their identifiers have to be resolved.
                         values['is_function_based'] = index_details.get('is_function_based', 'NO')
+                        # Access method of the source index (gin, gist, hash, brin, ...) -
+                        # without it every index would be created as the default btree.
+                        values['using_method'] = index_details.get('using_method', '')
                         values['index_sql'] = self.target_connection.get_create_index_sql(
                             {**values, 'target_columns': target_columns,
+                             'source_index_sql': index_details.get('index_sql', ''),
                              'user_collations': self.migrated_collations})
                         self.migrator_tables.insert_indexes( values )
                         self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_tables: Processed index: {values}")

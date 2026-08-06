@@ -1001,11 +1001,14 @@ class PostgreSQLConnector(DatabaseConnector):
         index_columns = settings['index_columns']
         target_columns = settings.get('target_columns')
         is_function_based = str(settings.get('is_function_based', 'NO')).upper() == 'YES'
-        index_sql = settings.get('index_sql', '')
+        index_sql = settings.get('source_index_sql') or settings.get('index_sql', '')
         using_method = settings.get('using_method', '')
         user_collations = settings.get('user_collations') or {}
 
-        if not using_method and index_sql:
+        # Last resort when the connector did not report the access method separately.
+        # Only for a PostgreSQL source - the USING keyword of the other engines does not
+        # name a PostgreSQL access method (MySQL USING BTREE / USING HASH).
+        if not using_method and index_sql and self.config_parser.get_source_db_type() == 'postgresql':
             using_match = re.search(r'\b(?i:USING)\s+([a-zA-Z0-9_]+)', index_sql)
             if using_match:
                 using_method = using_match.group(1)

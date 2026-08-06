@@ -1099,6 +1099,36 @@ class DatabaseConnector(ABC):
         """
         return ''
 
+    def fetch_text_search_objects(self, schema: str):
+        """
+        Returns user defined full text search objects - dictionaries and configurations.
+        Only PostgreSQL knows these as standalone objects, therefore this method is
+        optional and returns an empty dict by default.
+
+        Returns: dict
+        { ordinal_identifier: {
+            'object_schema': schema_name,
+            'object_name': object_name,
+            'object_type': 'DICTIONARY' / 'CONFIGURATION',
+            'template_name': schema qualified template of a dictionary,
+            'init_options': option string of a dictionary,
+            'parser_name': schema qualified parser of a configuration,
+            'mappings': [ (token_type, [dictionary, ...]), ... ] of a configuration,
+            'source_object_sql': original CREATE statement,
+            'object_comment': comment
+            }
+        }
+        """
+        return {}
+
+    def get_create_text_search_sql(self, settings):
+        """
+        This function is relevant only for the target database.
+        Centralizes creation of the SQL DDL statements for full text search objects.
+        Returns an empty string when the target cannot create the object.
+        """
+        return ''
+
     @abstractmethod
     def testing_select(self):
         """

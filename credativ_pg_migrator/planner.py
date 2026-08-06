@@ -42,6 +42,9 @@ class Planner:
         # source collation name -> collation recreated in the target schema,
         # filled by stdwf_prepare_collations and used when the DDL is generated
         self.migrated_collations = {}
+        # source text search object name -> object recreated in the target schema,
+        # filled by stdwf_prepare_text_search and used when the DDL is generated
+        self.migrated_text_search = {}
         self.sql_functions_mapping = self.source_connection.get_sql_functions_mapping({
             'target_db_type': self.config_parser.get_target_db_type()
         })
@@ -79,6 +82,7 @@ class Planner:
                         self.source_schema_name = self.config_parser.get_source_schema()
 
                     self.stdwf_prepare_collations()
+                    self.stdwf_prepare_text_search()
                     self.stdwf_prepare_domains()
                     self.stdwf_prepare_user_defined_types()
                     self.stdwf_prepare_defaults()
@@ -134,6 +138,7 @@ class Planner:
                         self.source_schema_name = self.config_parser.get_source_schema()
 
                     self.stdwf_prepare_collations()
+                    self.stdwf_prepare_text_search()
                     self.stdwf_prepare_domains()
                     self.stdwf_prepare_user_defined_types()
                     self.stdwf_prepare_defaults()
@@ -639,6 +644,7 @@ class Planner:
                     'source_columns': source_columns,
                     'migrator_tables': self.migrator_tables,
                     'user_collations': self.migrated_collations,
+                    'text_search_objects': self.migrated_text_search,
                 }
                 self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_tables: convert_table_columns - settings: {settings}")
                 target_columns = self.convert_table_columns(settings)
@@ -812,13 +818,17 @@ class Planner:
                         # Access method of the source index (gin, gist, hash, brin, ...) -
                         # without it every index would be created as the default btree.
                         values['using_method'] = index_details.get('using_method', '')
+                        # INCLUDE columns, NULLS NOT DISTINCT, storage parameters and the
+                        # WHERE predicate of a partial index
+                        values['index_tail'] = index_details.get('index_tail', '')
                         values['index_sql'] = self.target_connection.get_create_index_sql(
                             {**values, 'target_columns': target_columns,
                              'source_index_sql': index_details.get('index_sql', ''),
                              # Definition of the constraint implemented by the index, when
                              # the object is a constraint rather than a plain index
                              'constraint_def': index_details.get('constraint_def', ''),
-                             'user_collations': self.migrated_collations})
+                             'user_collations': self.migrated_collations,
+                             'text_search_objects': self.migrated_text_search})
                         self.migrator_tables.insert_indexes( values )
                         self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_tables: Processed index: {values}")
                 else:
@@ -1329,6 +1339,7 @@ class Planner:
                     'view_type': view_info.get('view_type', 'VIEW'), # Pass type
                     'migrator_tables': self.migrator_tables,
                     'alias_view': view_info.get('is_alias', False),
+                    'text_search_objects': self.migrated_text_search,
                 })
                 self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_views: Converted view SQL: {converted_view_sql}")
 
@@ -1506,6 +1517,49 @@ class Planner:
             }
             self.config_parser.print_log_message('INFO', f"planner: stdwf_prepare_collations: Collation {collation_info['collation_name']} processed successfully.")
         self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_collations: Collations processed successfully.")
+
+    def stdwf_prepare_text_search(self):
+        """
+        Full text search dictionaries and configurations have to be prepared before tables -
+        a generated tsvector column references a configuration, and so do views, indexes and
+        functions.
+        """
+        self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_text_search: Preparing full text search objects...")
+        self.migrated_text_search = {}
+        text_search_objects = self.source_connection.fetch_text_search_objects(self.source_schema_name)
+        self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_text_search: Text search objects found in source database: {text_search_objects}")
+        if not text_search_objects:
+            self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_text_search: No full text search objects found.")
+            return
+
+        for order_num, object_info in text_search_objects.items():
+            self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_text_search: Processing text search object: {object_info}")
+            target_object_name = self.config_parser.convert_names_case(object_info['object_name'])
+            object_info['target_schema_name'] = self.target_schema_name
+            object_info['target_object_name'] = target_object_name
+            converted_sql = self.target_connection.get_create_text_search_sql(object_info)
+            self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_text_search: Converted text search SQL: {converted_sql}")
+            if not converted_sql:
+                self.config_parser.print_log_message('WARNING', f"planner: stdwf_prepare_text_search: Text search object {object_info['object_name']} cannot be recreated in the target database - skipped.")
+                continue
+
+            self.migrator_tables.insert_text_search({
+                'source_schema_name': object_info.get('object_schema') or self.source_schema_name,
+                'source_object_name': object_info['object_name'],
+                'source_object_sql': object_info.get('source_object_sql', ''),
+                'target_schema_name': self.target_schema_name,
+                'target_object_name': target_object_name,
+                'target_object_sql': converted_sql,
+                'object_type': object_info.get('object_type', ''),
+                'object_comment': object_info.get('object_comment'),
+            })
+            self.migrated_text_search[object_info['object_name']] = {
+                'target_schema_name': self.target_schema_name,
+                'target_object_name': target_object_name,
+                'object_type': object_info.get('object_type', ''),
+            }
+            self.config_parser.print_log_message('INFO', f"planner: stdwf_prepare_text_search: Text search {object_info.get('object_type', 'object').lower()} {object_info['object_name']} processed successfully.")
+        self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_text_search: Full text search objects processed successfully.")
 
     def stdwf_prepare_domains(self):
         self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_domains: Preparing domains...")

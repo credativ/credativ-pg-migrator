@@ -64,6 +64,12 @@ class Orchestrator:
                     self.run_create_collations()
                     self.check_pausing_resuming()
 
+                    ## Migration of full text search objects:
+                    ## Generated tsvector columns, views, indexes and functions reference
+                    ## text search configurations, so they must exist before the tables.
+                    self.run_create_text_search_objects()
+                    self.check_pausing_resuming()
+
                     ## Migration of domains:
                     ## Domains in PostgreSQL are special data types (e.g. domains/scalar types).
                     ## Composite user-defined types often depend on domains (e.g. money_amount -> iso_currency).
@@ -746,6 +752,33 @@ class Orchestrator:
         else:
             self.config_parser.print_log_message('INFO', "orchestrator: run_create_collations: No collations found to migrate.")
         self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': 'collations migration', 'success': True, 'message': 'finished OK'})
+
+    def run_create_text_search_objects(self):
+        self.migrator_tables.insert_main({'task_name': 'Orchestrator', 'subtask_name': 'text search objects migration'})
+        self.config_parser.print_log_message('INFO', "orchestrator: run_create_text_search_objects: Migrating full text search objects.")
+        text_search_objects = self.migrator_tables.fetch_all_text_search({})
+        if len(text_search_objects) > 0:
+            for text_search_row in text_search_objects:
+                object_data = self.migrator_tables.decode_text_search_row(text_search_row)
+                self.migrator_tables.update_protocol_task_started('text_search', object_data['id'])
+                self.config_parser.print_log_message('INFO', f"orchestrator: run_create_text_search_objects: Creating text search {object_data['object_type'].lower()} {object_data['target_object_name']} in target database using SQL: {object_data['target_object_sql']}")
+                try:
+                    self.target_connection.connect()
+                    self.target_connection.execute_query(object_data['target_object_sql'])
+                    if object_data['object_comment']:
+                        safe_comment = object_data['object_comment'].replace("'", "''")
+                        self.target_connection.execute_query(
+                            f"""COMMENT ON TEXT SEARCH {object_data['object_type']} "{object_data['target_schema_name']}"."{object_data['target_object_name']}" IS '{safe_comment}'""")
+                    self.migrator_tables.update_text_search_status({'row_id': object_data['id'], 'success': True, 'message': 'migrated OK'})
+                    self.config_parser.print_log_message('INFO', f"orchestrator: run_create_text_search_objects: Text search {object_data['object_type'].lower()} {object_data['target_object_name']} created successfully.")
+                    self.target_connection.disconnect()
+                except Exception as e:
+                    self.migrator_tables.update_text_search_status({'row_id': object_data['id'], 'success': False, 'message': f'ERROR: {e}'})
+                    self.handle_error(e, f"create_text_search {object_data['target_object_name']}")
+            self.config_parser.print_log_message('INFO', "orchestrator: run_create_text_search_objects: Full text search objects migrated successfully.")
+        else:
+            self.config_parser.print_log_message('INFO', "orchestrator: run_create_text_search_objects: No full text search objects found to migrate.")
+        self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': 'text search objects migration', 'success': True, 'message': 'finished OK'})
 
     def run_create_domains(self):
         self.migrator_tables.insert_main({'task_name': 'Orchestrator', 'subtask_name': 'domains migration'})
@@ -1869,6 +1902,7 @@ class Orchestrator:
                             'table_list': table_names,
                             'view_list': view_names,
                             'migrator_tables': self.migrator_tables,
+                            'text_search_objects': self.migrator_tables.get_migrated_text_search_objects(),
                             })
 
                         self.config_parser.print_log_message( 'DEBUG', "orchestrator: run_migrate_funcprocs: Checking for remote objects substitution in functions/procedures...")

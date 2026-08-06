@@ -296,11 +296,16 @@ class PostgreSQLConnector(DatabaseConnector):
                         is_generated,
                         pg_catalog.format_type(a.atttypid, a.atttypmod) as format_type,
                         c.collation_schema,
-                        c.collation_name
+                        c.collation_name,
+                        a.attgenerated,
+                        CASE WHEN a.attgenerated <> ''
+                             THEN pg_catalog.pg_get_expr(ad.adbin, ad.adrelid)
+                        END as generation_expression
                     FROM information_schema.columns c
                     JOIN pg_namespace n ON c.table_schema = n.nspname
                     JOIN pg_class cl ON cl.relname = c.table_name AND cl.relnamespace = n.oid
                     JOIN pg_attribute a ON a.attrelid = cl.oid AND a.attname = c.column_name AND NOT a.attisdropped
+                    LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum
                     LEFT JOIN information_schema.column_udt_usage u ON c.table_schema = u.table_schema
                         AND c.table_name = u.table_name
                         AND c.column_name = u.column_name
@@ -329,6 +334,11 @@ class PostgreSQLConnector(DatabaseConnector):
                 format_type = row[13] if len(row) > 13 and row[13] else ''
                 collation_schema = row[14] if len(row) > 14 else None
                 collation_name = row[15] if len(row) > 15 else None
+                # 's' = stored, 'v' = virtual (PostgreSQL 18+), '' = ordinary column.
+                # information_schema.columns.is_generated reports only ALWAYS / NEVER and
+                # carries no expression, so the catalog is used instead.
+                attgenerated = row[16] if len(row) > 16 else ''
+                generation_expression = row[17] if len(row) > 17 else None
 
                 if data_type.upper() == 'ARRAY' or (format_type and '[]' in format_type):
                     data_type = format_type if format_type else data_type
@@ -356,8 +366,10 @@ class PostgreSQLConnector(DatabaseConnector):
                     'udt_schema': udt_schema,
                     'udt_name': udt_name,
                     'column_comment': column_comment,
-                    'is_generated_virtual': 'NO',
-                    'is_generated_stored': is_generated,
+                    'is_generated_virtual': 'YES' if attgenerated == 'v' else 'NO',
+                    'is_generated_stored': 'YES' if attgenerated == 's' else 'NO',
+                    'generation_expression': generation_expression or '',
+                    'stripped_generation_expression': generation_expression or '',
                     'collation_schema': collation_schema,
                     'collation_name': collation_name,
                 }
@@ -444,6 +456,10 @@ class PostgreSQLConnector(DatabaseConnector):
         def convert_operators(text):
             # Concatenation is '+' in some source engines, '||' in PostgreSQL. Applied only
             # outside string literals, and only for string results (the same guard as before).
+            # A PostgreSQL expression already uses '||' and its '+' really is an addition,
+            # which must not be rewritten.
+            if self.config_parser.get_source_db_type() == 'postgresql':
+                return text
             return text.replace('+', '||') if self.is_string_type(column_data_type) else text
 
         converted_expression = self.convert_expression_identifiers(
@@ -548,6 +564,63 @@ class PostgreSQLConnector(DatabaseConnector):
         parts.append(current)
         return [part.strip() for part in parts]
 
+    def qualify_text_search_references(self, sql, text_search_objects):
+        """
+        Point '<name>'::regconfig / '<name>'::regdictionary literals at the objects
+        recreated in the target schema.
+
+        These references live inside a string literal, so they cannot be schema qualified
+        by rewriting identifiers - and the source does not even hand them over qualified:
+        pg_get_viewdef() and pg_get_expr() print the bare name whenever the object is
+        visible in the search_path of the source. Left as they are, they would be resolved
+        against the search_path of the target session, which normally does not contain the
+        target schema of the migration.
+        Names which were not migrated (built-in configurations like pg_catalog.english)
+        are left untouched.
+        """
+        if not sql or not text_search_objects:
+            return sql
+
+        def replace_reference(match):
+            raw_name = match.group('name')
+            cast = match.group('cast')
+            parts = self.parse_identifier_parts(raw_name)
+            object_name = parts[-1]
+            mapped_object = text_search_objects.get(object_name)
+            if not mapped_object:
+                return match.group(0)
+            target_schema = mapped_object['target_schema_name']
+            target_name = mapped_object['target_object_name']
+            return f"'{self.quote_identifier_for_literal(target_schema)}.{self.quote_identifier_for_literal(target_name)}'::{cast}"
+
+        return re.sub(
+            r"'(?P<name>(?:[^']|'')+)'::(?P<cast>regconfig|regdictionary)\b",
+            replace_reference, sql, flags=re.IGNORECASE)
+
+    def quote_identifier_for_literal(self, name):
+        """
+        Quote an identifier which is part of an object name inside a string literal
+        (e.g. '"My Schema"."My Config"'::regconfig). Simple lower case names need no quoting.
+        """
+        if re.fullmatch(r'[a-z_][a-z0-9_$]*', name or '') and name not in self.RESERVED_IDENTIFIERS:
+            return name
+        return '"' + (name or '').replace('"', '""') + '"'
+
+    # Keywords which must stay quoted when they are used as an object name
+    RESERVED_IDENTIFIERS = frozenset({'default', 'simple', 'all', 'analyse', 'analyze', 'and',
+                                      'any', 'array', 'as', 'asc', 'both', 'case', 'cast',
+                                      'check', 'collate', 'column', 'constraint', 'create',
+                                      'current_date', 'current_time', 'current_timestamp',
+                                      'current_user', 'desc', 'distinct', 'do', 'else', 'end',
+                                      'except', 'false', 'for', 'foreign', 'from', 'grant',
+                                      'group', 'having', 'in', 'initially', 'intersect', 'into',
+                                      'leading', 'limit', 'localtime', 'localtimestamp', 'not',
+                                      'null', 'offset', 'on', 'only', 'or', 'order', 'placing',
+                                      'primary', 'references', 'returning', 'select', 'session_user',
+                                      'some', 'symmetric', 'table', 'then', 'to', 'trailing',
+                                      'true', 'union', 'unique', 'user', 'using', 'variadic',
+                                      'when', 'where', 'window', 'with'})
+
     def get_existing_collation_names(self):
         """
         Names of collations which already exist in this database and are usable with its
@@ -555,8 +628,12 @@ class PostgreSQLConnector(DatabaseConnector):
         """
         if self.existing_collation_names is None:
             self.existing_collation_names = set()
+            # This runs in the middle of the DDL generation - a connection opened by the
+            # caller must stay open, only a connection opened here is closed again.
+            opened_here = self.connection is None or self.connection.closed
             try:
-                self.connect()
+                if opened_here:
+                    self.connect()
                 cursor = self.connection.cursor()
                 cursor.execute("""
                     SELECT collname FROM pg_catalog.pg_collation
@@ -564,7 +641,8 @@ class PostgreSQLConnector(DatabaseConnector):
                 """)
                 self.existing_collation_names = {row[0] for row in cursor.fetchall()}
                 cursor.close()
-                self.disconnect()
+                if opened_here:
+                    self.disconnect()
             except Exception as e:
                 self.config_parser.print_log_message('WARNING', f"postgresql_connector: get_existing_collation_names: Cannot read collations of the database: {e}")
         return self.existing_collation_names
@@ -630,6 +708,7 @@ class PostgreSQLConnector(DatabaseConnector):
         converted = settings['target_columns']
         migrator_tables = settings['migrator_tables']
         user_collations = settings.get('user_collations') or {}
+        text_search_objects = settings.get('text_search_objects') or {}
         create_table_sql = ""
         create_table_sql_parts = []
 
@@ -810,8 +889,20 @@ class PostgreSQLConnector(DatabaseConnector):
             if column_info['is_generated_virtual'] == 'YES' or column_info['is_generated_stored'] == 'YES':
                 generated_column_expression = self.convert_generation_expression(
                     column_info['stripped_generation_expression'], converted, column_data_type)
+                generated_column_expression = self.qualify_text_search_references(
+                    generated_column_expression, text_search_objects)
                 if generated_column_expression:
-                    create_column_sql += f" GENERATED ALWAYS AS {generated_column_expression} STORED"
+                    # VIRTUAL generated columns exist since PostgreSQL 18. On an older target
+                    # the column is created as STORED - the values are the same, it only costs
+                    # storage instead of computing time.
+                    storage_kind = 'STORED'
+                    if column_info['is_generated_virtual'] == 'YES' and column_info['is_generated_stored'] != 'YES':
+                        target_version = self.get_server_version_num()
+                        if target_version is None or target_version >= 180000:
+                            storage_kind = 'VIRTUAL'
+                        else:
+                            self.config_parser.print_log_message('WARNING', f"postgresql_connector: get_create_table_sql: Column {column_name} is a VIRTUAL generated column, which the target database does not support - it is created as STORED.")
+                    create_column_sql += f" GENERATED ALWAYS AS {generated_column_expression} {storage_kind}"
                 else:
                     # Without an expression the column cannot be generated - creating it as an
                     # ordinary column is better than emitting "GENERATED ALWAYS AS  STORED".
@@ -965,12 +1056,22 @@ class PostgreSQLConnector(DatabaseConnector):
                 start = position
         if start is None:
             return ''
+        end = self.find_matching_parenthesis(index_sql, start)
+        if end is None:
+            # Unbalanced definition - return what is behind the opening parenthesis
+            return index_sql[start + 1:].strip()
+        return index_sql[start + 1:end].strip()
 
+    def find_matching_parenthesis(self, text, start):
+        """
+        Position of the parenthesis closing the one at `start`, ignoring parentheses inside
+        string literals and quoted identifiers. None when the text is unbalanced.
+        """
         depth = 0
         in_literal = False
         in_quoted_name = False
-        for position in range(start, len(index_sql)):
-            char = index_sql[position]
+        for position in range(start, len(text)):
+            char = text[position]
             if in_literal:
                 if char == "'":
                     in_literal = False
@@ -988,9 +1089,38 @@ class PostgreSQLConnector(DatabaseConnector):
             elif char == ')':
                 depth -= 1
                 if depth == 0:
-                    return index_sql[start + 1:position].strip()
-        # Unbalanced definition - return what is behind the opening parenthesis
-        return index_sql[start + 1:].strip()
+                    return position
+        return None
+
+    def extract_index_tail(self, index_sql):
+        """
+        Return everything the index definition carries behind its key list - `INCLUDE (...)`,
+        `NULLS NOT DISTINCT`, `WITH (...)` storage parameters and the `WHERE` predicate of a
+        partial index. It already is valid PostgreSQL and is appended to the generated
+        statement unchanged, apart from the identifier case handling and the text search
+        references, which the caller applies.
+
+        A `TABLESPACE` clause is deliberately dropped - the tablespace of the source does
+        not have to exist in the target, and where it does not, it would fail the index.
+        """
+        if not index_sql:
+            return ''
+        using_match = re.search(r'\b(?i:USING)\s+[a-zA-Z0-9_]+\s*\(', index_sql)
+        if using_match:
+            start = using_match.end() - 1
+        else:
+            on_match = re.search(r'\b(?i:ON)\s+', index_sql)
+            start = index_sql.find('(', on_match.end() if on_match else 0)
+            if start < 0:
+                return ''
+        end = self.find_matching_parenthesis(index_sql, start)
+        if end is None:
+            return ''
+        tail = index_sql[end + 1:].strip().rstrip(';').strip()
+        if not tail:
+            return ''
+        tail = re.sub(r'\s*\b(?i:TABLESPACE)\s+(?:"(?:[^"]|"")+"|[a-zA-Z0-9_]+)', '', tail).strip()
+        return tail
 
     def fetch_indexes(self, settings):
         source_table_id = settings['source_table_id']
@@ -1006,6 +1136,7 @@ class PostgreSQLConnector(DatabaseConnector):
                 coalesce(c.constraint_type, 'INDEX') as type,
                 obj_description(('"'||i.schemaname||'"."'||i.indexname||'"')::regclass::oid, 'pg_class') as index_comment,
                 (x.indexprs IS NOT NULL) as is_expression_index,
+                x.indisunique as is_unique,
                 con.contype as constraint_kind,
                 CASE WHEN con.oid IS NOT NULL THEN pg_get_constraintdef(con.oid) END as constraint_def
             FROM pg_indexes i
@@ -1034,11 +1165,13 @@ class PostgreSQLConnector(DatabaseConnector):
                 index_name = row[0]
                 index_type = row[2]
                 index_sql = row[1]
-                constraint_kind = row[5]
-                constraint_def = row[6]
+                is_unique = row[5]
+                constraint_kind = row[6]
+                constraint_def = row[7]
                 using_match = re.search(r'\b(?i:USING)\s+([a-zA-Z0-9_]+)', index_sql)
                 using_method = using_match.group(1) if using_match else ''
                 index_columns = self.extract_index_key_list(index_sql)
+                index_tail = self.extract_index_tail(index_sql)
                 # pg_index.indexprs tells us reliably that at least one key is an expression -
                 # there is no need to recognize function names in the DDL text.
                 is_function_based = 'YES' if row[4] else 'NO'
@@ -1053,6 +1186,12 @@ class PostgreSQLConnector(DatabaseConnector):
                     self.config_parser.print_log_message('DEBUG', f"postgresql_connector: fetch_indexes: Index {index_name} implements constraint '{constraint_def}' - skipped here, it is created by the constraints migration.")
                     continue
 
+                # A plain CREATE UNIQUE INDEX is not a constraint, so it is not listed in
+                # information_schema.table_constraints - without pg_index.indisunique its
+                # uniqueness would be lost.
+                if is_unique and index_type == 'INDEX':
+                    index_type = 'UNIQUE'
+
                 table_indexes[order_num] = {
                     'index_name': index_name,
                     'index_type': index_type,
@@ -1062,6 +1201,9 @@ class PostgreSQLConnector(DatabaseConnector):
                     'index_comment': row[3],
                     'using_method': using_method,
                     'is_function_based': is_function_based,
+                    # INCLUDE columns, NULLS NOT DISTINCT, WITH storage parameters and the
+                    # WHERE predicate of a partial index
+                    'index_tail': index_tail,
                     # Definition of the constraint the index implements (primary keys are
                     # created here, not by the constraints migration)
                     'constraint_def': constraint_def if constraint_kind == 'p' else '',
@@ -1087,6 +1229,7 @@ class PostgreSQLConnector(DatabaseConnector):
         index_sql = settings.get('source_index_sql') or settings.get('index_sql', '')
         using_method = settings.get('using_method', '')
         user_collations = settings.get('user_collations') or {}
+        text_search_objects = settings.get('text_search_objects') or {}
         constraint_def = settings.get('constraint_def') or ''
 
         # Last resort when the connector did not report the access method separately.
@@ -1138,6 +1281,7 @@ class PostgreSQLConnector(DatabaseConnector):
                         expression)
                 else:
                     expression = re.sub(r'(?i)\bCOLLATE\s+[`\'"]?[a-zA-Z0-9_]+[`\'"]?', '', expression)
+                expression = self.qualify_text_search_references(expression, text_search_objects)
                 if not self.expression_is_parenthesized(expression):
                     expression = f"({expression})"
                 column_names.append(f'{expression}{order_direction}{nulls_direction}')
@@ -1194,6 +1338,13 @@ class PostgreSQLConnector(DatabaseConnector):
         elif is_spatial:
             using_clause = " USING gist"
 
+        # INCLUDE columns, NULLS NOT DISTINCT, storage parameters and the WHERE predicate of
+        # a partial index. The predicate can reference columns and text search objects.
+        index_tail = settings.get('index_tail') or ''
+        if index_tail:
+            index_tail = self.qualify_text_search_references(index_tail, text_search_objects)
+            index_tail = ' ' + self.convert_constraint_sql_case(index_tail).strip()
+
         create_index_query = ''
         if constraint_def:
             # The index implements a table constraint - the constraint definition from the
@@ -1204,7 +1355,8 @@ class PostgreSQLConnector(DatabaseConnector):
         elif index_type == 'PRIMARY KEY':
             create_index_query = f"""ALTER TABLE "{target_schema_name}"."{target_table_name}" ADD CONSTRAINT "{index_name}_tab_{target_table_name}" PRIMARY KEY ({index_columns});"""
         else:
-            create_index_query = f"""CREATE {'UNIQUE' if index_type == 'UNIQUE' else ''} INDEX "{index_name}_tab_{target_table_name}" ON "{target_schema_name}"."{target_table_name}"{using_clause} ({index_columns});"""
+            unique_clause = 'UNIQUE ' if index_type == 'UNIQUE' else ''
+            create_index_query = f"""CREATE {unique_clause}INDEX "{index_name}_tab_{target_table_name}" ON "{target_schema_name}"."{target_table_name}"{using_clause} ({index_columns}){index_tail};"""
 
         return create_index_query
 
@@ -2379,7 +2531,8 @@ class PostgreSQLConnector(DatabaseConnector):
         target_schema_name = settings['target_schema_name']
 
         # Simple schema replacement if they differ
-        converted_code = funcproc_code
+        converted_code = self.qualify_text_search_references(
+            funcproc_code, settings.get('text_search_objects'))
         if source_schema_name != target_schema_name:
             # Replace schema references
             # Use loose matching or generic replace for source_schema_name
@@ -2800,6 +2953,8 @@ class PostgreSQLConnector(DatabaseConnector):
         target_schema_name = settings['target_schema_name']
         view_type = settings.get('view_type', 'VIEW')
 
+        view_code = self.qualify_text_search_references(view_code, settings.get('text_search_objects'))
+
         ddl = f'CREATE {view_type} "{target_schema_name}"."{view_name}" AS {view_code}'
         if not ddl.strip().endswith(';'):
              ddl += ';'
@@ -3211,6 +3366,163 @@ class PostgreSQLConnector(DatabaseConnector):
         # The collation version is deliberately not copied - the target can be built with
         # another ICU / libc version and a wrong recorded version produces false warnings.
         return f'''CREATE COLLATION IF NOT EXISTS "{target_schema_name}"."{target_collation_name}" ({', '.join(options)});'''
+
+    def fetch_text_search_objects(self, schema: str):
+        """
+        Returns user defined full text search dictionaries and configurations.
+
+        Like collations these are database wide objects, so all non system schemas are
+        searched - a generated tsvector column of the migrated schema regularly uses a
+        configuration created in public. Objects belonging to an extension are left out,
+        they come with the extension itself (e.g. the unaccent dictionary).
+        Dictionaries come first, configurations reference them.
+        """
+        objects = {}
+        query = ''
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+
+            query = f"""
+                SELECT
+                    n.nspname as object_schema,
+                    d.dictname as object_name,
+                    (SELECT quote_ident(tn.nspname)||'.'||quote_ident(t.tmplname)
+                     FROM pg_catalog.pg_ts_template t
+                     JOIN pg_catalog.pg_namespace tn ON tn.oid = t.tmplnamespace
+                     WHERE t.oid = d.dicttemplate) as template_name,
+                    d.dictinitoption as init_options,
+                    pg_catalog.obj_description(d.oid, 'pg_ts_dict') as object_comment
+                FROM pg_catalog.pg_ts_dict d
+                JOIN pg_catalog.pg_namespace n ON n.oid = d.dictnamespace
+                WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+                  AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend dep
+                                  WHERE dep.objid = d.oid AND dep.deptype = 'e')
+                ORDER BY (n.nspname = '{schema}') DESC, n.nspname, d.dictname
+            """
+            cursor.execute(query)
+            for row in cursor.fetchall():
+                object_name = row[1]
+                if object_name in objects:
+                    self.config_parser.print_log_message('WARNING', f"postgresql_connector: fetch_text_search_objects: Text search dictionary {row[0]}.{object_name} is skipped - a dictionary with the same name is already migrated from another schema.")
+                    continue
+                objects[object_name] = {
+                    'object_schema': row[0],
+                    'object_name': object_name,
+                    'object_type': 'DICTIONARY',
+                    'template_name': row[2],
+                    'init_options': row[3],
+                    'parser_name': '',
+                    'mappings': [],
+                    'object_comment': row[4],
+                }
+
+            query = f"""
+                SELECT
+                    n.nspname as object_schema,
+                    c.cfgname as object_name,
+                    (SELECT quote_ident(pn.nspname)||'.'||quote_ident(p.prsname)
+                     FROM pg_catalog.pg_ts_parser p
+                     JOIN pg_catalog.pg_namespace pn ON pn.oid = p.prsnamespace
+                     WHERE p.oid = c.cfgparser) as parser_name,
+                    pg_catalog.obj_description(c.oid, 'pg_ts_config') as object_comment,
+                    c.oid as config_oid,
+                    c.cfgparser as parser_oid
+                FROM pg_catalog.pg_ts_config c
+                JOIN pg_catalog.pg_namespace n ON n.oid = c.cfgnamespace
+                WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+                  AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend dep
+                                  WHERE dep.objid = c.oid AND dep.deptype = 'e')
+                ORDER BY (n.nspname = '{schema}') DESC, n.nspname, c.cfgname
+            """
+            cursor.execute(query)
+            configurations = cursor.fetchall()
+
+            for row in configurations:
+                object_name = row[1]
+                if object_name in objects:
+                    self.config_parser.print_log_message('WARNING', f"postgresql_connector: fetch_text_search_objects: Text search configuration {row[0]}.{object_name} is skipped - an object with the same name is already migrated from another schema.")
+                    continue
+                # Token type -> ordered list of dictionaries. The mapping is what makes the
+                # configuration different from the one it was copied from, so it has to be
+                # transferred token type by token type.
+                cursor.execute(f"""
+                    SELECT tt.alias as token_type,
+                           quote_ident(dn.nspname)||'.'||quote_ident(d.dictname) as dictionary
+                    FROM pg_catalog.pg_ts_config_map m
+                    JOIN pg_catalog.pg_ts_dict d ON d.oid = m.mapdict
+                    JOIN pg_catalog.pg_namespace dn ON dn.oid = d.dictnamespace
+                    JOIN pg_catalog.ts_token_type({row[5]}::oid) tt ON tt.tokid = m.maptokentype
+                    WHERE m.mapcfg = {row[4]}
+                    ORDER BY tt.alias, m.mapseqno
+                """)
+                mappings = {}
+                for token_type, dictionary in cursor.fetchall():
+                    mappings.setdefault(token_type, []).append(dictionary)
+
+                objects[object_name] = {
+                    'object_schema': row[0],
+                    'object_name': object_name,
+                    'object_type': 'CONFIGURATION',
+                    'template_name': '',
+                    'init_options': '',
+                    'parser_name': row[2],
+                    'mappings': sorted(mappings.items()),
+                    'object_comment': row[3],
+                }
+
+            for object_info in objects.values():
+                object_info['source_object_sql'] = self.get_create_text_search_sql(
+                    {**object_info, 'target_schema_name': object_info['object_schema']})
+
+            cursor.close()
+            self.disconnect()
+
+            # Dictionaries first - configurations reference them
+            ordered = sorted(objects.values(), key=lambda item: 0 if item['object_type'] == 'DICTIONARY' else 1)
+            return {index + 1: value for index, value in enumerate(ordered)}
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"postgresql_connector: fetch_text_search_objects: Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
+            raise
+
+    def get_create_text_search_sql(self, settings):
+        object_name = settings['object_name']
+        object_type = settings.get('object_type', '')
+        target_schema_name = settings['target_schema_name']
+        target_object_name = settings.get('target_object_name') or object_name
+        qualified_name = f'"{target_schema_name}"."{target_object_name}"'
+
+        if object_type == 'DICTIONARY':
+            template_name = settings.get('template_name')
+            if not template_name:
+                self.config_parser.print_log_message('WARNING', f"postgresql_connector: get_create_text_search_sql: Text search dictionary {object_name} has no template - skipping.")
+                return ''
+            options = [f"TEMPLATE = {template_name}"]
+            init_options = settings.get('init_options')
+            if init_options:
+                # dictinitoption is already a comma separated option list ("stopwords = 'english'")
+                options.append(init_options)
+            return f"""CREATE TEXT SEARCH DICTIONARY {qualified_name} ({', '.join(options)});"""
+
+        if object_type == 'CONFIGURATION':
+            parser_name = settings.get('parser_name')
+            if not parser_name:
+                self.config_parser.print_log_message('WARNING', f"postgresql_connector: get_create_text_search_sql: Text search configuration {object_name} has no parser - skipping.")
+                return ''
+            # The parser plus the explicit mappings are used instead of "COPY = <config>":
+            # the configuration copied from does not have to exist in the target, and the
+            # mappings were altered afterwards anyway.
+            statements = [f"""CREATE TEXT SEARCH CONFIGURATION {qualified_name} (PARSER = {parser_name});"""]
+            for token_type, dictionaries in settings.get('mappings') or []:
+                if not dictionaries:
+                    continue
+                statements.append(
+                    f"""ALTER TEXT SEARCH CONFIGURATION {qualified_name} ADD MAPPING FOR {token_type} WITH {', '.join(dictionaries)};""")
+            return '\n'.join(statements)
+
+        self.config_parser.print_log_message('WARNING', f"postgresql_connector: get_create_text_search_sql: Unknown text search object type '{object_type}' of {object_name} - skipping.")
+        return ''
 
     def fetch_default_values(self, settings) -> dict:
         # Placeholder for fetching default values

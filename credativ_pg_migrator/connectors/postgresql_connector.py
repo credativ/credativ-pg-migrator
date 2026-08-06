@@ -938,6 +938,60 @@ class PostgreSQLConnector(DatabaseConnector):
         numeric_types = ['BIGINT', 'INTEGER', 'INT', 'TINYINT', 'SMALLINT', 'FLOAT', 'DOUBLE PRECISION', 'DECIMAL', 'NUMERIC']
         return column_type.upper() in numeric_types
 
+    def extract_index_key_list(self, index_sql):
+        """
+        Return the key list of a CREATE INDEX statement - everything between the parentheses
+        which follow the access method.
+
+        The parentheses have to be counted, they cannot be matched with a regular expression:
+        the key of a functional index is an expression of its own (`lower(company_name)`,
+        `lower((email)::text)`), and stopping at the first closing parenthesis truncates it.
+        What follows the key list (`INCLUDE (...)`, `WITH (...)`, `WHERE ...`) is not part of
+        the result.
+        """
+        if not index_sql:
+            return ''
+
+        start = None
+        using_match = re.search(r'\b(?i:USING)\s+[a-zA-Z0-9_]+\s*\(', index_sql)
+        if using_match:
+            start = using_match.end() - 1
+        else:
+            # An index definition without the USING clause - take the first parenthesis
+            # behind the table name.
+            on_match = re.search(r'\b(?i:ON)\s+', index_sql)
+            position = index_sql.find('(', on_match.end() if on_match else 0)
+            if position >= 0:
+                start = position
+        if start is None:
+            return ''
+
+        depth = 0
+        in_literal = False
+        in_quoted_name = False
+        for position in range(start, len(index_sql)):
+            char = index_sql[position]
+            if in_literal:
+                if char == "'":
+                    in_literal = False
+                continue
+            if in_quoted_name:
+                if char == '"':
+                    in_quoted_name = False
+                continue
+            if char == "'":
+                in_literal = True
+            elif char == '"':
+                in_quoted_name = True
+            elif char == '(':
+                depth += 1
+            elif char == ')':
+                depth -= 1
+                if depth == 0:
+                    return index_sql[start + 1:position].strip()
+        # Unbalanced definition - return what is behind the opening parenthesis
+        return index_sql[start + 1:].strip()
+
     def fetch_indexes(self, settings):
         source_table_id = settings['source_table_id']
         source_table_schema = settings['source_table_schema']
@@ -950,11 +1004,16 @@ class PostgreSQLConnector(DatabaseConnector):
                 i.indexname,
                 i.indexdef,
                 coalesce(c.constraint_type, 'INDEX') as type,
-                obj_description(('"'||i.schemaname||'"."'||i.indexname||'"')::regclass::oid, 'pg_class') as index_comment
+                obj_description(('"'||i.schemaname||'"."'||i.indexname||'"')::regclass::oid, 'pg_class') as index_comment,
+                (x.indexprs IS NOT NULL) as is_expression_index
             FROM pg_indexes i
             JOIN pg_class t
             ON t.relnamespace::regnamespace::text = i.schemaname
             AND t.relname = i.tablename
+            LEFT JOIN pg_class ic
+            ON ic.relname = i.indexname
+                AND ic.relnamespace = t.relnamespace
+            LEFT JOIN pg_index x ON x.indexrelid = ic.oid
             LEFT JOIN information_schema.table_constraints c
             ON i.schemaname = c.table_schema
                 and i.tablename = c.table_name
@@ -966,13 +1025,15 @@ class PostgreSQLConnector(DatabaseConnector):
             cursor = self.connection.cursor()
             cursor.execute(query)
             for row in cursor.fetchall():
-                columns_match = re.search(r'\((.*?)\)', row[1])
-                index_columns = columns_match.group(1) if columns_match else ''
                 index_name = row[0]
                 index_type = row[2]
                 index_sql = row[1]
                 using_match = re.search(r'\b(?i:USING)\s+([a-zA-Z0-9_]+)', index_sql)
                 using_method = using_match.group(1) if using_match else ''
+                index_columns = self.extract_index_key_list(index_sql)
+                # pg_index.indexprs tells us reliably that at least one key is an expression -
+                # there is no need to recognize function names in the DDL text.
+                is_function_based = 'YES' if row[4] else 'NO'
 
                 table_indexes[order_num] = {
                     'index_name': index_name,
@@ -981,7 +1042,8 @@ class PostgreSQLConnector(DatabaseConnector):
                     'index_columns': index_columns,
                     'index_sql': index_sql,
                     'index_comment': row[3],
-                    'using_method': using_method
+                    'using_method': using_method,
+                    'is_function_based': is_function_based
                 }
                 order_num += 1
             cursor.close()

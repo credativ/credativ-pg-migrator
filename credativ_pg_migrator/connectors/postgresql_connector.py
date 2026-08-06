@@ -106,6 +106,162 @@ class PostgreSQLConnector(DatabaseConnector):
             self.config_parser.print_log_message('WARNING', f"postgresql_connector: check_and_create_extension: Failed to create extension '{ext_clean}': {err_msg}")
             return False, f"Required PostgreSQL extension '{ext_clean}' is missing and CREATE EXTENSION failed: {err_msg}"
 
+    def fetch_installed_extensions(self):
+        """
+        Extensions installed in this database. Returns dict: name -> {'version', 'schema'}.
+        """
+        extensions = {}
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute("""
+                SELECT e.extname, e.extversion, n.nspname
+                FROM pg_catalog.pg_extension e
+                JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace
+                ORDER BY e.extname
+            """)
+            for name, version, schema in cursor.fetchall():
+                extensions[name] = {'version': version, 'schema': schema}
+            cursor.close()
+            self.disconnect()
+        except Exception as e:
+            self.config_parser.print_log_message('WARNING', f"postgresql_connector: fetch_installed_extensions: Cannot read installed extensions: {e}")
+        return extensions
+
+    def fetch_available_extensions(self):
+        """
+        Extensions which can be installed in this database - the control files present on the
+        server. Returns dict: name -> default version.
+        """
+        extensions = {}
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute("SELECT name, default_version FROM pg_catalog.pg_available_extensions ORDER BY name")
+            for name, default_version in cursor.fetchall():
+                extensions[name] = default_version
+            cursor.close()
+            self.disconnect()
+        except Exception as e:
+            self.config_parser.print_log_message('WARNING', f"postgresql_connector: fetch_available_extensions: Cannot read available extensions: {e}")
+        return extensions
+
+    def fetch_extension_dependencies(self, settings):
+        """
+        Which extensions the objects selected for migration actually depend on.
+
+        The dependencies are not guessed from the SQL text - they are read from pg_depend,
+        which records every type, function, operator, operator class and text search
+        dictionary an object refers to. An object is attributed to an extension when it is a
+        member of one (a pg_depend entry with deptype = 'e').
+
+        settings:
+            source_schema_name - schema being migrated
+            table_names        - list of table names selected for migration
+            migrate_indexes / migrate_constraints / migrate_triggers /
+            migrate_views / migrate_funcprocs - booleans from the configuration
+
+        Returns dict: extension name -> sorted list of objects requiring it.
+        """
+        schema = settings['source_schema_name']
+        table_names = list(settings.get('table_names') or [])
+        query = ''
+        dependencies = {}
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            query = """
+                WITH tabs AS (
+                    SELECT c.oid
+                    FROM pg_catalog.pg_class c
+                    WHERE c.relnamespace = to_regnamespace(%(schema)s)
+                      AND c.relkind IN ('r', 'p')
+                      AND c.relname = ANY(%(tables)s)
+                ),
+                objects AS (
+                    SELECT 'pg_class'::regclass AS classid, t.oid AS objid,
+                           'table ' || t.oid::regclass::text AS required_by
+                    FROM tabs t
+                    UNION ALL
+                    SELECT 'pg_attrdef'::regclass, ad.oid,
+                           'column ' || ad.adrelid::regclass::text || '.' || a.attname
+                             || CASE WHEN a.attgenerated <> '' THEN ' (generated)' ELSE ' (default)' END
+                    FROM pg_catalog.pg_attrdef ad
+                    JOIN tabs t ON t.oid = ad.adrelid
+                    JOIN pg_catalog.pg_attribute a ON a.attrelid = ad.adrelid AND a.attnum = ad.adnum
+                    UNION ALL
+                    SELECT 'pg_class'::regclass, i.indexrelid,
+                           'index ' || i.indexrelid::regclass::text
+                    FROM pg_catalog.pg_index i JOIN tabs t ON t.oid = i.indrelid
+                    WHERE %(migrate_indexes)s
+                    UNION ALL
+                    SELECT 'pg_constraint'::regclass, con.oid,
+                           'constraint ' || con.conname || ' on ' || con.conrelid::regclass::text
+                    FROM pg_catalog.pg_constraint con JOIN tabs t ON t.oid = con.conrelid
+                    WHERE %(migrate_constraints)s
+                    UNION ALL
+                    SELECT 'pg_trigger'::regclass, tg.oid,
+                           'trigger ' || tg.tgname || ' on ' || tg.tgrelid::regclass::text
+                    FROM pg_catalog.pg_trigger tg JOIN tabs t ON t.oid = tg.tgrelid
+                    WHERE NOT tg.tgisinternal AND %(migrate_triggers)s
+                    UNION ALL
+                    SELECT 'pg_rewrite'::regclass, r.oid,
+                           'view ' || r.ev_class::regclass::text
+                    FROM pg_catalog.pg_rewrite r
+                    JOIN pg_catalog.pg_class v ON v.oid = r.ev_class
+                    WHERE v.relnamespace = to_regnamespace(%(schema)s)
+                      AND v.relkind IN ('v', 'm') AND %(migrate_views)s
+                    UNION ALL
+                    SELECT 'pg_class'::regclass, v.oid,
+                           'view ' || v.oid::regclass::text
+                    FROM pg_catalog.pg_class v
+                    WHERE v.relnamespace = to_regnamespace(%(schema)s)
+                      AND v.relkind IN ('v', 'm') AND %(migrate_views)s
+                    UNION ALL
+                    SELECT 'pg_proc'::regclass, p.oid,
+                           'function ' || p.oid::regprocedure::text
+                    FROM pg_catalog.pg_proc p
+                    WHERE p.pronamespace = to_regnamespace(%(schema)s) AND %(migrate_funcprocs)s
+                    UNION ALL
+                    SELECT 'pg_ts_config'::regclass, cfg.oid,
+                           'text search configuration ' || cfg.cfgname
+                    FROM pg_catalog.pg_ts_config cfg
+                    WHERE cfg.cfgnamespace = to_regnamespace(%(schema)s)
+                    UNION ALL
+                    SELECT 'pg_ts_dict'::regclass, dict.oid,
+                           'text search dictionary ' || dict.dictname
+                    FROM pg_catalog.pg_ts_dict dict
+                    WHERE dict.dictnamespace = to_regnamespace(%(schema)s)
+                )
+                SELECT e.extname, o.required_by
+                FROM objects o
+                JOIN pg_catalog.pg_depend d ON d.classid = o.classid AND d.objid = o.objid
+                JOIN pg_catalog.pg_depend ed ON ed.classid = d.refclassid AND ed.objid = d.refobjid
+                    AND ed.refclassid = 'pg_extension'::regclass AND ed.deptype = 'e'
+                JOIN pg_catalog.pg_extension e ON e.oid = ed.refobjid
+                WHERE e.extname <> 'plpgsql'
+                GROUP BY 1, 2
+                ORDER BY 1, 2
+            """
+            cursor.execute(query, {
+                'schema': schema,
+                'tables': table_names,
+                'migrate_indexes': bool(settings.get('migrate_indexes', True)),
+                'migrate_constraints': bool(settings.get('migrate_constraints', True)),
+                'migrate_triggers': bool(settings.get('migrate_triggers', True)),
+                'migrate_views': bool(settings.get('migrate_views', True)),
+                'migrate_funcprocs': bool(settings.get('migrate_funcprocs', True)),
+            })
+            for extension_name, required_by in cursor.fetchall():
+                dependencies.setdefault(extension_name, []).append(required_by)
+            cursor.close()
+            self.disconnect()
+            return dependencies
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"postgresql_connector: fetch_extension_dependencies: Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
+            raise
+
     def fetch_table_names(self, schema: str = 'public'):
         query = f"""
             SELECT

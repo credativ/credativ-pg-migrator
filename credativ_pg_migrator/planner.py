@@ -471,6 +471,10 @@ class Planner:
                 f"This requires PostgreSQL 12 or newer, but the target runs version {target_version_num // 10000}. "
                 f"Upgrade the target database, or exclude the affected tables from the migration.")
 
+        # Extensions of the source, their availability in the target, and whether the
+        # configured list covers what the migrated objects really need.
+        blocking_issues.extend(self.check_extensions())
+
         # Check and attempt creation of required PostgreSQL extensions
         required_extensions = self.config_parser.get_required_extensions()
         if required_extensions:
@@ -479,6 +483,117 @@ class Planner:
                 success, msg = self.target_connection.check_and_create_extension(ext)
                 if not success:
                     blocking_issues.append(msg)
+
+        return blocking_issues
+
+    def get_tables_selected_for_migration(self):
+        """
+        Names of the source tables which the configuration selects for migration - the same
+        include_tables / exclude_tables evaluation as in stdwf_prepare_tables.
+        """
+        selected = []
+        include_tables = self.config_parser.get_include_tables()
+        exclude_tables = self.config_parser.get_exclude_tables() or []
+        source_tables = self.source_connection.fetch_table_names(self.source_schema_name)
+        for _, table_info in (source_tables or {}).items():
+            table_name = table_info['table_name']
+            if include_tables == ['.*'] or '.*' in include_tables:
+                pass
+            elif include_tables and not any(fnmatch.fnmatch(table_name, pattern) for pattern in include_tables):
+                continue
+            if any(fnmatch.fnmatch(table_name, pattern) for pattern in exclude_tables):
+                continue
+            selected.append(table_name)
+        return selected
+
+    def check_extensions(self):
+        """
+        Report the extensions of the source database together with their availability in the
+        target, and verify that everything the migrated objects depend on is covered - either
+        already installed in the target, or listed in migration.required_extensions so that
+        the migrator creates it.
+
+        Returns a list of blocking issues. A missing dependency is blocking: the object using
+        it would fail to be created later, in the middle of the migration.
+        """
+        blocking_issues = []
+
+        source_extensions = self.source_connection.fetch_installed_extensions() or {}
+        target_extensions = self.target_connection.fetch_installed_extensions() or {}
+        target_available = self.target_connection.fetch_available_extensions() or {}
+        configured = {name.lower() for name in (self.config_parser.get_required_extensions() or [])}
+
+        if not source_extensions:
+            self.config_parser.print_log_message('INFO', "planner: check_extensions: The source database reports no extensions - nothing to check.")
+        else:
+            self.config_parser.print_log_message('INFO', "planner: check_extensions: Extensions of the source database and their state in the target database:")
+            header = ["Extension", "Source version", "Source schema", "In target", "Available in target"]
+            rows = [header]
+            for name in sorted(source_extensions):
+                info = source_extensions[name]
+                in_target = target_extensions[name]['version'] if name in target_extensions else '--'
+                available = target_available.get(name, '--')
+                rows.append([name, info['version'] or '', info['schema'] or '', in_target, available])
+            widths = [max(len(str(row[index])) for row in rows) for index in range(len(header))]
+            for row in rows:
+                self.config_parser.print_log_message(
+                    'INFO', "planner: check_extensions: " + " | ".join(str(cell).ljust(widths[index]) for index, cell in enumerate(row)))
+
+        # What the objects selected for migration really depend on
+        table_names = self.get_tables_selected_for_migration()
+        dependencies = self.source_connection.fetch_extension_dependencies({
+            'source_schema_name': self.source_schema_name,
+            'table_names': table_names,
+            'migrate_indexes': self.config_parser.should_migrate_indexes(),
+            'migrate_constraints': self.config_parser.should_migrate_constraints(),
+            'migrate_triggers': self.config_parser.should_migrate_triggers(),
+            'migrate_views': self.config_parser.should_migrate_views(),
+            'migrate_funcprocs': self.config_parser.should_migrate_funcprocs(),
+        }) or {}
+
+        if not dependencies:
+            self.config_parser.print_log_message('INFO', "planner: check_extensions: The objects selected for migration do not depend on any extension.")
+            return blocking_issues
+
+        self.config_parser.print_log_message('INFO', f"planner: check_extensions: The objects selected for migration depend on {len(dependencies)} extension(s):")
+        for name in sorted(dependencies):
+            required_by = dependencies[name]
+            shown = ', '.join(required_by[:5])
+            if len(required_by) > 5:
+                shown += f", ... ({len(required_by)} objects in total)"
+            state = 'installed in target' if name in target_extensions else (
+                'listed in migration.required_extensions' if name in configured else 'NOT COVERED')
+            self.config_parser.print_log_message('INFO', f"planner: check_extensions: - {name} [{state}]: required by {shown}")
+
+        missing = []
+        for name in sorted(dependencies):
+            if name in target_extensions:
+                # Already there, nothing has to be created and nothing has to be configured
+                continue
+            if name in configured:
+                # The migrator creates it - check_and_create_extension reports a failure
+                continue
+            missing.append(name)
+
+        for name in missing:
+            required_by = dependencies[name]
+            shown = ', '.join(required_by[:10])
+            if len(required_by) > 10:
+                shown += f", ... ({len(required_by)} objects in total)"
+            availability = (f"it is available in the target and would be installed"
+                            if name in target_available
+                            else "it is NOT even available in the target - install the operating system package providing it first")
+            blocking_issues.append(
+                f"Extension '{name}' is required by objects selected for migration ({shown}), "
+                f"but it is neither installed in the target database nor listed in "
+                f"migration.required_extensions - {availability}.")
+
+        if missing:
+            self.config_parser.print_log_message('WARNING', "planner: check_extensions: Add the missing extensions to the configuration file:")
+            self.config_parser.print_log_message('WARNING', "planner: check_extensions:   migration:")
+            self.config_parser.print_log_message('WARNING', "planner: check_extensions:     required_extensions:")
+            for name in sorted(set(missing) | configured):
+                self.config_parser.print_log_message('WARNING', f"planner: check_extensions:       - {name}")
 
         return blocking_issues
 

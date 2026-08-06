@@ -1099,6 +1099,32 @@ class DatabaseConnector(ABC):
         """
         return ''
 
+    def fetch_installed_extensions(self):
+        """
+        Extensions installed in this database. Only PostgreSQL has extensions, therefore this
+        method is optional and returns an empty dict by default.
+
+        Returns dict: extension name -> {'version': version, 'schema': schema_name}
+        """
+        return {}
+
+    def fetch_available_extensions(self):
+        """
+        Extensions which could be installed in this database - relevant for the target.
+        Returns dict: extension name -> default version.
+        """
+        return {}
+
+    def fetch_extension_dependencies(self, settings):
+        """
+        Which extensions the objects selected for migration depend on - relevant for a
+        PostgreSQL source, where a column type, an index operator class, a function or a text
+        search dictionary can be provided by an extension.
+
+        Returns dict: extension name -> list of objects requiring it.
+        """
+        return {}
+
     def fetch_text_search_objects(self, schema: str):
         """
         Returns user defined full text search objects - dictionaries and configurations.

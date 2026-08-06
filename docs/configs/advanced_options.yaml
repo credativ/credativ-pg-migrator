@@ -1,0 +1,225 @@
+# ============================================================================
+# credativ-pg-migrator - the ADVANCED options, on a PostgreSQL source
+# ============================================================================
+# The other examples cover the options you need for a normal migration. This
+# one collects the rest - the settings for large, long-running or partial
+# migrations. Take the BLOCKS you need out of here and paste them into the
+# example for your source engine; they work with any source.
+#
+# Everything below is switched off or commented out, so the file can be run
+# as it is (it then behaves like postgresql_to_postgresql.yaml).
+#
+# MUST ADJUST
+#   - migrator / source / target connection details
+#   - every path
+#   - the table names in the partitioning and limitation blocks - they are
+#     examples and will match nothing in your schema
+# ============================================================================
+
+workflow: "standard"
+
+pre_migration_analysis:
+  top_n_tables:
+    by_rows: 10
+    by_size: 10
+    by_columns: 10
+    by_indexes: 10
+    by_constraints: 10
+
+# Environment variables set before the migration starts. Needed for client
+# libraries that read their configuration from the environment - Oracle Thick
+# mode, SQL Anywhere, or a locale a driver insists on.
+# env_variables:
+#   - name: "LD_LIBRARY_PATH"
+#     value: "/opt/oracle/instantclient_23_8"     # >>> ADJUST
+#   - name: "LANG"
+#     value: "en_US.UTF-8"
+
+migrator:
+  type: "postgresql"
+  host: "localhost"           # >>> ADJUST
+  port: 5432                  # >>> ADJUST
+  username: "postgres"        # >>> ADJUST
+  password: "postgres"        # >>> ADJUST
+  database: "target_db"       # >>> ADJUST
+  schema: "migration"
+
+source:
+  type: "postgresql"          # >>> ADJUST to your engine
+  host: "localhost"           # >>> ADJUST
+  port: 5432                  # >>> ADJUST
+  username: "postgres"        # >>> ADJUST
+  password: "postgres"        # >>> ADJUST
+  database: "source_db"       # >>> ADJUST
+  schema: "public"            # >>> ADJUST
+  connectivity: "native"
+
+  # ------------------------------------------------------------------------
+  # SPLITTING HUGE DATA FILES  (only with a data_export block, i.e. when the
+  # rows come from files rather than from a connection)
+  # A single 200 GB unload cannot be converted in one piece. When a file is
+  # larger than "threshold" it is cut into "chunk_size" pieces that are
+  # converted by "workers" processes in parallel.
+  # ------------------------------------------------------------------------
+  # data_export:
+  #   format: "CSV"
+  #   file: "/path/to/export/{{source_table_name}}.csv"     # >>> ADJUST
+  #   conversion_path: "/path/to/export/converted"          # >>> ADJUST
+  #   delimiter: ","
+  #   header: false
+  #   character_set: "UTF-8"
+  #   clean: false
+  #   workers: 4
+  #   on_missing_data_file: skip
+  #   big_files_split:
+  #     enabled: true
+  #     threshold: '5GB'      # >>> ADJUST - files above this are split
+  #     chunk_size: '2GB'     # >>> ADJUST - size of one piece
+  #     workers: 4
+
+target:
+  type: "postgresql"
+  host: "localhost"           # >>> ADJUST
+  port: 5432                  # >>> ADJUST
+  username: "postgres"        # >>> ADJUST
+  password: "postgres"        # >>> ADJUST
+  database: "target_db"       # >>> ADJUST
+  schema: "public"            # >>> ADJUST
+  settings:
+    work_mem: '32MB'
+    maintenance_work_mem: '512MB'
+    search_path: "public"     # >>> ADJUST
+
+migration:
+  drop_schema: false
+  drop_tables: true
+  truncate_tables: true
+  create_tables: true
+  migrate_data: true
+  migrate_indexes: true
+  migrate_constraints: true
+  migrate_funcprocs: true
+  migrate_triggers: true
+  migrate_views: true
+  set_sequences: true
+  on_error: continue
+  parallel_workers: 8         # >>> ADJUST
+  batch_size: 100000
+  chunk_size: 250000
+  validate_objects: retry
+
+  # ------------------------------------------------------------------------
+  # YOUR OWN SQL BEFORE AND AFTER THE MIGRATION
+  # Plain .sql files executed against the TARGET. The pre script runs before
+  # anything is created (roles, schemas, extensions, a search_path), the post
+  # script after everything is done (grants, ANALYZE, application specific
+  # fixes). The migrator checks at start-up that both files are readable, so a
+  # typo in the path fails immediately instead of after the data load.
+  # ------------------------------------------------------------------------
+  # pre_migration_script: "/path/to/pre_migration.sql"      # >>> ADJUST
+  # post_migration_script: "/path/to/post_migration.sql"    # >>> ADJUST
+
+  # ------------------------------------------------------------------------
+  # PAUSING A LONG MIGRATION
+  # Stop or pause when the maintenance window closes, without killing the
+  # process. Only "datetime" is evaluated - "timer_hours" is not implemented.
+  # ------------------------------------------------------------------------
+  # scheduled_actions:
+  #   - name: "pause when the window closes"
+  #     datetime: "2026.08.10 06:00"     # >>> ADJUST - YYYY.MM.DD HH:MM
+  #     action: "pause"                  # pause | stop | continue
+  #   - name: "resume in the next window"
+  #     datetime: "2026.08.10 22:00"     # >>> ADJUST
+  #     action: "continue"
+
+# ---------------------------------------------------------------------------
+# MIGRATING ONLY PART OF THE DATA
+# Each entry is
+#   ["table regex", "condition without WHERE", "column that must exist", row limit]
+# The condition is applied only to tables that match the pattern AND contain
+# the named column, and only when the table has more rows than the limit - so
+# one entry can thin out the history tables and leave the small reference
+# tables complete. {source_schema} and {source_table_name} are substituted.
+# >>> ADJUST - delete or replace, these will match nothing in your schema
+# ---------------------------------------------------------------------------
+# data_migration_limitation:
+#   - [".*", "created_at >= '2024-01-01'", "created_at", 1000000]
+#   - ["order_items", "order_id in (select id from orders where created_at >= '2024-01-01')", "order_id", 0]
+
+# ---------------------------------------------------------------------------
+# CREATING THE TARGET TABLE PARTITIONED
+# The source table does not have to be partitioned - this partitions it on the
+# way in. A list, one entry per table.
+#   partition_by          RANGE | LIST | HASH
+#   partitioning_columns  one or more columns, comma separated
+#   date_range            year | month | week | day - when given, the migrator
+#                         also CREATES the partitions covering the data found
+#                         in the source column
+# >>> ADJUST - replace with your real tables, or delete the block
+# ---------------------------------------------------------------------------
+# target_partitioning:
+#   - description: "orders partitioned by month"
+#     table_name: "orders"
+#     partition_by: "RANGE"
+#     partitioning_columns: "created_at"
+#     date_range: "month"
+#   - description: "events partitioned by hash of the customer"
+#     table_name: "events"
+#     partition_by: "HASH"
+#     partitioning_columns: "customer_id"
+
+# ---------------------------------------------------------------------------
+# REWRITING REFERENCES THAT CANNOT EXIST IN POSTGRESQL
+# Three- and four-part names of a linked server / remote database appear inside
+# view and routine bodies and have no PostgreSQL equivalent. Each entry is a
+# plain search-and-replace over the converted code.
+# >>> ADJUST or delete
+# ---------------------------------------------------------------------------
+# remote_objects_substitution:
+#   - ["remotedb:dbo.customers", "public.customers"]
+#   - ["OTHERSRV.otherdb.dbo.", "public."]
+
+include_tables: all
+exclude_tables:
+include_views: all
+exclude_views:
+include_funcprocs: all
+exclude_funcprocs:
+
+# Per-table overrides. Anything you set globally in "migration" can be
+# overridden here for the tables matching table_name (a name or a regex).
+# A table listed here for one reason keeps the global value of every switch it
+# does not mention - a table listed only for its batch_size does not silently
+# lose its data or indexes.
+table_settings:
+  # - table_name: "huge_history"
+  #   batch_size: 5000            # smaller batches for very wide rows
+  #   chunk_size: 50000
+  # - table_name: "staging_.*"
+  #   migrate_data: false         # create the table, do not copy the rows
+  # - table_name: "reference_.*"
+  #   data_conflict_action: "replace"
+
+validation:
+  workers: 4
+  check_row_counts: true
+  check_table_checksums: true
+  check_random_sample: true
+  check_lob_sizes: true
+  random_sample_size: 1000
+  report_filename: "validator_report.txt"     # >>> ADJUST
+  # Compare against a THIRD database instead of the source - e.g. a reference
+  # restore, or the result of a previous migration run.
+  # target_copy:
+  #   type: "postgresql"
+  #   host: "localhost"           # >>> ADJUST
+  #   port: 5432
+  #   username: "postgres"
+  #   password: "postgres"
+  #   database: "target_db_copy"
+  #   schema: "public"
+
+summary:
+  top_migrated_tables: 10
+  top_mismatched_tables: 10
+  top_longest_batches: 15

@@ -1,0 +1,138 @@
+# ============================================================================
+# credativ-pg-migrator - Oracle -> PostgreSQL
+# ============================================================================
+# MUST ADJUST
+#   - migrator / source / target connection details
+#   - source.schema - IN UPPER CASE, Oracle stores unquoted names upper case
+#   - source.database - the service name / PDB name, not the SID directory
+#   - env_variables LD_LIBRARY_PATH - only when oracle_thick_mode is true
+#
+# Prerequisite: pip install oracledb   (imported when the connector loads, so
+# a missing package fails at start-up, not at connect time)
+#
+# Thin mode is the default and needs no Oracle client at all.
+# ============================================================================
+
+workflow: "standard"
+
+pre_migration_analysis:
+  top_n_tables:
+    by_rows: 10
+    by_size: 10
+    by_columns: 10
+    by_indexes: 10
+    by_constraints: 10
+
+# Only needed for Thick mode (oracle_thick_mode: true). Remove otherwise.
+# env_variables:
+#   - name: "LD_LIBRARY_PATH"
+#     value: "/opt/oracle/instantclient_23_8"   # >>> ADJUST
+
+migrator:
+  type: "postgresql"
+  host: "localhost"           # >>> ADJUST
+  port: 5432                  # >>> ADJUST
+  username: "postgres"        # >>> ADJUST
+  password: "postgres"        # >>> ADJUST
+  database: "oracle_target"   # >>> ADJUST
+  schema: "migration"
+
+source:
+  type: "oracle"
+  host: "localhost"           # >>> ADJUST
+  port: 1521                  # >>> ADJUST
+  username: "system"          # >>> ADJUST - needs read access to the migrated schema
+  password: "password"        # >>> ADJUST
+  database: "ORCLPDB1"        # >>> ADJUST - service name / PDB
+  schema: "HR"                # >>> ADJUST - UPPER CASE
+  connectivity: "native"      # "native" (oracledb) | "jdbc" | "odbc"
+  # false = Thin mode, no Oracle Client libraries needed (recommended).
+  # true  = Thick mode, requires Oracle Instant Client + LD_LIBRARY_PATH above.
+  oracle_thick_mode: false
+
+target:
+  type: "postgresql"
+  host: "localhost"           # >>> ADJUST
+  port: 5432                  # >>> ADJUST
+  username: "postgres"        # >>> ADJUST
+  password: "postgres"        # >>> ADJUST
+  database: "oracle_target"   # >>> ADJUST
+  schema: "public"            # >>> ADJUST
+  settings:
+    work_mem: '32MB'
+    maintenance_work_mem: '512MB'
+    search_path: "public"     # >>> ADJUST if target.schema is not public
+
+migration:
+  drop_schema: true           # >>> ADJUST
+  drop_tables: true
+  truncate_tables: true
+  create_tables: true
+  migrate_data: true
+  migrate_indexes: true
+  migrate_constraints: true
+  migrate_funcprocs: true
+  migrate_triggers: true
+  migrate_views: true
+  set_sequences: true
+  on_error: continue
+  parallel_workers: 8         # >>> ADJUST
+  batch_size: 25000
+  # chunk_size: 25000
+
+  # Oracle names are upper case; "lower" gives you idiomatic PostgreSQL names
+  # that need no quoting. Use "keep" only if the application sends quoted
+  # upper-case identifiers.
+  names_case_handling: lower  # >>> ADJUST
+
+  # VARCHAR2/CHAR at or above these lengths become TEXT instead of
+  # VARCHAR(n)/CHAR(n). -1 keeps the declared length.
+  varchar_to_text_length: 4000  # >>> ADJUST
+  char_to_text_length: 255      # >>> ADJUST
+
+  # PostgreSQL has no packages. Each package routine becomes a standalone
+  # object and the call sites are rewritten. Package STATE is not migrated.
+  #   functions = <package>_<routine>() in the target schema (default)
+  #   schemas   = one schema per package, routines keep their own names
+  packages_as: functions      # >>> ADJUST
+
+  # NUMBER(1,0) is ambiguous - a 0/1 flag or a small code. Default is SMALLINT
+  # (always lossless). Opt individual columns in to BOOLEAN here.
+  # >>> ADJUST - list your real flag columns, or delete the block
+  numeric_1_boolean_columns:
+    - 'is_.*'
+    - '.*_flag'
+    # - { table: 'CUSTOMERS', column: 'ACTIVE' }
+  map_numeric_1_to_boolean: false   # true maps ALL NUMBER(1,0) to BOOLEAN
+
+  # Replacement for Oracle SYS_GUID() defaults.
+  uuid_default_function: gen_random_uuid()
+  required_extensions:
+    - pgcrypto                # provides gen_random_uuid() before PostgreSQL 13
+
+  validate_objects: retry
+
+include_tables: all
+exclude_tables:               # >>> ADJUST - e.g. - "BIN\\$.*"  (recycle bin)
+include_views: all
+exclude_views:
+include_funcprocs: all
+exclude_funcprocs:
+
+# Oracle types that have no direct counterpart, or that you want narrowed.
+# ["table regex", "column regex", "source type", "target type", "length"]
+# >>> ADJUST - examples only, delete what you do not need
+data_types_substitution:
+  # - ["", "", "NUMBER(_,0)", "BIGINT", '']
+  # - ["", "", "XMLTYPE", "XML", '']
+  # - ["AUDIT_.*", "", "CLOB", "TEXT", '']
+
+# ["table regex", "column data type", "source default", "target default"]
+default_values_substitution:
+  # - ["", "", "SYSDATE", "current_timestamp"]
+  # - ["", "", "SYS_GUID()", "gen_random_uuid()"]
+
+summary:
+  top_migrated_tables: 10
+  top_mismatched_tables: 10
+  top_longest_batches: 15

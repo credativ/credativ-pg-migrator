@@ -1,0 +1,136 @@
+# ============================================================================
+# credativ-pg-migrator - IBM Db2 for i (IBM i / AS-400) -> PostgreSQL
+#                                                          (OFFLINE, DDL + files)
+# ============================================================================
+# Db2 for i runs only on IBM Power hardware, so as with z/OS the delivery is
+# the source: extracted DDL (ACS "Generate SQL" output) plus CPYTOIMPF unload
+# files. connectivity: "ddl", no host / port / credentials.
+#
+# THE IBM i SPECIALITY - TWO NAMES PER OBJECT
+#   Every table has a long SQL name (CUSTOMERS) and a 10-character SYSTEM name
+#   (CUSTMAST), declared in the DDL as FOR SYSTEM NAME. The unload files are
+#   named after the SYSTEM name, because that is what CPYTOIMPF writes.
+#   The connector registers the system names as ALIASES, which is why the data
+#   file below uses {{source_alias_name}} and not {{source_table_name}}.
+#   Columns have the same duality (FOR COLUMN).
+#
+# MUST ADJUST
+#   - migrator / target connection details
+#   - source.schema - on IBM i a schema IS a LIBRARY, UPPER CASE
+#   - source.ddl.path and source.data_export.file
+#   - source.data_export.character_set - CCSID 1208 is UTF-8, CCSID 37 is
+#     EBCDIC; a mixed delivery needs per-table table_settings
+#
+# NO PREREQUISITES - everything is read from disk.
+# ============================================================================
+
+workflow: "standard"
+
+pre_migration_analysis:
+  top_n_tables:
+    by_rows: 0
+    by_size: 0
+    by_columns: 0
+    by_indexes: 0
+    by_constraints: 0
+
+migrator:
+  type: "postgresql"
+  host: "localhost"           # >>> ADJUST
+  port: 5432                  # >>> ADJUST
+  username: "postgres"        # >>> ADJUST
+  password: "postgres"        # >>> ADJUST
+  database: "db2i_target"     # >>> ADJUST
+  schema: "migration"
+
+source:
+  type: "ibm_db2_i"
+  connectivity: "ddl"         # the only mode for this connector
+  schema: "APPLIB"            # >>> ADJUST - the LIBRARY name, UPPER CASE
+  ddl:
+    path: "/path/to/delivery/ddl"                        # >>> ADJUST
+  data_export:
+    format: "CSV"
+    # {{source_alias_name}} resolves to the 10-character SYSTEM name, which is
+    # how CPYTOIMPF named the files. Use {{source_table_name}} only if your
+    # delivery really is named after the long SQL names.
+    file: "/path/to/delivery/data/{{source_alias_name}}.csv"   # >>> ADJUST
+    conversion_path: "/path/to/delivery/data/converted"        # >>> ADJUST
+    delimiter: ","
+    header: false             # >>> ADJUST - CPYTOIMPF can add one, per file
+    # CCSID 1208 = UTF-8 (the usual modern default),
+    # CCSID 37   = EBCDIC US -> "cp037"
+    character_set: "UTF-8"    # >>> ADJUST
+    clean: false
+    workers: 4
+    on_missing_data_file: skip   # empty physical files often have no unload
+
+target:
+  type: "postgresql"
+  host: "localhost"           # >>> ADJUST
+  port: 5432                  # >>> ADJUST
+  username: "postgres"        # >>> ADJUST
+  password: "postgres"        # >>> ADJUST
+  database: "db2i_target"     # >>> ADJUST
+  schema: "public"            # >>> ADJUST
+  settings:
+    work_mem: '32MB'
+    maintenance_work_mem: '512MB'
+    search_path: "public"     # >>> ADJUST if target.schema is not public
+
+migration:
+  drop_schema: true           # >>> ADJUST
+  drop_tables: true
+  truncate_tables: true
+  create_tables: true
+  migrate_data: true
+  migrate_indexes: true
+  migrate_constraints: true
+  migrate_funcprocs: false    # not implemented for Db2 for i
+  migrate_triggers: true      # best-effort
+  migrate_views: true
+  set_sequences: true
+  on_error: continue
+  parallel_workers: 8         # >>> ADJUST
+  batch_size: 2500
+  chunk_size: 25000
+  # IBM i names are upper case. "lower" gives idiomatic PostgreSQL names.
+  names_case_handling: lower  # >>> ADJUST
+  varchar_to_text_length: 4000
+  char_to_text_length: 255
+  # >>> ADJUST - THE decision for an IBM i migration:
+  #   false = tables get their long SQL names (CUSTOMERS) - recommended when
+  #           you migrate the application as well
+  #   true  = tables get the 10-character SYSTEM names (CUSTMAST) - use it when
+  #           existing programs address the short names
+  use_aliases_as_target_names: false
+  validate_objects: retry
+
+include_tables: all
+exclude_tables:               # >>> ADJUST
+include_views: all
+exclude_views:
+include_funcprocs: all
+exclude_funcprocs:
+
+# A CPYTOIMPF delivery is rarely homogeneous - one file has a header, another
+# is still in EBCDIC. Override per table here.
+# >>> ADJUST or delete
+table_settings:
+  # - table_name: "PRODUCT_CATALOG"
+  #   header: true
+  # - table_name: "LEGACY_.*"
+  #   character_set: "cp037"
+  # - table_name: "STG_IMPORT"
+  #   migrate_data: false
+
+data_types_substitution:
+  # - ["", "", "GRAPHIC", "TEXT", '']
+
+default_values_substitution:
+  # - ["", "", "CURRENT TIMESTAMP", "current_timestamp"]
+
+summary:
+  top_migrated_tables: 10
+  top_mismatched_tables: 10
+  top_longest_batches: 15

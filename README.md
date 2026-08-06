@@ -38,6 +38,7 @@ Detailed documentation and technical insights are available in the `docs/` direc
 - [User Guide & Connectivity Options](docs/README.md) - per-connector status, connectivity and limitations
 - [Feature Matrix](FEATURE_MATRIX.md) - which feature is supported by which connector
 - [Standard Migration Workflow](docs/workflow/standard/migration_workflow.md)
+- [Configuration Examples](docs/configs/README.md) - ready-to-use configuration file for every source database and workflow
 - [Configuration Parameters Map](docs/config_parameters_map.md)
 
 ## Installation
@@ -65,6 +66,7 @@ credativ-pg-migrator --config=./test_database.yaml --log-file=./test_database_$(
 ## Configuration file
 
 - Configuration file is a YAML file
+- Ready-to-use configuration examples for every supported source database and workflow are in [docs/configs/](./docs/configs/) - copy the one matching your source, adjust the lines marked `>>> ADJUST`, run it. See [docs/configs/README.md](./docs/configs/README.md) for the overview
 - All settings available in the config file are described in [docs/configs/config_all_options_reference.yaml](./docs/configs/config_all_options_reference.yaml) - a reference of every existing option, not a template to be used directly
 
 ## Architecture

@@ -1,0 +1,140 @@
+# ============================================================================
+# credativ-pg-migrator - SQLite -> PostgreSQL   (the database FILE)
+# ============================================================================
+# The simplest possible source: one local file, no server, no credentials, no
+# driver to install - SQLite is read with the sqlite3 module of the Python
+# standard library.
+#
+# MUST ADJUST
+#   - migrator / target connection details
+#   - source.database - the PATH of the .db file (this replaces host, port,
+#     username and password, which do not exist here)
+#   - exclude_tables - see the note there, it is not optional in practice
+#
+# The file is opened read-only whenever possible. It falls back to read-write
+# with a warning when a hot journal or WAL has to be recovered first.
+#
+# The companion example sqlite_ddl_to_postgresql.yaml migrates the same model
+# from SQL scripts + CSV files instead of the .db file.
+# ============================================================================
+
+workflow: "standard"
+
+pre_migration_analysis:
+  top_n_tables:
+    by_rows: 10
+    by_size: 10
+    by_columns: 10
+    by_indexes: 10
+    by_constraints: 10
+
+migrator:
+  type: "postgresql"
+  host: "localhost"           # >>> ADJUST
+  port: 5432                  # >>> ADJUST
+  username: "postgres"        # >>> ADJUST
+  password: "postgres"        # >>> ADJUST
+  database: "sqlite_target"   # >>> ADJUST
+  schema: "migration"
+
+source:
+  type: "sqlite"
+  connectivity: "native"      # "native" (the .db file) | "ddl" (SQL scripts)
+  # The whole connection IS the file path. Relative paths are resolved against
+  # the directory of THIS config file.
+  database: "/path/to/app.db" # >>> ADJUST
+  # SQLite calls the main database "main"; only ATTACHed databases and "temp"
+  # can ever be anything else.
+  schema: "main"
+
+target:
+  type: "postgresql"
+  host: "localhost"           # >>> ADJUST
+  port: 5432                  # >>> ADJUST
+  username: "postgres"        # >>> ADJUST
+  password: "postgres"        # >>> ADJUST
+  database: "sqlite_target"   # >>> ADJUST
+  schema: "public"            # >>> ADJUST
+  settings:
+    work_mem: '32MB'
+    maintenance_work_mem: '512MB'
+    search_path: "public"     # >>> ADJUST if target.schema is not public
+
+migration:
+  drop_schema: true           # >>> ADJUST
+  drop_tables: true
+  truncate_tables: true
+  create_tables: true
+  migrate_data: true
+  migrate_indexes: true
+  migrate_constraints: true
+  # SQLite has NO stored functions or procedures at all - nothing to migrate.
+  migrate_funcprocs: false
+  migrate_triggers: true      # translated to PL/pgSQL trigger functions
+  migrate_views: true
+  set_sequences: true
+  on_error: continue
+  parallel_workers: 8         # >>> ADJUST
+  batch_size: 25000
+  names_case_handling: lower  # >>> ADJUST
+  varchar_to_text_length: 4000
+  char_to_text_length: 255
+  validate_objects: retry
+
+include_tables: all
+
+# >>> ADJUST - keep these patterns and add your own.
+# SQLite reports a lot of tables that must never be migrated:
+#   sqlite_sequence   bookkeeping of AUTOINCREMENT columns
+#   sqlite_stat1      statistics written by ANALYZE
+#   <name>_data/_idx/_docsize/_config   shadow tables of an FTS5 index
+#   <name>_node/_parent/_rowid          shadow tables of an R-Tree
+# The connector filters virtual tables and their shadow tables by itself; this
+# list is the safety net and documents the intent.
+exclude_tables:
+  - "sqlite_.*"
+  # - "products_fts"          # the FTS5 virtual table itself
+  # - "products_fts_.*"       # its shadow tables
+  # - "warehouse_bbox"        # an R-Tree virtual table
+  # - "warehouse_bbox_.*"
+
+include_funcprocs: all
+exclude_funcprocs:
+include_views: all
+exclude_views:
+
+# ---------------------------------------------------------------------------
+# WHAT TO WATCH OUT FOR - SQLite is dynamically typed
+#
+# A declared type is only an AFFINITY, not a constraint: a column declared
+# NUMERIC can hold text, a column declared TEXT can hold integers. The
+# connector derives the target type from the values actually stored, not from
+# the declared name alone - but where a column really is mixed, decide
+# yourself and pin it with data_types_substitution below.
+#
+# There is no DATE type. All three conventions appear in the wild: ISO text,
+# unix epoch integers and REAL Julian days. The connector coerces 0/1 to
+# boolean, unix timestamps and Julian days to timestamp - check the result on
+# your own data.
+#
+# FOREIGN KEYS ARE OFF BY DEFAULT in SQLite (per connection), so the data may
+# violate constraints that the DDL declares. They become enforced in
+# PostgreSQL - a foreign key that fails to be created is telling you the truth
+# about the data.
+#
+# Partial indexes are migrated WITHOUT their WHERE condition (a partial UNIQUE
+# index is degraded to non-unique) and the original condition is recorded in
+# the index comment.
+# ---------------------------------------------------------------------------
+
+# ["table regex", "column regex", "source type", "target type", "length"]
+data_types_substitution:
+  # - ["orders", "total_amount", "NUMERIC", "NUMERIC(12,2)", '']
+  # - ["", "", "BLOB", "BYTEA", '']
+
+default_values_substitution:
+
+summary:
+  top_migrated_tables: 10
+  top_mismatched_tables: 10
+  top_longest_batches: 15

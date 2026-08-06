@@ -1,0 +1,118 @@
+# ============================================================================
+# credativ-pg-migrator - Sybase ASE (SAP ASE) -> PostgreSQL
+# ============================================================================
+# MUST ADJUST
+#   - migrator / source / target connection details
+#   - source.schema - usually "dbo"
+#   - source.jdbc.libraries - the path to YOUR jconn jar
+#
+# Prerequisites for connectivity: "jdbc"
+#   a JRE, and the SAP jConnect jar (jconn4.jar) somewhere on disk.
+# For connectivity: "odbc" install FreeTDS instead.
+#
+# Sybase ASE is one of the most completely supported sources: named default
+# objects (CREATE DEFAULT), rules/domains and user-defined types are migrated
+# as well. That is why the substitution lists below are richer than elsewhere -
+# T-SQL defaults have to be translated one by one.
+# ============================================================================
+
+workflow: "standard"
+
+pre_migration_analysis:
+  top_n_tables:
+    by_rows: 10
+    by_size: 10
+    by_columns: 10
+    by_indexes: 10
+    by_constraints: 10
+
+migrator:
+  type: "postgresql"
+  host: "localhost"           # >>> ADJUST
+  port: 5432                  # >>> ADJUST
+  username: "postgres"        # >>> ADJUST
+  password: "postgres"        # >>> ADJUST
+  database: "sybase_target"   # >>> ADJUST
+  schema: "migration"
+
+source:
+  type: "sybase_ase"
+  host: "localhost"           # >>> ADJUST
+  port: 5000                  # >>> ADJUST
+  username: "sa"              # >>> ADJUST
+  password: "password"        # >>> ADJUST
+  database: "app_db"          # >>> ADJUST
+  schema: "dbo"               # >>> ADJUST
+  connectivity: "jdbc"        # "jdbc" | "odbc"
+  jdbc:
+    driver: "com.sybase.jdbc4.jdbc.SybDriver"
+    libraries: "/usr/share/java/jconn4.jar"    # >>> ADJUST
+  # odbc:
+  #   driver: 'FreeTDS'
+  #   libraries: "/usr/lib/x86_64-linux-gnu/odbc/libtdsodbc.so"   # >>> ADJUST
+
+target:
+  type: "postgresql"
+  host: "localhost"           # >>> ADJUST
+  port: 5432                  # >>> ADJUST
+  username: "postgres"        # >>> ADJUST
+  password: "postgres"        # >>> ADJUST
+  database: "sybase_target"   # >>> ADJUST
+  schema: "public"            # >>> ADJUST
+  settings:
+    work_mem: '32MB'
+    maintenance_work_mem: '512MB'
+    search_path: "public"     # >>> ADJUST if target.schema is not public
+    # role: 'sybase_owner'    # >>> ADJUST - SET ROLE so migrated objects get the right owner
+
+migration:
+  drop_schema: true           # >>> ADJUST
+  drop_tables: true
+  truncate_tables: true
+  create_tables: true
+  migrate_data: true
+  migrate_indexes: true
+  migrate_constraints: true
+  migrate_funcprocs: true     # best-effort T-SQL conversion
+  migrate_triggers: true      # best-effort
+  migrate_views: true
+  set_sequences: true
+  on_error: continue
+  parallel_workers: 8         # >>> ADJUST
+  batch_size: 100000
+  names_case_handling: lower  # >>> ADJUST
+  varchar_to_text_length: 4000
+  validate_objects: retry
+
+include_tables: all
+exclude_tables:               # >>> ADJUST
+include_views: all
+exclude_views:
+  - "sys*"
+include_funcprocs: all
+exclude_funcprocs:
+
+# ["table regex", "column regex", "source type", "target type", "length"]
+# Sybase user-defined types appear here under their own name.
+# >>> ADJUST - replace with the UDTs of your database
+data_types_substitution:
+  # - ["", "", "TypID", "BIGINT", '']
+  # - ["", "", "numeric(_,0)", "BIGINT", '']
+
+# ["table regex", "column data type", "source default", "target default"]
+# "%" works as a wildcard inside the source default pattern.
+default_values_substitution:
+  - ["", "", "%getdate()%", "statement_timestamp()"]
+  - ["", "", "current_bigdatetime()", "statement_timestamp()"]
+  - ["", "", "db_name()", "current_database()"]
+  - ["", "", "%user_name()", "session_user"]
+  - ["", "BIT", "0", "false"]
+  - ["", "BIT", "1", "true"]
+  # Sybase allows 01-Jan-1753 / 31-Dec-9999 which are outside sensible ranges
+  - ["", "", "01-Jan-1753", "'1753-01-01'::date"]
+  - ["", "", "31-Dec-9999", "'9999-12-31'::date"]
+
+summary:
+  top_migrated_tables: 10
+  top_mismatched_tables: 10
+  top_longest_batches: 15

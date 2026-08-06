@@ -493,8 +493,10 @@ carries numbered notes for the engine-specific caveats.
 - The config file is a YAML document.
 - Every existing configuration setting is documented by example in `docs/configs/config_all_options_reference.yaml`. That file is a **reference, not a template**: it lists all options at once, including ones that exclude each other — all three connectivity sub-blocks (`jdbc`, `odbc`, `ddl`) although `connectivity` selects one, options belonging to different source engines side by side, the `mapping` block while `workflow` is `standard` — so it cannot be used as a configuration file as it is.
 
+- Ready-to-use examples for every supported source database and workflow are in [configs/](configs/) - see [configs/README.md](configs/README.md). Taking the example for your engine is the fastest way to start: every line that must be changed is marked `>>> ADJUST`.
+
 The usual workflow is:
-- Create a new file, e.g. my_migration.yaml, and copy into it only the sections relevant for your migration from `docs/configs/config_all_options_reference.yaml`.
+- Copy the example matching your source from `docs/configs/` to a new file, e.g. my_migration.yaml (or start from scratch and copy the sections you need out of `docs/configs/config_all_options_reference.yaml`).
 - Edit what you need:
   - connection details
   - schemas / objects to include or exclude

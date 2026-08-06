@@ -1,0 +1,127 @@
+# ============================================================================
+# credativ-pg-migrator - Microsoft SQL Server -> PostgreSQL
+# ============================================================================
+# MUST ADJUST
+#   - migrator / source / target connection details
+#   - source.odbc.driver - must match a driver installed on THIS machine,
+#     check with:  odbcinst -q -d
+#   - source.schema - usually "dbo"
+#
+# Prerequisites: an ODBC driver ("ODBC Driver 18 for SQL Server" or FreeTDS)
+# plus unixodbc. No extra Python package beyond pyodbc, which the migrator
+# already depends on.
+#
+# NOT migrated for MS SQL Server: CHECK constraints, foreign-key ON DELETE
+# actions, table and column comments (extended properties), computed columns
+# and rules/domains. Functions, procedures and triggers are best-effort.
+# ============================================================================
+
+workflow: "standard"
+
+pre_migration_analysis:
+  top_n_tables:
+    by_rows: 10
+    by_size: 10
+    by_columns: 10
+    by_indexes: 10
+    by_constraints: 10
+
+migrator:
+  type: "postgresql"
+  host: "localhost"           # >>> ADJUST
+  port: 5432                  # >>> ADJUST
+  username: "postgres"        # >>> ADJUST
+  password: "postgres"        # >>> ADJUST
+  database: "mssql_target"    # >>> ADJUST
+  schema: "migration"
+
+source:
+  type: "mssql"
+  host: "localhost"           # >>> ADJUST
+  port: 1433                  # >>> ADJUST
+  username: "sa"              # >>> ADJUST
+  password: "password"        # >>> ADJUST
+  database: "app_db"          # >>> ADJUST
+  schema: "dbo"               # >>> ADJUST
+  connectivity: "odbc"        # "odbc" | "jdbc"
+  odbc:
+    driver: 'ODBC Driver 18 for SQL Server'   # >>> ADJUST - odbcinst -q -d
+  # Appended to the connection string, semicolon separated. Driver 18 defaults
+  # to Encrypt=yes, so without a trusted certificate you need this:
+  connection_string_options: "encrypt=yes;trustServerCertificate=yes"   # >>> ADJUST
+  # Only for connectivity: "jdbc"
+  # jdbc:
+  #   driver: "com.microsoft.sqlserver.jdbc.SQLServerDriver"
+  #   libraries: "/usr/share/java/mssql-jdbc.jar"            # >>> ADJUST
+  # Which catalog the connector reads the model from.
+  system_catalog: "INFORMATION_SCHEMA"        # INFORMATION_SCHEMA | SYS
+
+target:
+  type: "postgresql"
+  host: "localhost"           # >>> ADJUST
+  port: 5432                  # >>> ADJUST
+  username: "postgres"        # >>> ADJUST
+  password: "postgres"        # >>> ADJUST
+  database: "mssql_target"    # >>> ADJUST
+  schema: "public"            # >>> ADJUST
+  settings:
+    work_mem: '32MB'
+    maintenance_work_mem: '512MB'
+    search_path: "public"     # >>> ADJUST if target.schema is not public
+
+migration:
+  drop_schema: true           # >>> ADJUST
+  drop_tables: true
+  truncate_tables: true
+  create_tables: true
+  migrate_data: true
+  migrate_indexes: true
+  migrate_constraints: true
+  migrate_funcprocs: true     # best-effort T-SQL conversion
+  migrate_triggers: true      # best-effort
+  migrate_views: true
+  set_sequences: true
+  on_error: continue
+  parallel_workers: 8         # >>> ADJUST
+  batch_size: 25000
+  # ODBC round trips are comparatively expensive; chunking keeps the workers
+  # busy on wide tables.
+  chunk_size: 100000
+  names_case_handling: lower  # >>> ADJUST - "keep" preserves MixedCase names
+  varchar_to_text_length: 4000
+  char_to_text_length: 255
+  uuid_default_function: gen_random_uuid()    # for NEWID() defaults
+  required_extensions:
+    - pgcrypto
+  validate_objects: retry
+
+include_tables: all
+exclude_tables:               # >>> ADJUST
+include_views: all
+exclude_views:
+  - "sys*"                    # never migrate the system views
+include_funcprocs: all
+exclude_funcprocs:
+
+# T-SQL defaults are wrapped in parentheses and use their own functions.
+default_values_substitution:
+  - ["", "", "getdate()", "current_timestamp"]
+  - ["", "", "sysdatetime()", "current_timestamp"]
+  - ["", "", "newid()", "gen_random_uuid()"]
+  - ["", "bit", "0", "false"]
+  - ["", "bit", "1", "true"]
+
+data_types_substitution:
+  # - ["", "", "uniqueidentifier", "UUID", '']
+  # - ["", "", "datetime2", "TIMESTAMP", '']
+  # - ["", "", "money", "NUMERIC(19,4)", '']
+
+# Three-part / four-part names of a linked server cannot be resolved in
+# PostgreSQL - rewrite them to something local.
+# remote_objects_substitution:
+#   - ["remotedb:dbo.table1", "remote_db.table1"]     # >>> ADJUST
+
+summary:
+  top_migrated_tables: 10
+  top_mismatched_tables: 10
+  top_longest_batches: 15

@@ -1,4 +1,5 @@
-include docs/configs/config_all_options_reference.yaml
+include docs/configs/*.yaml
+include docs/configs/README.md
 include *.md
 include COPYING
 include docs/images/architecture.jpg

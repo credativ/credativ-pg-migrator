@@ -1,0 +1,107 @@
+# ============================================================================
+# credativ-pg-migrator - SAP SQL Anywhere -> PostgreSQL
+# ============================================================================
+# MUST ADJUST
+#   - migrator / source / target connection details
+#   - source.schema - usually "DBA", UPPER CASE
+#
+# Prerequisite:
+#   pip install sqlanydb        (imported when the connector loads)
+#   plus the SQL Anywhere client libraries on LD_LIBRARY_PATH
+#
+# This is currently the least complete of the live connectors. NOT migrated:
+# functions, procedures and triggers (placeholders only), CHECK constraints,
+# foreign-key ON DELETE actions, sequences, user-defined types, domains,
+# generated columns and comments. Plan a manual pass for those.
+# ============================================================================
+
+workflow: "standard"
+
+pre_migration_analysis:
+  top_n_tables:
+    by_rows: 10
+    by_size: 10
+    by_columns: 10
+    by_indexes: 10
+    by_constraints: 10
+
+# The client libraries usually need this. Remove it if they are already on the
+# system search path.
+# env_variables:
+#   - name: "LD_LIBRARY_PATH"
+#     value: "/opt/sqlanywhere17/lib64"     # >>> ADJUST
+
+migrator:
+  type: "postgresql"
+  host: "localhost"             # >>> ADJUST
+  port: 5432                    # >>> ADJUST
+  username: "postgres"          # >>> ADJUST
+  password: "postgres"          # >>> ADJUST
+  database: "anywhere_target"   # >>> ADJUST
+  schema: "migration"
+
+source:
+  type: "sql_anywhere"
+  host: "localhost"             # >>> ADJUST
+  port: 2638                    # >>> ADJUST - 2638 is the default
+  username: "dba"               # >>> ADJUST
+  password: "sql"               # >>> ADJUST
+  database: "app_db"            # >>> ADJUST
+  schema: "DBA"                 # >>> ADJUST - UPPER CASE
+  connectivity: "native"        # "native" (sqlanydb) | "odbc"
+  # odbc:
+  #   driver: "SQL Anywhere 17"                # >>> ADJUST
+
+target:
+  type: "postgresql"
+  host: "localhost"             # >>> ADJUST
+  port: 5432                    # >>> ADJUST
+  username: "postgres"          # >>> ADJUST
+  password: "postgres"          # >>> ADJUST
+  database: "anywhere_target"   # >>> ADJUST
+  schema: "public"              # >>> ADJUST
+  settings:
+    work_mem: '32MB'
+    maintenance_work_mem: '512MB'
+    search_path: "public"       # >>> ADJUST if target.schema is not public
+
+migration:
+  drop_schema: true             # >>> ADJUST
+  drop_tables: true
+  truncate_tables: true
+  create_tables: true
+  migrate_data: true
+  migrate_indexes: true
+  migrate_constraints: true     # primary and foreign keys only
+  migrate_funcprocs: false      # not implemented for SQL Anywhere
+  migrate_triggers: false       # not implemented for SQL Anywhere
+  migrate_views: true           # schema-name replacement only - review the result
+  set_sequences: false          # sequences are not migrated for this source
+  on_error: continue
+  parallel_workers: 8           # >>> ADJUST
+  batch_size: 25000
+  names_case_handling: lower    # >>> ADJUST
+  varchar_to_text_length: 4000
+  char_to_text_length: 255
+  validate_objects: retry
+
+include_tables: all
+exclude_tables:                 # >>> ADJUST
+include_views: all
+exclude_views:
+  - "SYS*"
+include_funcprocs: all
+exclude_funcprocs:
+
+data_types_substitution:
+  # - ["", "", "long varchar", "TEXT", '']
+  # - ["", "", "uniqueidentifier", "UUID", '']
+
+default_values_substitution:
+  # - ["", "", "current timestamp", "current_timestamp"]
+  # - ["", "", "newid()", "gen_random_uuid()"]
+
+summary:
+  top_migrated_tables: 10
+  top_mismatched_tables: 10
+  top_longest_batches: 15

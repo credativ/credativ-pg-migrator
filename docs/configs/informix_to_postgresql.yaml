@@ -1,0 +1,154 @@
+# ============================================================================
+# credativ-pg-migrator - IBM Informix -> PostgreSQL
+# ============================================================================
+# MUST ADJUST
+#   - migrator / source / target connection details
+#   - source.server - the INFORMIXSERVER name. Informix needs BOTH "database"
+#     and "server"; the server is not derivable from host/port.
+#   - source.owner - Informix calls the schema an OWNER. Use "owner", not
+#     "schema" (the migrator accepts either, but only one of them).
+#   - source.jdbc.libraries - paths to YOUR jars
+#   - source.db_locale - must match the locale the database was created with,
+#     otherwise Informix refuses the connection
+#
+# Prerequisites for connectivity: "jdbc"
+#   a JRE plus two jars, e.g. jdbc-4.50.10.1.jar and bson-3.8.0.jar
+# For connectivity: "odbc" the Informix ODBC driver instead.
+#
+# Informix is the most completely converted source: functions, procedures and
+# triggers are fully translated, not best-effort. Views are migrated with
+# schema-name replacement only, so view bodies using Informix-specific syntax
+# need a review afterwards.
+# ============================================================================
+
+workflow: "standard"
+
+pre_migration_analysis:
+  top_n_tables:
+    by_rows: 10
+    by_size: 10
+    by_columns: 10
+    by_indexes: 10
+    by_constraints: 10
+
+migrator:
+  type: "postgresql"
+  host: "localhost"           # >>> ADJUST
+  port: 5432                  # >>> ADJUST
+  username: "postgres"        # >>> ADJUST
+  password: "postgres"        # >>> ADJUST
+  database: "informix_target" # >>> ADJUST
+  schema: "migration"
+
+source:
+  type: "informix"
+  server: "informix"          # >>> ADJUST - INFORMIXSERVER name
+  host: "localhost"           # >>> ADJUST
+  port: 9088                  # >>> ADJUST
+  username: "informix"        # >>> ADJUST
+  password: "password"        # >>> ADJUST
+  database: "app_db"          # >>> ADJUST
+  owner: "informix"           # >>> ADJUST - the schema/owner being migrated
+  connectivity: "jdbc"        # "jdbc" | "odbc" | "native"
+  jdbc:
+    driver: "com.informix.jdbc.IfxDriver"
+    # colon separated classpath   >>> ADJUST
+    libraries: "/usr/share/java/jdbc-4.50.10.1.jar:/usr/share/java/bson-3.8.0.jar"
+  # odbc:
+  #   driver: "IBM INFORMIX ODBC DRIVER"      # >>> ADJUST
+  # Locale of the DATABASE - a mismatch is rejected by the server.
+  db_locale: "en_US.utf8"     # >>> ADJUST
+  client_locale: "en_US.utf8" # >>> ADJUST
+
+  # ------------------------------------------------------------------------
+  # OPTIONAL: data from exported files instead of the live connection.
+  # Informix UNL is the classic dbexport format. The source connection is
+  # still needed for the data model - only the ROWS come from the files.
+  # Delete the whole block to read the data over the connection.
+  # ------------------------------------------------------------------------
+  # data_export:
+  #   format: "UNL"                    # "UNL" | "CSV" | "SQL"
+  #   # {{source_schema}} and {{source_table}} are substituted per table
+  #   file: "/path/to/export/{{source_table}}.unl"          # >>> ADJUST
+  #   delimiter: "|"                   # UNL default is "|", CSV default is ","
+  #   header: false
+  #   # UNL is converted to CSV first; the converted files are written here
+  #   conversion_path: "/path/to/export/converted"          # >>> ADJUST
+  #   clean: false                     # true deletes the converted files afterwards
+  #   workers: 4
+  #   on_missing_data_file: skip       # skip | error
+  #   character_set: "UTF-8"           # >>> ADJUST if the export is not UTF-8
+  #   # CLOB/BLOB columns whose UNL value is a "file,offset,length" reference.
+  #   # Listed as ["table", "column"] pairs; requires migrate_lob_values: true
+  #   lob_columns:
+  #     - ["documents", "content"]                          # >>> ADJUST
+
+target:
+  type: "postgresql"
+  host: "localhost"           # >>> ADJUST
+  port: 5432                  # >>> ADJUST
+  username: "postgres"        # >>> ADJUST
+  password: "postgres"        # >>> ADJUST
+  database: "informix_target" # >>> ADJUST
+  schema: "public"            # >>> ADJUST
+  settings:
+    work_mem: '32MB'
+    maintenance_work_mem: '512MB'
+    search_path: "public"     # >>> ADJUST if target.schema is not public
+
+migration:
+  drop_schema: true           # >>> ADJUST
+  drop_tables: true
+  truncate_tables: true
+  create_tables: true
+  migrate_data: true
+  migrate_indexes: true
+  migrate_constraints: true
+  migrate_funcprocs: true     # fully converted for Informix
+  migrate_triggers: true      # fully converted for Informix
+  migrate_views: true         # schema-name replacement only - review the result
+  set_sequences: true
+  on_error: continue
+  parallel_workers: 8         # >>> ADJUST
+  batch_size: 25000
+  varchar_to_text_length: 4000
+  names_case_handling: lower  # >>> ADJUST
+  # Read LOB values at all. Needed for lob_columns above, and expensive.
+  migrate_lob_values: true
+  validate_objects: retry
+
+  # Pause or stop the migration at a given time - useful when the maintenance
+  # window ends before the data does.
+  # scheduled_actions:
+  #   - name: "pause when the window closes"
+  #     datetime: "2026.08.10 06:00"      # >>> ADJUST
+  #     action: "pause"                   # pause | stop | continue
+
+include_tables: all
+exclude_tables:               # >>> ADJUST
+include_views: all
+exclude_views:
+  - "sys*"                    # Informix system catalog views
+include_funcprocs: all
+exclude_funcprocs:
+
+# Per-table overrides of the global settings. table_name is a name or regex.
+# >>> ADJUST or delete
+table_settings:
+  # - table_name: "big_history"
+  #   batch_size: 5000
+  #   chunk_size: 50000
+  # - table_name: "staging_.*"
+  #   migrate_data: false
+
+data_types_substitution:
+  # - ["", "", "byte", "BYTEA", '']
+  # - ["", "", "datetime year to fraction", "TIMESTAMP", '']
+
+default_values_substitution:
+  # - ["", "", "current year to fraction", "current_timestamp"]
+
+summary:
+  top_migrated_tables: 10
+  top_mismatched_tables: 10
+  top_longest_batches: 15

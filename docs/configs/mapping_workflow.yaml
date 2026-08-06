@@ -1,0 +1,161 @@
+# ============================================================================
+# credativ-pg-migrator - MAPPING workflow (Oracle source in this example)
+# ============================================================================
+# WHAT IT IS FOR: the target schema ALREADY EXISTS - created by an application
+# installer, a different tool or an earlier migration - and only the DATA has
+# to be moved into it. Nothing is created or dropped; the workflow matches
+# source tables and columns to the existing target ones and copies the rows.
+#
+# That is the opposite of the standard workflow, which builds the target from
+# the source. Use it for a staged cut-over, for reloading one schema out of a
+# larger migration, or when the target was normalized/renamed on the way.
+#
+# MUST ADJUST
+#   - migrator / source / target connection details
+#   - the heuristics, so the automatic matching fits YOUR renaming scheme
+#   - mapping.report_filename - read it before you trust the result
+#
+# ALWAYS DO A DRY RUN FIRST and read the mapping report:
+#   credativ-pg-migrator --config mapping_workflow.yaml --dry-run
+# The report lists every matched and unmatched table and column. A wrong match
+# writes data into the wrong column, which no validation can undo.
+# ============================================================================
+
+workflow: "mapping"
+
+pre_migration_analysis:
+  top_n_tables:
+    by_rows: 10
+    by_size: 10
+    by_columns: 10
+    by_indexes: 10
+    by_constraints: 10
+
+migrator:
+  type: "postgresql"
+  host: "localhost"           # >>> ADJUST
+  port: 5432                  # >>> ADJUST
+  username: "postgres"        # >>> ADJUST
+  password: "postgres"        # >>> ADJUST
+  database: "target_db"       # >>> ADJUST
+  schema: "mapping_migration"
+
+# Any supported source engine can be used - this example takes Oracle.
+source:
+  type: "oracle"              # >>> ADJUST to your source engine
+  host: "localhost"           # >>> ADJUST
+  port: 1521                  # >>> ADJUST
+  username: "system"          # >>> ADJUST
+  password: "password"        # >>> ADJUST
+  database: "ORCLPDB1"        # >>> ADJUST
+  schema: "LEGACY_APP"        # >>> ADJUST
+  connectivity: "native"
+
+target:
+  type: "postgresql"
+  host: "localhost"           # >>> ADJUST
+  port: 5432                  # >>> ADJUST
+  username: "postgres"        # >>> ADJUST
+  password: "postgres"        # >>> ADJUST
+  database: "target_db"       # >>> ADJUST
+  schema: "public"            # >>> ADJUST - the EXISTING schema
+  settings:
+    work_mem: '32MB'
+    maintenance_work_mem: '512MB'
+    search_path: "public"     # >>> ADJUST
+
+migration:
+  # The target objects exist - creating or dropping them is exactly what this
+  # workflow must not do. Leave these false.
+  drop_schema: false
+  drop_tables: false
+  create_tables: false
+  truncate_tables: false      # >>> ADJUST - true empties the target tables first
+  migrate_data: true
+  migrate_indexes: false
+  migrate_constraints: false
+  migrate_funcprocs: false
+  migrate_triggers: false
+  migrate_views: false
+  set_sequences: true         # >>> ADJUST - advance target sequences past the data
+  on_error: continue
+  parallel_workers: 8         # >>> ADJUST
+  batch_size: 25000
+
+mapping:
+  # Drop the indexes and non-primary-key constraints of the target before the
+  # load and recreate them afterwards. Much faster for a bulk load, and the
+  # migrator reports whether every one of them came back.
+  suspend_indexes_constraints: true    # >>> ADJUST
+  # >>> ADJUST - the report is the whole point, give it a real path
+  report_filename: "/path/to/mapping_report.md"
+  # What to do when a row already exists in the target:
+  #   skip               leave the target row alone
+  #   merge_keep_target  insert what is missing, keep existing values
+  #   merge_keep_source  insert what is missing, overwrite with source values
+  #   replace            truncate the target table, then insert
+  data_conflict_action: "skip"         # >>> ADJUST
+
+  # How source names are normalized before they are compared to target names.
+  # >>> ADJUST - this is what makes or breaks the automatic matching
+  heuristics:
+    table_normalization_rules:
+      - "lowercase"             # ORACLE_TABLE -> oracle_table
+      - "strip_trailing_numbers" # invoices_2024 -> invoices
+    column_normalization_rules:
+      - "lowercase"
+    # Prefixes removed from column names before comparing, e.g. gov_id -> id
+    column_prefixes_to_strip: ["gov_", "log_"]      # >>> ADJUST
+
+  # Everything the heuristics cannot guess, stated explicitly. Exact names or
+  # a regex with a backreference.
+  # >>> ADJUST or delete
+  # forced_table_mappings:
+  #   - source: "SYS_CONFIG"
+  #     target: "app_config"
+  #   - source_regex: "^LEGACY_(.*)$"
+  #     target: "new_\\1"
+
+  # NOTE: forced_column_mappings is currently only echoed into the mapping
+  # report - it is NOT applied to the column matching. Do not rely on it to
+  # correct a column match; adjust the heuristics or rename in the target.
+  # forced_column_mappings:
+  #   - table: "CUSTOMERS"
+  #     source: "CUST_NO"
+  #     target: "customer_number"
+
+# Per-table override of the conflict action.
+table_settings:
+  - table_name: ".*"
+    data_conflict_action: "skip"      # >>> ADJUST
+  # - table_name: "reference_data"
+  #   data_conflict_action: "replace"
+
+include_tables: all
+exclude_tables:               # >>> ADJUST
+
+# Independent verification after the load. target_copy is optional and lets you
+# compare against a THIRD database (e.g. a reference restore) instead of the
+# source - useful exactly in this workflow, where source and target schemas
+# differ by design.
+validation:
+  workers: 8                  # >>> ADJUST
+  check_row_counts: true
+  check_table_checksums: true
+  check_random_sample: true
+  check_lob_sizes: true
+  random_sample_size: 1000
+  report_filename: "/path/to/validator_report.md"   # >>> ADJUST
+  # target_copy:
+  #   type: "postgresql"
+  #   host: "localhost"       # >>> ADJUST
+  #   port: 5432
+  #   username: "postgres"
+  #   password: "postgres"
+  #   database: "target_db_copy"
+  #   schema: "public"
+
+summary:
+  top_migrated_tables: 10
+  top_mismatched_tables: 10
+  top_longest_batches: 15

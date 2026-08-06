@@ -1284,6 +1284,15 @@ class PostgreSQLConnector(DatabaseConnector):
                 if constraint_type in ('PRIMARY KEY', 'p', 'P'):
                     continue # Primary key is handled in fetch_indexes
 
+                if constraint_type in ('TRIGGER', 't', 'T'):
+                    # A CONSTRAINT TRIGGER is registered in pg_constraint, but it is a trigger -
+                    # there is no ALTER TABLE ... ADD CONSTRAINT syntax for it, and
+                    # pg_get_constraintdef returns only the deferrability
+                    # ('TRIGGER DEFERRABLE INITIALLY DEFERRED'), not a usable definition.
+                    # It is migrated by the triggers migration from pg_get_triggerdef.
+                    self.config_parser.print_log_message('DEBUG', f"postgresql_connector: fetch_constraints: Constraint {constraint_name} is a CONSTRAINT TRIGGER - skipped here, it is created by the triggers migration.")
+                    continue
+
                 if constraint_type in ('FOREIGN KEY', 'f', 'F'):
                      constraints[order_num] = {
                          'constraint_name': constraint_name,

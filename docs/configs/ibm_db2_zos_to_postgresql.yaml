@@ -1,0 +1,141 @@
+# ============================================================================
+# credativ-pg-migrator - IBM Db2 for z/OS -> PostgreSQL   (OFFLINE, DDL + files)
+# ============================================================================
+# There is normally no network route to a mainframe, so this connector does not
+# connect at all: the DELIVERY is the source. You receive
+#   - DDL text dumps of every object          -> source.ddl.path
+#   - UNLOAD DELIMITED data files             -> source.data_export.file
+# and the migrator parses the first and loads the second. Hence
+# connectivity: "ddl" and no host / port / username / password anywhere in the
+# source block.
+#
+# MUST ADJUST
+#   - migrator / target connection details
+#   - source.schema - the SQL ID the objects belong to, UPPER CASE. On z/OS a
+#     DATABASE is only a container for tablespaces, it is NOT the schema.
+#   - source.ddl.path - directory, file mask or single file with the DDL
+#   - source.data_export.file - the unload files, with a placeholder
+#   - source.data_export.character_set - a mainframe unload is usually EBCDIC
+#
+# NO PREREQUISITES - nothing has to be installed, everything is read from disk.
+# ============================================================================
+
+workflow: "standard"
+
+# All zeros: the analysis asks the SOURCE database for row counts and sizes,
+# and there is no source database to ask.
+pre_migration_analysis:
+  top_n_tables:
+    by_rows: 0
+    by_size: 0
+    by_columns: 0
+    by_indexes: 0
+    by_constraints: 0
+
+migrator:
+  type: "postgresql"
+  host: "localhost"           # >>> ADJUST
+  port: 5432                  # >>> ADJUST
+  username: "postgres"        # >>> ADJUST
+  password: "postgres"        # >>> ADJUST
+  database: "db2zos_target"   # >>> ADJUST
+  schema: "migration"
+
+source:
+  type: "ibm_db2_zos"
+  connectivity: "ddl"         # the only mode for this connector
+  schema: "APPSCHEMA"         # >>> ADJUST - the SQL ID, UPPER CASE
+  ddl:
+    # A directory, a mask (/path/*.sql) or one single file. Relative paths are
+    # resolved against the directory of THIS config file.
+    path: "/path/to/delivery/ddl"                        # >>> ADJUST
+  data_export:
+    format: "CSV"             # UNLOAD DELIMITED output is CSV shaped
+    # Placeholders substituted per table. The case of the placeholder is the
+    # case used for substitution: {{SOURCE_TABLE_NAME}} produces CUSTOMERS.csv,
+    # {{source_table_name}} produces customers.csv. Mainframe unloads are
+    # normally UPPER CASE even when names_case_handling folds the target names.
+    file: "/path/to/delivery/data/{{SOURCE_TABLE_NAME}}.csv"   # >>> ADJUST
+    # Non-UTF-8 files are transcoded into this directory first.
+    conversion_path: "/path/to/delivery/data/converted"        # >>> ADJUST
+    delimiter: ","
+    header: false             # UNLOAD DELIMITED never writes a header row
+    # >>> ADJUST - THE critical setting for a mainframe delivery.
+    # cp037 is EBCDIC US/Canada; cp273 German, cp500 international, and so on.
+    # Check a file before you start:
+    #   iconv -f IBM-037 -t UTF-8 data/CUSTOMERS.csv | head
+    character_set: "cp037"
+    clean: false              # true removes the converted files afterwards
+    workers: 4                # parallel conversion workers
+    on_missing_data_file: skip   # skip = create the empty table | error = stop
+
+target:
+  type: "postgresql"
+  host: "localhost"           # >>> ADJUST
+  port: 5432                  # >>> ADJUST
+  username: "postgres"        # >>> ADJUST
+  password: "postgres"        # >>> ADJUST
+  database: "db2zos_target"   # >>> ADJUST
+  schema: "public"            # >>> ADJUST
+  settings:
+    work_mem: '32MB'
+    maintenance_work_mem: '512MB'
+    search_path: "public"     # >>> ADJUST if target.schema is not public
+
+migration:
+  drop_schema: true           # >>> ADJUST
+  drop_tables: true
+  truncate_tables: true
+  create_tables: true
+  migrate_data: true
+  migrate_indexes: true
+  migrate_constraints: true
+  migrate_funcprocs: true     # best-effort conversion of the DDL routines
+  migrate_triggers: true      # best-effort
+  migrate_views: true
+  set_sequences: true
+  on_error: continue
+  parallel_workers: 8         # >>> ADJUST
+  batch_size: 2500
+  chunk_size: 25000
+  names_case_handling: lower  # >>> ADJUST
+  varchar_to_text_length: 4000
+  char_to_text_length: 255
+  # An ALIAS in the DDL is an additional NAME for a table. false migrates the
+  # tables under their real names; true uses the alias as the target name -
+  # which is what you want when the delivery ships short 8-character aliases
+  # and the aliases are the names the application uses.
+  use_aliases_as_target_names: false   # >>> ADJUST
+  # A z/OS LOB unload usually contains a FILE REFERENCE, not the bytes. The
+  # migrator cannot dereference the z/OS LOBF form yet, so leave this false
+  # unless your LOB values really are inline.
+  migrate_lob_values: false
+  validate_objects: retry
+
+include_tables: all
+exclude_tables:               # >>> ADJUST
+include_views: all
+exclude_views:
+include_funcprocs: all
+exclude_funcprocs:
+
+# Per-table exceptions to the data_export settings above - one table delivered
+# with a header row, another one in a different code page.
+# >>> ADJUST or delete
+table_settings:
+  # - table_name: "PRODUCT_CATALOG"
+  #   header: true
+  # - table_name: "LOCAL_NAMES"
+  #   character_set: "cp273"
+
+data_types_substitution:
+  # - ["", "", "GRAPHIC", "TEXT", '']
+  # - ["", "", "ROWID", "BYTEA", '']
+
+default_values_substitution:
+  # - ["", "", "CURRENT TIMESTAMP", "current_timestamp"]
+
+summary:
+  top_migrated_tables: 10
+  top_mismatched_tables: 10
+  top_longest_batches: 15

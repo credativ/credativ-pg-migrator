@@ -33,12 +33,26 @@ class PostgreSQLConnector(DatabaseConnector):
         self.config_parser = config_parser
         self.source_or_target = source_or_target
         self.logger = MigratorLogger(self.config_parser.get_log_file()).logger
+        # Names of collations usable in this database - filled on first use, see
+        # get_existing_collation_names()
+        self.existing_collation_names = None
         self.session_settings = self.prepare_session_settings()
 
     def connect(self):
         connection_string = self.config_parser.get_connect_string(self.source_or_target)
         self.connection = psycopg2.connect(connection_string, application_name=MigratorConstants.get_application_name())
         self.connection.autocommit = True
+        self._register_type_casters()
+
+    def _register_type_casters(self):
+        try:
+            def cast_str(val, cur):
+                return val
+            oids = (1082, 1114, 1184, 1083, 1266, 1186)
+            caster = psycopg2.extensions.new_type(oids, "DATE_STR_CASTER", cast_str)
+            psycopg2.extensions.register_type(caster, self.connection)
+        except Exception:
+            pass
 
     def disconnect(self):
         try:
@@ -91,6 +105,162 @@ class PostgreSQLConnector(DatabaseConnector):
             err_msg = str(e).strip()
             self.config_parser.print_log_message('WARNING', f"postgresql_connector: check_and_create_extension: Failed to create extension '{ext_clean}': {err_msg}")
             return False, f"Required PostgreSQL extension '{ext_clean}' is missing and CREATE EXTENSION failed: {err_msg}"
+
+    def fetch_installed_extensions(self):
+        """
+        Extensions installed in this database. Returns dict: name -> {'version', 'schema'}.
+        """
+        extensions = {}
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute("""
+                SELECT e.extname, e.extversion, n.nspname
+                FROM pg_catalog.pg_extension e
+                JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace
+                ORDER BY e.extname
+            """)
+            for name, version, schema in cursor.fetchall():
+                extensions[name] = {'version': version, 'schema': schema}
+            cursor.close()
+            self.disconnect()
+        except Exception as e:
+            self.config_parser.print_log_message('WARNING', f"postgresql_connector: fetch_installed_extensions: Cannot read installed extensions: {e}")
+        return extensions
+
+    def fetch_available_extensions(self):
+        """
+        Extensions which can be installed in this database - the control files present on the
+        server. Returns dict: name -> default version.
+        """
+        extensions = {}
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute("SELECT name, default_version FROM pg_catalog.pg_available_extensions ORDER BY name")
+            for name, default_version in cursor.fetchall():
+                extensions[name] = default_version
+            cursor.close()
+            self.disconnect()
+        except Exception as e:
+            self.config_parser.print_log_message('WARNING', f"postgresql_connector: fetch_available_extensions: Cannot read available extensions: {e}")
+        return extensions
+
+    def fetch_extension_dependencies(self, settings):
+        """
+        Which extensions the objects selected for migration actually depend on.
+
+        The dependencies are not guessed from the SQL text - they are read from pg_depend,
+        which records every type, function, operator, operator class and text search
+        dictionary an object refers to. An object is attributed to an extension when it is a
+        member of one (a pg_depend entry with deptype = 'e').
+
+        settings:
+            source_schema_name - schema being migrated
+            table_names        - list of table names selected for migration
+            migrate_indexes / migrate_constraints / migrate_triggers /
+            migrate_views / migrate_funcprocs - booleans from the configuration
+
+        Returns dict: extension name -> sorted list of objects requiring it.
+        """
+        schema = settings['source_schema_name']
+        table_names = list(settings.get('table_names') or [])
+        query = ''
+        dependencies = {}
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            query = """
+                WITH tabs AS (
+                    SELECT c.oid
+                    FROM pg_catalog.pg_class c
+                    WHERE c.relnamespace = to_regnamespace(%(schema)s)
+                      AND c.relkind IN ('r', 'p')
+                      AND c.relname = ANY(%(tables)s)
+                ),
+                objects AS (
+                    SELECT 'pg_class'::regclass AS classid, t.oid AS objid,
+                           'table ' || t.oid::regclass::text AS required_by
+                    FROM tabs t
+                    UNION ALL
+                    SELECT 'pg_attrdef'::regclass, ad.oid,
+                           'column ' || ad.adrelid::regclass::text || '.' || a.attname
+                             || CASE WHEN a.attgenerated <> '' THEN ' (generated)' ELSE ' (default)' END
+                    FROM pg_catalog.pg_attrdef ad
+                    JOIN tabs t ON t.oid = ad.adrelid
+                    JOIN pg_catalog.pg_attribute a ON a.attrelid = ad.adrelid AND a.attnum = ad.adnum
+                    UNION ALL
+                    SELECT 'pg_class'::regclass, i.indexrelid,
+                           'index ' || i.indexrelid::regclass::text
+                    FROM pg_catalog.pg_index i JOIN tabs t ON t.oid = i.indrelid
+                    WHERE %(migrate_indexes)s
+                    UNION ALL
+                    SELECT 'pg_constraint'::regclass, con.oid,
+                           'constraint ' || con.conname || ' on ' || con.conrelid::regclass::text
+                    FROM pg_catalog.pg_constraint con JOIN tabs t ON t.oid = con.conrelid
+                    WHERE %(migrate_constraints)s
+                    UNION ALL
+                    SELECT 'pg_trigger'::regclass, tg.oid,
+                           'trigger ' || tg.tgname || ' on ' || tg.tgrelid::regclass::text
+                    FROM pg_catalog.pg_trigger tg JOIN tabs t ON t.oid = tg.tgrelid
+                    WHERE NOT tg.tgisinternal AND %(migrate_triggers)s
+                    UNION ALL
+                    SELECT 'pg_rewrite'::regclass, r.oid,
+                           'view ' || r.ev_class::regclass::text
+                    FROM pg_catalog.pg_rewrite r
+                    JOIN pg_catalog.pg_class v ON v.oid = r.ev_class
+                    WHERE v.relnamespace = to_regnamespace(%(schema)s)
+                      AND v.relkind IN ('v', 'm') AND %(migrate_views)s
+                    UNION ALL
+                    SELECT 'pg_class'::regclass, v.oid,
+                           'view ' || v.oid::regclass::text
+                    FROM pg_catalog.pg_class v
+                    WHERE v.relnamespace = to_regnamespace(%(schema)s)
+                      AND v.relkind IN ('v', 'm') AND %(migrate_views)s
+                    UNION ALL
+                    SELECT 'pg_proc'::regclass, p.oid,
+                           'function ' || p.oid::regprocedure::text
+                    FROM pg_catalog.pg_proc p
+                    WHERE p.pronamespace = to_regnamespace(%(schema)s) AND %(migrate_funcprocs)s
+                    UNION ALL
+                    SELECT 'pg_ts_config'::regclass, cfg.oid,
+                           'text search configuration ' || cfg.cfgname
+                    FROM pg_catalog.pg_ts_config cfg
+                    WHERE cfg.cfgnamespace = to_regnamespace(%(schema)s)
+                    UNION ALL
+                    SELECT 'pg_ts_dict'::regclass, dict.oid,
+                           'text search dictionary ' || dict.dictname
+                    FROM pg_catalog.pg_ts_dict dict
+                    WHERE dict.dictnamespace = to_regnamespace(%(schema)s)
+                )
+                SELECT e.extname, o.required_by
+                FROM objects o
+                JOIN pg_catalog.pg_depend d ON d.classid = o.classid AND d.objid = o.objid
+                JOIN pg_catalog.pg_depend ed ON ed.classid = d.refclassid AND ed.objid = d.refobjid
+                    AND ed.refclassid = 'pg_extension'::regclass AND ed.deptype = 'e'
+                JOIN pg_catalog.pg_extension e ON e.oid = ed.refobjid
+                WHERE e.extname <> 'plpgsql'
+                GROUP BY 1, 2
+                ORDER BY 1, 2
+            """
+            cursor.execute(query, {
+                'schema': schema,
+                'tables': table_names,
+                'migrate_indexes': bool(settings.get('migrate_indexes', True)),
+                'migrate_constraints': bool(settings.get('migrate_constraints', True)),
+                'migrate_triggers': bool(settings.get('migrate_triggers', True)),
+                'migrate_views': bool(settings.get('migrate_views', True)),
+                'migrate_funcprocs': bool(settings.get('migrate_funcprocs', True)),
+            })
+            for extension_name, required_by in cursor.fetchall():
+                dependencies.setdefault(extension_name, []).append(required_by)
+            cursor.close()
+            self.disconnect()
+            return dependencies
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"postgresql_connector: fetch_extension_dependencies: Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
+            raise
 
     def fetch_table_names(self, schema: str = 'public'):
         query = f"""
@@ -265,7 +435,7 @@ class PostgreSQLConnector(DatabaseConnector):
         table_name = settings['table_name']
         result = {}
         try:
-            query =f"""
+            query = f"""
                     SELECT
                         c.ordinal_position,
                         c.column_name,
@@ -279,13 +449,25 @@ class PostgreSQLConnector(DatabaseConnector):
                         u.udt_schema,
                         u.udt_name,
                         col_description((c.table_schema||'.'||c.table_name)::regclass::oid, c.ordinal_position) as column_comment,
-                        is_generated
+                        is_generated,
+                        pg_catalog.format_type(a.atttypid, a.atttypmod) as format_type,
+                        c.collation_schema,
+                        c.collation_name,
+                        a.attgenerated,
+                        CASE WHEN a.attgenerated <> ''
+                             THEN pg_catalog.pg_get_expr(ad.adbin, ad.adrelid)
+                        END as generation_expression
                     FROM information_schema.columns c
+                    JOIN pg_namespace n ON c.table_schema = n.nspname
+                    JOIN pg_class cl ON cl.relname = c.table_name AND cl.relnamespace = n.oid
+                    JOIN pg_attribute a ON a.attrelid = cl.oid AND a.attname = c.column_name AND NOT a.attisdropped
+                    LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum
                     LEFT JOIN information_schema.column_udt_usage u ON c.table_schema = u.table_schema
                         AND c.table_name = u.table_name
                         AND c.column_name = u.column_name
                         AND c.udt_name = u.udt_name
                     WHERE c.table_name = '{table_name}' AND c.table_schema = '{table_schema}'
+                    ORDER BY c.ordinal_position
                 """
             self.connect()
             cursor = self.connection.cursor()
@@ -305,13 +487,26 @@ class PostgreSQLConnector(DatabaseConnector):
                 udt_name = row[10]
                 column_comment = row[11]
                 is_generated = row[12]
-                column_type = data_type
-                if self.is_string_type(data_type) and character_maximum_length:
-                    column_type = f"{data_type}({character_maximum_length})"
-                elif self.is_numeric_type(data_type) and numeric_precision and numeric_scale:
-                    column_type = f"{data_type}({numeric_precision},{numeric_scale})"
-                elif self.is_numeric_type(data_type) and numeric_precision and not numeric_scale:
-                    column_type = f"{data_type}({numeric_precision})"
+                format_type = row[13] if len(row) > 13 and row[13] else ''
+                collation_schema = row[14] if len(row) > 14 else None
+                collation_name = row[15] if len(row) > 15 else None
+                # 's' = stored, 'v' = virtual (PostgreSQL 18+), '' = ordinary column.
+                # information_schema.columns.is_generated reports only ALWAYS / NEVER and
+                # carries no expression, so the catalog is used instead.
+                attgenerated = row[16] if len(row) > 16 else ''
+                generation_expression = row[17] if len(row) > 17 else None
+
+                if data_type.upper() == 'ARRAY' or (format_type and '[]' in format_type):
+                    data_type = format_type if format_type else data_type
+                    column_type = data_type
+                else:
+                    column_type = data_type
+                    if (self.is_string_type(data_type) or data_type.upper() in ('BIT', 'VARBIT', 'BIT VARYING')) and character_maximum_length:
+                        column_type = f"{data_type}({character_maximum_length})"
+                    elif self.is_numeric_type(data_type) and numeric_precision and numeric_scale:
+                        column_type = f"{data_type}({numeric_precision},{numeric_scale})"
+                    elif self.is_numeric_type(data_type) and numeric_precision and not numeric_scale:
+                        column_type = f"{data_type}({numeric_precision})"
                 result[ordinal_position] = {
                     'column_name': column_name,
                     'is_nullable': is_nullable,
@@ -327,8 +522,12 @@ class PostgreSQLConnector(DatabaseConnector):
                     'udt_schema': udt_schema,
                     'udt_name': udt_name,
                     'column_comment': column_comment,
-                    'is_generated_virtual': 'NO',
-                    'is_generated_stored': is_generated,
+                    'is_generated_virtual': 'YES' if attgenerated == 'v' else 'NO',
+                    'is_generated_stored': 'YES' if attgenerated == 's' else 'NO',
+                    'generation_expression': generation_expression or '',
+                    'stripped_generation_expression': generation_expression or '',
+                    'collation_schema': collation_schema,
+                    'collation_name': collation_name,
                 }
             cursor.close()
             self.disconnect()
@@ -413,6 +612,10 @@ class PostgreSQLConnector(DatabaseConnector):
         def convert_operators(text):
             # Concatenation is '+' in some source engines, '||' in PostgreSQL. Applied only
             # outside string literals, and only for string results (the same guard as before).
+            # A PostgreSQL expression already uses '||' and its '+' really is an addition,
+            # which must not be rewritten.
+            if self.config_parser.get_source_db_type() == 'postgresql':
+                return text
             return text.replace('+', '||') if self.is_string_type(column_data_type) else text
 
         converted_expression = self.convert_expression_identifiers(
@@ -455,6 +658,180 @@ class PostgreSQLConnector(DatabaseConnector):
         parts.append(''.join(current))
         return [part for part in parts if part.strip()]
 
+    def split_leading_identifier(self, text):
+        """
+        Split the leading - possibly schema qualified and quoted - identifier off the text.
+        Returns tuple (identifier, rest). Quoted parts are kept as they are, so names
+        containing dots (e.g. "en_US.utf8") survive untouched.
+        """
+        position = 0
+        length = len(text)
+        token = ''
+        while position < length:
+            char = text[position]
+            if char == '"':
+                end = position + 1
+                while end < length:
+                    if text[end] == '"':
+                        if end + 1 < length and text[end + 1] == '"':
+                            end += 2
+                            continue
+                        break
+                    end += 1
+                token += text[position:min(end + 1, length)]
+                position = end + 1
+            elif char.isspace():
+                break
+            else:
+                start = position
+                while position < length and not text[position].isspace() and text[position] != '.':
+                    position += 1
+                token += text[start:position]
+            if position < length and text[position] == '.':
+                token += '.'
+                position += 1
+                continue
+            break
+        return token, text[position:].strip()
+
+    def parse_identifier_parts(self, identifier):
+        """ Split a qualified identifier into its parts and remove the quoting. """
+        parts = []
+        current = ''
+        in_quotes = False
+        position = 0
+        while position < len(identifier):
+            char = identifier[position]
+            if char == '"':
+                if in_quotes and position + 1 < len(identifier) and identifier[position + 1] == '"':
+                    current += '"'
+                    position += 2
+                    continue
+                in_quotes = not in_quotes
+                position += 1
+                continue
+            if char == '.' and not in_quotes:
+                parts.append(current)
+                current = ''
+                position += 1
+                continue
+            current += char
+            position += 1
+        parts.append(current)
+        return [part.strip() for part in parts]
+
+    def qualify_text_search_references(self, sql, text_search_objects):
+        """
+        Point '<name>'::regconfig / '<name>'::regdictionary literals at the objects
+        recreated in the target schema.
+
+        These references live inside a string literal, so they cannot be schema qualified
+        by rewriting identifiers - and the source does not even hand them over qualified:
+        pg_get_viewdef() and pg_get_expr() print the bare name whenever the object is
+        visible in the search_path of the source. Left as they are, they would be resolved
+        against the search_path of the target session, which normally does not contain the
+        target schema of the migration.
+        Names which were not migrated (built-in configurations like pg_catalog.english)
+        are left untouched.
+        """
+        if not sql or not text_search_objects:
+            return sql
+
+        def replace_reference(match):
+            raw_name = match.group('name')
+            cast = match.group('cast')
+            parts = self.parse_identifier_parts(raw_name)
+            object_name = parts[-1]
+            mapped_object = text_search_objects.get(object_name)
+            if not mapped_object:
+                return match.group(0)
+            target_schema = mapped_object['target_schema_name']
+            target_name = mapped_object['target_object_name']
+            return f"'{self.quote_identifier_for_literal(target_schema)}.{self.quote_identifier_for_literal(target_name)}'::{cast}"
+
+        return re.sub(
+            r"'(?P<name>(?:[^']|'')+)'::(?P<cast>regconfig|regdictionary)\b",
+            replace_reference, sql, flags=re.IGNORECASE)
+
+    def quote_identifier_for_literal(self, name):
+        """
+        Quote an identifier which is part of an object name inside a string literal
+        (e.g. '"My Schema"."My Config"'::regconfig). Simple lower case names need no quoting.
+        """
+        if re.fullmatch(r'[a-z_][a-z0-9_$]*', name or '') and name not in self.RESERVED_IDENTIFIERS:
+            return name
+        return '"' + (name or '').replace('"', '""') + '"'
+
+    # Keywords which must stay quoted when they are used as an object name
+    RESERVED_IDENTIFIERS = frozenset({'default', 'simple', 'all', 'analyse', 'analyze', 'and',
+                                      'any', 'array', 'as', 'asc', 'both', 'case', 'cast',
+                                      'check', 'collate', 'column', 'constraint', 'create',
+                                      'current_date', 'current_time', 'current_timestamp',
+                                      'current_user', 'desc', 'distinct', 'do', 'else', 'end',
+                                      'except', 'false', 'for', 'foreign', 'from', 'grant',
+                                      'group', 'having', 'in', 'initially', 'intersect', 'into',
+                                      'leading', 'limit', 'localtime', 'localtimestamp', 'not',
+                                      'null', 'offset', 'on', 'only', 'or', 'order', 'placing',
+                                      'primary', 'references', 'returning', 'select', 'session_user',
+                                      'some', 'symmetric', 'table', 'then', 'to', 'trailing',
+                                      'true', 'union', 'unique', 'user', 'using', 'variadic',
+                                      'when', 'where', 'window', 'with'})
+
+    def get_existing_collation_names(self):
+        """
+        Names of collations which already exist in this database and are usable with its
+        encoding - built-in ones (C, POSIX) and those provided by the operating system / ICU.
+        """
+        if self.existing_collation_names is None:
+            self.existing_collation_names = set()
+            # This runs in the middle of the DDL generation - a connection opened by the
+            # caller must stay open, only a connection opened here is closed again.
+            opened_here = self.connection is None or self.connection.closed
+            try:
+                if opened_here:
+                    self.connect()
+                cursor = self.connection.cursor()
+                cursor.execute("""
+                    SELECT collname FROM pg_catalog.pg_collation
+                    WHERE collencoding IN (-1, pg_char_to_encoding(pg_catalog.current_setting('server_encoding')))
+                """)
+                self.existing_collation_names = {row[0] for row in cursor.fetchall()}
+                cursor.close()
+                if opened_here:
+                    self.disconnect()
+            except Exception as e:
+                self.config_parser.print_log_message('WARNING', f"postgresql_connector: get_existing_collation_names: Cannot read collations of the database: {e}")
+        return self.existing_collation_names
+
+    def get_collate_clause(self, raw_collation, user_collations):
+        """
+        Build the COLLATE clause for the target database.
+        Collations migrated together with the schema are referenced with the target schema -
+        in the source they were often unqualified and resolved through the search_path,
+        which does not contain the target schema during the migration.
+        Built-in collations (C, POSIX, "en_US.utf8", ...) are kept as they are.
+        """
+        collation_parts = self.parse_identifier_parts(raw_collation)
+        collation_name = collation_parts[-1]
+        mapped_collation = (user_collations or {}).get(collation_name)
+        if mapped_collation:
+            return f''' COLLATE "{mapped_collation['target_schema_name']}"."{mapped_collation['target_collation_name']}"'''
+        existing_collations = self.get_existing_collation_names()
+        if existing_collations and collation_name not in existing_collations:
+            # Operating system / ICU collations are not migrated, and collations of other
+            # engines (utf8mb4_general_ci, Latin1_General_CI_AS, ...) have no counterpart
+            # here at all. When the target cannot provide the collation, the default
+            # collation is used instead of failing the whole object.
+            self.config_parser.print_log_message('WARNING', f"postgresql_connector: get_collate_clause: Collation {collation_name} does not exist in the target database - the reference is dropped and the default collation is used.")
+            return ''
+        converted_parts = []
+        for part in collation_parts:
+            # Names of built-in collations (C, POSIX, en_US.utf8, ...) are case sensitive
+            # and must not be touched by the configured name case handling.
+            converted = part if self.config_parser.get_source_db_type() == 'postgresql' else self.config_parser.convert_names_case(part)
+            converted_parts.append(f'"{converted}"' if converted else f'"{part}"')
+        return f' COLLATE {".".join(converted_parts)}'
+
     def expression_is_parenthesized(self, expression):
         """ True when the whole expression is already wrapped in one pair of parentheses. """
         if not expression.startswith('(') or not expression.endswith(')'):
@@ -486,6 +863,8 @@ class PostgreSQLConnector(DatabaseConnector):
         # source_columns = settings['source_columns']
         converted = settings['target_columns']
         migrator_tables = settings['migrator_tables']
+        user_collations = settings.get('user_collations') or {}
+        text_search_objects = settings.get('text_search_objects') or {}
         create_table_sql = ""
         create_table_sql_parts = []
 
@@ -632,7 +1011,7 @@ class PostgreSQLConnector(DatabaseConnector):
                 create_column_sql = f""""{column_name}" {altered_data_type}"""
                 self.config_parser.print_log_message('DEBUG', f"postgresql_connector: get_create_table_sql: Column {column_name} is NUMBER with precision 19, scale 0, altered data type to {altered_data_type}")
             else:
-                if (character_maximum_length != '' and 'CHAR' in column_data_type):
+                if (character_maximum_length != '' and ('CHAR' in column_data_type or 'BIT' in column_data_type)):
                     create_column_sql = f""""{column_name}" {column_data_type}({character_maximum_length})"""
                 elif self.is_numeric_type(column_data_type) and column_data_type in ('DECIMAL', 'NUMERIC'):
                     if numeric_precision not in (None, '') and numeric_scale not in (None, ''):
@@ -651,6 +1030,12 @@ class PostgreSQLConnector(DatabaseConnector):
             if altered_data_type != '':
                 column_data_type = altered_data_type
 
+            # Column collation - only collatable (string) columns can carry one, and only
+            # when the column does not use the database default collation.
+            column_collation = column_info.get('collation_name')
+            if column_collation and altered_data_type == '':
+                create_column_sql += self.get_collate_clause(f'"{column_collation}"', user_collations)
+
             if nullable_string != '':
                 create_column_sql += f""" {nullable_string}"""
 
@@ -660,8 +1045,20 @@ class PostgreSQLConnector(DatabaseConnector):
             if column_info['is_generated_virtual'] == 'YES' or column_info['is_generated_stored'] == 'YES':
                 generated_column_expression = self.convert_generation_expression(
                     column_info['stripped_generation_expression'], converted, column_data_type)
+                generated_column_expression = self.qualify_text_search_references(
+                    generated_column_expression, text_search_objects)
                 if generated_column_expression:
-                    create_column_sql += f" GENERATED ALWAYS AS {generated_column_expression} STORED"
+                    # VIRTUAL generated columns exist since PostgreSQL 18. On an older target
+                    # the column is created as STORED - the values are the same, it only costs
+                    # storage instead of computing time.
+                    storage_kind = 'STORED'
+                    if column_info['is_generated_virtual'] == 'YES' and column_info['is_generated_stored'] != 'YES':
+                        target_version = self.get_server_version_num()
+                        if target_version is None or target_version >= 180000:
+                            storage_kind = 'VIRTUAL'
+                        else:
+                            self.config_parser.print_log_message('WARNING', f"postgresql_connector: get_create_table_sql: Column {column_name} is a VIRTUAL generated column, which the target database does not support - it is created as STORED.")
+                    create_column_sql += f" GENERATED ALWAYS AS {generated_column_expression} {storage_kind}"
                 else:
                     # Without an expression the column cannot be generated - creating it as an
                     # ordinary column is better than emitting "GENERATED ALWAYS AS  STORED".
@@ -719,25 +1116,28 @@ class PostgreSQLConnector(DatabaseConnector):
                     # value which already is a complete string literal ('ACTIVE', 'it''s')
                     # must be used as it is - quoting it again would break embedded quotes
                     default_is_string_literal = re.fullmatch(r"'(?:[^']|'')*'", column_default) is not None
-                    if (('CHAR' in column_data_type or column_data_type in ('TEXT'))
-                        and (default_is_expression or default_is_string_literal)):
-                        # default value is here NOT quoted
+                    source_db_type = self.config_parser.get_source_db_type()
+                    if default_is_expression or default_is_string_literal:
                         create_column_sql += f""" DEFAULT {column_default}"""
                     elif 'CHAR' in column_data_type or column_data_type in ('TEXT'):
                         # here we must quote the default value
                         escaped_default = column_default.replace("'", "''")
                         create_column_sql += f""" DEFAULT '{escaped_default}'"""
-                    elif column_data_type in ('BOOLEAN', 'BIT'):
-                        if column_default.lower() in ('0', '(0)', 'false'):
+                    elif column_data_type in ('BOOLEAN', 'BOOL') or (source_db_type != 'postgresql' and column_data_type == 'BIT'):
+                        clean_default = column_default.lower().strip()
+                        if clean_default in ('0', '(0)', 'false', "b'0'"):
                             create_column_sql += """ DEFAULT FALSE"""
-                        elif column_default.lower() in ('1', '(1)', 'true'):
+                        elif clean_default in ('1', '(1)', 'true', "b'1'"):
                             create_column_sql += """ DEFAULT TRUE"""
                         else:
-                            create_column_sql += f""" DEFAULT {column_default}::BOOLEAN"""
+                            if source_db_type != 'postgresql':
+                                create_column_sql += f""" DEFAULT {column_default}::BOOLEAN"""
+                            else:
+                                create_column_sql += f""" DEFAULT {column_default}"""
                     elif column_data_type in ('BYTEA'):
                         create_column_sql += f""" DEFAULT '{column_default}'::BYTEA"""
                     else:
-                        create_column_sql += f" DEFAULT {column_default}::{column_data_type}"
+                        create_column_sql += f" DEFAULT {column_default}"
 
             if domain_name:
                 domain_details = migrator_tables.get_domain_details({'source_domain_name': domain_name})
@@ -785,6 +1185,127 @@ class PostgreSQLConnector(DatabaseConnector):
         numeric_types = ['BIGINT', 'INTEGER', 'INT', 'TINYINT', 'SMALLINT', 'FLOAT', 'DOUBLE PRECISION', 'DECIMAL', 'NUMERIC']
         return column_type.upper() in numeric_types
 
+    def extract_index_key_list(self, index_sql):
+        """
+        Return the key list of a CREATE INDEX statement - everything between the parentheses
+        which follow the access method.
+
+        The parentheses have to be counted, they cannot be matched with a regular expression:
+        the key of a functional index is an expression of its own (`lower(company_name)`,
+        `lower((email)::text)`), and stopping at the first closing parenthesis truncates it.
+        What follows the key list (`INCLUDE (...)`, `WITH (...)`, `WHERE ...`) is not part of
+        the result.
+        """
+        if not index_sql:
+            return ''
+
+        start = None
+        using_match = re.search(r'\b(?i:USING)\s+[a-zA-Z0-9_]+\s*\(', index_sql)
+        if using_match:
+            start = using_match.end() - 1
+        else:
+            # An index definition without the USING clause - take the first parenthesis
+            # behind the table name.
+            on_match = re.search(r'\b(?i:ON)\s+', index_sql)
+            position = index_sql.find('(', on_match.end() if on_match else 0)
+            if position >= 0:
+                start = position
+        if start is None:
+            return ''
+        end = self.find_matching_parenthesis(index_sql, start)
+        if end is None:
+            # Unbalanced definition - return what is behind the opening parenthesis
+            return index_sql[start + 1:].strip()
+        return index_sql[start + 1:end].strip()
+
+    def find_matching_parenthesis(self, text, start):
+        """
+        Position of the parenthesis closing the one at `start`, ignoring parentheses inside
+        string literals and quoted identifiers. None when the text is unbalanced.
+        """
+        depth = 0
+        in_literal = False
+        in_quoted_name = False
+        for position in range(start, len(text)):
+            char = text[position]
+            if in_literal:
+                if char == "'":
+                    in_literal = False
+                continue
+            if in_quoted_name:
+                if char == '"':
+                    in_quoted_name = False
+                continue
+            if char == "'":
+                in_literal = True
+            elif char == '"':
+                in_quoted_name = True
+            elif char == '(':
+                depth += 1
+            elif char == ')':
+                depth -= 1
+                if depth == 0:
+                    return position
+        return None
+
+    def strip_generated_column_clauses(self, create_table_sql):
+        """
+        Remove `GENERATED ALWAYS AS (<expression>) STORED / VIRTUAL` from a CREATE TABLE
+        statement, leaving ordinary columns behind.
+
+        Used for the intermediate table of the LOB import: it is a staging copy which has to
+        accept the values coming from the data file, and a generated column rejects them.
+        `GENERATED BY DEFAULT AS IDENTITY` and `GENERATED ALWAYS AS IDENTITY` are not touched -
+        they are not followed by a parenthesized expression.
+        """
+        if not create_table_sql:
+            return create_table_sql
+
+        pattern = re.compile(r'\s*\b(?i:GENERATED)\s+(?i:ALWAYS)\s+(?i:AS)\s*\(')
+        result = create_table_sql
+        while True:
+            match = pattern.search(result)
+            if not match:
+                return result
+            expression_end = self.find_matching_parenthesis(result, match.end() - 1)
+            if expression_end is None:
+                return result
+            remainder = result[expression_end + 1:]
+            keyword = re.match(r'\s*\b(?i:STORED|VIRTUAL)\b', remainder)
+            if keyword:
+                remainder = remainder[keyword.end():]
+            result = result[:match.start()] + remainder
+
+    def extract_index_tail(self, index_sql):
+        """
+        Return everything the index definition carries behind its key list - `INCLUDE (...)`,
+        `NULLS NOT DISTINCT`, `WITH (...)` storage parameters and the `WHERE` predicate of a
+        partial index. It already is valid PostgreSQL and is appended to the generated
+        statement unchanged, apart from the identifier case handling and the text search
+        references, which the caller applies.
+
+        A `TABLESPACE` clause is deliberately dropped - the tablespace of the source does
+        not have to exist in the target, and where it does not, it would fail the index.
+        """
+        if not index_sql:
+            return ''
+        using_match = re.search(r'\b(?i:USING)\s+[a-zA-Z0-9_]+\s*\(', index_sql)
+        if using_match:
+            start = using_match.end() - 1
+        else:
+            on_match = re.search(r'\b(?i:ON)\s+', index_sql)
+            start = index_sql.find('(', on_match.end() if on_match else 0)
+            if start < 0:
+                return ''
+        end = self.find_matching_parenthesis(index_sql, start)
+        if end is None:
+            return ''
+        tail = index_sql[end + 1:].strip().rstrip(';').strip()
+        if not tail:
+            return ''
+        tail = re.sub(r'\s*\b(?i:TABLESPACE)\s+(?:"(?:[^"]|"")+"|[a-zA-Z0-9_]+)', '', tail).strip()
+        return tail
+
     def fetch_indexes(self, settings):
         source_table_id = settings['source_table_id']
         source_table_schema = settings['source_table_schema']
@@ -796,16 +1317,29 @@ class PostgreSQLConnector(DatabaseConnector):
             SELECT
                 i.indexname,
                 i.indexdef,
-                coalesce(c.constraint_type, 'INDEX') as type,
-                obj_description(('"'||i.schemaname||'"."'||i.indexname||'"')::regclass::oid, 'pg_class') as index_comment
+                CASE con.contype
+                    WHEN 'p' THEN 'PRIMARY KEY'
+                    WHEN 'u' THEN 'UNIQUE'
+                    WHEN 'x' THEN 'EXCLUSION'
+                    ELSE 'INDEX'
+                END as type,
+                obj_description(('"'||i.schemaname||'"."'||i.indexname||'"')::regclass::oid, 'pg_class') as index_comment,
+                (x.indexprs IS NOT NULL) as is_expression_index,
+                x.indisunique as is_unique,
+                con.contype as constraint_kind,
+                CASE WHEN con.oid IS NOT NULL THEN pg_get_constraintdef(con.oid) END as constraint_def
             FROM pg_indexes i
             JOIN pg_class t
             ON t.relnamespace::regnamespace::text = i.schemaname
             AND t.relname = i.tablename
-            LEFT JOIN information_schema.table_constraints c
-            ON i.schemaname = c.table_schema
-                and i.tablename = c.table_name
-                and i.indexname = c.constraint_name
+            LEFT JOIN pg_class ic
+            ON ic.relname = i.indexname
+                AND ic.relnamespace = t.relnamespace
+            LEFT JOIN pg_index x ON x.indexrelid = ic.oid
+            LEFT JOIN pg_constraint con
+            ON con.conindid = ic.oid
+                AND con.conrelid = t.oid
+                AND con.contype IN ('p', 'u', 'x')
             WHERE t.oid = {source_table_id}
         """
         try:
@@ -813,11 +1347,35 @@ class PostgreSQLConnector(DatabaseConnector):
             cursor = self.connection.cursor()
             cursor.execute(query)
             for row in cursor.fetchall():
-                columns_match = re.search(r'\((.*?)\)', row[1])
-                index_columns = columns_match.group(1) if columns_match else ''
                 index_name = row[0]
                 index_type = row[2]
                 index_sql = row[1]
+                is_unique = row[5]
+                constraint_kind = row[6]
+                constraint_def = row[7]
+                using_match = re.search(r'\b(?i:USING)\s+([a-zA-Z0-9_]+)', index_sql)
+                using_method = using_match.group(1) if using_match else ''
+                index_columns = self.extract_index_key_list(index_sql)
+                index_tail = self.extract_index_tail(index_sql)
+                # pg_index.indexprs tells us reliably that at least one key is an expression -
+                # there is no need to recognize function names in the DDL text.
+                is_function_based = 'YES' if row[4] else 'NO'
+
+                # UNIQUE and EXCLUDE constraints are implemented by an index, but they are
+                # objects of their own and are migrated by the constraints migration, which
+                # uses the constraint definition. Recreating them here as a bare index is
+                # both a duplicate and lossy - a temporal UNIQUE (... WITHOUT OVERLAPS) is
+                # backed by a gist index, and "CREATE UNIQUE INDEX ... USING gist" is not
+                # even a legal statement.
+                if constraint_kind in ('u', 'x'):
+                    self.config_parser.print_log_message('DEBUG', f"postgresql_connector: fetch_indexes: Index {index_name} implements constraint '{constraint_def}' - skipped here, it is created by the constraints migration.")
+                    continue
+
+                # A plain CREATE UNIQUE INDEX is not a constraint, so it is not listed in
+                # information_schema.table_constraints - without pg_index.indisunique its
+                # uniqueness would be lost.
+                if is_unique and index_type == 'INDEX':
+                    index_type = 'UNIQUE'
 
                 table_indexes[order_num] = {
                     'index_name': index_name,
@@ -825,7 +1383,15 @@ class PostgreSQLConnector(DatabaseConnector):
                     'index_owner': source_table_schema,
                     'index_columns': index_columns,
                     'index_sql': index_sql,
-                    'index_comment': row[3]
+                    'index_comment': row[3],
+                    'using_method': using_method,
+                    'is_function_based': is_function_based,
+                    # INCLUDE columns, NULLS NOT DISTINCT, WITH storage parameters and the
+                    # WHERE predicate of a partial index
+                    'index_tail': index_tail,
+                    # Definition of the constraint the index implements (primary keys are
+                    # created here, not by the constraints migration)
+                    'constraint_def': constraint_def if constraint_kind == 'p' else '',
                 }
                 order_num += 1
             cursor.close()
@@ -838,64 +1404,106 @@ class PostgreSQLConnector(DatabaseConnector):
 
     def get_create_index_sql(self, settings):
 
-        # source_schema_name = settings['source_schema_name']
-        # source_table_name = settings['source_table_name']
-        # source_table_id = settings['source_table_id']
-        # index_owner = settings['index_owner']
         index_name = self.config_parser.convert_names_case(settings['index_name'])
         index_type = settings['index_type']
-        # target_schema_name = self.config_parser.convert_names_case(settings['target_schema_name'])
-        target_schema_name = settings['target_schema_name'] ## target schema is used as it is defined in config, not converted to upper/lower case
+        target_schema_name = settings['target_schema_name']
         target_table_name = self.config_parser.convert_names_case(settings['target_table_name'])
         index_columns = settings['index_columns']
         target_columns = settings.get('target_columns')
         is_function_based = str(settings.get('is_function_based', 'NO')).upper() == 'YES'
+        index_sql = settings.get('source_index_sql') or settings.get('index_sql', '')
+        using_method = settings.get('using_method', '')
+        user_collations = settings.get('user_collations') or {}
+        text_search_objects = settings.get('text_search_objects') or {}
+        constraint_def = settings.get('constraint_def') or ''
+
+        # Last resort when the connector did not report the access method separately.
+        # Only for a PostgreSQL source - the USING keyword of the other engines does not
+        # name a PostgreSQL access method (MySQL USING BTREE / USING HASH).
+        if not using_method and index_sql and self.config_parser.get_source_db_type() == 'postgresql':
+            using_match = re.search(r'\b(?i:USING)\s+([a-zA-Z0-9_]+)', index_sql)
+            if using_match:
+                using_method = using_match.group(1)
 
         if not index_columns or not index_columns.strip():
             self.config_parser.print_log_message('WARNING', f"postgresql_connector: get_create_index_sql: Index '{index_name}' on table '{target_schema_name}.{target_table_name}' has empty columns list - skipping index creation.")
             return ''
 
-        # Split index_columns into elements, clean up quotes, convert case, and re-quote.
-        # A column entry may carry an ASC/DESC ordering keyword (e.g. '"STORE_NAME" ASC')
-        # which must be preserved but must NOT be quoted together with the column name -
-        # otherwise the re-quoting produces a dangling quote ('"store_name" asc"').
-        # Splitting is on top-level commas only, because an element of a function-based index
-        # is a whole expression that may contain commas of its own, e.g. (NVL("CODE",'X')).
         column_names = []
         for col in self.split_top_level_commas(index_columns):
             col = col.strip()
-            # Split off a trailing ASC/DESC ordering keyword (split on the last whitespace)
+
+            # Split off trailing NULLS FIRST / NULLS LAST ordering keyword
+            nulls_direction = ''
+            parts_nulls = col.rsplit(None, 2)
+            if len(parts_nulls) == 3 and parts_nulls[1].upper() == 'NULLS' and parts_nulls[2].upper() in ('FIRST', 'LAST'):
+                col = parts_nulls[0].strip()
+                nulls_direction = f' {parts_nulls[1].upper()} {parts_nulls[2].upper()}'
+
+            # Split off trailing ASC/DESC ordering keyword
             order_direction = ''
-            parts = col.rsplit(None, 1)
-            if len(parts) == 2 and parts[1].upper() in ('ASC', 'DESC'):
-                col = parts[0].strip()
-                order_direction = f' {parts[1].upper()}'
-            # An element of a function-based index is an expression (Oracle delivers it
-            # parenthesized), not a column name: its identifiers are rewritten, but the
-            # expression itself must stay unquoted - quoting it whole would produce
-            # '"(upper("last_name"))"' and fail with a syntax error.
+            parts_order = col.rsplit(None, 1)
+            if len(parts_order) == 2 and parts_order[1].upper() in ('ASC', 'DESC'):
+                col = parts_order[0].strip()
+                order_direction = f' {parts_order[1].upper()}'
+
+            # An element of a function-based index is an expression
             if self.expression_is_parenthesized(col) or (is_function_based and '(' in col):
                 expression = self.convert_expression_identifiers(col, target_columns)
                 expression = expression.replace(r"\'", "'").replace(r'\"', '"')
-                expression = re.sub(r'(?i)_[a-zA-Z0-9_]+(\'|")', r'\1', expression)
+                if self.config_parser.get_source_db_type() != 'postgresql':
+                    # Remove charset introducers of MySQL / MariaDB (_utf8'text')
+                    # In PostgreSQL such a pattern is part of a quoted identifier
+                    # (e.g. "natural_numeric") and must be kept.
+                    expression = re.sub(r'(?i)_[a-zA-Z0-9_]+(\'|")', r'\1', expression)
                 expression = re.sub(r'(?i)\b(?:CHARACTER\s+SET|CHARSET)\s+[a-zA-Z0-9_]+', '', expression)
-                expression = re.sub(r'(?i)\bCOLLATE\s+[`\'"]?[a-zA-Z0-9_]+[`\'"]?', '', expression)
+                if self.config_parser.get_source_db_type() == 'postgresql':
+                    # PostgreSQL collations are migrated with the schema - keep them in the
+                    # expression, only point them to the collation in the target schema.
+                    expression = re.sub(
+                        r'(?i)\bCOLLATE\s+((?:"(?:[^"]|"")+"|[a-zA-Z0-9_]+)(?:\.(?:"(?:[^"]|"")+"|[a-zA-Z0-9_]+))?)',
+                        lambda match: self.get_collate_clause(match.group(1), user_collations).strip(),
+                        expression)
+                else:
+                    expression = re.sub(r'(?i)\bCOLLATE\s+[`\'"]?[a-zA-Z0-9_]+[`\'"]?', '', expression)
+                expression = self.qualify_text_search_references(expression, text_search_objects)
                 if not self.expression_is_parenthesized(expression):
                     expression = f"({expression})"
-                column_names.append(f'{expression}{order_direction}')
+                column_names.append(f'{expression}{order_direction}{nulls_direction}')
                 continue
-            # Remove backticks, single quotes, and double quotes
+
+            # Split off COLLATE clause if present
+            collation_clause = ''
+            collate_match = re.search(r'\s+(?i:COLLATE)\s+(.+)$', col)
+            if collate_match:
+                raw_collation, collate_remainder = self.split_leading_identifier(collate_match.group(1).strip())
+                col = col[:collate_match.start()].strip()
+                collation_clause = self.get_collate_clause(raw_collation, user_collations)
+                if collate_remainder:
+                    # Anything behind the collation name is the operator class - it is
+                    # processed below together with the column name.
+                    col = f"{col} {collate_remainder}"
+
+            # Split off operator class if present (e.g. 'event_type gin_trgm_ops')
+            opclass_clause = ''
+            col_parts = col.split()
+            if len(col_parts) == 2:
+                col = col_parts[0].strip()
+                opclass = col_parts[1].strip()
+                opc_parts = opclass.split('.')
+                conv_opc = []
+                for opc in opc_parts:
+                    opc_clean = opc.strip('`').strip("'").strip('"')
+                    opc_conv = self.config_parser.convert_names_case(opc_clean)
+                    conv_opc.append(f'"{opc_conv}"' if opc_conv else opc)
+                opclass_clause = f' {".".join(conv_opc)}'
+
             col = col.strip('`').strip("'").strip('"')
-            # Convert case using config parser function
             col = self.config_parser.convert_names_case(col)
-            # Add to list with double quotes, preserving the (unquoted) ordering keyword
-            column_names.append(f'"{col}"{order_direction}')
+            column_names.append(f'"{col}"{collation_clause}{opclass_clause}{order_direction}{nulls_direction}')
         # Join back with comma
         index_columns = ', '.join(column_names)
-        # index_comment = settings['index_comment']
 
-        # index_columns = ', '.join(f'"{col}"' for col in index_columns)
-        # index_columns_count = row[2]
         spatial_types = ('POINT', 'GEOMETRY', 'BOX', 'POLYGON', 'PATH', 'CIRCLE', 'LINESTRING', 'MULTIPOINT', 'MULTILINESTRING', 'MULTIPOLYGON', 'GEOMETRYCOLLECTION')
         is_spatial = 'SPATIAL' in str(index_type).upper()
         if not is_spatial and target_columns:
@@ -909,13 +1517,31 @@ class PostgreSQLConnector(DatabaseConnector):
                         is_spatial = True
                         break
 
-        create_index_query = ''
-        if index_type == 'PRIMARY KEY':
-            create_index_query = f"""ALTER TABLE "{target_schema_name}"."{target_table_name}" ADD CONSTRAINT "{index_name}_tab_{target_table_name}" PRIMARY KEY ({index_columns});"""
+        using_clause = ''
+        if using_method and using_method.lower() != 'btree':
+            using_clause = f" USING {using_method.lower()}"
         elif is_spatial:
-            create_index_query = f"""CREATE INDEX "{index_name}_tab_{target_table_name}" ON "{target_schema_name}"."{target_table_name}" USING gist ({index_columns});"""
+            using_clause = " USING gist"
+
+        # INCLUDE columns, NULLS NOT DISTINCT, storage parameters and the WHERE predicate of
+        # a partial index. The predicate can reference columns and text search objects.
+        index_tail = settings.get('index_tail') or ''
+        if index_tail:
+            index_tail = self.qualify_text_search_references(index_tail, text_search_objects)
+            index_tail = ' ' + self.convert_constraint_sql_case(index_tail).strip()
+
+        create_index_query = ''
+        if constraint_def:
+            # The index implements a table constraint - the constraint definition from the
+            # source catalog is authoritative and carries what a key list cannot express
+            # (WITHOUT OVERLAPS of a temporal key, NULLS NOT DISTINCT, INCLUDE columns,
+            # DEFERRABLE).
+            create_index_query = f"""ALTER TABLE "{target_schema_name}"."{target_table_name}" ADD CONSTRAINT "{index_name}_tab_{target_table_name}" {self.convert_constraint_sql_case(constraint_def)};"""
+        elif index_type == 'PRIMARY KEY':
+            create_index_query = f"""ALTER TABLE "{target_schema_name}"."{target_table_name}" ADD CONSTRAINT "{index_name}_tab_{target_table_name}" PRIMARY KEY ({index_columns});"""
         else:
-            create_index_query = f"""CREATE {'UNIQUE' if index_type == 'UNIQUE' else ''} INDEX "{index_name}_tab_{target_table_name}" ON "{target_schema_name}"."{target_table_name}" ({index_columns});"""
+            unique_clause = 'UNIQUE ' if index_type == 'UNIQUE' else ''
+            create_index_query = f"""CREATE {unique_clause}INDEX "{index_name}_tab_{target_table_name}" ON "{target_schema_name}"."{target_table_name}"{using_clause} ({index_columns}){index_tail};"""
 
         return create_index_query
 
@@ -994,6 +1620,15 @@ class PostgreSQLConnector(DatabaseConnector):
 
                 if constraint_type in ('PRIMARY KEY', 'p', 'P'):
                     continue # Primary key is handled in fetch_indexes
+
+                if constraint_type in ('TRIGGER', 't', 'T'):
+                    # A CONSTRAINT TRIGGER is registered in pg_constraint, but it is a trigger -
+                    # there is no ALTER TABLE ... ADD CONSTRAINT syntax for it, and
+                    # pg_get_constraintdef returns only the deferrability
+                    # ('TRIGGER DEFERRABLE INITIALLY DEFERRED'), not a usable definition.
+                    # It is migrated by the triggers migration from pg_get_triggerdef.
+                    self.config_parser.print_log_message('DEBUG', f"postgresql_connector: fetch_constraints: Constraint {constraint_name} is a CONSTRAINT TRIGGER - skipped here, it is created by the triggers migration.")
+                    continue
 
                 if constraint_type in ('FOREIGN KEY', 'f', 'F'):
                      constraints[order_num] = {
@@ -1557,7 +2192,23 @@ class PostgreSQLConnector(DatabaseConnector):
                     select_columns_list = []
                     orderby_columns_list = []
                     insert_columns_list = []
-                    for order_num, col in source_columns.items():
+
+                    def is_generated_column(col):
+                        return col.get('is_generated_virtual') == 'YES' or col.get('is_generated_stored') == 'YES'
+
+                    # A generated column is computed by the target and rejects an inserted
+                    # value ("cannot insert a non-DEFAULT value into column ..."), so it is
+                    # part of neither the SELECT nor the INSERT.
+                    migrated_source_columns = {
+                        order_num: col for order_num, col in source_columns.items()
+                        if not is_generated_column(col) and not is_generated_column(target_columns.get(order_num, {}))
+                    }
+                    skipped_columns = [col['column_name'] for order_num, col in source_columns.items()
+                                       if order_num not in migrated_source_columns]
+                    if skipped_columns:
+                        self.config_parser.print_log_message('DEBUG', f"postgresql_connector: migrate_table: Worker {worker_id}: Table {source_schema_name}.{source_table_name}: generated columns are computed by the target and excluded from the data migration: {', '.join(skipped_columns)}")
+
+                    for order_num, col in migrated_source_columns.items():
                         self.config_parser.print_log_message('DEBUG2',
                                                             f"Worker {worker_id}: Table {source_schema_name}.{source_table_name}: Processing column {col['column_name']} ({order_num}) with data type {col['data_type']}")
 
@@ -1625,11 +2276,11 @@ class PostgreSQLConnector(DatabaseConnector):
 
                         transforming_start_time = time.time()
                         records = [
-                            {column['column_name']: value for column, value in zip(source_columns.values(), record)}
+                            {column['column_name']: value for column, value in zip(migrated_source_columns.values(), record)}
                             for record in records
                         ]
                         for record in records:
-                            for order_num, column in source_columns.items():
+                            for order_num, column in migrated_source_columns.items():
                                 column_name = column['column_name']
                                 column_type = column['data_type']
                                 if column_type in ['bytea'] and record[column_name] is not None:
@@ -1849,8 +2500,10 @@ class PostgreSQLConnector(DatabaseConnector):
             self.config_parser.print_log_message('DEBUG2', f"postgresql_connector: insert_batch: Worker {worker_id}: Started insert batch into {target_schema_name}.{target_table_name} with {len(data)} rows")
             if isinstance(data, list) and all(isinstance(item, dict) for item in data):
 
-                # Symmetrically unpack the payload values
-                if insert_columns_provided and len(data) > 0:
+                # Match extract_keys order exactly to insert_columns
+                if isinstance(insert_columns, str) and insert_columns.strip():
+                    extract_keys = [c.strip().strip('"') for c in insert_columns.split(',')]
+                elif insert_columns_provided and len(data) > 0:
                     extract_keys = list(data[0].keys())
                 else:
                     extract_keys = [columns[col]['column_name'] for col in insertable_column_keys]
@@ -1864,13 +2517,66 @@ class PostgreSQLConnector(DatabaseConnector):
                     if str(col_info.get('data_type', '')).strip().lower() in ('boolean', 'bool')
                 }
 
+                # Target columns of type JSON or JSONB need Python objects (dict, list, bool, etc.)
+                # serialized to JSON strings so psycopg2 and PostgreSQL accept them properly.
+                json_columns = {
+                    col_info['column_name']
+                    for col_info in columns.values()
+                    if str(col_info.get('data_type', '')).strip().lower() in ('json', 'jsonb')
+                }
+
+                columns_by_name = {
+                    col_info['column_name']: col_info
+                    for col_info in columns.values()
+                    if 'column_name' in col_info
+                }
+
                 formatted_data = []
                 for item in data:
                     row = []
                     for col_name in extract_keys:
                         value = item.get(col_name)
+                        if value is None and col_name not in item:
+                            for k, v in item.items():
+                                if str(k).lower() == str(col_name).lower():
+                                    value = v
+                                    break
+
+                        col_info = columns_by_name.get(col_name)
+                        if not col_info:
+                            for c_k, c_v in columns_by_name.items():
+                                if str(c_k).lower() == str(col_name).lower():
+                                    col_info = c_v
+                                    break
+
+                        if value is None and col_info and col_info.get('is_nullable') == 'NO':
+                            default_val = col_info.get('column_default_value')
+                            if default_val is not None and str(default_val).strip() != '' and not str(default_val).lower().startswith('nextval'):
+                                value = default_val
+                            else:
+                                data_type_lower = str(col_info.get('data_type', '')).strip().lower()
+                                if data_type_lower in ('json', 'jsonb'):
+                                    value = 'null'
+                                elif self.is_string_type(data_type_lower) or any(t in data_type_lower for t in ('text', 'char', 'varchar', 'string')):
+                                    value = ''
+                                elif self.is_numeric_type(data_type_lower) or any(t in data_type_lower for t in ('int', 'numeric', 'decimal', 'float', 'double', 'real')):
+                                    value = 0
+                                elif data_type_lower in ('boolean', 'bool'):
+                                    value = False
+
                         if col_name in boolean_columns:
                             value = self._coerce_boolean_value(value)
+                        elif col_name in json_columns:
+                            if value is None:
+                                if col_info and col_info.get('is_nullable') == 'NO':
+                                    value = 'null'
+                            elif isinstance(value, str):
+                                try:
+                                    json.loads(value)
+                                except Exception:
+                                    value = json.dumps(value)
+                            else:
+                                value = json.dumps(value)
                         elif value is not None and (type(value).__name__ == 'array' or hasattr(value, 'tolist')):
                             value = json.dumps(value.tolist()) if hasattr(value, 'tolist') else str(value)
                         row.append(value)
@@ -1979,19 +2685,27 @@ class PostgreSQLConnector(DatabaseConnector):
             FROM pg_proc p
             JOIN pg_namespace n ON p.pronamespace = n.oid
             WHERE n.nspname = '{schema}'
-              AND p.prokind IN ('f', 'p')
-            ORDER BY p.proname
+              AND p.prokind IN ('f', 'p', 'a')
+              AND NOT EXISTS (SELECT 1 FROM pg_depend dep
+                              WHERE dep.objid = p.oid AND dep.deptype = 'e')
+            ORDER BY (p.prokind = 'a'), p.proname
         """
         try:
             self.connect()
             cursor = self.connection.cursor()
             cursor.execute(query)
             for row in cursor.fetchall():
-                func_type = 'PROCEDURE' if row[4] == 'p' else 'FUNCTION'
+                # Aggregates are ordered last - they reference their state transition and
+                # final functions, which have to exist first.
+                func_type = {'p': 'PROCEDURE', 'a': 'AGGREGATE'}.get(row[4], 'FUNCTION')
                 funcprocs[order_num] = {
                     'id': row[0],
                     'name': row[1],
                     'header': f"{row[1]}({row[2]})",
+                    # The identity arguments are needed to address the object in
+                    # COMMENT ON FUNCTION / PROCEDURE / AGGREGATE - the name alone is
+                    # ambiguous for overloaded routines.
+                    'arguments': row[2],
                     'comment': row[3],
                     'type': func_type
                 }
@@ -2009,6 +2723,15 @@ class PostgreSQLConnector(DatabaseConnector):
         try:
             self.connect()
             cursor = self.connection.cursor()
+            # pg_get_functiondef() does not work for an aggregate ("... is an aggregate
+            # function") - an aggregate is described by pg_aggregate, not by a body.
+            cursor.execute("SELECT prokind FROM pg_catalog.pg_proc WHERE oid = %s", (funcproc_id,))
+            row = cursor.fetchone()
+            if row and row[0] == 'a':
+                cursor.close()
+                self.disconnect()
+                return self.fetch_aggregate_code(funcproc_id)
+
             cursor.execute(query)
             code = cursor.fetchone()[0]
             cursor.close()
@@ -2019,6 +2742,142 @@ class PostgreSQLConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', e)
             raise
 
+    def fetch_aggregate_code(self, aggregate_id: int):
+        """
+        Build the CREATE AGGREGATE statement of a user defined aggregate from pg_aggregate.
+
+        The search_path of this short lived connection is set to pg_catalog, so that
+        format_type() and pg_get_function_identity_arguments() qualify every user defined
+        type and function with its schema while leaving the built-in ones bare. The schema
+        replacement of convert_funcproc_code() then maps them to the target schema.
+        """
+        query = ''
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute("SET search_path TO pg_catalog")
+
+            cursor.execute("""
+                SELECT attname FROM pg_catalog.pg_attribute
+                WHERE attrelid = 'pg_catalog.pg_aggregate'::regclass AND attnum > 0 AND NOT attisdropped
+            """)
+            available_columns = {row[0] for row in cursor.fetchall()}
+            # aggfinalmodify / aggmfinalmodify exist since PostgreSQL 11
+            final_modify = 'a.aggfinalmodify' if 'aggfinalmodify' in available_columns else "NULL::\"char\""
+            mfinal_modify = 'a.aggmfinalmodify' if 'aggmfinalmodify' in available_columns else "NULL::\"char\""
+
+            def function_name(column):
+                return f"""(SELECT quote_ident(fn.nspname)||'.'||quote_ident(fp.proname)
+                            FROM pg_catalog.pg_proc fp
+                            JOIN pg_catalog.pg_namespace fn ON fn.oid = fp.pronamespace
+                            WHERE fp.oid = nullif({column}, 0))"""
+
+            query = f"""
+                SELECT
+                    quote_ident(n.nspname) as aggregate_schema,
+                    quote_ident(p.proname) as aggregate_name,
+                    pg_get_function_identity_arguments(p.oid) as arguments,
+                    a.aggkind,
+                    {function_name('a.aggtransfn')} as sfunc,
+                    format_type(a.aggtranstype, NULL) as stype,
+                    nullif(a.aggtransspace, 0) as sspace,
+                    {function_name('a.aggfinalfn')} as finalfunc,
+                    a.aggfinalextra,
+                    {final_modify} as finalmodify,
+                    {function_name('a.aggcombinefn')} as combinefunc,
+                    {function_name('a.aggserialfn')} as serialfunc,
+                    {function_name('a.aggdeserialfn')} as deserialfunc,
+                    a.agginitval,
+                    {function_name('a.aggmtransfn')} as msfunc,
+                    {function_name('a.aggminvtransfn')} as minvfunc,
+                    CASE WHEN a.aggmtranstype <> 0 THEN format_type(a.aggmtranstype, NULL) END as mstype,
+                    nullif(a.aggmtransspace, 0) as msspace,
+                    {function_name('a.aggmfinalfn')} as mfinalfunc,
+                    a.aggmfinalextra,
+                    {mfinal_modify} as mfinalmodify,
+                    a.aggminitval,
+                    (SELECT oprname FROM pg_catalog.pg_operator o WHERE o.oid = nullif(a.aggsortop, 0)) as sortop,
+                    p.proparallel
+                FROM pg_catalog.pg_aggregate a
+                JOIN pg_catalog.pg_proc p ON p.oid = a.aggfnoid
+                JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+                WHERE p.oid = %s
+            """
+            cursor.execute(query, (aggregate_id,))
+            row = cursor.fetchone()
+            cursor.close()
+            self.disconnect()
+            if not row:
+                self.config_parser.print_log_message('WARNING', f"postgresql_connector: fetch_aggregate_code: Aggregate with oid {aggregate_id} not found in pg_aggregate.")
+                return ''
+            return self.get_create_aggregate_sql(row)
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"postgresql_connector: fetch_aggregate_code: Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
+            raise
+
+    def get_create_aggregate_sql(self, aggregate_row):
+        """ Assemble CREATE AGGREGATE from a row delivered by fetch_aggregate_code(). """
+        (aggregate_schema, aggregate_name, arguments, aggkind, sfunc, stype, sspace,
+         finalfunc, finalextra, finalmodify, combinefunc, serialfunc, deserialfunc,
+         initcond, msfunc, minvfunc, mstype, msspace, mfinalfunc, mfinalextra,
+         mfinalmodify, minitcond, sortop, proparallel) = aggregate_row
+
+        modify_keywords = {'r': 'READ_ONLY', 's': 'SHAREABLE', 'w': 'READ_WRITE'}
+        parallel_keywords = {'s': 'SAFE', 'r': 'RESTRICTED', 'u': 'UNSAFE'}
+
+        def quoted(value):
+            return "'" + str(value).replace("'", "''") + "'"
+
+        options = [f"SFUNC = {sfunc}", f"STYPE = {stype}"]
+        if sspace:
+            options.append(f"SSPACE = {sspace}")
+        if finalfunc:
+            options.append(f"FINALFUNC = {finalfunc}")
+            if finalextra:
+                options.append("FINALFUNC_EXTRA")
+            if finalmodify in modify_keywords:
+                options.append(f"FINALFUNC_MODIFY = {modify_keywords[finalmodify]}")
+        if combinefunc:
+            options.append(f"COMBINEFUNC = {combinefunc}")
+        if serialfunc:
+            options.append(f"SERIALFUNC = {serialfunc}")
+        if deserialfunc:
+            options.append(f"DESERIALFUNC = {deserialfunc}")
+        if initcond is not None:
+            options.append(f"INITCOND = {quoted(initcond)}")
+        # Moving aggregate implementation - used for window functions with a moving frame
+        if msfunc:
+            options.append(f"MSFUNC = {msfunc}")
+        if minvfunc:
+            options.append(f"MINVFUNC = {minvfunc}")
+        if mstype:
+            options.append(f"MSTYPE = {mstype}")
+        if msspace:
+            options.append(f"MSSPACE = {msspace}")
+        if mfinalfunc:
+            options.append(f"MFINALFUNC = {mfinalfunc}")
+            if mfinalextra:
+                options.append("MFINALFUNC_EXTRA")
+            if mfinalmodify in modify_keywords:
+                options.append(f"MFINALFUNC_MODIFY = {modify_keywords[mfinalmodify]}")
+        if minitcond is not None:
+            options.append(f"MINITCOND = {quoted(minitcond)}")
+        if sortop:
+            options.append(f"SORTOP = OPERATOR({sortop})")
+        if aggkind == 'h':
+            options.append("HYPOTHETICAL")
+        if proparallel in ('s', 'r'):
+            options.append(f"PARALLEL = {parallel_keywords[proparallel]}")
+
+        if aggkind in ('o', 'h'):
+            # An ordered-set aggregate - pg_get_function_identity_arguments already formats
+            # the direct arguments, the ORDER BY separator and the aggregated arguments.
+            self.config_parser.print_log_message('DEBUG', f"postgresql_connector: get_create_aggregate_sql: {aggregate_name} is an ordered-set aggregate ({arguments}).")
+
+        return (f"CREATE AGGREGATE {aggregate_schema}.{aggregate_name}({arguments}) (\n    "
+                + ",\n    ".join(options) + "\n);")
+
     def convert_funcproc_code(self, settings):
         funcproc_code = settings['funcproc_code']
         # target_db_type = settings['target_db_type']
@@ -2026,7 +2885,8 @@ class PostgreSQLConnector(DatabaseConnector):
         target_schema_name = settings['target_schema_name']
 
         # Simple schema replacement if they differ
-        converted_code = funcproc_code
+        converted_code = self.qualify_text_search_references(
+            funcproc_code, settings.get('text_search_objects'))
         if source_schema_name != target_schema_name:
             # Replace schema references
             # Use loose matching or generic replace for source_schema_name
@@ -2048,7 +2908,76 @@ class PostgreSQLConnector(DatabaseConnector):
             self.config_parser.print_log_message('WARNING', f"postgresql_connector: handle_error: Error caught, but continuing as requested by configuration (on_error_action='{self.on_error_action}').")
 
     def fetch_sequences(self, schema_name: str):
-        return {}
+        sequences = {}
+        order_num = 1
+        query = f"""
+            SELECT
+                c.relname::text AS sequence_name,
+                c.oid AS sequence_id
+            FROM pg_class c
+            JOIN pg_namespace n ON c.relnamespace = n.oid
+            WHERE c.relkind = 'S'
+              AND n.nspname = '{schema_name}'
+            ORDER BY c.relname
+        """
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            cursor.close()
+
+            for row in rows:
+                sequence_name = row[0]
+                sequence_id = row[1]
+                details = self.get_sequence_details(schema_name, sequence_name)
+                min_value = details['min_value'] if details and details.get('min_value') is not None else 1
+                max_value = details['max_value'] if details and details.get('max_value') is not None else 9223372036854775807
+                increment_by = details['increment_by'] if details and details.get('increment_by') is not None else 1
+                cycle = details['cycle'] if details and details.get('cycle') is not None else False
+                cache_size = details['cache_size'] if details and details.get('cache_size') is not None else 1
+                start_value = details['start_value'] if details and details.get('start_value') is not None else 1
+                is_cycled = 'YES' if cycle else 'NO'
+
+                last_number = start_value
+                try:
+                    last_val_query = f'SELECT last_value FROM "{schema_name}"."{sequence_name}"'
+                    cursor = self.connection.cursor()
+                    cursor.execute(last_val_query)
+                    curr_val_row = cursor.fetchone()
+                    cursor.close()
+                    if curr_val_row and curr_val_row[0] is not None:
+                        last_number = curr_val_row[0]
+                except Exception:
+                    pass
+
+                source_sequence_sql = (
+                    f'CREATE SEQUENCE "{schema_name}"."{sequence_name}" '
+                    f'INCREMENT BY {increment_by} MINVALUE {min_value} MAXVALUE {max_value} '
+                    f'START WITH {start_value} CACHE {cache_size} {"CYCLE" if is_cycled == "YES" else "NO CYCLE"};'
+                )
+
+                sequences[order_num] = {
+                    'sequence_name': sequence_name,
+                    'id': sequence_id,
+                    'table_name': None,
+                    'column_name': None,
+                    'source_sequence_sql': source_sequence_sql,
+                    'source_start_value': last_number,
+                    'source_increment_by': increment_by,
+                    'source_minvalue': min_value,
+                    'source_maxvalue': max_value,
+                    'source_cache': cache_size,
+                    'source_is_cycled': is_cycled,
+                }
+                self.config_parser.print_log_message('DEBUG', f"postgresql_connector: fetch_sequences: Found sequence {sequence_name} (start {last_number}, increment {increment_by}).")
+                order_num += 1
+
+            self.disconnect()
+            return sequences
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"postgresql_connector: fetch_sequences: Error fetching sequences for schema {schema_name}: {e}")
+            return sequences
 
     def fetch_table_sequences(self, table_schema: str, table_name: str):
         sequence_data = {}
@@ -2269,120 +3198,87 @@ class PostgreSQLConnector(DatabaseConnector):
             raise
 
     def migrate_sequences(self, target_connector, settings):
-        source_schema_name = settings['source_schema_name']
-        target_schema_name = settings['target_schema_name']
-        migrator_tables = settings.get('migrator_tables')
-
-        self.config_parser.print_log_message('INFO', f"postgresql_connector: migrate_sequences: Migrating sequences from {source_schema_name} to {target_schema_name}...")
-
-        query = f"""
-            SELECT c.relname, c.oid
-            FROM pg_class c
-            JOIN pg_namespace n ON c.relnamespace = n.oid
-            WHERE n.nspname = '{source_schema_name}'
-              AND c.relkind = 'S'
         """
+        Create a single standalone sequence in the target database.
+        Called once per sequence by the orchestrator's sequence_worker.
+        """
+        source_schema_name = settings.get('source_schema_name')
+        target_schema_name = settings.get('target_schema_name')
+        source_sequence_name = settings.get('source_sequence_name') or settings.get('sequence_name')
+        target_sequence_name = settings.get('target_sequence_name') or source_sequence_name
 
+        if not source_sequence_name:
+            self.config_parser.print_log_message('ERROR', f"postgresql_connector: migrate_sequences: Missing sequence_name in settings: {settings}")
+            return False
+
+        self.config_parser.print_log_message('INFO', f"postgresql_connector: migrate_sequences: Migrating sequence {source_sequence_name} to {target_schema_name}.{target_sequence_name}...")
+
+        PG_BIGINT_MAX = 9223372036854775807
+        PG_BIGINT_MIN = -9223372036854775808
+
+        def _to_int(val):
+            try:
+                return int(val)
+            except (TypeError, ValueError):
+                return None
+
+        increment_by = _to_int(settings.get('source_increment_by')) or 1
+        minvalue = _to_int(settings.get('source_minvalue'))
+        maxvalue = _to_int(settings.get('source_maxvalue'))
+        start_value = _to_int(settings.get('source_start_value'))
+        cache = _to_int(settings.get('source_cache'))
+        is_cycled = str(settings.get('source_is_cycled') or '').upper() in ('Y', 'YES', 'TRUE', '1')
+
+        if maxvalue is not None and maxvalue >= PG_BIGINT_MAX:
+            maxvalue = None
+        if minvalue is not None and minvalue <= PG_BIGINT_MIN:
+            minvalue = None
+
+        last_value = start_value
+        is_called = True
         try:
             self.connect()
-            target_connector.connect() # Ensure target is connected
+            curr_val_query = f'SELECT last_value, is_called FROM "{source_schema_name}"."{source_sequence_name}"'
             cursor = self.connection.cursor()
-            cursor.execute(query)
-            sequences = cursor.fetchall() # list of (name, oid) matches
+            cursor.execute(curr_val_query)
+            curr_val_row = cursor.fetchone()
             cursor.close()
-
-            for seq_row in sequences:
-                seq_name = seq_row[0]
-                seq_oid = seq_row[1]
-
-                self.config_parser.print_log_message('DEBUG', f"postgresql_connector: migrate_sequences: Processing sequence: {seq_name}")
-
-                # Insert into protocol table if migrator_tables is available
-                # We don't have table/column info here as we are migrating all sequences in schema
-                if migrator_tables:
-                    try:
-                        # set_sequence_sql will be populated later, but we need to insert first to get ID/track start?
-                        # insert_sequence(self, sequence_id, schema_name, table_name, column_name, sequence_name, set_sequence_sql)
-                        # We'll update it later or insert it now with placeholders?
-                        # Usually insert happens before work starts to track 'started', but insert_sequence seems to just log existence?
-                        # Looking at other methods, insert_* usually logs the item and then update_* sets status.
-                        migrator_tables.insert_sequence({
-                            'sequence_id': seq_oid,
-                            'source_schema_name': source_schema_name,
-                            'source_table_name': '',
-                            'source_column_name': '',
-                            'source_sequence_name': seq_name,
-                            'source_sequence_sql': ''
-                        })
-                    except Exception as e:
-                        self.config_parser.print_log_message('ERROR', f"postgresql_connector: migrate_sequences: Failed to insert sequence {seq_name} into protocol: {e}")
-                details = self.get_sequence_details(source_schema_name, seq_name)
-
-                # Fetch current value separately as it's not in pg_sequence catalog
-                curr_val_query = f"SELECT last_value, is_called FROM {source_schema_name}.{seq_name}"
-                cursor = self.connection.cursor()
-                cursor.execute(curr_val_query)
-                curr_val_row = cursor.fetchone()
+            if curr_val_row:
                 last_value = curr_val_row[0]
                 is_called = curr_val_row[1]
-                cursor.close()
+        except Exception as e:
+            self.config_parser.print_log_message('DEBUG', f"postgresql_connector: migrate_sequences: Could not fetch last_value directly from {source_sequence_name}: {e}")
 
-                # Generate CREATE SEQUENCE
-                # Details: min_value, max_value, increment_by, cycle, cache_size, start_value
-                # We use START WITH = last_value to ensure it picks up where it left off,
-                # OR we use START WITH = min_value and then setval?
-                # Postgres dump usually does CREATE SEQUENCE ...; SELECT setval(...);
+        try:
+            target_connector.connect()
 
-                # If we use setval, CREATE SEQUENCE can just use defaults or original properties.
-                # However, if we want `START WITH` to be correct for a fresh init, we might want original start_value (which we have in details['start_value'])
-                # But `last_value` is the critical runtime state.
+            cycle_str = "CYCLE" if is_cycled else "NO CYCLE"
+            parts = [f'CREATE SEQUENCE IF NOT EXISTS "{target_schema_name}"."{target_sequence_name}"']
+            parts.append(f"INCREMENT BY {increment_by}")
+            if minvalue is not None:
+                parts.append(f"MINVALUE {minvalue}")
+            if maxvalue is not None:
+                parts.append(f"MAXVALUE {maxvalue}")
+            if start_value is not None:
+                parts.append(f"START WITH {start_value}")
+            if cache is not None:
+                parts.append(f"CACHE {cache}")
+            parts.append(cycle_str)
 
-                cycle_str = "CYCLE" if details['cycle'] else "NO CYCLE"
-                create_sql = f"""CREATE SEQUENCE IF NOT EXISTS "{target_schema_name}"."{seq_name}"
-                    INCREMENT BY {details['increment_by']}
-                    MINVALUE {details['min_value']}
-                    MAXVALUE {details['max_value']}
-                    START WITH {details['start_value']}
-                    CACHE {details['cache_size']}
-                    {cycle_str};
-                """
+            create_sql = " ".join(parts) + ";"
+            self.config_parser.print_log_message('DEBUG', f"postgresql_connector: migrate_sequences: Sequence {target_sequence_name} SQL: {create_sql}")
 
-                setval_sql = f"SELECT setval('\"{target_schema_name}\".\"{seq_name}\"', {last_value}, {'true' if is_called else 'false'});"
+            target_connector.execute_query(create_sql)
 
-                self.config_parser.print_log_message('DEBUG', f"postgresql_connector: migrate_sequences: Sequence {seq_name} SQL: {create_sql}")
-                self.config_parser.print_log_message('DEBUG', f"postgresql_connector: migrate_sequences: Sequence {seq_name} SETVAL: {setval_sql}")
+            if last_value is not None:
+                setval_sql = f"SELECT setval('\"{target_schema_name}\".\"{target_sequence_name}\"', {last_value}, {'true' if is_called else 'false'});"
+                self.config_parser.print_log_message('DEBUG', f"postgresql_connector: migrate_sequences: Sequence {target_sequence_name} SETVAL: {setval_sql}")
+                target_connector.execute_query(setval_sql)
 
-                try:
-                    target_connector.execute_query(create_sql)
-                    target_connector.execute_query(setval_sql)
-
-                    if migrator_tables:
-                        # Update protocol with success and the setval SQL used
-                        # Note: update_sequence_status doesn't update SQL. insert check above put empty SQL.
-                        # Ideally we should have inserted SQL there. But we didn't have it yet.
-                        # Maybe we should DELETE and re-INSERT or just update status?
-                        # insert_sequence puts it in 'sequences' table.
-                        # update_sequence_status updates 'sequences' table.
-                        # If I want to save the SQL, I might need to update it.
-                        # But migrator_tables implementation of update_sequence_status only updates success/message/time.
-                        # So I should probably insert with the SQL if I can generate it before?
-                        # No, I generate it later.
-                        # I'll just leave SQL empty or put "See logs" if I can't update it.
-                        # Or I accept that the protocol table won't show the SQL.
-                        migrator_tables.update_sequence_status({'sequence_id': seq_oid, 'success': True, 'message': 'migrated OK'})
-
-                except Exception as ex:
-                    self.config_parser.print_log_message('ERROR', f"postgresql_connector: migrate_sequences: Failed to migrate sequence {seq_name}: {ex}")
-                    if migrator_tables:
-                        migrator_tables.update_sequence_status({'sequence_id': seq_oid, 'success': False, 'message': str(ex)})
-
-            self.disconnect()
-            target_connector.disconnect()
             return True
         except Exception as e:
-            self.config_parser.print_log_message('ERROR', f"postgresql_connector: migrate_sequences: Error migrating sequences: {e}")
+            self.config_parser.print_log_message('ERROR', f"postgresql_connector: migrate_sequences: Failed to migrate sequence {source_sequence_name}: {e}")
             self.disconnect()
-            # Try to disconnect target if possible, though it might be closed/failed
             try:
                 target_connector.disconnect()
             except:
@@ -2410,6 +3306,8 @@ class PostgreSQLConnector(DatabaseConnector):
         view_name = settings['target_view_name']
         target_schema_name = settings['target_schema_name']
         view_type = settings.get('view_type', 'VIEW')
+
+        view_code = self.qualify_text_search_references(view_code, settings.get('text_search_objects'))
 
         ddl = f'CREATE {view_type} "{target_schema_name}"."{view_name}" AS {view_code}'
         if not ddl.strip().endswith(';'):
@@ -2450,6 +3348,7 @@ class PostgreSQLConnector(DatabaseConnector):
             # 2. Composite Types
             query_composite = f"""
                 SELECT
+                    t.oid,
                     n.nspname,
                     t.typname,
                     pg_catalog.obj_description(t.oid, 'pg_type'),
@@ -2457,7 +3356,13 @@ class PostgreSQLConnector(DatabaseConnector):
                         SELECT string_agg('"'||a.attname||'" '||pg_catalog.format_type(a.atttypid, a.atttypmod), ', ' ORDER BY a.attnum)
                         FROM pg_attribute a
                         WHERE a.attrelid = t.typrelid AND a.attnum > 0 AND NOT a.attisdropped
-                    ) as attributes
+                    ) as attributes,
+                    (
+                        SELECT ARRAY_AGG(DISTINCT COALESCE(NULLIF(elem.typelem, 0), a.atttypid))
+                        FROM pg_attribute a
+                        JOIN pg_type elem ON elem.oid = a.atttypid
+                        WHERE a.attrelid = t.typrelid AND a.attnum > 0 AND NOT a.attisdropped
+                    ) as attr_type_oids
                 FROM pg_type t
                 JOIN pg_namespace n ON t.typnamespace = n.oid
                 JOIN pg_class c ON t.typrelid = c.oid
@@ -2467,18 +3372,54 @@ class PostgreSQLConnector(DatabaseConnector):
                 ORDER BY t.typname
             """
             cursor.execute(query_composite)
-            for row in cursor.fetchall():
-                schema_name = row[0]
-                type_name = row[1]
-                comment = row[2]
-                attributes = row[3]
+            composite_rows = cursor.fetchall()
+            composite_items = []
+            for row in composite_rows:
+                oid = row[0]
+                schema_name = row[1]
+                type_name = row[2]
+                comment = row[3]
+                attributes = row[4]
+                attr_type_oids = row[5] or []
                 sql = f'CREATE TYPE "{schema_name}"."{type_name}" AS ({attributes});'
-
-                user_defined_types[order_num] = {
+                composite_items.append({
+                    'oid': oid,
                     'schema_name': schema_name,
                     'type_name': type_name,
+                    'comment': comment,
                     'sql': sql,
-                    'comment': comment
+                    'attr_type_oids': attr_type_oids
+                })
+
+            known_oids = {item['oid'] for item in composite_items}
+            item_by_oid = {item['oid']: item for item in composite_items}
+            sorted_composites = []
+            visited = set()
+            visiting = set()
+
+            def visit_composite(item):
+                if item['oid'] in visiting:
+                    return
+                if item['oid'] not in visited:
+                    visiting.add(item['oid'])
+                    dep_oids = set(item['attr_type_oids'] or []) & known_oids - {item['oid']}
+                    for dep_oid in dep_oids:
+                        if dep_oid in item_by_oid:
+                            visit_composite(item_by_oid[dep_oid])
+                    visiting.remove(item['oid'])
+                    visited.add(item['oid'])
+                    sorted_composites.append(item)
+
+            for item in composite_items:
+                if item['oid'] not in visited:
+                    visit_composite(item)
+
+            for item in sorted_composites:
+                user_defined_types[order_num] = {
+                    'schema_name': item['schema_name'],
+                    'type_name': item['type_name'],
+                    'sql': item['sql'],
+                    'comment': item['comment']
                 }
                 order_num += 1
 
@@ -2514,7 +3455,7 @@ class PostgreSQLConnector(DatabaseConnector):
                 if canonical and canonical != '-':
                     parts.append(f"CANONICAL = {canonical}")
                 if subdiff and subdiff != '-':
-                    parts.append(f"SUBDIFF = {subdiff}")
+                    parts.append(f"SUBTYPE_DIFF = {subdiff}")
 
                 sql = f'CREATE TYPE "{schema_name}"."{type_name}" AS RANGE ({", ".join(parts)});'
 
@@ -2635,7 +3576,7 @@ class PostgreSQLConnector(DatabaseConnector):
             if domain_default is not None:
                 sql_parts.append(f"DEFAULT {domain_default}")
 
-            if domain_not_null:
+            if domain_not_null and not (domain_check_sql and 'NOT NULL' in domain_check_sql.upper()):
                 sql_parts.append("NOT NULL")
 
             if domain_check_sql:
@@ -2650,6 +3591,292 @@ class PostgreSQLConnector(DatabaseConnector):
             create_domain_sql = " ".join(sql_parts) + ";"
 
         return create_domain_sql
+
+    def fetch_collations(self, schema: str):
+        """
+        Returns user defined collations of the source database.
+
+        Collations are database wide objects - a table in the migrated schema can use a
+        collation created in another schema (typically public), therefore all non system
+        schemas are searched. Collations sharing the same name in several schemas are
+        reported only once - the one from the migrated schema wins.
+        """
+        collations = {}
+        order_num = 1
+        provider_names = {'c': 'libc', 'i': 'icu', 'd': 'default', 'b': 'builtin'}
+        query = ''
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+
+            # Catalog columns of pg_collation differ between PostgreSQL versions:
+            #   collisdeterministic - PostgreSQL 12+
+            #   colliculocale       - PostgreSQL 15/16, renamed to colllocale in PostgreSQL 17
+            #   collicurules        - PostgreSQL 16+
+            cursor.execute("""
+                SELECT attname FROM pg_catalog.pg_attribute
+                WHERE attrelid = 'pg_catalog.pg_collation'::regclass
+                  AND attnum > 0 AND NOT attisdropped
+            """)
+            available_columns = {row[0] for row in cursor.fetchall()}
+            if 'colllocale' in available_columns:
+                locale_column = 'c.colllocale'
+            elif 'colliculocale' in available_columns:
+                locale_column = 'c.colliculocale'
+            else:
+                locale_column = 'NULL::text'
+            deterministic_column = 'c.collisdeterministic' if 'collisdeterministic' in available_columns else 'TRUE'
+            rules_column = 'c.collicurules' if 'collicurules' in available_columns else 'NULL::text'
+
+            query = f"""
+                SELECT
+                    n.nspname as collation_schema,
+                    c.collname as collation_name,
+                    c.collprovider as collation_provider,
+                    {locale_column} as collation_locale,
+                    c.collcollate as collation_lc_collate,
+                    c.collctype as collation_lc_ctype,
+                    {deterministic_column} as collation_deterministic,
+                    {rules_column} as collation_rules,
+                    c.collversion as collation_version,
+                    pg_catalog.obj_description(c.oid, 'pg_collation') as collation_comment
+                FROM pg_catalog.pg_collation c
+                JOIN pg_catalog.pg_namespace n ON n.oid = c.collnamespace
+                WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+                ORDER BY (n.nspname = '{schema}') DESC, n.nspname, c.collname
+            """
+            cursor.execute(query)
+            for row in cursor.fetchall():
+                collation_name = row[1]
+                if collation_name in collations:
+                    # Same name in another schema - references in the DDL are resolved by name,
+                    # so only the first occurrence (the migrated schema) can be recreated.
+                    self.config_parser.print_log_message('WARNING', f"postgresql_connector: fetch_collations: Collation {row[0]}.{collation_name} is skipped - collation with the same name is already migrated from another schema.")
+                    continue
+                provider = provider_names.get(row[2], row[2])
+                collation_info = {
+                    'collation_schema': row[0],
+                    'collation_name': collation_name,
+                    'collation_provider': provider,
+                    'collation_locale': row[3],
+                    'collation_lc_collate': row[4],
+                    'collation_lc_ctype': row[5],
+                    'collation_deterministic': row[6],
+                    'collation_rules': row[7],
+                    'collation_version': row[8],
+                    'collation_comment': row[9],
+                }
+                collation_info['source_collation_sql'] = self.get_create_collation_sql(
+                    {**collation_info, 'target_schema_name': row[0]})
+                collations[collation_name] = collation_info
+
+            cursor.close()
+            self.disconnect()
+
+            # Keys of the returned dict have to be ordinal numbers - see the base connector
+            return {order_num + index: value for index, value in enumerate(collations.values())}
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"postgresql_connector: fetch_collations: Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
+            raise
+
+    def get_create_collation_sql(self, settings):
+        collation_name = settings['collation_name']
+        target_schema_name = settings['target_schema_name']
+        target_collation_name = settings.get('target_collation_name') or collation_name
+        provider = (settings.get('collation_provider') or '').lower()
+        locale = settings.get('collation_locale')
+        lc_collate = settings.get('collation_lc_collate')
+        lc_ctype = settings.get('collation_lc_ctype')
+        deterministic = settings.get('collation_deterministic')
+        rules = settings.get('collation_rules')
+
+        def quoted(value):
+            return "'" + str(value).replace("'", "''") + "'"
+
+        options = []
+        if provider in ('icu', 'libc', 'builtin'):
+            options.append(f"provider = {provider}")
+
+        if locale:
+            options.append(f"locale = {quoted(locale)}")
+        elif lc_collate and lc_ctype and lc_collate == lc_ctype:
+            options.append(f"locale = {quoted(lc_collate)}")
+        else:
+            if lc_collate:
+                options.append(f"lc_collate = {quoted(lc_collate)}")
+            if lc_ctype:
+                options.append(f"lc_ctype = {quoted(lc_ctype)}")
+
+        if rules:
+            options.append(f"rules = {quoted(rules)}")
+        if deterministic is False:
+            options.append("deterministic = false")
+
+        if not options:
+            self.config_parser.print_log_message('WARNING', f"postgresql_connector: get_create_collation_sql: Collation {collation_name} carries no locale settings - skipping.")
+            return ''
+
+        # The collation version is deliberately not copied - the target can be built with
+        # another ICU / libc version and a wrong recorded version produces false warnings.
+        return f'''CREATE COLLATION IF NOT EXISTS "{target_schema_name}"."{target_collation_name}" ({', '.join(options)});'''
+
+    def fetch_text_search_objects(self, schema: str):
+        """
+        Returns user defined full text search dictionaries and configurations.
+
+        Like collations these are database wide objects, so all non system schemas are
+        searched - a generated tsvector column of the migrated schema regularly uses a
+        configuration created in public. Objects belonging to an extension are left out,
+        they come with the extension itself (e.g. the unaccent dictionary).
+        Dictionaries come first, configurations reference them.
+        """
+        objects = {}
+        query = ''
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+
+            query = f"""
+                SELECT
+                    n.nspname as object_schema,
+                    d.dictname as object_name,
+                    (SELECT quote_ident(tn.nspname)||'.'||quote_ident(t.tmplname)
+                     FROM pg_catalog.pg_ts_template t
+                     JOIN pg_catalog.pg_namespace tn ON tn.oid = t.tmplnamespace
+                     WHERE t.oid = d.dicttemplate) as template_name,
+                    d.dictinitoption as init_options,
+                    pg_catalog.obj_description(d.oid, 'pg_ts_dict') as object_comment
+                FROM pg_catalog.pg_ts_dict d
+                JOIN pg_catalog.pg_namespace n ON n.oid = d.dictnamespace
+                WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+                  AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend dep
+                                  WHERE dep.objid = d.oid AND dep.deptype = 'e')
+                ORDER BY (n.nspname = '{schema}') DESC, n.nspname, d.dictname
+            """
+            cursor.execute(query)
+            for row in cursor.fetchall():
+                object_name = row[1]
+                if object_name in objects:
+                    self.config_parser.print_log_message('WARNING', f"postgresql_connector: fetch_text_search_objects: Text search dictionary {row[0]}.{object_name} is skipped - a dictionary with the same name is already migrated from another schema.")
+                    continue
+                objects[object_name] = {
+                    'object_schema': row[0],
+                    'object_name': object_name,
+                    'object_type': 'DICTIONARY',
+                    'template_name': row[2],
+                    'init_options': row[3],
+                    'parser_name': '',
+                    'mappings': [],
+                    'object_comment': row[4],
+                }
+
+            query = f"""
+                SELECT
+                    n.nspname as object_schema,
+                    c.cfgname as object_name,
+                    (SELECT quote_ident(pn.nspname)||'.'||quote_ident(p.prsname)
+                     FROM pg_catalog.pg_ts_parser p
+                     JOIN pg_catalog.pg_namespace pn ON pn.oid = p.prsnamespace
+                     WHERE p.oid = c.cfgparser) as parser_name,
+                    pg_catalog.obj_description(c.oid, 'pg_ts_config') as object_comment,
+                    c.oid as config_oid,
+                    c.cfgparser as parser_oid
+                FROM pg_catalog.pg_ts_config c
+                JOIN pg_catalog.pg_namespace n ON n.oid = c.cfgnamespace
+                WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+                  AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend dep
+                                  WHERE dep.objid = c.oid AND dep.deptype = 'e')
+                ORDER BY (n.nspname = '{schema}') DESC, n.nspname, c.cfgname
+            """
+            cursor.execute(query)
+            configurations = cursor.fetchall()
+
+            for row in configurations:
+                object_name = row[1]
+                if object_name in objects:
+                    self.config_parser.print_log_message('WARNING', f"postgresql_connector: fetch_text_search_objects: Text search configuration {row[0]}.{object_name} is skipped - an object with the same name is already migrated from another schema.")
+                    continue
+                # Token type -> ordered list of dictionaries. The mapping is what makes the
+                # configuration different from the one it was copied from, so it has to be
+                # transferred token type by token type.
+                cursor.execute(f"""
+                    SELECT tt.alias as token_type,
+                           quote_ident(dn.nspname)||'.'||quote_ident(d.dictname) as dictionary
+                    FROM pg_catalog.pg_ts_config_map m
+                    JOIN pg_catalog.pg_ts_dict d ON d.oid = m.mapdict
+                    JOIN pg_catalog.pg_namespace dn ON dn.oid = d.dictnamespace
+                    JOIN pg_catalog.ts_token_type({row[5]}::oid) tt ON tt.tokid = m.maptokentype
+                    WHERE m.mapcfg = {row[4]}
+                    ORDER BY tt.alias, m.mapseqno
+                """)
+                mappings = {}
+                for token_type, dictionary in cursor.fetchall():
+                    mappings.setdefault(token_type, []).append(dictionary)
+
+                objects[object_name] = {
+                    'object_schema': row[0],
+                    'object_name': object_name,
+                    'object_type': 'CONFIGURATION',
+                    'template_name': '',
+                    'init_options': '',
+                    'parser_name': row[2],
+                    'mappings': sorted(mappings.items()),
+                    'object_comment': row[3],
+                }
+
+            for object_info in objects.values():
+                object_info['source_object_sql'] = self.get_create_text_search_sql(
+                    {**object_info, 'target_schema_name': object_info['object_schema']})
+
+            cursor.close()
+            self.disconnect()
+
+            # Dictionaries first - configurations reference them
+            ordered = sorted(objects.values(), key=lambda item: 0 if item['object_type'] == 'DICTIONARY' else 1)
+            return {index + 1: value for index, value in enumerate(ordered)}
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"postgresql_connector: fetch_text_search_objects: Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
+            raise
+
+    def get_create_text_search_sql(self, settings):
+        object_name = settings['object_name']
+        object_type = settings.get('object_type', '')
+        target_schema_name = settings['target_schema_name']
+        target_object_name = settings.get('target_object_name') or object_name
+        qualified_name = f'"{target_schema_name}"."{target_object_name}"'
+
+        if object_type == 'DICTIONARY':
+            template_name = settings.get('template_name')
+            if not template_name:
+                self.config_parser.print_log_message('WARNING', f"postgresql_connector: get_create_text_search_sql: Text search dictionary {object_name} has no template - skipping.")
+                return ''
+            options = [f"TEMPLATE = {template_name}"]
+            init_options = settings.get('init_options')
+            if init_options:
+                # dictinitoption is already a comma separated option list ("stopwords = 'english'")
+                options.append(init_options)
+            return f"""CREATE TEXT SEARCH DICTIONARY {qualified_name} ({', '.join(options)});"""
+
+        if object_type == 'CONFIGURATION':
+            parser_name = settings.get('parser_name')
+            if not parser_name:
+                self.config_parser.print_log_message('WARNING', f"postgresql_connector: get_create_text_search_sql: Text search configuration {object_name} has no parser - skipping.")
+                return ''
+            # The parser plus the explicit mappings are used instead of "COPY = <config>":
+            # the configuration copied from does not have to exist in the target, and the
+            # mappings were altered afterwards anyway.
+            statements = [f"""CREATE TEXT SEARCH CONFIGURATION {qualified_name} (PARSER = {parser_name});"""]
+            for token_type, dictionaries in settings.get('mappings') or []:
+                if not dictionaries:
+                    continue
+                statements.append(
+                    f"""ALTER TEXT SEARCH CONFIGURATION {qualified_name} ADD MAPPING FOR {token_type} WITH {', '.join(dictionaries)};""")
+            return '\n'.join(statements)
+
+        self.config_parser.print_log_message('WARNING', f"postgresql_connector: get_create_text_search_sql: Unknown text search object type '{object_type}' of {object_name} - skipping.")
+        return ''
 
     def fetch_default_values(self, settings) -> dict:
         # Placeholder for fetching default values

@@ -1,0 +1,125 @@
+# ============================================================================
+# credativ-pg-migrator - SQLite -> PostgreSQL   (SQL scripts + CSV files)
+# ============================================================================
+# The same model as sqlite_to_postgresql.yaml, but taken from a file delivery
+# instead of the .db file - what you use when the customer sends an export
+# rather than the database.
+#
+# HOW THE DDL IS UNDERSTOOD: there is no hand-written SQLite parser. The
+# scripts are replayed into a STAGING SQLite database, which is then read by
+# exactly the same code as a live file - SQLite is the only parser that fully
+# understands its own DDL, so CHECK constraints, generated columns,
+# AUTOINCREMENT, functional and partial indexes, views and triggers are all
+# recognized without a second implementation.
+#
+# The staging database is written next to data_export.conversion_path when that
+# is set, otherwise into the system temp directory, and its location is logged.
+#
+# IF THE SCRIPTS CONTAIN INSERT STATEMENTS (a full .dump), the data lands in
+# the staging database and is migrated from there - then you need no
+# data_export block at all. A configured CSV source takes precedence over it.
+#
+# MUST ADJUST
+#   - migrator / target connection details
+#   - source.ddl.path
+#   - source.data_export.file - or delete the whole block for a full .dump
+# ============================================================================
+
+workflow: "standard"
+
+# The analysis would query a source database, and there is none.
+pre_migration_analysis:
+  top_n_tables:
+    by_rows: 0
+    by_size: 0
+    by_columns: 0
+    by_indexes: 0
+    by_constraints: 0
+
+migrator:
+  type: "postgresql"
+  host: "localhost"             # >>> ADJUST
+  port: 5432                    # >>> ADJUST
+  username: "postgres"          # >>> ADJUST
+  password: "postgres"          # >>> ADJUST
+  database: "sqlite_ddl_target" # >>> ADJUST
+  schema: "migration"
+
+source:
+  type: "sqlite"
+  connectivity: "ddl"
+  schema: "main"
+  ddl:
+    # A single file, a directory or a mask. `sqlite3 app.db .schema` output is
+    # the complete and authoritative DDL, because sqlite_schema stores the
+    # original text of every CREATE statement.
+    path: "/path/to/export/schema.sql"                   # >>> ADJUST
+    # A mask also works, if the scripts are split:
+    # path: "/path/to/export/0[1-6]_*.sql"
+    # Statements that cannot be executed are skipped and reported instead of
+    # costing the whole file - keep PRAGMA-only and SELECT-only scripts out of
+    # the mask anyway.
+  data_export:
+    format: "CSV"
+    # {{source_table_name}} is substituted per table.
+    file: "/path/to/export/data/{{source_table_name}}.csv"   # >>> ADJUST
+    conversion_path: "/path/to/export/converted"             # >>> ADJUST
+    delimiter: ","
+    header: true                # >>> ADJUST - CSV exports usually have one
+    character_set: "UTF-8"      # >>> ADJUST
+    clean: false
+    workers: 4
+    on_missing_data_file: skip
+
+target:
+  type: "postgresql"
+  host: "localhost"             # >>> ADJUST
+  port: 5432                    # >>> ADJUST
+  username: "postgres"          # >>> ADJUST
+  password: "postgres"          # >>> ADJUST
+  database: "sqlite_ddl_target" # >>> ADJUST
+  schema: "public"              # >>> ADJUST
+  settings:
+    work_mem: '32MB'
+    maintenance_work_mem: '512MB'
+    search_path: "public"       # >>> ADJUST if target.schema is not public
+
+migration:
+  drop_schema: true             # >>> ADJUST
+  drop_tables: true
+  truncate_tables: true
+  create_tables: true
+  migrate_data: true
+  migrate_indexes: true
+  migrate_constraints: true
+  migrate_funcprocs: false      # SQLite has none
+  migrate_triggers: true
+  migrate_views: true
+  set_sequences: true
+  on_error: continue
+  parallel_workers: 8           # >>> ADJUST
+  batch_size: 25000
+  names_case_handling: lower    # >>> ADJUST
+  varchar_to_text_length: 4000
+  char_to_text_length: 255
+  validate_objects: retry
+
+include_tables: all
+exclude_tables:
+  - "sqlite_.*"                 # >>> ADJUST - see sqlite_to_postgresql.yaml
+include_funcprocs: all
+exclude_funcprocs:
+include_views: all
+exclude_views:
+
+table_settings:
+  # - table_name: "big_events"
+  #   batch_size: 5000
+
+data_types_substitution:
+default_values_substitution:
+
+summary:
+  top_migrated_tables: 10
+  top_mismatched_tables: 10
+  top_longest_batches: 15

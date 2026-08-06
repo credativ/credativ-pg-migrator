@@ -71,6 +71,8 @@ class MigratorTables:
         self.create_table_for_user_defined_types()
         self.create_table_for_default_values()
         self.create_table_for_domains()
+        self.create_table_for_collations()
+        self.create_table_for_text_search()
         self.create_table_for_new_objects()
         self.create_table_for_tables()
         self.create_table_for_source_table_partitioning()
@@ -1285,6 +1287,301 @@ class MigratorTables:
             'target_domain_sql': row[7],
             'migrated_as': row[8],
             'domain_comment': row[9]
+        }
+
+    def create_table_for_collations(self):
+        table_name = self.config_parser.get_protocol_name_collations()
+        self.protocol_connection.execute_query(self.drop_table_sql.format(protocol_schema=self.protocol_schema, table_name=table_name))
+        self.protocol_connection.execute_query(f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."{table_name}"
+            (id SERIAL PRIMARY KEY,
+            source_schema_name TEXT,
+            source_collation_name TEXT,
+            source_collation_sql TEXT,
+            target_schema_name TEXT,
+            target_collation_name TEXT,
+            target_collation_sql TEXT,
+            collation_provider TEXT,
+            collation_comment TEXT,
+            task_created TIMESTAMP DEFAULT clock_timestamp(),
+            task_started TIMESTAMP,
+            task_completed TIMESTAMP,
+            success BOOLEAN,
+            message TEXT
+            )
+        """)
+        self.config_parser.print_log_message('DEBUG3', f"migrator_tables: create_table_for_collations: Table {table_name} created in schema {self.protocol_schema}")
+
+    def insert_collation(self, settings):
+        func_run_id = uuid.uuid4()
+        source_schema_name = settings['source_schema_name']
+        source_collation_name = settings['source_collation_name']
+        source_collation_sql = settings.get('source_collation_sql', '')
+        target_schema_name = settings['target_schema_name']
+        target_collation_name = settings['target_collation_name']
+        target_collation_sql = settings['target_collation_sql']
+        collation_provider = settings.get('collation_provider', '')
+        collation_comment = settings.get('collation_comment') or ''
+
+        table_name = self.config_parser.get_protocol_name_collations()
+        query = f"""
+            INSERT INTO "{self.protocol_schema}"."{table_name}"
+            (source_schema_name, source_collation_name, source_collation_sql,
+            target_schema_name, target_collation_name, target_collation_sql,
+            collation_provider, collation_comment)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING *
+        """
+        params = (source_schema_name, source_collation_name, source_collation_sql,
+                  target_schema_name, target_collation_name, target_collation_sql,
+                  collation_provider, collation_comment)
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+
+            collation_row = self.decode_collation_row(row)
+            self.config_parser.print_log_message( 'DEBUG3', f"migrator_tables: insert_collation: ({func_run_id}): returned row: {collation_row}")
+            self.insert_protocol({'object_type': 'collation', 'object_name': target_collation_name, 'object_action': 'create', 'object_ddl': target_collation_sql, 'execution_timestamp': None, 'execution_success': None, 'execution_error_message': None, 'row_type': 'info', 'execution_results': None, 'object_protocol_id': collation_row['id']})
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_collation: ({func_run_id}): Error inserting collation {target_collation_name} into {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_collation: ({func_run_id}): Error: {e}")
+            raise
+
+    def update_collation_status(self, settings):
+        row_id = settings.get('row_id')
+        success = settings.get('success')
+        message = settings.get('message')
+        func_run_id = uuid.uuid4()
+        table_name = self.config_parser.get_protocol_name_collations()
+        query = f"""
+            UPDATE "{self.protocol_schema}"."{table_name}"
+            SET task_completed = clock_timestamp(),
+            success = %s,
+            message = %s
+            WHERE id = %s
+            RETURNING *
+        """
+        self.config_parser.print_log_message( 'DEBUG3', f"migrator_tables: update_collation_status: ({func_run_id}): Query: {query}")
+        params = ('TRUE' if success else 'FALSE', message, row_id)
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+
+            if row:
+                collation_row = self.decode_collation_row(row)
+                self.config_parser.print_log_message( 'DEBUG3', f"migrator_tables: update_collation_status: ({func_run_id}): returned row: {collation_row}")
+                self.update_protocol({'object_type': 'collation', 'object_protocol_id': collation_row['id'], 'execution_success': success, 'execution_error_message': message, 'execution_results': None})
+            else:
+                self.config_parser.print_log_message('ERROR', f"migrator_tables: update_collation_status: ({func_run_id}): Error updating status for collation {row_id} in {table_name}.")
+                self.config_parser.print_log_message('ERROR', f"migrator_tables: update_collation_status: ({func_run_id}): Error: No protocol row returned.")
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_collation_status: ({func_run_id}): Error updating status for collation {row_id} in {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_collation_status: ({func_run_id}): Query: {query}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_collation_status: ({func_run_id}): Error: {e}")
+            raise
+
+    def fetch_all_collations(self, settings=None):
+        if settings is None: settings = {}
+        collation_owner = settings.get('collation_owner')
+        collation_name = settings.get('collation_name')
+        table_name = self.config_parser.get_protocol_name_collations()
+        where_clause = ""
+        if collation_owner:
+            where_clause += f" WHERE source_schema_name = '{collation_owner}'"
+        if collation_name:
+            if where_clause:
+                where_clause += f" AND source_collation_name = '{collation_name}'"
+            else:
+                where_clause += f" WHERE source_collation_name = '{collation_name}'"
+        query = f"""SELECT * FROM "{self.protocol_schema}"."{table_name}" {where_clause} ORDER BY id"""
+        cursor = self.protocol_connection.connection.cursor()
+        cursor.execute(query)
+        rows = cursor.fetchall()
+        cursor.close()
+        return rows
+
+    def get_migrated_collations(self):
+        """
+        Returns a mapping of source collation names to their target schema.
+        Used by DDL builders to qualify COLLATE references which were unqualified
+        in the source database (they relied on the source search_path).
+        """
+        result = {}
+        try:
+            for row in self.fetch_all_collations({}):
+                collation_row = self.decode_collation_row(row)
+                result[collation_row['source_collation_name']] = {
+                    'target_schema_name': collation_row['target_schema_name'],
+                    'target_collation_name': collation_row['target_collation_name'],
+                }
+        except Exception as e:
+            self.config_parser.print_log_message('WARNING', f"migrator_tables: get_migrated_collations: Error reading collations: {e}")
+        return result
+
+    def decode_collation_row(self, row):
+        return {
+            'id': row[0],
+            'source_schema_name': row[1],
+            'source_collation_name': row[2],
+            'source_collation_sql': row[3],
+            'target_schema_name': row[4],
+            'target_collation_name': row[5],
+            'target_collation_sql': row[6],
+            'collation_provider': row[7],
+            'collation_comment': row[8]
+        }
+
+    def create_table_for_text_search(self):
+        table_name = self.config_parser.get_protocol_name_text_search()
+        self.protocol_connection.execute_query(self.drop_table_sql.format(protocol_schema=self.protocol_schema, table_name=table_name))
+        self.protocol_connection.execute_query(f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."{table_name}"
+            (id SERIAL PRIMARY KEY,
+            source_schema_name TEXT,
+            source_object_name TEXT,
+            source_object_sql TEXT,
+            target_schema_name TEXT,
+            target_object_name TEXT,
+            target_object_sql TEXT,
+            object_type TEXT,
+            object_comment TEXT,
+            task_created TIMESTAMP DEFAULT clock_timestamp(),
+            task_started TIMESTAMP,
+            task_completed TIMESTAMP,
+            success BOOLEAN,
+            message TEXT
+            )
+        """)
+        self.config_parser.print_log_message('DEBUG3', f"migrator_tables: create_table_for_text_search: Table {table_name} created in schema {self.protocol_schema}")
+
+    def insert_text_search(self, settings):
+        func_run_id = uuid.uuid4()
+        source_schema_name = settings['source_schema_name']
+        source_object_name = settings['source_object_name']
+        source_object_sql = settings.get('source_object_sql', '')
+        target_schema_name = settings['target_schema_name']
+        target_object_name = settings['target_object_name']
+        target_object_sql = settings['target_object_sql']
+        object_type = settings.get('object_type', '')
+        object_comment = settings.get('object_comment') or ''
+
+        table_name = self.config_parser.get_protocol_name_text_search()
+        query = f"""
+            INSERT INTO "{self.protocol_schema}"."{table_name}"
+            (source_schema_name, source_object_name, source_object_sql,
+            target_schema_name, target_object_name, target_object_sql,
+            object_type, object_comment)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING *
+        """
+        params = (source_schema_name, source_object_name, source_object_sql,
+                  target_schema_name, target_object_name, target_object_sql,
+                  object_type, object_comment)
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+
+            text_search_row = self.decode_text_search_row(row)
+            self.config_parser.print_log_message( 'DEBUG3', f"migrator_tables: insert_text_search: ({func_run_id}): returned row: {text_search_row}")
+            self.insert_protocol({'object_type': 'text search', 'object_name': target_object_name, 'object_action': 'create', 'object_ddl': target_object_sql, 'execution_timestamp': None, 'execution_success': None, 'execution_error_message': None, 'row_type': 'info', 'execution_results': None, 'object_protocol_id': text_search_row['id']})
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_text_search: ({func_run_id}): Error inserting text search object {target_object_name} into {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_text_search: ({func_run_id}): Error: {e}")
+            raise
+
+    def update_text_search_status(self, settings):
+        row_id = settings.get('row_id')
+        success = settings.get('success')
+        message = settings.get('message')
+        func_run_id = uuid.uuid4()
+        table_name = self.config_parser.get_protocol_name_text_search()
+        query = f"""
+            UPDATE "{self.protocol_schema}"."{table_name}"
+            SET task_completed = clock_timestamp(),
+            success = %s,
+            message = %s
+            WHERE id = %s
+            RETURNING *
+        """
+        self.config_parser.print_log_message( 'DEBUG3', f"migrator_tables: update_text_search_status: ({func_run_id}): Query: {query}")
+        params = ('TRUE' if success else 'FALSE', message, row_id)
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            cursor.close()
+
+            if row:
+                text_search_row = self.decode_text_search_row(row)
+                self.config_parser.print_log_message( 'DEBUG3', f"migrator_tables: update_text_search_status: ({func_run_id}): returned row: {text_search_row}")
+                self.update_protocol({'object_type': 'text search', 'object_protocol_id': text_search_row['id'], 'execution_success': success, 'execution_error_message': message, 'execution_results': None})
+            else:
+                self.config_parser.print_log_message('ERROR', f"migrator_tables: update_text_search_status: ({func_run_id}): Error updating status for text search object {row_id} in {table_name}.")
+                self.config_parser.print_log_message('ERROR', f"migrator_tables: update_text_search_status: ({func_run_id}): Error: No protocol row returned.")
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_text_search_status: ({func_run_id}): Error updating status for text search object {row_id} in {table_name}.")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_text_search_status: ({func_run_id}): Query: {query}")
+            self.config_parser.print_log_message('ERROR', f"migrator_tables: update_text_search_status: ({func_run_id}): Error: {e}")
+            raise
+
+    def fetch_all_text_search(self, settings=None):
+        if settings is None: settings = {}
+        object_owner = settings.get('object_owner')
+        object_name = settings.get('object_name')
+        table_name = self.config_parser.get_protocol_name_text_search()
+        where_clause = ""
+        if object_owner:
+            where_clause += f" WHERE source_schema_name = '{object_owner}'"
+        if object_name:
+            if where_clause:
+                where_clause += f" AND source_object_name = '{object_name}'"
+            else:
+                where_clause += f" WHERE source_object_name = '{object_name}'"
+        # Dictionaries have to be created before the configurations which use them
+        query = f"""SELECT * FROM "{self.protocol_schema}"."{table_name}" {where_clause}
+                    ORDER BY CASE WHEN object_type = 'DICTIONARY' THEN 0 ELSE 1 END, id"""
+        cursor = self.protocol_connection.connection.cursor()
+        cursor.execute(query)
+        rows = cursor.fetchall()
+        cursor.close()
+        return rows
+
+    def get_migrated_text_search_objects(self):
+        """
+        Returns a mapping of source text search object names to their target schema.
+        Used by the DDL builders to qualify '<name>'::regconfig / ::regdictionary literals,
+        which in the source resolved through the search_path.
+        """
+        result = {}
+        try:
+            for row in self.fetch_all_text_search({}):
+                text_search_row = self.decode_text_search_row(row)
+                result[text_search_row['source_object_name']] = {
+                    'target_schema_name': text_search_row['target_schema_name'],
+                    'target_object_name': text_search_row['target_object_name'],
+                    'object_type': text_search_row['object_type'],
+                }
+        except Exception as e:
+            self.config_parser.print_log_message('WARNING', f"migrator_tables: get_migrated_text_search_objects: Error reading text search objects: {e}")
+        return result
+
+    def decode_text_search_row(self, row):
+        return {
+            'id': row[0],
+            'source_schema_name': row[1],
+            'source_object_name': row[2],
+            'source_object_sql': row[3],
+            'target_schema_name': row[4],
+            'target_object_name': row[5],
+            'target_object_sql': row[6],
+            'object_type': row[7],
+            'object_comment': row[8]
         }
 
     def create_table_for_default_values(self):
@@ -3797,6 +4094,8 @@ class MigratorTables:
 
         total_errors = 0
         objects_to_check = [
+            ('Collations', self.config_parser.get_protocol_name_collations(), 'collation_provider'),
+            ('Text Search Objects', self.config_parser.get_protocol_name_text_search(), 'object_type'),
             ('User Defined Types', self.config_parser.get_protocol_name_user_defined_types(), None),
             ('Domains', self.config_parser.get_protocol_name_domains(), 'migrated_as'),
             ('Sequences', self.config_parser.get_protocol_name_sequences(), None),
@@ -3897,7 +4196,9 @@ class MigratorTables:
                 (self.config_parser.get_protocol_name_constraints(), 'constraint_comment'),
                 (self.config_parser.get_protocol_name_funcprocs(), 'funcproc_comment'),
                 (self.config_parser.get_protocol_name_triggers(), 'trigger_comment'),
-                (self.config_parser.get_protocol_name_user_defined_types(), 'type_comment')
+                (self.config_parser.get_protocol_name_user_defined_types(), 'type_comment'),
+                (self.config_parser.get_protocol_name_collations(), 'collation_comment'),
+                (self.config_parser.get_protocol_name_text_search(), 'object_comment')
             ]:
                 try:
                     cursor.execute(f"""SELECT COUNT(*) FROM "{self.protocol_schema}"."{tbl}" WHERE {col} IS NOT NULL AND {col} != ''""")

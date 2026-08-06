@@ -1,0 +1,131 @@
+# ============================================================================
+# credativ-pg-migrator - MySQL -> PostgreSQL
+# ============================================================================
+# MUST ADJUST
+#   - migrator / source / target connection details
+#   - source.database and source.schema - in MySQL these are the SAME name,
+#     set both to your database name
+#
+# Prerequisite for connectivity: "native"
+#   pip install mysql-connector-python
+# With "jdbc" or "odbc" that package is not needed - see the blocks below.
+#
+# NOT migrated for MySQL: functions, procedures and triggers (the connector
+# has placeholders only). Views are migrated with SQL transpilation.
+# ============================================================================
+
+workflow: "standard"
+
+pre_migration_analysis:
+  top_n_tables:
+    by_rows: 10
+    by_size: 10
+    by_columns: 10
+    by_indexes: 10
+    by_constraints: 10
+
+migrator:
+  type: "postgresql"
+  host: "localhost"           # >>> ADJUST
+  port: 5432                  # >>> ADJUST
+  username: "postgres"        # >>> ADJUST
+  password: "postgres"        # >>> ADJUST
+  database: "mysql_target"    # >>> ADJUST
+  schema: "migration"
+
+source:
+  type: "mysql"
+  host: "localhost"           # >>> ADJUST
+  port: 3306                  # >>> ADJUST
+  username: "root"            # >>> ADJUST
+  password: "root"            # >>> ADJUST
+  database: "app_db"          # >>> ADJUST
+  schema: "app_db"            # >>> ADJUST - same value as database
+  connectivity: "native"      # "native" | "jdbc" | "odbc"
+  # Only for connectivity: "jdbc"
+  # jdbc:
+  #   driver: "com.mysql.cj.jdbc.Driver"
+  #   libraries: "/usr/share/java/mysql-connector-j.jar"   # >>> ADJUST
+  # Only for connectivity: "odbc"
+  # odbc:
+  #   driver: "MySQL ODBC 8.0 Unicode Driver"              # >>> ADJUST
+  #   libraries: "/usr/lib/x86_64-linux-gnu/odbc/libmyodbc8w.so"
+
+target:
+  type: "postgresql"
+  host: "localhost"           # >>> ADJUST
+  port: 5432                  # >>> ADJUST
+  username: "postgres"        # >>> ADJUST
+  password: "postgres"        # >>> ADJUST
+  database: "mysql_target"    # >>> ADJUST
+  schema: "public"            # >>> ADJUST
+  settings:
+    work_mem: '32MB'
+    maintenance_work_mem: '512MB'
+    search_path: "public"     # >>> ADJUST if target.schema is not public
+
+migration:
+  drop_schema: true           # >>> ADJUST
+  drop_tables: true
+  truncate_tables: true
+  create_tables: true
+  migrate_data: true
+  migrate_indexes: true
+  migrate_constraints: true
+  migrate_funcprocs: false    # not implemented for MySQL
+  migrate_triggers: false     # not implemented for MySQL
+  migrate_views: true
+  set_sequences: true
+  on_error: continue
+  parallel_workers: 8         # >>> ADJUST
+  batch_size: 25000
+  names_case_handling: lower  # MySQL on Linux is already lower case
+  varchar_to_text_length: 4000
+  char_to_text_length: 255
+
+  # ------------------------------------------------------------------------
+  # MySQL specialities
+  # ------------------------------------------------------------------------
+  # '0000-00-00' is a legal MySQL value and no date at all in PostgreSQL.
+  # zero_datetime_default handles it in a column DEFAULT:
+  #   remove (default) | current_timestamp | '1970-01-01'
+  zero_datetime_default: remove
+  # zero_datetime_data_value: what to store when a ROW contains '0000-00-00'.
+  # Without it such a row keeps NULL - which fails on a NOT NULL column, hence
+  # relax_not_null_datetime below.
+  # zero_datetime_data_value: '1970-01-01'    # >>> ADJUST if you prefer a value
+  # Drop NOT NULL on date/time columns that contain zero dates, so the rows
+  # can be inserted at all. Only effective when zero_datetime_data_value is
+  # NOT set.
+  relax_not_null_datetime: true
+
+  # MySQL BIT/TINYINT(1) flags become BOOLEAN when listed here; the default
+  # for NUMERIC(1,0) is SMALLINT.
+  # numeric_1_boolean_columns:
+  #   - 'is_.*'
+
+  validate_objects: retry
+
+include_tables: all
+exclude_tables:               # >>> ADJUST
+include_views: all
+exclude_views:
+include_funcprocs: all
+exclude_funcprocs:
+
+# MySQL writes its own function syntax into DEFAULT clauses.
+# ["table regex", "column data type", "source default", "target default"]
+default_values_substitution:
+  - ["", "", "current_timestamp()", "current_timestamp"]
+  - ["", "bit", "b'0'", "false"]
+  - ["", "bit", "b'1'", "true"]
+
+# ["table regex", "column regex", "source type", "target type", "length"]
+data_types_substitution:
+  # - ["", "", "tinyint(1)", "BOOLEAN", '']
+  # - ["", "", "set", "TEXT", '']
+
+summary:
+  top_migrated_tables: 10
+  top_mismatched_tables: 10
+  top_longest_batches: 15

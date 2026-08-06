@@ -1,0 +1,113 @@
+# ============================================================================
+# credativ-pg-migrator - MariaDB -> PostgreSQL
+# ============================================================================
+# MariaDB has its own connector, separate from MySQL - do NOT set
+# type: "mysql" for a MariaDB source.
+#
+# MUST ADJUST
+#   - migrator / source / target connection details
+#   - source.database and source.schema - the same name in MariaDB
+#
+# Prerequisite for connectivity: "native"
+#   apt install libmariadb-dev   (or the equivalent for your distribution)
+#   pip install mariadb
+# The dedicated mariadb driver is used instead of mysql-connector-python for
+# licensing reasons. With "jdbc" or "odbc" neither package is needed.
+#
+# NOT migrated for MariaDB: functions, procedures and triggers.
+# ============================================================================
+
+workflow: "standard"
+
+pre_migration_analysis:
+  top_n_tables:
+    by_rows: 10
+    by_size: 10
+    by_columns: 10
+    by_indexes: 10
+    by_constraints: 10
+
+migrator:
+  type: "postgresql"
+  host: "localhost"           # >>> ADJUST
+  port: 5432                  # >>> ADJUST
+  username: "postgres"        # >>> ADJUST
+  password: "postgres"        # >>> ADJUST
+  database: "mariadb_target"  # >>> ADJUST
+  schema: "migration"
+
+source:
+  type: "mariadb"
+  host: "localhost"           # >>> ADJUST
+  port: 3306                  # >>> ADJUST
+  username: "root"            # >>> ADJUST
+  password: "root"            # >>> ADJUST
+  database: "app_db"          # >>> ADJUST
+  schema: "app_db"            # >>> ADJUST - same value as database
+  connectivity: "native"      # "native" | "jdbc" | "odbc"
+  # jdbc:
+  #   driver: "org.mariadb.jdbc.Driver"
+  #   libraries: "/usr/share/java/mariadb-java-client.jar"   # >>> ADJUST
+  # odbc:
+  #   driver: 'MariaDB ODBC 3.1 Driver'                      # >>> ADJUST
+  #   libraries: "/usr/lib/x86_64-linux-gnu/odbc/libmaodbc.so"
+
+target:
+  type: "postgresql"
+  host: "localhost"           # >>> ADJUST
+  port: 5432                  # >>> ADJUST
+  username: "postgres"        # >>> ADJUST
+  password: "postgres"        # >>> ADJUST
+  database: "mariadb_target"  # >>> ADJUST
+  schema: "public"            # >>> ADJUST
+  settings:
+    work_mem: '32MB'
+    maintenance_work_mem: '512MB'
+    search_path: "public"     # >>> ADJUST if target.schema is not public
+
+migration:
+  drop_schema: true           # >>> ADJUST
+  drop_tables: true
+  truncate_tables: true
+  create_tables: true
+  migrate_data: true
+  migrate_indexes: true
+  migrate_constraints: true
+  migrate_funcprocs: false    # not implemented for MariaDB
+  migrate_triggers: false     # not implemented for MariaDB
+  migrate_views: true
+  set_sequences: true
+  on_error: continue
+  parallel_workers: 8         # >>> ADJUST
+  batch_size: 25000
+  names_case_handling: lower
+  varchar_to_text_length: 4000
+  char_to_text_length: 255
+
+  # Same zero-date handling as MySQL - see mysql_to_postgresql.yaml for the
+  # full explanation.
+  zero_datetime_default: remove
+  relax_not_null_datetime: true
+  # zero_datetime_data_value: '1970-01-01'    # >>> ADJUST
+
+  validate_objects: retry
+
+include_tables: all
+exclude_tables:               # >>> ADJUST
+include_views: all
+exclude_views:
+include_funcprocs: all
+exclude_funcprocs:
+
+default_values_substitution:
+  - ["", "", "current_timestamp()", "current_timestamp"]
+  - ["", "bit", "b'0'", "false"]
+  - ["", "bit", "b'1'", "true"]
+
+data_types_substitution:
+  # - ["", "", "tinyint(1)", "BOOLEAN", '']
+
+summary:
+  top_migrated_tables: 10
+  top_mismatched_tables: 10
+  top_longest_batches: 15

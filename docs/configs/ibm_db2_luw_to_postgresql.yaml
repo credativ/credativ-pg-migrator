@@ -1,0 +1,109 @@
+# ============================================================================
+# credativ-pg-migrator - IBM Db2 LUW (Linux, UNIX, Windows) -> PostgreSQL
+# ============================================================================
+# MUST ADJUST
+#   - migrator / source / target connection details
+#   - source.database and source.schema - IN UPPER CASE
+#   - source.system_catalog - see the note below
+#
+# Prerequisite:
+#   pip install ibm_db      (provides ibm_db_dbi; imported when the connector
+#                            loads, so a missing package fails at start-up)
+#
+# This is the LIVE Db2 connector. Db2 for z/OS and Db2 for i are different
+# products with their own connectors and work offline from DDL + data files -
+# see ibm_db2_zos_to_postgresql.yaml and ibm_db2_i_to_postgresql.yaml.
+#
+# NOT migrated for Db2 LUW: functions, procedures and triggers, foreign-key
+# ON DELETE actions, user-defined types and domains.
+# ============================================================================
+
+workflow: "standard"
+
+pre_migration_analysis:
+  top_n_tables:
+    by_rows: 10
+    by_size: 10
+    by_columns: 10
+    by_indexes: 10
+    by_constraints: 10
+
+migrator:
+  type: "postgresql"
+  host: "localhost"           # >>> ADJUST
+  port: 5432                  # >>> ADJUST
+  username: "postgres"        # >>> ADJUST
+  password: "postgres"        # >>> ADJUST
+  database: "db2_target"      # >>> ADJUST
+  schema: "migration"
+
+source:
+  type: "ibm_db2_luw"
+  host: "localhost"           # >>> ADJUST
+  port: 50000                 # >>> ADJUST
+  username: "db2inst1"        # >>> ADJUST
+  password: "password"        # >>> ADJUST
+  database: "APPDB"           # >>> ADJUST - UPPER CASE
+  schema: "APPSCHEMA"         # >>> ADJUST - UPPER CASE
+  connectivity: "native"      # "native" (ibm_db) | "jdbc" | "odbc"
+  # Which catalog the model is read from:
+  #   SYSIBM = the SQL standard style views, simulates information_schema
+  #   SYSCAT = the Db2 native catalog, more detail
+  system_catalog: "SYSIBM"    # >>> ADJUST - SYSIBM | SYSCAT
+  # jdbc:
+  #   driver: "com.ibm.db2.jcc.DB2Driver"
+  #   libraries: "/usr/share/java/db2jcc4.jar"        # >>> ADJUST
+
+target:
+  type: "postgresql"
+  host: "localhost"           # >>> ADJUST
+  port: 5432                  # >>> ADJUST
+  username: "postgres"        # >>> ADJUST
+  password: "postgres"        # >>> ADJUST
+  database: "db2_target"      # >>> ADJUST
+  schema: "public"            # >>> ADJUST
+  settings:
+    work_mem: '32MB'
+    maintenance_work_mem: '512MB'
+    search_path: "public"     # >>> ADJUST if target.schema is not public
+
+migration:
+  drop_schema: true           # >>> ADJUST
+  drop_tables: true
+  truncate_tables: true
+  create_tables: true
+  migrate_data: true
+  migrate_indexes: true
+  migrate_constraints: true
+  migrate_funcprocs: false    # not implemented for Db2 LUW
+  migrate_triggers: false     # not implemented for Db2 LUW
+  migrate_views: true
+  set_sequences: true
+  on_error: continue
+  parallel_workers: 8         # >>> ADJUST
+  batch_size: 25000
+  # chunk_size: 25000
+  names_case_handling: lower  # >>> ADJUST - Db2 names are upper case
+  varchar_to_text_length: 4000
+  char_to_text_length: 255
+  validate_objects: retry
+
+include_tables: all
+exclude_tables:               # >>> ADJUST
+include_views: all
+exclude_views:
+  - "SYS*"
+include_funcprocs: all
+exclude_funcprocs:
+
+data_types_substitution:
+  # - ["", "", "DECFLOAT", "NUMERIC", '']
+  # - ["", "", "GRAPHIC", "TEXT", '']
+
+default_values_substitution:
+  # - ["", "", "CURRENT TIMESTAMP", "current_timestamp"]
+
+summary:
+  top_migrated_tables: 10
+  top_mismatched_tables: 10
+  top_longest_batches: 15

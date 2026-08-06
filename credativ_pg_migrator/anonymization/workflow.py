@@ -27,6 +27,8 @@ class AnonymizationWorkflow:
         original_migrate_data = self.config_parser.config['migration'].get('migrate_data', True)
         self.config_parser.config['migration']['migrate_data'] = False
         
+        self.orchestrator.run_create_collations()
+        self.orchestrator.run_create_text_search_objects()
         self.orchestrator.run_create_user_defined_types()
         self.orchestrator.run_create_domains()
         self.orchestrator.stdwf_migrate_sequences()
@@ -136,6 +138,15 @@ class AnonymizationWorkflow:
             target_columns = list(table_data.get('target_columns', {}).values())
             # Sort columns by column_id for correct ordering
             target_columns.sort(key=lambda x: x.get('column_id', 0))
+            # A generated column is computed by the target and rejects an inserted value
+            # ("cannot insert a non-DEFAULT value into column ..."), so it is part of neither
+            # the SELECT nor the INSERT.
+            skipped_columns = [col['column_name'] for col in target_columns
+                               if col.get('is_generated_virtual') == 'YES' or col.get('is_generated_stored') == 'YES']
+            target_columns = [col for col in target_columns
+                              if col.get('is_generated_virtual') != 'YES' and col.get('is_generated_stored') != 'YES']
+            if skipped_columns:
+                self.config_parser.print_log_message('DEBUG', f"anonymization_workflow: Worker {worker_id}: Table {target_table}: generated columns are computed by the target and excluded from the data copy: {', '.join(skipped_columns)}")
             col_names = [col['column_name'] for col in target_columns]
             
             select_sql = f'SELECT {", ".join([f"{col}" for col in col_names])} FROM "{source_schema}"."{source_table}"'

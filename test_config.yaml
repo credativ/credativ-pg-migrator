@@ -1,0 +1,22 @@
+
+source:
+  type: postgresql
+  host: /tmp/credativ_pg_sockets
+  port: 5444
+  username: postgres
+  password: postgres
+  database: omdb
+  schema: public
+  connectivity: native
+target:
+  type: postgresql
+  host: /tmp/credativ_pg_sockets
+  port: 5447
+  username: postgres
+  password: postgres
+  database: omdb
+  schema: migration
+migration:
+  drop_tables: true
+include_tables: all
+exclude_tables: null

@@ -39,6 +39,12 @@ class Planner:
         self.pre_script = self.config_parser.get_pre_migration_script()
         self.post_script = self.config_parser.get_post_migration_script()
         self.user_defined_types = {}
+        # source collation name -> collation recreated in the target schema,
+        # filled by stdwf_prepare_collations and used when the DDL is generated
+        self.migrated_collations = {}
+        # source text search object name -> object recreated in the target schema,
+        # filled by stdwf_prepare_text_search and used when the DDL is generated
+        self.migrated_text_search = {}
         self.sql_functions_mapping = self.source_connection.get_sql_functions_mapping({
             'target_db_type': self.config_parser.get_target_db_type()
         })
@@ -75,8 +81,10 @@ class Planner:
                         self.source_connection.parse_ddl_files({ 'migrator_tables': self.migrator_tables})
                         self.source_schema_name = self.config_parser.get_source_schema()
 
-                    self.stdwf_prepare_user_defined_types()
+                    self.stdwf_prepare_collations()
+                    self.stdwf_prepare_text_search()
                     self.stdwf_prepare_domains()
+                    self.stdwf_prepare_user_defined_types()
                     self.stdwf_prepare_defaults()
 
                     self.check_pausing_resuming()
@@ -129,8 +137,10 @@ class Planner:
                         self.source_connection.parse_ddl_files({ 'migrator_tables': self.migrator_tables})
                         self.source_schema_name = self.config_parser.get_source_schema()
 
-                    self.stdwf_prepare_user_defined_types()
+                    self.stdwf_prepare_collations()
+                    self.stdwf_prepare_text_search()
                     self.stdwf_prepare_domains()
+                    self.stdwf_prepare_user_defined_types()
                     self.stdwf_prepare_defaults()
 
                     self.check_pausing_resuming()
@@ -461,6 +471,10 @@ class Planner:
                 f"This requires PostgreSQL 12 or newer, but the target runs version {target_version_num // 10000}. "
                 f"Upgrade the target database, or exclude the affected tables from the migration.")
 
+        # Extensions of the source, their availability in the target, and whether the
+        # configured list covers what the migrated objects really need.
+        blocking_issues.extend(self.check_extensions())
+
         # Check and attempt creation of required PostgreSQL extensions
         required_extensions = self.config_parser.get_required_extensions()
         if required_extensions:
@@ -469,6 +483,117 @@ class Planner:
                 success, msg = self.target_connection.check_and_create_extension(ext)
                 if not success:
                     blocking_issues.append(msg)
+
+        return blocking_issues
+
+    def get_tables_selected_for_migration(self):
+        """
+        Names of the source tables which the configuration selects for migration - the same
+        include_tables / exclude_tables evaluation as in stdwf_prepare_tables.
+        """
+        selected = []
+        include_tables = self.config_parser.get_include_tables()
+        exclude_tables = self.config_parser.get_exclude_tables() or []
+        source_tables = self.source_connection.fetch_table_names(self.source_schema_name)
+        for _, table_info in (source_tables or {}).items():
+            table_name = table_info['table_name']
+            if include_tables == ['.*'] or '.*' in include_tables:
+                pass
+            elif include_tables and not any(fnmatch.fnmatch(table_name, pattern) for pattern in include_tables):
+                continue
+            if any(fnmatch.fnmatch(table_name, pattern) for pattern in exclude_tables):
+                continue
+            selected.append(table_name)
+        return selected
+
+    def check_extensions(self):
+        """
+        Report the extensions of the source database together with their availability in the
+        target, and verify that everything the migrated objects depend on is covered - either
+        already installed in the target, or listed in migration.required_extensions so that
+        the migrator creates it.
+
+        Returns a list of blocking issues. A missing dependency is blocking: the object using
+        it would fail to be created later, in the middle of the migration.
+        """
+        blocking_issues = []
+
+        source_extensions = self.source_connection.fetch_installed_extensions() or {}
+        target_extensions = self.target_connection.fetch_installed_extensions() or {}
+        target_available = self.target_connection.fetch_available_extensions() or {}
+        configured = {name.lower() for name in (self.config_parser.get_required_extensions() or [])}
+
+        if not source_extensions:
+            self.config_parser.print_log_message('INFO', "planner: check_extensions: The source database reports no extensions - nothing to check.")
+        else:
+            self.config_parser.print_log_message('INFO', "planner: check_extensions: Extensions of the source database and their state in the target database:")
+            header = ["Extension", "Source version", "Source schema", "In target", "Available in target"]
+            rows = [header]
+            for name in sorted(source_extensions):
+                info = source_extensions[name]
+                in_target = target_extensions[name]['version'] if name in target_extensions else '--'
+                available = target_available.get(name, '--')
+                rows.append([name, info['version'] or '', info['schema'] or '', in_target, available])
+            widths = [max(len(str(row[index])) for row in rows) for index in range(len(header))]
+            for row in rows:
+                self.config_parser.print_log_message(
+                    'INFO', "planner: check_extensions: " + " | ".join(str(cell).ljust(widths[index]) for index, cell in enumerate(row)))
+
+        # What the objects selected for migration really depend on
+        table_names = self.get_tables_selected_for_migration()
+        dependencies = self.source_connection.fetch_extension_dependencies({
+            'source_schema_name': self.source_schema_name,
+            'table_names': table_names,
+            'migrate_indexes': self.config_parser.should_migrate_indexes(),
+            'migrate_constraints': self.config_parser.should_migrate_constraints(),
+            'migrate_triggers': self.config_parser.should_migrate_triggers(),
+            'migrate_views': self.config_parser.should_migrate_views(),
+            'migrate_funcprocs': self.config_parser.should_migrate_funcprocs(),
+        }) or {}
+
+        if not dependencies:
+            self.config_parser.print_log_message('INFO', "planner: check_extensions: The objects selected for migration do not depend on any extension.")
+            return blocking_issues
+
+        self.config_parser.print_log_message('INFO', f"planner: check_extensions: The objects selected for migration depend on {len(dependencies)} extension(s):")
+        for name in sorted(dependencies):
+            required_by = dependencies[name]
+            shown = ', '.join(required_by[:5])
+            if len(required_by) > 5:
+                shown += f", ... ({len(required_by)} objects in total)"
+            state = 'installed in target' if name in target_extensions else (
+                'listed in migration.required_extensions' if name in configured else 'NOT COVERED')
+            self.config_parser.print_log_message('INFO', f"planner: check_extensions: - {name} [{state}]: required by {shown}")
+
+        missing = []
+        for name in sorted(dependencies):
+            if name in target_extensions:
+                # Already there, nothing has to be created and nothing has to be configured
+                continue
+            if name in configured:
+                # The migrator creates it - check_and_create_extension reports a failure
+                continue
+            missing.append(name)
+
+        for name in missing:
+            required_by = dependencies[name]
+            shown = ', '.join(required_by[:10])
+            if len(required_by) > 10:
+                shown += f", ... ({len(required_by)} objects in total)"
+            availability = (f"it is available in the target and would be installed"
+                            if name in target_available
+                            else "it is NOT even available in the target - install the operating system package providing it first")
+            blocking_issues.append(
+                f"Extension '{name}' is required by objects selected for migration ({shown}), "
+                f"but it is neither installed in the target database nor listed in "
+                f"migration.required_extensions - {availability}.")
+
+        if missing:
+            self.config_parser.print_log_message('WARNING', "planner: check_extensions: Add the missing extensions to the configuration file:")
+            self.config_parser.print_log_message('WARNING', "planner: check_extensions:   migration:")
+            self.config_parser.print_log_message('WARNING', "planner: check_extensions:     required_extensions:")
+            for name in sorted(set(missing) | configured):
+                self.config_parser.print_log_message('WARNING', f"planner: check_extensions:       - {name}")
 
         return blocking_issues
 
@@ -633,6 +758,8 @@ class Planner:
                     'target_table_name': target_table_name,
                     'source_columns': source_columns,
                     'migrator_tables': self.migrator_tables,
+                    'user_collations': self.migrated_collations,
+                    'text_search_objects': self.migrated_text_search,
                 }
                 self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_tables: convert_table_columns - settings: {settings}")
                 target_columns = self.convert_table_columns(settings)
@@ -803,8 +930,20 @@ class Planner:
                         # that the index columns are expressions, and against which columns of
                         # the table their identifiers have to be resolved.
                         values['is_function_based'] = index_details.get('is_function_based', 'NO')
+                        # Access method of the source index (gin, gist, hash, brin, ...) -
+                        # without it every index would be created as the default btree.
+                        values['using_method'] = index_details.get('using_method', '')
+                        # INCLUDE columns, NULLS NOT DISTINCT, storage parameters and the
+                        # WHERE predicate of a partial index
+                        values['index_tail'] = index_details.get('index_tail', '')
                         values['index_sql'] = self.target_connection.get_create_index_sql(
-                            {**values, 'target_columns': target_columns})
+                            {**values, 'target_columns': target_columns,
+                             'source_index_sql': index_details.get('index_sql', ''),
+                             # Definition of the constraint implemented by the index, when
+                             # the object is a constraint rather than a plain index
+                             'constraint_def': index_details.get('constraint_def', ''),
+                             'user_collations': self.migrated_collations,
+                             'text_search_objects': self.migrated_text_search})
                         self.migrator_tables.insert_indexes( values )
                         self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_tables: Processed index: {values}")
                 else:
@@ -1243,6 +1382,8 @@ class Planner:
                     'udt_name': column_info['udt_name'] if 'udt_name' in column_info else '',
                     'domain_schema': column_info['domain_schema'] if 'domain_schema' in column_info else '',
                     'domain_name': column_info['domain_name'] if 'domain_name' in column_info else '',
+                    'collation_schema': column_info['collation_schema'] if 'collation_schema' in column_info else '',
+                    'collation_name': column_info['collation_name'] if 'collation_name' in column_info else '',
                     'is_hidden_column': column_info['is_hidden_column'] if 'is_hidden_column' in column_info else '',
                     'stripped_generation_expression': column_info['stripped_generation_expression'] if 'stripped_generation_expression' in column_info else '',
                 }
@@ -1313,6 +1454,7 @@ class Planner:
                     'view_type': view_info.get('view_type', 'VIEW'), # Pass type
                     'migrator_tables': self.migrator_tables,
                     'alias_view': view_info.get('is_alias', False),
+                    'text_search_objects': self.migrated_text_search,
                 })
                 self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_views: Converted view SQL: {converted_view_sql}")
 
@@ -1448,6 +1590,91 @@ class Planner:
             self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_user_defined_types: User defined types processed successfully.")
         else:
             self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_user_defined_types: No user defined types found.")
+
+    def stdwf_prepare_collations(self):
+        """
+        Collations have to be prepared as the first objects - tables, columns and indexes
+        reference them, and the generated DDL must point to the collations recreated in the
+        target schema.
+        """
+        self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_collations: Preparing collations...")
+        self.migrated_collations = {}
+        collations = self.source_connection.fetch_collations(self.source_schema_name)
+        self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_collations: Collations found in source database: {collations}")
+        if not collations:
+            self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_collations: No collations found.")
+            return
+
+        for order_num, collation_info in collations.items():
+            self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_collations: Processing collation: {collation_info}")
+            target_collation_name = self.config_parser.convert_names_case(collation_info['collation_name'])
+            collation_info['target_schema_name'] = self.target_schema_name
+            collation_info['target_collation_name'] = target_collation_name
+            converted_collation_sql = self.target_connection.get_create_collation_sql(collation_info)
+            self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_collations: Converted collation SQL: {converted_collation_sql}")
+            if not converted_collation_sql:
+                self.config_parser.print_log_message('WARNING', f"planner: stdwf_prepare_collations: Collation {collation_info['collation_name']} cannot be recreated in the target database - skipped.")
+                continue
+
+            self.migrator_tables.insert_collation({
+                'source_schema_name': collation_info.get('collation_schema') or self.source_schema_name,
+                'source_collation_name': collation_info['collation_name'],
+                'source_collation_sql': collation_info.get('source_collation_sql', ''),
+                'target_schema_name': self.target_schema_name,
+                'target_collation_name': target_collation_name,
+                'target_collation_sql': converted_collation_sql,
+                'collation_provider': collation_info.get('collation_provider', ''),
+                'collation_comment': collation_info.get('collation_comment'),
+            })
+            self.migrated_collations[collation_info['collation_name']] = {
+                'target_schema_name': self.target_schema_name,
+                'target_collation_name': target_collation_name,
+            }
+            self.config_parser.print_log_message('INFO', f"planner: stdwf_prepare_collations: Collation {collation_info['collation_name']} processed successfully.")
+        self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_collations: Collations processed successfully.")
+
+    def stdwf_prepare_text_search(self):
+        """
+        Full text search dictionaries and configurations have to be prepared before tables -
+        a generated tsvector column references a configuration, and so do views, indexes and
+        functions.
+        """
+        self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_text_search: Preparing full text search objects...")
+        self.migrated_text_search = {}
+        text_search_objects = self.source_connection.fetch_text_search_objects(self.source_schema_name)
+        self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_text_search: Text search objects found in source database: {text_search_objects}")
+        if not text_search_objects:
+            self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_text_search: No full text search objects found.")
+            return
+
+        for order_num, object_info in text_search_objects.items():
+            self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_text_search: Processing text search object: {object_info}")
+            target_object_name = self.config_parser.convert_names_case(object_info['object_name'])
+            object_info['target_schema_name'] = self.target_schema_name
+            object_info['target_object_name'] = target_object_name
+            converted_sql = self.target_connection.get_create_text_search_sql(object_info)
+            self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_text_search: Converted text search SQL: {converted_sql}")
+            if not converted_sql:
+                self.config_parser.print_log_message('WARNING', f"planner: stdwf_prepare_text_search: Text search object {object_info['object_name']} cannot be recreated in the target database - skipped.")
+                continue
+
+            self.migrator_tables.insert_text_search({
+                'source_schema_name': object_info.get('object_schema') or self.source_schema_name,
+                'source_object_name': object_info['object_name'],
+                'source_object_sql': object_info.get('source_object_sql', ''),
+                'target_schema_name': self.target_schema_name,
+                'target_object_name': target_object_name,
+                'target_object_sql': converted_sql,
+                'object_type': object_info.get('object_type', ''),
+                'object_comment': object_info.get('object_comment'),
+            })
+            self.migrated_text_search[object_info['object_name']] = {
+                'target_schema_name': self.target_schema_name,
+                'target_object_name': target_object_name,
+                'object_type': object_info.get('object_type', ''),
+            }
+            self.config_parser.print_log_message('INFO', f"planner: stdwf_prepare_text_search: Text search {object_info.get('object_type', 'object').lower()} {object_info['object_name']} processed successfully.")
+        self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_text_search: Full text search objects processed successfully.")
 
     def stdwf_prepare_domains(self):
         self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_domains: Preparing domains...")

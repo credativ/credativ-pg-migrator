@@ -1,6 +1,6 @@
 # credativ-pg-migrator Configuration Map
 
-This document provides a simplified overview and hierarchy of the configuration parameters available in `config_sample.yaml`.
+This document provides a simplified overview and hierarchy of the configuration parameters available in `docs/configs/config_all_options_reference.yaml`.
 
 ## 1. Pre-Migration Analysis (`pre_migration_analysis`)
 - `top_n_tables`: Settings for listing the top N tables from the source database.
@@ -21,6 +21,7 @@ This document provides a simplified overview and hierarchy of the configuration 
 
 ### Source Database (`source`)
 - `type`, `host`, `port`, `username`, `password`, `database`, `schema`: Basic connection details.
+  - For `type: sqlite` only `database` and `schema` apply: `database` is the **path to the SQLite file** (relative paths are resolved against the directory of the config file) and `schema` must be `main` or the name of an attached database. `host`, `port`, `username` and `password` are unused.
 - `connectivity`: Connection method (`jdbc`, `odbc`, `native`, `ddl`).
 - `connection_string_options`: Extra options (e.g., for MS SQL JDBC).
 - `jdbc` / `odbc`: Driver and specific library paths.

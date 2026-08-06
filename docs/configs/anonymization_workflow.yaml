@@ -1,0 +1,178 @@
+# ============================================================================
+# credativ-pg-migrator - ANONYMIZATION workflow (PostgreSQL -> PostgreSQL)
+# ============================================================================
+# A standalone workflow: it copies a schema and MASKS selected columns on the
+# way, to produce a test or development database from production data. The
+# structure is migrated exactly as in the standard workflow - only the data is
+# transformed.
+#
+# It is a PostgreSQL-to-PostgreSQL workflow in practice. With no rules
+# configured it behaves as a plain copy and says so in the log.
+#
+# MUST ADJUST
+#   - migrator / source / target connection details
+#   - the anonymization rules - the examples below are placeholders and will
+#     match nothing in your schema
+#
+# Prerequisites for some methods:
+#   pip install faker      for faker_*
+#   pip install mimesis    for mimesis_*
+#   the "anon" extension   for postgres_anon_native
+#
+# SAFETY: source and target MUST be different databases. The workflow reads
+# the production data and writes the masked copy - point target somewhere you
+# are allowed to drop.
+# ============================================================================
+
+workflow: "anonymization"
+
+pre_migration_analysis:
+  top_n_tables:
+    by_rows: 10
+    by_size: 10
+    by_columns: 10
+    by_indexes: 10
+    by_constraints: 10
+
+migrator:
+  type: "postgresql"
+  host: "localhost"           # >>> ADJUST
+  port: 5432                  # >>> ADJUST
+  username: "postgres"        # >>> ADJUST
+  password: "postgres"        # >>> ADJUST
+  database: "anon_target"     # >>> ADJUST
+  schema: "migration"
+
+source:
+  type: "postgresql"
+  host: "localhost"           # >>> ADJUST - the PRODUCTION database
+  port: 5432                  # >>> ADJUST
+  username: "postgres"        # >>> ADJUST - read-only user is enough
+  password: "postgres"        # >>> ADJUST
+  database: "production_db"   # >>> ADJUST
+  schema: "public"            # >>> ADJUST
+  connectivity: "native"
+
+target:
+  type: "postgresql"
+  host: "localhost"           # >>> ADJUST - MUST NOT be the source database
+  port: 5432                  # >>> ADJUST
+  username: "postgres"        # >>> ADJUST
+  password: "postgres"        # >>> ADJUST
+  database: "anon_target"     # >>> ADJUST
+  schema: "public"            # >>> ADJUST
+  settings:
+    work_mem: '32MB'
+    maintenance_work_mem: '512MB'
+    search_path: "public"     # >>> ADJUST if target.schema is not public
+
+migration:
+  drop_schema: false          # >>> ADJUST
+  drop_tables: true
+  truncate_tables: true
+  create_tables: true
+  migrate_data: true
+  migrate_indexes: true
+  migrate_constraints: true
+  migrate_funcprocs: true
+  # Triggers are usually OFF for an anonymized copy: an audit trigger would
+  # otherwise record the masking itself, and a trigger may re-derive a column
+  # from the value you just masked.
+  migrate_triggers: false     # >>> ADJUST
+  migrate_views: true
+  set_sequences: true
+  on_error: continue
+  parallel_workers: 8         # >>> ADJUST
+  batch_size: 100000
+  validate_objects: retry
+
+# ---------------------------------------------------------------------------
+# THE RULES. Two ways to select a column, both may be used together:
+#   anonymization.tables        exact table -> exact column
+#   anonymization.regex_mappings regex over table name and column name
+#
+# Available methods (see credativ_pg_migrator/anonymization/methods.py):
+#   faker_name               a generated person name
+#   faker_email              a generated e-mail address
+#   mimesis_address          address parts, params: part (e.g. street_address)
+#   custom_iban              a syntactically valid IBAN
+#   custom_german_bank       German bank data, params: part (e.g. combined)
+#   consistent_integer_mask  the same input always gives the same output
+#   static_mask              every character replaced, params: mask_char
+#   deterministic_hash_mask  hash, params: salt, out_type (string / integer)
+#   numeric_noise            value +/- a ratio, params: ratio (0.10 = 10 %)
+#   partial_mask             keep the ends, params: prefix_len, suffix_len,
+#                            mask_str
+#   postgres_anon_native     call a function of the "anon" extension,
+#                            params: func_name
+#
+# Choose consistent_integer_mask / deterministic_hash_mask when a value is used
+# as a join key - a random replacement would break the relations.
+# >>> ADJUST EVERYTHING BELOW - these names are examples, not defaults
+# ---------------------------------------------------------------------------
+anonymization:
+  tables:
+    customers:
+      full_name:
+        method: faker_name
+      email:
+        method: faker_email
+      # a join key must stay consistent across every table using it
+      external_ref:
+        method: deterministic_hash_mask
+        params:
+          salt: "change-me-and-keep-it-secret"    # >>> ADJUST
+          out_type: "string"
+      phone:
+        method: partial_mask
+        params:
+          prefix_len: 4
+          suffix_len: 2
+          mask_str: "*****"
+    orders:
+      total_amount:
+        method: numeric_noise
+        params:
+          ratio: 0.10           # +/- 10 %
+    api_tokens:
+      token:
+        method: static_mask
+        params:
+          mask_char: "X"
+
+  # Applied to every table/column whose names match both patterns. Useful for
+  # the columns that appear in dozens of tables under the same name.
+  regex_mappings:
+    - table_pattern: ".*"
+      column_pattern: "^email(_address)?$"
+      method: "faker_email"
+    - table_pattern: "address.*"
+      column_pattern: "^address2?$"
+      method: "mimesis_address"
+      params:
+        part: "street_address"
+    - table_pattern: ".*"
+      column_pattern: "^iban$"
+      method: "custom_iban"
+    # Requires the "anon" extension in the target database
+    # - table_pattern: "staff"
+    #   column_pattern: "password"
+    #   method: "postgres_anon_native"
+    #   params:
+    #     func_name: "anon.fake_password"
+
+include_tables: all
+exclude_tables:               # >>> ADJUST - e.g. - "audit_log" (do not copy at all)
+include_views: all
+exclude_views:
+include_funcprocs: all
+exclude_funcprocs:
+
+summary:
+  top_migrated_tables: 10
+  top_longest_batches: 15
+  # How many anonymized tables / columns to list, and how many example values
+  # to print so you can verify the masking really happened.
+  top_anonymized_tables: 10
+  top_anonymized_columns: 20
+  show_anonymization_examples: 3    # >>> ADJUST - 0 prints no sample values

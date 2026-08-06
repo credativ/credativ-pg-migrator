@@ -1,0 +1,129 @@
+# ============================================================================
+# credativ-pg-migrator - PostgreSQL -> PostgreSQL
+# ============================================================================
+# Ready to run. Adjust every line marked ">>> ADJUST" and you are done.
+#
+# MUST ADJUST
+#   - migrator / source / target: host, port, username, password, database
+#   - source.schema  - the schema you migrate FROM
+#   - target.schema  - the schema you migrate INTO (may be the same name)
+#   - migration.required_extensions - see the note in that section
+#
+# Typical use: moving a schema between instances, re-homing it under a
+# different schema name, or upgrading across major versions.
+#
+# Nothing has to be converted here - the source already is PostgreSQL, so
+# object definitions are taken from the catalog (pg_get_viewdef,
+# pg_get_functiondef, pg_get_constraintdef, pg_get_indexdef) and are valid as
+# they are. There is no type mapping and no default-value rewriting.
+# ============================================================================
+
+workflow: "standard"
+
+pre_migration_analysis:
+  # 0 disables a section. The analysis also lists the extensions of the source,
+  # tells you which of them the migrated objects really need, and STOPS the
+  # migrator if one is neither installed in the target nor listed under
+  # migration.required_extensions.
+  top_n_tables:
+    by_rows: 10
+    by_size: 10
+    by_columns: 10
+    by_indexes: 10
+    by_constraints: 10
+
+# Where the migrator keeps its protocol tables. Usually the target database
+# with a schema of its own, so the metadata lives next to the result.
+migrator:
+  type: "postgresql"          # only postgresql is supported here
+  host: "localhost"           # >>> ADJUST
+  port: 5432                  # >>> ADJUST
+  username: "postgres"        # >>> ADJUST
+  password: "postgres"        # >>> ADJUST
+  database: "target_db"       # >>> ADJUST
+  schema: "migration"         # >>> ADJUST - created if missing
+
+source:
+  type: "postgresql"
+  host: "localhost"           # >>> ADJUST - a path like /var/run/postgresql connects over a unix socket
+  port: 5432                  # >>> ADJUST
+  username: "postgres"        # >>> ADJUST
+  password: "postgres"        # >>> ADJUST
+  database: "source_db"       # >>> ADJUST
+  schema: "public"            # >>> ADJUST - the schema being migrated
+  connectivity: "native"      # postgresql supports "native" only
+  # sslmode: "require"        # optional, default "prefer"
+
+target:
+  type: "postgresql"          # the target is always PostgreSQL
+  host: "localhost"           # >>> ADJUST
+  port: 5432                  # >>> ADJUST
+  username: "postgres"        # >>> ADJUST
+  password: "postgres"        # >>> ADJUST
+  database: "target_db"       # >>> ADJUST
+  schema: "public"            # >>> ADJUST
+  # Applied with SET on every connection the migrator opens.
+  settings:
+    work_mem: '32MB'
+    maintenance_work_mem: '512MB'
+    # >>> ADJUST - IMPORTANT. View bodies and function bodies are copied with
+    # their unqualified names, so the target schema must be reachable through
+    # the search_path, together with the schema holding your extensions.
+    search_path: "public"
+    # role: 'owner_role'      # optional SET ROLE
+
+migration:
+  drop_schema: false          # >>> ADJUST - true drops and recreates target.schema (refused for "public")
+  drop_tables: true
+  truncate_tables: true
+  create_tables: true
+  migrate_data: true
+  migrate_indexes: true
+  migrate_constraints: true
+  migrate_funcprocs: true     # functions, procedures AND aggregates
+  migrate_triggers: true
+  migrate_views: true
+  set_sequences: true         # NOTE the spelling - "set_sequnces" is silently ignored
+  on_error: continue          # continue | stop
+  parallel_workers: 8         # >>> ADJUST to the cores/IO you can spare
+  batch_size: 100000          # rows per INSERT batch
+  # chunk_size: 250000        # rows per worker chunk; -1 (default) = no chunking
+  names_case_handling: keep   # keep | lower | upper
+
+  # Final pass over views, functions and triggers: an object that failed
+  # because a dependency did not exist yet is retried once the whole schema is
+  # there, and the result is recorded in the summary.
+  validate_objects: retry     # retry | check | off
+
+  # >>> ADJUST - extensions are NEVER created from the source automatically.
+  # List every extension the migrated objects need; the migrator runs
+  # CREATE EXTENSION IF NOT EXISTS for each. The pre-migration analysis tells
+  # you exactly which ones are missing, naming the objects that need them, and
+  # stops before anything is created. Delete the entries you do not need.
+  required_extensions:
+    - pgcrypto
+    - pg_trgm
+    - unaccent
+
+include_tables: all           # "all" or a list of names / regular expressions
+exclude_tables:               # >>> ADJUST - e.g. - "audit_.*"
+include_views: all
+exclude_views:
+include_funcprocs: all
+exclude_funcprocs:
+
+# Optional independent verification of the migrated data. Remove the block if
+# you do not want it - it reads both databases again and costs time.
+validation:
+  workers: 4
+  check_row_counts: true
+  check_table_checksums: true
+  check_random_sample: true
+  check_lob_sizes: true
+  random_sample_size: 1000
+  report_filename: "validator_report.txt"   # >>> ADJUST - mandatory when validation is used
+
+summary:
+  top_migrated_tables: 10
+  top_mismatched_tables: 10
+  top_longest_batches: 15

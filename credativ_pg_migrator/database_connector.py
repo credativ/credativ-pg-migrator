@@ -1067,6 +1067,94 @@ class DatabaseConnector(ABC):
         """
         pass
 
+    def fetch_collations(self, schema: str):
+        """
+        Returns user defined collations relevant for the migration.
+        Most source databases do not know collations as standalone objects, therefore
+        this method is optional and returns an empty dict by default.
+
+        Returns: dict
+        { ordinal_identifier: {
+            'collation_schema': schema_name,
+            'collation_name': collation_name,
+            'collation_provider': 'icu' / 'libc' / 'builtin',
+            'collation_locale': locale string (or None when lc_collate / lc_ctype are used),
+            'collation_lc_collate': LC_COLLATE (or None),
+            'collation_lc_ctype': LC_CTYPE (or None),
+            'collation_deterministic': True / False,
+            'collation_rules': ICU tailoring rules (or None),
+            'collation_version': version string (or None),
+            'source_collation_sql': original CREATE COLLATION statement,
+            'collation_comment': comment
+            }
+        }
+        """
+        return {}
+
+    def get_create_collation_sql(self, settings):
+        """
+        This function is relevant only for the target database.
+        Centralizes creation of the SQL DDL statement for collations.
+        Returns an empty string when the target cannot create the collation.
+        """
+        return ''
+
+    def fetch_installed_extensions(self):
+        """
+        Extensions installed in this database. Only PostgreSQL has extensions, therefore this
+        method is optional and returns an empty dict by default.
+
+        Returns dict: extension name -> {'version': version, 'schema': schema_name}
+        """
+        return {}
+
+    def fetch_available_extensions(self):
+        """
+        Extensions which could be installed in this database - relevant for the target.
+        Returns dict: extension name -> default version.
+        """
+        return {}
+
+    def fetch_extension_dependencies(self, settings):
+        """
+        Which extensions the objects selected for migration depend on - relevant for a
+        PostgreSQL source, where a column type, an index operator class, a function or a text
+        search dictionary can be provided by an extension.
+
+        Returns dict: extension name -> list of objects requiring it.
+        """
+        return {}
+
+    def fetch_text_search_objects(self, schema: str):
+        """
+        Returns user defined full text search objects - dictionaries and configurations.
+        Only PostgreSQL knows these as standalone objects, therefore this method is
+        optional and returns an empty dict by default.
+
+        Returns: dict
+        { ordinal_identifier: {
+            'object_schema': schema_name,
+            'object_name': object_name,
+            'object_type': 'DICTIONARY' / 'CONFIGURATION',
+            'template_name': schema qualified template of a dictionary,
+            'init_options': option string of a dictionary,
+            'parser_name': schema qualified parser of a configuration,
+            'mappings': [ (token_type, [dictionary, ...]), ... ] of a configuration,
+            'source_object_sql': original CREATE statement,
+            'object_comment': comment
+            }
+        }
+        """
+        return {}
+
+    def get_create_text_search_sql(self, settings):
+        """
+        This function is relevant only for the target database.
+        Centralizes creation of the SQL DDL statements for full text search objects.
+        Returns an empty string when the target cannot create the object.
+        """
+        return ''
+
     @abstractmethod
     def testing_select(self):
         """

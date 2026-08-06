@@ -1,4 +1,4 @@
-include config_sample.yaml
+include docs/configs/config_all_options_reference.yaml
 include *.md
 include COPYING
 include docs/images/architecture.jpg

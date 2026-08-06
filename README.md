@@ -65,7 +65,7 @@ credativ-pg-migrator --config=./test_database.yaml --log-file=./test_database_$(
 ## Configuration file
 
 - Configuration file is a YAML file
-- Settings available in the config file are described in [config_sample.yaml](./config_sample.yaml) file
+- All settings available in the config file are described in [docs/configs/config_all_options_reference.yaml](./docs/configs/config_all_options_reference.yaml) - a reference of every existing option, not a template to be used directly
 
 ## Architecture
 

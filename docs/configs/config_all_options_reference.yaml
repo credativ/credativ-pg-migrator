@@ -1,4 +1,35 @@
-# File contains muster configuration file for credativ-pg-migrator
+# ============================================================================
+# credativ-pg-migrator - reference of ALL available configuration options
+# ============================================================================
+#
+# This file is a REFERENCE, not a template - it is NOT intended to be used
+# directly as a configuration file.
+#
+# It lists every option the migrator understands, including options which
+# exclude each other or belong to different source databases, all present at
+# the same time:
+#   - the "jdbc", "odbc" and "ddl" sub-blocks of the source are all filled in,
+#     although "connectivity" selects exactly one of them,
+#   - options meaningful only for one engine stand side by side (system_catalog
+#     for IBM DB2 and MS SQL Server, db_locale for Informix, oracle_thick_mode
+#     for Oracle, ...),
+#   - the "mapping" block of the mapping workflow is present although
+#     "workflow" is set to "standard".
+# Used as it is, the settings would contradict each other.
+#
+# How to use it:
+#   - look up the option you need here, together with its explanation and its
+#     default value,
+#   - copy only the sections relevant for your migration into your own
+#     configuration file, e.g. my_migration.yaml,
+#   - keep the values you really want; everything you leave out falls back to
+#     its default.
+#
+# See docs/config_parameters_map.md for the hierarchy of all parameters and
+# section 5 "Configuration File (.yaml)" of docs/README.md for a walk-through
+# of a real configuration.
+#
+# ============================================================================
 
 # workflow can be:
 # - standard: default migrator workflow

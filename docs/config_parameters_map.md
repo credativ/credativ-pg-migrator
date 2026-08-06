@@ -1,6 +1,6 @@
 # credativ-pg-migrator Configuration Map
 
-This document provides a simplified overview and hierarchy of the configuration parameters available in `config_sample.yaml`.
+This document provides a simplified overview and hierarchy of the configuration parameters available in `docs/configs/config_all_options_reference.yaml`.
 
 ## 1. Pre-Migration Analysis (`pre_migration_analysis`)
 - `top_n_tables`: Settings for listing the top N tables from the source database.

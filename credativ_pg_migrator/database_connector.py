@@ -1067,6 +1067,38 @@ class DatabaseConnector(ABC):
         """
         pass
 
+    def fetch_collations(self, schema: str):
+        """
+        Returns user defined collations relevant for the migration.
+        Most source databases do not know collations as standalone objects, therefore
+        this method is optional and returns an empty dict by default.
+
+        Returns: dict
+        { ordinal_identifier: {
+            'collation_schema': schema_name,
+            'collation_name': collation_name,
+            'collation_provider': 'icu' / 'libc' / 'builtin',
+            'collation_locale': locale string (or None when lc_collate / lc_ctype are used),
+            'collation_lc_collate': LC_COLLATE (or None),
+            'collation_lc_ctype': LC_CTYPE (or None),
+            'collation_deterministic': True / False,
+            'collation_rules': ICU tailoring rules (or None),
+            'collation_version': version string (or None),
+            'source_collation_sql': original CREATE COLLATION statement,
+            'collation_comment': comment
+            }
+        }
+        """
+        return {}
+
+    def get_create_collation_sql(self, settings):
+        """
+        This function is relevant only for the target database.
+        Centralizes creation of the SQL DDL statement for collations.
+        Returns an empty string when the target cannot create the collation.
+        """
+        return ''
+
     @abstractmethod
     def testing_select(self):
         """

@@ -58,6 +58,12 @@ class Orchestrator:
                 if self.config_parser.is_resume_after_crash():
                     self.config_parser.print_log_message('INFO', "orchestrator: run: In current version of crash recovery we assume user defined types and domains already exist, so we skip them.")
                 else:
+                    ## Migration of collations:
+                    ## Columns, indexes and domains can reference collations, so collations
+                    ## must be created as the first objects in the target schema.
+                    self.run_create_collations()
+                    self.check_pausing_resuming()
+
                     ## Migration of domains:
                     ## Domains in PostgreSQL are special data types (e.g. domains/scalar types).
                     ## Composite user-defined types often depend on domains (e.g. money_amount -> iso_currency).
@@ -713,6 +719,33 @@ class Orchestrator:
         }
 
         return mapping.get(dt, dt)
+
+    def run_create_collations(self):
+        self.migrator_tables.insert_main({'task_name': 'Orchestrator', 'subtask_name': 'collations migration'})
+        self.config_parser.print_log_message('INFO', "orchestrator: run_create_collations: Migrating collations.")
+        collations = self.migrator_tables.fetch_all_collations({})
+        if len(collations) > 0:
+            for collation_row in collations:
+                collation_data = self.migrator_tables.decode_collation_row(collation_row)
+                self.migrator_tables.update_protocol_task_started('collations', collation_data['id'])
+                self.config_parser.print_log_message('INFO', f"orchestrator: run_create_collations: Creating collation {collation_data['target_collation_name']} in target database using SQL: {collation_data['target_collation_sql']}")
+                try:
+                    self.target_connection.connect()
+                    self.target_connection.execute_query(collation_data['target_collation_sql'])
+                    if collation_data['collation_comment']:
+                        safe_comment = collation_data['collation_comment'].replace("'", "''")
+                        self.target_connection.execute_query(
+                            f"""COMMENT ON COLLATION "{collation_data['target_schema_name']}"."{collation_data['target_collation_name']}" IS '{safe_comment}'""")
+                    self.migrator_tables.update_collation_status({'row_id': collation_data['id'], 'success': True, 'message': 'migrated OK'})
+                    self.config_parser.print_log_message('INFO', f"orchestrator: run_create_collations: Collation {collation_data['target_collation_name']} created successfully.")
+                    self.target_connection.disconnect()
+                except Exception as e:
+                    self.migrator_tables.update_collation_status({'row_id': collation_data['id'], 'success': False, 'message': f'ERROR: {e}'})
+                    self.handle_error(e, f"create_collation {collation_data['target_collation_name']}")
+            self.config_parser.print_log_message('INFO', "orchestrator: run_create_collations: Collations migrated successfully.")
+        else:
+            self.config_parser.print_log_message('INFO', "orchestrator: run_create_collations: No collations found to migrate.")
+        self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': 'collations migration', 'success': True, 'message': 'finished OK'})
 
     def run_create_domains(self):
         self.migrator_tables.insert_main({'task_name': 'Orchestrator', 'subtask_name': 'domains migration'})

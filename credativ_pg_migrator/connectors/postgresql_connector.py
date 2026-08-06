@@ -33,6 +33,9 @@ class PostgreSQLConnector(DatabaseConnector):
         self.config_parser = config_parser
         self.source_or_target = source_or_target
         self.logger = MigratorLogger(self.config_parser.get_log_file()).logger
+        # Names of collations usable in this database - filled on first use, see
+        # get_existing_collation_names()
+        self.existing_collation_names = None
         self.session_settings = self.prepare_session_settings()
 
     def connect(self):
@@ -291,7 +294,9 @@ class PostgreSQLConnector(DatabaseConnector):
                         u.udt_name,
                         col_description((c.table_schema||'.'||c.table_name)::regclass::oid, c.ordinal_position) as column_comment,
                         is_generated,
-                        pg_catalog.format_type(a.atttypid, a.atttypmod) as format_type
+                        pg_catalog.format_type(a.atttypid, a.atttypmod) as format_type,
+                        c.collation_schema,
+                        c.collation_name
                     FROM information_schema.columns c
                     JOIN pg_namespace n ON c.table_schema = n.nspname
                     JOIN pg_class cl ON cl.relname = c.table_name AND cl.relnamespace = n.oid
@@ -322,6 +327,8 @@ class PostgreSQLConnector(DatabaseConnector):
                 column_comment = row[11]
                 is_generated = row[12]
                 format_type = row[13] if len(row) > 13 and row[13] else ''
+                collation_schema = row[14] if len(row) > 14 else None
+                collation_name = row[15] if len(row) > 15 else None
 
                 if data_type.upper() == 'ARRAY' or (format_type and '[]' in format_type):
                     data_type = format_type if format_type else data_type
@@ -351,6 +358,8 @@ class PostgreSQLConnector(DatabaseConnector):
                     'column_comment': column_comment,
                     'is_generated_virtual': 'NO',
                     'is_generated_stored': is_generated,
+                    'collation_schema': collation_schema,
+                    'collation_name': collation_name,
                 }
             cursor.close()
             self.disconnect()
@@ -477,6 +486,118 @@ class PostgreSQLConnector(DatabaseConnector):
         parts.append(''.join(current))
         return [part for part in parts if part.strip()]
 
+    def split_leading_identifier(self, text):
+        """
+        Split the leading - possibly schema qualified and quoted - identifier off the text.
+        Returns tuple (identifier, rest). Quoted parts are kept as they are, so names
+        containing dots (e.g. "en_US.utf8") survive untouched.
+        """
+        position = 0
+        length = len(text)
+        token = ''
+        while position < length:
+            char = text[position]
+            if char == '"':
+                end = position + 1
+                while end < length:
+                    if text[end] == '"':
+                        if end + 1 < length and text[end + 1] == '"':
+                            end += 2
+                            continue
+                        break
+                    end += 1
+                token += text[position:min(end + 1, length)]
+                position = end + 1
+            elif char.isspace():
+                break
+            else:
+                start = position
+                while position < length and not text[position].isspace() and text[position] != '.':
+                    position += 1
+                token += text[start:position]
+            if position < length and text[position] == '.':
+                token += '.'
+                position += 1
+                continue
+            break
+        return token, text[position:].strip()
+
+    def parse_identifier_parts(self, identifier):
+        """ Split a qualified identifier into its parts and remove the quoting. """
+        parts = []
+        current = ''
+        in_quotes = False
+        position = 0
+        while position < len(identifier):
+            char = identifier[position]
+            if char == '"':
+                if in_quotes and position + 1 < len(identifier) and identifier[position + 1] == '"':
+                    current += '"'
+                    position += 2
+                    continue
+                in_quotes = not in_quotes
+                position += 1
+                continue
+            if char == '.' and not in_quotes:
+                parts.append(current)
+                current = ''
+                position += 1
+                continue
+            current += char
+            position += 1
+        parts.append(current)
+        return [part.strip() for part in parts]
+
+    def get_existing_collation_names(self):
+        """
+        Names of collations which already exist in this database and are usable with its
+        encoding - built-in ones (C, POSIX) and those provided by the operating system / ICU.
+        """
+        if self.existing_collation_names is None:
+            self.existing_collation_names = set()
+            try:
+                self.connect()
+                cursor = self.connection.cursor()
+                cursor.execute("""
+                    SELECT collname FROM pg_catalog.pg_collation
+                    WHERE collencoding IN (-1, pg_char_to_encoding(pg_catalog.current_setting('server_encoding')))
+                """)
+                self.existing_collation_names = {row[0] for row in cursor.fetchall()}
+                cursor.close()
+                self.disconnect()
+            except Exception as e:
+                self.config_parser.print_log_message('WARNING', f"postgresql_connector: get_existing_collation_names: Cannot read collations of the database: {e}")
+        return self.existing_collation_names
+
+    def get_collate_clause(self, raw_collation, user_collations):
+        """
+        Build the COLLATE clause for the target database.
+        Collations migrated together with the schema are referenced with the target schema -
+        in the source they were often unqualified and resolved through the search_path,
+        which does not contain the target schema during the migration.
+        Built-in collations (C, POSIX, "en_US.utf8", ...) are kept as they are.
+        """
+        collation_parts = self.parse_identifier_parts(raw_collation)
+        collation_name = collation_parts[-1]
+        mapped_collation = (user_collations or {}).get(collation_name)
+        if mapped_collation:
+            return f''' COLLATE "{mapped_collation['target_schema_name']}"."{mapped_collation['target_collation_name']}"'''
+        existing_collations = self.get_existing_collation_names()
+        if existing_collations and collation_name not in existing_collations:
+            # Operating system / ICU collations are not migrated, and collations of other
+            # engines (utf8mb4_general_ci, Latin1_General_CI_AS, ...) have no counterpart
+            # here at all. When the target cannot provide the collation, the default
+            # collation is used instead of failing the whole object.
+            self.config_parser.print_log_message('WARNING', f"postgresql_connector: get_collate_clause: Collation {collation_name} does not exist in the target database - the reference is dropped and the default collation is used.")
+            return ''
+        converted_parts = []
+        for part in collation_parts:
+            # Names of built-in collations (C, POSIX, en_US.utf8, ...) are case sensitive
+            # and must not be touched by the configured name case handling.
+            converted = part if self.config_parser.get_source_db_type() == 'postgresql' else self.config_parser.convert_names_case(part)
+            converted_parts.append(f'"{converted}"' if converted else f'"{part}"')
+        return f' COLLATE {".".join(converted_parts)}'
+
     def expression_is_parenthesized(self, expression):
         """ True when the whole expression is already wrapped in one pair of parentheses. """
         if not expression.startswith('(') or not expression.endswith(')'):
@@ -508,6 +629,7 @@ class PostgreSQLConnector(DatabaseConnector):
         # source_columns = settings['source_columns']
         converted = settings['target_columns']
         migrator_tables = settings['migrator_tables']
+        user_collations = settings.get('user_collations') or {}
         create_table_sql = ""
         create_table_sql_parts = []
 
@@ -672,6 +794,12 @@ class PostgreSQLConnector(DatabaseConnector):
 
             if altered_data_type != '':
                 column_data_type = altered_data_type
+
+            # Column collation - only collatable (string) columns can carry one, and only
+            # when the column does not use the database default collation.
+            column_collation = column_info.get('collation_name')
+            if column_collation and altered_data_type == '':
+                create_column_sql += self.get_collate_clause(f'"{column_collation}"', user_collations)
 
             if nullable_string != '':
                 create_column_sql += f""" {nullable_string}"""
@@ -875,6 +1003,7 @@ class PostgreSQLConnector(DatabaseConnector):
         is_function_based = str(settings.get('is_function_based', 'NO')).upper() == 'YES'
         index_sql = settings.get('index_sql', '')
         using_method = settings.get('using_method', '')
+        user_collations = settings.get('user_collations') or {}
 
         if not using_method and index_sql:
             using_match = re.search(r'\b(?i:USING)\s+([a-zA-Z0-9_]+)', index_sql)
@@ -907,9 +1036,21 @@ class PostgreSQLConnector(DatabaseConnector):
             if self.expression_is_parenthesized(col) or (is_function_based and '(' in col):
                 expression = self.convert_expression_identifiers(col, target_columns)
                 expression = expression.replace(r"\'", "'").replace(r'\"', '"')
-                expression = re.sub(r'(?i)_[a-zA-Z0-9_]+(\'|")', r'\1', expression)
+                if self.config_parser.get_source_db_type() != 'postgresql':
+                    # Remove charset introducers of MySQL / MariaDB (_utf8'text')
+                    # In PostgreSQL such a pattern is part of a quoted identifier
+                    # (e.g. "natural_numeric") and must be kept.
+                    expression = re.sub(r'(?i)_[a-zA-Z0-9_]+(\'|")', r'\1', expression)
                 expression = re.sub(r'(?i)\b(?:CHARACTER\s+SET|CHARSET)\s+[a-zA-Z0-9_]+', '', expression)
-                expression = re.sub(r'(?i)\bCOLLATE\s+[`\'"]?[a-zA-Z0-9_]+[`\'"]?', '', expression)
+                if self.config_parser.get_source_db_type() == 'postgresql':
+                    # PostgreSQL collations are migrated with the schema - keep them in the
+                    # expression, only point them to the collation in the target schema.
+                    expression = re.sub(
+                        r'(?i)\bCOLLATE\s+((?:"(?:[^"]|"")+"|[a-zA-Z0-9_]+)(?:\.(?:"(?:[^"]|"")+"|[a-zA-Z0-9_]+))?)',
+                        lambda match: self.get_collate_clause(match.group(1), user_collations).strip(),
+                        expression)
+                else:
+                    expression = re.sub(r'(?i)\bCOLLATE\s+[`\'"]?[a-zA-Z0-9_]+[`\'"]?', '', expression)
                 if not self.expression_is_parenthesized(expression):
                     expression = f"({expression})"
                 column_names.append(f'{expression}{order_direction}{nulls_direction}')
@@ -919,15 +1060,13 @@ class PostgreSQLConnector(DatabaseConnector):
             collation_clause = ''
             collate_match = re.search(r'\s+(?i:COLLATE)\s+(.+)$', col)
             if collate_match:
-                raw_collation = collate_match.group(1).strip()
+                raw_collation, collate_remainder = self.split_leading_identifier(collate_match.group(1).strip())
                 col = col[:collate_match.start()].strip()
-                coll_parts = raw_collation.split('.')
-                converted_coll_parts = []
-                for cp in coll_parts:
-                    cp_clean = cp.strip('`').strip("'").strip('"')
-                    cp_conv = self.config_parser.convert_names_case(cp_clean)
-                    converted_coll_parts.append(f'"{cp_conv}"' if cp_conv else cp)
-                collation_clause = f' COLLATE {".".join(converted_coll_parts)}'
+                collation_clause = self.get_collate_clause(raw_collation, user_collations)
+                if collate_remainder:
+                    # Anything behind the collation name is the operator class - it is
+                    # processed below together with the column name.
+                    col = f"{col} {collate_remainder}"
 
             # Split off operator class if present (e.g. 'event_type gin_trgm_ops')
             opclass_clause = ''
@@ -2841,6 +2980,135 @@ class PostgreSQLConnector(DatabaseConnector):
             create_domain_sql = " ".join(sql_parts) + ";"
 
         return create_domain_sql
+
+    def fetch_collations(self, schema: str):
+        """
+        Returns user defined collations of the source database.
+
+        Collations are database wide objects - a table in the migrated schema can use a
+        collation created in another schema (typically public), therefore all non system
+        schemas are searched. Collations sharing the same name in several schemas are
+        reported only once - the one from the migrated schema wins.
+        """
+        collations = {}
+        order_num = 1
+        provider_names = {'c': 'libc', 'i': 'icu', 'd': 'default', 'b': 'builtin'}
+        query = ''
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+
+            # Catalog columns of pg_collation differ between PostgreSQL versions:
+            #   collisdeterministic - PostgreSQL 12+
+            #   colliculocale       - PostgreSQL 15/16, renamed to colllocale in PostgreSQL 17
+            #   collicurules        - PostgreSQL 16+
+            cursor.execute("""
+                SELECT attname FROM pg_catalog.pg_attribute
+                WHERE attrelid = 'pg_catalog.pg_collation'::regclass
+                  AND attnum > 0 AND NOT attisdropped
+            """)
+            available_columns = {row[0] for row in cursor.fetchall()}
+            if 'colllocale' in available_columns:
+                locale_column = 'c.colllocale'
+            elif 'colliculocale' in available_columns:
+                locale_column = 'c.colliculocale'
+            else:
+                locale_column = 'NULL::text'
+            deterministic_column = 'c.collisdeterministic' if 'collisdeterministic' in available_columns else 'TRUE'
+            rules_column = 'c.collicurules' if 'collicurules' in available_columns else 'NULL::text'
+
+            query = f"""
+                SELECT
+                    n.nspname as collation_schema,
+                    c.collname as collation_name,
+                    c.collprovider as collation_provider,
+                    {locale_column} as collation_locale,
+                    c.collcollate as collation_lc_collate,
+                    c.collctype as collation_lc_ctype,
+                    {deterministic_column} as collation_deterministic,
+                    {rules_column} as collation_rules,
+                    c.collversion as collation_version,
+                    pg_catalog.obj_description(c.oid, 'pg_collation') as collation_comment
+                FROM pg_catalog.pg_collation c
+                JOIN pg_catalog.pg_namespace n ON n.oid = c.collnamespace
+                WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+                ORDER BY (n.nspname = '{schema}') DESC, n.nspname, c.collname
+            """
+            cursor.execute(query)
+            for row in cursor.fetchall():
+                collation_name = row[1]
+                if collation_name in collations:
+                    # Same name in another schema - references in the DDL are resolved by name,
+                    # so only the first occurrence (the migrated schema) can be recreated.
+                    self.config_parser.print_log_message('WARNING', f"postgresql_connector: fetch_collations: Collation {row[0]}.{collation_name} is skipped - collation with the same name is already migrated from another schema.")
+                    continue
+                provider = provider_names.get(row[2], row[2])
+                collation_info = {
+                    'collation_schema': row[0],
+                    'collation_name': collation_name,
+                    'collation_provider': provider,
+                    'collation_locale': row[3],
+                    'collation_lc_collate': row[4],
+                    'collation_lc_ctype': row[5],
+                    'collation_deterministic': row[6],
+                    'collation_rules': row[7],
+                    'collation_version': row[8],
+                    'collation_comment': row[9],
+                }
+                collation_info['source_collation_sql'] = self.get_create_collation_sql(
+                    {**collation_info, 'target_schema_name': row[0]})
+                collations[collation_name] = collation_info
+
+            cursor.close()
+            self.disconnect()
+
+            # Keys of the returned dict have to be ordinal numbers - see the base connector
+            return {order_num + index: value for index, value in enumerate(collations.values())}
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"postgresql_connector: fetch_collations: Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
+            raise
+
+    def get_create_collation_sql(self, settings):
+        collation_name = settings['collation_name']
+        target_schema_name = settings['target_schema_name']
+        target_collation_name = settings.get('target_collation_name') or collation_name
+        provider = (settings.get('collation_provider') or '').lower()
+        locale = settings.get('collation_locale')
+        lc_collate = settings.get('collation_lc_collate')
+        lc_ctype = settings.get('collation_lc_ctype')
+        deterministic = settings.get('collation_deterministic')
+        rules = settings.get('collation_rules')
+
+        def quoted(value):
+            return "'" + str(value).replace("'", "''") + "'"
+
+        options = []
+        if provider in ('icu', 'libc', 'builtin'):
+            options.append(f"provider = {provider}")
+
+        if locale:
+            options.append(f"locale = {quoted(locale)}")
+        elif lc_collate and lc_ctype and lc_collate == lc_ctype:
+            options.append(f"locale = {quoted(lc_collate)}")
+        else:
+            if lc_collate:
+                options.append(f"lc_collate = {quoted(lc_collate)}")
+            if lc_ctype:
+                options.append(f"lc_ctype = {quoted(lc_ctype)}")
+
+        if rules:
+            options.append(f"rules = {quoted(rules)}")
+        if deterministic is False:
+            options.append("deterministic = false")
+
+        if not options:
+            self.config_parser.print_log_message('WARNING', f"postgresql_connector: get_create_collation_sql: Collation {collation_name} carries no locale settings - skipping.")
+            return ''
+
+        # The collation version is deliberately not copied - the target can be built with
+        # another ICU / libc version and a wrong recorded version produces false warnings.
+        return f'''CREATE COLLATION IF NOT EXISTS "{target_schema_name}"."{target_collation_name}" ({', '.join(options)});'''
 
     def fetch_default_values(self, settings) -> dict:
         # Placeholder for fetching default values

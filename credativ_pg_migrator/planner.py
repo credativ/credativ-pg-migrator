@@ -39,6 +39,9 @@ class Planner:
         self.pre_script = self.config_parser.get_pre_migration_script()
         self.post_script = self.config_parser.get_post_migration_script()
         self.user_defined_types = {}
+        # source collation name -> collation recreated in the target schema,
+        # filled by stdwf_prepare_collations and used when the DDL is generated
+        self.migrated_collations = {}
         self.sql_functions_mapping = self.source_connection.get_sql_functions_mapping({
             'target_db_type': self.config_parser.get_target_db_type()
         })
@@ -75,6 +78,7 @@ class Planner:
                         self.source_connection.parse_ddl_files({ 'migrator_tables': self.migrator_tables})
                         self.source_schema_name = self.config_parser.get_source_schema()
 
+                    self.stdwf_prepare_collations()
                     self.stdwf_prepare_domains()
                     self.stdwf_prepare_user_defined_types()
                     self.stdwf_prepare_defaults()
@@ -129,6 +133,7 @@ class Planner:
                         self.source_connection.parse_ddl_files({ 'migrator_tables': self.migrator_tables})
                         self.source_schema_name = self.config_parser.get_source_schema()
 
+                    self.stdwf_prepare_collations()
                     self.stdwf_prepare_domains()
                     self.stdwf_prepare_user_defined_types()
                     self.stdwf_prepare_defaults()
@@ -633,6 +638,7 @@ class Planner:
                     'target_table_name': target_table_name,
                     'source_columns': source_columns,
                     'migrator_tables': self.migrator_tables,
+                    'user_collations': self.migrated_collations,
                 }
                 self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_tables: convert_table_columns - settings: {settings}")
                 target_columns = self.convert_table_columns(settings)
@@ -804,7 +810,8 @@ class Planner:
                         # the table their identifiers have to be resolved.
                         values['is_function_based'] = index_details.get('is_function_based', 'NO')
                         values['index_sql'] = self.target_connection.get_create_index_sql(
-                            {**values, 'target_columns': target_columns})
+                            {**values, 'target_columns': target_columns,
+                             'user_collations': self.migrated_collations})
                         self.migrator_tables.insert_indexes( values )
                         self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_tables: Processed index: {values}")
                 else:
@@ -1243,6 +1250,8 @@ class Planner:
                     'udt_name': column_info['udt_name'] if 'udt_name' in column_info else '',
                     'domain_schema': column_info['domain_schema'] if 'domain_schema' in column_info else '',
                     'domain_name': column_info['domain_name'] if 'domain_name' in column_info else '',
+                    'collation_schema': column_info['collation_schema'] if 'collation_schema' in column_info else '',
+                    'collation_name': column_info['collation_name'] if 'collation_name' in column_info else '',
                     'is_hidden_column': column_info['is_hidden_column'] if 'is_hidden_column' in column_info else '',
                     'stripped_generation_expression': column_info['stripped_generation_expression'] if 'stripped_generation_expression' in column_info else '',
                 }
@@ -1448,6 +1457,48 @@ class Planner:
             self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_user_defined_types: User defined types processed successfully.")
         else:
             self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_user_defined_types: No user defined types found.")
+
+    def stdwf_prepare_collations(self):
+        """
+        Collations have to be prepared as the first objects - tables, columns and indexes
+        reference them, and the generated DDL must point to the collations recreated in the
+        target schema.
+        """
+        self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_collations: Preparing collations...")
+        self.migrated_collations = {}
+        collations = self.source_connection.fetch_collations(self.source_schema_name)
+        self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_collations: Collations found in source database: {collations}")
+        if not collations:
+            self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_collations: No collations found.")
+            return
+
+        for order_num, collation_info in collations.items():
+            self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_collations: Processing collation: {collation_info}")
+            target_collation_name = self.config_parser.convert_names_case(collation_info['collation_name'])
+            collation_info['target_schema_name'] = self.target_schema_name
+            collation_info['target_collation_name'] = target_collation_name
+            converted_collation_sql = self.target_connection.get_create_collation_sql(collation_info)
+            self.config_parser.print_log_message( 'DEBUG', f"planner: stdwf_prepare_collations: Converted collation SQL: {converted_collation_sql}")
+            if not converted_collation_sql:
+                self.config_parser.print_log_message('WARNING', f"planner: stdwf_prepare_collations: Collation {collation_info['collation_name']} cannot be recreated in the target database - skipped.")
+                continue
+
+            self.migrator_tables.insert_collation({
+                'source_schema_name': collation_info.get('collation_schema') or self.source_schema_name,
+                'source_collation_name': collation_info['collation_name'],
+                'source_collation_sql': collation_info.get('source_collation_sql', ''),
+                'target_schema_name': self.target_schema_name,
+                'target_collation_name': target_collation_name,
+                'target_collation_sql': converted_collation_sql,
+                'collation_provider': collation_info.get('collation_provider', ''),
+                'collation_comment': collation_info.get('collation_comment'),
+            })
+            self.migrated_collations[collation_info['collation_name']] = {
+                'target_schema_name': self.target_schema_name,
+                'target_collation_name': target_collation_name,
+            }
+            self.config_parser.print_log_message('INFO', f"planner: stdwf_prepare_collations: Collation {collation_info['collation_name']} processed successfully.")
+        self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_collations: Collations processed successfully.")
 
     def stdwf_prepare_domains(self):
         self.config_parser.print_log_message('INFO', "planner: stdwf_prepare_domains: Preparing domains...")

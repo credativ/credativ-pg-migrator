@@ -35,6 +35,7 @@ Note to the unclear status - the biggest issue is to find reasonable testing dat
 | Check Constraints                         | yes     | yes     | yes     | yes      | --     | --    | --      | ?[7]   | yes        | --       | yes[8] | yes    |
 | Check Rules/Domains[3]                    | --      | --      | --      | --       | --     | N/A   | N/A     | ?[7]   | ?          | --       | N/A    | yes    |
 | User-defined types                        | --      | --      | --      | --       | ?      | N/A   | N/A     | ?[7]   | yes        | --       | N/A    | yes    |
+| User-defined collations[12]               | --      | --      | --      | --       | --     | --    | --      | --     | yes        | --       | N/A    | --     |
 | Comments on columns                       | yes     | --[9]   | --[9]   | N/A*     | --     | yes   | yes     | ?[7]   | yes        | --       | N/A    | N/A*   |
 | Comments on tables                        | yes     | --[9]   | --[9]   | N/A*     | --     | yes   | yes     | ?[7]   | yes        | --       | N/A    | N/A*   |
 | Migration of views                        | ?       | ?       | ?       | WIP      | ?      | WIP   | WIP     | ?[7]   | yes        | WIP      | ?[8]   | ?      |
@@ -60,6 +61,7 @@ Notes:
 - [9]: IBM DB2 z/OS and IBM DB2 for i are **offline** connectors - they never connect to the source instance. The structure is read from `.sql`/DDL extracts (`connectivity: "ddl"`) and the data from source-generated CSV files, so anything that requires a live source (pre-migration analysis, random-sample and LOB-size validation) is not available. `COMMENT ON` / `LABEL ON` statements *are* parsed out of the DDL and stored in the protocol tables, but they are not yet handed back as table/column comments, so no comment reaches the target.
 - [10]: MySQL and MariaDB use separate connectors. They are largely identical, but MariaDB additionally migrates standalone `SEQUENCE` objects (MariaDB 10.3+), which MySQL does not have. Neither connector converts functions, procedures or triggers.
 - [11]: Every connector ships a mapping of the most common source SQL functions to their PostgreSQL equivalents, applied when defaults, views, constraints and routine bodies are converted. Coverage differs per engine and is extended on demand, hence WIP everywhere. For PostgreSQL as a source no mapping is needed.
+- [12]: Collations created as standalone objects ([CREATE COLLATION](https://www.postgresql.org/docs/current/sql-createcollation.html)) and referenced by columns and indexes. They are migrated for a PostgreSQL source (ICU and libc provider, locale, tailoring rules, non-deterministic collations and the comment) and recreated in the target schema. Collations of the other engines are named differently (`utf8mb4_general_ci`, `Latin1_General_CI_AS`, ...) and have no PostgreSQL counterpart, so a reference to them is dropped and the column keeps the default collation of the target database.
 
 ## Tested versions of databases
 

@@ -27,6 +27,7 @@ class AnonymizationWorkflow:
         original_migrate_data = self.config_parser.config['migration'].get('migrate_data', True)
         self.config_parser.config['migration']['migrate_data'] = False
         
+        self.orchestrator.run_create_collations()
         self.orchestrator.run_create_user_defined_types()
         self.orchestrator.run_create_domains()
         self.orchestrator.stdwf_migrate_sequences()

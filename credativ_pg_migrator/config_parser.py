@@ -452,6 +452,9 @@ class ConfigParser:
     def get_protocol_name_domains(self):
         return f"{self.get_protocol_name()}_domains"
 
+    def get_protocol_name_collations(self):
+        return f"{self.get_protocol_name()}_collations"
+
     def get_protocol_name_default_values(self):
         return f"{self.get_protocol_name()}_defaults"
 

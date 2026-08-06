@@ -1317,7 +1317,12 @@ class PostgreSQLConnector(DatabaseConnector):
             SELECT
                 i.indexname,
                 i.indexdef,
-                coalesce(c.constraint_type, 'INDEX') as type,
+                CASE con.contype
+                    WHEN 'p' THEN 'PRIMARY KEY'
+                    WHEN 'u' THEN 'UNIQUE'
+                    WHEN 'x' THEN 'EXCLUSION'
+                    ELSE 'INDEX'
+                END as type,
                 obj_description(('"'||i.schemaname||'"."'||i.indexname||'"')::regclass::oid, 'pg_class') as index_comment,
                 (x.indexprs IS NOT NULL) as is_expression_index,
                 x.indisunique as is_unique,
@@ -1335,10 +1340,6 @@ class PostgreSQLConnector(DatabaseConnector):
             ON con.conindid = ic.oid
                 AND con.conrelid = t.oid
                 AND con.contype IN ('p', 'u', 'x')
-            LEFT JOIN information_schema.table_constraints c
-            ON i.schemaname = c.table_schema
-                and i.tablename = c.table_name
-                and i.indexname = c.constraint_name
             WHERE t.oid = {source_table_id}
         """
         try:

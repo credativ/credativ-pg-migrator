@@ -1169,6 +1169,11 @@ class Orchestrator:
                                                 flags=re.IGNORECASE
                                             )
                                             create_import_table_sql = re.sub( 'bytea', 'text', create_import_table_sql, flags=re.IGNORECASE)
+                                            # The intermediate table is a staging copy which has to accept
+                                            # the values from the data file - a generated column would
+                                            # reject them, and it serves no purpose here.
+                                            if hasattr(worker_target_connection, 'strip_generated_column_clauses'):
+                                                create_import_table_sql = worker_target_connection.strip_generated_column_clauses(create_import_table_sql)
                                             self.config_parser.print_log_message('DEBUG', f"orchestrator: table_worker: Worker {worker_id}: Creating intermediate import table with SQL: {create_import_table_sql}")
                                             worker_target_connection.execute_query(create_import_table_sql)
 
@@ -1518,8 +1523,35 @@ class Orchestrator:
             self.config_parser.print_log_message('INFO', f"orchestrator: lob_worker: Worker {worker_id}: started for LOB file: {datafile}, LOB column {lob_column} - occurrences: {occurrences} - {current_datafile_num}/{datafiles_count}")
 
             part_name = 'prepare insert SQL'
-            col_list = ', '.join([f'"{col_info["column_name"]}"' for _, col_info in target_columns.items()])
-            placeholders = ', '.join(['%s'] * len(target_columns))
+            # A generated column is computed by the target and rejects an inserted value, so
+            # it is part of neither the SELECT from the intermediate table nor the INSERT.
+            def column_sort_key(item):
+                try:
+                    return (0, int(item[0]))
+                except (TypeError, ValueError):
+                    return (1, str(item[0]))
+
+            migrated_columns = []
+            skipped_columns = []
+            for _, col_info in sorted(target_columns.items(), key=column_sort_key):
+                if col_info.get('is_generated_virtual') == 'YES' or col_info.get('is_generated_stored') == 'YES':
+                    skipped_columns.append(col_info['column_name'])
+                else:
+                    migrated_columns.append(col_info)
+            if skipped_columns:
+                self.config_parser.print_log_message('DEBUG', f"orchestrator: lob_worker: Table {target_table_name}: generated columns are computed by the target and excluded from the LOB import: {', '.join(skipped_columns)}")
+
+            # lob_col_index is passed as the ordinal position of the column in the full column
+            # list - it addresses the row tuple positionally, so it has to be re-derived from
+            # the list actually selected.
+            lob_column_name = str(lob_column).strip().strip('"')
+            for position, col_info in enumerate(migrated_columns, start=1):
+                if col_info['column_name'].strip().strip('"').lower() == lob_column_name.lower():
+                    lob_col_index = position
+                    break
+
+            col_list = ', '.join([f'"{col_info["column_name"]}"' for col_info in migrated_columns])
+            placeholders = ', '.join(['%s'] * len(migrated_columns))
 
             basic_insert_sql = f'''INSERT INTO "{target_schema_name}"."{target_table_name}" ({col_list}) VALUES ({placeholders})'''
 
@@ -1535,7 +1567,7 @@ class Orchestrator:
 
                 # Get all column names excluding LOB columns
                 non_lob_columns = []
-                for _, col_info in target_columns.items():
+                for col_info in migrated_columns:
                     col_name = col_info['column_name'].strip().strip('"')
                     if col_name not in all_lob_columns:
                         non_lob_columns.append(col_name)
@@ -1553,12 +1585,12 @@ class Orchestrator:
                 #         merge_match_conditions = ' AND '.join([f'target."{col_info["column_name"].strip().strip('"')}" = source."{col_info["column_name"].strip().strip('"')}"' for _, col_info in target_columns.items()])
 
                 # Build the column assignments for INSERT and UPDATE
-                insert_columns = ', '.join([f'"{col_info["column_name"]}"' for _, col_info in target_columns.items()])
-                insert_values = ', '.join([f'source."{col_info["column_name"]}"' for _, col_info in target_columns.items()])
+                insert_columns = ', '.join([f'"{col_info["column_name"]}"' for col_info in migrated_columns])
+                insert_values = ', '.join([f'source."{col_info["column_name"]}"' for col_info in migrated_columns])
 
                 # Build cast expressions for each column based on its data type
                 cast_expressions = []
-                for _, col_info in target_columns.items():
+                for col_info in migrated_columns:
                     col_name = col_info["column_name"]
                     data_type = col_info["data_type"]
                     if data_type.lower() == 'oid':

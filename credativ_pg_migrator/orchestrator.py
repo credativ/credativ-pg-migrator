@@ -1964,6 +1964,22 @@ class Orchestrator:
                                 self.target_connection.execute_query(self.target_connection.session_settings)
 
                             self.target_connection.execute_query(converted_code)
+
+                            # The comment is not part of CREATE FUNCTION / PROCEDURE /
+                            # AGGREGATE and has to be set separately. The identity arguments
+                            # are required - the name alone is ambiguous for overloaded
+                            # routines - so this runs only for connectors delivering them.
+                            if funcproc_data.get('comment') and funcproc_data.get('arguments') is not None:
+                                safe_comment = funcproc_data['comment'].replace("'", "''")
+                                comment_query = (f"""COMMENT ON {funcproc_type} "{self.target_schema_name}"."""
+                                                 f""""{self.config_parser.convert_names_case(funcproc_data['name'])}"({funcproc_data['arguments']}) """
+                                                 f"""IS '{safe_comment}'""")
+                                try:
+                                    self.config_parser.print_log_message('DEBUG', f"orchestrator: run_migrate_funcprocs: Setting comment: {comment_query}")
+                                    self.target_connection.execute_query(comment_query)
+                                except Exception as comment_error:
+                                    self.config_parser.print_log_message('WARNING', f"orchestrator: run_migrate_funcprocs: Comment of {funcproc_type} {funcproc_data['name']} could not be set: {comment_error}")
+
                             self.config_parser.print_log_message( 'DEBUG', f"orchestrator: run_migrate_funcprocs: [OK] Source code for {funcproc_data['name']}: {funcproc_code_str}")
                             self.config_parser.print_log_message( 'DEBUG', f"orchestrator: run_migrate_funcprocs: [OK] Converted code for {funcproc_data['name']}: {converted_code}")
                             self.migrator_tables.update_funcproc_status({'source_funcproc_id': funcproc_id, 'success': True, 'message': 'migrated OK'})

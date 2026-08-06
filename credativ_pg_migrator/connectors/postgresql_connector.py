@@ -2684,19 +2684,27 @@ class PostgreSQLConnector(DatabaseConnector):
             FROM pg_proc p
             JOIN pg_namespace n ON p.pronamespace = n.oid
             WHERE n.nspname = '{schema}'
-              AND p.prokind IN ('f', 'p')
-            ORDER BY p.proname
+              AND p.prokind IN ('f', 'p', 'a')
+              AND NOT EXISTS (SELECT 1 FROM pg_depend dep
+                              WHERE dep.objid = p.oid AND dep.deptype = 'e')
+            ORDER BY (p.prokind = 'a'), p.proname
         """
         try:
             self.connect()
             cursor = self.connection.cursor()
             cursor.execute(query)
             for row in cursor.fetchall():
-                func_type = 'PROCEDURE' if row[4] == 'p' else 'FUNCTION'
+                # Aggregates are ordered last - they reference their state transition and
+                # final functions, which have to exist first.
+                func_type = {'p': 'PROCEDURE', 'a': 'AGGREGATE'}.get(row[4], 'FUNCTION')
                 funcprocs[order_num] = {
                     'id': row[0],
                     'name': row[1],
                     'header': f"{row[1]}({row[2]})",
+                    # The identity arguments are needed to address the object in
+                    # COMMENT ON FUNCTION / PROCEDURE / AGGREGATE - the name alone is
+                    # ambiguous for overloaded routines.
+                    'arguments': row[2],
                     'comment': row[3],
                     'type': func_type
                 }
@@ -2714,6 +2722,15 @@ class PostgreSQLConnector(DatabaseConnector):
         try:
             self.connect()
             cursor = self.connection.cursor()
+            # pg_get_functiondef() does not work for an aggregate ("... is an aggregate
+            # function") - an aggregate is described by pg_aggregate, not by a body.
+            cursor.execute("SELECT prokind FROM pg_catalog.pg_proc WHERE oid = %s", (funcproc_id,))
+            row = cursor.fetchone()
+            if row and row[0] == 'a':
+                cursor.close()
+                self.disconnect()
+                return self.fetch_aggregate_code(funcproc_id)
+
             cursor.execute(query)
             code = cursor.fetchone()[0]
             cursor.close()
@@ -2723,6 +2740,142 @@ class PostgreSQLConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', f"postgresql_connector: fetch_funcproc_code: Error executing query: {query}")
             self.config_parser.print_log_message('ERROR', e)
             raise
+
+    def fetch_aggregate_code(self, aggregate_id: int):
+        """
+        Build the CREATE AGGREGATE statement of a user defined aggregate from pg_aggregate.
+
+        The search_path of this short lived connection is set to pg_catalog, so that
+        format_type() and pg_get_function_identity_arguments() qualify every user defined
+        type and function with its schema while leaving the built-in ones bare. The schema
+        replacement of convert_funcproc_code() then maps them to the target schema.
+        """
+        query = ''
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute("SET search_path TO pg_catalog")
+
+            cursor.execute("""
+                SELECT attname FROM pg_catalog.pg_attribute
+                WHERE attrelid = 'pg_catalog.pg_aggregate'::regclass AND attnum > 0 AND NOT attisdropped
+            """)
+            available_columns = {row[0] for row in cursor.fetchall()}
+            # aggfinalmodify / aggmfinalmodify exist since PostgreSQL 11
+            final_modify = 'a.aggfinalmodify' if 'aggfinalmodify' in available_columns else "NULL::\"char\""
+            mfinal_modify = 'a.aggmfinalmodify' if 'aggmfinalmodify' in available_columns else "NULL::\"char\""
+
+            def function_name(column):
+                return f"""(SELECT quote_ident(fn.nspname)||'.'||quote_ident(fp.proname)
+                            FROM pg_catalog.pg_proc fp
+                            JOIN pg_catalog.pg_namespace fn ON fn.oid = fp.pronamespace
+                            WHERE fp.oid = nullif({column}, 0))"""
+
+            query = f"""
+                SELECT
+                    quote_ident(n.nspname) as aggregate_schema,
+                    quote_ident(p.proname) as aggregate_name,
+                    pg_get_function_identity_arguments(p.oid) as arguments,
+                    a.aggkind,
+                    {function_name('a.aggtransfn')} as sfunc,
+                    format_type(a.aggtranstype, NULL) as stype,
+                    nullif(a.aggtransspace, 0) as sspace,
+                    {function_name('a.aggfinalfn')} as finalfunc,
+                    a.aggfinalextra,
+                    {final_modify} as finalmodify,
+                    {function_name('a.aggcombinefn')} as combinefunc,
+                    {function_name('a.aggserialfn')} as serialfunc,
+                    {function_name('a.aggdeserialfn')} as deserialfunc,
+                    a.agginitval,
+                    {function_name('a.aggmtransfn')} as msfunc,
+                    {function_name('a.aggminvtransfn')} as minvfunc,
+                    CASE WHEN a.aggmtranstype <> 0 THEN format_type(a.aggmtranstype, NULL) END as mstype,
+                    nullif(a.aggmtransspace, 0) as msspace,
+                    {function_name('a.aggmfinalfn')} as mfinalfunc,
+                    a.aggmfinalextra,
+                    {mfinal_modify} as mfinalmodify,
+                    a.aggminitval,
+                    (SELECT oprname FROM pg_catalog.pg_operator o WHERE o.oid = nullif(a.aggsortop, 0)) as sortop,
+                    p.proparallel
+                FROM pg_catalog.pg_aggregate a
+                JOIN pg_catalog.pg_proc p ON p.oid = a.aggfnoid
+                JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+                WHERE p.oid = %s
+            """
+            cursor.execute(query, (aggregate_id,))
+            row = cursor.fetchone()
+            cursor.close()
+            self.disconnect()
+            if not row:
+                self.config_parser.print_log_message('WARNING', f"postgresql_connector: fetch_aggregate_code: Aggregate with oid {aggregate_id} not found in pg_aggregate.")
+                return ''
+            return self.get_create_aggregate_sql(row)
+        except Exception as e:
+            self.config_parser.print_log_message('ERROR', f"postgresql_connector: fetch_aggregate_code: Error executing query: {query}")
+            self.config_parser.print_log_message('ERROR', e)
+            raise
+
+    def get_create_aggregate_sql(self, aggregate_row):
+        """ Assemble CREATE AGGREGATE from a row delivered by fetch_aggregate_code(). """
+        (aggregate_schema, aggregate_name, arguments, aggkind, sfunc, stype, sspace,
+         finalfunc, finalextra, finalmodify, combinefunc, serialfunc, deserialfunc,
+         initcond, msfunc, minvfunc, mstype, msspace, mfinalfunc, mfinalextra,
+         mfinalmodify, minitcond, sortop, proparallel) = aggregate_row
+
+        modify_keywords = {'r': 'READ_ONLY', 's': 'SHAREABLE', 'w': 'READ_WRITE'}
+        parallel_keywords = {'s': 'SAFE', 'r': 'RESTRICTED', 'u': 'UNSAFE'}
+
+        def quoted(value):
+            return "'" + str(value).replace("'", "''") + "'"
+
+        options = [f"SFUNC = {sfunc}", f"STYPE = {stype}"]
+        if sspace:
+            options.append(f"SSPACE = {sspace}")
+        if finalfunc:
+            options.append(f"FINALFUNC = {finalfunc}")
+            if finalextra:
+                options.append("FINALFUNC_EXTRA")
+            if finalmodify in modify_keywords:
+                options.append(f"FINALFUNC_MODIFY = {modify_keywords[finalmodify]}")
+        if combinefunc:
+            options.append(f"COMBINEFUNC = {combinefunc}")
+        if serialfunc:
+            options.append(f"SERIALFUNC = {serialfunc}")
+        if deserialfunc:
+            options.append(f"DESERIALFUNC = {deserialfunc}")
+        if initcond is not None:
+            options.append(f"INITCOND = {quoted(initcond)}")
+        # Moving aggregate implementation - used for window functions with a moving frame
+        if msfunc:
+            options.append(f"MSFUNC = {msfunc}")
+        if minvfunc:
+            options.append(f"MINVFUNC = {minvfunc}")
+        if mstype:
+            options.append(f"MSTYPE = {mstype}")
+        if msspace:
+            options.append(f"MSSPACE = {msspace}")
+        if mfinalfunc:
+            options.append(f"MFINALFUNC = {mfinalfunc}")
+            if mfinalextra:
+                options.append("MFINALFUNC_EXTRA")
+            if mfinalmodify in modify_keywords:
+                options.append(f"MFINALFUNC_MODIFY = {modify_keywords[mfinalmodify]}")
+        if minitcond is not None:
+            options.append(f"MINITCOND = {quoted(minitcond)}")
+        if sortop:
+            options.append(f"SORTOP = OPERATOR({sortop})")
+        if aggkind == 'h':
+            options.append("HYPOTHETICAL")
+        if proparallel in ('s', 'r'):
+            options.append(f"PARALLEL = {parallel_keywords[proparallel]}")
+
+        if aggkind in ('o', 'h'):
+            # An ordered-set aggregate - pg_get_function_identity_arguments already formats
+            # the direct arguments, the ORDER BY separator and the aggregated arguments.
+            self.config_parser.print_log_message('DEBUG', f"postgresql_connector: get_create_aggregate_sql: {aggregate_name} is an ordered-set aggregate ({arguments}).")
+
+        return (f"CREATE AGGREGATE {aggregate_schema}.{aggregate_name}({arguments}) (\n    "
+                + ",\n    ".join(options) + "\n);")
 
     def convert_funcproc_code(self, settings):
         funcproc_code = settings['funcproc_code']

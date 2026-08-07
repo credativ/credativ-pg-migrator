@@ -158,13 +158,15 @@ class InformixConnector(DatabaseConnector):
                 CASE WHEN c.coltype >= 256 THEN 'NO' ELSE 'YES' END AS nullable,
                 CASE WHEN d.type = 'L' THEN
                     CASE
-                        WHEN c.coltype IN (0, 13, 15, 16, 40, 41, 45) THEN d.default
+                        WHEN (CASE WHEN c.coltype >= 256 THEN c.coltype - 256 ELSE c.coltype END)
+                            IN (0, 13, 15, 16, 40, 41, 45) THEN d.default
                         ELSE SUBSTR(d.default, INSTR(d.default, ' ') + 1)
                     END
                 ELSE NULL
                 END AS default_value,
                 ifx_bit_rightshift(c.collength, 8) as numeric_precision,
-                bitand(c.collength, "0xff") as numeric_scale
+                bitand(c.collength, "0xff") as numeric_scale,
+                d.type AS default_type
             FROM syscolumns c LEFT join sysxtdtypes x ON c.extended_id = x.extended_id
             LEFT JOIN sysdefaults d ON c.tabid = d.tabid AND c.colno = d.colno and d.class = 'T'
             WHERE c.tabid = (SELECT t.tabid
@@ -184,9 +186,14 @@ class InformixConnector(DatabaseConnector):
                 data_type = row[2].strip().upper()
                 maximum_length = row[3]
                 is_nullable = row[4].strip().upper()
-                column_default_value = row[5]
                 numeric_precision = row[6]
                 numeric_scale = row[7]
+                column_default_value = self.convert_informix_default({
+                    'column_name': column_name,
+                    'data_type': data_type,
+                    'default_type': row[8],
+                    'default_value': row[5],
+                })
 
                 column_type = data_type
                 if self.is_string_type(data_type):
@@ -2314,9 +2321,78 @@ class InformixConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', f"informix_connector: fetch_all_rows: Error fetching all rows: {e}")
             return []
 
+    def convert_informix_default(self, settings) -> str:
+        """
+        Translate one sysdefaults record into a default value usable in PostgreSQL.
+
+        sysdefaults.type tells which kind of default was declared - only type 'L'
+        stores a literal in sysdefaults.default, all other types are keywords
+        (TODAY, CURRENT, USER, SITENAME/DBSERVERNAME, NULL) which are stored
+        nowhere else and would otherwise be lost.
+        sysdefaults.default is CHAR(256), so literals come back padded - Informix
+        pads them with NUL bytes, which must be removed before the value is used,
+        otherwise psycopg refuses to pass it to PostgreSQL
+        ("A string literal cannot contain NUL (0x00) characters").
+        """
+        column_name = settings.get('column_name', '')
+        data_type = (settings.get('data_type') or '').strip().upper()
+        default_type = (settings.get('default_type') or '').strip().upper()
+        default_value = settings.get('default_value')
+
+        if default_type == '' and default_value is None:
+            return ''
+
+        if default_type == 'L':
+            if default_value is None:
+                return ''
+            # remove NUL padding and other control characters used as padding
+            cleaned_default = self.clean_default_value(default_value)
+            if cleaned_default == '':
+                self.config_parser.print_log_message('WARNING',
+                    f"informix_connector: convert_informix_default: Column {column_name} ({data_type}) has a literal default which contains no printable characters - default value is ignored.")
+                return ''
+            if data_type == 'BOOLEAN':
+                # Informix stores boolean literals as 't' / 'f'
+                if cleaned_default.strip("'").lower() in ('t', 'true', '1'):
+                    return 'TRUE'
+                if cleaned_default.strip("'").lower() in ('f', 'false', '0'):
+                    return 'FALSE'
+                self.config_parser.print_log_message('WARNING',
+                    f"informix_connector: convert_informix_default: Column {column_name} - unexpected BOOLEAN default value '{cleaned_default}' - kept as it is.")
+            return cleaned_default
+        elif default_type == 'T':
+            # TODAY
+            return 'CURRENT_DATE'
+        elif default_type == 'C':
+            # CURRENT [ ... ] - Informix keeps no information about the precision here
+            return 'CURRENT_TIMESTAMP'
+        elif default_type == 'U':
+            # USER
+            return 'CURRENT_USER'
+        elif default_type == 'S':
+            # SITENAME / DBSERVERNAME - PostgreSQL has no equivalent,
+            # so the name of the source Informix server is used as a literal
+            source_server_name = (self.config_parser.get_db_config(self.source_or_target).get('server') or '')
+            self.config_parser.print_log_message('WARNING',
+                f"informix_connector: convert_informix_default: Column {column_name} - default SITENAME/DBSERVERNAME has no equivalent in PostgreSQL - replaced by literal '{source_server_name}'.")
+            return f"'{source_server_name}'"
+        elif default_type == 'N':
+            # explicit DEFAULT NULL - same as no default in PostgreSQL
+            return ''
+        else:
+            self.config_parser.print_log_message('WARNING',
+                f"informix_connector: convert_informix_default: Column {column_name} - unknown default type '{default_type}' (value: '{default_value}') - default value is ignored.")
+            return ''
+
+    def clean_default_value(self, default_value) -> str:
+        """ Removes NUL bytes / control characters used by Informix as padding of CHAR(256) values. """
+        if default_value is None:
+            return ''
+        return re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', str(default_value)).strip()
+
     def convert_default_value(self, settings) -> dict:
         extracted_default_value = settings['extracted_default_value']
-        return extracted_default_value
+        return self.clean_default_value(extracted_default_value)
 
     def get_table_checksum(self, schema_name: str, table_name: str, columns: list):
         if not columns:

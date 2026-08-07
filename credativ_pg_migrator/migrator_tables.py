@@ -296,6 +296,14 @@ class MigratorTables:
         check_column_data_type = settings['check_column_data_type']
         check_default_value = settings['check_default_value']
 
+        # Some source databases return default values padded with NUL bytes (Informix stores
+        # them in CHAR(256) columns) - PostgreSQL cannot accept NUL bytes in text parameters,
+        # so such characters must be removed before the value is used in the query below.
+        if isinstance(check_default_value, str) and '\x00' in check_default_value:
+            check_default_value = check_default_value.replace('\x00', '').strip()
+            self.config_parser.print_log_message('DEBUG',
+                f"migrator_tables: check_default_values_substitution: removed NUL bytes from default value of column {check_column_name}: '{check_default_value}'")
+
         target_default_value = check_default_value
 
         try:

@@ -2,6 +2,14 @@
 
 ## 0.16.0 - 2026.08.05
 
+- 2026.08.07
+
+  - Fix - Informix Connector: Default values of columns were read from `sysdefaults` in a way which both corrupted the value and lost whole kinds of defaults.
+    - `sysdefaults.default` is a `CHAR(256)` column, so a literal comes back padded with NUL bytes. The padding was passed on unchanged, which made `check_default_values_substitution()` fail with `A string literal cannot contain NUL (0x00) characters` - PostgreSQL cannot accept a NUL byte in a text parameter - and put the padding into the DDL: `"eu_member" BOOLEAN DEFAULT f ::BOOLEAN`. The new `informix_connector.clean_default_value()` removes NUL bytes and the other control characters used as padding, and `migrator_tables.check_default_values_substitution()` additionally drops NUL bytes from whatever a connector hands over, so the same value can no longer abort the lookup.
+    - Only `sysdefaults.type = 'L'` (literal) was evaluated, every other type was translated to `NULL` - so `DATE DEFAULT TODAY` arrived as a column without any default, and the same happened to `CURRENT`, `USER`, `SITENAME` / `DBSERVERNAME` and an explicit `DEFAULT NULL`. These keywords are stored in `sysdefaults.type` and nowhere else. The new `informix_connector.convert_informix_default()` maps them: `TODAY` to `CURRENT_DATE`, `CURRENT` to `CURRENT_TIMESTAMP`, `USER` to `CURRENT_USER`, `DEFAULT NULL` to no default at all (identical in PostgreSQL), and `SITENAME` / `DBSERVERNAME`, which has no PostgreSQL equivalent, to the name of the source Informix server as a literal, with a warning.
+    - A `BOOLEAN` default is stored by Informix as `t` / `f` and was emitted as the bare word `f`, which is not a valid expression. It is now converted to `TRUE` / `FALSE`.
+    - The branch deciding whether the literal is stored as plain text or behind the internal representation (`SUBSTR(d.default, INSTR(d.default, ' ') + 1)`) tested `c.coltype` without normalizing it - `syscolumns.coltype` carries `+ 256` for a `NOT NULL` column, so for a `NOT NULL CHAR` / `VARCHAR` / `NVARCHAR` / `LVARCHAR` column the wrong branch was taken and a literal containing a space (`DEFAULT 'New York'`) was truncated to its last word. The type is normalized now, exactly as it already was for the type name itself.
+
 - 2026.08.06
 
   - Documentation - Configuration examples: Added `docs/configs/` with a ready to use configuration file for every supported source database and every workflow, derived from the internal test configurations. Every line which has to be changed carries the marker `>>> ADJUST`, so `grep -n '>>> ADJUST' <file>` lists the complete to-do list of an example.

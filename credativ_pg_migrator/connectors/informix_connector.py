@@ -680,6 +680,34 @@ class InformixConnector(DatabaseConnector):
         if target_db_type == 'postgresql':
             postgresql_code = funcproc_code
 
+            # Normalize the CREATE clause before anything else looks at it. Informix knows
+            # the variants CREATE DBA PROCEDURE / CREATE DBA FUNCTION (executable only by a
+            # user holding the DBA privilege) and CREATE ... IF NOT EXISTS, and every rule
+            # converting the header expects a plain "CREATE PROCEDURE" / "CREATE FUNCTION".
+            # Without this the whole header stays in the code as it was in Informix
+            # ("create dba procedure informix.systdist(...) returning int, date, ...").
+            # PostgreSQL has no DBA-only routine - restrict the EXECUTE privilege of such a
+            # function in the target instead, it is granted to PUBLIC by default.
+            normalized_code, dba_replacements = re.subn(
+                r'\bCREATE\s+DBA\s+(PROCEDURE|FUNCTION)\b',
+                r'CREATE \1',
+                postgresql_code,
+                flags=re.IGNORECASE)
+            if dba_replacements:
+                postgresql_code = normalized_code
+                self.config_parser.print_log_message('WARNING',
+                    "informix_connector: convert_funcproc_code: Routine is declared as a DBA routine - PostgreSQL has no equivalent, the keyword DBA is removed. Check the EXECUTE privilege of the created function, PostgreSQL grants it to PUBLIC.")
+
+            normalized_code, ine_replacements = re.subn(
+                r'\bCREATE\s+(PROCEDURE|FUNCTION)\s+IF\s+NOT\s+EXISTS\b',
+                r'CREATE \1',
+                postgresql_code,
+                flags=re.IGNORECASE)
+            if ine_replacements:
+                postgresql_code = normalized_code
+                self.config_parser.print_log_message('DEBUG',
+                    "informix_connector: convert_funcproc_code: Removed 'IF NOT EXISTS' from the CREATE clause - PostgreSQL does not support it for routines.")
+
             # Replace empty lines with ";"
             postgresql_code = re.sub(r'^\s*$', ';\n', postgresql_code, flags=re.MULTILINE)
             # Split the code based on "\n
@@ -783,13 +811,27 @@ class InformixConnector(DatabaseConnector):
                 flags=re.IGNORECASE
             )
 
-            # Replace source_schema_name in the function/procedure name with target_schema_name
+            # Replace source_schema_name in the function/procedure name with target_schema_name.
+            # Informix keeps the CREATE statement as it was written, so the owner in front of the
+            # routine name is regularly unquoted - the quotes have to be optional here, otherwise
+            # the routine keeps the schema of the source and the target reports
+            # 'schema "..." does not exist'.
             postgresql_code = re.sub(
-                rf'CREATE\s+(FUNCTION|PROCEDURE)\s+"{source_schema_name}"\.',
+                rf'CREATE\s+(FUNCTION|PROCEDURE)\s+"?{re.escape(source_schema_name)}"?\.',
                 rf'CREATE \1 "{target_schema_name}".',
                 postgresql_code,
                 flags=re.IGNORECASE
             )
+
+            # A routine qualified with any other schema than the migrated one is left as it is -
+            # only reported, because that schema is not part of this migration.
+            foreign_schema_match = re.search(
+                r'CREATE\s+(?:FUNCTION|PROCEDURE)\s+"?(\w+)"?\.',
+                postgresql_code,
+                flags=re.IGNORECASE)
+            if foreign_schema_match and foreign_schema_match.group(1).lower() != target_schema_name.lower():
+                self.config_parser.print_log_message('WARNING',
+                    f"informix_connector: convert_funcproc_code: Routine is created in the schema \"{foreign_schema_match.group(1)}\" - neither the migrated schema \"{source_schema_name}\" nor the target schema \"{target_schema_name}\". It is kept as it is and will fail unless that schema exists in the target.")
 
             # Convert DEFINE lines to DECLARE and BEGIN block
             def_lines = re.findall(r'^\s*DEFINE\s+.*$', postgresql_code, flags=re.MULTILINE | re.IGNORECASE)
@@ -1125,6 +1167,15 @@ class InformixConnector(DatabaseConnector):
                     lines.insert(i + 1, "BEGIN")
                     break
             postgresql_code = "\n".join(lines)
+
+            # Report what could not be converted, instead of leaving it to be discovered
+            # in the error message of the target database.
+            if re.search(r'\bRETURNING\b', postgresql_code, flags=re.IGNORECASE):
+                self.config_parser.print_log_message('WARNING',
+                    "informix_connector: convert_funcproc_code: The RETURNING clause of the routine could not be converted - only a single return type is handled. A routine returning several values needs 'RETURNS TABLE (...)' or OUT parameters in PostgreSQL, the converted code has to be completed manually.")
+            if re.search(r'\bWITH\s+RESUME\b', postgresql_code, flags=re.IGNORECASE):
+                self.config_parser.print_log_message('WARNING',
+                    "informix_connector: convert_funcproc_code: The routine returns a set of rows with 'RETURN ... WITH RESUME'. PostgreSQL needs a set returning function ('RETURNS SETOF ...' / 'RETURNS TABLE (...)' with 'RETURN NEXT'), the converted code has to be completed manually.")
 
             return postgresql_code
 

@@ -328,6 +328,9 @@ class InformixConnector(DatabaseConnector):
             types_mapping = {
                 'BLOB': 'BYTEA',
                 'BOOLEAN': 'BOOLEAN',
+                # BSON is the binary and JSON the textual representation of a document -
+                # both become JSONB, which is the binary document type of PostgreSQL
+                'BSON': 'JSONB',
                 'BYTE': 'BYTEA',
                 'CHAR': 'CHAR',
                 'CLOB': 'TEXT',
@@ -338,6 +341,7 @@ class InformixConnector(DatabaseConnector):
                 'INTEGER': 'INTEGER',
                 'INTERVAL': 'INTERVAL',
                 'INT8': 'BIGINT',
+                'JSON': 'JSONB',
                 'LVARCHAR': 'VARCHAR',
                 'MONEY': 'MONEY',
                 'NCHAR': 'CHAR',
@@ -347,12 +351,22 @@ class InformixConnector(DatabaseConnector):
                 # SERIAL & SERIAL8 are replaced in PostgreSQL with IDENTITY columns
                 'SERIAL8': 'BIGINT',
                 'SERIAL': 'INTEGER',
+                'BIGSERIAL': 'BIGINT',
                 'SMALLFLOAT': 'REAL',
                 'SMALLINT': 'SMALLINT',
                 'TEXT': 'TEXT',
                 'TIME': 'TIME',
                 'TIMESTAMP': 'TIMESTAMP',
                 'VARCHAR': 'VARCHAR',
+                # Collection and row types have no counterpart in PostgreSQL - they are
+                # migrated as their text representation, which at least keeps the content
+                # readable instead of emitting a data type the target does not know
+                'COLLECTION': 'TEXT',
+                'LIST': 'TEXT',
+                'MULTISET': 'TEXT',
+                'ROW': 'TEXT',
+                'SET': 'TEXT',
+                'IDSSECURITYLABEL': 'TEXT',
             }
         else:
             raise ValueError(f"Unsupported target database type: {target_db_type}")
@@ -1227,6 +1241,16 @@ class InformixConnector(DatabaseConnector):
                         elif col['data_type'].lower() in ['char', 'nchar']:
                             ## compensate for Informix's fixed-length char columns
                             select_columns_list.append(f"trim({col['column_name']}) as {col['column_name']}")
+                        elif col['data_type'].lower() in ['bson', 'json']:
+                            ## Both are opaque types of Informix and would arrive as an object of the
+                            ## driver, which the target JSONB column cannot accept - a BSON document is
+                            ## converted to its JSON representation first, JSON is already text
+                            self.config_parser.print_log_message('WARNING',
+                                f"informix_connector: migrate_table: Worker {worker_id}: Table {source_schema_name}.{source_table_name}: Column {col['column_name']} ({col['data_type']}) is transferred as its JSON text representation, limited to the LVARCHAR maximum of 32739 characters - larger documents have to be migrated separately.")
+                            if col['data_type'].lower() == 'bson':
+                                select_columns_list.append(f"CAST(CAST({col['column_name']} AS JSON) AS LVARCHAR(32739)) as {col['column_name']}")
+                            else:
+                                select_columns_list.append(f"CAST({col['column_name']} AS LVARCHAR(32739)) as {col['column_name']}")
                         #     select_columns_list.append(f"ST_asText(`{col['column_name']}`) as `{col['column_name']}`")
                         # elif col['data_type'].lower() == 'set':
                         #     select_columns_list.append(f"cast(`{col['column_name']}` as char(4000)) as `{col['column_name']}`")
@@ -2401,7 +2425,7 @@ class InformixConnector(DatabaseConnector):
         cols_list = []
         for col in columns:
             dtype = col.get('data_type', '').lower()
-            if any(x in dtype for x in ['lob', 'bytea', 'xml', 'json', 'text']):
+            if any(x in dtype for x in ['lob', 'bytea', 'xml', 'json', 'bson', 'text']):
                 continue
             cols_list.append(f'"{col["column_name"]}"')
             
@@ -2422,7 +2446,7 @@ class InformixConnector(DatabaseConnector):
         cols_list = []
         for col in columns:
             dtype = col.get('data_type', '').lower()
-            if any(x in dtype for x in ['lob', 'bytea', 'xml', 'json', 'text']):
+            if any(x in dtype for x in ['lob', 'bytea', 'xml', 'json', 'bson', 'text']):
                 continue
             cols_list.append(f'"{col["column_name"]}"')
             

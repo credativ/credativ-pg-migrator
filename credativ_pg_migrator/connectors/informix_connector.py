@@ -486,6 +486,9 @@ class InformixConnector(DatabaseConnector):
         source_table_id = settings['source_table_id']
         source_table_schema = settings['source_table_schema']
         source_table_name = settings['source_table_name']
+        ## a function based index calls a routine which the migration puts into the target
+        ## schema - the owner reported by the source catalog does not exist in the target
+        target_table_schema = settings.get('target_table_schema') or source_table_schema
         table_indexes = {}
         order_num = 1
         query = f"""
@@ -588,7 +591,7 @@ class InformixConnector(DatabaseConnector):
                     'index_name': index_name,
                     'index_type': target_index_type,
                     'index_owner': index_owner,
-                    'index_columns': index_columns if not function_based_index else f'''{procedure_owner}.{procedure_name}({procedure_columns})''',
+                    'index_columns': index_columns if not function_based_index else f'''"{target_table_schema}".{procedure_name}({procedure_columns})''',
                     'index_keys': index_keys,
                     'index_comment': '',
                     'is_function_based': 'YES' if function_based_index else 'NO',
@@ -1708,7 +1711,8 @@ class InformixConnector(DatabaseConnector):
             raise
 
 
-    def convert_trigger(self, informix_code: str, settings: dict):
+    def convert_trigger(self, settings: dict):
+        informix_code = settings['trigger_sql']
         pgsql_trigger_code = ''
         pgsql_triggers = []
         trigger_code = ''

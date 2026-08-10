@@ -1155,8 +1155,17 @@ class InformixConnector(DatabaseConnector):
             # self.config_parser.print_log_message('DEBUG', 'informix_connector: convert_funcproc_code: Processing step 1: Splitting code into commands and replacing keywords')
 
             for command in commands:
+                ## A comment behind a statement has to be bracketed here, before the code is
+                ## split on the semicolon: 'RETURN;   -- being deleted; do not touch it' would
+                ## otherwise be torn apart at the semicolon inside the comment and its second
+                ## half would become a statement of its own.
+                comment_match = re.search(r'--', command)
+                if comment_match and not command.startswith('--') and command[:comment_match.start()].count("'") % 2 == 0:
+                    comment_text = command[comment_match.start() + 2:].strip().rstrip(';')
+                    command = f"{command[:comment_match.start()].rstrip()} /* {comment_text} */"
+
                 if command.startswith('--'):
-                    command = command.replace(command, f"\n/* {command.strip()} */;")
+                    command = command.replace(command, f"\n/* {command.strip().rstrip(';')} */;")
                 elif command.startswith('IF'):
                     command = command.replace(command, f";{command.strip()}")
 
@@ -1592,14 +1601,68 @@ class InformixConnector(DatabaseConnector):
                                 modified_exception_block = [re.sub(r'ON EXCEPTION;?', f'EXCEPTION WHEN OTHERS THEN', line) for line in modified_exception_block]
                                 modified_exception_block = [line for line in modified_exception_block if 'END EXCEPTION' not in line]
 
-                                end_index = next((i for i, line in enumerate(lines) if 'END;' in line and '$$ LANGUAGE plpgsql {function_immutable};' in lines[i + 1]), None)
+                                ## The exception handler belongs in front of the END of the
+                                ## routine, which is the line followed by the language clause.
+                                ## This condition used to be written as a plain string
+                                ## containing '{function_immutable}' instead of an f-string,
+                                ## so it never matched anything - and because the block had
+                                ## already been cut out above, the whole ON EXCEPTION handler
+                                ## was silently dropped from every routine which had one.
+                                end_index = next((i for i, line in enumerate(lines)
+                                                  if line.strip().startswith('END;')
+                                                  and i + 1 < len(lines)
+                                                  and lines[i + 1].lstrip().startswith('$$ LANGUAGE')), None)
                                 if end_index is not None:
                                     lines = lines[:end_index] + modified_exception_block + lines[end_index:]
+                                else:
+                                    self.config_parser.print_log_message('WARNING',
+                                        "informix_connector: convert_funcproc_code: The ON EXCEPTION block of the routine could not be placed into the converted code - the error handling has to be added manually.")
+                                    lines = lines[:exception_start_index] + [f"/* {line} */" for line in exception_block] + lines[exception_start_index:]
 
                                 # Join the lines back into a single string
                                 postgresql_code = '\n'.join(lines)
 
             postgresql_code = re.sub(r';;', ';', postgresql_code, flags=re.IGNORECASE)
+
+            # RAISE EXCEPTION of Informix carries the error number and an ISAM error code in
+            # front of the message ('RAISE EXCEPTION -746, 0, ...'), PL/pgSQL expects the
+            # message first. The number is kept in the message when there is none.
+            def convert_raise_exception(match):
+                message = (match.group('message') or '').strip()
+                if not message:
+                    message = f"'Informix error {match.group('error')}'"
+                    self.config_parser.print_log_message('DEBUG',
+                        f"informix_connector: convert_funcproc_code: RAISE EXCEPTION {match.group('error')} has no message of its own - the error number is reported as the message.")
+                return f"RAISE EXCEPTION {message}"
+
+            postgresql_code = re.sub(
+                r"(?i)\bRAISE\s+EXCEPTION\s+(?P<error>-?\d+)\s*(?:,\s*-?\d+\s*)?(?:,\s*(?P<message>'(?:[^']|'')*'))?",
+                convert_raise_exception,
+                postgresql_code)
+
+            # Transaction control inside a routine. A PL/pgSQL block runs in the transaction
+            # of its caller, so 'BEGIN WORK' has no counterpart at all, and PL/pgSQL knows no
+            # SAVEPOINT either - its subtransaction is the BEGIN ... EXCEPTION ... END block.
+            # The statements are commented out instead of being dropped, so that the reader
+            # of the converted routine sees what the source did.
+            ## One pass over all of them, longest first: replacing them one kind after the
+            ## other would match SAVEPOINT again inside the comment just written around
+            ## 'ROLLBACK WORK TO SAVEPOINT x'. Not anchored to the start of a line either -
+            ## the statement also turns up behind 'EXCEPTION WHEN OTHERS THEN' once the
+            ## exception block has been moved.
+            commented_out_statements = []
+
+            def comment_out_transaction_statement(match):
+                commented_out_statements.append(re.sub(r'\s+', ' ', match.group(0).strip()))
+                return f"/* {match.group(0).strip()} */"
+
+            postgresql_code = re.sub(
+                r'(?i)\b(?:ROLLBACK\s+WORK\s+TO\s+SAVEPOINT\s+\w+|BEGIN\s+WORK|COMMIT\s+WORK|ROLLBACK\s+WORK|SAVEPOINT\s+\w+)\s*;',
+                comment_out_transaction_statement,
+                postgresql_code)
+            if commented_out_statements:
+                self.config_parser.print_log_message('WARNING',
+                    f"informix_connector: convert_funcproc_code: The transaction control of the routine was commented out ({', '.join(commented_out_statements)}) - a PL/pgSQL routine runs in the transaction of its caller and has no savepoints of its own. Verify that the caller commits, and use a BEGIN ... EXCEPTION ... END block where the routine relied on a savepoint.")
 
             # The data types of the parameter list, of the DECLARE section and of a cast
             postgresql_code = self.convert_data_types_in_code(postgresql_code, target_db_type)

@@ -145,6 +145,50 @@ class InformixConnector(DatabaseConnector):
         cast_length = available_width // document_columns
         return max(self.MIN_DOCUMENT_CAST_LENGTH, min(cast_length, self.MAX_LVARCHAR_LENGTH))
 
+    def map_trigger_correlation_names(self, text, old_ref, new_ref):
+        """
+        Replace the correlation names of an Informix trigger with OLD and NEW.
+
+        Informix names the two row images itself ('referencing old as o new as n') and the
+        body then reads 'o.list_price'. A PL/pgSQL trigger function addresses them as OLD
+        and NEW, so the names of the source are of no use in the target.
+        """
+        if old_ref:
+            text = re.sub(rf'\b{re.escape(old_ref)}\.', 'OLD.', text)
+        if new_ref:
+            text = re.sub(rf'\b{re.escape(new_ref)}\.', 'NEW.', text)
+        return text
+
+    def split_top_level_commas(self, text):
+        """
+        Split on the commas which are not inside parentheses or a string literal.
+
+        Needed wherever a list of items may contain a routine call of its own, where the
+        commas belong to its argument list and must not end the item.
+        """
+        items = []
+        current = []
+        depth = 0
+        quote = ''
+        for character in text:
+            if quote:
+                if character == quote:
+                    quote = ''
+            elif character in ("'", '"'):
+                quote = character
+            elif character == '(':
+                depth += 1
+            elif character == ')':
+                depth -= 1
+            elif character == ',' and depth == 0:
+                items.append(''.join(current).strip())
+                current = []
+                continue
+            current.append(character)
+        if ''.join(current).strip():
+            items.append(''.join(current).strip())
+        return items
+
     def is_year_month_interval(self, col):
         """
         True for an INTERVAL of the year-month class, False for the day-time class.
@@ -867,6 +911,10 @@ class InformixConnector(DatabaseConnector):
     ## routine would destroy statements like "UPDATE ... SET x = 1" or a ROW(...) constructor
     TYPES_NOT_REPLACED_IN_CODE = ('SET', 'ROW', 'LIST', 'MULTISET', 'COLLECTION')
 
+    ## the return type of a routine, with the length or precision it may carry -
+    ## 'VARCHAR(120)' and 'MONEY(14,2)' as well as a bare 'INTEGER'
+    RETURN_TYPE_PATTERN = r'\w+(?:\s*\([^)]*\))?'
+
     MERGE_PLACEHOLDER = '__CREDATIV_PG_MIGRATOR_MERGE_{}__'
     GLOBAL_PLACEHOLDER = '__CREDATIV_PG_MIGRATOR_GLOBAL_{}__'
     ## prefix of the customized option a global variable of Informix is migrated to - a
@@ -1290,7 +1338,9 @@ class InformixConnector(DatabaseConnector):
                     postgresql_code = postgresql_code[:header_end] + '\n AS $$\n' + postgresql_code[header_end:]
 
             # header for functions
-            header_match = re.search(r'CREATE FUNCTION.*?RETURNING\s+\w+\s+;?', postgresql_code, flags=re.DOTALL | re.IGNORECASE)
+            # The return type may carry a length or a precision - 'RETURNING VARCHAR(120);'
+            # and 'RETURNING MONEY(14,2);' are as usual as a bare 'RETURNING INTEGER;'
+            header_match = re.search(rf'CREATE FUNCTION.*?RETURNING\s+{self.RETURN_TYPE_PATTERN}\s*;?', postgresql_code, flags=re.DOTALL | re.IGNORECASE)
             if header_match:
                 header_end = header_match.end()
                 postgresql_code_part = re.sub(r'RETURNING', 'RETURNS', postgresql_code[:header_end], flags=re.DOTALL | re.IGNORECASE)
@@ -1300,7 +1350,7 @@ class InformixConnector(DatabaseConnector):
                     postgresql_code_part += ' AS $$\n'
                 postgresql_code = postgresql_code_part + postgresql_code[header_end:]
 
-            header_match = re.search(r'\s*RETURNING\s+\w+\s+;?', postgresql_code, flags=re.DOTALL | re.IGNORECASE)
+            header_match = re.search(rf'\s*RETURNING\s+{self.RETURN_TYPE_PATTERN}\s*;?', postgresql_code, flags=re.DOTALL | re.IGNORECASE)
             if header_match:
                 header_end = header_match.end()
                 postgresql_code_part = re.sub(r'RETURNING', 'RETURNS', postgresql_code[:header_end], flags=re.DOTALL | re.IGNORECASE)
@@ -1318,7 +1368,7 @@ class InformixConnector(DatabaseConnector):
                 postgresql_code = re.sub(r'AS\s+\$\$', 'AS $$\nBEGIN', postgresql_code, flags=re.IGNORECASE)
 
             # Replace Informix specific syntax with PostgreSQL syntax
-            returning_matches = re.finditer(r'RETURNING\s+(\w+)\s*;', postgresql_code, flags=re.DOTALL | re.IGNORECASE | re.MULTILINE)
+            returning_matches = re.finditer(rf'RETURNING\s+({self.RETURN_TYPE_PATTERN})\s*;', postgresql_code, flags=re.DOTALL | re.IGNORECASE | re.MULTILINE)
             for match in returning_matches:
                 return_type = match.group(1)
                 postgresql_code = postgresql_code.replace(match.group(0), f'RETURNS {return_type} AS $$\n')
@@ -1966,7 +2016,11 @@ class InformixConnector(DatabaseConnector):
                 """
                 cursor.execute(query)
                 trigger_code = cursor.fetchall()
-                trigger_code_str = '\n'.join([body[0].strip() for body in trigger_code])
+                ## Informix stores the text of a trigger split into fixed size pieces, one
+                ## row per seqno - joining them with a newline and stripping each piece cuts
+                ## words in half at every boundary ("n.total_amo" + "unt"), the pieces have
+                ## to be concatenated exactly as they are stored
+                trigger_code_str = ''.join([body[0] for body in trigger_code if body[0] is not None]).strip()
 
                 trigger_code_lines = trigger_code_str.split('\n')
 
@@ -2021,10 +2075,16 @@ class InformixConnector(DatabaseConnector):
                 # Extract how NEW and OLD are referenced in Informix code
                 new_ref = ""
                 old_ref = ""
-                ref_match = re.search(r'referencing\s+(new\s+as\s+(\S+))?\s*(old\s+as\s+(\S+))?', trig, re.IGNORECASE)
+                ## Informix writes the correlation names in either order - 'referencing old
+                ## as o new as n' is as usual as 'referencing new as n old as o', and reading
+                ## them positionally lost whichever came second
+                ref_match = re.search(r'referencing\s+((?:(?:new|old)\s+as\s+\w+\s*)+)', trig, re.IGNORECASE)
                 if ref_match:
-                    new_ref = ref_match.group(2) if ref_match.group(2) else ""
-                    old_ref = ref_match.group(4) if ref_match.group(4) else ""
+                    for correlation, alias in re.findall(r'(new|old)\s+as\s+(\w+)', ref_match.group(1), re.IGNORECASE):
+                        if correlation.lower() == 'new':
+                            new_ref = alias
+                        else:
+                            old_ref = alias
 
                 self.config_parser.print_log_message('DEBUG', f"informix_connector: convert_trigger: new_ref: {new_ref}, old_ref: {old_ref}")
 
@@ -2118,39 +2178,15 @@ class InformixConnector(DatabaseConnector):
                     action_current_command = []
                     actions_match = re.search(r'for each row\s*\((.*)\)', trig, re.IGNORECASE | re.DOTALL)
                     if actions_match:
-                        action_content = actions_match.group(1).strip()
-                        # Split the content into individual SQL commands by commas, considering nested structures
-                        open_parentheses = 0
-
-                        for part in re.split(r'(,)', action_content):  # Keep commas as separate tokens
-                            if part == ',' and open_parentheses == 0:
-                            # Check if the current command starts with a valid SQL keyword
-                                if action_current_command and any(action_current_command[0].strip().lower().startswith(kw) for kw in ['insert', 'update', 'delete']):
-                                    # End of a command
-                                    action_all_commands.append(''.join(action_current_command).strip())
-                                    action_current_command = []
-                                else:
-                                    # Concatenate with the previous part
-                                    if action_all_commands:
-                                        action_all_commands[-1] += ',' + ''.join(action_current_command).strip()
-                                        action_current_command = []
-                            else:
-                                action_current_command.append(part)
-                                # Track parentheses to handle nested structures
-                                open_parentheses += part.count('(') - part.count(')')
-
-                        # Add the last command if any
-                        if action_current_command:
-                            if any(action_current_command[0].strip().lower().startswith(kw) for kw in ['insert', 'update', 'delete']):
-                                action_all_commands.append(''.join(action_current_command).strip())
-                            else:
-                                if action_all_commands:
-                                    action_all_commands[-1] += ',' + ''.join(action_current_command).strip()
+                        ## The actions of a trigger are separated by a comma, but a comma
+                        ## also separates the arguments of the called routine - splitting on
+                        ## every comma tore 'execute procedure p(o.list_price ,n.list_price )'
+                        ## into two actions and left the call without its closing parenthesis
+                        action_all_commands = self.split_top_level_commas(actions_match.group(1))
 
                         self.config_parser.print_log_message('DEBUG', f"informix_connector: convert_trigger: ACTION part action_all_commands: {action_all_commands}")
 
-                        actions = actions_match.group(1).split(',')
-                        for action in actions:
+                        for action in action_all_commands:
                             self.config_parser.print_log_message('INFO', f"informix_connector: convert_trigger: action: {action.strip()}")
                             if "execute procedure" in action:
                                 # action = re.sub("execute procedure", "", action, flags=re.IGNORECASE) ## keep it for further processing
@@ -2190,10 +2226,11 @@ class InformixConnector(DatabaseConnector):
 
                     self.config_parser.print_log_message('DEBUG3', f"informix_connector: convert_trigger: func_body_lines: {func_body_lines}")
 
+                    func_body = self.map_trigger_correlation_names(chr(10).join(func_body_lines), old_ref, new_ref)
                     func_code = f"""CREATE OR REPLACE FUNCTION "{settings['target_schema_name']}"."{function_name + str(counter)}"()
                         RETURNS trigger AS $$
                         BEGIN
-                        {chr(10).join(func_body_lines)}
+                        {func_body}
                             RETURN NEW;
                         END;
                         $$ LANGUAGE plpgsql;"""
@@ -2203,15 +2240,14 @@ class InformixConnector(DatabaseConnector):
                     if re.search(r'for each row', trig, re.IGNORECASE):
                         trigger_code += f"""\nAFTER {operation.upper()} ON "{table_schema.replace(settings['source_schema_name'], settings['target_schema_name'])}"."{table_name}" """
 
-                    if new_ref:
-                        trigger_code += f"\nREFERENCING NEW TABLE AS {new_ref}"
-                    if old_ref:
-                        trigger_code += f"\nREFERENCING OLD TABLE AS {old_ref}"
-
+                    ## no REFERENCING clause: the correlation names of the source are mapped
+                    ## to OLD and NEW in the body, a row trigger of PostgreSQL needs nothing
+                    ## else, and 'REFERENCING ... TABLE AS' declares transition tables, which
+                    ## is a different construct altogether
                     if re.search(r'for each row', trig, re.IGNORECASE):
                         trigger_code += f"\nFOR EACH ROW"
 
-                    trigger_code += f"\nEXECUTE FUNCTION {schema.replace(settings['source_schema_name'], settings['target_schema_name'])}.{function_name + str(counter)}();"
+                    trigger_code += f"""\nEXECUTE FUNCTION "{settings['target_schema_name']}"."{function_name + str(counter)}"();"""
                     counter += 1
 
                     pgsql_triggers.append(func_code + "\n\n" + trigger_code)
@@ -2228,31 +2264,34 @@ class InformixConnector(DatabaseConnector):
                         if re.search(r'for each row', trig, re.IGNORECASE):
                             trigger_code += f"""\nAFTER {operation.upper()} ON "{table_schema.replace(settings['source_schema_name'], settings['target_schema_name'])}"."{table_name}" """
 
-                        if new_ref:
-                            trigger_code += f"\nREFERENCING NEW TABLE AS {new_ref}"
-                        if old_ref:
-                            trigger_code += f"\nREFERENCING OLD TABLE AS {old_ref}"
-
                         if re.search(r'for each row', trig, re.IGNORECASE):
                             trigger_code += f"\nFOR EACH ROW"
 
-                        if proc_call.startswith("execute procedure"):
-                            proc_call = proc_call.replace("execute procedure", "")
-                            trigger_code += f"\nEXECUTE FUNCTION {proc_call};"
-                        else:
-                            func_code = f"""CREATE OR REPLACE FUNCTION "{settings['target_schema_name']}"."{function_name + str(counter)}"()
+                        ## The action of the trigger always becomes the body of a trigger
+                        ## function. 'EXECUTE FUNCTION' of PostgreSQL cannot take the action
+                        ## itself: it calls a function returning 'trigger' and accepts string
+                        ## literals as its arguments, never a column of the changed row.
+                        statement = proc_call.replace(f'''"{settings['source_schema_name']}"''', f'''"{settings['target_schema_name']}"''')
+                        if re.match(r'(?i)\s*execute\s+procedure\b', statement):
+                            statement = re.sub(r'(?i)\s*execute\s+procedure\s*', 'CALL ', statement)
+                        statement = self.map_trigger_correlation_names(statement, old_ref, new_ref)
+
+                        func_code = f"""CREATE OR REPLACE FUNCTION "{settings['target_schema_name']}"."{function_name + str(counter)}"()
                                 RETURNS trigger AS $$
                                 BEGIN
-                                    {proc_call.replace(f'''"{settings['source_schema_name']}"''', f'''"{settings['target_schema_name']}"''')};
+                                    {statement};
                                     RETURN NEW;
                                 END;
                                 $$ LANGUAGE plpgsql;"""
-                            trigger_code += f"\nEXECUTE FUNCTION {settings['target_schema_name']}.{function_name + str(counter)}();"
-                            counter += 1
+                        trigger_code += f"""\nEXECUTE FUNCTION "{settings['target_schema_name']}"."{function_name + str(counter)}"();"""
+                        counter += 1
 
                         pgsql_triggers.append(func_code + "\n\n" + trigger_code)
 
             pgsql_trigger_code = "\n\n".join(pgsql_triggers)
+            # The body of a trigger names Informix data types in its casts, e.g.
+            # '::lvarchar(2000)', which the target does not know
+            pgsql_trigger_code = self.convert_data_types_in_code(pgsql_trigger_code, settings['target_db_type'])
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"informix_connector: convert_trigger: Error converting trigger {trigger_name}: {e}")
             self.config_parser.print_log_message('ERROR', traceback.format_exc())

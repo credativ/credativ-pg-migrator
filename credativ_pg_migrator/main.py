@@ -24,12 +24,16 @@ from credativ_pg_migrator.orchestrator import Orchestrator
 from credativ_pg_migrator.migrator_logging import MigratorLogger
 from credativ_pg_migrator.planner import Planner
 from credativ_pg_migrator.constants import MigratorConstants
+from credativ_pg_migrator.jvm_helper import configure_jvm_shutdown
 import sys
 import os
 import traceback
 import signal
 
 def main():
+    # JDBC connectors start a JVM - make sure it cannot block the exit of the migrator
+    configure_jvm_shutdown()
+
     cmd = CommandLine()
     args = cmd.parse_arguments()
 

@@ -16,6 +16,7 @@
 
 from credativ_pg_migrator.database_connector import DatabaseConnector
 from credativ_pg_migrator.migrator_logging import MigratorLogger
+from credativ_pg_migrator.jvm_helper import detach_thread_from_jvm
 # import mysql.connector  ## only for native connectivity - install mysql-connector-python
 import traceback
 import re
@@ -72,8 +73,11 @@ class MySQLConnector(DatabaseConnector):
             raise ValueError(f"Unsupported connectivity: {self.config_parser.get_connectivity(self.source_or_target)}")
 
     def disconnect(self):
-        if self.connection:
-            self.connection.close()
+        try:
+            if self.connection:
+                self.connection.close()
+        finally:
+            detach_thread_from_jvm()
 
     def get_sql_functions_mapping(self, settings):
         """ Returns a dictionary of SQL functions mapping for the target database """

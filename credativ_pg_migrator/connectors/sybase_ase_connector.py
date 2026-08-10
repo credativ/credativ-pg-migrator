@@ -678,10 +678,15 @@ class SybaseASEConnector(DatabaseConnector):
                 'DOUBLE PRECISION': 'DOUBLE PRECISION',
                 'FLOAT': 'FLOAT',
                 'INTERVAL': 'INTERVAL',
-                # 'MONEY': 'MONEY',
-                # 'SMALLMONEY': 'MONEY',
-                'MONEY': 'INTEGER',
-                'SMALLMONEY': 'INTEGER',
+                # MONEY of Sybase ASE is a fixed point number with four decimal places -
+                # MONEY holds up to 922337203685477.5807, SMALLMONEY up to 214748.3647.
+                # The MONEY type of PostgreSQL is not the same thing: it has almost no
+                # operators (`operator does not exist: money > integer` for a CHECK as
+                # ordinary as `VALUE > 0`) and keeps the decimal places of the lc_monetary
+                # setting instead of the four of the source. INTEGER, which stood here
+                # before, silently dropped the decimal places of every amount.
+                'MONEY': 'NUMERIC(19,4)',
+                'SMALLMONEY': 'NUMERIC(10,4)',
                 'NUMERIC': 'NUMERIC',
                 'REAL': 'REAL',
                 'SERIAL8': 'BIGSERIAL',
@@ -3201,6 +3206,9 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_name}_func"();
     def fetch_domains(self, schema: str):
         order_num = 1
         domains = {}
+        ## the data type a rule is bound to is a type of the source and has to be migrated
+        ## like the type of a column
+        types_mapping = self.get_types_mapping({'target_db_type': self.config_parser.get_target_db_type()})
         schema_condition = f"AND r.uid = USER_ID('{schema}')" if schema else ""
         query = f"""
             SELECT
@@ -3255,8 +3263,15 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_name}_func"();
             cursor.execute(query)
             row = cursor.fetchone()
             if row and row[0]:
-                basic_data_type = row[0]
-                domains[rule_name]['domain_data_type'] = basic_data_type
+                ## the catalog reports the data type of the source, and it was used for the
+                ## CREATE DOMAIN unchanged - a domain over 'money' was created as a
+                ## PostgreSQL MONEY, whose CHECK then failed with
+                ## 'operator does not exist: money > integer'
+                basic_data_type = row[0].strip()
+                domains[rule_name]['domain_data_type'] = types_mapping.get(basic_data_type.upper(), basic_data_type)
+                if domains[rule_name]['domain_data_type'].upper() != basic_data_type.upper():
+                    self.config_parser.print_log_message('DEBUG',
+                        f"sybase_ase_connector: fetch_domains: Domain {rule_name}: data type {basic_data_type} of the source migrated as {domains[rule_name]['domain_data_type']}.")
             else:
                 domain_sql_lower = domains[rule_name]['source_domain_sql'].lower()
                 if re.search(r'\blike\b', domain_sql_lower) or "'" in domains[rule_name]['source_domain_sql']:

@@ -258,6 +258,11 @@ class InformixConnector(DatabaseConnector):
                 'year(': 'extract(year from ',
                 'month(': 'extract(month from ',
                 'day(': 'extract(day from ',
+                ## NVL is the Informix spelling of COALESCE, and a routine using it is
+                ## created without a word by PostgreSQL - the body of a PL/pgSQL routine is
+                ## only checked for its syntax - and fails on the first call with
+                ## 'function nvl(numeric, integer) does not exist'
+                'nvl(': 'coalesce(',
             }
         else:
             self.config_parser.print_log_message('ERROR', f"informix_connector: get_sql_functions_mapping: Unsupported target database type: {target_db_type}")
@@ -922,8 +927,10 @@ class InformixConnector(DatabaseConnector):
     TYPES_NOT_REPLACED_IN_CODE = ('SET', 'ROW', 'LIST', 'MULTISET', 'COLLECTION')
 
     ## the return type of a routine, with the length or precision it may carry -
-    ## 'VARCHAR(120)' and 'MONEY(14,2)' as well as a bare 'INTEGER'
-    RETURN_TYPE_PATTERN = r'\w+(?:\s*\([^)]*\))?'
+    ## 'VARCHAR(120)' and 'MONEY(14,2)' as well as a bare 'INTEGER'. The nesting of one
+    ## level is needed for 'TABLE (item_count INTEGER, total MONEY(12,2))', which
+    ## convert_returning_clause() builds for a function returning several values.
+    RETURN_TYPE_PATTERN = r'\w+(?:\s*\((?:[^()]|\([^()]*\))*\))?'
 
     ## the error number Informix uses for an exception raised by a routine itself - its
     ## counterpart is the SQLSTATE P0001, which RAISE EXCEPTION of PL/pgSQL already sets
@@ -935,6 +942,61 @@ class InformixConnector(DatabaseConnector):
     ## customized option must carry one, and a single namespace for the whole migration
     ## matches the source, where a global variable is shared by the entire session
     GLOBAL_VARIABLE_NAMESPACE = 'credativ_pg_migrator'
+
+    def convert_returning_clause(self, code):
+        """
+        Convert the RETURNING clause of an Informix function.
+
+        A function of Informix returns several values at once and may give each of them a
+        name:
+
+            RETURNING INTEGER AS item_count, MONEY(12,2) AS total, DATE AS ord_date;
+            ...
+            RETURN v_cnt, v_tot, v_dt;
+
+        PostgreSQL expresses that as a function returning a table, so the clause becomes
+        'RETURNING TABLE (item_count INTEGER, total MONEY(12,2), ord_date DATE)' - the
+        header conversion turns the keyword into RETURNS afterwards - and every RETURN of
+        the routine becomes 'RETURN QUERY SELECT ...'. An unnamed value gets the name
+        'column<n>', the position is what identifies it in Informix as well.
+
+        'RETURN ... WITH RESUME' of an iterator function hands one row to the caller and
+        continues where it left off. RETURN QUERY appends its rows in the same way, so the
+        loop of the source keeps working - what the caller receives is the whole set
+        instead of one row per call.
+
+        A function returning a single value keeps its plain type; the name Informix allows
+        there has no counterpart and would only turn a scalar function into a table one.
+        """
+        returning_match = re.search(r'(?is)\bRETURNING\b(?P<clause>[^;]+);', code)
+        if not returning_match:
+            return code
+
+        items = []
+        for position, item in enumerate(self.split_top_level_commas(returning_match.group('clause')), start=1):
+            item_match = re.match(r'(?is)^(?P<type>.+?)(?:\s+AS\s+(?P<name>\w+))?$', item.strip())
+            if not item_match:
+                continue
+            items.append((item_match.group('name') or f'column{position}', item_match.group('type').strip()))
+
+        if not items:
+            return code
+
+        if len(items) == 1:
+            replacement = f"RETURNING {items[0][1]};"
+        else:
+            columns = ', '.join(f"{name} {data_type}" for name, data_type in items)
+            replacement = f"RETURNING TABLE ({columns});"
+            self.config_parser.print_log_message('INFO',
+                f"informix_connector: convert_funcproc_code: The function returns {len(items)} values and is migrated as a function returning a table ({columns}). Its callers have to read it as a table, 'SELECT * FROM the_function(...)'.")
+
+        code = code[:returning_match.start()] + replacement + code[returning_match.end():]
+
+        if len(items) > 1:
+            code = re.sub(r'(?is)\bRETURN\s+(?P<values>[^;]+?)(?:\s+WITH\s+RESUME)?\s*;',
+                          lambda match: f"RETURN QUERY SELECT {match.group('values').strip()};",
+                          code)
+        return code
 
     def extract_global_variables(self, code, target_db_type):
         """
@@ -1140,6 +1202,9 @@ class InformixConnector(DatabaseConnector):
                 postgresql_code = normalized_code
                 self.config_parser.print_log_message('DEBUG',
                     "informix_connector: convert_funcproc_code: Removed 'IF NOT EXISTS' from the CREATE clause - PostgreSQL does not support it for routines.")
+
+            # A function returning several values becomes one returning a table
+            postgresql_code = self.convert_returning_clause(postgresql_code)
 
             # Global variables have no PL/pgSQL counterpart and become customized options
             postgresql_code, global_variables = self.extract_global_variables(postgresql_code, target_db_type)
@@ -1687,6 +1752,33 @@ class InformixConnector(DatabaseConnector):
             if commented_out_statements:
                 self.config_parser.print_log_message('WARNING',
                     f"informix_connector: convert_funcproc_code: The transaction control of the routine was commented out ({', '.join(commented_out_statements)}) - a PL/pgSQL routine runs in the transaction of its caller and has no savepoints of its own. Verify that the caller commits, and use a BEGIN ... EXCEPTION ... END block where the routine relied on a savepoint.")
+
+            # Informix calls a routine with EXECUTE PROCEDURE / EXECUTE FUNCTION, and takes
+            # the result of the call through an INTO clause behind it
+            ## both parts stop at the semicolon - a call without an INTO clause of its own
+            ## would otherwise reach across the statements which follow it and take the INTO
+            ## of a later SELECT
+            postgresql_code = re.sub(
+                r'(?is)\bEXECUTE\s+(?:PROCEDURE|FUNCTION)\s+(?P<call>[^;]+?)\s+INTO\s+(?P<target>[^;]+);',
+                lambda match: f"SELECT {match.group('call').strip()} INTO {match.group('target').strip()};",
+                postgresql_code)
+            ## a procedure is called with CALL, a function has to be selected - PERFORM is
+            ## the way to call one whose result is not used
+            postgresql_code = re.sub(r'(?i)\bEXECUTE\s+PROCEDURE\s+', 'CALL ', postgresql_code)
+            postgresql_code = re.sub(r'(?i)\bEXECUTE\s+FUNCTION\s+', 'PERFORM ', postgresql_code)
+
+            # Sequences are read through the pseudo columns of the sequence in Informix
+            postgresql_code = re.sub(r'(?i)\b(\w+)\.NEXTVAL\b', r"nextval('\1')", postgresql_code)
+            postgresql_code = re.sub(r'(?i)\b(\w+)\.CURRVAL\b', r"currval('\1')", postgresql_code)
+            # sysdual is the one row pseudo table of Informix, PostgreSQL selects without FROM
+            postgresql_code = re.sub(r'(?i)\s+FROM\s+(?:\w+:)?sysdual\b', '', postgresql_code)
+            # TODAY is the current date, CURRENT is already handled with the other keywords
+            postgresql_code = re.sub(r'(?i)\bTODAY\b', 'CURRENT_DATE', postgresql_code)
+
+            # The SQL functions of Informix which the target does not know under that name.
+            # Without this a routine using them is created without a complaint - PostgreSQL
+            # only checks the syntax of a PL/pgSQL body - and fails on its first call.
+            postgresql_code = self.apply_sql_functions_mapping(postgresql_code, settings)
 
             # The data types of the parameter list, of the DECLARE section and of a cast
             postgresql_code = self.convert_data_types_in_code(postgresql_code, target_db_type)

@@ -514,9 +514,15 @@ class InformixConnector(DatabaseConnector):
                 if colnos:
                     self.config_parser.print_log_message('DEBUG3', f"informix_connector: fetch_indexes: Index {index_name}: Extracted colnos: {colnos}")
                     for colno in colnos:
-                        cursor.execute(f"SELECT colname FROM syscolumns WHERE colno = {colno} AND tabid = {source_table_id}")
-                        colname = cursor.fetchone()[0]
-                        columns.append(colname)
+                        ## Informix stores the column number of a descending index column
+                        ## negated - the column itself is found under its absolute value
+                        descending = colno < 0
+                        cursor.execute(f"SELECT colname FROM syscolumns WHERE colno = {abs(colno)} AND tabid = {source_table_id}")
+                        colname = cursor.fetchone()
+                        if colname is None:
+                            self.config_parser.print_log_message('WARNING', f"informix_connector: fetch_indexes: Index {index_name}: No column with colno {abs(colno)} found in table {source_table_id} - the key is left out of the index.")
+                            continue
+                        columns.append({'column_name': colname[0].strip(), 'descending': descending})
 
                 if procedure_id > 0:
                     cursor.execute(f"""
@@ -535,18 +541,28 @@ class InformixConnector(DatabaseConnector):
                     # Get the column names for the function-based index
                     proc_columns = []
                     for colno in procedure_colnos:
-                        cursor.execute(f"SELECT colname FROM syscolumns WHERE colno = {colno} AND tabid = {source_table_id}")
-                        colname = cursor.fetchone()[0]
-                        proc_columns.append(colname)
+                        cursor.execute(f"SELECT colname FROM syscolumns WHERE colno = {abs(colno)} AND tabid = {source_table_id}")
+                        colname = cursor.fetchone()
+                        if colname is None:
+                            self.config_parser.print_log_message('WARNING', f"informix_connector: fetch_indexes: Index {index_name}: No column with colno {abs(colno)} found in table {source_table_id} - the key is left out of the function based index.")
+                            continue
+                        proc_columns.append(colname[0].strip())
                     procedure_columns = ', '.join(proc_columns)
                     self.config_parser.print_log_message('DEBUG', f"informix_connector: fetch_indexes: Index {index_name}: Function-based index columns: {procedure_columns}")
 
-                index_columns = ', '.join([f'"{col}"' for col in columns])
+                target_index_type = "PRIMARY KEY" if index_type == 'P' else "UNIQUE" if index_type == 'U' else "INDEX"
+                ## PostgreSQL accepts an ordering keyword in CREATE INDEX but not in the
+                ## column list of a PRIMARY KEY constraint
+                keep_ordering = target_index_type != "PRIMARY KEY"
+                index_columns = ', '.join([
+                    f'"{col["column_name"]}" DESC' if col['descending'] and keep_ordering else f'"{col["column_name"]}"'
+                    for col in columns
+                ])
                 self.config_parser.print_log_message('DEBUG', f"informix_connector: fetch_indexes: Index {index_name}: Columns list: {index_columns}, index type: {index_type}, clustered: {index[2]}")
 
                 table_indexes[order_num] = {
                     'index_name': index_name,
-                    'index_type': "PRIMARY KEY" if index_type == 'P' else "UNIQUE" if index_type == 'U' else "INDEX",
+                    'index_type': target_index_type,
                     'index_owner': index_owner,
                     'index_columns': index_columns if not function_based_index else f'''{procedure_owner}.{procedure_name}({procedure_columns})''',
                     'index_keys': index_keys,

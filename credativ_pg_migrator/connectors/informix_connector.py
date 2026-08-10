@@ -45,7 +45,8 @@ class InformixConnector(DatabaseConnector):
         'smallint': 2,
         'integer': 4, 'int': 4, 'serial': 4, 'date': 4, 'smallfloat': 4, 'real': 4,
         'int8': 8, 'bigint': 8, 'serial8': 8, 'bigserial': 8, 'float': 8, 'double precision': 8,
-        'interval': 12,
+        ## read through a cast to LVARCHAR(40), see migrate_table()
+        'interval': 48,
         'decimal': 17, 'numeric': 17, 'money': 17,
         ## only the descriptor of a large object travels in the row, not its content
         'text': 72, 'byte': 72, 'clob': 72, 'blob': 72,
@@ -112,8 +113,12 @@ class InformixConnector(DatabaseConnector):
         """ Estimated number of bytes a column occupies in the output row of a SELECT """
         data_type = (col.get('data_type') or '').lower()
         if data_type in ('char', 'nchar', 'varchar', 'nvarchar', 'lvarchar'):
+            ## character_maximum_length is only filled for the types is_string_type()
+            ## knows, which leaves out LVARCHAR - the length of the catalog is the
+            ## fallback, and only a column without any length at all is estimated
+            length = col.get('character_maximum_length') or col.get('source_column_length') or self.DEFAULT_OUTPUT_WIDTH
             ## trim() turns a CHAR into a VARCHAR, both carry one extra byte for the length
-            return (col.get('character_maximum_length') or self.DEFAULT_OUTPUT_WIDTH) + 1
+            return length + 1
         return self.OUTPUT_WIDTH_BY_DATA_TYPE.get(data_type, self.DEFAULT_OUTPUT_WIDTH)
 
     def calculate_document_cast_length(self, source_columns):
@@ -139,6 +144,67 @@ class InformixConnector(DatabaseConnector):
         available_width = self.MAX_OUTPUT_ROWSIZE - used_width - self.OUTPUT_ROWSIZE_RESERVE
         cast_length = available_width // document_columns
         return max(self.MIN_DOCUMENT_CAST_LENGTH, min(cast_length, self.MAX_LVARCHAR_LENGTH))
+
+    def is_year_month_interval(self, col):
+        """
+        True for an INTERVAL of the year-month class, False for the day-time class.
+
+        Informix encodes the qualifier of an INTERVAL in syscolumns.collength: the low
+        byte holds the largest qualifier in its upper and the smallest in its lower four
+        bits, with YEAR = 0, MONTH = 2, DAY = 4, HOUR = 6, MINUTE = 8, SECOND = 10.
+        """
+        largest_qualifier = ((col.get('source_column_length') or 0) % 256) // 16
+        return largest_qualifier <= 2
+
+    def convert_interval_value(self, value, year_month):
+        """
+        Turn the text of an Informix interval into a literal PostgreSQL reads correctly.
+
+        The value is selected normalized to the widest qualifier of its class, so it
+        always arrives as '[-]DDD HH:MM:SS' or as '[-]YYY-MM'. It cannot be handed over
+        unchanged: for Informix the leading sign negates the whole interval, while
+        PostgreSQL reads '-2 06:30:00' as '-2 days +06:30:00' - it applies the sign to
+        the day alone. The sign is therefore repeated in front of every field.
+        """
+        text = str(value).strip()
+        if not text:
+            return None
+        sign = '-' if text.startswith('-') else ''
+        text = text.lstrip('+-').strip()
+
+        if year_month:
+            years, _, months = text.partition('-')
+            return f"{sign}{int(years or 0)} years {sign}{int(months or 0)} months"
+
+        days, _, clock = text.partition(' ')
+        hours, minutes, seconds = (clock.split(':') + ['0', '0', '0'])[:3]
+        return (f"{sign}{int(days or 0)} days {sign}{int(hours or 0)} hours "
+                f"{sign}{int(minutes or 0)} minutes {sign}{float(seconds or 0)} seconds")
+
+    def execute_query_with_rowsize_retry(self, cursor, query, cast_length, worker_id, table_reference):
+        """
+        Run the data query, making the LVARCHAR casts smaller if Informix rejects the row.
+
+        How many bytes a column occupies in the output row of a SELECT can only be
+        estimated - see calculate_document_cast_length() - and an estimate which is too
+        optimistic costs the whole table with 'Maximum output rowsize (32767) exceeded'.
+        Instead of failing, the casts of the document and collection columns are halved
+        until the statement is accepted: a shortened value is still better than no table,
+        and it is reported. Returns the query which was finally executed.
+        """
+        while True:
+            try:
+                cursor.execute(query)
+                return query
+            except Exception as e:
+                if 'Maximum output rowsize' not in str(e) or cast_length <= self.MIN_DOCUMENT_CAST_LENGTH:
+                    raise
+                cast_length = max(self.MIN_DOCUMENT_CAST_LENGTH, cast_length // 2)
+                ## every cast of the SELECT list carries the same length, and LVARCHAR
+                ## appears nowhere else in the generated query
+                query = re.sub(r'(?i)AS\s+LVARCHAR\(\d+\)', f'AS LVARCHAR({cast_length})', query)
+                self.config_parser.print_log_message('WARNING',
+                    f"informix_connector: migrate_table: Worker {worker_id}: Table {table_reference}: The output row of the data query exceeds the maximum of Informix - the document and collection columns are reduced to {cast_length} characters and the query is repeated. A longer value is truncated.")
 
     def get_sql_functions_mapping(self, settings):
         """ Returns a dictionary of SQL functions mapping for the target database """
@@ -300,6 +366,10 @@ class InformixConnector(DatabaseConnector):
                     'column_name': column_name,
                     'data_type': data_type,
                     'column_type': '',
+                    ## syscolumns.collength as it is - the width calculation of the SELECT
+                    ## list needs it also for the types is_string_type() does not cover,
+                    ## LVARCHAR above all
+                    'source_column_length': maximum_length,
                     'character_maximum_length': maximum_length if self.is_string_type(data_type) else None,
                     'numeric_precision': numeric_precision if self.is_numeric_type(data_type) else None,
                     'numeric_scale': numeric_scale if self.is_numeric_type(data_type) and numeric_scale < 255 else None,
@@ -1612,6 +1682,13 @@ class InformixConnector(DatabaseConnector):
                         elif col['data_type'].lower() in ['char', 'nchar']:
                             ## compensate for Informix's fixed-length char columns
                             select_columns_list.append(f"trim({col['column_name']}) as {col['column_name']}")
+                        elif col['data_type'].lower() == 'interval':
+                            ## the driver hands an interval over as a com.informix.lang.Interval
+                            ## object, which the target cannot store - reading it normalized to
+                            ## the widest qualifier of its class gives a text of a known shape,
+                            ## which convert_interval_value() turns into a PostgreSQL literal
+                            qualifier = 'YEAR(9) TO MONTH' if self.is_year_month_interval(col) else 'DAY(9) TO SECOND'
+                            select_columns_list.append(f"CAST(CAST({col['column_name']} AS INTERVAL {qualifier}) AS LVARCHAR(40)) as {col['column_name']}")
                         elif col['data_type'].lower() in ['bson', 'json']:
                             ## Both are opaque types of Informix and would arrive as an object of the
                             ## driver, which the target JSONB column cannot accept - a BSON document is
@@ -1678,7 +1755,8 @@ class InformixConnector(DatabaseConnector):
                     batch_number = 0
                     batch_durations = []
 
-                    cursor.execute(query)
+                    query = self.execute_query_with_rowsize_retry(
+                        cursor, query, document_cast_length, worker_id, f"{source_schema_name}.{source_table_name}")
                     total_inserted_rows = 0
                     while True:
                         records = cursor.fetchmany(batch_size)
@@ -1700,7 +1778,9 @@ class InformixConnector(DatabaseConnector):
                                 column_type = column['data_type']
                                 target_column_type = target_columns[order_num]['data_type']
                                 # if column_type.lower() in ['binary', 'bytea']:
-                                if column_type.lower() in ['blob'] and record[column_name] is not None:
+                                if column_type.lower() == 'interval' and record[column_name] is not None:
+                                    record[column_name] = self.convert_interval_value(record[column_name], self.is_year_month_interval(column))
+                                elif column_type.lower() in ['blob'] and record[column_name] is not None:
                                     record[column_name] = bytes(record[column_name].getBytes(1, int(record[column_name].length())))  # Convert 'com.informix.jdbc.IfxCblob' to bytes
                                 elif column_type.lower() in ['clob'] and record[column_name] is not None:
                                     # elif isinstance(record[column_name], IfxCblob):

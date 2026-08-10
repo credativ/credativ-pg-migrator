@@ -787,7 +787,133 @@ class InformixConnector(DatabaseConnector):
         procbody_str = ''.join([str(body[0]) for body in procbody])
         return procbody_str
 
+    ## PostgreSQL types which accept a length or precision - behind every other type the
+    ## modifier taken over from Informix has to go, the target rejects the whole routine
+    ## with "type modifier is not allowed for type ..." otherwise
+    TYPES_WITH_MODIFIER = ('char', 'character', 'varchar', 'character varying', 'nchar',
+                           'numeric', 'decimal', 'time', 'timestamp', 'interval',
+                           'bit', 'varbit', 'bit varying')
+    ## these type names are ordinary SQL keywords as well - replacing them in the code of a
+    ## routine would destroy statements like "UPDATE ... SET x = 1" or a ROW(...) constructor
+    TYPES_NOT_REPLACED_IN_CODE = ('SET', 'ROW', 'LIST', 'MULTISET', 'COLLECTION')
+
     MERGE_PLACEHOLDER = '__CREDATIV_PG_MIGRATOR_MERGE_{}__'
+    GLOBAL_PLACEHOLDER = '__CREDATIV_PG_MIGRATOR_GLOBAL_{}__'
+    ## prefix of the customized option a global variable of Informix is migrated to - a
+    ## customized option must carry one, and a single namespace for the whole migration
+    ## matches the source, where a global variable is shared by the entire session
+    GLOBAL_VARIABLE_NAMESPACE = 'credativ_pg_migrator'
+
+    def extract_global_variables(self, code, target_db_type):
+        """
+        Replace the global variables of a routine with customized options of the session.
+
+        'DEFINE GLOBAL <name> <type> DEFAULT <value>' declares a variable which lives for
+        the whole session and is shared by every routine declaring it - one routine sets
+        it, another one reads it. PL/pgSQL has nothing of that kind, its variables belong
+        to a single call, and the declaration is not even valid inside a DECLARE section,
+        so the routine failed with 'syntax error at or near "BOOLEAN"'.
+
+        A customized option ('<namespace>.<name>') has exactly the wanted lifetime and
+        visibility, so every read of the variable becomes current_setting() with the
+        declared default as its fallback, and every assignment becomes set_config().
+        Both are returned as snippets behind a placeholder, because the conversion of the
+        routine replaces every occurrence of 'current' with 'CURRENT_TIMESTAMP' and would
+        otherwise turn current_setting() into CURRENT_TIMESTAMP_setting().
+        """
+        snippets = []
+        declarations = []
+
+        def take_declaration(match):
+            declarations.append({
+                'name': match.group('name'),
+                'type': self.convert_data_types_in_code(match.group('type').strip(), target_db_type),
+                'default': (match.group('default') or '').strip(),
+            })
+            return ''
+
+        code = re.sub(
+            r'(?im)^[ \t]*DEFINE\s+GLOBAL\s+(?P<name>\w+)\s+(?P<type>.+?)(?:\s+DEFAULT\s+(?P<default>.+?))?\s*;[ \t]*\n?',
+            take_declaration,
+            code)
+
+        if re.search(r'(?i)\bDEFINE\s+GLOBAL\b', code):
+            self.config_parser.print_log_message('WARNING',
+                "informix_connector: extract_global_variables: A 'DEFINE GLOBAL' declaration could not be read - only one variable per declaration is supported. It is left in the code and has to be migrated manually.")
+
+        def placeholder(text):
+            snippets.append(text)
+            return self.GLOBAL_PLACEHOLDER.format(len(snippets) - 1)
+
+        for declaration in declarations:
+            name = declaration['name']
+            option = f"{self.GLOBAL_VARIABLE_NAMESPACE}.{name.lower()}"
+            stored = f"nullif(current_setting('{option}', true), '')"
+            read = f"coalesce({stored}, {declaration['default']})" if declaration['default'] else stored
+            read = f"{read}::{declaration['type']}"
+
+            self.config_parser.print_log_message('WARNING',
+                f"informix_connector: extract_global_variables: The global variable {name} is migrated as the customized option '{option}' - PostgreSQL has no global variable of a routine. It keeps the lifetime and the visibility of the Informix original, but it is read and written as text, so the behaviour has to be verified.")
+
+            ## the assignments first, otherwise the variable on the left hand side would be
+            ## replaced by the expression reading it - a read on the right hand side is
+            ## substituted here as well, it is no longer visible afterwards
+            code = re.sub(
+                rf"(?im)^[ \t]*(?:LET\s+)?{re.escape(name)}\s*:?=\s*(?P<value>.+?)\s*;[ \t]*$",
+                lambda match: ';' + placeholder(
+                    f"PERFORM set_config('{option}', ({re.sub(rf'(?i)\b{re.escape(name)}\b', read, match.group('value').strip())})::text, false)") + ';',
+                code)
+
+            ## whatever is left is a read of the variable
+            code = re.sub(rf'(?i)\b{re.escape(name)}\b', lambda match: placeholder(read), code)
+
+        return code, snippets
+
+    def restore_global_variables(self, code, snippets):
+        """ Put the converted global variable accesses back in place of their placeholders """
+        for index, snippet in enumerate(snippets):
+            code = code.replace(self.GLOBAL_PLACEHOLDER.format(index), snippet)
+        return code
+
+    def convert_data_types_in_code(self, code, target_db_type):
+        """
+        Translate the Informix data types used inside the code of a routine.
+
+        The parameter list, the DECLARE section and a cast name data types just like a
+        table definition does, but the conversion of a routine never looked at them - only
+        a few of them were covered by a rule of their own. So a type PostgreSQL does not
+        know under that name reached the target unchanged, and so did a length behind a
+        type which does not accept one ("type modifier is not allowed for type money" for
+        a parameter declared as MONEY(12,2)).
+
+        The same mapping as for a table column is used, minus the type names which are
+        also SQL keywords - see TYPES_NOT_REPLACED_IN_CODE.
+        """
+        types_mapping = self.get_types_mapping({'target_db_type': target_db_type})
+
+        ## the qualifiers of an Informix DATETIME / INTERVAL are not a length and have no
+        ## counterpart in PostgreSQL - the type is used without them
+        code = re.sub(r'(?i)\bDATETIME\s+\w+(?:\s*\(\s*\d+\s*\))?\s+TO\s+\w+(?:\s*\(\s*\d+\s*\))?', 'TIMESTAMP', code)
+        code = re.sub(r'(?i)\bINTERVAL\s+\w+(?:\s*\(\s*\d+\s*\))?\s+TO\s+\w+(?:\s*\(\s*\d+\s*\))?', 'INTERVAL', code)
+
+        def replace_type(match):
+            target_type = types_mapping[match.group('type').upper()]
+            modifier = match.group('modifier') or ''
+            if modifier and target_type.lower() not in self.TYPES_WITH_MODIFIER:
+                self.config_parser.print_log_message('DEBUG',
+                    f"informix_connector: convert_data_types_in_code: Removed the length {modifier.strip()} behind {match.group('type')} - PostgreSQL accepts none for {target_type}.")
+                modifier = ''
+            return target_type + modifier
+
+        ## longest name first, so that SERIAL8 is not matched as SERIAL
+        for source_type in sorted(types_mapping, key=len, reverse=True):
+            if source_type in self.TYPES_NOT_REPLACED_IN_CODE:
+                continue
+            code = re.sub(
+                rf"(?i)\b(?P<type>{re.escape(source_type)})\b(?P<modifier>\s*\(\s*\d+\s*(?:,\s*\d+\s*)?\))?",
+                replace_type,
+                code)
+        return code
 
     def convert_merge_statement(self, merge_sql):
         """
@@ -882,6 +1008,9 @@ class InformixConnector(DatabaseConnector):
                 postgresql_code = normalized_code
                 self.config_parser.print_log_message('DEBUG',
                     "informix_connector: convert_funcproc_code: Removed 'IF NOT EXISTS' from the CREATE clause - PostgreSQL does not support it for routines.")
+
+            # Global variables have no PL/pgSQL counterpart and become customized options
+            postgresql_code, global_variables = self.extract_global_variables(postgresql_code, target_db_type)
 
             # A MERGE statement must not be touched by the line based conversion below
             postgresql_code, merge_statements = self.extract_merge_statements(postgresql_code)
@@ -1153,6 +1282,7 @@ class InformixConnector(DatabaseConnector):
             # Back in place before step 7, so that the tables of a MERGE are qualified
             # with the target schema like the tables of every other statement
             postgresql_code = self.restore_merge_statements(postgresql_code, merge_statements)
+            postgresql_code = self.restore_global_variables(postgresql_code, global_variables)
 
             self.config_parser.print_log_message('DEBUG3', f'informix_connector: convert_funcproc_code: Processing step 7: Replacing source schema and table names with target schema and table names ({len(table_list)} tables)')
 
@@ -1340,6 +1470,10 @@ class InformixConnector(DatabaseConnector):
                                 postgresql_code = '\n'.join(lines)
 
             postgresql_code = re.sub(r';;', ';', postgresql_code, flags=re.IGNORECASE)
+
+            # The data types of the parameter list, of the DECLARE section and of a cast
+            postgresql_code = self.convert_data_types_in_code(postgresql_code, target_db_type)
+
             # Indent the code
             postgresql_code = self.config_parser.indent_code(postgresql_code)
             # Remove empty lines from the converted code

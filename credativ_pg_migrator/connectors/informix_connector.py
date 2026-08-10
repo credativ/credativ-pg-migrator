@@ -787,6 +787,61 @@ class InformixConnector(DatabaseConnector):
         procbody_str = ''.join([str(body[0]) for body in procbody])
         return procbody_str
 
+    MERGE_PLACEHOLDER = '__CREDATIV_PG_MIGRATOR_MERGE_{}__'
+
+    def convert_merge_statement(self, merge_sql):
+        """
+        Convert one Informix MERGE statement into the PostgreSQL form.
+
+        PostgreSQL knows MERGE since version 15 and the syntax is almost the same. Two
+        things differ: the target of the SET clause may not be qualified with the alias
+        of the merged table ("SET target columns cannot be qualified with the relation
+        name"), and Informix reads a single row from the pseudo table sysmaster:sysdual,
+        for which PostgreSQL needs no FROM clause at all.
+        """
+        merge_sql = merge_sql.strip().rstrip(';').strip()
+        merge_sql = re.sub(r'(?i)\s+FROM\s+(?:\w+:)?sysdual\b', '', merge_sql)
+
+        def strip_set_alias(match):
+            ## only the assignment targets - a column at the start of the SET list or
+            ## behind a comma - lose the alias, the assigned values keep theirs
+            return match.group(1) + re.sub(r'(^|,)(\s*)[A-Za-z_]\w*\.(?=[A-Za-z_]\w*\s*=)', r'\1\2', match.group(2))
+
+        merge_sql = re.sub(
+            r'(?is)(\bWHEN\s+(?:NOT\s+)?MATCHED\b.*?\bUPDATE\s+SET\b)(.*?)(?=\bWHEN\b|$)',
+            strip_set_alias,
+            merge_sql)
+        return merge_sql + ';'
+
+    def extract_merge_statements(self, code):
+        """
+        Take every MERGE statement out of the routine and leave a placeholder behind.
+
+        The conversion below works line by line and inserts a statement separator in
+        front of keywords such as UPDATE and INSERT. Inside a MERGE those keywords belong
+        to the WHEN MATCHED / WHEN NOT MATCHED branches, so the statement would be torn
+        into pieces. The header detection would break as well: it ends the header at the
+        first ');', and an Informix routine header is not closed by a semicolon, so the
+        whole MERGE ended up in front of 'AS $$' instead of in the body.
+
+        The placeholder is a single statement of its own, which is what makes the header
+        end where it should. It is put back in restore_merge_statements().
+        """
+        merge_statements = []
+
+        def replace(match):
+            merge_statements.append(self.convert_merge_statement(match.group(0)))
+            return f';{self.MERGE_PLACEHOLDER.format(len(merge_statements) - 1)};'
+
+        code = re.sub(r'(?is)\bMERGE\s+INTO\b.*?;', replace, code)
+        return code, merge_statements
+
+    def restore_merge_statements(self, code, merge_statements):
+        """ Put the converted MERGE statements back in place of their placeholders """
+        for index, statement in enumerate(merge_statements):
+            code = code.replace(self.MERGE_PLACEHOLDER.format(index), statement)
+        return code
+
     def convert_funcproc_code(self, settings):
         funcproc_code = settings['funcproc_code']
         target_db_type = settings['target_db_type']
@@ -827,6 +882,12 @@ class InformixConnector(DatabaseConnector):
                 postgresql_code = normalized_code
                 self.config_parser.print_log_message('DEBUG',
                     "informix_connector: convert_funcproc_code: Removed 'IF NOT EXISTS' from the CREATE clause - PostgreSQL does not support it for routines.")
+
+            # A MERGE statement must not be touched by the line based conversion below
+            postgresql_code, merge_statements = self.extract_merge_statements(postgresql_code)
+            if merge_statements:
+                self.config_parser.print_log_message('DEBUG',
+                    f"informix_connector: convert_funcproc_code: {len(merge_statements)} MERGE statement(s) converted separately from the rest of the routine.")
 
             # Replace empty lines with ";"
             postgresql_code = re.sub(r'^\s*$', ';\n', postgresql_code, flags=re.MULTILINE)
@@ -1088,6 +1149,10 @@ class InformixConnector(DatabaseConnector):
             postgresql_code = re.sub(r'ELSE;', 'ELSE', postgresql_code, flags=re.IGNORECASE)
             postgresql_code = re.sub(r';;', ';', postgresql_code, flags=re.IGNORECASE )
             postgresql_code = re.sub(r'\*/;', '*/', postgresql_code, flags=re.IGNORECASE)
+
+            # Back in place before step 7, so that the tables of a MERGE are qualified
+            # with the target schema like the tables of every other statement
+            postgresql_code = self.restore_merge_statements(postgresql_code, merge_statements)
 
             self.config_parser.print_log_message('DEBUG3', f'informix_connector: convert_funcproc_code: Processing step 7: Replacing source schema and table names with target schema and table names ({len(table_list)} tables)')
 

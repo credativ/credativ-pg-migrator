@@ -26,6 +26,43 @@ import time
 import datetime
 
 class InformixConnector(DatabaseConnector):
+
+    ## Informix refuses a query whose output row is wider than 32767 bytes. BSON and JSON
+    ## columns are read as LVARCHAR, so such a cast cannot simply claim the whole LVARCHAR
+    ## maximum - it has to share the row with all other columns of the SELECT list.
+    MAX_OUTPUT_ROWSIZE = 32767
+    MAX_LVARCHAR_LENGTH = 32739
+    ## reserve for the per column overhead of the row descriptor and for columns whose
+    ## width we can only estimate
+    OUTPUT_ROWSIZE_RESERVE = 512
+    ## below this a cast makes no sense anymore - such a table has to be migrated with
+    ## the document column excluded
+    MIN_DOCUMENT_CAST_LENGTH = 256
+    ## estimated width of a column in the output row of a SELECT
+    DEFAULT_OUTPUT_WIDTH = 256
+    OUTPUT_WIDTH_BY_DATA_TYPE = {
+        'boolean': 1,
+        'smallint': 2,
+        'integer': 4, 'int': 4, 'serial': 4, 'date': 4, 'smallfloat': 4, 'real': 4,
+        'int8': 8, 'bigint': 8, 'serial8': 8, 'bigserial': 8, 'float': 8, 'double precision': 8,
+        'interval': 12,
+        'decimal': 17, 'numeric': 17, 'money': 17,
+        ## only the descriptor of a large object travels in the row, not its content
+        'text': 72, 'byte': 72, 'clob': 72, 'blob': 72,
+        ## these are wrapped into TO_CHAR() in the SELECT list
+        'datetime': 256, 'time': 256, 'timestamp': 256,
+    }
+    DOCUMENT_DATA_TYPES = ('bson', 'json')
+
+    ## Informix reserves the tabid values 1 to 99 for the tables and views of the system
+    ## catalog - user objects start at 100. Filtering by owner alone is not enough because
+    ## a database created by the informix user has its own objects owned by 'informix' too.
+    FIRST_USER_TABID = 100
+    ## sysprocedures.mode marks the routines supplied by the database server with a
+    ## lowercase letter, routines created by a user carry the uppercase one:
+    ## D = DBA, O = owner, P = protected, R = restricted, T = trigger
+    USER_ROUTINE_MODES = ('D', 'O', 'P', 'R', 'T')
+
     def __init__(self, config_parser, source_or_target):
         if source_or_target != 'source':
             raise ValueError(f"Informix is supported only as source database")
@@ -67,6 +104,37 @@ class InformixConnector(DatabaseConnector):
         finally:
             detach_thread_from_jvm()
 
+    def estimate_column_output_width(self, col):
+        """ Estimated number of bytes a column occupies in the output row of a SELECT """
+        data_type = (col.get('data_type') or '').lower()
+        if data_type in ('char', 'nchar', 'varchar', 'nvarchar', 'lvarchar'):
+            ## trim() turns a CHAR into a VARCHAR, both carry one extra byte for the length
+            return (col.get('character_maximum_length') or self.DEFAULT_OUTPUT_WIDTH) + 1
+        return self.OUTPUT_WIDTH_BY_DATA_TYPE.get(data_type, self.DEFAULT_OUTPUT_WIDTH)
+
+    def calculate_document_cast_length(self, source_columns):
+        """
+        Length of the LVARCHAR cast used to read BSON / JSON columns.
+
+        Informix rejects a query whose output row exceeds 32767 bytes, so the cast may
+        only claim what the remaining columns of the SELECT list leave over. Returns 0
+        when the table has no document columns at all.
+        """
+        document_columns = 0
+        used_width = 0
+        for col in source_columns.values():
+            if (col.get('data_type') or '').lower() in self.DOCUMENT_DATA_TYPES:
+                document_columns += 1
+            else:
+                used_width += self.estimate_column_output_width(col)
+
+        if document_columns == 0:
+            return 0
+
+        available_width = self.MAX_OUTPUT_ROWSIZE - used_width - self.OUTPUT_ROWSIZE_RESERVE
+        cast_length = available_width // document_columns
+        return max(self.MIN_DOCUMENT_CAST_LENGTH, min(cast_length, self.MAX_LVARCHAR_LENGTH))
+
     def get_sql_functions_mapping(self, settings):
         """ Returns a dictionary of SQL functions mapping for the target database """
         target_db_type = settings['target_db_type']
@@ -87,6 +155,7 @@ class InformixConnector(DatabaseConnector):
             SELECT tabid, tabname
             FROM systables
             WHERE owner = '{table_schema}' AND tabtype = 'T'
+            AND tabid >= {self.FIRST_USER_TABID}
             ORDER BY tabname
         """
         try:
@@ -236,6 +305,7 @@ class InformixConnector(DatabaseConnector):
             FROM systables t
             JOIN syssyntable s ON t.tabid = s.tabid
             WHERE t.owner = '{source_schema_name}' AND t.tabtype IN ('S', 'P')
+            AND t.tabid >= {self.FIRST_USER_TABID}
             ORDER BY t.tabname
         """
         try:
@@ -275,6 +345,7 @@ class InformixConnector(DatabaseConnector):
             FROM sysviews v
             JOIN systables t on v.tabid = t.tabid
             WHERE t.owner = '{source_schema_name}'
+            AND t.tabid >= {self.FIRST_USER_TABID}
             ORDER BY t.tabname
         """
         try:
@@ -594,16 +665,18 @@ class InformixConnector(DatabaseConnector):
                         FROM sysconstraints c
                         JOIN syschecks ck ON c.constrid = ck.constrid
                         WHERE c.tabid = {source_table_id}
-                        AND c.constrname = {constraint_name}
+                        AND c.constrname = '{constraint_name}'
                         AND c.constrtype = 'C'
                         AND ck.type in ('T', 's')
-                        ORDER BY seqno
+                        ORDER BY ck.seqno
                     """
                     cursor.execute(find_ck_query)
-                    ck_details = cursor.fetchone()
+                    ## Informix stores the text of a check constraint split into 32 byte
+                    ## pieces - all rows have to be read and put together in seqno order
+                    ck_details = cursor.fetchall()
                     self.config_parser.print_log_message('DEBUG', f"informix_connector: fetch_constraints: Source table {source_table_name}: CHECK constraint details: {ck_details}")
 
-                    create_constraint_query = ''.join([f"{ck[0].strip()}" for ck in ck_details])
+                    create_constraint_query = ''.join([ck[0] for ck in ck_details if ck[0] is not None]).strip()
 
                 table_constraints[order_num] = {
                     'constraint_name': constraint_name,
@@ -635,6 +708,7 @@ class InformixConnector(DatabaseConnector):
                 CASE WHEN isproc = 't' THEN 'Procedure' ELSE 'Function' END AS type
             FROM sysprocedures
             WHERE owner = '{schema}'
+            AND mode IN ({', '.join(f"'{mode}'" for mode in self.USER_ROUTINE_MODES)})
             ORDER BY procname
         """
         self.config_parser.print_log_message('DEBUG3', f"informix_connector: fetch_funcproc_names: Fetching function/procedure names for schema {schema}")
@@ -1284,6 +1358,7 @@ class InformixConnector(DatabaseConnector):
                     select_columns_list = []
                     orderby_columns_list = []
                     insert_columns_list = []
+                    document_cast_length = self.calculate_document_cast_length(source_columns)
                     for order_num, col in source_columns.items():
                         self.config_parser.print_log_message('DEBUG2',
                                                             f"Worker {worker_id}: Table {source_schema_name}.{source_table_name}: Processing column {col['column_name']} ({order_num}) with data type {col['data_type']}")
@@ -1300,11 +1375,11 @@ class InformixConnector(DatabaseConnector):
                             ## driver, which the target JSONB column cannot accept - a BSON document is
                             ## converted to its JSON representation first, JSON is already text
                             self.config_parser.print_log_message('WARNING',
-                                f"informix_connector: migrate_table: Worker {worker_id}: Table {source_schema_name}.{source_table_name}: Column {col['column_name']} ({col['data_type']}) is transferred as its JSON text representation, limited to the LVARCHAR maximum of 32739 characters - larger documents have to be migrated separately.")
+                                f"informix_connector: migrate_table: Worker {worker_id}: Table {source_schema_name}.{source_table_name}: Column {col['column_name']} ({col['data_type']}) is transferred as its JSON text representation, limited to {document_cast_length} characters by the maximum output rowsize of Informix - larger documents have to be migrated separately.")
                             if col['data_type'].lower() == 'bson':
-                                select_columns_list.append(f"CAST(CAST({col['column_name']} AS JSON) AS LVARCHAR(32739)) as {col['column_name']}")
+                                select_columns_list.append(f"CAST(CAST({col['column_name']} AS JSON) AS LVARCHAR({document_cast_length})) as {col['column_name']}")
                             else:
-                                select_columns_list.append(f"CAST({col['column_name']} AS LVARCHAR(32739)) as {col['column_name']}")
+                                select_columns_list.append(f"CAST({col['column_name']} AS LVARCHAR({document_cast_length})) as {col['column_name']}")
                         #     select_columns_list.append(f"ST_asText(`{col['column_name']}`) as `{col['column_name']}`")
                         # elif col['data_type'].lower() == 'set':
                         #     select_columns_list.append(f"cast(`{col['column_name']}` as char(4000)) as `{col['column_name']}`")

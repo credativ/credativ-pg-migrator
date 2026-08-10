@@ -26,27 +26,45 @@ attaches threads to the JVM but never detaches them again. The result is that
 the migrator prints its final summary and then hangs forever in the interpreter
 shutdown.
 
-Since the process is terminating anyway there is nothing worth waiting for, so
-we tell JPype to skip that wait, and we detach worker threads from the JVM when
-they close their connection.
+Skipping only the wait (jpype.config.destroy_jvm = False) is not an option - the
+JVM then aborts with "FATAL: exception not rethrown" in roughly half of all runs,
+because JPype tears its state down while driver threads are still alive. The
+migrator has finished all of its work at that point, so the process is ended
+directly instead and the operating system reclaims everything.
 """
 
+import logging
+import os
+import sys
 import threading
 
 
-def configure_jvm_shutdown():
-    """
-    Prevent JPype from blocking the interpreter shutdown.
-
-    Safe to call repeatedly and also when the JDBC stack is not used at all -
-    the setting is only evaluated by JPype's atexit handler.
-    """
+def is_jvm_running():
+    """ True when a JDBC connector has started a JVM in this process """
     try:
-        import jpype.config
-        jpype.config.destroy_jvm = False
+        import jpype
+        return jpype.isJVMStarted()
     except Exception:
-        # jpype is not installed or too old - nothing to configure
-        pass
+        # jpype is not installed - no JDBC connector was used
+        return False
+
+
+def terminate_process(status=0):
+    """
+    End the migrator with the given exit status.
+
+    Without a running JVM this is an ordinary exit. With one the process is ended
+    immediately, because both shutdown paths offered by JPype are unusable once a
+    JDBC driver has been loaded - see the module docstring. All output is flushed
+    and the logging handlers are closed first, since that is what the skipped
+    atexit handlers would have done.
+    """
+    logging.shutdown()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    if is_jvm_running():
+        os._exit(status)
+    sys.exit(status)
 
 
 def detach_thread_from_jvm():

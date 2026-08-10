@@ -832,7 +832,8 @@ class DatabaseConnector(ABC):
         pass
 
     @abstractmethod
-    def convert_trigger(self, trig: str, settings: dict):
+    def convert_trigger(self, settings: dict):
+        """ The trigger source is passed in settings['trigger_sql'] - see planner.stdwf_prepare_tables """
         pass
 
     @abstractmethod

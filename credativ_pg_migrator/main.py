@@ -24,6 +24,7 @@ from credativ_pg_migrator.orchestrator import Orchestrator
 from credativ_pg_migrator.migrator_logging import MigratorLogger
 from credativ_pg_migrator.planner import Planner
 from credativ_pg_migrator.constants import MigratorConstants
+from credativ_pg_migrator.jvm_helper import terminate_process
 import sys
 import os
 import traceback
@@ -103,14 +104,17 @@ def main():
     except Exception as e:
         logger.logger.error(f"An error in the main: {e}")
         logger.stop_logging()
-        sys.exit(1)
+        # a JVM started by a JDBC connector would keep the process alive forever
+        terminate_process(1)
+
+    print('All done')
+    terminate_process(0)
 
 
 def ctrlc_signal_handler(sig, frame):
     print("Program interrupted with Ctrl+C")
     traceback.print_stack(frame)
-    sys.exit(1)
+    terminate_process(1)
 
 if __name__ == "__main__":
     main()
-    print('All done')

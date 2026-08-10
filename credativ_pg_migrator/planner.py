@@ -1337,6 +1337,12 @@ class Planner:
                                         coltype = types_mapping.get(coltype, 'TEXT').upper()
                                 else:
                                     coltype = types_mapping.get(coltype, 'TEXT').upper()
+                            else:
+                                # Nothing to fall back to - the source data type is used in the DDL
+                                # unchanged and the target rejects it unless it knows a type of the
+                                # same name (`type "bson" does not exist`). Reported as a warning,
+                                # because the table is created only later, by a worker.
+                                self.config_parser.print_log_message('WARNING', f"planner: convert_table_columns: Column {column_info['column_name']} - data type {column_info['data_type']} has no mapping to the target database and no column type or basic data type to fall back to - it is used unchanged and will fail unless the target knows it. Configure a substitution in 'data_types_substitution' for it.")
                         else:
                             coltype = types_mapping.get(coltype, coltype).upper()
 

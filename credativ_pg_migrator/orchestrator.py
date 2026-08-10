@@ -1124,7 +1124,23 @@ class Orchestrator:
                                         self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Data source for table {target_table_name} is CSV format. Using converted file {csv_file_name}.")
 
                                     try:
-                                        if data_source_settings['lob_columns'] != '' and self.config_parser.should_migrate_lob_values():
+                                        ## Only an export which keeps the LOB values outside the data file needs the
+                                        ## import through the intermediate table: the UNL export of Informix writes a
+                                        ## reference 'file,offset,length' into the column instead of the value, and a
+                                        ## column declared in data_export.lob_columns holds such a reference as well.
+                                        ## A CSV export carries the content of a CLOB in the file itself, where the
+                                        ## ordinary COPY reads it - running it through the reference handling made the
+                                        ## migrator look for a file name in the text of the column
+                                        ## (`WHERE coalesce(split_part(DESCRIPTION_LONG,',',3), '0,0,0') = ''`).
+                                        lob_values_in_separate_files = (
+                                            data_source_settings['format_options']['format'].upper() == 'UNL'
+                                            or self.config_parser.has_configured_lob_columns(
+                                                table_data['source_table_name'], data_source_settings['lob_columns']))
+
+                                        if data_source_settings['lob_columns'] != '' and self.config_parser.should_migrate_lob_values() and not lob_values_in_separate_files:
+                                            self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Table {target_table_name} has LOB columns ({data_source_settings['lob_columns']}), and the {data_source_settings['format_options']['format']} data source carries their content in the data file itself - they are imported with the rest of the row. Declare the column in 'data_export.lob_columns' when it holds a reference to a separate file instead.")
+
+                                        if data_source_settings['lob_columns'] != '' and self.config_parser.should_migrate_lob_values() and lob_values_in_separate_files:
 
                                             # Loop over import table row by row, select all columns, find column(s) specified in lob_columns and read their content
                                             lob_columns = [col.strip() for col in data_source_settings['lob_columns'].split(',') if col.strip()]

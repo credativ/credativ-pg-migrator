@@ -20,6 +20,40 @@ import psycopg2
 import traceback
 from credativ_pg_migrator.constants import MigratorConstants
 
+
+def remove_nul_characters(value):
+    """
+    Removes NUL (0x00) characters from strings, recursively in query parameter
+    collections. PostgreSQL cannot store a NUL byte in a text value at all and psycopg
+    refuses to send one ("A string literal cannot contain NUL (0x00) characters"), so a
+    single NUL coming from a source database would abort a whole migration phase.
+    Sources deliver them regularly - Informix pads values of its CHAR(256) catalog columns
+    with NUL bytes, other engines return them inside comments or DDL texts.
+    Values of type bytes are left untouched - there a NUL is legitimate content.
+    """
+    if isinstance(value, str):
+        return value.replace('\x00', '') if '\x00' in value else value
+    if isinstance(value, dict):
+        return {key: remove_nul_characters(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        cleaned = [remove_nul_characters(item) for item in value]
+        return type(value)(cleaned) if isinstance(value, list) else tuple(cleaned)
+    return value
+
+
+class ProtocolCursor(psycopg2.extensions.cursor):
+    """
+    Cursor of the protocol connection - it removes NUL characters from every statement
+    and every parameter before it is sent. It is used only for the protocol schema
+    (the migration metadata), never for migrated data.
+    """
+    def execute(self, query, vars=None):
+        return super().execute(remove_nul_characters(query), remove_nul_characters(vars))
+
+    def executemany(self, query, vars_list):
+        return super().executemany(remove_nul_characters(query), remove_nul_characters(vars_list))
+
+
 class ProtocolPostgresConnection:
     def __init__(self, config_parser):
         self.config_parser = config_parser
@@ -39,7 +73,8 @@ class ProtocolPostgresConnection:
             password=cfg['password'],
             host=cfg.get('host', 'localhost'),
             port=cfg.get('port', 5432),
-            application_name=MigratorConstants.get_application_name()
+            application_name=MigratorConstants.get_application_name(),
+            cursor_factory=ProtocolCursor
         )
         self.connection.autocommit = True
 
@@ -295,6 +330,14 @@ class MigratorTables:
         check_column_name = settings['check_column_name']
         check_column_data_type = settings['check_column_data_type']
         check_default_value = settings['check_default_value']
+
+        # Some source databases return default values padded with NUL bytes (Informix stores
+        # them in CHAR(256) columns) - PostgreSQL cannot accept NUL bytes in text parameters,
+        # so such characters must be removed before the value is used in the query below.
+        if isinstance(check_default_value, str) and '\x00' in check_default_value:
+            check_default_value = check_default_value.replace('\x00', '').strip()
+            self.config_parser.print_log_message('DEBUG',
+                f"migrator_tables: check_default_values_substitution: removed NUL bytes from default value of column {check_column_name}: '{check_default_value}'")
 
         target_default_value = check_default_value
 
@@ -2948,8 +2991,11 @@ class MigratorTables:
         create_partitions_sql = settings['create_partitions_sql']
 
         table_name = self.config_parser.get_protocol_name_tables()
-        source_columns_str = json.dumps(source_columns)
-        target_columns_str = json.dumps(target_columns)
+        # NUL characters are cleaned before serializing - json.dumps() encodes them as an
+        # escaped Unicode sequence, which the sanitizing cursor cannot recognize any more and
+        # which would be handed back as a real NUL character when the column list is decoded.
+        source_columns_str = json.dumps(remove_nul_characters(source_columns))
+        target_columns_str = json.dumps(remove_nul_characters(target_columns))
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
             (source_schema_name, source_table_name, source_table_id, source_columns, source_table_rows_all, source_table_rows_limited, source_table_description, source_table_sql,

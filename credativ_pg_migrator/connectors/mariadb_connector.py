@@ -16,6 +16,7 @@
 
 from credativ_pg_migrator.database_connector import DatabaseConnector
 from credativ_pg_migrator.migrator_logging import MigratorLogger
+from credativ_pg_migrator.jvm_helper import detach_thread_from_jvm
 # import mariadb  ## only for native connectivity - install mariadb-connector-python
 import traceback
 import re
@@ -82,6 +83,7 @@ class MariaDBConnector(DatabaseConnector):
                 pass
             finally:
                 self.connection = None
+                detach_thread_from_jvm()
 
     def get_sql_functions_mapping(self, settings):
         """ Returns a dictionary of SQL functions mapping for the target database """

@@ -18,6 +18,7 @@ import jaydebeapi
 # import jpype
 from credativ_pg_migrator.database_connector import DatabaseConnector
 from credativ_pg_migrator.migrator_logging import MigratorLogger
+from credativ_pg_migrator.jvm_helper import detach_thread_from_jvm
 import re
 import traceback
 import pyodbc
@@ -25,6 +26,51 @@ import time
 import datetime
 
 class InformixConnector(DatabaseConnector):
+
+    ## Informix refuses a query whose output row is wider than 32767 bytes. BSON and JSON
+    ## columns are read as LVARCHAR, so such a cast cannot simply claim the whole LVARCHAR
+    ## maximum - it has to share the row with all other columns of the SELECT list.
+    MAX_OUTPUT_ROWSIZE = 32767
+    MAX_LVARCHAR_LENGTH = 32739
+    ## reserve for the per column overhead of the row descriptor and for columns whose
+    ## width we can only estimate
+    OUTPUT_ROWSIZE_RESERVE = 512
+    ## below this a cast makes no sense anymore - such a table has to be migrated with
+    ## the document column excluded
+    MIN_DOCUMENT_CAST_LENGTH = 256
+    ## estimated width of a column in the output row of a SELECT
+    DEFAULT_OUTPUT_WIDTH = 256
+    OUTPUT_WIDTH_BY_DATA_TYPE = {
+        'boolean': 1,
+        'smallint': 2,
+        'integer': 4, 'int': 4, 'serial': 4, 'date': 4, 'smallfloat': 4, 'real': 4,
+        'int8': 8, 'bigint': 8, 'serial8': 8, 'bigserial': 8, 'float': 8, 'double precision': 8,
+        ## read through a cast to LVARCHAR(40), see migrate_table()
+        'interval': 48,
+        'decimal': 17, 'numeric': 17, 'money': 17,
+        ## only the descriptor of a large object travels in the row, not its content
+        'text': 72, 'byte': 72, 'clob': 72, 'blob': 72,
+        ## these are wrapped into TO_CHAR() in the SELECT list
+        'datetime': 256, 'time': 256, 'timestamp': 256,
+    }
+    DOCUMENT_DATA_TYPES = ('bson', 'json')
+    ## Collection and row types reach the driver as a Java object (HashSet, ArrayList,
+    ## IfxStruct) which the target cannot store - Informix casts them to their literal
+    ## text representation instead: SET{'a','b'}, LIST{'x'}, ROW('a','b')
+    COLLECTION_DATA_TYPES = ('set', 'multiset', 'list', 'row', 'collection')
+    ## those of them which become an array in the target - a ROW is a record, not a
+    ## collection, and keeps the text of its literal
+    ARRAY_DATA_TYPES = ('set', 'multiset', 'list', 'collection')
+
+    ## Informix reserves the tabid values 1 to 99 for the tables and views of the system
+    ## catalog - user objects start at 100. Filtering by owner alone is not enough because
+    ## a database created by the informix user has its own objects owned by 'informix' too.
+    FIRST_USER_TABID = 100
+    ## sysprocedures.mode marks the routines supplied by the database server with a
+    ## lowercase letter, routines created by a user carry the uppercase one:
+    ## D = DBA, O = owner, P = protected, R = restricted, T = trigger
+    USER_ROUTINE_MODES = ('D', 'O', 'P', 'R', 'T')
+
     def __init__(self, config_parser, source_or_target):
         if source_or_target != 'source':
             raise ValueError(f"Informix is supported only as source database")
@@ -63,6 +109,149 @@ class InformixConnector(DatabaseConnector):
                 self.connection.close()
         except Exception as e:
             pass
+        finally:
+            detach_thread_from_jvm()
+
+    def estimate_column_output_width(self, col):
+        """ Estimated number of bytes a column occupies in the output row of a SELECT """
+        data_type = (col.get('data_type') or '').lower()
+        if data_type in ('char', 'nchar', 'varchar', 'nvarchar', 'lvarchar'):
+            ## character_maximum_length is only filled for the types is_string_type()
+            ## knows, which leaves out LVARCHAR - the length of the catalog is the
+            ## fallback, and only a column without any length at all is estimated
+            length = col.get('character_maximum_length') or col.get('source_column_length') or self.DEFAULT_OUTPUT_WIDTH
+            ## trim() turns a CHAR into a VARCHAR, both carry one extra byte for the length
+            return length + 1
+        return self.OUTPUT_WIDTH_BY_DATA_TYPE.get(data_type, self.DEFAULT_OUTPUT_WIDTH)
+
+    def calculate_document_cast_length(self, source_columns):
+        """
+        Length of the LVARCHAR cast used to read BSON / JSON and collection columns.
+
+        Informix rejects a query whose output row exceeds 32767 bytes, so the casts may
+        only claim what the remaining columns of the SELECT list leave over, shared
+        between them. Returns 0 when the table has no such column at all.
+        """
+        cast_types = self.DOCUMENT_DATA_TYPES + self.COLLECTION_DATA_TYPES
+        document_columns = 0
+        used_width = 0
+        for col in source_columns.values():
+            if (col.get('data_type') or '').lower() in cast_types:
+                document_columns += 1
+            else:
+                used_width += self.estimate_column_output_width(col)
+
+        if document_columns == 0:
+            return 0
+
+        available_width = self.MAX_OUTPUT_ROWSIZE - used_width - self.OUTPUT_ROWSIZE_RESERVE
+        cast_length = available_width // document_columns
+        return max(self.MIN_DOCUMENT_CAST_LENGTH, min(cast_length, self.MAX_LVARCHAR_LENGTH))
+
+    def map_trigger_correlation_names(self, text, old_ref, new_ref):
+        """
+        Replace the correlation names of an Informix trigger with OLD and NEW.
+
+        Informix names the two row images itself ('referencing old as o new as n') and the
+        body then reads 'o.list_price'. A PL/pgSQL trigger function addresses them as OLD
+        and NEW, so the names of the source are of no use in the target.
+        """
+        if old_ref:
+            text = re.sub(rf'\b{re.escape(old_ref)}\.', 'OLD.', text)
+        if new_ref:
+            text = re.sub(rf'\b{re.escape(new_ref)}\.', 'NEW.', text)
+        return text
+
+    def split_top_level_commas(self, text):
+        """
+        Split on the commas which are not inside parentheses or a string literal.
+
+        Needed wherever a list of items may contain a routine call of its own, where the
+        commas belong to its argument list and must not end the item.
+        """
+        items = []
+        current = []
+        depth = 0
+        quote = ''
+        for character in text:
+            if quote:
+                if character == quote:
+                    quote = ''
+            elif character in ("'", '"'):
+                quote = character
+            elif character == '(':
+                depth += 1
+            elif character == ')':
+                depth -= 1
+            elif character == ',' and depth == 0:
+                items.append(''.join(current).strip())
+                current = []
+                continue
+            current.append(character)
+        if ''.join(current).strip():
+            items.append(''.join(current).strip())
+        return items
+
+    def is_year_month_interval(self, col):
+        """
+        True for an INTERVAL of the year-month class, False for the day-time class.
+
+        Informix encodes the qualifier of an INTERVAL in syscolumns.collength: the low
+        byte holds the largest qualifier in its upper and the smallest in its lower four
+        bits, with YEAR = 0, MONTH = 2, DAY = 4, HOUR = 6, MINUTE = 8, SECOND = 10.
+        """
+        largest_qualifier = ((col.get('source_column_length') or 0) % 256) // 16
+        return largest_qualifier <= 2
+
+    def convert_interval_value(self, value, year_month):
+        """
+        Turn the text of an Informix interval into a literal PostgreSQL reads correctly.
+
+        The value is selected normalized to the widest qualifier of its class, so it
+        always arrives as '[-]DDD HH:MM:SS' or as '[-]YYY-MM'. It cannot be handed over
+        unchanged: for Informix the leading sign negates the whole interval, while
+        PostgreSQL reads '-2 06:30:00' as '-2 days +06:30:00' - it applies the sign to
+        the day alone. The sign is therefore repeated in front of every field.
+        """
+        text = str(value).strip()
+        if not text:
+            return None
+        sign = '-' if text.startswith('-') else ''
+        text = text.lstrip('+-').strip()
+
+        if year_month:
+            years, _, months = text.partition('-')
+            return f"{sign}{int(years or 0)} years {sign}{int(months or 0)} months"
+
+        days, _, clock = text.partition(' ')
+        hours, minutes, seconds = (clock.split(':') + ['0', '0', '0'])[:3]
+        return (f"{sign}{int(days or 0)} days {sign}{int(hours or 0)} hours "
+                f"{sign}{int(minutes or 0)} minutes {sign}{float(seconds or 0)} seconds")
+
+    def execute_query_with_rowsize_retry(self, cursor, query, cast_length, worker_id, table_reference):
+        """
+        Run the data query, making the LVARCHAR casts smaller if Informix rejects the row.
+
+        How many bytes a column occupies in the output row of a SELECT can only be
+        estimated - see calculate_document_cast_length() - and an estimate which is too
+        optimistic costs the whole table with 'Maximum output rowsize (32767) exceeded'.
+        Instead of failing, the casts of the document and collection columns are halved
+        until the statement is accepted: a shortened value is still better than no table,
+        and it is reported. Returns the query which was finally executed.
+        """
+        while True:
+            try:
+                cursor.execute(query)
+                return query
+            except Exception as e:
+                if 'Maximum output rowsize' not in str(e) or cast_length <= self.MIN_DOCUMENT_CAST_LENGTH:
+                    raise
+                cast_length = max(self.MIN_DOCUMENT_CAST_LENGTH, cast_length // 2)
+                ## every cast of the SELECT list carries the same length, and LVARCHAR
+                ## appears nowhere else in the generated query
+                query = re.sub(r'(?i)AS\s+LVARCHAR\(\d+\)', f'AS LVARCHAR({cast_length})', query)
+                self.config_parser.print_log_message('WARNING',
+                    f"informix_connector: migrate_table: Worker {worker_id}: Table {table_reference}: The output row of the data query exceeds the maximum of Informix - the document and collection columns are reduced to {cast_length} characters and the query is repeated. A longer value is truncated.")
 
     def get_sql_functions_mapping(self, settings):
         """ Returns a dictionary of SQL functions mapping for the target database """
@@ -72,6 +261,11 @@ class InformixConnector(DatabaseConnector):
                 'year(': 'extract(year from ',
                 'month(': 'extract(month from ',
                 'day(': 'extract(day from ',
+                ## NVL is the Informix spelling of COALESCE, and a routine using it is
+                ## created without a word by PostgreSQL - the body of a PL/pgSQL routine is
+                ## only checked for its syntax - and fails on the first call with
+                ## 'function nvl(numeric, integer) does not exist'
+                'nvl(': 'coalesce(',
             }
         else:
             self.config_parser.print_log_message('ERROR', f"informix_connector: get_sql_functions_mapping: Unsupported target database type: {target_db_type}")
@@ -84,6 +278,7 @@ class InformixConnector(DatabaseConnector):
             SELECT tabid, tabname
             FROM systables
             WHERE owner = '{table_schema}' AND tabtype = 'T'
+            AND tabid >= {self.FIRST_USER_TABID}
             ORDER BY tabname
         """
         try:
@@ -109,6 +304,16 @@ class InformixConnector(DatabaseConnector):
             raise
 
     def fetch_table_columns(self, settings) -> dict:
+        """
+        Column list of a table.
+
+        A column of an extended data type carries the name of that type in sysxtdtypes.
+        The constructed types - SET(...), MULTISET(...), LIST(...) and an unnamed
+        ROW(...) - have no name of their own (mode 'C'), they are identified by the base
+        type code in sysxtdtypes.type. A named row type (mode 'R') is reported as ROW as
+        well, because PostgreSQL has no counterpart for either and both are migrated as
+        their text representation.
+        """
         table_schema = settings['table_schema']
         table_name = settings['table_name']
         result = {}
@@ -150,21 +355,32 @@ class InformixConnector(DatabaseConnector):
                             when 53 THEN 'BIGSERIAL'
                             ELSE 'UNKNOWN-'||cast(c.coltype as varchar(10))
                         END
-                    ELSE
-                    	CASE WHEN x.name IS NOT NULL THEN upper(x.name)
-                    	ELSE 'UNKNOWN-'||cast(c.coltype as varchar(10))||'-'||cast(x.extended_id as varchar(10)) END
+                    WHEN trim(x.mode) = 'C' THEN
+                        CASE x.type
+                            WHEN 19 THEN 'SET'
+                            WHEN 20 THEN 'MULTISET'
+                            WHEN 21 THEN 'LIST'
+                            WHEN 22 THEN 'ROW'
+                            WHEN 23 THEN 'COLLECTION'
+                            ELSE 'UNKNOWN-'||cast(c.coltype as varchar(10))||'-'||cast(x.extended_id as varchar(10))
+                        END
+                    WHEN trim(x.mode) = 'R' THEN 'ROW'
+                    WHEN x.name IS NOT NULL THEN upper(trim(x.name))
+                    ELSE 'UNKNOWN-'||cast(c.coltype as varchar(10))||'-'||cast(x.extended_id as varchar(10))
                 END AS coltype,
                 c.collength,
                 CASE WHEN c.coltype >= 256 THEN 'NO' ELSE 'YES' END AS nullable,
                 CASE WHEN d.type = 'L' THEN
                     CASE
-                        WHEN c.coltype IN (0, 13, 15, 16, 40, 41, 45) THEN d.default
+                        WHEN (CASE WHEN c.coltype >= 256 THEN c.coltype - 256 ELSE c.coltype END)
+                            IN (0, 13, 15, 16, 40, 41, 45) THEN d.default
                         ELSE SUBSTR(d.default, INSTR(d.default, ' ') + 1)
                     END
                 ELSE NULL
                 END AS default_value,
                 ifx_bit_rightshift(c.collength, 8) as numeric_precision,
-                bitand(c.collength, "0xff") as numeric_scale
+                bitand(c.collength, "0xff") as numeric_scale,
+                d.type AS default_type
             FROM syscolumns c LEFT join sysxtdtypes x ON c.extended_id = x.extended_id
             LEFT JOIN sysdefaults d ON c.tabid = d.tabid AND c.colno = d.colno and d.class = 'T'
             WHERE c.tabid = (SELECT t.tabid
@@ -184,9 +400,14 @@ class InformixConnector(DatabaseConnector):
                 data_type = row[2].strip().upper()
                 maximum_length = row[3]
                 is_nullable = row[4].strip().upper()
-                column_default_value = row[5]
                 numeric_precision = row[6]
                 numeric_scale = row[7]
+                column_default_value = self.convert_informix_default({
+                    'column_name': column_name,
+                    'data_type': data_type,
+                    'default_type': row[8],
+                    'default_value': row[5],
+                })
 
                 column_type = data_type
                 if self.is_string_type(data_type):
@@ -197,6 +418,10 @@ class InformixConnector(DatabaseConnector):
                     'column_name': column_name,
                     'data_type': data_type,
                     'column_type': '',
+                    ## syscolumns.collength as it is - the width calculation of the SELECT
+                    ## list needs it also for the types is_string_type() does not cover,
+                    ## LVARCHAR above all
+                    'source_column_length': maximum_length,
                     'character_maximum_length': maximum_length if self.is_string_type(data_type) else None,
                     'numeric_precision': numeric_precision if self.is_numeric_type(data_type) else None,
                     'numeric_scale': numeric_scale if self.is_numeric_type(data_type) and numeric_scale < 255 else None,
@@ -226,6 +451,7 @@ class InformixConnector(DatabaseConnector):
             FROM systables t
             JOIN syssyntable s ON t.tabid = s.tabid
             WHERE t.owner = '{source_schema_name}' AND t.tabtype IN ('S', 'P')
+            AND t.tabid >= {self.FIRST_USER_TABID}
             ORDER BY t.tabname
         """
         try:
@@ -265,6 +491,7 @@ class InformixConnector(DatabaseConnector):
             FROM sysviews v
             JOIN systables t on v.tabid = t.tabid
             WHERE t.owner = '{source_schema_name}'
+            AND t.tabid >= {self.FIRST_USER_TABID}
             ORDER BY t.tabname
         """
         try:
@@ -308,10 +535,94 @@ class InformixConnector(DatabaseConnector):
         view_code_str = ''.join([code[0] for code in view_code])
         return view_code_str
 
+    def convert_collection_value(self, value):
+        """
+        Turn the literal of an Informix collection into a list for the array of the target.
+
+        The value is read from the source as its literal representation, which names the
+        constructor and holds the elements in braces:
+
+            SET{'+49 30 000002','+49 172 000006'}   ->  ['+49 30 000002', '+49 172 000006']
+            LIST{'office'}                          ->  ['office']
+            SET{}                                   ->  []
+
+        A value which does not look like one of them is handed over unchanged, so nothing
+        is lost when the source delivers something unexpected.
+        """
+        text = str(value).strip()
+        collection_match = re.match(r'(?is)^(?:SET|MULTISET|LIST|COLLECTION)?\s*\{(?P<elements>.*)\}$', text)
+        if not collection_match:
+            return text
+
+        elements = []
+        for element in self.split_top_level_commas(collection_match.group('elements')):
+            element = element.strip()
+            if len(element) >= 2 and element.startswith("'") and element.endswith("'"):
+                ## a quote inside an element is doubled in the literal
+                element = element[1:-1].replace("''", "'")
+            elements.append(element)
+        return elements
+
+    def convert_matches_operator(self, code):
+        """
+        Convert the MATCHES operator of Informix, which PostgreSQL does not know.
+
+        MATCHES is a pattern operator of its own, it is not LIKE with another name:
+
+            *      any number of characters      -> % of LIKE
+            ?      exactly one character         -> _ of LIKE
+            [abc]  one character out of a set    -> no counterpart in LIKE
+            %, _   ordinary characters           -> have to be escaped for LIKE
+
+        A pattern without a character class becomes LIKE, which the target can answer from
+        an index. A pattern with one becomes SIMILAR TO, whose bracket expression means the
+        same thing. Only a pattern written as a literal can be translated - MATCHES against
+        an expression is reported and left as it is.
+        """
+        def convert_pattern(match):
+            pattern = match.group('pattern')[1:-1]
+            converted = []
+            character_class = False
+            index = 0
+            while index < len(pattern):
+                character = pattern[index]
+                if character == '\\' and index + 1 < len(pattern):
+                    ## an escaped character of MATCHES stands for itself
+                    following = pattern[index + 1]
+                    converted.append(f"\\{following}" if following in '%_[]\\' else following)
+                    index += 2
+                    continue
+                if character == '[':
+                    character_class = True
+                    closing = pattern.find(']', index + 1)
+                    if closing == -1:
+                        converted.append('\\[')
+                        index += 1
+                        continue
+                    converted.append(pattern[index:closing + 1])
+                    index = closing + 1
+                    continue
+                converted.append({'*': '%', '?': '_', '%': '\\%', '_': '\\_'}.get(character, character))
+                index += 1
+
+            operator = 'SIMILAR TO' if character_class else 'LIKE'
+            self.config_parser.print_log_message('DEBUG',
+                f"informix_connector: convert_matches_operator: MATCHES {match.group('pattern')} converted to {operator} '{''.join(converted)}'")
+            return f"{operator} '{''.join(converted)}'"
+
+        code = re.sub(r"(?i)\bMATCHES\s+(?P<pattern>'(?:[^']|'')*')", convert_pattern, code)
+
+        if re.search(r'(?i)\bMATCHES\b', code):
+            self.config_parser.print_log_message('WARNING',
+                "informix_connector: convert_matches_operator: A MATCHES operator whose pattern is not a literal was left in the code - PostgreSQL does not know the operator, it has to be rewritten manually.")
+        return code
+
     def convert_view_code(self, settings: dict):
         view_code = settings['view_code']
         converted_view_code = view_code
         converted_view_code = converted_view_code.replace(f'''"{settings['source_schema_name']}".''', f'''"{settings['target_schema_name']}".''')
+        converted_view_code = self.convert_matches_operator(converted_view_code)
+        converted_view_code = self.apply_sql_functions_mapping(converted_view_code, settings)
         return converted_view_code
 
     def get_types_mapping(self, settings):
@@ -321,6 +632,9 @@ class InformixConnector(DatabaseConnector):
             types_mapping = {
                 'BLOB': 'BYTEA',
                 'BOOLEAN': 'BOOLEAN',
+                # BSON is the binary and JSON the textual representation of a document -
+                # both become JSONB, which is the binary document type of PostgreSQL
+                'BSON': 'JSONB',
                 'BYTE': 'BYTEA',
                 'CHAR': 'CHAR',
                 'CLOB': 'TEXT',
@@ -331,8 +645,16 @@ class InformixConnector(DatabaseConnector):
                 'INTEGER': 'INTEGER',
                 'INTERVAL': 'INTERVAL',
                 'INT8': 'BIGINT',
+                'JSON': 'JSONB',
                 'LVARCHAR': 'VARCHAR',
-                'MONEY': 'MONEY',
+                # MONEY of Informix is a DECIMAL with a fixed scale, and that is what it
+                # becomes here. The MONEY type of PostgreSQL is not the same thing: it has
+                # almost no operators (`operator does not exist: money >= numeric` for a
+                # CHECK constraint as ordinary as `credit_limit >= 0.00`, and no `money +
+                # integer` either), and it keeps the number of decimal places of the
+                # lc_monetary setting instead of the declared one, so a MONEY(12,4) would
+                # lose the last two digits of every value.
+                'MONEY': 'NUMERIC',
                 'NCHAR': 'CHAR',
                 'NVARCHAR': 'VARCHAR',
                 # 'SERIAL8': 'BIGSERIAL',
@@ -340,12 +662,26 @@ class InformixConnector(DatabaseConnector):
                 # SERIAL & SERIAL8 are replaced in PostgreSQL with IDENTITY columns
                 'SERIAL8': 'BIGINT',
                 'SERIAL': 'INTEGER',
+                'BIGSERIAL': 'BIGINT',
                 'SMALLFLOAT': 'REAL',
                 'SMALLINT': 'SMALLINT',
                 'TEXT': 'TEXT',
                 'TIME': 'TIME',
                 'TIMESTAMP': 'TIMESTAMP',
                 'VARCHAR': 'VARCHAR',
+                # A collection of Informix is an array in PostgreSQL, which keeps the
+                # elements addressable instead of storing them as one string: CARDINALITY(),
+                # the element access and the containment operators go on working. The
+                # element type is not carried over - a collection may hold a row type or
+                # another collection, and TEXT holds all of them.
+                'COLLECTION': 'TEXT[]',
+                'LIST': 'TEXT[]',
+                'MULTISET': 'TEXT[]',
+                'SET': 'TEXT[]',
+                # a row type is a record and not a collection - it stays the text of its
+                # literal, PostgreSQL has no anonymous record type for a column
+                'ROW': 'TEXT',
+                'IDSSECURITYLABEL': 'TEXT',
             }
         else:
             raise ValueError(f"Unsupported target database type: {target_db_type}")
@@ -360,13 +696,19 @@ class InformixConnector(DatabaseConnector):
         return column_type.upper() in string_types
 
     def is_numeric_type(self, column_type: str) -> bool:
-        numeric_types = ['BIGINT', 'INTEGER', 'INT', 'TINYINT', 'SMALLINT', 'FLOAT', 'DOUBLE PRECISION', 'DECIMAL', 'NUMERIC']
+        ## MONEY belongs here as well - it is a DECIMAL of Informix and its precision and
+        ## scale have to reach the target, otherwise the column ends up as an unconstrained
+        ## NUMERIC instead of NUMERIC(12,2)
+        numeric_types = ['BIGINT', 'INTEGER', 'INT', 'TINYINT', 'SMALLINT', 'FLOAT', 'DOUBLE PRECISION', 'DECIMAL', 'NUMERIC', 'MONEY']
         return column_type.upper() in numeric_types
 
     def fetch_indexes(self, settings):
         source_table_id = settings['source_table_id']
         source_table_schema = settings['source_table_schema']
         source_table_name = settings['source_table_name']
+        ## a function based index calls a routine which the migration puts into the target
+        ## schema - the owner reported by the source catalog does not exist in the target
+        target_table_schema = settings.get('target_table_schema') or source_table_schema
         table_indexes = {}
         order_num = 1
         query = f"""
@@ -419,9 +761,15 @@ class InformixConnector(DatabaseConnector):
                 if colnos:
                     self.config_parser.print_log_message('DEBUG3', f"informix_connector: fetch_indexes: Index {index_name}: Extracted colnos: {colnos}")
                     for colno in colnos:
-                        cursor.execute(f"SELECT colname FROM syscolumns WHERE colno = {colno} AND tabid = {source_table_id}")
-                        colname = cursor.fetchone()[0]
-                        columns.append(colname)
+                        ## Informix stores the column number of a descending index column
+                        ## negated - the column itself is found under its absolute value
+                        descending = colno < 0
+                        cursor.execute(f"SELECT colname FROM syscolumns WHERE colno = {abs(colno)} AND tabid = {source_table_id}")
+                        colname = cursor.fetchone()
+                        if colname is None:
+                            self.config_parser.print_log_message('WARNING', f"informix_connector: fetch_indexes: Index {index_name}: No column with colno {abs(colno)} found in table {source_table_id} - the key is left out of the index.")
+                            continue
+                        columns.append({'column_name': colname[0].strip(), 'descending': descending})
 
                 if procedure_id > 0:
                     cursor.execute(f"""
@@ -440,20 +788,30 @@ class InformixConnector(DatabaseConnector):
                     # Get the column names for the function-based index
                     proc_columns = []
                     for colno in procedure_colnos:
-                        cursor.execute(f"SELECT colname FROM syscolumns WHERE colno = {colno} AND tabid = {source_table_id}")
-                        colname = cursor.fetchone()[0]
-                        proc_columns.append(colname)
+                        cursor.execute(f"SELECT colname FROM syscolumns WHERE colno = {abs(colno)} AND tabid = {source_table_id}")
+                        colname = cursor.fetchone()
+                        if colname is None:
+                            self.config_parser.print_log_message('WARNING', f"informix_connector: fetch_indexes: Index {index_name}: No column with colno {abs(colno)} found in table {source_table_id} - the key is left out of the function based index.")
+                            continue
+                        proc_columns.append(colname[0].strip())
                     procedure_columns = ', '.join(proc_columns)
                     self.config_parser.print_log_message('DEBUG', f"informix_connector: fetch_indexes: Index {index_name}: Function-based index columns: {procedure_columns}")
 
-                index_columns = ', '.join([f'"{col}"' for col in columns])
+                target_index_type = "PRIMARY KEY" if index_type == 'P' else "UNIQUE" if index_type == 'U' else "INDEX"
+                ## PostgreSQL accepts an ordering keyword in CREATE INDEX but not in the
+                ## column list of a PRIMARY KEY constraint
+                keep_ordering = target_index_type != "PRIMARY KEY"
+                index_columns = ', '.join([
+                    f'"{col["column_name"]}" DESC' if col['descending'] and keep_ordering else f'"{col["column_name"]}"'
+                    for col in columns
+                ])
                 self.config_parser.print_log_message('DEBUG', f"informix_connector: fetch_indexes: Index {index_name}: Columns list: {index_columns}, index type: {index_type}, clustered: {index[2]}")
 
                 table_indexes[order_num] = {
                     'index_name': index_name,
-                    'index_type': "PRIMARY KEY" if index_type == 'P' else "UNIQUE" if index_type == 'U' else "INDEX",
+                    'index_type': target_index_type,
                     'index_owner': index_owner,
-                    'index_columns': index_columns if not function_based_index else f'''{procedure_owner}.{procedure_name}({procedure_columns})''',
+                    'index_columns': index_columns if not function_based_index else f'''"{target_table_schema}".{procedure_name}({procedure_columns})''',
                     'index_keys': index_keys,
                     'index_comment': '',
                     'is_function_based': 'YES' if function_based_index else 'NO',
@@ -570,16 +928,18 @@ class InformixConnector(DatabaseConnector):
                         FROM sysconstraints c
                         JOIN syschecks ck ON c.constrid = ck.constrid
                         WHERE c.tabid = {source_table_id}
-                        AND c.constrname = {constraint_name}
+                        AND c.constrname = '{constraint_name}'
                         AND c.constrtype = 'C'
                         AND ck.type in ('T', 's')
-                        ORDER BY seqno
+                        ORDER BY ck.seqno
                     """
                     cursor.execute(find_ck_query)
-                    ck_details = cursor.fetchone()
+                    ## Informix stores the text of a check constraint split into 32 byte
+                    ## pieces - all rows have to be read and put together in seqno order
+                    ck_details = cursor.fetchall()
                     self.config_parser.print_log_message('DEBUG', f"informix_connector: fetch_constraints: Source table {source_table_name}: CHECK constraint details: {ck_details}")
 
-                    create_constraint_query = ''.join([f"{ck[0].strip()}" for ck in ck_details])
+                    create_constraint_query = ''.join([ck[0] for ck in ck_details if ck[0] is not None]).strip()
 
                 table_constraints[order_num] = {
                     'constraint_name': constraint_name,
@@ -611,6 +971,7 @@ class InformixConnector(DatabaseConnector):
                 CASE WHEN isproc = 't' THEN 'Procedure' ELSE 'Function' END AS type
             FROM sysprocedures
             WHERE owner = '{schema}'
+            AND mode IN ({', '.join(f"'{mode}'" for mode in self.USER_ROUTINE_MODES)})
             ORDER BY procname
         """
         self.config_parser.print_log_message('DEBUG3', f"informix_connector: fetch_funcproc_names: Fetching function/procedure names for schema {schema}")
@@ -646,6 +1007,252 @@ class InformixConnector(DatabaseConnector):
         procbody_str = ''.join([str(body[0]) for body in procbody])
         return procbody_str
 
+    ## PostgreSQL types which accept a length or precision - behind every other type the
+    ## modifier taken over from Informix has to go, the target rejects the whole routine
+    ## with "type modifier is not allowed for type ..." otherwise
+    TYPES_WITH_MODIFIER = ('char', 'character', 'varchar', 'character varying', 'nchar',
+                           'numeric', 'decimal', 'time', 'timestamp', 'interval',
+                           'bit', 'varbit', 'bit varying')
+    ## these type names are ordinary SQL keywords as well - replacing them in the code of a
+    ## routine would destroy statements like "UPDATE ... SET x = 1" or a ROW(...) constructor
+    TYPES_NOT_REPLACED_IN_CODE = ('SET', 'ROW', 'LIST', 'MULTISET', 'COLLECTION')
+
+    ## the return type of a routine, with the length or precision it may carry -
+    ## 'VARCHAR(120)' and 'MONEY(14,2)' as well as a bare 'INTEGER'. The nesting of one
+    ## level is needed for 'TABLE (item_count INTEGER, total MONEY(12,2))', which
+    ## convert_returning_clause() builds for a function returning several values.
+    RETURN_TYPE_PATTERN = r'\w+(?:\s*\((?:[^()]|\([^()]*\))*\))?'
+
+    ## the error number Informix uses for an exception raised by a routine itself - its
+    ## counterpart is the SQLSTATE P0001, which RAISE EXCEPTION of PL/pgSQL already sets
+    INFORMIX_USER_EXCEPTION_ERROR = '-746'
+
+    MERGE_PLACEHOLDER = '__CREDATIV_PG_MIGRATOR_MERGE_{}__'
+    GLOBAL_PLACEHOLDER = '__CREDATIV_PG_MIGRATOR_GLOBAL_{}__'
+    ## prefix of the customized option a global variable of Informix is migrated to - a
+    ## customized option must carry one, and a single namespace for the whole migration
+    ## matches the source, where a global variable is shared by the entire session
+    GLOBAL_VARIABLE_NAMESPACE = 'credativ_pg_migrator'
+
+    def convert_returning_clause(self, code):
+        """
+        Convert the RETURNING clause of an Informix function.
+
+        A function of Informix returns several values at once and may give each of them a
+        name:
+
+            RETURNING INTEGER AS item_count, MONEY(12,2) AS total, DATE AS ord_date;
+            ...
+            RETURN v_cnt, v_tot, v_dt;
+
+        PostgreSQL expresses that as a function returning a table, so the clause becomes
+        'RETURNING TABLE (item_count INTEGER, total MONEY(12,2), ord_date DATE)' - the
+        header conversion turns the keyword into RETURNS afterwards - and every RETURN of
+        the routine becomes 'RETURN QUERY SELECT ...'. An unnamed value gets the name
+        'column<n>', the position is what identifies it in Informix as well.
+
+        'RETURN ... WITH RESUME' of an iterator function hands one row to the caller and
+        continues where it left off. RETURN QUERY appends its rows in the same way, so the
+        loop of the source keeps working - what the caller receives is the whole set
+        instead of one row per call.
+
+        A function returning a single value keeps its plain type; the name Informix allows
+        there has no counterpart and would only turn a scalar function into a table one.
+        """
+        returning_match = re.search(r'(?is)\bRETURNING\b(?P<clause>[^;]+);', code)
+        if not returning_match:
+            return code
+
+        items = []
+        for position, item in enumerate(self.split_top_level_commas(returning_match.group('clause')), start=1):
+            item_match = re.match(r'(?is)^(?P<type>.+?)(?:\s+AS\s+(?P<name>\w+))?$', item.strip())
+            if not item_match:
+                continue
+            items.append((item_match.group('name') or f'column{position}', item_match.group('type').strip()))
+
+        if not items:
+            return code
+
+        if len(items) == 1:
+            replacement = f"RETURNING {items[0][1]};"
+        else:
+            columns = ', '.join(f"{name} {data_type}" for name, data_type in items)
+            replacement = f"RETURNING TABLE ({columns});"
+            self.config_parser.print_log_message('INFO',
+                f"informix_connector: convert_funcproc_code: The function returns {len(items)} values and is migrated as a function returning a table ({columns}). Its callers have to read it as a table, 'SELECT * FROM the_function(...)'.")
+
+        code = code[:returning_match.start()] + replacement + code[returning_match.end():]
+
+        if len(items) > 1:
+            code = re.sub(r'(?is)\bRETURN\s+(?P<values>[^;]+?)(?:\s+WITH\s+RESUME)?\s*;',
+                          lambda match: f"RETURN QUERY SELECT {match.group('values').strip()};",
+                          code)
+        return code
+
+    def extract_global_variables(self, code, target_db_type):
+        """
+        Replace the global variables of a routine with customized options of the session.
+
+        'DEFINE GLOBAL <name> <type> DEFAULT <value>' declares a variable which lives for
+        the whole session and is shared by every routine declaring it - one routine sets
+        it, another one reads it. PL/pgSQL has nothing of that kind, its variables belong
+        to a single call, and the declaration is not even valid inside a DECLARE section,
+        so the routine failed with 'syntax error at or near "BOOLEAN"'.
+
+        A customized option ('<namespace>.<name>') has exactly the wanted lifetime and
+        visibility, so every read of the variable becomes current_setting() with the
+        declared default as its fallback, and every assignment becomes set_config().
+        Both are returned as snippets behind a placeholder, because the conversion of the
+        routine replaces every occurrence of 'current' with 'CURRENT_TIMESTAMP' and would
+        otherwise turn current_setting() into CURRENT_TIMESTAMP_setting().
+        """
+        snippets = []
+        declarations = []
+
+        def take_declaration(match):
+            declarations.append({
+                'name': match.group('name'),
+                'type': self.convert_data_types_in_code(match.group('type').strip(), target_db_type),
+                'default': (match.group('default') or '').strip(),
+            })
+            return ''
+
+        code = re.sub(
+            r'(?im)^[ \t]*DEFINE\s+GLOBAL\s+(?P<name>\w+)\s+(?P<type>.+?)(?:\s+DEFAULT\s+(?P<default>.+?))?\s*;[ \t]*\n?',
+            take_declaration,
+            code)
+
+        if re.search(r'(?i)\bDEFINE\s+GLOBAL\b', code):
+            self.config_parser.print_log_message('WARNING',
+                "informix_connector: extract_global_variables: A 'DEFINE GLOBAL' declaration could not be read - only one variable per declaration is supported. It is left in the code and has to be migrated manually.")
+
+        def placeholder(text):
+            snippets.append(text)
+            return self.GLOBAL_PLACEHOLDER.format(len(snippets) - 1)
+
+        for declaration in declarations:
+            name = declaration['name']
+            option = f"{self.GLOBAL_VARIABLE_NAMESPACE}.{name.lower()}"
+            stored = f"nullif(current_setting('{option}', true), '')"
+            read = f"coalesce({stored}, {declaration['default']})" if declaration['default'] else stored
+            read = f"{read}::{declaration['type']}"
+
+            self.config_parser.print_log_message('WARNING',
+                f"informix_connector: extract_global_variables: The global variable {name} is migrated as the customized option '{option}' - PostgreSQL has no global variable of a routine. It keeps the lifetime and the visibility of the Informix original, but it is read and written as text, so the behaviour has to be verified.")
+
+            ## the assignments first, otherwise the variable on the left hand side would be
+            ## replaced by the expression reading it - a read on the right hand side is
+            ## substituted here as well, it is no longer visible afterwards
+            code = re.sub(
+                rf"(?im)^[ \t]*(?:LET\s+)?{re.escape(name)}\s*:?=\s*(?P<value>.+?)\s*;[ \t]*$",
+                lambda match: ';' + placeholder(
+                    f"PERFORM set_config('{option}', ({re.sub(rf'(?i)\b{re.escape(name)}\b', read, match.group('value').strip())})::text, false)") + ';',
+                code)
+
+            ## whatever is left is a read of the variable
+            code = re.sub(rf'(?i)\b{re.escape(name)}\b', lambda match: placeholder(read), code)
+
+        return code, snippets
+
+    def restore_global_variables(self, code, snippets):
+        """ Put the converted global variable accesses back in place of their placeholders """
+        for index, snippet in enumerate(snippets):
+            code = code.replace(self.GLOBAL_PLACEHOLDER.format(index), snippet)
+        return code
+
+    def convert_data_types_in_code(self, code, target_db_type):
+        """
+        Translate the Informix data types used inside the code of a routine.
+
+        The parameter list, the DECLARE section and a cast name data types just like a
+        table definition does, but the conversion of a routine never looked at them - only
+        a few of them were covered by a rule of their own. So a type PostgreSQL does not
+        know under that name reached the target unchanged, and so did a length behind a
+        type which does not accept one ("type modifier is not allowed for type money" for
+        a parameter declared as MONEY(12,2)).
+
+        The same mapping as for a table column is used, minus the type names which are
+        also SQL keywords - see TYPES_NOT_REPLACED_IN_CODE.
+        """
+        types_mapping = self.get_types_mapping({'target_db_type': target_db_type})
+
+        ## the qualifiers of an Informix DATETIME / INTERVAL are not a length and have no
+        ## counterpart in PostgreSQL - the type is used without them
+        code = re.sub(r'(?i)\bDATETIME\s+\w+(?:\s*\(\s*\d+\s*\))?\s+TO\s+\w+(?:\s*\(\s*\d+\s*\))?', 'TIMESTAMP', code)
+        code = re.sub(r'(?i)\bINTERVAL\s+\w+(?:\s*\(\s*\d+\s*\))?\s+TO\s+\w+(?:\s*\(\s*\d+\s*\))?', 'INTERVAL', code)
+
+        def replace_type(match):
+            target_type = types_mapping[match.group('type').upper()]
+            modifier = match.group('modifier') or ''
+            if modifier and target_type.lower() not in self.TYPES_WITH_MODIFIER:
+                self.config_parser.print_log_message('DEBUG',
+                    f"informix_connector: convert_data_types_in_code: Removed the length {modifier.strip()} behind {match.group('type')} - PostgreSQL accepts none for {target_type}.")
+                modifier = ''
+            return target_type + modifier
+
+        ## longest name first, so that SERIAL8 is not matched as SERIAL
+        for source_type in sorted(types_mapping, key=len, reverse=True):
+            if source_type in self.TYPES_NOT_REPLACED_IN_CODE:
+                continue
+            code = re.sub(
+                rf"(?i)\b(?P<type>{re.escape(source_type)})\b(?P<modifier>\s*\(\s*\d+\s*(?:,\s*\d+\s*)?\))?",
+                replace_type,
+                code)
+        return code
+
+    def convert_merge_statement(self, merge_sql):
+        """
+        Convert one Informix MERGE statement into the PostgreSQL form.
+
+        PostgreSQL knows MERGE since version 15 and the syntax is almost the same. Two
+        things differ: the target of the SET clause may not be qualified with the alias
+        of the merged table ("SET target columns cannot be qualified with the relation
+        name"), and Informix reads a single row from the pseudo table sysmaster:sysdual,
+        for which PostgreSQL needs no FROM clause at all.
+        """
+        merge_sql = merge_sql.strip().rstrip(';').strip()
+        merge_sql = re.sub(r'(?i)\s+FROM\s+(?:\w+:)?sysdual\b', '', merge_sql)
+
+        def strip_set_alias(match):
+            ## only the assignment targets - a column at the start of the SET list or
+            ## behind a comma - lose the alias, the assigned values keep theirs
+            return match.group(1) + re.sub(r'(^|,)(\s*)[A-Za-z_]\w*\.(?=[A-Za-z_]\w*\s*=)', r'\1\2', match.group(2))
+
+        merge_sql = re.sub(
+            r'(?is)(\bWHEN\s+(?:NOT\s+)?MATCHED\b.*?\bUPDATE\s+SET\b)(.*?)(?=\bWHEN\b|$)',
+            strip_set_alias,
+            merge_sql)
+        return merge_sql + ';'
+
+    def extract_merge_statements(self, code):
+        """
+        Take every MERGE statement out of the routine and leave a placeholder behind.
+
+        The conversion below works line by line and inserts a statement separator in
+        front of keywords such as UPDATE and INSERT. Inside a MERGE those keywords belong
+        to the WHEN MATCHED / WHEN NOT MATCHED branches, so the statement would be torn
+        into pieces. The header detection would break as well: it ends the header at the
+        first ');', and an Informix routine header is not closed by a semicolon, so the
+        whole MERGE ended up in front of 'AS $$' instead of in the body.
+
+        The placeholder is a single statement of its own, which is what makes the header
+        end where it should. It is put back in restore_merge_statements().
+        """
+        merge_statements = []
+
+        def replace(match):
+            merge_statements.append(self.convert_merge_statement(match.group(0)))
+            return f';{self.MERGE_PLACEHOLDER.format(len(merge_statements) - 1)};'
+
+        code = re.sub(r'(?is)\bMERGE\s+INTO\b.*?;', replace, code)
+        return code, merge_statements
+
+    def restore_merge_statements(self, code, merge_statements):
+        """ Put the converted MERGE statements back in place of their placeholders """
+        for index, statement in enumerate(merge_statements):
+            code = code.replace(self.MERGE_PLACEHOLDER.format(index), statement)
+        return code
+
     def convert_funcproc_code(self, settings):
         funcproc_code = settings['funcproc_code']
         target_db_type = settings['target_db_type']
@@ -659,6 +1266,46 @@ class InformixConnector(DatabaseConnector):
         if target_db_type == 'postgresql':
             postgresql_code = funcproc_code
 
+            # Normalize the CREATE clause before anything else looks at it. Informix knows
+            # the variants CREATE DBA PROCEDURE / CREATE DBA FUNCTION (executable only by a
+            # user holding the DBA privilege) and CREATE ... IF NOT EXISTS, and every rule
+            # converting the header expects a plain "CREATE PROCEDURE" / "CREATE FUNCTION".
+            # Without this the whole header stays in the code as it was in Informix
+            # ("create dba procedure informix.systdist(...) returning int, date, ...").
+            # PostgreSQL has no DBA-only routine - restrict the EXECUTE privilege of such a
+            # function in the target instead, it is granted to PUBLIC by default.
+            normalized_code, dba_replacements = re.subn(
+                r'\bCREATE\s+DBA\s+(PROCEDURE|FUNCTION)\b',
+                r'CREATE \1',
+                postgresql_code,
+                flags=re.IGNORECASE)
+            if dba_replacements:
+                postgresql_code = normalized_code
+                self.config_parser.print_log_message('WARNING',
+                    "informix_connector: convert_funcproc_code: Routine is declared as a DBA routine - PostgreSQL has no equivalent, the keyword DBA is removed. Check the EXECUTE privilege of the created function, PostgreSQL grants it to PUBLIC.")
+
+            normalized_code, ine_replacements = re.subn(
+                r'\bCREATE\s+(PROCEDURE|FUNCTION)\s+IF\s+NOT\s+EXISTS\b',
+                r'CREATE \1',
+                postgresql_code,
+                flags=re.IGNORECASE)
+            if ine_replacements:
+                postgresql_code = normalized_code
+                self.config_parser.print_log_message('DEBUG',
+                    "informix_connector: convert_funcproc_code: Removed 'IF NOT EXISTS' from the CREATE clause - PostgreSQL does not support it for routines.")
+
+            # A function returning several values becomes one returning a table
+            postgresql_code = self.convert_returning_clause(postgresql_code)
+
+            # Global variables have no PL/pgSQL counterpart and become customized options
+            postgresql_code, global_variables = self.extract_global_variables(postgresql_code, target_db_type)
+
+            # A MERGE statement must not be touched by the line based conversion below
+            postgresql_code, merge_statements = self.extract_merge_statements(postgresql_code)
+            if merge_statements:
+                self.config_parser.print_log_message('DEBUG',
+                    f"informix_connector: convert_funcproc_code: {len(merge_statements)} MERGE statement(s) converted separately from the rest of the routine.")
+
             # Replace empty lines with ";"
             postgresql_code = re.sub(r'^\s*$', ';\n', postgresql_code, flags=re.MULTILINE)
             # Split the code based on "\n
@@ -668,8 +1315,17 @@ class InformixConnector(DatabaseConnector):
             # self.config_parser.print_log_message('DEBUG', 'informix_connector: convert_funcproc_code: Processing step 1: Splitting code into commands and replacing keywords')
 
             for command in commands:
+                ## A comment behind a statement has to be bracketed here, before the code is
+                ## split on the semicolon: 'RETURN;   -- being deleted; do not touch it' would
+                ## otherwise be torn apart at the semicolon inside the comment and its second
+                ## half would become a statement of its own.
+                comment_match = re.search(r'--', command)
+                if comment_match and not command.startswith('--') and command[:comment_match.start()].count("'") % 2 == 0:
+                    comment_text = command[comment_match.start() + 2:].strip().rstrip(';')
+                    command = f"{command[:comment_match.start()].rstrip()} /* {comment_text} */"
+
                 if command.startswith('--'):
-                    command = command.replace(command, f"\n/* {command.strip()} */;")
+                    command = command.replace(command, f"\n/* {command.strip().rstrip(';')} */;")
                 elif command.startswith('IF'):
                     command = command.replace(command, f";{command.strip()}")
 
@@ -762,13 +1418,27 @@ class InformixConnector(DatabaseConnector):
                 flags=re.IGNORECASE
             )
 
-            # Replace source_schema_name in the function/procedure name with target_schema_name
+            # Replace source_schema_name in the function/procedure name with target_schema_name.
+            # Informix keeps the CREATE statement as it was written, so the owner in front of the
+            # routine name is regularly unquoted - the quotes have to be optional here, otherwise
+            # the routine keeps the schema of the source and the target reports
+            # 'schema "..." does not exist'.
             postgresql_code = re.sub(
-                rf'CREATE\s+(FUNCTION|PROCEDURE)\s+"{source_schema_name}"\.',
+                rf'CREATE\s+(FUNCTION|PROCEDURE)\s+"?{re.escape(source_schema_name)}"?\.',
                 rf'CREATE \1 "{target_schema_name}".',
                 postgresql_code,
                 flags=re.IGNORECASE
             )
+
+            # A routine qualified with any other schema than the migrated one is left as it is -
+            # only reported, because that schema is not part of this migration.
+            foreign_schema_match = re.search(
+                r'CREATE\s+(?:FUNCTION|PROCEDURE)\s+"?(\w+)"?\.',
+                postgresql_code,
+                flags=re.IGNORECASE)
+            if foreign_schema_match and foreign_schema_match.group(1).lower() != target_schema_name.lower():
+                self.config_parser.print_log_message('WARNING',
+                    f"informix_connector: convert_funcproc_code: Routine is created in the schema \"{foreign_schema_match.group(1)}\" - neither the migrated schema \"{source_schema_name}\" nor the target schema \"{target_schema_name}\". It is kept as it is and will fail unless that schema exists in the target.")
 
             # Convert DEFINE lines to DECLARE and BEGIN block
             def_lines = re.findall(r'^\s*DEFINE\s+.*$', postgresql_code, flags=re.MULTILINE | re.IGNORECASE)
@@ -847,7 +1517,9 @@ class InformixConnector(DatabaseConnector):
                     postgresql_code = postgresql_code[:header_end] + '\n AS $$\n' + postgresql_code[header_end:]
 
             # header for functions
-            header_match = re.search(r'CREATE FUNCTION.*?RETURNING\s+\w+\s+;?', postgresql_code, flags=re.DOTALL | re.IGNORECASE)
+            # The return type may carry a length or a precision - 'RETURNING VARCHAR(120);'
+            # and 'RETURNING MONEY(14,2);' are as usual as a bare 'RETURNING INTEGER;'
+            header_match = re.search(rf'CREATE FUNCTION.*?RETURNING\s+{self.RETURN_TYPE_PATTERN}\s*;?', postgresql_code, flags=re.DOTALL | re.IGNORECASE)
             if header_match:
                 header_end = header_match.end()
                 postgresql_code_part = re.sub(r'RETURNING', 'RETURNS', postgresql_code[:header_end], flags=re.DOTALL | re.IGNORECASE)
@@ -857,7 +1529,7 @@ class InformixConnector(DatabaseConnector):
                     postgresql_code_part += ' AS $$\n'
                 postgresql_code = postgresql_code_part + postgresql_code[header_end:]
 
-            header_match = re.search(r'\s*RETURNING\s+\w+\s+;?', postgresql_code, flags=re.DOTALL | re.IGNORECASE)
+            header_match = re.search(rf'\s*RETURNING\s+{self.RETURN_TYPE_PATTERN}\s*;?', postgresql_code, flags=re.DOTALL | re.IGNORECASE)
             if header_match:
                 header_end = header_match.end()
                 postgresql_code_part = re.sub(r'RETURNING', 'RETURNS', postgresql_code[:header_end], flags=re.DOTALL | re.IGNORECASE)
@@ -875,7 +1547,7 @@ class InformixConnector(DatabaseConnector):
                 postgresql_code = re.sub(r'AS\s+\$\$', 'AS $$\nBEGIN', postgresql_code, flags=re.IGNORECASE)
 
             # Replace Informix specific syntax with PostgreSQL syntax
-            returning_matches = re.finditer(r'RETURNING\s+(\w+)\s*;', postgresql_code, flags=re.DOTALL | re.IGNORECASE | re.MULTILINE)
+            returning_matches = re.finditer(rf'RETURNING\s+({self.RETURN_TYPE_PATTERN})\s*;', postgresql_code, flags=re.DOTALL | re.IGNORECASE | re.MULTILINE)
             for match in returning_matches:
                 return_type = match.group(1)
                 postgresql_code = postgresql_code.replace(match.group(0), f'RETURNS {return_type} AS $$\n')
@@ -905,6 +1577,11 @@ class InformixConnector(DatabaseConnector):
             postgresql_code = re.sub(r'ELSE;', 'ELSE', postgresql_code, flags=re.IGNORECASE)
             postgresql_code = re.sub(r';;', ';', postgresql_code, flags=re.IGNORECASE )
             postgresql_code = re.sub(r'\*/;', '*/', postgresql_code, flags=re.IGNORECASE)
+
+            # Back in place before step 7, so that the tables of a MERGE are qualified
+            # with the target schema like the tables of every other statement
+            postgresql_code = self.restore_merge_statements(postgresql_code, merge_statements)
+            postgresql_code = self.restore_global_variables(postgresql_code, global_variables)
 
             self.config_parser.print_log_message('DEBUG3', f'informix_connector: convert_funcproc_code: Processing step 7: Replacing source schema and table names with target schema and table names ({len(table_list)} tables)')
 
@@ -1084,14 +1761,122 @@ class InformixConnector(DatabaseConnector):
                                 modified_exception_block = [re.sub(r'ON EXCEPTION;?', f'EXCEPTION WHEN OTHERS THEN', line) for line in modified_exception_block]
                                 modified_exception_block = [line for line in modified_exception_block if 'END EXCEPTION' not in line]
 
-                                end_index = next((i for i, line in enumerate(lines) if 'END;' in line and '$$ LANGUAGE plpgsql {function_immutable};' in lines[i + 1]), None)
+                                ## The exception handler belongs in front of the END of the
+                                ## routine, which is the line followed by the language clause.
+                                ## This condition used to be written as a plain string
+                                ## containing '{function_immutable}' instead of an f-string,
+                                ## so it never matched anything - and because the block had
+                                ## already been cut out above, the whole ON EXCEPTION handler
+                                ## was silently dropped from every routine which had one.
+                                end_index = next((i for i, line in enumerate(lines)
+                                                  if line.strip().startswith('END;')
+                                                  and i + 1 < len(lines)
+                                                  and lines[i + 1].lstrip().startswith('$$ LANGUAGE')), None)
                                 if end_index is not None:
                                     lines = lines[:end_index] + modified_exception_block + lines[end_index:]
+                                else:
+                                    self.config_parser.print_log_message('WARNING',
+                                        "informix_connector: convert_funcproc_code: The ON EXCEPTION block of the routine could not be placed into the converted code - the error handling has to be added manually.")
+                                    lines = lines[:exception_start_index] + [f"/* {line} */" for line in exception_block] + lines[exception_start_index:]
 
                                 # Join the lines back into a single string
                                 postgresql_code = '\n'.join(lines)
 
             postgresql_code = re.sub(r';;', ';', postgresql_code, flags=re.IGNORECASE)
+
+            # RAISE EXCEPTION of Informix names the error number and the ISAM error code in
+            # front of the message ('RAISE EXCEPTION -746, 0, 'text''), while PL/pgSQL expects
+            # the message first and takes everything else through a USING clause.
+            def convert_raise_exception(match):
+                error_number = match.group('error')
+                isam_error = match.group('isam')
+                message = (match.group('message') or '').strip()
+
+                if not message:
+                    ## an exception raised without a message of its own would arrive in the
+                    ## target as an empty error - the error number is reported instead
+                    message = f"'Informix error {error_number}'"
+                    self.config_parser.print_log_message('DEBUG',
+                        f"informix_connector: convert_funcproc_code: RAISE EXCEPTION {error_number} has no message of its own - the error number is reported as the message.")
+
+                statement = f"RAISE EXCEPTION {message}"
+
+                ## -746 is the number Informix itself uses for an exception raised by a
+                ## routine, and PL/pgSQL raises its own exceptions with the equivalent
+                ## SQLSTATE P0001 - there is nothing to carry over. Any other number is
+                ## chosen by the routine and part of what its callers check for, so it is
+                ## kept in the DETAIL of the message instead of being dropped silently.
+                if error_number != self.INFORMIX_USER_EXCEPTION_ERROR:
+                    detail = f"Informix error {error_number}"
+                    if isam_error and isam_error.strip('-0') != '':
+                        detail += f", ISAM error {isam_error}"
+                    statement += f" USING DETAIL = '{detail}'"
+                    self.config_parser.print_log_message('DEBUG',
+                        f"informix_connector: convert_funcproc_code: RAISE EXCEPTION {error_number} is raised with the standard SQLSTATE of PL/pgSQL, the error number is kept in the DETAIL of the message.")
+                return statement
+
+            postgresql_code = re.sub(
+                r"(?i)\bRAISE\s+EXCEPTION\s+(?P<error>-?\d+)\s*(?:,\s*(?P<isam>-?\d+)\s*)?(?:,\s*(?P<message>'(?:[^']|'')*'))?",
+                convert_raise_exception,
+                postgresql_code)
+
+            # Transaction control inside a routine. A PL/pgSQL block runs in the transaction
+            # of its caller, so 'BEGIN WORK' has no counterpart at all, and PL/pgSQL knows no
+            # SAVEPOINT either - its subtransaction is the BEGIN ... EXCEPTION ... END block.
+            # The statements are commented out instead of being dropped, so that the reader
+            # of the converted routine sees what the source did.
+            ## One pass over all of them, longest first: replacing them one kind after the
+            ## other would match SAVEPOINT again inside the comment just written around
+            ## 'ROLLBACK WORK TO SAVEPOINT x'. Not anchored to the start of a line either -
+            ## the statement also turns up behind 'EXCEPTION WHEN OTHERS THEN' once the
+            ## exception block has been moved.
+            commented_out_statements = []
+
+            def comment_out_transaction_statement(match):
+                commented_out_statements.append(re.sub(r'\s+', ' ', match.group(0).strip()))
+                return f"/* {match.group(0).strip()} */"
+
+            postgresql_code = re.sub(
+                r'(?i)\b(?:ROLLBACK\s+WORK\s+TO\s+SAVEPOINT\s+\w+|BEGIN\s+WORK|COMMIT\s+WORK|ROLLBACK\s+WORK|SAVEPOINT\s+\w+)\s*;',
+                comment_out_transaction_statement,
+                postgresql_code)
+            if commented_out_statements:
+                self.config_parser.print_log_message('WARNING',
+                    f"informix_connector: convert_funcproc_code: The transaction control of the routine was commented out ({', '.join(commented_out_statements)}) - a PL/pgSQL routine runs in the transaction of its caller and has no savepoints of its own. Verify that the caller commits, and use a BEGIN ... EXCEPTION ... END block where the routine relied on a savepoint.")
+
+            # Informix calls a routine with EXECUTE PROCEDURE / EXECUTE FUNCTION, and takes
+            # the result of the call through an INTO clause behind it
+            ## both parts stop at the semicolon - a call without an INTO clause of its own
+            ## would otherwise reach across the statements which follow it and take the INTO
+            ## of a later SELECT
+            postgresql_code = re.sub(
+                r'(?is)\bEXECUTE\s+(?:PROCEDURE|FUNCTION)\s+(?P<call>[^;]+?)\s+INTO\s+(?P<target>[^;]+);',
+                lambda match: f"SELECT {match.group('call').strip()} INTO {match.group('target').strip()};",
+                postgresql_code)
+            ## a procedure is called with CALL, a function has to be selected - PERFORM is
+            ## the way to call one whose result is not used
+            postgresql_code = re.sub(r'(?i)\bEXECUTE\s+PROCEDURE\s+', 'CALL ', postgresql_code)
+            postgresql_code = re.sub(r'(?i)\bEXECUTE\s+FUNCTION\s+', 'PERFORM ', postgresql_code)
+
+            # Sequences are read through the pseudo columns of the sequence in Informix
+            postgresql_code = re.sub(r'(?i)\b(\w+)\.NEXTVAL\b', r"nextval('\1')", postgresql_code)
+            postgresql_code = re.sub(r'(?i)\b(\w+)\.CURRVAL\b', r"currval('\1')", postgresql_code)
+            # sysdual is the one row pseudo table of Informix, PostgreSQL selects without FROM
+            postgresql_code = re.sub(r'(?i)\s+FROM\s+(?:\w+:)?sysdual\b', '', postgresql_code)
+            # TODAY is the current date, CURRENT is already handled with the other keywords
+            postgresql_code = re.sub(r'(?i)\bTODAY\b', 'CURRENT_DATE', postgresql_code)
+
+            # The pattern operator of Informix, which PostgreSQL does not know
+            postgresql_code = self.convert_matches_operator(postgresql_code)
+
+            # The SQL functions of Informix which the target does not know under that name.
+            # Without this a routine using them is created without a complaint - PostgreSQL
+            # only checks the syntax of a PL/pgSQL body - and fails on its first call.
+            postgresql_code = self.apply_sql_functions_mapping(postgresql_code, settings)
+
+            # The data types of the parameter list, of the DECLARE section and of a cast
+            postgresql_code = self.convert_data_types_in_code(postgresql_code, target_db_type)
+
             # Indent the code
             postgresql_code = self.config_parser.indent_code(postgresql_code)
             # Remove empty lines from the converted code
@@ -1104,6 +1889,15 @@ class InformixConnector(DatabaseConnector):
                     lines.insert(i + 1, "BEGIN")
                     break
             postgresql_code = "\n".join(lines)
+
+            # Report what could not be converted, instead of leaving it to be discovered
+            # in the error message of the target database.
+            if re.search(r'\bRETURNING\b', postgresql_code, flags=re.IGNORECASE):
+                self.config_parser.print_log_message('WARNING',
+                    "informix_connector: convert_funcproc_code: The RETURNING clause of the routine could not be converted - only a single return type is handled. A routine returning several values needs 'RETURNS TABLE (...)' or OUT parameters in PostgreSQL, the converted code has to be completed manually.")
+            if re.search(r'\bWITH\s+RESUME\b', postgresql_code, flags=re.IGNORECASE):
+                self.config_parser.print_log_message('WARNING',
+                    "informix_connector: convert_funcproc_code: The routine returns a set of rows with 'RETURN ... WITH RESUME'. PostgreSQL needs a set returning function ('RETURNS SETOF ...' / 'RETURNS TABLE (...)' with 'RETURN NEXT'), the converted code has to be completed manually.")
 
             return postgresql_code
 
@@ -1209,6 +2003,7 @@ class InformixConnector(DatabaseConnector):
                     select_columns_list = []
                     orderby_columns_list = []
                     insert_columns_list = []
+                    document_cast_length = self.calculate_document_cast_length(source_columns)
                     for order_num, col in source_columns.items():
                         self.config_parser.print_log_message('DEBUG2',
                                                             f"Worker {worker_id}: Table {source_schema_name}.{source_table_name}: Processing column {col['column_name']} ({order_num}) with data type {col['data_type']}")
@@ -1220,6 +2015,30 @@ class InformixConnector(DatabaseConnector):
                         elif col['data_type'].lower() in ['char', 'nchar']:
                             ## compensate for Informix's fixed-length char columns
                             select_columns_list.append(f"trim({col['column_name']}) as {col['column_name']}")
+                        elif col['data_type'].lower() == 'interval':
+                            ## the driver hands an interval over as a com.informix.lang.Interval
+                            ## object, which the target cannot store - reading it normalized to
+                            ## the widest qualifier of its class gives a text of a known shape,
+                            ## which convert_interval_value() turns into a PostgreSQL literal
+                            qualifier = 'YEAR(9) TO MONTH' if self.is_year_month_interval(col) else 'DAY(9) TO SECOND'
+                            select_columns_list.append(f"CAST(CAST({col['column_name']} AS INTERVAL {qualifier}) AS LVARCHAR(40)) as {col['column_name']}")
+                        elif col['data_type'].lower() in ['bson', 'json']:
+                            ## Both are opaque types of Informix and would arrive as an object of the
+                            ## driver, which the target JSONB column cannot accept - a BSON document is
+                            ## converted to its JSON representation first, JSON is already text
+                            self.config_parser.print_log_message('WARNING',
+                                f"informix_connector: migrate_table: Worker {worker_id}: Table {source_schema_name}.{source_table_name}: Column {col['column_name']} ({col['data_type']}) is transferred as its JSON text representation, limited to {document_cast_length} characters by the maximum output rowsize of Informix - larger documents have to be migrated separately.")
+                            if col['data_type'].lower() == 'bson':
+                                select_columns_list.append(f"CAST(CAST({col['column_name']} AS JSON) AS LVARCHAR({document_cast_length})) as {col['column_name']}")
+                            else:
+                                select_columns_list.append(f"CAST({col['column_name']} AS LVARCHAR({document_cast_length})) as {col['column_name']}")
+                        elif col['data_type'].lower() in self.COLLECTION_DATA_TYPES:
+                            ## A collection or row column arrives as an object of the driver -
+                            ## Informix renders it as its literal text representation instead,
+                            ## which is what the TEXT column of the target expects
+                            self.config_parser.print_log_message('WARNING',
+                                f"informix_connector: migrate_table: Worker {worker_id}: Table {source_schema_name}.{source_table_name}: Column {col['column_name']} ({col['data_type']}) is transferred as its literal text representation, limited to {document_cast_length} characters by the maximum output rowsize of Informix.")
+                            select_columns_list.append(f"CAST({col['column_name']} AS LVARCHAR({document_cast_length})) as {col['column_name']}")
                         #     select_columns_list.append(f"ST_asText(`{col['column_name']}`) as `{col['column_name']}`")
                         # elif col['data_type'].lower() == 'set':
                         #     select_columns_list.append(f"cast(`{col['column_name']}` as char(4000)) as `{col['column_name']}`")
@@ -1269,7 +2088,8 @@ class InformixConnector(DatabaseConnector):
                     batch_number = 0
                     batch_durations = []
 
-                    cursor.execute(query)
+                    query = self.execute_query_with_rowsize_retry(
+                        cursor, query, document_cast_length, worker_id, f"{source_schema_name}.{source_table_name}")
                     total_inserted_rows = 0
                     while True:
                         records = cursor.fetchmany(batch_size)
@@ -1291,7 +2111,11 @@ class InformixConnector(DatabaseConnector):
                                 column_type = column['data_type']
                                 target_column_type = target_columns[order_num]['data_type']
                                 # if column_type.lower() in ['binary', 'bytea']:
-                                if column_type.lower() in ['blob'] and record[column_name] is not None:
+                                if column_type.lower() in self.ARRAY_DATA_TYPES and record[column_name] is not None:
+                                    record[column_name] = self.convert_collection_value(record[column_name])
+                                elif column_type.lower() == 'interval' and record[column_name] is not None:
+                                    record[column_name] = self.convert_interval_value(record[column_name], self.is_year_month_interval(column))
+                                elif column_type.lower() in ['blob'] and record[column_name] is not None:
                                     record[column_name] = bytes(record[column_name].getBytes(1, int(record[column_name].length())))  # Convert 'com.informix.jdbc.IfxCblob' to bytes
                                 elif column_type.lower() in ['clob'] and record[column_name] is not None:
                                     # elif isinstance(record[column_name], IfxCblob):
@@ -1477,7 +2301,11 @@ class InformixConnector(DatabaseConnector):
                 """
                 cursor.execute(query)
                 trigger_code = cursor.fetchall()
-                trigger_code_str = '\n'.join([body[0].strip() for body in trigger_code])
+                ## Informix stores the text of a trigger split into fixed size pieces, one
+                ## row per seqno - joining them with a newline and stripping each piece cuts
+                ## words in half at every boundary ("n.total_amo" + "unt"), the pieces have
+                ## to be concatenated exactly as they are stored
+                trigger_code_str = ''.join([body[0] for body in trigger_code if body[0] is not None]).strip()
 
                 trigger_code_lines = trigger_code_str.split('\n')
 
@@ -1501,275 +2329,211 @@ class InformixConnector(DatabaseConnector):
             raise
 
 
-    def convert_trigger(self, informix_code: str, settings: dict):
-        pgsql_trigger_code = ''
+    def read_parenthesized_group(self, text, start):
+        """
+        Content of the parenthesized group beginning at or behind 'start'.
+
+        Returns the text between the parentheses and the position behind the closing one,
+        counting the nesting and skipping string literals.
+        """
+        open_position = text.find('(', start)
+        if open_position == -1:
+            return '', len(text)
+        depth = 0
+        quote = ''
+        for index in range(open_position, len(text)):
+            character = text[index]
+            if quote:
+                if character == quote:
+                    quote = ''
+            elif character in ("'", '"'):
+                quote = character
+            elif character == '(':
+                depth += 1
+            elif character == ')':
+                depth -= 1
+                if depth == 0:
+                    return text[open_position + 1:index], index + 1
+        return text[open_position + 1:], len(text)
+
+    def extract_trigger_action_blocks(self, trig):
+        """
+        Split the action part of an Informix trigger into its blocks.
+
+        One trigger may carry all three of them:
+
+            BEFORE (actions) FOR EACH ROW [WHEN (condition)] (actions) AFTER (actions)
+
+        BEFORE and AFTER run once per statement, FOR EACH ROW once per row. Reading them
+        with a greedy regular expression let the FOR EACH ROW block swallow everything up
+        to the last closing parenthesis, so the statements of the AFTER block ended up
+        inside the row trigger and the parentheses no longer matched. The blocks are read
+        by counting parentheses instead.
+
+        Returns a list of (kind, when_condition, actions), kind being 'before', 'after'
+        or 'for each row'.
+        """
+        blocks = []
+        position = 0
+        keyword = re.compile(r'(?i)\b(before|after|for\s+each\s+row)\b')
+        while True:
+            match = keyword.search(trig, position)
+            if not match:
+                break
+            kind = re.sub(r'\s+', ' ', match.group(1)).lower()
+            position = match.end()
+
+            ## a WHEN condition belongs to the action list which follows it
+            when_condition = ''
+            when_match = re.compile(r'(?i)\s*\bwhen\b').match(trig, position)
+            if when_match:
+                when_condition, position = self.read_parenthesized_group(trig, when_match.end())
+
+            if trig.find('(', position) == -1:
+                break
+            actions, position = self.read_parenthesized_group(trig, position)
+            blocks.append((kind, when_condition.strip(), self.split_top_level_commas(actions)))
+        return blocks
+
+    def convert_trigger_action(self, action, settings, old_ref, new_ref):
+        """ One action of a trigger block as a PL/pgSQL statement """
+        action = action.replace(f'''"{settings['source_schema_name']}"''', f'''"{settings['target_schema_name']}"''')
+        ## PostgreSQL calls a procedure with CALL - 'EXECUTE FUNCTION' of CREATE TRIGGER is
+        ## something else entirely, it names the trigger function and takes only literals
+        action = re.sub(r'(?i)^\s*execute\s+procedure\s*', 'CALL ', action)
+        return self.map_trigger_correlation_names(action.strip(), old_ref, new_ref).rstrip(';')
+
+    def convert_trigger(self, settings: dict):
+        """
+        Convert the triggers of one Informix table to PostgreSQL.
+
+        Every action block of the source becomes a trigger of its own, because PostgreSQL
+        separates what Informix writes in a single statement: the BEFORE and AFTER blocks
+        are statement level triggers, the FOR EACH ROW block is a row level one. Each of
+        them gets the trigger function PostgreSQL requires - a trigger cannot execute the
+        statements directly.
+        """
+        informix_code = settings['trigger_sql']
+        source_schema_name = settings['source_schema_name']
+        target_schema_name = settings['target_schema_name']
         pgsql_triggers = []
-        trigger_code = ''
         trigger_name = ''
-        func_code = ''
 
         try:
-            # Split the input into individual trigger definitions
-            triggers = re.split(r'(?i)create trigger', informix_code, re.IGNORECASE | re.DOTALL | re.MULTILINE)
-            for trig in triggers:
+            for trig in re.split(r'(?i)create\s+trigger', informix_code):
                 trig = trig.strip()
                 if not trig:
                     continue
 
-                trig_lines = trig.split('\n')
-                trig_lines = [line.strip() for line in trig_lines]
-                trig_lines = [line for line in trig_lines if line != '--']
-                trig_lines = [f"/* {line.strip()} */" if line.startswith('--') else line for line in trig_lines]
-                trig = '\n'.join(trig_lines)
+                ## the code is read as one line below, so a comment would swallow whatever
+                ## follows it - they are turned into the bracketed form first
+                trig = '\n'.join(f"/* {line.strip()} */" if line.strip().startswith('--') else line
+                                 for line in trig.split('\n') if line.strip() != '--')
+                trig = re.sub(r'\s+', ' ', trig).strip()
                 self.config_parser.print_log_message('DEBUG', f"informix_connector: convert_trigger: Trigger code: {trig}")
 
-                # Replace groups of multiple spaces with just one space
-                trig = re.sub(r'\s+', ' ', trig)
-                # Add new line character before each word WHEN (case insensitive)
-                trig = re.sub(r'(?i)\s*when', '\nWHEN', trig, flags=re.IGNORECASE)
-
-                # Extract how NEW and OLD are referenced in Informix code
-                new_ref = ""
-                old_ref = ""
-                ref_match = re.search(r'referencing\s+(new\s+as\s+(\S+))?\s*(old\s+as\s+(\S+))?', trig, re.IGNORECASE)
-                if ref_match:
-                    new_ref = ref_match.group(2) if ref_match.group(2) else ""
-                    old_ref = ref_match.group(4) if ref_match.group(4) else ""
-
-                self.config_parser.print_log_message('DEBUG', f"informix_connector: convert_trigger: new_ref: {new_ref}, old_ref: {old_ref}")
-
-                # Extract schema, trigger name, and operation (insert/update)
-                header_match = re.match(r'"([^"]+)"\.(\S+)\s+(insert|update|delete)', trig, re.IGNORECASE)
+                ## 'INSTEAD OF' stands between the name and the event of a trigger on a view
+                header_match = re.match(r'(?i)"?([^".\s]+)"?\.(\S+?)"?\s+(?:(instead\s+of)\s+)?(insert|update|delete)\b', trig)
                 if not header_match:
+                    self.config_parser.print_log_message('WARNING',
+                        f"informix_connector: convert_trigger: The header of a trigger could not be read, it is not migrated: {trig[:120]}")
                     continue
                 schema = header_match.group(1)
-                trigger_name = header_match.group(2)
-                operation = header_match.group(3).lower()
+                trigger_name = header_match.group(2).strip('"')
+                instead_of = bool(header_match.group(3))
+                operation = header_match.group(4).upper()
 
-                self.config_parser.print_log_message('DEBUG', f"informix_connector: convert_trigger: Trigger name: {trigger_name}, Operation: {operation}")
+                ## 'UPDATE OF a, b' fires only when one of those columns is written, and
+                ## PostgreSQL knows the same restriction
+                update_columns = ''
+                if operation == 'UPDATE':
+                    columns_match = re.match(r'(?i)\s*of\s+(.+?)\s+on\b', trig[header_match.end():])
+                    if columns_match:
+                        update_columns = ' OF ' + ', '.join(column.strip().strip('"') for column in columns_match.group(1).split(','))
 
-                # Extract the table name (assumes: on "schemaname".table)
-                table_match = re.search(r'\s+on\s+"([^"]+)"\.(\S+)', trig, re.IGNORECASE)
-                if table_match:
-                    table_schema = table_match.group(1)
-                    table_name = table_match.group(2)
-                else:
-                    table_schema = schema
-                    table_name = "unknown_table"
+                table_match = re.search(r'(?i)\son\s+"?([^".\s]+)"?\.\s*"?([^"\s(]+)"?', trig)
+                table_schema = table_match.group(1) if table_match else schema
+                table_name = table_match.group(2) if table_match else 'unknown_table'
+                if table_schema == source_schema_name:
+                    table_schema = target_schema_name
 
-                self.config_parser.print_log_message('DEBUG', f"informix_connector: convert_trigger: Table name: {table_name}, Schema: {table_schema}")
-
-                func_body_lines = []
-
-                order_num = 1
-                when_conditions = {}
-                proc_calls = {}
-
-                # when_pattern = re.compile(r'when\s*\((.*?)\)\s*\((.*?)\)', re.DOTALL | re.IGNORECASE)
-                # after_pattern = re.compile(r'after\s*\((.*)\)', re.DOTALL | re.IGNORECASE)
-
-                # when_matches = re.findall(r'(?:when\s*\((.*?)\)\s*)?\(\s*(execute procedure.*?;?)\s*\)', trig, re.IGNORECASE | re.DOTALL | re.MULTILINE)
-                # when_matches = re.findall(r'(?:when\s*\((.*?)\)\s*)?\(\s*(execute procedure.*?\(.*?\));?\s*\)', trig, re.IGNORECASE | re.DOTALL | re.MULTILINE)
-                # when_matches = re.findall(r'(?:when\s*\((?:\((?:\((.*?)\))?\))?\)\s*)?\(\s*(execute procedure.*?\(.*?\));?\s*\)', trig, re.IGNORECASE | re.DOTALL | re.MULTILINE)
-                when_matches = re.findall(r'when\s*\((.*?)\)\s*\((.*?\)\s*\))', trig, re.IGNORECASE | re.DOTALL | re.MULTILINE)
-                # when_matches = re.findall(r'when\s*\((.*?)\)\s*\((.*?\n*?)\)', trig, re.IGNORECASE | re.DOTALL | re.MULTILINE)
-
-                self.config_parser.print_log_message('DEBUG', f"informix_connector: convert_trigger: when_matches: {when_matches}")
-
-                for match in when_matches:
-                    when_condition = match[0]
-                    proc_call = match[1]
-                    proc_call = re.sub(r'\*/', '*/\n', proc_call, flags=re.IGNORECASE)
-                    when_conditions[order_num] = when_condition
-                    proc_calls[order_num] = proc_call
-                    order_num += 1
-                    self.config_parser.print_log_message('DEBUG', f"informix_connector: convert_trigger: when_condition: {when_condition}")
-                    self.config_parser.print_log_message('DEBUG', f"informix_connector: convert_trigger: proc_call: {proc_call}")
-
-                after_pattern = re.compile(r'after\s*\((.*)\)', re.DOTALL | re.IGNORECASE | re.MULTILINE)
-                # Extract AFTER clause
-                after_match = after_pattern.search(trig)
-                after_all_commands = []
-                after_current_command = []
-                if after_match:
-                    after_content = after_match.group(1).strip()
-                    # Split the content into individual SQL commands by commas, considering nested structures
-                    open_parentheses = 0
-
-                    for part in re.split(r'(,)', after_content):  # Keep commas as separate tokens
-                        if part == ',' and open_parentheses == 0:
-                        # Check if the current command starts with a valid SQL keyword
-                            if after_current_command and any(after_current_command[0].strip().lower().startswith(kw) for kw in ['insert', 'update', 'delete']):
-                                # End of a command
-                                after_all_commands.append(''.join(after_current_command).strip())
-                                after_current_command = []
-                            else:
-                                # Concatenate with the previous part
-                                if after_all_commands:
-                                    after_all_commands[-1] += ',' + ''.join(after_current_command).strip()
-                                    after_current_command = []
+                ## Informix names the two row images itself, in either order
+                new_ref = ''
+                old_ref = ''
+                ref_match = re.search(r'(?i)referencing\s+((?:(?:new|old)\s+as\s+\w+\s*)+)', trig)
+                if ref_match:
+                    for correlation, alias in re.findall(r'(?i)(new|old)\s+as\s+(\w+)', ref_match.group(1)):
+                        if correlation.lower() == 'new':
+                            new_ref = alias
                         else:
-                            after_current_command.append(part)
-                            # Track parentheses to handle nested structures
-                            open_parentheses += part.count('(') - part.count(')')
+                            old_ref = alias
 
-                    # Add the last command if any
-                    if after_current_command:
-                        if any(after_current_command[0].strip().lower().startswith(kw) for kw in ['insert', 'update', 'delete']):
-                            after_all_commands.append(''.join(after_current_command).strip())
-                        else:
-                            if after_all_commands:
-                                after_all_commands[-1] += ',' + ''.join(after_current_command).strip()
+                self.config_parser.print_log_message('DEBUG',
+                    f"informix_connector: convert_trigger: {trigger_name}: {'INSTEAD OF ' if instead_of else ''}{operation}{update_columns} on {table_schema}.{table_name}, new: {new_ref or '-'}, old: {old_ref or '-'}")
 
-                    self.config_parser.print_log_message('DEBUG', f"informix_connector: convert_trigger: AFTER part after_all_commands: {after_all_commands}")
+                blocks = self.extract_trigger_action_blocks(trig)
+                if not blocks:
+                    self.config_parser.print_log_message('WARNING',
+                        f"informix_connector: convert_trigger: Trigger {trigger_name} has no action which could be read - it has to be migrated manually.")
+                    continue
 
-                if not when_conditions and not proc_calls:
-                    action_all_commands = []
-                    action_current_command = []
-                    actions_match = re.search(r'for each row\s*\((.*)\)', trig, re.IGNORECASE | re.DOTALL)
-                    if actions_match:
-                        action_content = actions_match.group(1).strip()
-                        # Split the content into individual SQL commands by commas, considering nested structures
-                        open_parentheses = 0
-
-                        for part in re.split(r'(,)', action_content):  # Keep commas as separate tokens
-                            if part == ',' and open_parentheses == 0:
-                            # Check if the current command starts with a valid SQL keyword
-                                if action_current_command and any(action_current_command[0].strip().lower().startswith(kw) for kw in ['insert', 'update', 'delete']):
-                                    # End of a command
-                                    action_all_commands.append(''.join(action_current_command).strip())
-                                    action_current_command = []
-                                else:
-                                    # Concatenate with the previous part
-                                    if action_all_commands:
-                                        action_all_commands[-1] += ',' + ''.join(action_current_command).strip()
-                                        action_current_command = []
-                            else:
-                                action_current_command.append(part)
-                                # Track parentheses to handle nested structures
-                                open_parentheses += part.count('(') - part.count(')')
-
-                        # Add the last command if any
-                        if action_current_command:
-                            if any(action_current_command[0].strip().lower().startswith(kw) for kw in ['insert', 'update', 'delete']):
-                                action_all_commands.append(''.join(action_current_command).strip())
-                            else:
-                                if action_all_commands:
-                                    action_all_commands[-1] += ',' + ''.join(action_current_command).strip()
-
-                        self.config_parser.print_log_message('DEBUG', f"informix_connector: convert_trigger: ACTION part action_all_commands: {action_all_commands}")
-
-                        actions = actions_match.group(1).split(',')
-                        for action in actions:
-                            self.config_parser.print_log_message('INFO', f"informix_connector: convert_trigger: action: {action.strip()}")
-                            if "execute procedure" in action:
-                                # action = re.sub("execute procedure", "", action, flags=re.IGNORECASE) ## keep it for further processing
-                                action = re.sub("with trigger references", "", action, flags=re.IGNORECASE)
-                                action = action.replace(settings['source_schema_name'], settings['target_schema_name'])
-                            proc_calls[order_num] = action.strip()
-                            order_num += 1
-
-                self.config_parser.print_log_message('DEBUG', f"informix_connector: convert_trigger: when_conditions: {when_conditions}")
-                self.config_parser.print_log_message('DEBUG', f"informix_connector: convert_trigger: proc_calls: {proc_calls}")
-
-                function_name = trigger_name + "_trigfunc"
                 counter = 0
-                if ((when_conditions and proc_calls) or after_all_commands):
+                for kind, when_condition, actions in blocks:
+                    actions = [self.convert_trigger_action(action, settings, old_ref, new_ref)
+                               for action in actions if action.strip()]
+                    if not actions:
+                        continue
 
-                    for i in when_conditions.keys():
-                        proc_call = proc_calls[i].replace("execute procedure", "PERFORM")
+                    row_level = kind == 'for each row'
+                    if row_level:
+                        timing = 'INSTEAD OF' if instead_of else 'AFTER'
+                        scope = 'FOR EACH ROW'
+                        ## the row PostgreSQL expects back - for a DELETE only OLD is filled,
+                        ## and an INSTEAD OF trigger reports the row as handled by returning it
+                        returned_row = 'OLD' if operation == 'DELETE' else 'NEW'
+                    else:
+                        timing = 'BEFORE' if kind == 'before' else 'AFTER'
+                        scope = 'FOR EACH STATEMENT'
+                        ## a statement level trigger has neither OLD nor NEW
+                        returned_row = 'NULL'
+                        for action in actions:
+                            if re.search(r'(?i)\b(OLD|NEW)\.', action):
+                                self.config_parser.print_log_message('WARNING',
+                                    f"informix_connector: convert_trigger: Trigger {trigger_name}: the {kind.upper()} block uses a column of the changed row, which a statement level trigger of PostgreSQL cannot read. The statement has to be migrated manually: {action}")
 
-                        if when_conditions[i]:
-                            func_body_lines.append(f"    IF {when_conditions[i]} THEN")
-                            func_body_lines.append(f"        {proc_call.replace(settings['source_schema_name'], settings['target_schema_name'])};")
-                            func_body_lines.append("    END IF;")
+                    body_lines = [f"    {action};" for action in actions]
+                    if when_condition:
+                        condition = self.map_trigger_correlation_names(when_condition, old_ref, new_ref)
+                        body_lines = [f"    IF {condition} THEN"] + [f"    {line}" for line in body_lines] + ["    END IF;"]
 
-                    if re.search(r'for each row', trig, re.IGNORECASE) and after_all_commands:
-                        func_body_lines.append(f"""    /* AFTER part */""")
-                        for after_command in after_all_commands:
-                            if after_command:
-                                func_body_lines.append(f"""    {after_command.replace(f'''"{settings['source_schema_name']}"''', f'''"{settings['target_schema_name']}"''')};""")
+                    function_name = f"{trigger_name}_trigfunc{counter}"
+                    func_code = (f'CREATE OR REPLACE FUNCTION "{target_schema_name}"."{function_name}"()\n'
+                                 f'RETURNS trigger AS $$\n'
+                                 f'BEGIN\n'
+                                 + '\n'.join(body_lines) + '\n'
+                                 f'    RETURN {returned_row};\n'
+                                 f'END;\n'
+                                 f'$$ LANGUAGE plpgsql;')
 
-                    if ((not re.search(r'for each row', trig, re.IGNORECASE) or re.search(r'before', trig, re.IGNORECASE))
-                        and after_all_commands):
-                        self.config_parser.print_log_message('ERROR', f"informix_connector: convert_trigger: Trigger {trigger_name} has AFTER clause but is not FOR EACH ROW. This is not supported!!!")
-                        func_body_lines.append("/* AFTER clause not migrated */")
-                        for after_command in after_all_commands:
-                            if after_command:
-                                func_body_lines.append(f"/*    {after_command.replace(settings['source_schema_name'], settings['target_schema_name'])}; */")
-
-                    self.config_parser.print_log_message('DEBUG3', f"informix_connector: convert_trigger: func_body_lines: {func_body_lines}")
-
-                    func_code = f"""CREATE OR REPLACE FUNCTION "{settings['target_schema_name']}"."{function_name + str(counter)}"()
-                        RETURNS trigger AS $$
-                        BEGIN
-                        {chr(10).join(func_body_lines)}
-                            RETURN NEW;
-                        END;
-                        $$ LANGUAGE plpgsql;"""
-
-                    trigger_code = f"""CREATE TRIGGER "{trigger_name + str(counter)}" """
-
-                    if re.search(r'for each row', trig, re.IGNORECASE):
-                        trigger_code += f"""\nAFTER {operation.upper()} ON "{table_schema.replace(settings['source_schema_name'], settings['target_schema_name'])}"."{table_name}" """
-
-                    if new_ref:
-                        trigger_code += f"\nREFERENCING NEW TABLE AS {new_ref}"
-                    if old_ref:
-                        trigger_code += f"\nREFERENCING OLD TABLE AS {old_ref}"
-
-                    if re.search(r'for each row', trig, re.IGNORECASE):
-                        trigger_code += f"\nFOR EACH ROW"
-
-                    trigger_code += f"\nEXECUTE FUNCTION {schema.replace(settings['source_schema_name'], settings['target_schema_name'])}.{function_name + str(counter)}();"
-                    counter += 1
+                    trigger_code = (f'CREATE TRIGGER "{trigger_name}{counter}"\n'
+                                    f'{timing} {operation}{update_columns} ON "{table_schema}"."{table_name}"\n'
+                                    f'{scope}\n'
+                                    f'EXECUTE FUNCTION "{target_schema_name}"."{function_name}"();')
 
                     pgsql_triggers.append(func_code + "\n\n" + trigger_code)
-
-                elif not when_conditions and proc_calls:
-                    for i in proc_calls.keys():
-                        trigger_code = ''
-                        func_code = ''
-                        proc_call = proc_calls[i]
-                        self.config_parser.print_log_message('DEBUG3', f"informix_connector: convert_trigger: proc_call: {proc_call}")
-
-                        trigger_code = f"""CREATE TRIGGER "{trigger_name + str(counter)}" """
-
-                        if re.search(r'for each row', trig, re.IGNORECASE):
-                            trigger_code += f"""\nAFTER {operation.upper()} ON "{table_schema.replace(settings['source_schema_name'], settings['target_schema_name'])}"."{table_name}" """
-
-                        if new_ref:
-                            trigger_code += f"\nREFERENCING NEW TABLE AS {new_ref}"
-                        if old_ref:
-                            trigger_code += f"\nREFERENCING OLD TABLE AS {old_ref}"
-
-                        if re.search(r'for each row', trig, re.IGNORECASE):
-                            trigger_code += f"\nFOR EACH ROW"
-
-                        if proc_call.startswith("execute procedure"):
-                            proc_call = proc_call.replace("execute procedure", "")
-                            trigger_code += f"\nEXECUTE FUNCTION {proc_call};"
-                        else:
-                            func_code = f"""CREATE OR REPLACE FUNCTION "{settings['target_schema_name']}"."{function_name + str(counter)}"()
-                                RETURNS trigger AS $$
-                                BEGIN
-                                    {proc_call.replace(f'''"{settings['source_schema_name']}"''', f'''"{settings['target_schema_name']}"''')};
-                                    RETURN NEW;
-                                END;
-                                $$ LANGUAGE plpgsql;"""
-                            trigger_code += f"\nEXECUTE FUNCTION {settings['target_schema_name']}.{function_name + str(counter)}();"
-                            counter += 1
-
-                        pgsql_triggers.append(func_code + "\n\n" + trigger_code)
+                    counter += 1
 
             pgsql_trigger_code = "\n\n".join(pgsql_triggers)
+            pgsql_trigger_code = self.convert_matches_operator(pgsql_trigger_code)
+            pgsql_trigger_code = self.apply_sql_functions_mapping(pgsql_trigger_code, settings)
+            # The body names Informix data types in its casts, e.g. '::lvarchar(2000)'
+            pgsql_trigger_code = self.convert_data_types_in_code(pgsql_trigger_code, settings['target_db_type'])
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"informix_connector: convert_trigger: Error converting trigger {trigger_name}: {e}")
             self.config_parser.print_log_message('ERROR', traceback.format_exc())
+            return ''
 
         return pgsql_trigger_code
-
-
 
     def execute_query(self, query: str, params=None):
         cursor = self.connection.cursor()
@@ -2314,9 +3078,78 @@ class InformixConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', f"informix_connector: fetch_all_rows: Error fetching all rows: {e}")
             return []
 
+    def convert_informix_default(self, settings) -> str:
+        """
+        Translate one sysdefaults record into a default value usable in PostgreSQL.
+
+        sysdefaults.type tells which kind of default was declared - only type 'L'
+        stores a literal in sysdefaults.default, all other types are keywords
+        (TODAY, CURRENT, USER, SITENAME/DBSERVERNAME, NULL) which are stored
+        nowhere else and would otherwise be lost.
+        sysdefaults.default is CHAR(256), so literals come back padded - Informix
+        pads them with NUL bytes, which must be removed before the value is used,
+        otherwise psycopg refuses to pass it to PostgreSQL
+        ("A string literal cannot contain NUL (0x00) characters").
+        """
+        column_name = settings.get('column_name', '')
+        data_type = (settings.get('data_type') or '').strip().upper()
+        default_type = (settings.get('default_type') or '').strip().upper()
+        default_value = settings.get('default_value')
+
+        if default_type == '' and default_value is None:
+            return ''
+
+        if default_type == 'L':
+            if default_value is None:
+                return ''
+            # remove NUL padding and other control characters used as padding
+            cleaned_default = self.clean_default_value(default_value)
+            if cleaned_default == '':
+                self.config_parser.print_log_message('WARNING',
+                    f"informix_connector: convert_informix_default: Column {column_name} ({data_type}) has a literal default which contains no printable characters - default value is ignored.")
+                return ''
+            if data_type == 'BOOLEAN':
+                # Informix stores boolean literals as 't' / 'f'
+                if cleaned_default.strip("'").lower() in ('t', 'true', '1'):
+                    return 'TRUE'
+                if cleaned_default.strip("'").lower() in ('f', 'false', '0'):
+                    return 'FALSE'
+                self.config_parser.print_log_message('WARNING',
+                    f"informix_connector: convert_informix_default: Column {column_name} - unexpected BOOLEAN default value '{cleaned_default}' - kept as it is.")
+            return cleaned_default
+        elif default_type == 'T':
+            # TODAY
+            return 'CURRENT_DATE'
+        elif default_type == 'C':
+            # CURRENT [ ... ] - Informix keeps no information about the precision here
+            return 'CURRENT_TIMESTAMP'
+        elif default_type == 'U':
+            # USER
+            return 'CURRENT_USER'
+        elif default_type == 'S':
+            # SITENAME / DBSERVERNAME - PostgreSQL has no equivalent,
+            # so the name of the source Informix server is used as a literal
+            source_server_name = (self.config_parser.get_db_config(self.source_or_target).get('server') or '')
+            self.config_parser.print_log_message('WARNING',
+                f"informix_connector: convert_informix_default: Column {column_name} - default SITENAME/DBSERVERNAME has no equivalent in PostgreSQL - replaced by literal '{source_server_name}'.")
+            return f"'{source_server_name}'"
+        elif default_type == 'N':
+            # explicit DEFAULT NULL - same as no default in PostgreSQL
+            return ''
+        else:
+            self.config_parser.print_log_message('WARNING',
+                f"informix_connector: convert_informix_default: Column {column_name} - unknown default type '{default_type}' (value: '{default_value}') - default value is ignored.")
+            return ''
+
+    def clean_default_value(self, default_value) -> str:
+        """ Removes NUL bytes / control characters used by Informix as padding of CHAR(256) values. """
+        if default_value is None:
+            return ''
+        return re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', str(default_value)).strip()
+
     def convert_default_value(self, settings) -> dict:
         extracted_default_value = settings['extracted_default_value']
-        return extracted_default_value
+        return self.clean_default_value(extracted_default_value)
 
     def get_table_checksum(self, schema_name: str, table_name: str, columns: list):
         if not columns:
@@ -2325,7 +3158,7 @@ class InformixConnector(DatabaseConnector):
         cols_list = []
         for col in columns:
             dtype = col.get('data_type', '').lower()
-            if any(x in dtype for x in ['lob', 'bytea', 'xml', 'json', 'text']):
+            if any(x in dtype for x in ['lob', 'bytea', 'xml', 'json', 'bson', 'text']):
                 continue
             cols_list.append(f'"{col["column_name"]}"')
             
@@ -2346,7 +3179,7 @@ class InformixConnector(DatabaseConnector):
         cols_list = []
         for col in columns:
             dtype = col.get('data_type', '').lower()
-            if any(x in dtype for x in ['lob', 'bytea', 'xml', 'json', 'text']):
+            if any(x in dtype for x in ['lob', 'bytea', 'xml', 'json', 'bson', 'text']):
                 continue
             cols_list.append(f'"{col["column_name"]}"')
             

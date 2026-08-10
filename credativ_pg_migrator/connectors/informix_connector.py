@@ -2044,261 +2044,209 @@ class InformixConnector(DatabaseConnector):
             raise
 
 
+    def read_parenthesized_group(self, text, start):
+        """
+        Content of the parenthesized group beginning at or behind 'start'.
+
+        Returns the text between the parentheses and the position behind the closing one,
+        counting the nesting and skipping string literals.
+        """
+        open_position = text.find('(', start)
+        if open_position == -1:
+            return '', len(text)
+        depth = 0
+        quote = ''
+        for index in range(open_position, len(text)):
+            character = text[index]
+            if quote:
+                if character == quote:
+                    quote = ''
+            elif character in ("'", '"'):
+                quote = character
+            elif character == '(':
+                depth += 1
+            elif character == ')':
+                depth -= 1
+                if depth == 0:
+                    return text[open_position + 1:index], index + 1
+        return text[open_position + 1:], len(text)
+
+    def extract_trigger_action_blocks(self, trig):
+        """
+        Split the action part of an Informix trigger into its blocks.
+
+        One trigger may carry all three of them:
+
+            BEFORE (actions) FOR EACH ROW [WHEN (condition)] (actions) AFTER (actions)
+
+        BEFORE and AFTER run once per statement, FOR EACH ROW once per row. Reading them
+        with a greedy regular expression let the FOR EACH ROW block swallow everything up
+        to the last closing parenthesis, so the statements of the AFTER block ended up
+        inside the row trigger and the parentheses no longer matched. The blocks are read
+        by counting parentheses instead.
+
+        Returns a list of (kind, when_condition, actions), kind being 'before', 'after'
+        or 'for each row'.
+        """
+        blocks = []
+        position = 0
+        keyword = re.compile(r'(?i)\b(before|after|for\s+each\s+row)\b')
+        while True:
+            match = keyword.search(trig, position)
+            if not match:
+                break
+            kind = re.sub(r'\s+', ' ', match.group(1)).lower()
+            position = match.end()
+
+            ## a WHEN condition belongs to the action list which follows it
+            when_condition = ''
+            when_match = re.compile(r'(?i)\s*\bwhen\b').match(trig, position)
+            if when_match:
+                when_condition, position = self.read_parenthesized_group(trig, when_match.end())
+
+            if trig.find('(', position) == -1:
+                break
+            actions, position = self.read_parenthesized_group(trig, position)
+            blocks.append((kind, when_condition.strip(), self.split_top_level_commas(actions)))
+        return blocks
+
+    def convert_trigger_action(self, action, settings, old_ref, new_ref):
+        """ One action of a trigger block as a PL/pgSQL statement """
+        action = action.replace(f'''"{settings['source_schema_name']}"''', f'''"{settings['target_schema_name']}"''')
+        ## PostgreSQL calls a procedure with CALL - 'EXECUTE FUNCTION' of CREATE TRIGGER is
+        ## something else entirely, it names the trigger function and takes only literals
+        action = re.sub(r'(?i)^\s*execute\s+procedure\s*', 'CALL ', action)
+        return self.map_trigger_correlation_names(action.strip(), old_ref, new_ref).rstrip(';')
+
     def convert_trigger(self, settings: dict):
+        """
+        Convert the triggers of one Informix table to PostgreSQL.
+
+        Every action block of the source becomes a trigger of its own, because PostgreSQL
+        separates what Informix writes in a single statement: the BEFORE and AFTER blocks
+        are statement level triggers, the FOR EACH ROW block is a row level one. Each of
+        them gets the trigger function PostgreSQL requires - a trigger cannot execute the
+        statements directly.
+        """
         informix_code = settings['trigger_sql']
-        pgsql_trigger_code = ''
+        source_schema_name = settings['source_schema_name']
+        target_schema_name = settings['target_schema_name']
         pgsql_triggers = []
-        trigger_code = ''
         trigger_name = ''
-        func_code = ''
 
         try:
-            # Split the input into individual trigger definitions
-            triggers = re.split(r'(?i)create trigger', informix_code, re.IGNORECASE | re.DOTALL | re.MULTILINE)
-            for trig in triggers:
+            for trig in re.split(r'(?i)create\s+trigger', informix_code):
                 trig = trig.strip()
                 if not trig:
                     continue
 
-                trig_lines = trig.split('\n')
-                trig_lines = [line.strip() for line in trig_lines]
-                trig_lines = [line for line in trig_lines if line != '--']
-                trig_lines = [f"/* {line.strip()} */" if line.startswith('--') else line for line in trig_lines]
-                trig = '\n'.join(trig_lines)
+                ## the code is read as one line below, so a comment would swallow whatever
+                ## follows it - they are turned into the bracketed form first
+                trig = '\n'.join(f"/* {line.strip()} */" if line.strip().startswith('--') else line
+                                 for line in trig.split('\n') if line.strip() != '--')
+                trig = re.sub(r'\s+', ' ', trig).strip()
                 self.config_parser.print_log_message('DEBUG', f"informix_connector: convert_trigger: Trigger code: {trig}")
 
-                # Replace groups of multiple spaces with just one space
-                trig = re.sub(r'\s+', ' ', trig)
-                # Add new line character before each word WHEN (case insensitive)
-                trig = re.sub(r'(?i)\s*when', '\nWHEN', trig, flags=re.IGNORECASE)
+                ## 'INSTEAD OF' stands between the name and the event of a trigger on a view
+                header_match = re.match(r'(?i)"?([^".\s]+)"?\.(\S+?)"?\s+(?:(instead\s+of)\s+)?(insert|update|delete)\b', trig)
+                if not header_match:
+                    self.config_parser.print_log_message('WARNING',
+                        f"informix_connector: convert_trigger: The header of a trigger could not be read, it is not migrated: {trig[:120]}")
+                    continue
+                schema = header_match.group(1)
+                trigger_name = header_match.group(2).strip('"')
+                instead_of = bool(header_match.group(3))
+                operation = header_match.group(4).upper()
 
-                # Extract how NEW and OLD are referenced in Informix code
-                new_ref = ""
-                old_ref = ""
-                ## Informix writes the correlation names in either order - 'referencing old
-                ## as o new as n' is as usual as 'referencing new as n old as o', and reading
-                ## them positionally lost whichever came second
-                ref_match = re.search(r'referencing\s+((?:(?:new|old)\s+as\s+\w+\s*)+)', trig, re.IGNORECASE)
+                ## 'UPDATE OF a, b' fires only when one of those columns is written, and
+                ## PostgreSQL knows the same restriction
+                update_columns = ''
+                if operation == 'UPDATE':
+                    columns_match = re.match(r'(?i)\s*of\s+(.+?)\s+on\b', trig[header_match.end():])
+                    if columns_match:
+                        update_columns = ' OF ' + ', '.join(column.strip().strip('"') for column in columns_match.group(1).split(','))
+
+                table_match = re.search(r'(?i)\son\s+"?([^".\s]+)"?\.\s*"?([^"\s(]+)"?', trig)
+                table_schema = table_match.group(1) if table_match else schema
+                table_name = table_match.group(2) if table_match else 'unknown_table'
+                if table_schema == source_schema_name:
+                    table_schema = target_schema_name
+
+                ## Informix names the two row images itself, in either order
+                new_ref = ''
+                old_ref = ''
+                ref_match = re.search(r'(?i)referencing\s+((?:(?:new|old)\s+as\s+\w+\s*)+)', trig)
                 if ref_match:
-                    for correlation, alias in re.findall(r'(new|old)\s+as\s+(\w+)', ref_match.group(1), re.IGNORECASE):
+                    for correlation, alias in re.findall(r'(?i)(new|old)\s+as\s+(\w+)', ref_match.group(1)):
                         if correlation.lower() == 'new':
                             new_ref = alias
                         else:
                             old_ref = alias
 
-                self.config_parser.print_log_message('DEBUG', f"informix_connector: convert_trigger: new_ref: {new_ref}, old_ref: {old_ref}")
+                self.config_parser.print_log_message('DEBUG',
+                    f"informix_connector: convert_trigger: {trigger_name}: {'INSTEAD OF ' if instead_of else ''}{operation}{update_columns} on {table_schema}.{table_name}, new: {new_ref or '-'}, old: {old_ref or '-'}")
 
-                # Extract schema, trigger name, and operation (insert/update)
-                header_match = re.match(r'"([^"]+)"\.(\S+)\s+(insert|update|delete)', trig, re.IGNORECASE)
-                if not header_match:
+                blocks = self.extract_trigger_action_blocks(trig)
+                if not blocks:
+                    self.config_parser.print_log_message('WARNING',
+                        f"informix_connector: convert_trigger: Trigger {trigger_name} has no action which could be read - it has to be migrated manually.")
                     continue
-                schema = header_match.group(1)
-                trigger_name = header_match.group(2)
-                operation = header_match.group(3).lower()
 
-                self.config_parser.print_log_message('DEBUG', f"informix_connector: convert_trigger: Trigger name: {trigger_name}, Operation: {operation}")
-
-                # Extract the table name (assumes: on "schemaname".table)
-                table_match = re.search(r'\s+on\s+"([^"]+)"\.(\S+)', trig, re.IGNORECASE)
-                if table_match:
-                    table_schema = table_match.group(1)
-                    table_name = table_match.group(2)
-                else:
-                    table_schema = schema
-                    table_name = "unknown_table"
-
-                self.config_parser.print_log_message('DEBUG', f"informix_connector: convert_trigger: Table name: {table_name}, Schema: {table_schema}")
-
-                func_body_lines = []
-
-                order_num = 1
-                when_conditions = {}
-                proc_calls = {}
-
-                # when_pattern = re.compile(r'when\s*\((.*?)\)\s*\((.*?)\)', re.DOTALL | re.IGNORECASE)
-                # after_pattern = re.compile(r'after\s*\((.*)\)', re.DOTALL | re.IGNORECASE)
-
-                # when_matches = re.findall(r'(?:when\s*\((.*?)\)\s*)?\(\s*(execute procedure.*?;?)\s*\)', trig, re.IGNORECASE | re.DOTALL | re.MULTILINE)
-                # when_matches = re.findall(r'(?:when\s*\((.*?)\)\s*)?\(\s*(execute procedure.*?\(.*?\));?\s*\)', trig, re.IGNORECASE | re.DOTALL | re.MULTILINE)
-                # when_matches = re.findall(r'(?:when\s*\((?:\((?:\((.*?)\))?\))?\)\s*)?\(\s*(execute procedure.*?\(.*?\));?\s*\)', trig, re.IGNORECASE | re.DOTALL | re.MULTILINE)
-                when_matches = re.findall(r'when\s*\((.*?)\)\s*\((.*?\)\s*\))', trig, re.IGNORECASE | re.DOTALL | re.MULTILINE)
-                # when_matches = re.findall(r'when\s*\((.*?)\)\s*\((.*?\n*?)\)', trig, re.IGNORECASE | re.DOTALL | re.MULTILINE)
-
-                self.config_parser.print_log_message('DEBUG', f"informix_connector: convert_trigger: when_matches: {when_matches}")
-
-                for match in when_matches:
-                    when_condition = match[0]
-                    proc_call = match[1]
-                    proc_call = re.sub(r'\*/', '*/\n', proc_call, flags=re.IGNORECASE)
-                    when_conditions[order_num] = when_condition
-                    proc_calls[order_num] = proc_call
-                    order_num += 1
-                    self.config_parser.print_log_message('DEBUG', f"informix_connector: convert_trigger: when_condition: {when_condition}")
-                    self.config_parser.print_log_message('DEBUG', f"informix_connector: convert_trigger: proc_call: {proc_call}")
-
-                after_pattern = re.compile(r'after\s*\((.*)\)', re.DOTALL | re.IGNORECASE | re.MULTILINE)
-                # Extract AFTER clause
-                after_match = after_pattern.search(trig)
-                after_all_commands = []
-                after_current_command = []
-                if after_match:
-                    after_content = after_match.group(1).strip()
-                    # Split the content into individual SQL commands by commas, considering nested structures
-                    open_parentheses = 0
-
-                    for part in re.split(r'(,)', after_content):  # Keep commas as separate tokens
-                        if part == ',' and open_parentheses == 0:
-                        # Check if the current command starts with a valid SQL keyword
-                            if after_current_command and any(after_current_command[0].strip().lower().startswith(kw) for kw in ['insert', 'update', 'delete']):
-                                # End of a command
-                                after_all_commands.append(''.join(after_current_command).strip())
-                                after_current_command = []
-                            else:
-                                # Concatenate with the previous part
-                                if after_all_commands:
-                                    after_all_commands[-1] += ',' + ''.join(after_current_command).strip()
-                                    after_current_command = []
-                        else:
-                            after_current_command.append(part)
-                            # Track parentheses to handle nested structures
-                            open_parentheses += part.count('(') - part.count(')')
-
-                    # Add the last command if any
-                    if after_current_command:
-                        if any(after_current_command[0].strip().lower().startswith(kw) for kw in ['insert', 'update', 'delete']):
-                            after_all_commands.append(''.join(after_current_command).strip())
-                        else:
-                            if after_all_commands:
-                                after_all_commands[-1] += ',' + ''.join(after_current_command).strip()
-
-                    self.config_parser.print_log_message('DEBUG', f"informix_connector: convert_trigger: AFTER part after_all_commands: {after_all_commands}")
-
-                if not when_conditions and not proc_calls:
-                    action_all_commands = []
-                    action_current_command = []
-                    actions_match = re.search(r'for each row\s*\((.*)\)', trig, re.IGNORECASE | re.DOTALL)
-                    if actions_match:
-                        ## The actions of a trigger are separated by a comma, but a comma
-                        ## also separates the arguments of the called routine - splitting on
-                        ## every comma tore 'execute procedure p(o.list_price ,n.list_price )'
-                        ## into two actions and left the call without its closing parenthesis
-                        action_all_commands = self.split_top_level_commas(actions_match.group(1))
-
-                        self.config_parser.print_log_message('DEBUG', f"informix_connector: convert_trigger: ACTION part action_all_commands: {action_all_commands}")
-
-                        for action in action_all_commands:
-                            self.config_parser.print_log_message('INFO', f"informix_connector: convert_trigger: action: {action.strip()}")
-                            if "execute procedure" in action:
-                                # action = re.sub("execute procedure", "", action, flags=re.IGNORECASE) ## keep it for further processing
-                                action = re.sub("with trigger references", "", action, flags=re.IGNORECASE)
-                                action = action.replace(settings['source_schema_name'], settings['target_schema_name'])
-                            proc_calls[order_num] = action.strip()
-                            order_num += 1
-
-                self.config_parser.print_log_message('DEBUG', f"informix_connector: convert_trigger: when_conditions: {when_conditions}")
-                self.config_parser.print_log_message('DEBUG', f"informix_connector: convert_trigger: proc_calls: {proc_calls}")
-
-                function_name = trigger_name + "_trigfunc"
                 counter = 0
-                if ((when_conditions and proc_calls) or after_all_commands):
+                for kind, when_condition, actions in blocks:
+                    actions = [self.convert_trigger_action(action, settings, old_ref, new_ref)
+                               for action in actions if action.strip()]
+                    if not actions:
+                        continue
 
-                    for i in when_conditions.keys():
-                        proc_call = proc_calls[i].replace("execute procedure", "PERFORM")
+                    row_level = kind == 'for each row'
+                    if row_level:
+                        timing = 'INSTEAD OF' if instead_of else 'AFTER'
+                        scope = 'FOR EACH ROW'
+                        ## the row PostgreSQL expects back - for a DELETE only OLD is filled,
+                        ## and an INSTEAD OF trigger reports the row as handled by returning it
+                        returned_row = 'OLD' if operation == 'DELETE' else 'NEW'
+                    else:
+                        timing = 'BEFORE' if kind == 'before' else 'AFTER'
+                        scope = 'FOR EACH STATEMENT'
+                        ## a statement level trigger has neither OLD nor NEW
+                        returned_row = 'NULL'
+                        for action in actions:
+                            if re.search(r'(?i)\b(OLD|NEW)\.', action):
+                                self.config_parser.print_log_message('WARNING',
+                                    f"informix_connector: convert_trigger: Trigger {trigger_name}: the {kind.upper()} block uses a column of the changed row, which a statement level trigger of PostgreSQL cannot read. The statement has to be migrated manually: {action}")
 
-                        if when_conditions[i]:
-                            func_body_lines.append(f"    IF {when_conditions[i]} THEN")
-                            func_body_lines.append(f"        {proc_call.replace(settings['source_schema_name'], settings['target_schema_name'])};")
-                            func_body_lines.append("    END IF;")
+                    body_lines = [f"    {action};" for action in actions]
+                    if when_condition:
+                        condition = self.map_trigger_correlation_names(when_condition, old_ref, new_ref)
+                        body_lines = [f"    IF {condition} THEN"] + [f"    {line}" for line in body_lines] + ["    END IF;"]
 
-                    if re.search(r'for each row', trig, re.IGNORECASE) and after_all_commands:
-                        func_body_lines.append(f"""    /* AFTER part */""")
-                        for after_command in after_all_commands:
-                            if after_command:
-                                func_body_lines.append(f"""    {after_command.replace(f'''"{settings['source_schema_name']}"''', f'''"{settings['target_schema_name']}"''')};""")
+                    function_name = f"{trigger_name}_trigfunc{counter}"
+                    func_code = (f'CREATE OR REPLACE FUNCTION "{target_schema_name}"."{function_name}"()\n'
+                                 f'RETURNS trigger AS $$\n'
+                                 f'BEGIN\n'
+                                 + '\n'.join(body_lines) + '\n'
+                                 f'    RETURN {returned_row};\n'
+                                 f'END;\n'
+                                 f'$$ LANGUAGE plpgsql;')
 
-                    if ((not re.search(r'for each row', trig, re.IGNORECASE) or re.search(r'before', trig, re.IGNORECASE))
-                        and after_all_commands):
-                        self.config_parser.print_log_message('ERROR', f"informix_connector: convert_trigger: Trigger {trigger_name} has AFTER clause but is not FOR EACH ROW. This is not supported!!!")
-                        func_body_lines.append("/* AFTER clause not migrated */")
-                        for after_command in after_all_commands:
-                            if after_command:
-                                func_body_lines.append(f"/*    {after_command.replace(settings['source_schema_name'], settings['target_schema_name'])}; */")
-
-                    self.config_parser.print_log_message('DEBUG3', f"informix_connector: convert_trigger: func_body_lines: {func_body_lines}")
-
-                    func_body = self.map_trigger_correlation_names(chr(10).join(func_body_lines), old_ref, new_ref)
-                    func_code = f"""CREATE OR REPLACE FUNCTION "{settings['target_schema_name']}"."{function_name + str(counter)}"()
-                        RETURNS trigger AS $$
-                        BEGIN
-                        {func_body}
-                            RETURN NEW;
-                        END;
-                        $$ LANGUAGE plpgsql;"""
-
-                    trigger_code = f"""CREATE TRIGGER "{trigger_name + str(counter)}" """
-
-                    if re.search(r'for each row', trig, re.IGNORECASE):
-                        trigger_code += f"""\nAFTER {operation.upper()} ON "{table_schema.replace(settings['source_schema_name'], settings['target_schema_name'])}"."{table_name}" """
-
-                    ## no REFERENCING clause: the correlation names of the source are mapped
-                    ## to OLD and NEW in the body, a row trigger of PostgreSQL needs nothing
-                    ## else, and 'REFERENCING ... TABLE AS' declares transition tables, which
-                    ## is a different construct altogether
-                    if re.search(r'for each row', trig, re.IGNORECASE):
-                        trigger_code += f"\nFOR EACH ROW"
-
-                    trigger_code += f"""\nEXECUTE FUNCTION "{settings['target_schema_name']}"."{function_name + str(counter)}"();"""
-                    counter += 1
+                    trigger_code = (f'CREATE TRIGGER "{trigger_name}{counter}"\n'
+                                    f'{timing} {operation}{update_columns} ON "{table_schema}"."{table_name}"\n'
+                                    f'{scope}\n'
+                                    f'EXECUTE FUNCTION "{target_schema_name}"."{function_name}"();')
 
                     pgsql_triggers.append(func_code + "\n\n" + trigger_code)
-
-                elif not when_conditions and proc_calls:
-                    for i in proc_calls.keys():
-                        trigger_code = ''
-                        func_code = ''
-                        proc_call = proc_calls[i]
-                        self.config_parser.print_log_message('DEBUG3', f"informix_connector: convert_trigger: proc_call: {proc_call}")
-
-                        trigger_code = f"""CREATE TRIGGER "{trigger_name + str(counter)}" """
-
-                        if re.search(r'for each row', trig, re.IGNORECASE):
-                            trigger_code += f"""\nAFTER {operation.upper()} ON "{table_schema.replace(settings['source_schema_name'], settings['target_schema_name'])}"."{table_name}" """
-
-                        if re.search(r'for each row', trig, re.IGNORECASE):
-                            trigger_code += f"\nFOR EACH ROW"
-
-                        ## The action of the trigger always becomes the body of a trigger
-                        ## function. 'EXECUTE FUNCTION' of PostgreSQL cannot take the action
-                        ## itself: it calls a function returning 'trigger' and accepts string
-                        ## literals as its arguments, never a column of the changed row.
-                        statement = proc_call.replace(f'''"{settings['source_schema_name']}"''', f'''"{settings['target_schema_name']}"''')
-                        if re.match(r'(?i)\s*execute\s+procedure\b', statement):
-                            statement = re.sub(r'(?i)\s*execute\s+procedure\s*', 'CALL ', statement)
-                        statement = self.map_trigger_correlation_names(statement, old_ref, new_ref)
-
-                        func_code = f"""CREATE OR REPLACE FUNCTION "{settings['target_schema_name']}"."{function_name + str(counter)}"()
-                                RETURNS trigger AS $$
-                                BEGIN
-                                    {statement};
-                                    RETURN NEW;
-                                END;
-                                $$ LANGUAGE plpgsql;"""
-                        trigger_code += f"""\nEXECUTE FUNCTION "{settings['target_schema_name']}"."{function_name + str(counter)}"();"""
-                        counter += 1
-
-                        pgsql_triggers.append(func_code + "\n\n" + trigger_code)
+                    counter += 1
 
             pgsql_trigger_code = "\n\n".join(pgsql_triggers)
-            # The body of a trigger names Informix data types in its casts, e.g.
-            # '::lvarchar(2000)', which the target does not know
+            # The body names Informix data types in its casts, e.g. '::lvarchar(2000)'
             pgsql_trigger_code = self.convert_data_types_in_code(pgsql_trigger_code, settings['target_db_type'])
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"informix_connector: convert_trigger: Error converting trigger {trigger_name}: {e}")
             self.config_parser.print_log_message('ERROR', traceback.format_exc())
+            return ''
 
         return pgsql_trigger_code
-
-
 
     def execute_query(self, query: str, params=None):
         cursor = self.connection.cursor()

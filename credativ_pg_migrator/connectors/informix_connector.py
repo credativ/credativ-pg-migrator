@@ -925,6 +925,10 @@ class InformixConnector(DatabaseConnector):
     ## 'VARCHAR(120)' and 'MONEY(14,2)' as well as a bare 'INTEGER'
     RETURN_TYPE_PATTERN = r'\w+(?:\s*\([^)]*\))?'
 
+    ## the error number Informix uses for an exception raised by a routine itself - its
+    ## counterpart is the SQLSTATE P0001, which RAISE EXCEPTION of PL/pgSQL already sets
+    INFORMIX_USER_EXCEPTION_ERROR = '-746'
+
     MERGE_PLACEHOLDER = '__CREDATIV_PG_MIGRATOR_MERGE_{}__'
     GLOBAL_PLACEHOLDER = '__CREDATIV_PG_MIGRATOR_GLOBAL_{}__'
     ## prefix of the customized option a global variable of Informix is migrated to - a
@@ -1624,19 +1628,39 @@ class InformixConnector(DatabaseConnector):
 
             postgresql_code = re.sub(r';;', ';', postgresql_code, flags=re.IGNORECASE)
 
-            # RAISE EXCEPTION of Informix carries the error number and an ISAM error code in
-            # front of the message ('RAISE EXCEPTION -746, 0, ...'), PL/pgSQL expects the
-            # message first. The number is kept in the message when there is none.
+            # RAISE EXCEPTION of Informix names the error number and the ISAM error code in
+            # front of the message ('RAISE EXCEPTION -746, 0, 'text''), while PL/pgSQL expects
+            # the message first and takes everything else through a USING clause.
             def convert_raise_exception(match):
+                error_number = match.group('error')
+                isam_error = match.group('isam')
                 message = (match.group('message') or '').strip()
+
                 if not message:
-                    message = f"'Informix error {match.group('error')}'"
+                    ## an exception raised without a message of its own would arrive in the
+                    ## target as an empty error - the error number is reported instead
+                    message = f"'Informix error {error_number}'"
                     self.config_parser.print_log_message('DEBUG',
-                        f"informix_connector: convert_funcproc_code: RAISE EXCEPTION {match.group('error')} has no message of its own - the error number is reported as the message.")
-                return f"RAISE EXCEPTION {message}"
+                        f"informix_connector: convert_funcproc_code: RAISE EXCEPTION {error_number} has no message of its own - the error number is reported as the message.")
+
+                statement = f"RAISE EXCEPTION {message}"
+
+                ## -746 is the number Informix itself uses for an exception raised by a
+                ## routine, and PL/pgSQL raises its own exceptions with the equivalent
+                ## SQLSTATE P0001 - there is nothing to carry over. Any other number is
+                ## chosen by the routine and part of what its callers check for, so it is
+                ## kept in the DETAIL of the message instead of being dropped silently.
+                if error_number != self.INFORMIX_USER_EXCEPTION_ERROR:
+                    detail = f"Informix error {error_number}"
+                    if isam_error and isam_error.strip('-0') != '':
+                        detail += f", ISAM error {isam_error}"
+                    statement += f" USING DETAIL = '{detail}'"
+                    self.config_parser.print_log_message('DEBUG',
+                        f"informix_connector: convert_funcproc_code: RAISE EXCEPTION {error_number} is raised with the standard SQLSTATE of PL/pgSQL, the error number is kept in the DETAIL of the message.")
+                return statement
 
             postgresql_code = re.sub(
-                r"(?i)\bRAISE\s+EXCEPTION\s+(?P<error>-?\d+)\s*(?:,\s*-?\d+\s*)?(?:,\s*(?P<message>'(?:[^']|'')*'))?",
+                r"(?i)\bRAISE\s+EXCEPTION\s+(?P<error>-?\d+)\s*(?:,\s*(?P<isam>-?\d+)\s*)?(?:,\s*(?P<message>'(?:[^']|'')*'))?",
                 convert_raise_exception,
                 postgresql_code)
 

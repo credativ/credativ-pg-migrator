@@ -555,7 +555,14 @@ class InformixConnector(DatabaseConnector):
                 'INT8': 'BIGINT',
                 'JSON': 'JSONB',
                 'LVARCHAR': 'VARCHAR',
-                'MONEY': 'MONEY',
+                # MONEY of Informix is a DECIMAL with a fixed scale, and that is what it
+                # becomes here. The MONEY type of PostgreSQL is not the same thing: it has
+                # almost no operators (`operator does not exist: money >= numeric` for a
+                # CHECK constraint as ordinary as `credit_limit >= 0.00`, and no `money +
+                # integer` either), and it keeps the number of decimal places of the
+                # lc_monetary setting instead of the declared one, so a MONEY(12,4) would
+                # lose the last two digits of every value.
+                'MONEY': 'NUMERIC',
                 'NCHAR': 'CHAR',
                 'NVARCHAR': 'VARCHAR',
                 # 'SERIAL8': 'BIGSERIAL',
@@ -593,7 +600,10 @@ class InformixConnector(DatabaseConnector):
         return column_type.upper() in string_types
 
     def is_numeric_type(self, column_type: str) -> bool:
-        numeric_types = ['BIGINT', 'INTEGER', 'INT', 'TINYINT', 'SMALLINT', 'FLOAT', 'DOUBLE PRECISION', 'DECIMAL', 'NUMERIC']
+        ## MONEY belongs here as well - it is a DECIMAL of Informix and its precision and
+        ## scale have to reach the target, otherwise the column ends up as an unconstrained
+        ## NUMERIC instead of NUMERIC(12,2)
+        numeric_types = ['BIGINT', 'INTEGER', 'INT', 'TINYINT', 'SMALLINT', 'FLOAT', 'DOUBLE PRECISION', 'DECIMAL', 'NUMERIC', 'MONEY']
         return column_type.upper() in numeric_types
 
     def fetch_indexes(self, settings):

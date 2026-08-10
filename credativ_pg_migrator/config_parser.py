@@ -958,6 +958,22 @@ class ConfigParser:
         """
         return self.get_source_data_export().get('lob_columns', [])
 
+    def has_configured_lob_columns(self, source_table_name, lob_columns):
+        """
+        True when one of the LOB columns of the table was declared in data_export.lob_columns.
+
+        Such a column is declared precisely because its data type does not say it: it holds
+        a reference to the file with the value, not the value itself.
+        """
+        column_names = [column.strip() for column in (lob_columns or '').split(',') if column.strip()]
+        for lob_config in self.get_source_data_export_lob_columns():
+            if len(lob_config) >= 2:
+                config_table_name = lob_config[0]
+                config_column_name = lob_config[1]
+                if (not config_table_name or config_table_name == source_table_name) and config_column_name in column_names:
+                    return True
+        return False
+
     def get_table_name_for_lob_import(self, table_name):
         return f"{table_name}_unllobimport"
 
@@ -1219,6 +1235,50 @@ class ConfigParser:
                             break
         return ','.join(lob_columns_list)
 
+    ## the data types for which a comma in the exported value is a decimal separator and
+    ## not part of the text
+    NUMERIC_DATA_TYPES = ('DECIMAL', 'NUMERIC', 'NUMBER', 'FLOAT', 'REAL', 'DOUBLE',
+                          'DOUBLE PRECISION', 'SMALLFLOAT', 'MONEY')
+
+    def convert_decimal_separator(self, value):
+        """
+        Write a number exported with a decimal comma the way the target reads it.
+
+        An export can be written with either convention - Db2 for i does it with
+        DECPNT(*COMMA) - and PostgreSQL accepts the decimal point alone, so '1,00000000'
+        is refused with 'invalid input syntax for type numeric'. Whichever separator comes
+        last is the decimal one, the other one groups the digits:
+
+            1,00000000  ->  1.00000000
+            1.234,56    ->  1234.56
+            1,234.56    ->  1234.56          (already valid apart from the grouping)
+
+        A value which is not a number written in one of these two ways is returned
+        unchanged - it is better migrated as it is and reported by the target than
+        silently turned into a different number here.
+        """
+        number = value.strip()
+        if not re.fullmatch(r'[+-]?[\d.,]+', number) or not re.search(r'\d', number):
+            return value
+
+        last_comma = number.rfind(',')
+        last_dot = number.rfind('.')
+        if last_comma > last_dot:
+            ## the comma is the decimal separator, a dot groups the digits
+            converted = number.replace('.', '').replace(',', '.')
+        elif last_dot > last_comma:
+            ## the dot is the decimal separator, a comma groups the digits
+            converted = number.replace(',', '')
+        else:
+            return value
+
+        ## only a result which really is a number is used - '1,2,3' is written in neither
+        ## of the two conventions, and turning it into '1.2.3' would replace a value the
+        ## target reports with one it silently misreads
+        if not re.fullmatch(r'[+-]?\d+(?:\.\d+)?', converted):
+            return value
+        return converted
+
     def convert_csv_to_utf8(self, data_source_settings, source_columns=None, target_columns=None):
         part_name = 'convert_csv_to_utf8 start'
         self.print_log_message('DEBUG3', f"config_parser: convert_csv_to_utf8: ({part_name}): Starting conversion of CSV file '{data_source_settings.get('file_name')}' to UTF-8.")
@@ -1280,7 +1340,20 @@ class ConfigParser:
             with open(input_csv_data_file, 'r', encoding=character_set, errors='replace', newline='') as infile, \
                  open(output_csv_data_file, 'w', encoding='utf-8', newline='') as outfile:
 
-                reader = csv.reader(infile, delimiter=csv_delimiter)
+                ## An unquoted empty field of a CSV file is a NULL, a quoted empty one ("")
+                ## is an empty string. The default reader returns '' for both, so a NULL of
+                ## the source arrived in the target as an empty string and every column
+                ## which is not text refused it: 'invalid input syntax for type integer: ""'.
+                ## QUOTE_NOTNULL keeps the two apart - it returns None for the unquoted one.
+                reader_quoting = getattr(csv, 'QUOTE_NOTNULL', None)
+                if reader_quoting is None:
+                    ## Python before 3.12 cannot tell them apart - an empty field is read as
+                    ## an empty string and stays one
+                    self.print_log_message('WARNING',
+                        "config_parser: convert_csv_to_utf8: This Python cannot distinguish an unquoted empty CSV field from a quoted one (csv.QUOTE_NOTNULL needs Python 3.12). An empty field is migrated as an empty string, which a column that is not text refuses - Python 3.12 or newer is needed for such a file.")
+                    reader = csv.reader(infile, delimiter=csv_delimiter)
+                else:
+                    reader = csv.reader(infile, delimiter=csv_delimiter, quoting=reader_quoting)
                 writer = csv.writer(outfile, delimiter=csv_delimiter, quoting=csv.QUOTE_MINIMAL)
 
                 for row in reader:
@@ -1307,9 +1380,11 @@ class ConfigParser:
                                 if expected_type in ('FLOAT', 'REAL', 'DOUBLE', 'DECIMAL', 'NUMERIC') and has_decimal_scale and len(row) - i > len(expected_types) - col_idx:
                                     if i + 1 < len(row):
                                         next_field = row[i+1]
-                                        # Only merge if BOTH parts are purely numeric (representing a split comma decimal)
-                                        is_int_part = field.isdigit() or (field.startswith('-') and field[1:].isdigit())
-                                        if is_int_part and next_field.isdigit():
+                                        # Only merge if BOTH parts are purely numeric (representing a split comma decimal).
+                                        # A None is an empty field of the source, which stands for NULL and is never
+                                        # part of a split decimal - it has no string methods either.
+                                        is_int_part = field is not None and (field.isdigit() or (field.startswith('-') and field[1:].isdigit()))
+                                        if is_int_part and next_field is not None and next_field.isdigit():
                                             if counter < 10:  # Only loudly log the first few occurrences to avoid log spam
                                                 self.print_log_message('DEBUG3', f"config_parser: convert_csv_to_utf8: Table {source_table_name}: Row {counter+1}, Col {col_idx+1}: Merging split decimal parts '{field}' and '{next_field}' into '{field}.{next_field}'")
                                             field = f"{field}.{next_field}"
@@ -1328,10 +1403,20 @@ class ConfigParser:
                         self.print_log_message('DEBUG3', f"config_parser: convert_csv_to_utf8: Table {source_table_name}: Expected types: {types_str}")
                         self.print_log_message('DEBUG3', f"config_parser: convert_csv_to_utf8: Table {source_table_name}: First row fields: {row}")
 
-                    for field in row:
-                        if field == '(null)':
+                    for column_index, field in enumerate(row):
+                        ## None is the unquoted empty field, which stands for NULL, and
+                        ## '(null)' is what some exporters of the source write for it
+                        if field is None or field == '(null)':
                             processed_row.append(null_symbol)
                         else:
+                            expected_type = expected_types[column_index]['type'] if column_index < len(expected_types) else ''
+                            if ',' in field and expected_type in self.NUMERIC_DATA_TYPES:
+                                converted_number = self.convert_decimal_separator(field)
+                                if converted_number != field:
+                                    if counter < 5:
+                                        self.print_log_message('DEBUG3', f"config_parser: convert_csv_to_utf8: Table {source_table_name}: Row {counter+1}, column {column_index+1}: number '{field}' written with a decimal comma converted to '{converted_number}'")
+                                    processed_row.append(converted_number)
+                                    continue
                             match = ts_pattern.match(field)
                             if match:
                                 date_part = match.group(1)

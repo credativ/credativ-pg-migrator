@@ -2199,6 +2199,15 @@ class SybaseASEConnector(DatabaseConnector):
 
         final_body = re.sub(r'locvar_sybase_update_func\((.*?)\)', update_func_replacer, final_body, flags=re.IGNORECASE)
 
+        # A plain RETURN of Transact-SQL leaves the trigger and is written without a value.
+        # A trigger function of PL/pgSQL has to return a row, and PostgreSQL refuses a RETURN
+        # without an expression with 'missing expression at or near ";"'. It returns the same
+        # row the function returns at its end, which leaves the trigger in the same way.
+        final_body, plain_returns = re.subn(r'(?i)\bRETURN\s*;', 'RETURN NEW;', final_body)
+        if plain_returns:
+            self.config_parser.print_log_message('DEBUG',
+                f"sybase_ase_connector: convert_trigger: Trigger {trigger_name}: {plain_returns} plain RETURN statement(s) converted to 'RETURN NEW' - a trigger function of PostgreSQL cannot return without a value.")
+
         # 6. Event Extraction
         events = re.findall(r'for\s+([a-z, ]+?)(?:\s+as\b|$)', trigger_code, re.IGNORECASE)
         pg_events = "INSERT OR UPDATE OR DELETE"

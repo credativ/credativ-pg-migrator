@@ -53,6 +53,10 @@ class InformixConnector(DatabaseConnector):
         'datetime': 256, 'time': 256, 'timestamp': 256,
     }
     DOCUMENT_DATA_TYPES = ('bson', 'json')
+    ## Collection and row types reach the driver as a Java object (HashSet, ArrayList,
+    ## IfxStruct) which the target cannot store - Informix casts them to their literal
+    ## text representation instead: SET{'a','b'}, LIST{'x'}, ROW('a','b')
+    COLLECTION_DATA_TYPES = ('set', 'multiset', 'list', 'row', 'collection')
 
     ## Informix reserves the tabid values 1 to 99 for the tables and views of the system
     ## catalog - user objects start at 100. Filtering by owner alone is not enough because
@@ -114,16 +118,17 @@ class InformixConnector(DatabaseConnector):
 
     def calculate_document_cast_length(self, source_columns):
         """
-        Length of the LVARCHAR cast used to read BSON / JSON columns.
+        Length of the LVARCHAR cast used to read BSON / JSON and collection columns.
 
-        Informix rejects a query whose output row exceeds 32767 bytes, so the cast may
-        only claim what the remaining columns of the SELECT list leave over. Returns 0
-        when the table has no document columns at all.
+        Informix rejects a query whose output row exceeds 32767 bytes, so the casts may
+        only claim what the remaining columns of the SELECT list leave over, shared
+        between them. Returns 0 when the table has no such column at all.
         """
+        cast_types = self.DOCUMENT_DATA_TYPES + self.COLLECTION_DATA_TYPES
         document_columns = 0
         used_width = 0
         for col in source_columns.values():
-            if (col.get('data_type') or '').lower() in self.DOCUMENT_DATA_TYPES:
+            if (col.get('data_type') or '').lower() in cast_types:
                 document_columns += 1
             else:
                 used_width += self.estimate_column_output_width(col)
@@ -181,6 +186,16 @@ class InformixConnector(DatabaseConnector):
             raise
 
     def fetch_table_columns(self, settings) -> dict:
+        """
+        Column list of a table.
+
+        A column of an extended data type carries the name of that type in sysxtdtypes.
+        The constructed types - SET(...), MULTISET(...), LIST(...) and an unnamed
+        ROW(...) - have no name of their own (mode 'C'), they are identified by the base
+        type code in sysxtdtypes.type. A named row type (mode 'R') is reported as ROW as
+        well, because PostgreSQL has no counterpart for either and both are migrated as
+        their text representation.
+        """
         table_schema = settings['table_schema']
         table_name = settings['table_name']
         result = {}
@@ -222,9 +237,18 @@ class InformixConnector(DatabaseConnector):
                             when 53 THEN 'BIGSERIAL'
                             ELSE 'UNKNOWN-'||cast(c.coltype as varchar(10))
                         END
-                    ELSE
-                    	CASE WHEN x.name IS NOT NULL THEN upper(x.name)
-                    	ELSE 'UNKNOWN-'||cast(c.coltype as varchar(10))||'-'||cast(x.extended_id as varchar(10)) END
+                    WHEN trim(x.mode) = 'C' THEN
+                        CASE x.type
+                            WHEN 19 THEN 'SET'
+                            WHEN 20 THEN 'MULTISET'
+                            WHEN 21 THEN 'LIST'
+                            WHEN 22 THEN 'ROW'
+                            WHEN 23 THEN 'COLLECTION'
+                            ELSE 'UNKNOWN-'||cast(c.coltype as varchar(10))||'-'||cast(x.extended_id as varchar(10))
+                        END
+                    WHEN trim(x.mode) = 'R' THEN 'ROW'
+                    WHEN x.name IS NOT NULL THEN upper(trim(x.name))
+                    ELSE 'UNKNOWN-'||cast(c.coltype as varchar(10))||'-'||cast(x.extended_id as varchar(10))
                 END AS coltype,
                 c.collength,
                 CASE WHEN c.coltype >= 256 THEN 'NO' ELSE 'YES' END AS nullable,
@@ -1396,6 +1420,13 @@ class InformixConnector(DatabaseConnector):
                                 select_columns_list.append(f"CAST(CAST({col['column_name']} AS JSON) AS LVARCHAR({document_cast_length})) as {col['column_name']}")
                             else:
                                 select_columns_list.append(f"CAST({col['column_name']} AS LVARCHAR({document_cast_length})) as {col['column_name']}")
+                        elif col['data_type'].lower() in self.COLLECTION_DATA_TYPES:
+                            ## A collection or row column arrives as an object of the driver -
+                            ## Informix renders it as its literal text representation instead,
+                            ## which is what the TEXT column of the target expects
+                            self.config_parser.print_log_message('WARNING',
+                                f"informix_connector: migrate_table: Worker {worker_id}: Table {source_schema_name}.{source_table_name}: Column {col['column_name']} ({col['data_type']}) is transferred as its literal text representation, limited to {document_cast_length} characters by the maximum output rowsize of Informix.")
+                            select_columns_list.append(f"CAST({col['column_name']} AS LVARCHAR({document_cast_length})) as {col['column_name']}")
                         #     select_columns_list.append(f"ST_asText(`{col['column_name']}`) as `{col['column_name']}`")
                         # elif col['data_type'].lower() == 'set':
                         #     select_columns_list.append(f"cast(`{col['column_name']}` as char(4000)) as `{col['column_name']}`")

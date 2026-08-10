@@ -58,6 +58,9 @@ class InformixConnector(DatabaseConnector):
     ## IfxStruct) which the target cannot store - Informix casts them to their literal
     ## text representation instead: SET{'a','b'}, LIST{'x'}, ROW('a','b')
     COLLECTION_DATA_TYPES = ('set', 'multiset', 'list', 'row', 'collection')
+    ## those of them which become an array in the target - a ROW is a record, not a
+    ## collection, and keeps the text of its literal
+    ARRAY_DATA_TYPES = ('set', 'multiset', 'list', 'collection')
 
     ## Informix reserves the tabid values 1 to 99 for the tables and views of the system
     ## catalog - user objects start at 100. Filtering by owner alone is not enough because
@@ -532,10 +535,94 @@ class InformixConnector(DatabaseConnector):
         view_code_str = ''.join([code[0] for code in view_code])
         return view_code_str
 
+    def convert_collection_value(self, value):
+        """
+        Turn the literal of an Informix collection into a list for the array of the target.
+
+        The value is read from the source as its literal representation, which names the
+        constructor and holds the elements in braces:
+
+            SET{'+49 30 000002','+49 172 000006'}   ->  ['+49 30 000002', '+49 172 000006']
+            LIST{'office'}                          ->  ['office']
+            SET{}                                   ->  []
+
+        A value which does not look like one of them is handed over unchanged, so nothing
+        is lost when the source delivers something unexpected.
+        """
+        text = str(value).strip()
+        collection_match = re.match(r'(?is)^(?:SET|MULTISET|LIST|COLLECTION)?\s*\{(?P<elements>.*)\}$', text)
+        if not collection_match:
+            return text
+
+        elements = []
+        for element in self.split_top_level_commas(collection_match.group('elements')):
+            element = element.strip()
+            if len(element) >= 2 and element.startswith("'") and element.endswith("'"):
+                ## a quote inside an element is doubled in the literal
+                element = element[1:-1].replace("''", "'")
+            elements.append(element)
+        return elements
+
+    def convert_matches_operator(self, code):
+        """
+        Convert the MATCHES operator of Informix, which PostgreSQL does not know.
+
+        MATCHES is a pattern operator of its own, it is not LIKE with another name:
+
+            *      any number of characters      -> % of LIKE
+            ?      exactly one character         -> _ of LIKE
+            [abc]  one character out of a set    -> no counterpart in LIKE
+            %, _   ordinary characters           -> have to be escaped for LIKE
+
+        A pattern without a character class becomes LIKE, which the target can answer from
+        an index. A pattern with one becomes SIMILAR TO, whose bracket expression means the
+        same thing. Only a pattern written as a literal can be translated - MATCHES against
+        an expression is reported and left as it is.
+        """
+        def convert_pattern(match):
+            pattern = match.group('pattern')[1:-1]
+            converted = []
+            character_class = False
+            index = 0
+            while index < len(pattern):
+                character = pattern[index]
+                if character == '\\' and index + 1 < len(pattern):
+                    ## an escaped character of MATCHES stands for itself
+                    following = pattern[index + 1]
+                    converted.append(f"\\{following}" if following in '%_[]\\' else following)
+                    index += 2
+                    continue
+                if character == '[':
+                    character_class = True
+                    closing = pattern.find(']', index + 1)
+                    if closing == -1:
+                        converted.append('\\[')
+                        index += 1
+                        continue
+                    converted.append(pattern[index:closing + 1])
+                    index = closing + 1
+                    continue
+                converted.append({'*': '%', '?': '_', '%': '\\%', '_': '\\_'}.get(character, character))
+                index += 1
+
+            operator = 'SIMILAR TO' if character_class else 'LIKE'
+            self.config_parser.print_log_message('DEBUG',
+                f"informix_connector: convert_matches_operator: MATCHES {match.group('pattern')} converted to {operator} '{''.join(converted)}'")
+            return f"{operator} '{''.join(converted)}'"
+
+        code = re.sub(r"(?i)\bMATCHES\s+(?P<pattern>'(?:[^']|'')*')", convert_pattern, code)
+
+        if re.search(r'(?i)\bMATCHES\b', code):
+            self.config_parser.print_log_message('WARNING',
+                "informix_connector: convert_matches_operator: A MATCHES operator whose pattern is not a literal was left in the code - PostgreSQL does not know the operator, it has to be rewritten manually.")
+        return code
+
     def convert_view_code(self, settings: dict):
         view_code = settings['view_code']
         converted_view_code = view_code
         converted_view_code = converted_view_code.replace(f'''"{settings['source_schema_name']}".''', f'''"{settings['target_schema_name']}".''')
+        converted_view_code = self.convert_matches_operator(converted_view_code)
+        converted_view_code = self.apply_sql_functions_mapping(converted_view_code, settings)
         return converted_view_code
 
     def get_types_mapping(self, settings):
@@ -582,14 +669,18 @@ class InformixConnector(DatabaseConnector):
                 'TIME': 'TIME',
                 'TIMESTAMP': 'TIMESTAMP',
                 'VARCHAR': 'VARCHAR',
-                # Collection and row types have no counterpart in PostgreSQL - they are
-                # migrated as their text representation, which at least keeps the content
-                # readable instead of emitting a data type the target does not know
-                'COLLECTION': 'TEXT',
-                'LIST': 'TEXT',
-                'MULTISET': 'TEXT',
+                # A collection of Informix is an array in PostgreSQL, which keeps the
+                # elements addressable instead of storing them as one string: CARDINALITY(),
+                # the element access and the containment operators go on working. The
+                # element type is not carried over - a collection may hold a row type or
+                # another collection, and TEXT holds all of them.
+                'COLLECTION': 'TEXT[]',
+                'LIST': 'TEXT[]',
+                'MULTISET': 'TEXT[]',
+                'SET': 'TEXT[]',
+                # a row type is a record and not a collection - it stays the text of its
+                # literal, PostgreSQL has no anonymous record type for a column
                 'ROW': 'TEXT',
-                'SET': 'TEXT',
                 'IDSSECURITYLABEL': 'TEXT',
             }
         else:
@@ -1775,6 +1866,9 @@ class InformixConnector(DatabaseConnector):
             # TODAY is the current date, CURRENT is already handled with the other keywords
             postgresql_code = re.sub(r'(?i)\bTODAY\b', 'CURRENT_DATE', postgresql_code)
 
+            # The pattern operator of Informix, which PostgreSQL does not know
+            postgresql_code = self.convert_matches_operator(postgresql_code)
+
             # The SQL functions of Informix which the target does not know under that name.
             # Without this a routine using them is created without a complaint - PostgreSQL
             # only checks the syntax of a PL/pgSQL body - and fails on its first call.
@@ -2017,7 +2111,9 @@ class InformixConnector(DatabaseConnector):
                                 column_type = column['data_type']
                                 target_column_type = target_columns[order_num]['data_type']
                                 # if column_type.lower() in ['binary', 'bytea']:
-                                if column_type.lower() == 'interval' and record[column_name] is not None:
+                                if column_type.lower() in self.ARRAY_DATA_TYPES and record[column_name] is not None:
+                                    record[column_name] = self.convert_collection_value(record[column_name])
+                                elif column_type.lower() == 'interval' and record[column_name] is not None:
                                     record[column_name] = self.convert_interval_value(record[column_name], self.is_year_month_interval(column))
                                 elif column_type.lower() in ['blob'] and record[column_name] is not None:
                                     record[column_name] = bytes(record[column_name].getBytes(1, int(record[column_name].length())))  # Convert 'com.informix.jdbc.IfxCblob' to bytes
@@ -2428,6 +2524,8 @@ class InformixConnector(DatabaseConnector):
                     counter += 1
 
             pgsql_trigger_code = "\n\n".join(pgsql_triggers)
+            pgsql_trigger_code = self.convert_matches_operator(pgsql_trigger_code)
+            pgsql_trigger_code = self.apply_sql_functions_mapping(pgsql_trigger_code, settings)
             # The body names Informix data types in its casts, e.g. '::lvarchar(2000)'
             pgsql_trigger_code = self.convert_data_types_in_code(pgsql_trigger_code, settings['target_db_type'])
         except Exception as e:

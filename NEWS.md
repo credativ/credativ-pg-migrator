@@ -1,7 +1,7 @@
 credativ-pg-migrator Releases
 =============================
 
-0.16.0 - 05.08.2026
+0.16.0 - 10.08.2026
 -------------------
 
 * Hardened the recognition of primary keys and unique indexes. The kind of an index was read from `information_schema.table_constraints`, whose rows are filtered by the privileges of the current user, so a migration user without a privilege on a table would have seen its primary key as a plain index and recreated it as an ordinary unique index. The kind now comes from `pg_constraint.contype`, which the catalog reports regardless of privileges. Checked to be equivalent on a live schema - identical for all 140 indexes apart from two exclusion constraints, which `information_schema` does not list at all
@@ -130,6 +130,11 @@ credativ-pg-migrator Releases
 * Added migration of Informix `INTERVAL` columns, which failed with `can't adapt type 'com.informix.lang.IntervalDF'`. The value is read normalized to the widest qualifier of its class and converted to a literal PostgreSQL reads with the same meaning - the leading sign of an Informix interval negates all of its fields, of a PostgreSQL one only the first
 * Fixed a table with a `LVARCHAR` column still failing with `Maximum output rowsize (32767) exceeded` - its length was not taken into account when the room for a document or collection column was calculated. The data query is now additionally repeated with smaller casts when Informix rejects the row, instead of losing the table
 * Fixed the migration of Informix triggers, none of which could be created before: the trigger text was cut in half at every storage boundary, the actions were separated at every comma including the ones of an argument list, the `BEFORE` / `FOR EACH ROW` / `AFTER` blocks were merged into one, a trigger `INSTEAD OF` an operation on a view disappeared without a message, the action was written into `EXECUTE FUNCTION` where only a trigger function belongs, the correlation names were read positionally and emitted as transition tables, `RETURN NEW` was returned even from a `DELETE` and a statement level trigger, and `UPDATE OF column` was migrated as a trigger on every update
+* Added migration of Informix functions returning several values, named or not, as PostgreSQL functions returning a table. `RETURNING INTEGER AS item_count, MONEY(12,2) AS total` used to reach the target unchanged and fail with `syntax error at or near "AS"`. `RETURN ... WITH RESUME`, the SPL iterator, becomes `RETURN QUERY` and streams its rows the same way. Such a routine has to be read as a table by its callers, which is reported
+* Added conversion of the constructs behind the `RETURNING` clause: `EXECUTE PROCEDURE` to `CALL`, `EXECUTE FUNCTION ... INTO` to `SELECT ... INTO`, the sequence pseudo columns `NEXTVAL` / `CURRVAL` to `nextval()` / `currval()`, the one row pseudo table `sysmaster:sysdual`, and `TODAY` to `CURRENT_DATE`
+* Fixed the SQL functions of Informix never being converted in routines, views and triggers - the connector reported a mapping for them but nothing ever applied it. This only surfaced at runtime, because PostgreSQL checks a PL/pgSQL body for its syntax alone: a routine using `NVL` was created without a complaint and failed on its first call with `function nvl(numeric, integer) does not exist`. `NVL` was added to the mapping, and `YEAR()` / `MONTH()` / `DAY()` are applied now as well
+* Added conversion of the Informix `MATCHES` operator, which PostgreSQL does not know. It is not `LIKE` under another name - `*` and `?` are its wildcards, `[abc]` matches a character out of a set and `%` and `_` are ordinary characters - so the pattern is translated as well and the operator chosen to suit it, `LIKE` or `SIMILAR TO`. Checked against the source database: identical row counts
+* Changed the migration of the Informix collection types `SET`, `MULTISET` and `LIST` to a PostgreSQL array instead of the text of their literal, which makes their content accessible again - `CARDINALITY()`, the element access and the containment operators work without any translation. A `ROW` type stays text, it is a record and not a collection
 
 0.15.0 - 03.07.2026
 -------------------

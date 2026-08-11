@@ -610,6 +610,50 @@ class DatabaseConnector(ABC):
             value = value[1:-1].strip()
         return value
 
+    def strip_sql_comments(self, code: str) -> str:
+        """
+        Removes '--' line comments and '/* */' block comments, leaving the content of
+        string literals and quoted names alone - both may contain these sequences.
+        Every comment is replaced by a space, so the words around it stay separated.
+        """
+        if not code:
+            return code
+        result = []
+        index = 0
+        length = len(code)
+        quote = None
+        while index < length:
+            character = code[index]
+            if quote:
+                result.append(character)
+                if character == quote:
+                    quote = None
+                index += 1
+                continue
+            if character in ('"', "'", '`'):
+                quote = character
+                result.append(character)
+                index += 1
+                continue
+            if character == '[':
+                quote = ']'
+                result.append(character)
+                index += 1
+                continue
+            if character == '-' and code.startswith('--', index):
+                while index < length and code[index] != '\n':
+                    index += 1
+                result.append(' ')
+                continue
+            if character == '/' and code.startswith('/*', index):
+                end_of_comment = code.find('*/', index + 2)
+                index = length if end_of_comment == -1 else end_of_comment + 2
+                result.append(' ')
+                continue
+            result.append(character)
+            index += 1
+        return ''.join(result)
+
     @abstractmethod
     def is_string_type(self, column_type: str) -> bool:
         """

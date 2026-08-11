@@ -3256,7 +3256,11 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_name}_func"();
         for row in rows:
             rule_name = row[0]
             rule_owner = row[1]
-            rule_definition_part = row[3].strip()
+            ## syscomments keeps the text of an object cut into pieces of a fixed length,
+            ## which regularly falls inside a word - the pieces must be joined exactly as
+            ## they are, stripping each of them would glue the words at the boundary
+            ## together ('@val' + 'in (0, 1)' as '@valin (0, 1)').
+            rule_definition_part = row[3]
             if rule_name not in domains:
                 domains[rule_name] = {
                     'domain_schema': schema,
@@ -3266,9 +3270,16 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_name}_func"();
                     'domain_comment': '',
                 }
             else:
-                domains[rule_name]['source_domain_sql'] += '' + rule_definition_part
+                domains[rule_name]['source_domain_sql'] += rule_definition_part
 
         for rule_name, domain_info in domains.items():
+            ## The comments of the whole batch are stored with the rule, so they have to be
+            ## removed while the line ends are still in place - the newlines were replaced
+            ## by spaces first, which put the rest of the statement behind a '--' comment
+            ## and so commented the CHECK of the rule away without any message.
+            rule_sql = domains[rule_name]['source_domain_sql']
+            rule_sql_without_comments = self.strip_sql_comments(rule_sql)
+
             query = f"""
                 SELECT DISTINCT
                     bt.name as basic_data_type
@@ -3296,21 +3307,36 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_name}_func"();
                     self.config_parser.print_log_message('DEBUG',
                         f"sybase_ase_connector: fetch_domains: Domain {rule_name}: data type {basic_data_type} of the source migrated as {domains[rule_name]['domain_data_type']}.")
             else:
-                domain_sql_lower = domains[rule_name]['source_domain_sql'].lower()
-                if re.search(r'\blike\b', domain_sql_lower) or "'" in domains[rule_name]['source_domain_sql']:
+                ## the rule is bound to nothing the catalog can report a type for, so the
+                ## condition itself has to tell - a comment must not decide that, a word
+                ## like 'don't' in it is not a string literal of the rule
+                domain_sql_lower = rule_sql_without_comments.lower()
+                if re.search(r'\blike\b', domain_sql_lower) or "'" in rule_sql_without_comments:
                     domains[rule_name]['domain_data_type'] = 'TEXT'
                 else:
                     domains[rule_name]['domain_data_type'] = 'NUMERIC'
 
-            domains[rule_name]['source_domain_sql'] = domains[rule_name]['source_domain_sql'].replace('\n', ' ')
+            ## kept for the protocol as it stands in the source, only folded into one line
+            domains[rule_name]['source_domain_sql'] = re.sub(r'\s+', ' ', rule_sql).strip()
 
-            domain_check_sql = domains[rule_name]['source_domain_sql']
-            domain_check_sql = re.sub(r'@\w+', 'VALUE', domain_check_sql)
-            domain_check_sql = re.sub(r'create rule', '', domain_check_sql, flags=re.IGNORECASE)
-            domain_check_sql = re.sub(rf"{re.escape(domains[rule_name]['domain_name'])}\s+AS", '', domain_check_sql, flags=re.IGNORECASE)
+            domain_check_sql = rule_sql_without_comments
+            ## Everything up to 'CREATE RULE [owner.]name AS' introduces the rule, the
+            ## expression behind it is what the CHECK of the domain needs. The parameter of
+            ## the rule (@val) stands for the checked value and becomes VALUE.
+            header_pattern = r'(?is)^.*?\bcreate\s+rule\s+(?:[\w"\[\]]+\s*\.\s*)*[\w"\[\]]+\s+as\s+'
+            if re.search(header_pattern, domain_check_sql):
+                domain_check_sql = re.sub(header_pattern, '', domain_check_sql, count=1)
+            else:
+                self.config_parser.print_log_message('WARNING',
+                    f"sybase_ase_connector: fetch_domains: Rule {rule_name} does not begin with 'CREATE RULE {rule_name} AS' "
+                    f"- its condition is taken over as it stands and may need to be completed by hand: {domain_check_sql.strip()}")
             domain_check_sql = domain_check_sql.replace('"', "'")
-            # Remove all comments starting with /* and ending with */
-            domain_check_sql = re.sub(r'/\*.*?\*/', '', domain_check_sql, flags=re.DOTALL)
+            ## a '@' inside a string literal ('%@example.com') belongs to the data, only the
+            ## parameter of the rule is the checked value
+            literal_parts = re.split(r"('(?:[^']|'')*')", domain_check_sql)
+            domain_check_sql = ''.join(part if position % 2 else re.sub(r'@\w+', 'VALUE', part)
+                                       for position, part in enumerate(literal_parts))
+            domain_check_sql = re.sub(r'\s+', ' ', domain_check_sql).strip()
             # Ensure PostgreSQL standalone constraints rely on VALUE
             domain_check_sql = re.sub(r'(?i)(CHECK\s*\(\s*)([a-zA-Z_]\w*)(\s+|[<>=!])', r'\g<1>VALUE\g<3>', domain_check_sql)
             domains[rule_name]['source_domain_check_sql'] = domain_check_sql.strip()

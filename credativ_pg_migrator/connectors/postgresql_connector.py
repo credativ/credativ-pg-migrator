@@ -3582,7 +3582,13 @@ class PostgreSQLConnector(DatabaseConnector):
             if domain_check_sql:
                 # Ensure PostgreSQL standalone domain constraints rely on VALUE instead of column names
                 domain_check_sql = re.sub(r'(?i)(CHECK\s*\(\s*)([a-zA-Z_]\w*)(\s+|[<>=!])', r'\g<1>VALUE\g<3>', domain_check_sql)
-                
+
+                # A source which delivers the bare condition of its domain - a Sybase ASE rule
+                # is stored as 'create rule r_flag as @val in (0, 1)' - needs the CHECK clause
+                # around it, otherwise the statement ends as 'AS SMALLINT VALUE in (0, 1)'.
+                if not re.search(r'(?i)\bCHECK\b', domain_check_sql):
+                    domain_check_sql = f"CHECK ({domain_check_sql})"
+
                 # pg_get_constraintdef already allows CHECK (...).
                 # If multiple constraints were aggregated, they might look like CHECK (...) CHECK (...)
                 # We just append them.

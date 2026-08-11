@@ -1,7 +1,7 @@
 credativ-pg-migrator Releases
 =============================
 
-0.16.0 - 10.08.2026
+0.16.0 - 11.08.2026
 -------------------
 
 * Hardened the recognition of primary keys and unique indexes. The kind of an index was read from `information_schema.table_constraints`, whose rows are filtered by the privileges of the current user, so a migration user without a privilege on a table would have seen its primary key as a plain index and recreated it as an ordinary unique index. The kind now comes from `pg_constraint.contype`, which the catalog reports regardless of privileges. Checked to be equivalent on a live schema - identical for all 140 indexes apart from two exclusion constraints, which `information_schema` does not list at all
@@ -135,6 +135,8 @@ credativ-pg-migrator Releases
 * Fixed the SQL functions of Informix never being converted in routines, views and triggers - the connector reported a mapping for them but nothing ever applied it. This only surfaced at runtime, because PostgreSQL checks a PL/pgSQL body for its syntax alone: a routine using `NVL` was created without a complaint and failed on its first call with `function nvl(numeric, integer) does not exist`. `NVL` was added to the mapping, and `YEAR()` / `MONTH()` / `DAY()` are applied now as well
 * Added conversion of the Informix `MATCHES` operator, which PostgreSQL does not know. It is not `LIKE` under another name - `*` and `?` are its wildcards, `[abc]` matches a character out of a set and `%` and `_` are ordinary characters - so the pattern is translated as well and the operator chosen to suit it, `LIKE` or `SIMILAR TO`. Checked against the source database: identical row counts
 * Changed the migration of the Informix collection types `SET`, `MULTISET` and `LIST` to a PostgreSQL array instead of the text of their literal, which makes their content accessible again - `CARDINALITY()`, the element access and the containment operators work without any translation. A `ROW` type stays text, it is a record and not a collection
+* Fixed every table CHECK constraint of a Sybase ASE source being migrated a second time as a domain, which failed the migration for a `MONEY` column with `operator does not exist: money > integer`. Sybase ASE stores such a constraint as an object of the same type as a rule, and only its row in `sysconstraints` tells the two apart; the constraint keeps being migrated with its table, as it always was
+* Changed the migration of Sybase ASE `MONEY` and `SMALLMONEY` to `NUMERIC(19,4)` and `NUMERIC(10,4)`. The `MONEY` type of PostgreSQL is not the same thing - it has almost no operators and keeps the decimal places of `lc_monetary` instead of the four of the source - and the `INTEGER` used before it dropped the decimal places of every amount
 
 0.15.0 - 03.07.2026
 -------------------

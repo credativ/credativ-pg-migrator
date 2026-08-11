@@ -3210,6 +3210,14 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_name}_func"();
         ## like the type of a column
         types_mapping = self.get_types_mapping({'target_db_type': self.config_parser.get_target_db_type()})
         schema_condition = f"AND r.uid = USER_ID('{schema}')" if schema else ""
+        ## A table CHECK constraint is stored in sysobjects as an object of type 'R', the
+        ## same type as a rule created with CREATE RULE, and only a row in sysconstraints
+        ## tells the two apart. Such a constraint belongs to one table and is already
+        ## migrated with that table by fetch_constraints, so a domain must not be created
+        ## for it - that produced a second, redundant object whose base type was only
+        ## guessed from the checked column ('CHECK (VALUE > 0)' of a MONEY column then
+        ## failed with 'operator does not exist: money > integer').
+        no_check_constraint_condition = "AND NOT EXISTS (SELECT 1 FROM sysconstraints k WHERE k.constrid = r.id)"
         query = f"""
             SELECT
                 r.name AS RuleName,
@@ -3222,11 +3230,26 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_name}_func"();
                 syscomments sc ON r.id = sc.id
             WHERE
                 r.type = 'R' {schema_condition}
+                {no_check_constraint_condition}
             ORDER BY
                 RuleName, DefinitionLineNumber
         """
         self.connect()
         cursor = self.connection.cursor()
+
+        cursor.execute(f"""
+            SELECT r.name AS ConstraintName
+            FROM sysobjects r
+            WHERE r.type = 'R' {schema_condition}
+                AND EXISTS (SELECT 1 FROM sysconstraints k WHERE k.constrid = r.id)
+            ORDER BY r.name
+        """)
+        skipped_check_constraints = [skipped_row[0].strip() for skipped_row in cursor.fetchall()]
+        if skipped_check_constraints:
+            self.config_parser.print_log_message('INFO',
+                f"sybase_ase_connector: fetch_domains: Table CHECK constraints {', '.join(skipped_check_constraints)} "
+                "are not rules - they are migrated together with their tables, not as domains.")
+
         cursor.execute(query)
         rows = cursor.fetchall()
         domains = {}

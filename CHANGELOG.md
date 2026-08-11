@@ -1,6 +1,11 @@
 # Changelog
 
-## 0.16.0 - 2026.08.10
+## 0.16.0 - 2026.08.11
+
+- 2026.08.11
+
+  - Fix - Sybase ASE Connector: Every table CHECK constraint was migrated twice - once correctly with its table and once as a domain - and the domain regularly failed the migration, a CHECK of a `MONEY` column with `operator does not exist: money > integer` for `CREATE DOMAIN "migtest"."chk_emp_salary" AS money CONSTRAINT chk_emp_salary CHECK (VALUE > 0)`. Sybase ASE stores a CHECK constraint in `sysobjects` as an object of type `'R'`, exactly the type of a rule created with `CREATE RULE`, and `fetch_domains()` selected all of them; the base type of the resulting domain could then only be guessed from a column the constraint is bound to, which is where the source type `money` came from.
+    - Only the row in `sysconstraints`, which a bound rule never has, tells a constraint and a rule apart, so objects having one are left out of the domains now. Nothing is lost by that: `fetch_constraints()` already reads exactly these objects (`sysconstraints.status & 128`) and migrates them as table CHECK constraints, and the domain was not used by any column either - for a PostgreSQL target the column keeps its own data type. The names of the skipped constraints are logged, so the protocol still shows what became of them. The type mapping repaired on 10.08. (`MONEY` to `NUMERIC(19,4)`, `SMALLMONEY` to `NUMERIC(10,4)`, instead of the `MONEY` type of PostgreSQL, which has almost no operators, and instead of the `INTEGER` before that, which dropped the four decimal places of every amount) stays in place - it is needed for a real rule bound to a `MONEY` column.
 
 - 2026.08.10
 

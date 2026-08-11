@@ -906,6 +906,31 @@ class Orchestrator:
 
         self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': 'constraints migration', 'success': True, 'message': 'finished OK'})
 
+    def fetch_source_next_identity(self, table_data, worker_id):
+        """
+        The next identity value of a table of the source, read with a connection of its own.
+
+        The data migration reads this value with the connection it already has; this is the way
+        for a table whose data was not migrated at all, where the source is not connected - the
+        sequence of its identity column has to be set as well. A source which cannot answer -
+        no connection at all with DDL connectivity, a table without an identity column - leaves
+        the sequence to be set from the rows which are in the target.
+        """
+        source_connection = None
+        try:
+            source_connection = self.load_connector('source')
+            source_connection.connect()
+            return source_connection.get_table_next_identity(table_data['source_schema_name'], table_data['source_table_name'])
+        except Exception as e:
+            self.config_parser.print_log_message('WARNING', f"orchestrator: table_worker: Worker {worker_id}: Next identity value of {table_data['source_schema_name']}.{table_data['source_table_name']} could not be read from the source ({e}) - the sequence is set from the data in the target.")
+            return None
+        finally:
+            if source_connection is not None:
+                try:
+                    source_connection.disconnect()
+                except Exception:
+                    pass
+
     def table_worker(self, table_data, settings):
         worker_id = uuid.uuid4()
         part_name = 'start'
@@ -914,6 +939,8 @@ class Orchestrator:
         rows_migrated = 0
         worker_start_time = time.time()
         worker_end_time = None
+        next_identity = None
+        source_next_identity_read = False
         try:
             # target_schema_name = self.config_parser.convert_names_case(table_data['target_schema_name'])
             target_schema_name = table_data['target_schema_name'] ## target schema is used as defined in the config file, no case conversion
@@ -1448,47 +1475,54 @@ class Orchestrator:
                         table_settings['chunk_number'] += 1
 
                 next_identity = worker_source_connection.get_table_next_identity(table_data['source_schema_name'], table_data['source_table_name'])
+                source_next_identity_read = True
                 worker_source_connection.disconnect()
-
-                if rows_migrated > 0:
-                    # sequences setting
-                    part_name = 'sequences'
-                    self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Setting sequences for table {target_table_name} in target database.")
-                    sequences = worker_target_connection.fetch_table_sequences(target_schema_name, target_table_name)
-                    if sequences:
-                        for order_num, sequence_details in sequences.items():
-                            sequence_id = sequence_details['id']
-                            sequence_name = sequence_details['name']
-                            column_name = sequence_details['column_name']
-                            sequence_sql = sequence_details['set_sequence_sql']
-                            if next_identity is not None:
-                                sequence_sql = f"SELECT setval('\"{target_schema_name}\".\"{sequence_name}\"', {next_identity}, false);"
-
-                            self.migrator_tables.insert_sequence({
-                                'sequence_id': sequence_id,
-                                'target_schema_name': target_schema_name,
-                                'target_table_name': target_table_name,
-                                'target_column_name': column_name,
-                                'target_sequence_name': sequence_name,
-                                'target_sequence_sql': sequence_sql
-                            })
-                            self.config_parser.print_log_message( 'DEBUG', f"orchestrator: table_worker: Worker {worker_id}: Setting sequence with SQL: {sequence_sql}")
-                            try:
-                                worker_target_connection.execute_query(sequence_sql)
-                                self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Sequence ({order_num}) {sequence_name} set successfully for table {target_table_name}.")
-                                seq_curr_val = worker_target_connection.get_sequence_current_value(sequence_id)
-                                self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Current value of sequence {sequence_name} is {seq_curr_val}.")
-                                self.migrator_tables.update_sequence_status({'sequence_id': sequence_id, 'success': True, 'message': 'migrated OK'})
-                            except Exception as e:
-                                self.migrator_tables.update_sequence_status({'sequence_id': sequence_id, 'success': False, 'message': f'ERROR: {e}'})
-                                self.migrator_tables.update_table_status({'row_id': table_data['id'], 'success': False, 'message': f'ERROR: {e}'})
-                                self.config_parser.print_log_message('ERROR', f"orchestrator: table_worker: Worker {worker_id}: Error setting sequence {sequence_name} for table {target_table_name}: {e}")
-                    else:
-                        self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: No sequences found for table {target_table_name}.")
-                else:
-                    self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: No data found for table {target_table_name} - skipping sequences.")
             else:
                 self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Skipping data migration for table {target_table_name} based on configuration")
+
+            ## The sequence of an identity column is set whatever happened with the data. It
+            ## used to be set only when rows were migrated in this run, so a table which got
+            ## none - data migration switched off for it, an empty source table, everything
+            ## filtered out by data_migration_limitation - kept its sequence at 1 and the first
+            ## insert of the application collided with the keys already in the table. The value
+            ## comes from the source, which knows it regardless of any data being copied.
+            part_name = 'sequences'
+            sequences = worker_target_connection.fetch_table_sequences(target_schema_name, target_table_name)
+            if sequences:
+                self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Setting sequences for table {target_table_name} in target database.")
+                if next_identity is None and not source_next_identity_read:
+                    next_identity = self.fetch_source_next_identity(table_data, worker_id)
+                for order_num, sequence_details in sequences.items():
+                    sequence_id = sequence_details['id']
+                    sequence_name = sequence_details['name']
+                    column_name = sequence_details['column_name']
+                    sequence_sql = sequence_details['set_sequence_sql']
+                    if next_identity is not None:
+                        sequence_sql = f"SELECT setval('\"{target_schema_name}\".\"{sequence_name}\"', {next_identity}, false);"
+
+                    self.migrator_tables.insert_sequence({
+                        'sequence_id': sequence_id,
+                        'target_schema_name': target_schema_name,
+                        'target_table_name': target_table_name,
+                        'target_column_name': column_name,
+                        'target_sequence_name': sequence_name,
+                        'target_sequence_sql': sequence_sql
+                    })
+                    self.config_parser.print_log_message( 'DEBUG', f"orchestrator: table_worker: Worker {worker_id}: Setting sequence with SQL: {sequence_sql}")
+                    try:
+                        worker_target_connection.execute_query(sequence_sql)
+                        self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Sequence ({order_num}) {sequence_name} set successfully for table {target_table_name}.")
+                        seq_curr_val = worker_target_connection.get_sequence_current_value(sequence_id)
+                        self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Current value of sequence {sequence_name} is {seq_curr_val}.")
+                        self.migrator_tables.update_sequence_status({'sequence_id': sequence_id, 'success': True, 'message': 'migrated OK'})
+                    except Exception as e:
+                        self.migrator_tables.update_sequence_status({'sequence_id': sequence_id, 'success': False, 'message': f'ERROR: {e}'})
+                        self.migrator_tables.update_table_status({'row_id': table_data['id'], 'success': False, 'message': f'ERROR: {e}'})
+                        self.config_parser.print_log_message('ERROR', f"orchestrator: table_worker: Worker {worker_id}: Error setting sequence {sequence_name} for table {target_table_name}: {e}")
+            else:
+                ## a table without a sequence of its own is the normal case, so this is not
+                ## reported as an event of the migration - every table passes here now
+                self.config_parser.print_log_message('DEBUG', f"orchestrator: table_worker: Worker {worker_id}: No sequences found for table {target_table_name}.")
 
             worker_end_time = time.time()
             elapsed_time = worker_end_time - worker_start_time

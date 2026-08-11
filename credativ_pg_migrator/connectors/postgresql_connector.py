@@ -3008,13 +3008,15 @@ class PostgreSQLConnector(DatabaseConnector):
             for row in cursor.fetchall():
                 sequence_details = self.get_sequence_details(table_schema, row[0])
 
-                # The sequence has to continue behind the data which was just loaded. The source
-                # database does not always know its next value (with DDL connectivity there is no
-                # source database at all), so it is derived from the migrated rows themselves.
-                set_sequence_sql = row[3] or (
-                    f"""SELECT setval('"{table_schema}"."{row[0]}"', """
-                    f"""COALESCE((SELECT MAX("{row[2]}") FROM "{table_schema}"."{table_name}"), 0) + 1, false);"""
-                )
+                # The sequence has to continue behind the data which was just loaded. Without a
+                # value from the source - with DDL connectivity there is no source database at
+                # all - it is derived from the migrated rows alone.
+                set_sequence_sql = row[3] or self.get_set_sequence_sql({
+                    'target_schema_name': table_schema,
+                    'target_table_name': table_name,
+                    'target_column_name': row[2],
+                    'target_sequence_name': row[0],
+                })
 
                 sequence_data[order_num] = {
                     'name': row[0],
@@ -3030,6 +3032,41 @@ class PostgreSQLConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', f"postgresql_connector: fetch_table_sequences: Error executing sequence query: {query}")
             self.config_parser.print_log_message('ERROR', e)
             return {}
+
+    def get_set_sequence_sql(self, settings):
+        """
+        The statement which sets the sequence of a table so that it continues behind its data.
+
+        Two values can say where the sequence has to continue and they do not always agree:
+        the next value the source reported for its identity column, and the data which is
+        really in the target. The source was preferred, which set the sequence below the data
+        whenever the two came from different points in time - the source was reloaded, the
+        identity block of Sybase ASE was burnt back after a crash, the data arrived from an
+        older snapshot or from files - and the first INSERT of the application then failed with
+        a duplicate key. The greater of the two is used, so the sequence can never fall behind
+        the rows which are there; the gaps a source reserves above its data are kept as well.
+
+        Without a value from the source the statement is the one derived from the data alone.
+        """
+        target_schema_name = settings['target_schema_name']
+        target_table_name = settings['target_table_name']
+        target_column_name = settings['target_column_name']
+        target_sequence_name = settings['target_sequence_name']
+        try:
+            next_identity = int(settings['source_next_identity']) if settings.get('source_next_identity') is not None else None
+        except (TypeError, ValueError):
+            self.config_parser.print_log_message('WARNING',
+                f"postgresql_connector: get_set_sequence_sql: The next identity value reported for "
+                f'"{target_table_name}"."{target_column_name}" is not a number ({settings.get("source_next_identity")!r}) '
+                "- the sequence is set from the data in the target.")
+            next_identity = None
+
+        behind_the_data = (f'COALESCE((SELECT MAX("{target_column_name}") '
+                           f'FROM "{target_schema_name}"."{target_table_name}"), 0) + 1')
+        new_value = behind_the_data if next_identity is None else f'GREATEST({next_identity}, {behind_the_data})'
+        ## setval() takes a bigint, and the column of a sequence is not always an integer type -
+        ## a NUMERIC one would end as 'function setval(unknown, numeric, boolean) does not exist'
+        return f"""SELECT setval('"{target_schema_name}"."{target_sequence_name}"', ({new_value})::bigint, false);"""
 
     def get_table_next_identity(self, table_schema: str, table_name: str):
         try:

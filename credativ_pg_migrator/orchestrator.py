@@ -1535,9 +1535,15 @@ class Orchestrator:
                     sequence_id = sequence_details['id']
                     sequence_name = sequence_details['name']
                     column_name = sequence_details['column_name']
-                    sequence_sql = sequence_details['set_sequence_sql']
-                    if next_identity is not None:
-                        sequence_sql = f"SELECT setval('\"{target_schema_name}\".\"{sequence_name}\"', {next_identity}, false);"
+                    ## the sequence continues behind the greater of the two - the value the source
+                    ## reported and the data which really is in the target
+                    sequence_sql = worker_target_connection.get_set_sequence_sql({
+                        'target_schema_name': target_schema_name,
+                        'target_table_name': target_table_name,
+                        'target_column_name': column_name,
+                        'target_sequence_name': sequence_name,
+                        'source_next_identity': next_identity,
+                    })
 
                     self.migrator_tables.insert_sequence(
                         self.sequence_protocol_settings(table_data, sequence_details, sequence_sql, next_identity))

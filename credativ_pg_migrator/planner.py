@@ -618,6 +618,10 @@ class Planner:
                 'source_schema_name': self.source_schema_name,
                 'source_table_name': sequence_info.get('table_name', None),
                 'source_column_name': sequence_info.get('column_name', None),
+                ## a sequence object of the source is not an identity column - the flag says so
+                ## explicitly, so the protocol tells the two origins of a sequence apart
+                'source_is_identity': sequence_info.get('used_in_identity', False),
+                'source_column_data_type': sequence_info.get('column_data_type', None),
                 'source_sequence_name': sequence_info['sequence_name'],
                 'source_sequence_sql': sequence_info.get('source_sequence_sql', ''),
                 'source_start_value': sequence_info.get('source_start_value', None),

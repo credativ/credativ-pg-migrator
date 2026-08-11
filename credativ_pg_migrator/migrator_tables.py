@@ -2688,6 +2688,12 @@ class MigratorTables:
             source_schema_name TEXT,
             source_table_name TEXT,
             source_column_name TEXT,
+            ## a sequence of the target can come from a sequence of the source or from an
+            ## identity column, which most legacy databases have instead - these three columns
+            ## document which of the two it is, with what the source declared and reported
+            source_column_data_type TEXT,
+            source_is_identity BOOLEAN,
+            source_next_identity BIGINT,
             source_sequence_name TEXT,
             source_sequence_sql TEXT,
             source_start_value BIGINT,
@@ -2700,8 +2706,11 @@ class MigratorTables:
             target_schema_name TEXT,
             target_table_name TEXT,
             target_column_name TEXT,
+            target_column_data_type TEXT,
             target_sequence_name TEXT,
             target_sequence_sql TEXT,
+            ## the value the sequence really has after the statement above was executed
+            target_sequence_last_value BIGINT,
             target_sequence_comment TEXT,
             task_created TIMESTAMP DEFAULT clock_timestamp(),
             task_started TIMESTAMP,
@@ -2873,21 +2882,26 @@ class MigratorTables:
             'source_schema_name': row[1],
             'source_table_name': row[2],
             'source_column_name': row[3],
-            'source_sequence_name': row[4],
-            'source_sequence_sql': row[5],
-            'source_start_value': row[6],
-            'source_increment_by': row[7],
-            'source_minvalue': row[8],
-            'source_maxvalue': row[9],
-            'source_cache': row[10],
-            'source_is_cycled': row[11],
-            'source_sequence_comment': row[12],
-            'target_schema_name': row[13],
-            'target_table_name': row[14],
-            'target_column_name': row[15],
-            'target_sequence_name': row[16],
-            'target_sequence_sql': row[17],
-            'target_sequence_comment': row[18]
+            'source_column_data_type': row[4],
+            'source_is_identity': row[5],
+            'source_next_identity': row[6],
+            'source_sequence_name': row[7],
+            'source_sequence_sql': row[8],
+            'source_start_value': row[9],
+            'source_increment_by': row[10],
+            'source_minvalue': row[11],
+            'source_maxvalue': row[12],
+            'source_cache': row[13],
+            'source_is_cycled': row[14],
+            'source_sequence_comment': row[15],
+            'target_schema_name': row[16],
+            'target_table_name': row[17],
+            'target_column_name': row[18],
+            'target_column_data_type': row[19],
+            'target_sequence_name': row[20],
+            'target_sequence_sql': row[21],
+            'target_sequence_last_value': row[22],
+            'target_sequence_comment': row[23]
         }
 
     def decode_trigger_row(self, row):
@@ -3422,18 +3436,21 @@ class MigratorTables:
         func_run_id = uuid.uuid4()
         protocol_table_name = self.config_parser.get_protocol_name_sequences()
 
+        ## the next identity value is clamped like the values of a sequence - an identity
+        ## column of Sybase ASE is a NUMERIC of up to 38 digits and can report a value which
+        ## no BIGINT column of the protocol can hold
         clamped, message = self.clamp_bigint_sequence_fields(
-            settings, ('source_start_value', 'source_increment_by', 'source_minvalue', 'source_maxvalue', 'source_cache'))
+            settings, ('source_start_value', 'source_increment_by', 'source_minvalue', 'source_maxvalue', 'source_cache', 'source_next_identity'))
         if message:
-            self.config_parser.print_log_message('WARNING', f"migrator_tables: insert_sequence: ({func_run_id}): sequence {settings.get('source_sequence_name')}: {message}")
+            self.config_parser.print_log_message('WARNING', f"migrator_tables: insert_sequence: ({func_run_id}): sequence {settings.get('source_sequence_name') or settings.get('target_sequence_name')}: {message}")
 
         query = f"""
             INSERT INTO "{self.protocol_schema}"."{protocol_table_name}"
-            (sequence_id, source_schema_name, source_table_name, source_column_name, source_sequence_name, source_sequence_sql, source_start_value, source_increment_by, source_minvalue, source_maxvalue, source_cache, source_is_cycled, source_sequence_comment, target_schema_name, target_table_name, target_column_name, target_sequence_name, target_sequence_sql, target_sequence_comment, message)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (sequence_id, source_schema_name, source_table_name, source_column_name, source_column_data_type, source_is_identity, source_next_identity, source_sequence_name, source_sequence_sql, source_start_value, source_increment_by, source_minvalue, source_maxvalue, source_cache, source_is_cycled, source_sequence_comment, target_schema_name, target_table_name, target_column_name, target_column_data_type, target_sequence_name, target_sequence_sql, target_sequence_comment, message)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
-        params = (settings.get('sequence_id'), settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_column_name'), settings.get('source_sequence_name'), settings.get('source_sequence_sql'), clamped['source_start_value'], clamped['source_increment_by'], clamped['source_minvalue'], clamped['source_maxvalue'], clamped['source_cache'], settings.get('source_is_cycled'), settings.get('source_sequence_comment'), settings.get('target_schema_name'), settings.get('target_table_name'), settings.get('target_column_name'), settings.get('target_sequence_name'), settings.get('target_sequence_sql'), settings.get('target_sequence_comment'), message)
+        params = (settings.get('sequence_id'), settings.get('source_schema_name'), settings.get('source_table_name'), settings.get('source_column_name'), settings.get('source_column_data_type'), settings.get('source_is_identity'), clamped['source_next_identity'], settings.get('source_sequence_name'), settings.get('source_sequence_sql'), clamped['source_start_value'], clamped['source_increment_by'], clamped['source_minvalue'], clamped['source_maxvalue'], clamped['source_cache'], settings.get('source_is_cycled'), settings.get('source_sequence_comment'), settings.get('target_schema_name'), settings.get('target_table_name'), settings.get('target_column_name'), settings.get('target_column_data_type'), settings.get('target_sequence_name'), settings.get('target_sequence_sql'), settings.get('target_sequence_comment'), message)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -3442,7 +3459,9 @@ class MigratorTables:
 
             sequence_row = self.decode_sequence_row(row)
             self.config_parser.print_log_message('DEBUG3', f"migrator_tables: insert_sequence: ({func_run_id}): Returned row: {sequence_row}")
-            self.insert_protocol({'object_type': 'sequence', 'object_name': settings.get('source_sequence_name'), 'object_action': 'create', 'object_ddl': settings.get('source_sequence_sql'), 'execution_timestamp': None, 'execution_success': None, 'execution_error_message': None, 'row_type': 'info', 'execution_results': None, 'object_protocol_id': sequence_row['sequence_id']})
+            ## a sequence created for an identity column has no name of its own in the source,
+            ## the name of the sequence in the target names it in the protocol instead
+            self.insert_protocol({'object_type': 'sequence', 'object_name': settings.get('source_sequence_name') or settings.get('target_sequence_name'), 'object_action': 'create', 'object_ddl': settings.get('source_sequence_sql') or settings.get('target_sequence_sql'), 'execution_timestamp': None, 'execution_success': None, 'execution_error_message': None, 'row_type': 'info', 'execution_results': None, 'object_protocol_id': sequence_row['sequence_id']})
             return sequence_row['sequence_id']
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"migrator_tables: insert_sequence: ({func_run_id}): Error inserting sequence info {settings.get('source_sequence_name')} into {protocol_table_name}.")
@@ -3455,15 +3474,22 @@ class MigratorTables:
         message = settings.get('message')
         func_run_id = uuid.uuid4()
         table_name = self.config_parser.get_protocol_name_sequences()
+        ## the value the sequence has after it was set is recorded when the caller read it -
+        ## it documents the result of the statement, not only that it was executed
+        last_value_clamped, last_value_message = self.clamp_bigint_sequence_fields(
+            settings, ('target_sequence_last_value',))
+        if last_value_message:
+            self.config_parser.print_log_message('WARNING', f"migrator_tables: update_sequence_status: ({func_run_id}): sequence {sequence_id}: {last_value_message}")
         query = f"""
             UPDATE "{self.protocol_schema}"."{table_name}"
             SET task_completed = clock_timestamp(),
             success = %s,
-            message = %s
+            message = %s,
+            target_sequence_last_value = COALESCE(%s, target_sequence_last_value)
             WHERE sequence_id = %s
             RETURNING *
         """
-        params = ('TRUE' if success else 'FALSE', message, sequence_id)
+        params = ('TRUE' if success else 'FALSE', message, last_value_clamped['target_sequence_last_value'], sequence_id)
         try:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(query, params)
@@ -4148,7 +4174,10 @@ class MigratorTables:
             ('Text Search Objects', self.config_parser.get_protocol_name_text_search(), 'object_type'),
             ('User Defined Types', self.config_parser.get_protocol_name_user_defined_types(), None),
             ('Domains', self.config_parser.get_protocol_name_domains(), 'migrated_as'),
-            ('Sequences', self.config_parser.get_protocol_name_sequences(), None),
+            ## a sequence of the target stands either for an identity column of the source or
+            ## for a sequence object of it - the summary reports how many of each
+            ('Sequences', self.config_parser.get_protocol_name_sequences(),
+             "CASE WHEN source_is_identity IS TRUE THEN 'from identity column' ELSE 'from sequence object' END"),
             ('Tables', self.config_parser.get_protocol_name_tables(), None),
             ('Table Partitions', self.config_parser.get_protocol_name_source_table_partitioning(), None),
             ('Columns', self.config_parser.get_protocol_name_columns(), None),

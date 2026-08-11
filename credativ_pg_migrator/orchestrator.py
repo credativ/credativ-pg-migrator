@@ -476,21 +476,15 @@ class Orchestrator:
                     sequence_name = sequence_details['name']
                     column_name = sequence_details['column_name']
                     sequence_sql = sequence_details['set_sequence_sql']
-                    self.migrator_tables.insert_sequence({
-                        'sequence_id': sequence_id,
-                        'target_schema_name': target_schema_name,
-                        'target_table_name': target_table_name,
-                        'target_column_name': column_name,
-                        'target_sequence_name': sequence_name,
-                        'target_sequence_sql': sequence_sql
-                    })
+                    self.migrator_tables.insert_sequence(
+                        self.sequence_protocol_settings(table_data, sequence_details, sequence_sql, None))
                     self.config_parser.print_log_message( 'DEBUG', f"orchestrator: mapping_data_worker: Worker {worker_id}: Setting sequence with SQL: {sequence_sql}")
                     try:
                         worker_target_connection.execute_query(sequence_sql)
                         self.config_parser.print_log_message('INFO', f"orchestrator: mapping_data_worker: Worker {worker_id}: Sequence ({order_num}) {sequence_name} set successfully for table {target_table_name}.")
                         seq_curr_val = worker_target_connection.get_sequence_current_value(sequence_id)
                         self.config_parser.print_log_message('INFO', f"orchestrator: mapping_data_worker: Worker {worker_id}: Current value of sequence {sequence_name} is {seq_curr_val}.")
-                        self.migrator_tables.update_sequence_status({'sequence_id': sequence_id, 'success': True, 'message': 'migrated OK'})
+                        self.migrator_tables.update_sequence_status({'sequence_id': sequence_id, 'success': True, 'message': 'migrated OK', 'target_sequence_last_value': seq_curr_val})
                     except Exception as e:
                         self.migrator_tables.update_sequence_status({'sequence_id': sequence_id, 'success': False, 'message': f'ERROR: {e}'})
                         self.migrator_tables.update_table_status({'row_id': table_data['id'], 'success': False, 'message': f'ERROR: {e}'})
@@ -905,6 +899,51 @@ class Orchestrator:
             self.config_parser.print_log_message('INFO', "orchestrator: run_migrate_constraints: No constraints to create.")
 
         self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': 'constraints migration', 'success': True, 'message': 'finished OK'})
+
+    def sequence_protocol_settings(self, table_data, sequence_details, sequence_sql, next_identity):
+        """
+        The description of a sequence of a table for the sequences protocol table.
+
+        A sequence of the target which belongs to a table comes from an identity column of the
+        source - the legacy databases have no sequence objects of their own - and the protocol
+        has to say so: which column of the source it stands for, whether that column really is
+        an identity column, what data type it has there and which next value the source
+        reported. The columns of the source are matched to the column of the sequence by name,
+        because the name in the target went through the case handling of the configuration.
+        """
+        target_column_name = (sequence_details.get('column_name') or '')
+        source_column = None
+        for column_info in (table_data.get('source_columns') or {}).values():
+            if (column_info.get('column_name') or '').lower() == target_column_name.lower():
+                source_column = column_info
+                break
+        if source_column is None:
+            for column_info in (table_data.get('source_columns') or {}).values():
+                if self.config_parser.convert_names_case(column_info.get('column_name') or '') == target_column_name:
+                    source_column = column_info
+                    break
+
+        target_column = None
+        for column_info in (table_data.get('target_columns') or {}).values():
+            if self.config_parser.convert_names_case(column_info.get('column_name') or '') == target_column_name:
+                target_column = column_info
+                break
+
+        return {
+            'sequence_id': sequence_details['id'],
+            'source_schema_name': table_data.get('source_schema_name'),
+            'source_table_name': table_data.get('source_table_name'),
+            'source_column_name': source_column.get('column_name') if source_column else None,
+            'source_column_data_type': (source_column.get('column_type') or source_column.get('data_type')) if source_column else None,
+            'source_is_identity': (source_column.get('is_identity') in ('YES', True)) if source_column else None,
+            'source_next_identity': next_identity,
+            'target_schema_name': table_data.get('target_schema_name'),
+            'target_table_name': table_data.get('target_table_name'),
+            'target_column_name': target_column_name,
+            'target_column_data_type': target_column.get('data_type') if target_column else None,
+            'target_sequence_name': sequence_details['name'],
+            'target_sequence_sql': sequence_sql,
+        }
 
     def fetch_source_next_identity(self, table_data, worker_id):
         """
@@ -1500,21 +1539,15 @@ class Orchestrator:
                     if next_identity is not None:
                         sequence_sql = f"SELECT setval('\"{target_schema_name}\".\"{sequence_name}\"', {next_identity}, false);"
 
-                    self.migrator_tables.insert_sequence({
-                        'sequence_id': sequence_id,
-                        'target_schema_name': target_schema_name,
-                        'target_table_name': target_table_name,
-                        'target_column_name': column_name,
-                        'target_sequence_name': sequence_name,
-                        'target_sequence_sql': sequence_sql
-                    })
+                    self.migrator_tables.insert_sequence(
+                        self.sequence_protocol_settings(table_data, sequence_details, sequence_sql, next_identity))
                     self.config_parser.print_log_message( 'DEBUG', f"orchestrator: table_worker: Worker {worker_id}: Setting sequence with SQL: {sequence_sql}")
                     try:
                         worker_target_connection.execute_query(sequence_sql)
                         self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Sequence ({order_num}) {sequence_name} set successfully for table {target_table_name}.")
                         seq_curr_val = worker_target_connection.get_sequence_current_value(sequence_id)
                         self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Current value of sequence {sequence_name} is {seq_curr_val}.")
-                        self.migrator_tables.update_sequence_status({'sequence_id': sequence_id, 'success': True, 'message': 'migrated OK'})
+                        self.migrator_tables.update_sequence_status({'sequence_id': sequence_id, 'success': True, 'message': 'migrated OK', 'target_sequence_last_value': seq_curr_val})
                     except Exception as e:
                         self.migrator_tables.update_sequence_status({'sequence_id': sequence_id, 'success': False, 'message': f'ERROR: {e}'})
                         self.migrator_tables.update_table_status({'row_id': table_data['id'], 'success': False, 'message': f'ERROR: {e}'})

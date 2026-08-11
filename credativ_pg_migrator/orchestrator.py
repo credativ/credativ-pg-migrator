@@ -900,6 +900,38 @@ class Orchestrator:
 
         self.migrator_tables.update_main_status({'task_name': 'Orchestrator', 'subtask_name': 'constraints migration', 'success': True, 'message': 'finished OK'})
 
+    def find_source_column(self, table_data, target_column_name):
+        """
+        The description of the column of the source which the named column of the target stands
+        for, or None. The name in the target went through the case handling of the
+        configuration, so the names are compared without regard to case first and through that
+        handling afterwards.
+        """
+        target_column_name = target_column_name or ''
+        source_columns = (table_data.get('source_columns') or {}).values()
+        for column_info in source_columns:
+            if (column_info.get('column_name') or '').lower() == target_column_name.lower():
+                return column_info
+        for column_info in source_columns:
+            if self.config_parser.convert_names_case(column_info.get('column_name') or '') == target_column_name:
+                return column_info
+        return None
+
+    def is_identity_column(self, column_info):
+        """ True when the connector of the source reported this column as an identity column. """
+        return bool(column_info) and column_info.get('is_identity') in ('YES', True)
+
+    def table_identity_columns(self, table_data):
+        """
+        The names of the columns which the connector of the source reported as identity columns
+        of this table - the next identity value of the source describes those and no other.
+        Empty for a source which does not report an identity column of its own kind, a serial
+        column of PostgreSQL for instance.
+        """
+        return [column_info.get('column_name')
+                for column_info in (table_data.get('source_columns') or {}).values()
+                if self.is_identity_column(column_info)]
+
     def sequence_protocol_settings(self, table_data, sequence_details, sequence_sql, next_identity):
         """
         The description of a sequence of a table for the sequences protocol table.
@@ -912,16 +944,7 @@ class Orchestrator:
         because the name in the target went through the case handling of the configuration.
         """
         target_column_name = (sequence_details.get('column_name') or '')
-        source_column = None
-        for column_info in (table_data.get('source_columns') or {}).values():
-            if (column_info.get('column_name') or '').lower() == target_column_name.lower():
-                source_column = column_info
-                break
-        if source_column is None:
-            for column_info in (table_data.get('source_columns') or {}).values():
-                if self.config_parser.convert_names_case(column_info.get('column_name') or '') == target_column_name:
-                    source_column = column_info
-                    break
+        source_column = self.find_source_column(table_data, target_column_name)
 
         target_column = None
         for column_info in (table_data.get('target_columns') or {}).values():
@@ -935,7 +958,7 @@ class Orchestrator:
             'source_table_name': table_data.get('source_table_name'),
             'source_column_name': source_column.get('column_name') if source_column else None,
             'source_column_data_type': (source_column.get('column_type') or source_column.get('data_type')) if source_column else None,
-            'source_is_identity': (source_column.get('is_identity') in ('YES', True)) if source_column else None,
+            'source_is_identity': self.is_identity_column(source_column) if source_column else None,
             'source_next_identity': next_identity,
             'target_schema_name': table_data.get('target_schema_name'),
             'target_table_name': table_data.get('target_table_name'),
@@ -1531,10 +1554,37 @@ class Orchestrator:
                 self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Setting sequences for table {target_table_name} in target database.")
                 if next_identity is None and not source_next_identity_read:
                     next_identity = self.fetch_source_next_identity(table_data, worker_id)
+                ## The next identity value describes one column of the table, and a table can own
+                ## more than one sequence - a column with a sequence as its default next to an
+                ## identity column. The value used to be applied to every sequence of the table,
+                ## which set the sequence of another column to the position of the identity
+                ## column. It goes to the sequence of the identity column alone now; the others
+                ## are set from their own data. Which column that is comes from the connector of
+                ## the source, which reports it per column.
+                table_identity_columns = self.table_identity_columns(table_data)
+                if table_identity_columns:
+                    self.config_parser.print_log_message('INFO', f"orchestrator: table_worker: Worker {worker_id}: Identity column(s) of {table_data['source_schema_name']}.{table_data['source_table_name']}: {', '.join(table_identity_columns)} - next value in the source: {next_identity}.")
+                elif next_identity is not None and len(sequences) > 1:
+                    ## nothing can attribute the value to one of them
+                    self.config_parser.print_log_message('WARNING', f"orchestrator: table_worker: Worker {worker_id}: The source reported the next identity value {next_identity} for {table_data['source_schema_name']}.{table_data['source_table_name']}, but no column of it is reported as an identity column and the table owns {len(sequences)} sequences - all of them are set from the data of the target alone.")
+
                 for order_num, sequence_details in sequences.items():
                     sequence_id = sequence_details['id']
                     sequence_name = sequence_details['name']
                     column_name = sequence_details['column_name']
+                    source_column = self.find_source_column(table_data, column_name)
+                    if table_identity_columns:
+                        ## the value belongs to the identity column, whichever sequence it is
+                        use_next_identity = self.is_identity_column(source_column)
+                    else:
+                        ## a source which does not report an identity column at all - a PostgreSQL
+                        ## serial column is not one - still reports the next value of its sequence,
+                        ## and with a single sequence there is nothing else it could describe
+                        use_next_identity = len(sequences) == 1
+                    sequence_next_identity = next_identity if use_next_identity else None
+                    if next_identity is not None and not use_next_identity:
+                        self.config_parser.print_log_message('DEBUG', f"orchestrator: table_worker: Worker {worker_id}: Sequence {sequence_name} of column {column_name} does not belong to an identity column - it is set from the data of the target alone.")
+
                     ## the sequence continues behind the greater of the two - the value the source
                     ## reported and the data which really is in the target
                     sequence_sql = worker_target_connection.get_set_sequence_sql({
@@ -1542,11 +1592,11 @@ class Orchestrator:
                         'target_table_name': target_table_name,
                         'target_column_name': column_name,
                         'target_sequence_name': sequence_name,
-                        'source_next_identity': next_identity,
+                        'source_next_identity': sequence_next_identity,
                     })
 
                     self.migrator_tables.insert_sequence(
-                        self.sequence_protocol_settings(table_data, sequence_details, sequence_sql, next_identity))
+                        self.sequence_protocol_settings(table_data, sequence_details, sequence_sql, sequence_next_identity))
                     self.config_parser.print_log_message( 'DEBUG', f"orchestrator: table_worker: Worker {worker_id}: Setting sequence with SQL: {sequence_sql}")
                     try:
                         worker_target_connection.execute_query(sequence_sql)

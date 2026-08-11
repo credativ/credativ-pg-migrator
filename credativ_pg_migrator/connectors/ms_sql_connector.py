@@ -1192,18 +1192,33 @@ class MsSQLConnector(DatabaseConnector):
             mapping = self.get_sql_functions_mapping({ 'target_db_type': settings['target_db_type'] })
             # Prepare mapping for function names (without parentheses)
             func_name_map = {}
+            ## A mapping written as a complete call ('user_name()') or as a plain name replaces
+            ## the whole expression, while one written as a prefix ('len(') only renames the
+            ## function and keeps its arguments.
+            whole_expression_replacements = set()
             for k, v in mapping.items():
                 if k.endswith('('):
                     func_name_map[k[:-1].lower()] = v[:-1] if v.endswith('(') else v
                 elif k.endswith('()'):
                     func_name_map[k[:-2].lower()] = v
+                    whole_expression_replacements.add(k[:-2].lower())
                 else:
                     func_name_map[k.lower()] = v
+                    whole_expression_replacements.add(k.lower())
 
             if isinstance(node, sqlglot.exp.Anonymous):
                 func_name = node.name.lower()
                 if func_name in func_name_map:
                     mapped = func_name_map[func_name]
+                    ## The function was called without arguments and its replacement stands for
+                    ## the whole call, so the replacement is taken as the expression it is. Only
+                    ## the name was replaced before, which left the parentheses of the call
+                    ## around it: 'user_name()' became 'CURRENT_USER()', which PostgreSQL refuses
+                    ## with 'syntax error at or near "("'.
+                    if not node.expressions and func_name in whole_expression_replacements:
+                        replacement = self.mapped_function_expression(mapped)
+                        if replacement is not None:
+                            return replacement
                     # If mapped is a function name, replace the function name
                     if '(' not in mapped:
                         node.set("this", sqlglot.exp.Identifier(this=mapped, quoted=False))
@@ -1237,7 +1252,7 @@ class MsSQLConnector(DatabaseConnector):
                 # For functions like getdate(), getutcdate(), etc.
                 elif func_name + "()" in func_name_map:
                     mapped = func_name_map[func_name + "()"]
-                    return sqlglot.exp.Anonymous(this=mapped)
+                    return self.mapped_function_expression(mapped) or sqlglot.exp.Anonymous(this=mapped)
             return node
 
         def replace_udts(node):

@@ -2829,22 +2829,53 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_name}_func"();
                         alias_id.set("quoted", True)
             return node
 
+        def keep_source_variables(node):
+            """
+            A variable of the source keeps its own spelling. sqlglot reads '@v' of Sybase ASE as
+            a parameter and the PostgreSQL generator writes a parameter as '$v', while the
+            conversion of a routine expects '@v' - it renames the variables to locvar_v later.
+            '@@v', a global variable, is read as a parameter of a parameter.
+            """
+            if isinstance(node, sqlglot.exp.Parameter):
+                inner = node.this
+                if isinstance(inner, sqlglot.exp.Parameter):
+                    return sqlglot.exp.Var(this='@@' + inner.this.name)
+                return sqlglot.exp.Var(this='@' + (inner.name if hasattr(inner, 'name') else str(inner)))
+            return node
+
         def replace_functions(node):
             mapping = self.get_sql_functions_mapping({ 'target_db_type': settings['target_db_type'] })
             # Prepare mapping for function names (without parentheses)
             func_name_map = {}
+            ## A mapping written as a complete call ('suser_name()') or as a plain name
+            ## ('@@nestlevel') replaces the whole expression, while one written as a prefix
+            ## ('len(') only renames the function and keeps its arguments.
+            whole_expression_replacements = set()
             for k, v in mapping.items():
                 if k.endswith('('):
                     func_name_map[k[:-1].lower()] = v[:-1] if v.endswith('(') else v
                 elif k.endswith('()'):
                     func_name_map[k[:-2].lower()] = v
+                    whole_expression_replacements.add(k[:-2].lower())
                 else:
                     func_name_map[k.lower()] = v
+                    whole_expression_replacements.add(k.lower())
 
             if isinstance(node, sqlglot.exp.Anonymous):
                 func_name = node.name.lower()
                 if func_name in func_name_map:
                     mapped = func_name_map[func_name]
+                    ## The function was called without arguments and its replacement stands for
+                    ## the whole call, so the replacement is taken as the expression it is. Only
+                    ## the name of the function was replaced before, which left the parentheses
+                    ## of the call around it: 'suser_name()' became 'CURRENT_USER()', which
+                    ## PostgreSQL refuses with 'syntax error at or near "("' - its niladic
+                    ## keyword functions are written without them - and 'getutcdate()' would have
+                    ## become "TIMEZONE('UTC', NOW())()".
+                    if not node.expressions and func_name in whole_expression_replacements:
+                        replacement = self.mapped_function_expression(mapped)
+                        if replacement is not None:
+                            return replacement
                     # If mapped is a function name, replace the function name
                     if '(' not in mapped:
                         node.set("this", sqlglot.exp.Identifier(this=mapped, quoted=False))
@@ -2878,7 +2909,7 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_name}_func"();
                 # For functions like getdate(), getutcdate(), etc.
                 elif func_name + "()" in func_name_map:
                     mapped = func_name_map[func_name + "()"]
-                    return sqlglot.exp.Anonymous(this=mapped)
+                    return self.mapped_function_expression(mapped) or sqlglot.exp.Anonymous(this=mapped)
             return node
 
 
@@ -3067,21 +3098,28 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_name}_func"();
             # Map Sybase native cast datatypes to Postgres native equivalents
             parsed_code = parsed_code.transform(replace_cast_types)
 
-            self.config_parser.print_log_message('DEBUG3', f"sybase_ase_connector: convert_string_concatenation: Double quoted columns: {parsed_code.sql()}")
+            self.config_parser.print_log_message('DEBUG3', f"sybase_ase_connector: convert_string_concatenation: Double quoted columns: {parsed_code.sql(dialect='postgres')}")
 
             # replace source schema with target schema
             parsed_code = parsed_code.transform(replace_schema_names)
-            self.config_parser.print_log_message('DEBUG3', f"sybase_ase_connector: convert_string_concatenation: Replaced schema names: {parsed_code.sql()}")
+            self.config_parser.print_log_message('DEBUG3', f"sybase_ase_connector: convert_string_concatenation: Replaced schema names: {parsed_code.sql(dialect='postgres')}")
 
             # double quote schema and table names
             parsed_code = parsed_code.transform(quote_schema_and_table_names)
-            self.config_parser.print_log_message('DEBUG3', f"sybase_ase_connector: convert_string_concatenation: Double quoted schema and table names: {parsed_code.sql()}")
+            self.config_parser.print_log_message('DEBUG3', f"sybase_ase_connector: convert_string_concatenation: Double quoted schema and table names: {parsed_code.sql(dialect='postgres')}")
 
             # replace functions
             parsed_code = parsed_code.transform(replace_functions)
-            self.config_parser.print_log_message('DEBUG3', f"sybase_ase_connector: convert_string_concatenation: Replaced functions: {parsed_code.sql()}")
+            self.config_parser.print_log_message('DEBUG3', f"sybase_ase_connector: convert_string_concatenation: Replaced functions: {parsed_code.sql(dialect='postgres')}")
 
-            converted_code = parsed_code.sql()
+            ## The statement is generated for PostgreSQL. With the default dialect of sqlglot,
+            ## which was used here, the niladic keyword functions are written as calls -
+            ## 'suser_name()' came out as 'CURRENT_USER()' and 'getdate()' as
+            ## 'CURRENT_TIMESTAMP()', and PostgreSQL refuses both with
+            ## 'syntax error at or near "("'. The variables of the source are kept in their own
+            ## spelling first, the PostgreSQL generator would write them as '$v'.
+            parsed_code = parsed_code.transform(keep_source_variables)
+            converted_code = parsed_code.sql(dialect='postgres')
             converted_code = converted_code.replace("()()", "()")
 
             converted_code = self.apply_sql_functions_mapping(converted_code, settings)

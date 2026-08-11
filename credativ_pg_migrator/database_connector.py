@@ -610,6 +610,27 @@ class DatabaseConnector(ABC):
             value = value[1:-1].strip()
         return value
 
+    def mapped_function_expression(self, mapped_text: str):
+        """
+        The replacement of a function from `get_sql_functions_mapping()` as an expression node.
+
+        A replacement which is not the bare name of a function is a complete expression, and
+        writing a call around it produces SQL the target refuses: the niladic keyword functions
+        of PostgreSQL are written without parentheses ('suser_name()' as `CURRENT_USER()` fails
+        with 'syntax error at or near "("'), and a replacement which is a call of its own would
+        end with a second, empty argument list (`TIMEZONE('UTC', NOW())()`).
+
+        Returns None when the text cannot be parsed - the caller then keeps renaming the
+        function, which is the right thing for a replacement that really is only a name.
+        """
+        import sqlglot
+        if not mapped_text:
+            return None
+        try:
+            return sqlglot.parse_one(mapped_text, read='postgres')
+        except Exception:
+            return None
+
     def strip_sql_comments(self, code: str) -> str:
         """
         Removes '--' line comments and '/* */' block comments, leaving the content of

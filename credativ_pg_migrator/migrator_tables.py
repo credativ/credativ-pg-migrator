@@ -2682,15 +2682,17 @@ class MigratorTables:
     def create_table_for_sequences(self):
         table_name = self.config_parser.get_protocol_name_sequences()
         self.protocol_connection.execute_query(self.drop_table_sql.format(protocol_schema=self.protocol_schema, table_name=table_name))
+        ## a sequence of the target can come from a sequence of the source or from an identity
+        ## column, which most legacy databases have instead - source_column_data_type,
+        ## source_is_identity and source_next_identity document which of the two it is, with
+        ## what the source declared and reported, and target_sequence_last_value the value the
+        ## sequence really has after it was set
         self.protocol_connection.execute_query(f"""
             CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."{table_name}"
             (sequence_id INTEGER,
             source_schema_name TEXT,
             source_table_name TEXT,
             source_column_name TEXT,
-            ## a sequence of the target can come from a sequence of the source or from an
-            ## identity column, which most legacy databases have instead - these three columns
-            ## document which of the two it is, with what the source declared and reported
             source_column_data_type TEXT,
             source_is_identity BOOLEAN,
             source_next_identity BIGINT,
@@ -2709,7 +2711,6 @@ class MigratorTables:
             target_column_data_type TEXT,
             target_sequence_name TEXT,
             target_sequence_sql TEXT,
-            ## the value the sequence really has after the statement above was executed
             target_sequence_last_value BIGINT,
             target_sequence_comment TEXT,
             task_created TIMESTAMP DEFAULT clock_timestamp(),

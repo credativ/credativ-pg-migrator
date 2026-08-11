@@ -111,6 +111,9 @@ default_values_substitution:
   # Sybase allows 01-Jan-1753 / 31-Dec-9999 which are outside sensible ranges
   - ["", "", "01-Jan-1753", "'1753-01-01'::date"]
   - ["", "", "31-Dec-9999", "'9999-12-31'::date"]
+  # suser_name() + '@' + host_name() has no counterpart - the replacement is written into
+  # the DDL as it stands, so the literals in it carry single apostrophes
+  # - ["", "", "%suser_name%()%host_name%()%", "session_user||'@'||coalesce(inet_client_addr()::text,'UDS')"]
 
 summary:
   top_migrated_tables: 10

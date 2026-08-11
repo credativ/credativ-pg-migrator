@@ -540,7 +540,69 @@ class ConfigParser:
             # If from_config_file is a dict, convert its items to list of lists
             merged_substitutions.extend([list(item) for item in from_config_file.items()])
         merged_substitutions.extend(implicit_substitutions)
-        return merged_substitutions
+        return [self.repair_over_escaped_substitution(substitution) for substitution in merged_substitutions]
+
+    def repair_over_escaped_substitution(self, substitution):
+        """
+        The replacement of a default value is written into the DDL of the target as it
+        stands, so its string literals need single apostrophes. A value written with the
+        escaping of a SQL literal instead - "session_user||''@''||coalesce(...,''UDS'')" -
+        arrives as an empty literal followed by a word and is refused with
+        'syntax error at or near "UDS"'.
+
+        Such a value is repaired, but only when halving the apostrophes really makes it
+        readable: an empty literal is a legitimate default (coalesce(x, '')) and stays as
+        it is.
+        """
+        if not isinstance(substitution, (list, tuple)) or len(substitution) < 4:
+            return substitution
+        target_default_value = substitution[3]
+        if not isinstance(target_default_value, str) or "''" not in target_default_value:
+            return substitution
+        if self.reads_as_sql_expression(target_default_value):
+            return substitution
+        repaired_value = target_default_value.replace("''", "'")
+        if not self.reads_as_sql_expression(repaired_value):
+            return substitution
+        self.print_log_message('WARNING',
+            f"config_parser: get_default_values_substitution: the replacement of the default value '{substitution[2]}' "
+            f"is written with doubled apostrophes ({target_default_value}), which the target reads as empty string "
+            f"literals - it is used as {repaired_value}. Write the apostrophes of a literal singly in "
+            f"'default_values_substitution'; doubling them is needed inside a YAML value quoted with apostrophes, "
+            f"where YAML removes the doubling again.")
+        repaired_substitution = list(substitution)
+        repaired_substitution[3] = repaired_value
+        return repaired_substitution
+
+    @staticmethod
+    def reads_as_sql_expression(expression):
+        """
+        True when the apostrophes of an expression delimit its string literals the way
+        PostgreSQL reads them: every literal is closed, and none of them is written
+        directly against a following word - "''UDS''" is the empty literal '' followed by
+        the name UDS, which is what an over-escaped value looks like.
+        """
+        index = 0
+        length = len(expression)
+        while index < length:
+            if expression[index] != "'":
+                index += 1
+                continue
+            index += 1
+            while index < length:
+                if expression[index] == "'":
+                    if index + 1 < length and expression[index + 1] == "'":
+                        index += 2
+                        continue
+                    break
+                index += 1
+            if index >= length:
+                ## the literal is never closed
+                return False
+            index += 1
+            if index < length and (expression[index].isalnum() or expression[index] == '_'):
+                return False
+        return True
 
     def get_data_migration_limitation(self):
         return (self.config.get('data_migration_limitation') or {})

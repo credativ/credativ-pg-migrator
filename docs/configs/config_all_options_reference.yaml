@@ -530,6 +530,12 @@ default_values_substitution:
   - ["", "", "current_timestamp()", "current_timestamp"]
   - ["", "bit", "b'0'", "false"]
   - ["", "bit", "b'1'", "true"]
+  ## The replacement is written into the DDL as it stands, so a string literal in it is
+  ## written with single apostrophes - they are not escaped for a SQL literal. Doubling
+  ## them is needed only inside a YAML value quoted with apostrophes, which YAML undoes
+  ## again. A value which can only be read with halved apostrophes is corrected with a
+  ## warning; '' alone stays an empty literal.
+  - ["", "", "%suser_name%()%host_name%()%", "session_user||'@'||coalesce(inet_client_addr()::text,'UDS')"]
 
 # Substitutions for objects from other databases
 # Informix, Sybase ASE and some other databases allow to use objects from other databases

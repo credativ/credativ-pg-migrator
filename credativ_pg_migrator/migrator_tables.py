@@ -1787,13 +1787,17 @@ class MigratorTables:
             raise
 
     def decode_target_column_alteration_row(self, row):
+        ## the columns of the table are id, target_schema_name, target_table_name,
+        ## target_column, reason, original_data_type, altered_data_type - the reason was
+        ## missing here, so the two data types were reported one position too early
         return {
             'id': row[0],
             'target_schema_name': row[1],
             'target_table_name': row[2],
             'target_column': row[3],
-            'original_data_type': row[4],
-            'altered_data_type': row[5]
+            'reason': row[4],
+            'original_data_type': row[5],
+            'altered_data_type': row[6]
         }
 
     def fk_find_dependent_columns_to_alter(self, settings):

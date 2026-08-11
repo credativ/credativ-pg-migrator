@@ -4148,6 +4148,91 @@ class PostgreSQLConnector(DatabaseConnector):
         cursor.close()
         return exists
 
+    ## The integer types share an operator family, so a foreign key between SMALLINT,
+    ## INTEGER and BIGINT is accepted; NUMERIC belongs to another one, and a key mixing it
+    ## with an integer type cannot be implemented at all.
+    FK_COMPARABLE_INTEGER_TYPES = ('int2', 'int4', 'int8')
+    FK_ALIGNABLE_NUMERIC_TYPES = FK_COMPARABLE_INTEGER_TYPES + ('numeric',)
+
+    def align_foreign_key_column_types(self, settings):
+        """
+        Make the columns of a foreign key comparable before it is created.
+
+        A column of the referenced table can end up with another data type than the column
+        referencing it - a source identity column is created as BIGINT whatever its own type
+        was, while the column referencing it keeps the type of the source, and PostgreSQL
+        then refuses the key with 'Key columns "x" and "x" are of incompatible types:
+        numeric and bigint'. The referencing column is altered to the type of the referenced
+        one, which is the column of the primary key and must not be touched.
+
+        Reads the types from the catalog of the target, so it repairs the key whatever the
+        reason for the difference is. Returns the list of the columns it altered.
+        """
+        referencing_columns = settings['constraint_columns']
+        referenced_columns = settings['referenced_columns']
+        if not referencing_columns or not referenced_columns:
+            return []
+
+        referencing_types = self.fetch_column_types(settings['target_schema_name'], settings['target_table_name'])
+        referenced_types = self.fetch_column_types(settings['referenced_schema_name'], settings['referenced_table_name'])
+
+        altered_columns = []
+        for referencing_column, referenced_column in zip(referencing_columns, referenced_columns):
+            referencing_type = referencing_types.get(referencing_column.lower())
+            referenced_type = referenced_types.get(referenced_column.lower())
+            if not referencing_type or not referenced_type:
+                continue
+            if referencing_type['type_name'] == referenced_type['type_name']:
+                continue
+            if (referencing_type['type_name'] in self.FK_COMPARABLE_INTEGER_TYPES
+                    and referenced_type['type_name'] in self.FK_COMPARABLE_INTEGER_TYPES):
+                continue
+            if not (referencing_type['type_name'] in self.FK_ALIGNABLE_NUMERIC_TYPES
+                    and referenced_type['type_name'] in self.FK_ALIGNABLE_NUMERIC_TYPES):
+                self.config_parser.print_log_message('WARNING',
+                    f"postgresql_connector: align_foreign_key_column_types: Column "
+                    f'"{settings["target_table_name"]}"."{referencing_column}" ({referencing_type["full_type"]}) and the '
+                    f'column "{settings["referenced_table_name"]}"."{referenced_column}" ({referenced_type["full_type"]}) '
+                    "it references have data types which cannot be aligned automatically - the foreign key is created as it is.")
+                continue
+
+            alter_column_sql = (f'ALTER TABLE "{settings["target_schema_name"]}"."{settings["target_table_name"]}" '
+                                f'ALTER COLUMN "{referencing_column}" TYPE {referenced_type["full_type"]}')
+            self.config_parser.print_log_message('INFO',
+                f'postgresql_connector: align_foreign_key_column_types: Column "{settings["target_table_name"]}"."{referencing_column}" '
+                f'({referencing_type["full_type"]}) references "{settings["referenced_table_name"]}"."{referenced_column}" '
+                f'({referenced_type["full_type"]}) - altering it to the type of the referenced column, '
+                "otherwise the foreign key cannot be implemented.")
+            self.execute_query(alter_column_sql)
+            altered_columns.append({
+                'target_column': referencing_column,
+                'original_data_type': referencing_type['full_type'],
+                'altered_data_type': referenced_type['full_type'],
+                'reason': (f'FOREIGN KEY to {settings["referenced_table_name"]}.{referenced_column} '
+                           f'({referenced_type["full_type"]})'),
+            })
+        return altered_columns
+
+    def fetch_column_types(self, target_schema_name, target_table_name):
+        """
+        The data types of the columns of a table of the target, keyed by the column name in
+        lower case: {'category_id': {'type_name': 'int8', 'full_type': 'bigint'}}.
+        """
+        query = """
+            SELECT lower(a.attname), t.typname, pg_catalog.format_type(a.atttypid, a.atttypmod)
+            FROM pg_catalog.pg_attribute a
+            JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
+            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+            JOIN pg_catalog.pg_type t ON t.oid = a.atttypid
+            WHERE lower(n.nspname) = lower(%s)
+              AND lower(c.relname) = lower(%s)
+              AND a.attnum > 0
+              AND NOT a.attisdropped
+        """
+        with self.connection.cursor() as cursor:
+            cursor.execute(query, (target_schema_name, target_table_name))
+            return {row[0]: {'type_name': row[1], 'full_type': row[2]} for row in cursor.fetchall()}
+
     def target_view_exists(self, target_schema_name, target_view_name):
         """True if a view or materialized view with this name exists in the target schema.
         In PostgreSQL a view can only exist if its defining query is valid, so existence is a

@@ -1793,6 +1793,14 @@ class Orchestrator:
             self.handle_error(e, f"index_worker {worker_id} {index_name}")
             return False
 
+    def split_constraint_columns(self, columns):
+        """
+        The column list of a constraint as the protocol tables keep it ('"a", "b"'), as a
+        list of the column names in the spelling the target really uses.
+        """
+        return [self.config_parser.convert_names_case(column.replace('"', '').strip())
+                for column in (columns or '').split(',') if column.strip()]
+
     def constraint_worker(self, constraint_data, target_db_type):
         worker_id = uuid.uuid4()
         try:
@@ -1840,6 +1848,40 @@ class Orchestrator:
                         self.config_parser.print_log_message('ERROR', f"orchestrator: constraint_worker: Worker {worker_id}: Referenced table {referenced_target_table['target_schema_name']}.{referenced_target_table_name_to_check} for constraint {constraint_name} does not exist - skipping constraint creation.")
                         self.migrator_tables.update_constraint_status({'row_id': constraint_data['id'], 'success': False, 'message': f"ERROR: referenced table {referenced_target_table['target_schema_name']}.{referenced_target_table_name_to_check} does not exist"})
                         return False
+
+                    ## A column of the referenced table can carry another data type than the
+                    ## column referencing it - an identity column of the source is created as
+                    ## BIGINT whatever its own type was, and the referencing column keeps the
+                    ## type of the source. The columns are aligned by the type the target
+                    ## really has, which also covers a table not created in this run and a
+                    ## difference the bookkeeping of the alterations did not catch.
+                    if constraint_data['constraint_type'] == 'FOREIGN KEY':
+                        try:
+                            for altered_column in worker_target_connection.align_foreign_key_column_types({
+                                'target_schema_name': target_schema_name,
+                                'target_table_name': target_table_name_to_check,
+                                'constraint_columns': self.split_constraint_columns(constraint_data['constraint_columns']),
+                                'referenced_schema_name': referenced_target_table['target_schema_name'],
+                                'referenced_table_name': referenced_target_table_name_to_check,
+                                'referenced_columns': self.split_constraint_columns(constraint_data['referenced_columns']),
+                            }):
+                                self.migrator_tables.insert_target_column_alteration({
+                                    'target_schema_name': target_schema_name,
+                                    'target_table_name': target_table_name_to_check,
+                                    'target_column': altered_column['target_column'],
+                                    'reason': altered_column['reason'],
+                                    'original_data_type': altered_column['original_data_type'],
+                                    'altered_data_type': altered_column['altered_data_type'],
+                                })
+                        except Exception as e:
+                            ## the column cannot be altered - a value outside the range of the
+                            ## target type, an index or a view depending on it. The foreign key
+                            ## would fail as well, so it is reported here, where the reason is
+                            ## still known, instead of being retried five times.
+                            self.config_parser.print_log_message('ERROR', f"orchestrator: constraint_worker: Worker {worker_id}: Columns of constraint {constraint_name} could not be aligned with the referenced table: {e}")
+                            self.migrator_tables.update_constraint_status({'row_id': constraint_data['id'], 'success': False, 'message': f'ERROR: columns could not be aligned with the referenced table: {e}'})
+                            worker_target_connection.disconnect()
+                            return False
 
 
                 self.config_parser.print_log_message( 'DEBUG', f"orchestrator: constraint_worker: Worker {worker_id}: Creating constraint with SQL: {create_constraint_sql}")

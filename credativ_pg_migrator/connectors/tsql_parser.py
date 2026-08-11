@@ -342,6 +342,33 @@ class TsqlParser:
             i += 1
         return "".join(result)
 
+    def normalize_delete_with_second_from(self, statement: str) -> str:
+        """
+        'DELETE FROM t FROM t, x WHERE ...' of T-SQL as 'DELETE FROM t USING x WHERE ...'.
+
+        T-SQL names the table to delete from first and lists the tables the condition reads in a
+        second FROM clause. PostgreSQL has USING for that list and refuses the second FROM with
+        'syntax error at or near "from"'; the table itself must not appear in the list either,
+        there it would be a second, unrelated instance of it and the statement would delete
+        every row. A list containing anything but plain table names is left alone.
+        """
+        match = re.match(r'(?is)^\s*DELETE\s+FROM\s+([^\s,()]+)\s+FROM\s+(.*?)(\s+WHERE\b.*)?$', statement)
+        if not match:
+            return statement
+        target, sources, where = match.group(1), match.group(2), match.group(3) or ''
+        if '(' in sources or ' select ' in f' {sources.lower()} ':
+            return statement
+
+        def bare_name(source):
+            return source.split()[0].strip('"[]').lower() if source.split() else ''
+
+        other_sources = [source.strip() for source in sources.split(',') if source.strip()]
+        other_sources = [source for source in other_sources if bare_name(source) != target.strip('"[]').lower()]
+
+        if other_sources:
+            return f"DELETE FROM {target} USING {', '.join(other_sources)}{where}"
+        return f"DELETE FROM {target}{where}"
+
     def inside_open_case(self, collected_lines: List[str]) -> bool:
         """
         True when the statement collected so far has a CASE expression which is not closed yet.
@@ -1257,7 +1284,7 @@ class TsqlParser:
 
                 # Rule: "remove all spaces ... remove new line characters"
                 cleaned_lines = [l.strip() for l in delete_lines]
-                full_delete = " ".join(cleaned_lines)
+                full_delete = self.normalize_delete_with_second_from(" ".join(cleaned_lines))
 
                 self.delete_commands.append({
                     "line": start_line,

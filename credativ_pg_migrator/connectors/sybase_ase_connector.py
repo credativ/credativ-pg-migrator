@@ -2069,6 +2069,55 @@ class SybaseASEConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', f"sybase_ase_connector: migrate_table: Worker {worker_id}: Full stack trace: {traceback.format_exc()}")
             raise e
 
+    def convert_trigger_pseudo_tables(self, body_content, trigger_name):
+        """
+        The 'inserted' and 'deleted' tables of a trigger of Sybase ASE as the OLD and NEW record
+        of a trigger function of PostgreSQL.
+
+        They are not tables - they are the names under which Sybase ASE offers the rows of the
+        statement which fired the trigger - and they were left in the code as they stood, so the
+        target answered with 'relation "deleted" does not exist' or, with the table still in a
+        FROM clause, refused the statement outright. A row level trigger of PostgreSQL has the
+        two rows as the records OLD and NEW instead, so a reference to a column becomes a field
+        of the record and the table itself disappears from the FROM clause.
+
+        A trigger of Sybase ASE fires once per statement and can read all rows of it, while
+        this is a trigger per row - a statement which reads the pseudo table as a set (a join, a
+        count over it, an INSERT ... SELECT out of it) cannot be expressed this way. What
+        remains after the conversion is reported as a warning naming the trigger.
+        """
+        pseudo_tables = {'inserted': 'NEW', 'deleted': 'OLD'}
+
+        def replace_outside_literals(pattern, replacement, text):
+            parts = re.split(r"('(?:[^']|'')*')", text)
+            return ''.join(part if position % 2 else re.sub(pattern, replacement, part, flags=re.IGNORECASE)
+                           for position, part in enumerate(parts))
+
+        found = [pseudo_table for pseudo_table in pseudo_tables
+                 if re.search(rf'(?i)\b{pseudo_table}\b', re.sub(r"'(?:[^']|'')*'", "''", body_content))]
+        if found:
+            self.config_parser.print_log_message('DEBUG',
+                f"sybase_ase_connector: convert_trigger: Trigger {trigger_name} reads "
+                f"{', '.join(found)} - converted to the records "
+                f"{', '.join(pseudo_tables[pseudo_table] for pseudo_table in found)} of the trigger function.")
+
+        for pseudo_table, record in pseudo_tables.items():
+            ## a column of the pseudo table becomes a field of the record
+            body_content = replace_outside_literals(rf'\b{pseudo_table}\s*\.\s*(\w+)', rf'{record}.\1', body_content)
+            ## and the pseudo table itself leaves the FROM clause it was listed in
+            body_content = replace_outside_literals(rf',\s*{pseudo_table}\b', '', body_content)
+            body_content = replace_outside_literals(rf'\b{pseudo_table}\s*,', '', body_content)
+            body_content = replace_outside_literals(rf'\bFROM\s+{pseudo_table}\b', '', body_content)
+
+        remaining = [pseudo_table for pseudo_table in pseudo_tables
+                     if re.search(rf'(?i)\b{pseudo_table}\b', re.sub(r"'(?:[^']|'')*'", "''", body_content))]
+        if remaining:
+            self.config_parser.print_log_message('WARNING',
+                f"sybase_ase_connector: convert_trigger: Trigger {trigger_name} reads the table(s) "
+                f"{', '.join(remaining)} of Sybase ASE in a way which a trigger per row of PostgreSQL cannot "
+                "express - a join with them or a query over all their rows. The trigger needs to be completed by hand.")
+        return body_content
+
     def convert_trigger(self, settings):
         """
         Parser-based conversion for triggers (V2).
@@ -2114,10 +2163,8 @@ class SybaseASEConnector(DatabaseConnector):
         if as_match:
              body_content = trigger_code[as_match.end():].strip()
 
-        # 3. Global Replacements specific to Triggers (MOVED TO AST TRANSFORM)
-        # body_content = re.sub(r'\binserted\b', 'NEW', body_content, flags=re.IGNORECASE)
-        # body_content = re.sub(r'\bdeleted\b', 'OLD', body_content, flags=re.IGNORECASE)
-        # body_content = re.sub(r'\bFROM\s+(?:NEW|OLD)\b', '', body_content, flags=re.IGNORECASE)
+        # 3. Global Replacements specific to Triggers
+        body_content = self.convert_trigger_pseudo_tables(body_content, trigger_name)
 
         # IF UPDATE(col) -> IF locvar_sybase_update_func(col) (To avoid parser confusion with UPDATE keyword)
         def if_update_replacer(match):
@@ -2207,21 +2254,34 @@ class SybaseASEConnector(DatabaseConnector):
 
         final_body = re.sub(r'locvar_sybase_update_func\((.*?)\)', update_func_replacer, final_body, flags=re.IGNORECASE)
 
+        # 6. Event Extraction
+        events = re.findall(r'for\s+([a-z, ]+?)(?:\s+as\b|$)', trigger_code, re.IGNORECASE)
+        pg_events = "INSERT OR UPDATE OR DELETE"
+        event_list = ['INSERT', 'UPDATE', 'DELETE']
+        if events:
+             event_list = events[0].replace(' ', '').upper().split(',')
+             pg_events = ' OR '.join(event_list)
+
+        ## A trigger fired by a DELETE has no NEW row - the row which was deleted is OLD, and
+        ## that is the one such a trigger returns. The value is used by a BEFORE trigger and
+        ## ignored by an AFTER one, but 'RETURN NEW' in a DELETE trigger is wrong either way.
+        returned_record = 'OLD' if event_list == ['DELETE'] else 'NEW'
+
+        ## The records of the trigger are written by the conversion in upper case, and the
+        ## PostgreSQL generator of sqlglot quotes an identifier to preserve that case. A quoted
+        ## "OLD" is not the record OLD of PL/pgSQL, which resolves the name in lower case, so
+        ## the quotes are removed again.
+        final_body = re.sub(r'"(OLD|NEW)"(\s*\.)', r'\1\2', final_body)
+        final_body = re.sub(r'"(OLD|NEW)"', r'\1', final_body)
+
         # A plain RETURN of Transact-SQL leaves the trigger and is written without a value.
         # A trigger function of PL/pgSQL has to return a row, and PostgreSQL refuses a RETURN
         # without an expression with 'missing expression at or near ";"'. It returns the same
         # row the function returns at its end, which leaves the trigger in the same way.
-        final_body, plain_returns = re.subn(r'(?i)\bRETURN\s*;', 'RETURN NEW;', final_body)
+        final_body, plain_returns = re.subn(r'(?i)\bRETURN\s*;', f'RETURN {returned_record};', final_body)
         if plain_returns:
             self.config_parser.print_log_message('DEBUG',
-                f"sybase_ase_connector: convert_trigger: Trigger {trigger_name}: {plain_returns} plain RETURN statement(s) converted to 'RETURN NEW' - a trigger function of PostgreSQL cannot return without a value.")
-
-        # 6. Event Extraction
-        events = re.findall(r'for\s+([a-z, ]+?)(?:\s+as\b|$)', trigger_code, re.IGNORECASE)
-        pg_events = "INSERT OR UPDATE OR DELETE"
-        if events:
-             event_list = events[0].replace(' ', '').upper().split(',')
-             pg_events = ' OR '.join(event_list)
+                f"sybase_ase_connector: convert_trigger: Trigger {trigger_name}: {plain_returns} plain RETURN statement(s) converted to 'RETURN {returned_record}' - a trigger function of PostgreSQL cannot return without a value.")
 
         # 7. Assemble DDL
         pg_func = f"""CREATE OR REPLACE FUNCTION "{target_schema_name}"."{trigger_name}_func"()
@@ -2230,7 +2290,7 @@ DECLARE
 {chr(10).join(declarations)}
 BEGIN
 {final_body}
-RETURN NEW;
+RETURN {returned_record};
 END;
 $$ LANGUAGE plpgsql;
 """
@@ -2667,6 +2727,14 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_name}_func"();
     def fetch_triggers(self, table_id, schema_name, table_name):
         trigger_data = {}
         order_num = 1
+        ## A trigger belongs to the table it is declared ON, and Sybase ASE records that in the
+        ## table itself: sysobjects.instrig, updtrig and deltrig of the table carry the id of
+        ## the trigger for each statement (ASE allows one per statement and table).
+        ## sysdepends, which was used here, lists every object a trigger reads or writes, so a
+        ## trigger was reported for each table it touches: 'tr_datadeletiontaskqueue_d', which is
+        ## declared on data_deletion_task_queue and deletes from another table, was migrated as a
+        ## trigger of that other table - it would have fired on the wrong statements, and it was
+        ## created a second time for its own table as well.
         query = f"""
             SELECT DISTINCT
                 tr.name AS trigger_name,
@@ -2674,9 +2742,8 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_name}_func"();
                 tr.sysstat,
                 c.text,
                 c.colid
-            FROM sysobjects tr
-            JOIN sysdepends d ON tr.id = d.id
-            JOIN sysobjects tbl ON d.depid = tbl.id
+            FROM sysobjects tbl
+            JOIN sysobjects tr ON tr.id IN (tbl.instrig, tbl.updtrig, tbl.deltrig)
             JOIN syscomments c ON tr.id = c.id
             WHERE
                 tbl.id = {table_id}

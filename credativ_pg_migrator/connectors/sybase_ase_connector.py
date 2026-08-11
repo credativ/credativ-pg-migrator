@@ -1271,7 +1271,10 @@ class SybaseASEConnector(DatabaseConnector):
             # Reconstruct header string to parse parameters
             header_str = "\n".join(l.content for l in parser.header_lines)
 
-            header_match = re.search(r'CREATE\s+(?:PROC|PROCEDURE|FUNCTION)\s+([a-zA-Z0-9_\.]+)(.*?)(\bAS\b)', header_str, flags=re.IGNORECASE | re.DOTALL)
+            ## Sybase ASE 16 knows 'CREATE OR REPLACE PROCEDURE' - without the clause the header
+            ## did not match at all, so the routine was created without its parameters while its
+            ## body used them ('sp_changelog_delete()' with locvar_row_id inside)
+            header_match = re.search(r'CREATE\s+(?:OR\s+REPLACE\s+)?(?:PROC|PROCEDURE|FUNCTION)\s+([a-zA-Z0-9_\.]+)(.*?)(\bAS\b)', header_str, flags=re.IGNORECASE | re.DOTALL)
 
             func_schema = ""
             proc_name = settings.get('funcproc_name', '')

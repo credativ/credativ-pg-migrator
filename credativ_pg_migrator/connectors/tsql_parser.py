@@ -157,6 +157,83 @@ class TsqlParser:
             clean_content = line.rstrip()
             self.raw_lines.append(SourceLine(idx + 1, clean_content))
 
+    def mask_comments_and_literals(self, content: str, in_block_comment: bool):
+        """
+        The line with its comments and string literals replaced by spaces, and the state of the
+        block comment at the end of it. The result has the length of the original, so a position
+        found in it addresses the same character of the original line.
+        """
+        masked = list(content)
+        index = 0
+        length = len(content)
+        while index < length:
+            if in_block_comment:
+                if content.startswith('*/', index):
+                    masked[index] = masked[index + 1] = ' '
+                    index += 2
+                    in_block_comment = False
+                else:
+                    masked[index] = ' '
+                    index += 1
+                continue
+            if content.startswith('/*', index):
+                masked[index] = masked[index + 1] = ' '
+                index += 2
+                in_block_comment = True
+                continue
+            if content.startswith('--', index):
+                for position in range(index, length):
+                    masked[position] = ' '
+                break
+            if content[index] == "'":
+                masked[index] = ' '
+                index += 1
+                while index < length:
+                    if content[index] == "'":
+                        masked[index] = ' '
+                        index += 1
+                        if index < length and content[index] == "'":
+                            masked[index] = ' '
+                            index += 1
+                            continue
+                        break
+                    masked[index] = ' '
+                    index += 1
+                continue
+            index += 1
+        return ''.join(masked), in_block_comment
+
+    def find_header_end(self):
+        """
+        The index of the line carrying the AS which ends the header of the routine, and the
+        position of that AS in the line.
+
+        The AS is searched in the code alone: a comment in front of the routine regularly
+        contains the word ("Created as a stored procedure to allow for re-usage"), and taking
+        that one left the CREATE line and the parameters of the routine in the body, where every
+        one of them was reported as a line which could not be processed. The search starts at the
+        CREATE of the routine for the same reason. A source without a CREATE - a fragment - is
+        answered with the first AS of the text, as before.
+        """
+        in_block_comment = False
+        create_seen = False
+        for i, line in enumerate(self.raw_lines):
+            masked, in_block_comment = self.mask_comments_and_literals(line.content, in_block_comment)
+            if not create_seen:
+                if not re.search(r'(?i)\bCREATE\b', masked):
+                    continue
+                create_seen = True
+            match = re.search(r'\bAS\b', masked, re.IGNORECASE)
+            if match:
+                return i, match.end()
+
+        if not create_seen:
+            for i, line in enumerate(self.raw_lines):
+                match = re.search(r'\bAS\b', line.content, re.IGNORECASE)
+                if match:
+                    return i, match.end()
+        return -1, -1
+
     def parse_header_and_body_boundary(self):
         """
         Identify where the header ends and the body begins.
@@ -166,28 +243,25 @@ class TsqlParser:
         # Parsing of header
         # Header starts with "CREATE PROCEDURE" or "CREATE FUNCTION" or "CREATE TRIGGER" ... ends with "AS" key word
 
-        as_index = -1
         end_index = -1
 
-        # Determine body start (after 'AS')
-        for i, line in enumerate(self.raw_lines):
-            # Check for isolated AS
-            match = re.search(r'\bAS\b', line.content, re.IGNORECASE)
-            if match:
-                as_index = i
-                # Check if there's anything after 'AS'
-                after_as = line.content[match.end():]
-                if after_as.strip():
-                    # Split the line into two SourceLines
-                    header_part = line.content[:match.end()]
-                    body_part = after_as
+        # Determine body start (after 'AS') - the AS of the code, not one inside a comment
+        as_index, after_as_position = self.find_header_end()
 
-                    # Update current line to be just the header part
-                    self.raw_lines[i].content = header_part
+        if as_index != -1:
+            line = self.raw_lines[as_index]
+            # Check if there's anything after 'AS'
+            after_as = line.content[after_as_position:]
+            if after_as.strip():
+                # Split the line into two SourceLines
+                header_part = line.content[:after_as_position]
+                body_part = after_as
 
-                    # Insert the rest as the next line (preserve line_number for tracking)
-                    self.raw_lines.insert(i + 1, SourceLine(line.line_number, body_part))
-                break
+                # Update current line to be just the header part
+                self.raw_lines[as_index].content = header_part
+
+                # Insert the rest as the next line (preserve line_number for tracking)
+                self.raw_lines.insert(as_index + 1, SourceLine(line.line_number, body_part))
 
         if as_index != -1:
             # Header lines: 0 to as_index (inclusive)

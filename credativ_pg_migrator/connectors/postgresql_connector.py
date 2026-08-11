@@ -3586,7 +3586,11 @@ class PostgreSQLConnector(DatabaseConnector):
                 # A source which delivers the bare condition of its domain - a Sybase ASE rule
                 # is stored as 'create rule r_flag as @val in (0, 1)' - needs the CHECK clause
                 # around it, otherwise the statement ends as 'AS SMALLINT VALUE in (0, 1)'.
-                if not re.search(r'(?i)\bCHECK\b', domain_check_sql):
+                # The clause has to be recognized at the beginning of the condition and not
+                # by the word CHECK anywhere in it - in "VALUE in ('CHECK', 'CASH')" that word
+                # is data, and the condition would have been left without its clause.
+                already_a_check_clause = re.match(r'(?is)\s*(CONSTRAINT\s+("[^"]+"|\w+)\s+)?CHECK\s*\(', domain_check_sql)
+                if not already_a_check_clause:
                     domain_check_sql = f"CHECK ({domain_check_sql})"
 
                 # pg_get_constraintdef already allows CHECK (...).

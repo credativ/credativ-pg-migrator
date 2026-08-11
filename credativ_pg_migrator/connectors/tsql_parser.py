@@ -2080,28 +2080,44 @@ class TsqlParser:
 
     def pass_8d_convert_selects(self):
         """
-        Pass 8d: Converts SELECT commands using the view converter if provided.
+        Pass 8d: Converts the statements of the routine with the statement converter, when one
+        is provided.
+
+        Only the SELECT commands were converted, so everything a conversion does - the string
+        concatenation with '+' to '||', the functions of the source, the schema of the source,
+        the quoting of the names - was missing in every INSERT, UPDATE and DELETE of a routine:
+        `insert ... select ..., getdate(), @a + ':' + b ...` reached the target as it was
+        written for the source and failed there. A statement which the converter cannot read
+        keeps its original text and is reported.
         """
         if not self.view_converter or not self.settings:
             return
 
-        self.log("Running Pass 8d: Convert SELECTs with view converter")
+        self.log("Running Pass 8d: Convert statements with the statement converter")
 
-        for cmd_obj in self.select_commands:
-            original_content = cmd_obj['content']
-            
-            temp_settings = self.settings.copy()
-            temp_settings['view_code'] = original_content
-            
-            try:
-                converted = self.view_converter(temp_settings)
-                
-                if original_content.strip().endswith(';') and not converted.strip().endswith(';'):
-                    converted += ';'
-                
-                cmd_obj['content'] = converted
-            except Exception as e:
-                self.log(f"Failed to convert SELECT command: {e}")
+        for command_kind, commands in (('SELECT', self.select_commands),
+                                       ('INSERT', self.inserts),
+                                       ('UPDATE', self.update_commands),
+                                       ('DELETE', self.delete_commands)):
+            for cmd_obj in commands:
+                original_content = cmd_obj['content']
+
+                temp_settings = self.settings.copy()
+                temp_settings['view_code'] = original_content
+
+                try:
+                    converted = self.view_converter(temp_settings)
+
+                    if not converted or not converted.strip():
+                        self.log(f"Conversion of a {command_kind} command returned nothing - the original is kept")
+                        continue
+
+                    if original_content.strip().endswith(';') and not converted.strip().endswith(';'):
+                        converted += ';'
+
+                    cmd_obj['content'] = converted
+                except Exception as e:
+                    self.log(f"Failed to convert {command_kind} command: {e}")
 
 
     def pass_9_rename_variables(self):

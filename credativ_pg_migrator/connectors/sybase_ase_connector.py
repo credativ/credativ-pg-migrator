@@ -2829,20 +2829,6 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_name}_func"();
                         alias_id.set("quoted", True)
             return node
 
-        def keep_source_variables(node):
-            """
-            A variable of the source keeps its own spelling. sqlglot reads '@v' of Sybase ASE as
-            a parameter and the PostgreSQL generator writes a parameter as '$v', while the
-            conversion of a routine expects '@v' - it renames the variables to locvar_v later.
-            '@@v', a global variable, is read as a parameter of a parameter.
-            """
-            if isinstance(node, sqlglot.exp.Parameter):
-                inner = node.this
-                if isinstance(inner, sqlglot.exp.Parameter):
-                    return sqlglot.exp.Var(this='@@' + inner.this.name)
-                return sqlglot.exp.Var(this='@' + (inner.name if hasattr(inner, 'name') else str(inner)))
-            return node
-
         def replace_functions(node):
             mapping = self.get_sql_functions_mapping({ 'target_db_type': settings['target_db_type'] })
             # Prepare mapping for function names (without parentheses)
@@ -3005,41 +2991,9 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_name}_func"();
                     return sqlglot.exp.Cast(this=expr_node, to=new_type_node)
             return node
 
-        def is_string_expr(node):
-            if node is None:
-                return False
-            if node.is_string:
-                return True
-            if isinstance(node, sqlglot.exp.Cast) and getattr(node.to.this, 'name', '').upper() in ('VARCHAR', 'CHAR', 'TEXT', 'NVARCHAR', 'NCHAR', 'UNIVARCHAR', 'UNICHAR'):
-                return True
-            if isinstance(node, sqlglot.exp.DPipe):
-                return True
-            if isinstance(node, sqlglot.exp.Add):
-                return is_string_expr(node.left) or is_string_expr(node.right)
-            return False
-
-        def convert_string_concatenation(node):
-            if isinstance(node, sqlglot.exp.Add):
-                # Process children first to do a bottom-up replacement
-                left = node.left.transform(convert_string_concatenation)
-                right = node.right.transform(convert_string_concatenation)
-
-                is_left_string = is_string_expr(left)
-                is_right_string = is_string_expr(right)
-
-                if is_left_string or is_right_string:
-                    if not is_left_string:
-                         new_left = sqlglot.exp.Cast(this=left.copy(), to=sqlglot.exp.DataType.build('text'))
-                    else:
-                         new_left = left.copy()
-                         
-                    if not is_right_string:
-                         new_right = sqlglot.exp.Cast(this=right.copy(), to=sqlglot.exp.DataType.build('text'))
-                    else:
-                         new_right = right.copy()
-
-                    return sqlglot.exp.DPipe(this=new_left, expression=new_right)
-            return node
+        ## the '+' of Sybase ASE which concatenates and the conversion of its operands are
+        ## shared with the other T-SQL sources - see convert_string_concatenation()
+        ## and is_string_expression() of the base connector
 
         self.config_parser.print_log_message('DEBUG3', f"sybase_ase_connector: convert_string_concatenation: settings in convert_view_code: {settings}")
         converted_code = settings['view_code']
@@ -3093,7 +3047,7 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_name}_func"();
             parsed_code = transform_sybase_joins(parsed_code)
 
             # Convert string concatenation + to ||
-            parsed_code = parsed_code.transform(convert_string_concatenation)
+            parsed_code = parsed_code.transform(self.convert_string_concatenation)
 
             # Map Sybase native cast datatypes to Postgres native equivalents
             parsed_code = parsed_code.transform(replace_cast_types)
@@ -3118,7 +3072,7 @@ EXECUTE FUNCTION "{target_schema_name}"."{trigger_name}_func"();
             ## 'CURRENT_TIMESTAMP()', and PostgreSQL refuses both with
             ## 'syntax error at or near "("'. The variables of the source are kept in their own
             ## spelling first, the PostgreSQL generator would write them as '$v'.
-            parsed_code = parsed_code.transform(keep_source_variables)
+            parsed_code = parsed_code.transform(self.keep_source_variables)
             converted_code = parsed_code.sql(dialect='postgres')
             converted_code = converted_code.replace("()()", "()")
 

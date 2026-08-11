@@ -927,7 +927,13 @@ class MsSQLConnector(DatabaseConnector):
             funcproc_code, lambda fragment: re.sub(r'\[([^\]]+)\]', r'"\1"', fragment)
         )
 
-        parser = TsqlParser(funcproc_code, self.config_parser)
+        ## The statements of the routine are converted for PostgreSQL like the query of a
+        ## view - without the converter the parser only rearranged them, so `getdate()`,
+        ## the string concatenation with '+' and the schema of the source reached the
+        ## target unchanged.
+        parser = TsqlParser(funcproc_code, self.config_parser,
+                            view_converter=self.convert_statement_code, settings=settings,
+                            functions_mapping_converter=self.apply_sql_functions_mapping)
         final_output = parser.run()
 
         # Reconstruct header string to parse parameters
@@ -1146,7 +1152,16 @@ class MsSQLConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', e)
             raise
 
-    def convert_view_code(self, settings: dict):
+    def convert_statement_code(self, settings: dict):
+        """
+        A statement of the source converted for PostgreSQL, without any wrapper around it.
+
+        Used for the query of a view and for every statement of a routine - a routine used not
+        to be converted at all, so `getdate()` and the string concatenation with '+' reached
+        the target as they were written for MS SQL Server. `settings['view_code']` carries the
+        statement, `source_schema_name` and `target_schema_name` the schemas. Raises ValueError
+        when the statement cannot be parsed, so a caller can keep the original text.
+        """
         # Fetch UDT map for substitution
         udt_lookup_map = self._get_udt_map()
 
@@ -1298,7 +1313,7 @@ class MsSQLConnector(DatabaseConnector):
             expressions = sqlglot.parse(view_code, read=CustomTSQL)
         except Exception as e:
             self.config_parser.print_log_message('ERROR', f"ms_sql_connector: transform_sybase_joins: Failed to parse view code: {e}")
-            return f"-- ERROR parsing view: {e}\n/*\n{view_code}\n*/"
+            raise ValueError(f"-- ERROR parsing view: {e}\n/*\n{view_code}\n*/") from e
 
         transformed_sqls = []
         for expression in expressions:
@@ -1313,8 +1328,16 @@ class MsSQLConnector(DatabaseConnector):
                 expression = expression.transform(replace_schema_names)
                 expression = expression.transform(quote_schema_and_table_names)
                 expression = expression.transform(replace_udts)
+                ## '+' concatenates in MS SQL Server wherever one of its operands is text; it
+                ## has to become '||' before the operands of the remaining arithmetic are cast,
+                ## which would otherwise cast the parts of a concatenation to a number
+                expression = expression.transform(self.convert_string_concatenation)
                 expression = expression.transform(cast_arithmetic_operands)
                 # expression = transform_sybase_joins(expression) # Not needed if standard SQL
+
+                ## the variables of the source keep their own spelling, the PostgreSQL generator
+                ## would write '@v' as '$v' and the conversion of a routine renames '@v' later
+                expression = expression.transform(self.keep_source_variables)
 
                 pg_sql = expression.sql(dialect='postgres')
                 transformed_sqls.append(pg_sql)
@@ -1322,7 +1345,16 @@ class MsSQLConnector(DatabaseConnector):
                 self.config_parser.print_log_message('ERROR', f"ms_sql_connector: transform_sybase_joins: Failed to transform expression: {e}")
                 transformed_sqls.append(f"-- ERROR transforming: {e}")
 
-        final_select_sql = "\n".join(transformed_sqls)
+        return "\n".join(transformed_sqls)
+
+    def convert_view_code(self, settings: dict):
+        """
+        The complete `CREATE VIEW` statement of the target, built around the converted query.
+        """
+        try:
+            final_select_sql = self.convert_statement_code(settings)
+        except ValueError as e:
+            return str(e)
 
         target_schema_name = settings['target_schema_name']
         target_view_name = settings['target_view_name']
@@ -1736,7 +1768,9 @@ class MsSQLConnector(DatabaseConnector):
              return f"/* COULD NOT ISOLATE BODY FOR {trigger_name} */ {trigger_code}"
 
         fake_code = f"CREATE PROCEDURE dummy AS\n{body_content}"
-        parser = TsqlParser(fake_code, self.config_parser)
+        parser = TsqlParser(fake_code, self.config_parser,
+                            view_converter=self.convert_statement_code, settings=settings,
+                            functions_mapping_converter=self.apply_sql_functions_mapping)
         final_output = parser.run(pg_header_str=" ")
 
         final_stmts_clean = []

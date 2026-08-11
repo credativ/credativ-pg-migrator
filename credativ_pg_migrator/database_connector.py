@@ -610,6 +610,67 @@ class DatabaseConnector(ABC):
             value = value[1:-1].strip()
         return value
 
+    def is_string_expression(self, node):
+        """
+        True when the expression node produces text, as far as it can be told without the types
+        of the columns: a string literal, a cast to a character type, a concatenation.
+        """
+        import sqlglot
+        if node is None:
+            return False
+        if node.is_string:
+            return True
+        if isinstance(node, sqlglot.exp.Cast) and getattr(node.to.this, 'name', '').upper() in (
+                'VARCHAR', 'CHAR', 'TEXT', 'NVARCHAR', 'NCHAR', 'UNIVARCHAR', 'UNICHAR'):
+            return True
+        if isinstance(node, sqlglot.exp.DPipe):
+            return True
+        if isinstance(node, sqlglot.exp.Add):
+            return self.is_string_expression(node.left) or self.is_string_expression(node.right)
+        return False
+
+    def convert_string_concatenation(self, node):
+        """
+        A transformation for sqlglot which turns the '+' of T-SQL into the '||' of PostgreSQL
+        wherever one of its operands is text - '+' concatenates in Sybase ASE and MS SQL Server
+        and adds in PostgreSQL, which refuses it on text with 'operator does not exist'. The
+        operand which is not text is cast, because PostgreSQL does not concatenate a number
+        with a text without one.
+        """
+        import sqlglot
+        if isinstance(node, sqlglot.exp.Add):
+            # Process children first to do a bottom-up replacement
+            left = node.left.transform(self.convert_string_concatenation)
+            right = node.right.transform(self.convert_string_concatenation)
+
+            is_left_string = self.is_string_expression(left)
+            is_right_string = self.is_string_expression(right)
+
+            if is_left_string or is_right_string:
+                new_left = left.copy() if is_left_string else sqlglot.exp.Cast(
+                    this=left.copy(), to=sqlglot.exp.DataType.build('text'))
+                new_right = right.copy() if is_right_string else sqlglot.exp.Cast(
+                    this=right.copy(), to=sqlglot.exp.DataType.build('text'))
+                return sqlglot.exp.DPipe(this=new_left, expression=new_right)
+        return node
+
+    def keep_source_variables(self, node):
+        """
+        A transformation for sqlglot which keeps a variable of the source in its own spelling.
+
+        sqlglot reads '@v' of T-SQL as a parameter, and the PostgreSQL generator writes a
+        parameter as '$v', while the conversion of a routine expects '@v' - it renames the
+        variables to locvar_v afterwards. '@@v', a global variable, is read as a parameter of a
+        parameter. Used by every connector which converts T-SQL statements for PostgreSQL.
+        """
+        import sqlglot
+        if isinstance(node, sqlglot.exp.Parameter):
+            inner = node.this
+            if isinstance(inner, sqlglot.exp.Parameter):
+                return sqlglot.exp.Var(this='@@' + inner.this.name)
+            return sqlglot.exp.Var(this='@' + (inner.name if hasattr(inner, 'name') else str(inner)))
+        return node
+
     def mapped_function_expression(self, mapped_text: str):
         """
         The replacement of a function from `get_sql_functions_mapping()` as an expression node.

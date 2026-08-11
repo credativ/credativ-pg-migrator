@@ -268,6 +268,24 @@ class TsqlParser:
             i += 1
         return "".join(result)
 
+    def inside_open_case(self, collected_lines: List[str]) -> bool:
+        """
+        True when the statement collected so far has a CASE expression which is not closed yet.
+
+        The WHEN, ELSE and END of a CASE belong to the expression, but the same words end a
+        block of the routine, so a statement was cut at the first line of a CASE written over
+        several lines - the rest of it ('END', 'FROM ...', 'WHERE ...') was left behind as
+        separate lines which no pass could parse. String literals are left out of the count,
+        'END' inside one is not the end of a CASE.
+        """
+        if not collected_lines:
+            return False
+        text = " ".join(collected_lines)
+        text = re.sub(r"'(?:[^']|'')*'", "''", text)
+        opened = len(re.findall(r'(?i)\bCASE\b', text))
+        closed = len(re.findall(r'(?i)\bEND\b', text))
+        return opened > closed
+
     def find_unquoted_marker(self, content: str, markers: List[str]) -> tuple:
         """
         Finds the first occurrence of any marker in 'markers' that is NOT encapsulated.
@@ -376,38 +394,11 @@ class TsqlParser:
                 # Original: " code */"
                 # New: " more code "
 
-                part1 = ""
-                part2 = ""
-
-                if marker == "*/":
-                    # Split AFTER the marker
-                    split_point = idx + 2
-                    part1 = content[:split_point]
-                    part2 = content[split_point:]
-                    # If part2 is empty? "lines ... shifted".
-                    # If part2 is empty, do we make an empty line?
-                    # Rule doesn't say "if rest is not empty".
-                    # Let's assume strictly following rule.
-                else:
-                    # -- or /*
-                    # Split BEFORE the marker
-                    split_point = idx
-                    part1 = content[:split_point]
-                    part2 = content[split_point:]
-
-                # Update current line
-                self.body_lines[i].content = part1
-
-                # Insert new line
-                original_line_num = self.body_lines[i].line_number
-                new_line_num = original_line_num + 1
-                new_line = SourceLine(new_line_num, part2)
-
-                self.body_lines.insert(i + 1, new_line)
-
-                # Shift all following lines
-                for j in range(i + 2, len(self.body_lines)):
-                    self.body_lines[j].line_number += 1
+                # NOTE: the split itself is done further below, after the checks for a line
+                # which starts with a comment marker. It used to be done here as well, with the
+                # same content and without ending the iteration, so every line carrying an
+                # inline comment was split twice and the comment ended up in the output twice
+                # ("/*-- instance_id*/" once per split).
 
                 # We stay at 'i' ? or move to 'i+1'?
                 # If we split:
@@ -1002,6 +993,11 @@ class TsqlParser:
                                  if not has_values and not has_select:
                                      should_continue = True
 
+                             ## a CASE expression written over several lines carries its own
+                             ## WHEN / ELSE / END, which do not end the statement
+                             if self.inside_open_case(insert_lines):
+                                 should_continue = True
+
                              if not should_continue:
                                  break
 
@@ -1109,6 +1105,11 @@ class TsqlParser:
                                 if not has_set:
                                     should_continue = True
 
+                            ## a CASE expression written over several lines carries its own
+                            ## WHEN / ELSE / END, which do not end the statement
+                            if self.inside_open_case(update_lines):
+                                should_continue = True
+
                             if not should_continue:
                                 break
 
@@ -1167,6 +1168,11 @@ class TsqlParser:
 
                             # Curr starts with FROM
                             if re.match(r'^FROM\b', current_content, re.IGNORECASE):
+                                should_continue = True
+
+                            ## a CASE expression written over several lines carries its own
+                            ## WHEN / ELSE / END, which do not end the statement
+                            if self.inside_open_case(delete_lines):
                                 should_continue = True
 
                             if not should_continue:
@@ -1546,6 +1552,11 @@ class TsqlParser:
                                      terminator_pattern = r'^(IF|ELSE\s+IF|ELSE|ELSIF|END|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT|SET|BEGIN|EXEC|EXECUTE|WHILE|COMMIT|ROLLBACK|DECLARE|CREATE|ALTER|DROP|RAISERROR|BREAK|CONTINUE|OPEN|FETCH|CLOSE|DEALLOCATE|GOTO)\b'
                                      if not re.match(terminator_pattern, next_l_check, re.IGNORECASE):
                                          is_continuation = True
+
+                            ## a CASE expression written over several lines carries its own
+                            ## WHEN / ELSE / END, which do not end the statement
+                            if current_content != "" and self.inside_open_case(select_lines):
+                                is_continuation = True
 
                             if not is_continuation:
                                 break

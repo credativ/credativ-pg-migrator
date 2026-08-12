@@ -306,6 +306,26 @@ class TsqlParser:
 
         return False
 
+    def split_outside_parens(self, statement: str, separator: str = ',') -> List[str]:
+        """
+        The parts of a statement separated by the given character, counting only the occurrences
+        of it which stand outside parentheses, string literals and comments.
+        """
+        masked, _ = self.mask_comments_and_literals(statement, False)
+        parts = []
+        paren_level = 0
+        part_start = 0
+        for position, char in enumerate(masked):
+            if char == '(':
+                paren_level += 1
+            elif char == ')':
+                paren_level -= 1
+            elif char == separator and paren_level == 0:
+                parts.append(statement[part_start:position])
+                part_start = position + 1
+        parts.append(statement[part_start:])
+        return parts
+
     def replace_commas_outside_parens(self, s, stop_word=None):
         result = []
         paren_level = 0
@@ -982,24 +1002,101 @@ class TsqlParser:
                 i += 1
         self.body_lines = new_body_lines
 
+    def while_condition_is_incomplete(self, condition: str) -> bool:
+        """
+        Whether the condition of a WHILE collected so far still waits for its continuation on
+        the following line.
+
+        Sybase writes the condition of a loop over as many lines as it likes, and the parser
+        has to recognize the whole of it: `while (@i < 10` followed by `and @i is not null)`
+        is one condition, and taking only its first line left the rest of it standing in the
+        body as a statement of its own.
+        """
+        masked, _ = self.mask_comments_and_literals(condition, False)
+        if not masked.strip():
+            ## the condition begins on the line after the keyword
+            return True
+        if masked.count('(') > masked.count(')'):
+            return True
+        ## a condition which ends on an operator or a boolean connective wants its right side
+        return bool(re.search(r'(?i)(\b(AND|OR|NOT|LIKE|IN|BETWEEN|IS)\b|[-+*/%,=<>]|\|\|)\s*$', masked))
+
+    def continues_while_condition(self, line_content: str) -> bool:
+        """
+        Whether a line continues the condition of the WHILE above it because it begins with a
+        boolean connective, an operator or the closing parenthesis of the condition.
+
+        The condition is regularly broken in front of its connective - `while @i < 10` followed
+        by `and @j > 0` - where the first line reads as a complete condition on its own.
+        """
+        if line_content.startswith('--') or line_content.startswith('/*'):
+            return False
+        return bool(re.match(r'(?i)^(AND|OR)\b|^(\)|\|\||[-+*/%=<>])', line_content))
+
     def pass_7b_parse_while_loops(self):
+        """
+        Pass 7b: Parses WHILE loops into `WHILE <condition> LOOP`.
+
+        Sybase writes a loop as `WHILE <condition>` followed by its body, and the condition may
+        be attached to the keyword without a space (`while(@i is not null)`) and may run over
+        several lines. Only `WHILE <space> <condition on one line>` was recognized, so both of
+        these reached the target unconverted - PostgreSQL answered `missing "LOOP" at end of
+        SQL expression`, and the `END LOOP;` which Pass 12 adds for the loop had nothing to
+        close.
+        """
         self.log("Running Pass 7b: Parse WHILE Loops")
         new_body_lines = []
-        for line in self.body_lines:
-            line_content = line.content.strip()
-            m = re.match(r'^WHILE\s+(.*)', line_content, re.IGNORECASE)
-            if m:
-                condition = m.group(1).strip()
-                if re.search(r'\bBEGIN$', condition, re.IGNORECASE):
-                    condition = re.sub(r'\s+BEGIN$', '', condition, flags=re.IGNORECASE).strip()
-                
-                full_while = f"WHILE {condition} LOOP"
-                self.while_commands.append({
-                    "line": line.line_number,
-                    "content": full_while
-                })
-            else:
+        i = 0
+        while i < len(self.body_lines):
+            line = self.body_lines[i]
+            content = line.content.strip()
+
+            ## the condition may follow the keyword after a space or start right at its '('
+            match = re.match(r'^WHILE\b\s*(.*)$', content, re.IGNORECASE)
+            if not match:
                 new_body_lines.append(line)
+                i += 1
+                continue
+
+            start_line = line.line_number
+            condition_parts = [match.group(1).strip()]
+            i += 1
+
+            while i < len(self.body_lines):
+                next_content = self.body_lines[i].content.strip()
+                if next_content == "":
+                    break
+                if not (self.while_condition_is_incomplete(" ".join(condition_parts))
+                        or self.continues_while_condition(next_content)):
+                    break
+                condition_parts.append(next_content)
+                i += 1
+
+            condition = " ".join(part for part in condition_parts if part).strip()
+
+            ## the BEGIN of the body belongs to the body, not to the condition - it is put back
+            ## as a line of its own so that Pass 12 sees the block the loop encloses
+            body_begin = None
+            if re.search(r'(?<![\w@])BEGIN$', condition, re.IGNORECASE):
+                condition = re.sub(r'(?i)(?<![\w@])BEGIN$', '', condition).strip()
+                body_begin = type(line)(start_line + 0.1, "BEGIN")
+
+            if not condition:
+                ## a WHILE without a condition is not a loop this pass can build - the line is
+                ## left in the body, where Pass 10 marks it for the reader
+                self.log(f"Pass 7b: WHILE without a condition in line {start_line} - left unconverted")
+                new_body_lines.append(line)
+                if body_begin is not None:
+                    new_body_lines.append(body_begin)
+                continue
+
+            self.while_commands.append({
+                "line": start_line,
+                "content": f"WHILE {condition} LOOP"
+            })
+            if body_begin is not None:
+                new_body_lines.append(body_begin)
+
         self.body_lines = new_body_lines
 
     def pass_4_parse_inserts(self):
@@ -1402,12 +1499,30 @@ class TsqlParser:
 
         self.body_lines = new_body_lines
 
+    def convert_variable_assignment(self, assignment: str) -> str:
+        """
+        One `@variable = value` pair of a SET as the assignment `variable := value` of PL/pgSQL.
+
+        T-SQL also writes the assignment together with an operation on the variable
+        (`SET @count += 1`), which PL/pgSQL spells out: `count := count + (1)`. The value is
+        parenthesized so that an operation of its own keeps its precedence.
+        """
+        compound = re.match(r'^(@[\w@]+)\s*([-+*/%&|^])=(?!=)\s*(.*)$', assignment, re.DOTALL)
+        if compound:
+            variable, operator, value = compound.groups()
+            return f"{variable} := {variable} {operator} ({value.strip()})"
+        return re.sub(r'^(@[\w@]+)\s*=(?!=)', r'\1 :=', assignment, count=1)
+
     def pass_5d_parse_sets(self):
         """
-        Pass 5d: Parses SET commands that modify behavior (e.g., SET NOCOUNT ON).
-        Skips SET @var and SET ROWCOUNT.
-        Starts with SET.
-        Encapsulates into /* ... - Sybase Syntax */.
+        Pass 5d: Parses SET commands.
+
+        `SET @var = value` is the assignment of Sybase and becomes `var := value;`. It was left
+        in the body untouched, and PostgreSQL read the SET as the one it knows - the one for a
+        configuration parameter - and answered at run time with 'unrecognized configuration
+        parameter'. Every other SET (SET NOCOUNT ON and its like) changes a behaviour of the
+        session which has no counterpart here and is kept as a comment; SET ROWCOUNT is left for
+        Pass 11, which turns it into the LIMIT of the statements that follow it.
         """
         self.log("Running Pass 5d: Parse SETs")
         new_body_lines = []
@@ -1420,7 +1535,48 @@ class TsqlParser:
             is_var = re.match(r'^SET\s+@', content, re.IGNORECASE)
             is_rowcount = re.match(r'^SET\s+ROWCOUNT\b', content, re.IGNORECASE)
 
-            if is_set and not is_var and not is_rowcount:
+            if is_set and is_var:
+                start_line = line.line_number
+                assignment_lines = []
+
+                while i < len(self.body_lines):
+                    current_line = self.body_lines[i]
+                    current_content = current_line.content.strip()
+
+                    if len(assignment_lines) > 0:
+                        is_terminator = re.match(r'^(IF|ELSE\s+IF|ELSE|ELSIF|END|UPDATE|INSERT|DELETE|RETURN|SELECT|PRINT|SET|BEGIN|EXEC|EXECUTE|WHILE|COMMIT|ROLLBACK|DECLARE|CREATE|ALTER|DROP|RAISERROR|BREAK|CONTINUE|OPEN|FETCH|CLOSE|DEALLOCATE|GOTO)\b', current_content, re.IGNORECASE)
+
+                        if is_terminator or current_content == "":
+                            prev_content = assignment_lines[-1].content.strip()
+                            should_continue = (prev_content.endswith(",") or prev_content.endswith("=")
+                                               or prev_content.endswith("(")
+                                               or current_content.startswith(",") or current_content.startswith("="))
+                            if not should_continue:
+                                break
+
+                    assignment_lines.append(current_line)
+                    i += 1
+
+                full_set = re.sub(r'\s+', ' ', " ".join(l.content.strip() for l in assignment_lines)).strip()
+                full_set = re.sub(r'^SET\s+', '', full_set, count=1, flags=re.IGNORECASE)
+
+                ## `SET @a = 1, @b = 2` are as many assignments as there are pairs, and only the
+                ## '=' which follows the variable of a pair is the one of the assignment - a '='
+                ## inside the value (a CASE, a comparison) has to stay as it is
+                assignments = [self.convert_variable_assignment(part.strip())
+                               for part in self.split_outside_parens(full_set)]
+
+                if any(':=' in part for part in assignments):
+                    self.set_commands.append({
+                        "line": start_line,
+                        "content": " ".join(part.rstrip(';') + ';' for part in assignments if part)
+                    })
+                else:
+                    ## a SET on a variable which carries no assignment is none this pass can
+                    ## read - the lines stay in the body, where Pass 10 marks them for the reader
+                    self.log(f"Pass 5d: SET on a variable without an assignment in line {start_line}")
+                    new_body_lines.extend(assignment_lines)
+            elif is_set and not is_rowcount:
                 start_line = line.line_number
                 set_lines = []
 
@@ -1747,17 +1903,22 @@ class TsqlParser:
 
     def pass_3b_split_inline_ifs(self):
         """
-        Pass 3b: Splits inline IF statements.
-        Sybase allows `IF condition command`.
+        Pass 3b: Splits inline IF and WHILE statements.
+        Sybase allows `IF condition command` and `WHILE condition command`.
         This pass splits such lines into two: `IF condition` and `command`.
+
+        The WHILE was not split, so `while @i < 10 begin` kept the BEGIN of its body inside the
+        condition. The BEGIN was then dropped, the loop was closed after the first statement of
+        its body, and the END which the source wrote for that BEGIN was left over at the end of
+        the routine.
         """
-        self.log("Running Pass 3b: Split Inline IFs")
+        self.log("Running Pass 3b: Split Inline IFs and WHILEs")
         new_body_lines = []
         keywords = ["SELECT", "INSERT", "UPDATE", "DELETE", "PRINT", "EXEC", "EXECUTE", "BEGIN", "RETURN", "SET", "BREAK", "CONTINUE", "COMMIT", "ROLLBACK", "SAVE"]
-        
+
         for line in self.body_lines:
             content = line.content.strip()
-            if re.match(r'^(IF|ELSE\s+IF)\b', content, re.IGNORECASE):
+            if re.match(r'^(IF|ELSE\s+IF|WHILE)\b', content, re.IGNORECASE):
                 in_single_quote = False
                 in_double_quote = False
                 paren_level = 0
@@ -1794,15 +1955,14 @@ class TsqlParser:
                 if split_idx != -1:
                     part1 = content[:split_idx].strip()
                     part2 = content[split_idx:].strip()
-                    print(f"Split part 1: {part1}")
+                    self.log(f"Pass 3b: split inline statement into '{part1}' and '{part2}'")
                     new_body_lines.append(type(line)(line.line_number, part1))
-                    print(f"Split part 2: {part2}")
                     new_body_lines.append(type(line)(line.line_number + 0.1, part2))
                 else:
                     new_body_lines.append(line)
             else:
                 new_body_lines.append(line)
-                
+
         self.body_lines = new_body_lines
 
     def pass_7_parse_if_commands(self):
@@ -1936,7 +2096,10 @@ class TsqlParser:
 
                 # 3. Replace = with := for the assignment exclusively (Rule 112)
                 # Instead of a global .replace(), target only the assignment operator matching the @variable definition!
-                cleaned = re.sub(r'(@[\w@]+)\s*=', r'\1 :=', cleaned, count=1)
+                # Every pair of `SELECT @a = 1, @b = 2` is an assignment of its own - converting
+                # the first one only left `locvar_b = 2` behind, which PostgreSQL reads as a
+                # comparison and reports as a statement it cannot recognize
+                cleaned = re.sub(r'(^|;\s*)(@[\w@]+)\s*=(?!=)', r'\1\2 :=', cleaned)
 
                 # 4. Add semicolon at end (Rule 110)
                 cleaned = cleaned + ";"
@@ -2274,9 +2437,11 @@ class TsqlParser:
             for item in array:
                 item['content'] = apply_rename(item['content'])
 
-        for i_cmd in self.if_commands:
-            i_cmd['content'] = re.sub(r'@@sqlstatus\s*!=\s*0', 'NOT FOUND', i_cmd['content'], flags=re.IGNORECASE)
-            i_cmd['content'] = re.sub(r'@@sqlstatus\s*=\s*0', 'FOUND', i_cmd['content'], flags=re.IGNORECASE)
+        ## @@sqlstatus reports the result of the last FETCH, and the loop of a cursor tests it
+        ## just as an IF does - `while @@sqlstatus = 0` is the regular way to read a cursor out
+        for cmd in self.if_commands + self.while_commands:
+            cmd['content'] = re.sub(r'@@sqlstatus\s*!=\s*0', 'NOT FOUND', cmd['content'], flags=re.IGNORECASE)
+            cmd['content'] = re.sub(r'@@sqlstatus\s*=\s*0', 'FOUND', cmd['content'], flags=re.IGNORECASE)
 
 
 
@@ -2339,18 +2504,24 @@ class TsqlParser:
 
 
     def pass_9b_process_rowcount(self):
+        """
+        Pass 9b: Reads @@rowcount of Sybase out of the row count of the last statement.
+
+        A condition of a WHILE is tested once per turn of the loop, so the row count it reads
+        has to be taken again at the end of the body - the reading in front of the loop alone
+        describes the first turn only. Pass 12 adds that second reading when it closes the loop.
+        """
         self.log("Running Pass 9b: Process @@rowcount")
-        import re
         used_rowcount = False
-        for if_cmd in self.if_commands:
-            if re.search(r'@@rowcount', if_cmd['content'], re.IGNORECASE):
+        for cmd in self.if_commands + self.while_commands:
+            if re.search(r'@@rowcount', cmd['content'], re.IGNORECASE):
                 used_rowcount = True
-                if_cmd['content'] = re.sub(r'@@rowcount', 'locvar_rowcount', if_cmd['content'], flags=re.IGNORECASE)
+                cmd['content'] = re.sub(r'@@rowcount', 'locvar_rowcount', cmd['content'], flags=re.IGNORECASE)
                 self.exec_commands.append({
-                    "line": if_cmd['line'] - 0.1,
+                    "line": cmd['line'] - 0.1,
                     "content": "GET DIAGNOSTICS locvar_rowcount = ROW_COUNT;"
                 })
-        
+
         if used_rowcount:
             # Check if locvar_rowcount is already in variables
             found = False
@@ -2364,140 +2535,6 @@ class TsqlParser:
                     "content": "locvar_rowcount INTEGER;"
                 })
 
-
-    def pass_9b_process_rowcount(self):
-        self.log("Running Pass 9b: Process @@rowcount")
-        import re
-        used_rowcount = False
-        for if_cmd in self.if_commands:
-            if re.search(r'@@rowcount', if_cmd['content'], re.IGNORECASE):
-                used_rowcount = True
-                if_cmd['content'] = re.sub(r'@@rowcount', 'locvar_rowcount', if_cmd['content'], flags=re.IGNORECASE)
-                self.exec_commands.append({
-                    "line": if_cmd['line'] - 0.1,
-                    "content": "GET DIAGNOSTICS locvar_rowcount = ROW_COUNT;"
-                })
-        
-        if used_rowcount:
-            # Check if locvar_rowcount is already in variables
-            found = False
-            for v in self.variables:
-                if 'locvar_rowcount' in v['content']:
-                    found = True
-                    break
-            if not found:
-                self.variables.append({
-                    "line": 0,
-                    "content": "locvar_rowcount INTEGER;"
-                })
-
-
-    def pass_9b_process_rowcount(self):
-        self.log("Running Pass 9b: Process @@rowcount")
-        import re
-        used_rowcount = False
-        for if_cmd in self.if_commands:
-            if re.search(r'@@rowcount', if_cmd['content'], re.IGNORECASE):
-                used_rowcount = True
-                if_cmd['content'] = re.sub(r'@@rowcount', 'locvar_rowcount', if_cmd['content'], flags=re.IGNORECASE)
-                self.exec_commands.append({
-                    "line": if_cmd['line'] - 0.1,
-                    "content": "GET DIAGNOSTICS locvar_rowcount = ROW_COUNT;"
-                })
-        
-        if used_rowcount:
-            # Check if locvar_rowcount is already in variables
-            found = False
-            for v in self.variables:
-                if 'locvar_rowcount' in v['content']:
-                    found = True
-                    break
-            if not found:
-                self.variables.append({
-                    "line": 0,
-                    "content": "locvar_rowcount INTEGER;"
-                })
-
-
-    def pass_9b_process_rowcount(self):
-        self.log("Running Pass 9b: Process @@rowcount")
-        import re
-        used_rowcount = False
-        for if_cmd in self.if_commands:
-            if re.search(r'@@rowcount', if_cmd['content'], re.IGNORECASE):
-                used_rowcount = True
-                if_cmd['content'] = re.sub(r'@@rowcount', 'locvar_rowcount', if_cmd['content'], flags=re.IGNORECASE)
-                self.exec_commands.append({
-                    "line": if_cmd['line'] - 0.1,
-                    "content": "GET DIAGNOSTICS locvar_rowcount = ROW_COUNT;"
-                })
-        
-        if used_rowcount:
-            # Check if locvar_rowcount is already in variables
-            found = False
-            for v in self.variables:
-                if 'locvar_rowcount' in v['content']:
-                    found = True
-                    break
-            if not found:
-                self.variables.append({
-                    "line": 0,
-                    "content": "locvar_rowcount INTEGER;"
-                })
-
-
-    def pass_9b_process_rowcount(self):
-        self.log("Running Pass 9b: Process @@rowcount")
-        import re
-        used_rowcount = False
-        for if_cmd in self.if_commands:
-            if re.search(r'@@rowcount', if_cmd['content'], re.IGNORECASE):
-                used_rowcount = True
-                if_cmd['content'] = re.sub(r'@@rowcount', 'locvar_rowcount', if_cmd['content'], flags=re.IGNORECASE)
-                self.exec_commands.append({
-                    "line": if_cmd['line'] - 0.1,
-                    "content": "GET DIAGNOSTICS locvar_rowcount = ROW_COUNT;"
-                })
-        
-        if used_rowcount:
-            # Check if locvar_rowcount is already in variables
-            found = False
-            for v in self.variables:
-                if 'locvar_rowcount' in v['content']:
-                    found = True
-                    break
-            if not found:
-                self.variables.append({
-                    "line": 0,
-                    "content": "locvar_rowcount INTEGER;"
-                })
-
-
-    def pass_9b_process_rowcount(self):
-        self.log("Running Pass 9b: Process @@rowcount")
-        import re
-        used_rowcount = False
-        for if_cmd in self.if_commands:
-            if re.search(r'@@rowcount', if_cmd['content'], re.IGNORECASE):
-                used_rowcount = True
-                if_cmd['content'] = re.sub(r'@@rowcount', 'locvar_rowcount', if_cmd['content'], flags=re.IGNORECASE)
-                self.exec_commands.append({
-                    "line": if_cmd['line'] - 0.1,
-                    "content": "GET DIAGNOSTICS locvar_rowcount = ROW_COUNT;"
-                })
-        
-        if used_rowcount:
-            # Check if locvar_rowcount is already in variables
-            found = False
-            for v in self.variables:
-                if 'locvar_rowcount' in v['content']:
-                    found = True
-                    break
-            if not found:
-                self.variables.append({
-                    "line": 0,
-                    "content": "locvar_rowcount INTEGER;"
-                })
 
     def pass_10_add_semicolons(self):
         """
@@ -2669,7 +2706,9 @@ class TsqlParser:
 
         for st in self.set_commands:
             content = st['content']
-            # It's a comment, so we don't need a semicolon, but it doesn't hurt if we treat it uniformly or just skip adding it.
+            # A SET kept as a comment needs no semicolon, an assignment out of SET @var = value does
+            if not content.strip().startswith('/*') and not content.strip().endswith(';'):
+                content += ';'
             body_parts.append((st['line'], content, "set_commands"))
 
         for r in self.raiserror_commands:
@@ -2811,7 +2850,7 @@ class TsqlParser:
                 
 
             elif re.match(r'^WHILE\b', content, re.IGNORECASE):
-                if_stack.append({"type": "WHILE", "state": "EXPECT_TARGET"})
+                if_stack.append({"type": "WHILE", "state": "EXPECT_TARGET", "condition": content})
                 new_array.append(line)
             elif re.match(r'^(ELSIF|ELSE\s+IF|ELSE)\b', content, re.IGNORECASE):
                 # Extends the current IF statement
@@ -2848,6 +2887,10 @@ class TsqlParser:
                     popped_item = if_stack.pop()
                     orig_line = getattr(line, 'original_line_number', getattr(line, 'line_number_approx', 0))
                     if popped_item["type"] == "WHILE":
+                        ## a loop which turns on the row count reads it again for the next turn
+                        if 'locvar_rowcount' in popped_item.get("condition", ""):
+                            new_array.append(type(line)(0, 'injected_rowcount_refresh', orig_line,
+                                                        "GET DIAGNOSTICS locvar_rowcount = ROW_COUNT;"))
                         new_line = type(line)(0, 'injected_end_loop', orig_line, "END LOOP;")
                     else:
                         new_line = type(line)(0, 'injected_end_if', orig_line, "END IF;")
@@ -3001,21 +3044,6 @@ class TsqlParser:
 
         # Pass 8d
         self.pass_8d_convert_selects()
-
-        # Pass 9b
-        self.pass_9b_process_rowcount()
-
-        # Pass 9b
-        self.pass_9b_process_rowcount()
-
-        # Pass 9b
-        self.pass_9b_process_rowcount()
-
-        # Pass 9b
-        self.pass_9b_process_rowcount()
-
-        # Pass 9b
-        self.pass_9b_process_rowcount()
 
         # Pass 9b
         self.pass_9b_process_rowcount()

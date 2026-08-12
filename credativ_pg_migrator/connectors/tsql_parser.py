@@ -24,13 +24,14 @@ class OutputLine:
 
 
 class TsqlParser:
-    def __init__(self, code_str: str, config_parser=None, implicit_return=False, view_converter=None, settings=None, functions_mapping_converter=None):
+    def __init__(self, code_str: str, config_parser=None, implicit_return=False, view_converter=None, settings=None, functions_mapping_converter=None, pseudo_table_converter=None):
         self.code_str = code_str
         self.config_parser = config_parser
         self.implicit_return = implicit_return
         self.view_converter = view_converter
         self.settings = settings
         self.functions_mapping_converter = functions_mapping_converter
+        self.pseudo_table_converter = pseudo_table_converter
         self.raw_lines = []
         self.body_lines = []
         self.header_lines = []
@@ -2384,6 +2385,51 @@ class TsqlParser:
                     self.log(f"Failed to convert {command_kind} command: {e}")
 
 
+    def pass_8e_convert_pseudo_tables(self):
+        """
+        Pass 8e: Rewrites the statements which read a pseudo table of a trigger, when the source
+        database provides a converter for them.
+
+        A trigger of Sybase ASE and of MS SQL reads the rows of the statement which fired it out
+        of the tables 'inserted' and 'deleted', which a trigger of PostgreSQL has as the records
+        NEW and OLD instead. The rewriting needs one whole statement at a time - the FROM clause
+        the pseudo table is listed in, the columns which belong to it and the condition which
+        selects its rows all have to be seen together - and that is what the commands of the
+        routine are at this point. It runs after Pass 8d so that the converted statements, whose
+        columns are quoted, are the ones rewritten.
+        """
+        if not self.pseudo_table_converter:
+            return
+
+        self.log("Running Pass 8e: Convert the pseudo tables of a trigger")
+
+        for command_kind, commands in (('SELECT', self.select_commands),
+                                       ('INSERT', self.inserts),
+                                       ('UPDATE', self.update_commands),
+                                       ('DELETE', self.delete_commands),
+                                       ('IF', self.if_commands),
+                                       ('WHILE', self.while_commands),
+                                       ('SET', self.set_commands)):
+            for cmd_obj in commands:
+                content = cmd_obj['content']
+
+                ## the THEN of an IF and the LOOP of a WHILE were added by their pass and are
+                ## not part of the statement the converter reads
+                suffix = ''
+                for keyword in (' THEN', ' LOOP'):
+                    if content.upper().endswith(keyword):
+                        content, suffix = content[:-len(keyword)], content[-len(keyword):]
+                        break
+
+                try:
+                    converted = self.pseudo_table_converter(content, command_kind)
+                except Exception as e:
+                    self.log(f"Failed to convert the pseudo tables of a {command_kind} command: {e}")
+                    continue
+
+                if converted and converted != content:
+                    cmd_obj['content'] = converted + suffix
+
     def pass_9_rename_variables(self):
         """
         ...
@@ -3044,6 +3090,9 @@ class TsqlParser:
 
         # Pass 8d
         self.pass_8d_convert_selects()
+
+        # Pass 8e
+        self.pass_8e_convert_pseudo_tables()
 
         # Pass 9b
         self.pass_9b_process_rowcount()

@@ -2069,54 +2069,452 @@ class SybaseASEConnector(DatabaseConnector):
             self.config_parser.print_log_message('ERROR', f"sybase_ase_connector: migrate_table: Worker {worker_id}: Full stack trace: {traceback.format_exc()}")
             raise e
 
-    def convert_trigger_pseudo_tables(self, body_content, trigger_name):
+    PSEUDO_TABLE_RECORDS = {'inserted': 'NEW', 'deleted': 'OLD'}
+
+    ## the words an unquoted name of a query is not a column of the pseudo table for
+    NON_COLUMN_WORDS = frozenset("""
+        select distinct top all from where group by having order asc desc union intersect except
+        and or not null is in like between exists case when then else end as on join inner left
+        right full outer cross apply into values set update insert delete truncate returning
+        limit offset fetch first next rows only with recursive true false unknown current_date
+        current_time current_timestamp current_user session_user localtime localtimestamp
+        interval collate escape similar to any some new old
+        int integer smallint bigint tinyint numeric decimal dec float real double precision
+        money smallmoney char character varchar text nchar nvarchar unichar univarchar
+        date time datetime smalldatetime timestamp bigdatetime bigtime bit boolean bool bytea
+        binary varbinary image uuid json jsonb xml serial bigserial name
+    """.split())
+
+    def scan_sql_text(self, text):
         """
-        The 'inserted' and 'deleted' tables of a trigger of Sybase ASE as the OLD and NEW record
-        of a trigger function of PostgreSQL.
+        The text with its string literals and comments blanked out, and the depth of parentheses
+        of every one of its characters.
+
+        A position found in the blanked text addresses the same character of the original, so a
+        keyword or a name can be looked for where SQL means it and be taken from the text as it
+        was written. A parenthesis counts towards the depth of what it encloses, which makes the
+        span of a subquery the run of characters of its own depth.
+        """
+        masked = list(text)
+        depths = [0] * len(text)
+        depth = 0
+        index = 0
+        while index < len(text):
+            char = text[index]
+            if char == "'":
+                masked[index] = ' '
+                depths[index] = depth
+                index += 1
+                while index < len(text):
+                    depths[index] = depth
+                    is_quote = text[index] == "'"
+                    masked[index] = ' '
+                    index += 1
+                    if is_quote:
+                        ## a doubled quote is a quote inside the literal, not its end
+                        if index < len(text) and text[index] == "'":
+                            continue
+                        break
+                continue
+            if text.startswith('/*', index):
+                end = text.find('*/', index)
+                end = len(text) if end == -1 else end + 2
+                for position in range(index, end):
+                    masked[position] = ' '
+                    depths[position] = depth
+                index = end
+                continue
+            if char == '(':
+                depth += 1
+            depths[index] = depth
+            if char == ')':
+                depth -= 1
+            index += 1
+        return ''.join(masked), depths
+
+    def pseudo_table_pattern(self, pseudo_table=None):
+        """
+        The expression which finds a pseudo table of a trigger, written with or without quotes.
+
+        A name behind a dot is not one of them: Sybase ASE offers 'inserted' and 'deleted' under
+        those names alone, so a qualified 'dbo.inserted' is a table of the schema and stays as it
+        is written.
+        """
+        return rf'(?i)(?<![\w."])"?\b({pseudo_table or "inserted|deleted"})\b"?'
+
+    def reads_pseudo_table(self, text, pseudo_table=None):
+        """
+        Whether the code reads a pseudo table of a trigger, looking past its literals and
+        comments - the conversion names them in the comments it leaves behind.
+        """
+        return bool(re.search(self.pseudo_table_pattern(pseudo_table), self.scan_sql_text(text)[0]))
+
+    def substitute_outside_literals(self, text, pattern, replacement):
+        """
+        The text with every occurrence of the pattern outside its literals and comments replaced.
+        """
+        masked, _ = self.scan_sql_text(text)
+        result = []
+        position = 0
+        for match in re.finditer(pattern, masked):
+            result.append(text[position:match.start()])
+            result.append(replacement)
+            position = match.end()
+        result.append(text[position:])
+        return ''.join(result)
+
+    def find_pseudo_table_reference(self, statement):
+        """
+        The first reference to a pseudo table of a trigger in the statement, as its position, the
+        pseudo table named and the depth of parentheses it stands on.
+        """
+        masked, depths = self.scan_sql_text(statement)
+        match = re.search(self.pseudo_table_pattern(), masked)
+        if not match:
+            return None
+        return {'start': match.start(), 'end': match.end(),
+                'name': match.group(1).lower(),
+                'record': self.PSEUDO_TABLE_RECORDS[match.group(1).lower()],
+                'depth': depths[match.start()],
+                'masked': masked, 'depths': depths}
+
+    def enclosing_query_span(self, masked, depths, position, depth):
+        """
+        The span of the query a position belongs to: the parentheses of its depth which enclose
+        it, or the whole statement when it stands on the depth of the statement itself.
+        """
+        if depth == 0:
+            return 0, len(masked)
+        start = position
+        while start > 0 and not (depths[start] == depth and masked[start] == '('):
+            start -= 1
+        end = position
+        while end < len(masked) and not (depths[end] == depth and masked[end] == ')'):
+            end += 1
+        return start + 1, end
+
+    def clause_positions(self, masked, depths, span, depth):
+        """
+        The clauses of a query written between the given positions and on the given depth, as a
+        list of the keyword and where it begins.
+        """
+        pattern = (r'(?i)\b(FROM|WHERE|GROUP\s+BY|HAVING|ORDER\s+BY|UNION|INTERSECT|EXCEPT'
+                   r'|LIMIT|OFFSET|RETURNING|FOR\s+UPDATE|JOIN|VALUES)\b')
+        clauses = []
+        for match in re.finditer(pattern, masked[span[0]:span[1]]):
+            start = span[0] + match.start()
+            if depths[start] != depth:
+                continue
+            clauses.append({'keyword': re.sub(r'\s+', ' ', match.group(1)).upper(),
+                            'start': start, 'end': span[0] + match.end()})
+        return clauses
+
+    def split_pseudo_table_from_list(self, from_list, pseudo_table):
+        """
+        The FROM list without the pseudo table, and the names its columns were addressed by - the
+        pseudo table itself and the alias it was given.
+        """
+        masked, depths = self.scan_sql_text(from_list)
+        items = []
+        start = 0
+        for position, char in enumerate(masked):
+            if char == ',' and depths[position] == 0:
+                items.append(from_list[start:position])
+                start = position + 1
+        items.append(from_list[start:])
+
+        remaining = []
+        names = []
+        for item in items:
+            match = re.match(rf'(?i)^\s*"?{pseudo_table}"?\s*(?:AS\s+)?("?[\w$#]+"?)?\s*$', item)
+            if match:
+                names.append(pseudo_table)
+                if match.group(1):
+                    names.append(match.group(1).strip('"'))
+            else:
+                remaining.append(item.strip())
+        return remaining, names
+
+    def subquery_ranges(self, text):
+        """
+        The spans of the subqueries of an expression - every parenthesis whose content is a query
+        of its own.
+
+        A name written inside one of them belongs to the tables that query reads, not to the
+        pseudo table of the query around it: `select @v = (select max(x) from other) from
+        inserted` reads x of 'other', and both the column and the aggregate over it stay as they
+        are. A subquery which reads the pseudo table itself is rewritten as the query it is, in
+        its own turn of the conversion.
+        """
+        masked, _ = self.scan_sql_text(text)
+        ranges = []
+        opened = []
+        for position, char in enumerate(masked):
+            if char == '(':
+                opened.append(position)
+            elif char == ')' and opened:
+                start = opened.pop()
+                if re.match(r'(?i)^\s*SELECT\b', masked[start + 1:position]):
+                    ranges.append((start, position + 1))
+        return ranges
+
+    def qualify_pseudo_table_columns(self, expression, record, names, unqualified_are_columns):
+        """
+        The columns of an expression as fields of the record which replaces the pseudo table.
+
+        A column addressed through the pseudo table or its alias is always renamed. A column
+        written without a qualifier is one of the pseudo table only when that was the only table
+        the query read - with another table left in the FROM clause the column may as well be
+        one of that table, and it is left as it stands. The statement converter has quoted the
+        columns it read, and an unquoted name is taken for one when it is not a keyword, a type,
+        a function call or a variable.
+        """
+        for name in names:
+            expression = self.substitute_outside_literals(
+                expression, rf'(?i)(?<![\w."])"?\b{re.escape(name)}\b"?\s*\.\s*', f'{record}.')
+
+        if not unqualified_are_columns:
+            return expression
+
+        masked, _ = self.scan_sql_text(expression)
+        subqueries = self.subquery_ranges(expression)
+        result = []
+        position = 0
+        for match in re.finditer(r'"[^"]*"|[a-zA-Z_][\w$#]*', masked):
+            name = match.group(0)
+            before = masked[:match.start()].rstrip()
+            after = masked[match.end():].lstrip()
+
+            is_column = True
+            if any(start <= match.start() < end for start, end in subqueries):
+                ## a name of a subquery belongs to the tables that subquery reads
+                is_column = False
+            elif before.endswith('.') or before.endswith('@') or after.startswith('.') or after.startswith('('):
+                ## a qualified name, a variable or the name of a function
+                is_column = False
+            elif not name.startswith('"'):
+                if name.lower() in self.NON_COLUMN_WORDS or re.match(r'(?i)^(locvar|global)_', name):
+                    is_column = False
+
+            if is_column:
+                result.append(expression[position:match.start()])
+                result.append(f'{record}.{expression[match.start():match.end()]}')
+                position = match.end()
+        result.append(expression[position:])
+        return ''.join(result)
+
+    def unwrap_single_row_aggregates(self, expression):
+        """
+        An aggregate over the one row of the pseudo table as the value it aggregates.
+
+        `min(sales_object_id)` over the rows of the statement is the column itself once the rows
+        are seen one at a time, and `count(*)` is 1. Keeping the aggregate would work as well -
+        PostgreSQL aggregates over the one row of a query without a FROM clause - but it reads
+        as a query over a set which the trigger no longer performs.
+        """
+        def unwrapper(subqueries):
+            def unwrap(match):
+                if any(start <= match.start() < end for start, end in subqueries):
+                    ## the aggregate of a subquery is one over the rows that subquery reads
+                    return match.group(0)
+                function, argument = match.group(1).lower(), match.group(2).strip()
+                return '1' if function == 'count' else argument
+            return unwrap
+
+        previous = None
+        while previous != expression:
+            previous = expression
+            expression = re.sub(r'(?i)\b(MIN|MAX|SUM|AVG|COUNT)\s*\(\s*((?:[^()]|\([^()]*\))*?)\s*\)',
+                                unwrapper(self.subquery_ranges(expression)), expression)
+        return expression
+
+    def rewrite_assignment_select(self, select_list, condition, counted):
+        """
+        The list of an assignment SELECT with the condition which selected the row of the pseudo
+        table folded into the value of every assignment.
+
+        `select @old = created from deleted where id = @id` has no FROM clause left to carry the
+        condition, and PL/pgSQL assigns an expression alone, so the condition becomes a CASE. A
+        row which the condition does not select leaves the variable empty, as the SELECT of
+        Sybase over no row leaves it at what it held. A COUNT counted that row, so it becomes 0.
+        """
+        masked, depths = self.scan_sql_text(select_list)
+        pairs = []
+        start = 0
+        for position, char in enumerate(masked):
+            if char == ',' and depths[position] == 0:
+                pairs.append(select_list[start:position])
+                start = position + 1
+        pairs.append(select_list[start:])
+
+        rewritten = []
+        for pair in pairs:
+            match = re.match(r'^\s*(@[\w@]+)\s*=\s*(.+)$', pair, re.DOTALL)
+            if not match:
+                rewritten.append(pair.strip())
+                continue
+            variable, value = match.group(1), match.group(2).strip()
+            if condition:
+                otherwise = ' ELSE 0' if counted else ''
+                value = f"CASE WHEN {condition} THEN {value}{otherwise} END"
+            rewritten.append(f"{variable} = {value}")
+        return ', '.join(rewritten)
+
+    def convert_trigger_pseudo_tables(self, statement, command_kind, trigger_name, refusals):
+        """
+        One statement of a trigger of Sybase ASE reading the pseudo tables 'inserted' and
+        'deleted' as the same statement reading the records NEW and OLD of a trigger of
+        PostgreSQL.
 
         They are not tables - they are the names under which Sybase ASE offers the rows of the
-        statement which fired the trigger - and they were left in the code as they stood, so the
-        target answered with 'relation "deleted" does not exist' or, with the table still in a
-        FROM clause, refused the statement outright. A row level trigger of PostgreSQL has the
-        two rows as the records OLD and NEW instead, so a reference to a column becomes a field
-        of the record and the table itself disappears from the FROM clause.
+        statement which fired the trigger. Removing the name and leaving the rest of the query
+        as it stood is not enough: `select @old = created from deleted where id = @id` became
+        `old := created where id = @id`, which PostgreSQL refuses, and the columns of the pseudo
+        table were left addressing nothing. The pseudo table stands for exactly one row here, so
+        the FROM clause it was listed in loses it, its columns become fields of the record, an
+        aggregate over it is the value itself and the condition which selected its row is kept
+        as a condition over the record.
 
-        A trigger of Sybase ASE fires once per statement and can read all rows of it, while
-        this is a trigger per row - a statement which reads the pseudo table as a set (a join, a
-        count over it, an INSERT ... SELECT out of it) cannot be expressed this way. What
-        remains after the conversion is reported as a warning naming the trigger.
+        A trigger of Sybase ASE fires once per statement and can read all of its rows at once,
+        while this is a trigger per row. A statement which needs the whole set - a join with the
+        pseudo table, a group over it - cannot be expressed this way: it is replaced by a
+        statement which does nothing, keeps the original in a comment for the reader and is
+        reported as a refusal naming the trigger.
         """
-        pseudo_tables = {'inserted': 'NEW', 'deleted': 'OLD'}
+        if not self.reads_pseudo_table(statement):
+            return statement
 
-        def replace_outside_literals(pattern, replacement, text):
-            parts = re.split(r"('(?:[^']|'')*')", text)
-            return ''.join(part if position % 2 else re.sub(pattern, replacement, part, flags=re.IGNORECASE)
-                           for position, part in enumerate(parts))
+        original = statement
 
-        found = [pseudo_table for pseudo_table in pseudo_tables
-                 if re.search(rf'(?i)\b{pseudo_table}\b', re.sub(r"'(?:[^']|'')*'", "''", body_content))]
-        if found:
-            self.config_parser.print_log_message('DEBUG',
-                f"sybase_ase_connector: convert_trigger: Trigger {trigger_name} reads "
-                f"{', '.join(found)} - converted to the records "
-                f"{', '.join(pseudo_tables[pseudo_table] for pseudo_table in found)} of the trigger function.")
-
-        for pseudo_table, record in pseudo_tables.items():
-            ## a column of the pseudo table becomes a field of the record
-            body_content = replace_outside_literals(rf'\b{pseudo_table}\s*\.\s*(\w+)', rf'{record}.\1', body_content)
-            ## and the pseudo table itself leaves the FROM clause it was listed in
-            body_content = replace_outside_literals(rf',\s*{pseudo_table}\b', '', body_content)
-            body_content = replace_outside_literals(rf'\b{pseudo_table}\s*,', '', body_content)
-            body_content = replace_outside_literals(rf'\bFROM\s+{pseudo_table}\b', '', body_content)
-
-        remaining = [pseudo_table for pseudo_table in pseudo_tables
-                     if re.search(rf'(?i)\b{pseudo_table}\b', re.sub(r"'(?:[^']|'')*'", "''", body_content))]
-        if remaining:
+        def refuse(reason):
+            refusals.append(f"{reason}: {' '.join(original.split())}")
             self.config_parser.print_log_message('WARNING',
-                f"sybase_ase_connector: convert_trigger: Trigger {trigger_name} reads the table(s) "
-                f"{', '.join(remaining)} of Sybase ASE in a way which a trigger per row of PostgreSQL cannot "
-                "express - a join with them or a query over all their rows. The trigger needs to be completed by hand.")
-        return body_content
+                f"sybase_ase_connector: convert_trigger: Trigger {trigger_name}: {reason} - "
+                f"a trigger per row of PostgreSQL cannot express it and it has to be completed "
+                f"by hand: {' '.join(original.split())}")
+
+        ## A column addressed through the pseudo table itself is a field of the record wherever
+        ## it stands, and renaming those first leaves only the entries of a FROM clause to deal
+        ## with - `select inserted.a from inserted` names the table twice, and the reference in
+        ## the select list is not the one which has to leave a FROM clause.
+        for pseudo_table, record in self.PSEUDO_TABLE_RECORDS.items():
+            statement = self.substitute_outside_literals(
+                statement, self.pseudo_table_pattern(pseudo_table) + r'\s*\.\s*', f'{record}.')
+
+        ## every FROM clause listing a pseudo table, the innermost first - a statement can read
+        ## both of them and can read one in a subquery of its own
+        for _ in range(10):
+            reference = self.find_pseudo_table_reference(statement)
+            if reference is None:
+                return statement
+
+            masked, depths = reference['masked'], reference['depths']
+            span = self.enclosing_query_span(masked, depths, reference['start'], reference['depth'])
+            clauses = self.clause_positions(masked, depths, span, reference['depth'])
+
+            from_clause = next((clause for clause in clauses if clause['keyword'] == 'FROM'), None)
+            if from_clause is None or not from_clause['end'] <= reference['start'] < span[1]:
+                refuse(f"the table {reference['name']} is read outside a FROM clause")
+                break
+
+            if any(clause['keyword'] in ('JOIN', 'GROUP BY', 'HAVING', 'UNION', 'INTERSECT', 'EXCEPT')
+                   for clause in clauses):
+                refuse(f"the query over {reference['name']} joins or groups its rows")
+                break
+
+            following = [clause for clause in clauses if clause['start'] > from_clause['end']]
+            from_end = following[0]['start'] if following else span[1]
+            from_list = statement[from_clause['end']:from_end]
+            remaining, names = self.split_pseudo_table_from_list(from_list, reference['name'])
+            if not names:
+                refuse(f"the table {reference['name']} is not a plain entry of the FROM clause")
+                break
+            if len(names) > 2 or self.reads_pseudo_table(', '.join(remaining)):
+                ## both pseudo tables listed together are a join of the two sets, and a column
+                ## written without a qualifier cannot even be told apart
+                refuse("the FROM clause lists more than one pseudo table")
+                break
+
+            record = reference['record']
+
+            ## the parts of the query: what stands in front of its FROM clause, the condition of
+            ## its WHERE clause and whatever follows that condition
+            head = statement[span[0]:from_clause['start']]
+            where_clause = next((clause for clause in following if clause['keyword'] == 'WHERE'), None)
+            if where_clause is None:
+                condition, trailing = '', statement[from_end:span[1]].strip()
+            else:
+                after_where = [clause for clause in following if clause['start'] > where_clause['end']]
+                where_end = after_where[0]['start'] if after_where else span[1]
+                condition = statement[where_clause['end']:where_end].strip()
+                trailing = statement[where_end:span[1]].strip() if after_where else ''
+
+            ## Only a SELECT reads the pseudo table alone. The target of an UPDATE or a DELETE is
+            ## a table of its own, so a column written there without a qualifier is one of that
+            ## table and has to be left as it stands - and so has the target of an INSERT, which
+            ## stands in front of the SELECT reading the pseudo table.
+            select_starts = [match.start() for match in re.finditer(r'(?i)\bSELECT\b', masked[span[0]:from_clause['start']])
+                             if depths[span[0] + match.start()] == reference['depth']]
+            head_split = select_starts[-1] if select_starts else len(head)
+            sole_source = not remaining and bool(select_starts)
+
+            head_prefix = self.qualify_pseudo_table_columns(head[:head_split], record, names, False)
+            head_query = head[head_split:]
+            if sole_source:
+                head_query = self.unwrap_single_row_aggregates(head_query)
+                condition = self.unwrap_single_row_aggregates(condition)
+                if re.search(r'(?i)\bCOUNT\s*\(', head[head_split:] + condition):
+                    self.config_parser.print_log_message('WARNING',
+                        f"sybase_ase_connector: convert_trigger: Trigger {trigger_name} counts the rows of "
+                        f"{reference['name']} - a trigger per row of PostgreSQL sees one row at a time, so the "
+                        f"count is 1: {' '.join(original.split())}")
+            head_query = self.qualify_pseudo_table_columns(head_query, record, names, sole_source)
+            condition = self.qualify_pseudo_table_columns(condition, record, names, sole_source)
+
+            if sole_source and re.match(r'(?i)^ORDER\s+BY\b', trailing):
+                ## one row is in no order
+                self.config_parser.print_log_message('DEBUG',
+                    f"sybase_ase_connector: convert_trigger: Trigger {trigger_name}: the ORDER BY over "
+                    f"{reference['name']} was dropped - the trigger reads one row: {' '.join(original.split())}")
+                trailing = ''
+
+            ## an EXISTS over the pseudo table asks whether the row of the trigger is the row it
+            ## looks for, which is the condition of its subquery alone
+            exists = re.search(r'(?i)(\bNOT\s+)?\bEXISTS\s*$', statement[:max(span[0] - 1, 0)])
+            if exists and sole_source and not trailing:
+                negation = 'NOT ' if exists.group(1) else ''
+                replacement = f"{negation}({condition})" if condition else ('FALSE' if negation else 'TRUE')
+                statement = statement[:exists.start()] + replacement + statement[span[1] + 1:]
+                continue
+
+            assignment = re.match(r'(?i)^\s*SELECT\s+(?:ALL\s+|DISTINCT\s+)?(@[\w@]+\s*=.*)$', head_query, re.DOTALL)
+            if assignment and sole_source:
+                counted = bool(re.search(r'(?i)\bCOUNT\s*\(', head[head_split:]))
+                parts = [head_prefix.strip(),
+                         'SELECT ' + self.rewrite_assignment_select(assignment.group(1), condition, counted),
+                         trailing]
+            else:
+                parts = [head_prefix.strip(), head_query.strip(),
+                         'FROM ' + ', '.join(remaining) if remaining else '',
+                         f"WHERE {condition}" if condition else '',
+                         trailing]
+
+            query = ' '.join(' '.join(part.split()) for part in parts if part.strip())
+            statement = statement[:span[0]] + query + statement[span[1]:]
+        else:
+            refuse("the statement reads the pseudo tables of a trigger in too many places")
+
+        if self.reads_pseudo_table(statement):
+            ## nothing readable came out of the rewriting - the statement must not reach the
+            ## target, where it would fail with 'relation "inserted" does not exist'
+            note = f"/* TODO: not converted - {' '.join(original.split())} */"
+            if command_kind in ('IF', 'WHILE'):
+                return f"FALSE {note}"
+            ## the comment stands in front of the statement which replaces it, so that the
+            ## statement is the last thing on the line and no semicolon is added behind it
+            return f"{note} NULL;"
+
+        return statement
 
     def convert_trigger(self, settings):
         """
@@ -2164,7 +2562,18 @@ class SybaseASEConnector(DatabaseConnector):
              body_content = trigger_code[as_match.end():].strip()
 
         # 3. Global Replacements specific to Triggers
-        body_content = self.convert_trigger_pseudo_tables(body_content, trigger_name)
+        ## The pseudo tables 'inserted' and 'deleted' are rewritten by the parser, one statement
+        ## at a time - see convert_trigger_pseudo_tables - because a FROM clause, the columns
+        ## belonging to it and the condition selecting its rows have to be seen together.
+        pseudo_table_refusals = []
+        pseudo_tables_read = [pseudo_table for pseudo_table in self.PSEUDO_TABLE_RECORDS
+                              if self.reads_pseudo_table(body_content, pseudo_table)]
+        if pseudo_tables_read:
+            self.config_parser.print_log_message('DEBUG',
+                f"sybase_ase_connector: convert_trigger: Trigger {trigger_name} reads "
+                f"{', '.join(pseudo_tables_read)} - converted to the records "
+                f"{', '.join(self.PSEUDO_TABLE_RECORDS[pseudo_table] for pseudo_table in pseudo_tables_read)} "
+                "of the trigger function.")
 
         # IF UPDATE(col) -> IF locvar_sybase_update_func(col) (To avoid parser confusion with UPDATE keyword)
         def if_update_replacer(match):
@@ -2182,7 +2591,12 @@ class SybaseASEConnector(DatabaseConnector):
         declaration_replacer = lambda m: self._declaration_replacer(m, settings, types_mapping, declarations)
 
         # Expanded lookahead for declaration end
-        body_content = re.sub(r'DECLARE\s+(?![@#])[a-zA-Z0-9_].*?(?=\bBEGIN\b|\bEND\b|\bIF\b|\bWHILE\b|\bSELECT\b|\bINSERT\b|\bUPDATE\b|\bDELETE\b|\bRETURN\b|\bSET\b|\bFETCH\b|\bOPEN\b|\bCLOSE\b|\bDEALLOCATE\b|\bDECLARE\b|\bEXEC\b|\bEXECUTE\b|\bPRINT\b|\bRAISERROR\b|\bWAITFOR\b|\bCOMMIT\b|\bROLLBACK\b|\bSAVE\b|$)', declaration_replacer, body_content, flags=re.IGNORECASE | re.DOTALL)
+        ## The declaration of a cursor carries the query of the cursor, and this reads only up to
+        ## the SELECT of it: 'declare c1 cursor for select id from t' was taken as the declaration
+        ## 'c1 cursor for' and left its query standing in the body as a SELECT of its own, which
+        ## has nowhere to put its rows. The parser reads a cursor as a whole - see its Pass 3c -
+        ## so a line declaring one is left to it.
+        body_content = re.sub(r'DECLARE\s+(?![@#])(?![^\n]*\bCURSOR\b)[a-zA-Z0-9_].*?(?=\bBEGIN\b|\bEND\b|\bIF\b|\bWHILE\b|\bSELECT\b|\bINSERT\b|\bUPDATE\b|\bDELETE\b|\bRETURN\b|\bSET\b|\bFETCH\b|\bOPEN\b|\bCLOSE\b|\bDEALLOCATE\b|\bDECLARE\b|\bEXEC\b|\bEXECUTE\b|\bPRINT\b|\bRAISERROR\b|\bWAITFOR\b|\bCOMMIT\b|\bROLLBACK\b|\bSAVE\b|$)', declaration_replacer, body_content, flags=re.IGNORECASE | re.DOTALL)
 
         # 5. Convert Statements (using _convert_stmts logic)
         # 5. Convert Statements using new 12-pass Parser
@@ -2191,7 +2605,10 @@ class SybaseASEConnector(DatabaseConnector):
         
         fake_code = self._apply_types_mapping(fake_code, types_mapping)
             
-        parser = TsqlParser(fake_code, self.config_parser, view_converter=self.convert_view_code, settings=settings, functions_mapping_converter=self.apply_sql_functions_mapping)
+        pseudo_table_converter = lambda statement, command_kind: self.convert_trigger_pseudo_tables(
+            statement, command_kind, trigger_name, pseudo_table_refusals)
+
+        parser = TsqlParser(fake_code, self.config_parser, view_converter=self.convert_view_code, settings=settings, functions_mapping_converter=self.apply_sql_functions_mapping, pseudo_table_converter=pseudo_table_converter)
         final_output = parser.run(pg_header_str=" ") # space prevents default header
 
         final_stmts_clean = []
@@ -2210,6 +2627,13 @@ class SybaseASEConnector(DatabaseConnector):
 
             if line_obj.source_array == "declare_section" or stripped.upper() == "DECLARE":
                 in_body = True
+                continue
+
+            ## A cursor is declared in the DECLARE section of PL/pgSQL just as a variable is -
+            ## 'c1 CURSOR FOR SELECT ...' was left in the body, where PostgreSQL has no statement
+            ## it could be. Its query is not a declaration of a type, so it keeps its own names.
+            if line_obj.source_array == "cursor_declaration":
+                declarations.append(stripped)
                 continue
 
             if line_obj.source_array == "variable_declaration" or stripped.upper().startswith("DECLARE "):
@@ -2233,7 +2657,11 @@ class SybaseASEConnector(DatabaseConnector):
             final_stmts_clean.append(get_indent(indent_level) + line_obj.content)
 
         if has_rowcount:
-             declarations.insert(0, "locvar_rowcount INTEGER;")
+             ## @@rowcount of a trigger of Sybase ASE is the number of rows the statement which
+             ## fired it changed, and the regular use of it is the `if @@rowcount = 0 return` at
+             ## the head of the trigger. This trigger fires per row, so that number is 1 - the
+             ## variable was declared without a value, which made every test on it read NULL.
+             declarations.insert(0, "locvar_rowcount INTEGER DEFAULT 1; /* @@rowcount - this trigger fires once per row */")
 
         if 'global_trancount' in trigger_code.lower():
              declarations.insert(0, "global_trancount INTEGER DEFAULT 1;")
@@ -2253,6 +2681,36 @@ class SybaseASEConnector(DatabaseConnector):
              return f"NEW.{content} IS DISTINCT FROM OLD.{content}"
 
         final_body = re.sub(r'locvar_sybase_update_func\((.*?)\)', update_func_replacer, final_body, flags=re.IGNORECASE)
+
+        ## A pseudo table left in a place the statement by statement conversion never reads - the
+        ## query of a cursor, an EXECUTE - would reach the target and fail there with
+        ## 'relation "inserted" does not exist'. The literals and comments are masked out first,
+        ## because the refusals above name the pseudo tables in the comments they leave behind.
+        converted_code = "\n".join(declarations) + "\n" + final_body
+        surviving = [pseudo_table for pseudo_table in self.PSEUDO_TABLE_RECORDS
+                     if self.reads_pseudo_table(converted_code, pseudo_table)]
+        if surviving:
+            pseudo_table_refusals.append(
+                f"the table(s) {', '.join(surviving)} are still read by the converted code")
+            self.config_parser.print_log_message('WARNING',
+                f"sybase_ase_connector: convert_trigger: Trigger {trigger_name} still reads "
+                f"{', '.join(surviving)} after the conversion - PostgreSQL has no such table and will "
+                "refuse the trigger function. The statement reading it has to be written by hand.")
+
+        ## A statement which needed the whole set of rows of a pseudo table was replaced by one
+        ## which does nothing, and the trigger is not the trigger of the source until those
+        ## statements are written by hand. The reader of the target code has to find that out
+        ## from the code itself, so the refusals are collected at its head as well.
+        if pseudo_table_refusals:
+            self.config_parser.print_log_message('WARNING',
+                f"sybase_ase_connector: convert_trigger: Trigger {trigger_name} was converted "
+                f"with {len(pseudo_table_refusals)} statement(s) left out - it does not do what "
+                "the trigger of Sybase ASE did until they are completed by hand.")
+            final_body = ("/* INCOMPLETE CONVERSION - the following statement(s) of this trigger read the\n"
+                          "   rows of 'inserted' or 'deleted' as a set, which a trigger per row of PostgreSQL\n"
+                          "   cannot express, and were replaced by a statement which does nothing:\n"
+                          + "".join(f"     - {refusal}\n" for refusal in pseudo_table_refusals)
+                          + "*/\n" + final_body)
 
         # 6. Event Extraction
         events = re.findall(r'for\s+([a-z, ]+?)(?:\s+as\b|$)', trigger_code, re.IGNORECASE)

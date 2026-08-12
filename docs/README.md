@@ -292,6 +292,98 @@ Functions, procedures and triggers are converted (T-SQL → PL/pgSQL, via the sh
 
 **Known limitations (Sybase ASE):** foreign-key `ON DELETE` actions, table/column comments and standalone sequences have no Sybase counterpart or are not migrated. Note that older ASE versions do not support `LIMIT ... OFFSET`, so the migrator always drops and reloads unfinished tables when resuming after a crash for this source (it cannot skip already-loaded rows reliably).
 
+#### 4.6.1 Cases which need manual adjustment (Sybase ASE)
+
+Functions, procedures and triggers are converted statement by statement, and most of T-SQL has a
+counterpart in PL/pgSQL. What follows is the list of constructs which have **no** faithful
+counterpart. Each one is converted to something PostgreSQL accepts, so that the object can be
+created and the rest of it reviewed, and each one is marked where it stands — as a `TODO` comment
+in the generated code, as a `WARNING` in the log, or both. The generated SQL of every object is
+stored in the migration database (`migration.funcprocs`, `migration.triggers`) together with the
+error the target reported, so these places can be found again after a run.
+
+**Error handling and status codes**
+
+- **`@@error`** becomes the variable `locvar_sybase_error`, which starts at 0 and is never written.
+  PostgreSQL raises an exception where Sybase ASE sets a status, so a statement which fails does
+  not reach the test behind it: `if @@error <> 0 ... ` is dead code after the conversion. Rewrite
+  it as an `EXCEPTION WHEN OTHERS THEN` block around the statement. Reported as a `WARNING`.
+- **`GOTO` and its labels** become `/* TODO: GOTO ... - unsupported in PL/pgSQL */` comments;
+  PL/pgSQL has no `GOTO`. The usual pattern is a jump to an error exit (`goto do_rollback`), which
+  becomes unreachable code — the same rewrite as above replaces it.
+- **`RETURN <status>` together with an output parameter.** A procedure of Sybase answers with both
+  a status code and its `OUTPUT` parameters. A function of PostgreSQL answers with one value, and
+  the conversion gives it the output parameters (`INOUT`), so a `RETURN 0` / `RETURN -1` in the
+  body returns the status *instead of* them. Decide which of the two the callers need: keep the
+  status and read the value from a table, or drop the `RETURN` and keep the parameter.
+- **`RAISERROR`** becomes `RAISE EXCEPTION` and the `%1!` placeholders of Sybase become the `%` of
+  PostgreSQL, but the **error number is appended to the message text** as one more argument, since
+  PostgreSQL identifies an error by `SQLSTATE` and not by a number. Code which reacts to a
+  particular error number has to be given an `ERRCODE` and a matching handler.
+
+**Transactions**
+
+- **`BEGIN TRANSACTION` and `SAVE TRANSACTION`** become comments, and **`COMMIT`/`ROLLBACK`
+  remain** in the code, where PostgreSQL refuses them at run time with `cannot begin/end
+  transactions in PL/pgSQL`. A function runs inside the transaction of its caller and cannot
+  control it. Either move the transaction control to the caller, or turn the routine into a
+  PostgreSQL `PROCEDURE`, which may commit, and call it with `CALL`.
+- **`@@trancount`** becomes the variable `global_trancount`, which is 1 — a routine always runs
+  inside a transaction here. The regular `if @@trancount = 0 begin transaction` therefore does
+  nothing, which is correct, while `if @@trancount > 0 save transaction` needs a savepoint written
+  by hand.
+
+**Values PostgreSQL computes differently**
+
+- **`@@identity`** becomes `lastval()`. That is the value the routine wants as long as the column
+  it read is an identity or `serial` column of PostgreSQL and nothing else in the session drew
+  from a sequence in between. Where that is not certain, write the INSERT as
+  `INSERT ... RETURNING <column> INTO <variable>` instead.
+- **`SELECT @variable = <column> FROM <table>` over more than one row.** Sybase assigns the value
+  of the last row it reads; PostgreSQL raises `query returned more than one row`. Add the
+  `ORDER BY ... LIMIT 1` which says what "last" means, wherever the query is not by key.
+- **`object_name(@@procid)`** — the name of the running routine — becomes that name as a literal.
+  A bare **`@@procid`** does not: PostgreSQL has no id of the routine it is running.
+  **`@@servername`** reads the `cluster_name` setting, which is empty unless it was configured.
+- **Any other global variable** (`@@transtate`, `@@dbts`, `@@procid` on its own, …) is left as it
+  stands and the object will be refused with `syntax error at or near "@"`. The variables which are
+  converted are `@@rowcount`, `@@sqlstatus`, `@@error`, `@@identity`, `@@trancount`,
+  `object_name(@@procid)`, `@@spid`, `@@servername`, `@@version` and `@@nestlevel`; every other one
+  is named in a `WARNING`.
+
+**Triggers: one statement of Sybase against one row of PostgreSQL**
+
+A trigger of Sybase ASE fires **once per statement** and reads all rows of that statement out of
+the tables `inserted` and `deleted`. A trigger of PostgreSQL fires **once per row** and has the two
+rows as the records `NEW` and `OLD`. Statements which can be expressed that way are converted -
+the pseudo table leaves its FROM clause, its columns become fields of the record, an aggregate
+over its single row becomes the value itself and the condition which selected its row is kept - but
+the difference cannot be argued away:
+
+- **A statement which needs the whole set** — a join with `inserted`/`deleted`, a `GROUP BY` over
+  it, both pseudo tables in one FROM clause — is replaced by a statement which does nothing. Every
+  one of them is listed in an `INCOMPLETE CONVERSION` comment at the head of the trigger function
+  and reported as a `WARNING`. Such a trigger has to be written by hand, usually as a statement
+  level trigger (`FOR EACH STATEMENT`) reading a transition table (`REFERENCING NEW TABLE AS ...`),
+  which is the real counterpart of the pseudo tables.
+- **`count(*)` over a pseudo table becomes 1**, and `exists (select ... from inserted)` becomes the
+  condition of that subquery alone. A trigger which checked *how many* rows a statement changed
+  cannot ask that question per row; the count is reported as a `WARNING`.
+- **A cursor over `inserted` or `deleted`** is not converted. The pseudo table stays in the cursor
+  query, the trigger function will be refused by PostgreSQL, and a `WARNING` names it.
+- **A correlated subquery reading the outer pseudo table** leaves the correlated column
+  unqualified, because it cannot be told apart from a column of the subquery's own tables. The
+  object fails to create with `column "..." does not exist`.
+- **`@@rowcount` in a trigger is 1**, for the same reason.
+- **Side effects per statement become side effects per row.** A trigger writing one audit row per
+  statement writes one per changed row after the conversion. This is not reported — the code is
+  valid either way — and has to be judged per trigger.
+
+**Anything the parser could not read** is kept as it was written and marked
+`/* TODO: not processed line - check syntax */`. Such a line is usually a construct of Sybase which
+has no counterpart at all; it is left in place on purpose, so that the object fails to create and
+the place is not overlooked.
+
 ### 4.7 SQLite
 
 - **Mode**: local file — there is no server, no network connection and no authentication.

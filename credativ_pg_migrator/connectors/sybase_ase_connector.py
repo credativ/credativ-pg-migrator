@@ -1248,6 +1248,12 @@ class SybaseASEConnector(DatabaseConnector):
 
             funcproc_code = re.sub(r'"([^"]*)"', replacer_dq, funcproc_code)
 
+            ## The global variables of Sybase ASE have to go before the code is parsed - one of
+            ## them left in place is a syntax error of the target and the routine cannot be
+            ## created at all.
+            funcproc_code, global_variable_declarations = self.convert_sybase_global_variables(
+                funcproc_code, settings.get('funcproc_name', ''))
+
             target_db_type = settings.get('target_db_type', 'postgresql')
             local_settings = settings.copy() if settings else {}
             local_settings['target_db_type'] = target_db_type
@@ -1436,6 +1442,12 @@ class SybaseASEConnector(DatabaseConnector):
             # The pg header string formatted just like TsqlParser outputs:
             pg_header_str = f'CREATE OR REPLACE FUNCTION "{func_schema}"."{proc_name}"({pg_params_str})\n{returns_clause} AS'
 
+            ## the variables which stand for the global variables of Sybase belong to the routine
+            ## just as its own do, and are declared in front of them
+            for declaration in reversed(global_variable_declarations):
+                if not any(declaration.split()[0] in variable['content'] for variable in parser.variables):
+                    parser.variables.insert(0, {"line": 0, "content": declaration})
+
             # Re-run pass_11 with the customized header to let the parser cleanly merge it
             final_output = parser.pass_11_assemble_output(pg_header_str)
             
@@ -1510,6 +1522,8 @@ class SybaseASEConnector(DatabaseConnector):
                         current_indent = 0
 
                 ddl += get_indent(current_indent) + line_obj.content + "\n"
+
+            ddl = self.unquote_local_variables(ddl)
 
             # Double quote user defined types that remained in the DDL
             udt_map = self._get_udt_codes_mapping(settings)
@@ -2130,6 +2144,83 @@ class SybaseASEConnector(DatabaseConnector):
         binary varbinary image uuid json jsonb xml serial bigserial name
     """.split())
 
+    def convert_sybase_global_variables(self, code, routine_name):
+        """
+        The global variables of Sybase ASE as what PostgreSQL offers in their place, together with
+        the declarations the replacements need.
+
+        They were left in the code as they stood, and PostgreSQL answered every one of them with
+        'syntax error at or near "@"' - it has no such variables, so a routine reading one could
+        not even be created. What has a counterpart is replaced by it; what has none becomes a
+        variable holding the value the routine would read here, so that the code is accepted and
+        the place is named in the log. '@@rowcount' is not touched: the parser reads it out of
+        the row count of the last statement, which is what it means.
+
+        Which of them keep the behaviour of the source and which have to be rewritten by hand is
+        written down in the user guide, under 'Sybase ASE - cases which need manual adjustment'.
+        """
+        declarations = []
+
+        ## Sybase reads the name of the running routine out of its own id
+        code = re.sub(r'(?i)\bobject_name\s*\(\s*@@procid\s*\)', f"'{routine_name}'", code)
+
+        ## the value the IDENTITY column of the last INSERT was given. lastval() answers with the
+        ## value the last sequence of the session produced, which is that value as long as the
+        ## column is an identity column of PostgreSQL and nothing else drew from a sequence in
+        ## between.
+        code = re.sub(r'(?i)@@identity\b', 'lastval()', code)
+
+        code = re.sub(r'(?i)@@spid\b', 'pg_backend_pid()', code)
+        code = re.sub(r'(?i)@@servername\b', "current_setting('cluster_name', true)", code)
+        code = re.sub(r'(?i)@@version\b', 'version()', code)
+        ## a bare @@procid - the id of the running routine - is left to the report below: PostgreSQL
+        ## has no such value, and only the name of the routine, which is what 'object_name(@@procid)'
+        ## asks for, can be answered
+
+        ## A routine of PostgreSQL runs inside the transaction of its caller and cannot open one
+        ## of its own, so the number of open transactions is 1 wherever the routine reads it.
+        if re.search(r'(?i)@@trancount\b', code):
+            code = re.sub(r'(?i)@@trancount\b', 'global_trancount', code)
+            declarations.append("global_trancount INTEGER DEFAULT 1; "
+                                "/* @@trancount - a routine of PostgreSQL runs inside the transaction of its caller */")
+
+        ## @@error is the status the last statement left behind. PostgreSQL raises an exception
+        ## instead of setting a status, so the statement which failed never reaches the test: the
+        ## variable keeps the 0 it starts with, the routine is accepted, and the error handling
+        ## written around it is dead code until it is rewritten with an EXCEPTION block.
+        if re.search(r'(?i)@@error\b', code):
+            code = re.sub(r'(?i)@@error\b', 'locvar_sybase_error', code)
+            declarations.append("locvar_sybase_error INTEGER DEFAULT 0; "
+                                "/* @@error - PostgreSQL raises an exception instead of setting a status */")
+            self.config_parser.print_log_message('WARNING',
+                f"sybase_ase_connector: {routine_name} tests @@error - PostgreSQL raises an exception where Sybase ASE "
+                "sets a status, so the test never becomes true and the error handling behind it does nothing. It has to "
+                "be rewritten as an EXCEPTION block by hand.")
+
+        ## the parser reads these out of the statement they belong to
+        handled_by_parser = ('@@rowcount', '@@sqlstatus', '@@nestlevel')
+        remaining = sorted({found.lower() for found in re.findall(r'@@[a-zA-Z_][a-zA-Z0-9_]*', code)}
+                           - set(handled_by_parser))
+        if remaining:
+            self.config_parser.print_log_message('WARNING',
+                f"sybase_ase_connector: {routine_name} reads the global variable(s) {', '.join(remaining)} of Sybase ASE, "
+                "which PostgreSQL does not have and will refuse with 'syntax error at or near \"@\"'. They have to be "
+                "replaced by hand.")
+
+        return code, declarations
+
+    def unquote_local_variables(self, code):
+        """
+        The variables of the converted routine written without quotes.
+
+        The statement converter reads a bare name of a query as a column and quotes it to keep
+        its case, which is right for a column and wrong for a variable: 'select @a = @@trancount'
+        became 'locvar_a := "global_trancount"'. PL/pgSQL does resolve the quoted name as long as
+        it is lower case, but the quotes say column to every reader of the code. A name carrying
+        one of the prefixes the conversion gives its own variables is never a column.
+        """
+        return re.sub(r'"((?:locvar|global)_[a-zA-Z0-9_]+)"', r'\1', code)
+
     def encapsulate_line_comments(self, code):
         """
         The comments of the code written with '--' as block comments.
@@ -2659,12 +2750,14 @@ class SybaseASEConnector(DatabaseConnector):
         # 1.6 Handle Global Variables
         has_rowcount = '@@rowcount' in trigger_code.lower()
 
-        # Replace @@rowcount with locvar_rowcount
+        ## @@rowcount of a trigger is the number of rows the statement which fired it changed, and
+        ## this trigger fires once per row - the parser cannot read that out of a statement, so it
+        ## is replaced here and declared below. Everything else Sybase offers as a global variable
+        ## is converted like it is for a routine, which also declares what it replaced them with:
+        ## '@@error' became a variable nothing declared and the trigger function was refused with
+        ## 'column "locvar_error_placeholder" does not exist'.
         trigger_code = re.sub(r'@@rowcount\b', 'locvar_rowcount', trigger_code, flags=re.IGNORECASE)
-        # Replace @@error with placeholder (SQLSTATE breaks parsing)
-        trigger_code = re.sub(r'@@error\b', 'locvar_error_placeholder', trigger_code, flags=re.IGNORECASE)
-        # Replace @@trancount with global_trancount
-        trigger_code = re.sub(r'@@trancount\b', 'global_trancount', trigger_code, flags=re.IGNORECASE)
+        trigger_code, global_variable_declarations = self.convert_sybase_global_variables(trigger_code, trigger_name)
 
         # 2. Extract Body (After AS)
         as_match = re.search(r'\bAS\b', trigger_code, flags=re.IGNORECASE)
@@ -2774,8 +2867,9 @@ class SybaseASEConnector(DatabaseConnector):
              ## variable was declared without a value, which made every test on it read NULL.
              declarations.insert(0, "locvar_rowcount INTEGER DEFAULT 1; /* @@rowcount - this trigger fires once per row */")
 
-        if 'global_trancount' in trigger_code.lower():
-             declarations.insert(0, "global_trancount INTEGER DEFAULT 1;")
+        for declaration in reversed(global_variable_declarations):
+             if not any(declaration.split()[0] in existing for existing in declarations):
+                  declarations.insert(0, declaration)
 
         final_body = "\n".join(final_stmts_clean)
 
@@ -2842,6 +2936,7 @@ class SybaseASEConnector(DatabaseConnector):
         ## the quotes are removed again.
         final_body = re.sub(r'"(OLD|NEW)"(\s*\.)', r'\1\2', final_body)
         final_body = re.sub(r'"(OLD|NEW)"', r'\1', final_body)
+        final_body = self.unquote_local_variables(final_body)
 
         # A plain RETURN of Transact-SQL leaves the trigger and is written without a value.
         # A trigger function of PL/pgSQL has to return a row, and PostgreSQL refuses a RETURN

@@ -394,6 +394,12 @@ class DatabaseConnector(ABC):
                 escaped_src_func = re.escape(src_func)
                 if src_func and (src_func[0].isalnum() or src_func[0] == '_') and (src_func[-1].isalnum() or src_func[-1] == '_'):
                     pattern = rf"(?i)\b{escaped_src_func}\b"
+                elif src_func and (src_func[0].isalnum() or src_func[0] == '_') and src_func.endswith('('):
+                    ## A mapping written as a call ('nvl(') also has to find the call written with
+                    ## a space in front of its parenthesis. Informix stores the text of a view that
+                    ## way - 'NVL (sum(x))' - and the function stayed as it was, which PostgreSQL
+                    ## answered with 'function nvl(numeric, integer) does not exist'.
+                    pattern = rf"(?i)\b{re.escape(src_func[:-1])}\s*\("
                 elif src_func and (src_func[0].isalnum() or src_func[0] == '_'):
                     pattern = rf"(?i)\b{escaped_src_func}"
                 else:

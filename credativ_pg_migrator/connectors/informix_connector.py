@@ -162,6 +162,63 @@ class InformixConnector(DatabaseConnector):
             text = re.sub(rf'\b{re.escape(new_ref)}\.', 'NEW.', text)
         return text
 
+    ## the keywords which end the FROM clause of a query
+    CLAUSES_AFTER_FROM = (r'(?i)\b(WHERE|GROUP\s+BY|HAVING|ORDER\s+BY|UNION|INTERSECT|EXCEPT'
+                          r'|LIMIT|OFFSET|FOR\s+UPDATE|WITH\s+(?:NO\s+)?LOCKS|INTO\s+TEMP)\b')
+
+    def scan_sql_text(self, text):
+        """
+        The text with its string literals and comments blanked out, and the depth of parentheses
+        of every one of its characters.
+
+        A position found in the blanked text addresses the same character of the original, so a
+        keyword can be looked for where SQL means it - not inside a literal, and not in a
+        subquery when the clause of the query around it is the one being read.
+        """
+        masked = list(text)
+        depths = [0] * len(text)
+        depth = 0
+        index = 0
+        while index < len(text):
+            character = text[index]
+            if character in ("'", '"'):
+                quote = character
+                masked[index] = ' '
+                depths[index] = depth
+                index += 1
+                while index < len(text):
+                    depths[index] = depth
+                    closing = text[index] == quote
+                    masked[index] = ' '
+                    index += 1
+                    if closing:
+                        break
+                continue
+            if text.startswith('{', index):
+                ## Informix writes a comment in braces as well as with '--'
+                end = text.find('}', index)
+                end = len(text) if end == -1 else end + 1
+                for position in range(index, end):
+                    masked[position] = ' '
+                    depths[position] = depth
+                index = end
+                continue
+            if text.startswith('--', index):
+                end = text.find('\n', index)
+                end = len(text) if end == -1 else end
+                for position in range(index, end):
+                    masked[position] = ' '
+                    depths[position] = depth
+                index = end
+                continue
+            if character == '(':
+                depth += 1
+            depths[index] = depth
+            if character == ')':
+                depth -= 1
+            index += 1
+        return ''.join(masked), depths
+
     def split_top_level_commas(self, text):
         """
         Split on the commas which are not inside parentheses or a string literal.
@@ -617,10 +674,223 @@ class InformixConnector(DatabaseConnector):
                 "informix_connector: convert_matches_operator: A MATCHES operator whose pattern is not a literal was left in the code - PostgreSQL does not know the operator, it has to be rewritten manually.")
         return code
 
+    def outer_join_table_reference(self, item):
+        """
+        The name a column of a table reference is addressed by - its alias, or the table itself
+        when it was given none.
+        """
+        reference = re.sub(r'(?is)\s+AS\s+', ' ', item.strip())
+        parts = reference.split()
+        if len(parts) > 1 and not re.match(r'(?i)^(ONLY|OUTER)$', parts[-2]):
+            return parts[-1].strip('"')
+        return parts[0].split('.')[-1].strip('"')
+
+    def parse_outer_join_items(self, from_list):
+        """
+        The entries of a FROM clause of Informix as a list of nodes.
+
+        An entry marked with OUTER is the subordinate table of an outer join, and the tables it
+        encloses form a join of their own: `OUTER(b, c)` is the join of b and c outer-joined as a
+        whole, `OUTER(b, OUTER(c))` has c outer-joined to b inside it. Every node carries the
+        names its columns are addressed by, so that a condition of the WHERE clause can be
+        attributed to the join it belongs to.
+        """
+        nodes = []
+        for item in self.split_top_level_commas(from_list):
+            outer_match = re.match(r'(?is)^OUTER\s*(\((?P<parenthesized>.*)\)|(?P<plain>.+))$', item.strip())
+            if not outer_match:
+                nodes.append({'outer': False, 'text': item.strip(),
+                              'references': [self.outer_join_table_reference(item)], 'children': []})
+                continue
+            content = outer_match.group('parenthesized')
+            if content is None:
+                content = outer_match.group('plain')
+            children = self.parse_outer_join_items(content)
+            nodes.append({'outer': True, 'text': None, 'children': children,
+                          'references': [name for child in children for name in child['references']]})
+        return nodes
+
+    def build_outer_join_tree(self, nodes, predicates):
+        """
+        The FROM clause of the nodes written with the explicit joins of PostgreSQL, and the
+        conditions which were used for them.
+
+        A condition of the WHERE clause belongs to the join of the last node it reads: that is the
+        join which may leave the row of that node empty, and Informix applies such a condition
+        while it joins - a row of the dominant table is kept even when the condition fails, which
+        is what makes it a condition of the join and not a filter of the query.
+        """
+        used = set()
+
+        def claim(node, index_of, is_outer):
+            """
+            The conditions of the WHERE clause which belong to the join of this node.
+
+            A condition belongs to it when it reads the node and reads no node which is joined
+            after it. For an outer join a condition on the subordinate table alone belongs to the
+            join as well - that is how Informix reads it, and leaving it in the WHERE clause of
+            PostgreSQL would undo the outer join. For an inner join it does not: `x2.id = 100` is
+            a filter of the query, and the query reads better with it in its WHERE clause.
+            """
+            claimed = []
+            for position, predicate in enumerate(predicates):
+                if position in used:
+                    continue
+                names = [name for name in predicate['references'] if name in index_of]
+                if not names or not any(name in node['references'] for name in names):
+                    continue
+                if max(index_of[name] for name in names) != index_of[node['references'][-1]]:
+                    ## the condition reads a table which is joined later - it belongs to that join
+                    continue
+                if not is_outer and all(name in node['references'] for name in names):
+                    continue
+                claimed.append(position)
+            used.update(claimed)
+            return ' AND '.join(predicates[position]['text'] for position in claimed)
+
+        def build(nodes):
+            ## the order the nodes are joined in decides which join a condition belongs to
+            index_of = {}
+            for order, node in enumerate(nodes):
+                for name in node['references']:
+                    index_of[name] = order
+
+            ## The joins inside a group are built first, so that a condition between two tables of
+            ## the group is claimed by the join between them and not by the join of the whole
+            ## group: `outer(b, c)` is the join of b and c, outer-joined as one.
+            parts = []
+            for node in nodes:
+                if node['children']:
+                    text, count = build(node['children'])
+                    parts.append(f"({text})" if count > 1 else text)
+                else:
+                    parts.append(node['text'])
+
+            joined = parts[0]
+            for node, part in zip(nodes[1:], parts[1:]):
+                condition = claim(node, index_of, node['outer'])
+                if node['outer']:
+                    joined += f" LEFT OUTER JOIN {part} ON ({condition or 'TRUE'})"
+                    if not condition:
+                        self.config_parser.print_log_message('WARNING',
+                            "informix_connector: convert_outer_joins: An outer join of the source has no condition in the "
+                            "WHERE clause - it is written as 'ON (TRUE)', which keeps every row of both tables.")
+                elif condition:
+                    joined += f" INNER JOIN {part} ON ({condition})"
+                else:
+                    ## the comma of the source joined the two without a condition. It cannot stay
+                    ## a comma: a join binds tighter than a comma, so the ON clause of a join
+                    ## written behind one could not read the tables in front of it.
+                    joined += f" CROSS JOIN {part}"
+            return joined, len(nodes)
+
+        from_clause, _ = build(nodes)
+        remaining = [predicate['text'] for position, predicate in enumerate(predicates) if position not in used]
+        return from_clause, remaining
+
+    def convert_outer_joins(self, code):
+        """
+        The outer joins of Informix, written as OUTER in the FROM clause, as the explicit joins of
+        PostgreSQL.
+
+        Informix marks the subordinate table of an outer join in the FROM clause and writes the
+        condition of the join into the WHERE clause: `from orders x0, outer(order_items x1) where
+        x1.order_id = x0.order_id`. PostgreSQL knows neither the marker nor that reading of the
+        WHERE clause and answered the view with `syntax error at or near "x1"`, so such a view was
+        never created. The marked table becomes the right side of a LEFT OUTER JOIN and the
+        conditions which read it become the ON clause of that join - they have to move, because a
+        condition on the subordinate table in the WHERE clause of PostgreSQL would undo the outer
+        join and turn it back into an inner one.
+
+        A WHERE clause whose conditions cannot be attributed - an OR spanning the subordinate
+        table - is left as it is and reported, so that the view fails to be created instead of
+        being created with another meaning.
+        """
+        for _ in range(20):
+            masked, depths = self.scan_sql_text(code)
+
+            from_clause = None
+            for match in re.finditer(r'(?i)\bFROM\b', masked):
+                depth = depths[match.start()]
+                end = len(code)
+                for keyword in re.finditer(self.CLAUSES_AFTER_FROM, masked[match.end():]):
+                    position = match.end() + keyword.start()
+                    if depths[position] == depth:
+                        end = position
+                        break
+                else:
+                    ## the query may also end with the parenthesis which encloses it
+                    for position in range(match.end(), len(code)):
+                        if depths[position] < depth:
+                            end = position
+                            break
+                items = self.split_top_level_commas(code[match.end():end])
+                if any(re.match(r'(?i)^OUTER\b', item) for item in items):
+                    from_clause = {'start': match.end(), 'end': end, 'depth': depth}
+                    break
+
+            if from_clause is None:
+                return code
+
+            ## the WHERE clause of the same query carries the conditions of the joins
+            where_start = where_end = None
+            where_match = re.compile(r'(?i)\s*\bWHERE\b').match(masked, from_clause['end'])
+            if where_match:
+                where_start = where_match.end()
+                where_end = len(code)
+                for keyword in re.finditer(self.CLAUSES_AFTER_FROM, masked[where_start:]):
+                    position = where_start + keyword.start()
+                    if depths[position] == from_clause['depth']:
+                        where_end = position
+                        break
+                else:
+                    for position in range(where_start, len(code)):
+                        if depths[position] < from_clause['depth']:
+                            where_end = position
+                            break
+
+            predicates = []
+            if where_start is not None:
+                condition = code[where_start:where_end]
+                condition_masked = masked[where_start:where_end]
+                condition_depths = [depth - from_clause['depth'] for depth in depths[where_start:where_end]]
+                if re.search(r'(?i)\bOR\b', ''.join(character if condition_depths[position] == 0 else ' '
+                                                    for position, character in enumerate(condition_masked))):
+                    self.config_parser.print_log_message('WARNING',
+                        "informix_connector: convert_outer_joins: The WHERE clause of a query with an outer join of "
+                        "Informix contains an OR which is not parenthesized - which of its conditions belong to the join "
+                        "cannot be told, so the query is left as it is and has to be rewritten manually: "
+                        f"{' '.join(code[from_clause['start']:where_end].split())}")
+                    return code
+                start = 0
+                for keyword in re.finditer(r'(?i)\bAND\b', condition_masked):
+                    if condition_depths[keyword.start()] != 0:
+                        continue
+                    predicates.append(condition[start:keyword.start()])
+                    start = keyword.end()
+                predicates.append(condition[start:])
+                predicates = [{'text': text.strip(),
+                               'references': re.findall(r'(?i)\b([a-zA-Z_][\w$]*)\s*\.', text)}
+                              for text in predicates if text.strip()]
+
+            nodes = self.parse_outer_join_items(code[from_clause['start']:from_clause['end']])
+            joined, remaining = self.build_outer_join_tree(nodes, predicates)
+
+            rebuilt = f" {joined} "
+            if remaining:
+                rebuilt += f"WHERE {' AND '.join(remaining)} "
+            replaced_until = where_end if where_start is not None else from_clause['end']
+            code = code[:from_clause['start']] + rebuilt + code[replaced_until:]
+            self.config_parser.print_log_message('DEBUG',
+                f"informix_connector: convert_outer_joins: outer join converted to {' '.join(joined.split())}")
+
+        return code
+
     def convert_view_code(self, settings: dict):
         view_code = settings['view_code']
         converted_view_code = view_code
         converted_view_code = converted_view_code.replace(f'''"{settings['source_schema_name']}".''', f'''"{settings['target_schema_name']}".''')
+        converted_view_code = self.convert_outer_joins(converted_view_code)
         converted_view_code = self.convert_matches_operator(converted_view_code)
         converted_view_code = self.apply_sql_functions_mapping(converted_view_code, settings)
         return converted_view_code
@@ -1349,8 +1619,13 @@ class InformixConnector(DatabaseConnector):
                 for keyword in keywords:
                     command = re.sub(r'(?i)\b' + re.escape(keyword) + r'\b', keyword + ";", command, flags=re.IGNORECASE)
 
-                if re.search(r'\bOUTER\b', command, flags=re.IGNORECASE) and 'OUTER JOIN' not in command.upper():
-                    command = re.sub(r',\s*\bOUTER\b', ' LEFT OUTER JOIN ', command, flags=re.IGNORECASE)
+                ## The outer join of Informix is converted the same way as in a view - see
+                ## convert_outer_joins(). Replacing the comma and the keyword by 'LEFT OUTER JOIN'
+                ## alone, as this did, left the parentheses of 'OUTER(t x)' standing and the join
+                ## without the ON clause it needs, and it left the condition of the join in the
+                ## WHERE clause, where PostgreSQL would undo the outer join again.
+                if re.search(r'(?i)(,|\bFROM\b)\s*\bOUTER\b', command):
+                    command = self.convert_outer_joins(command)
 
                 command = re.sub(r'\bDATETIME YEAR TO DAY', 'TIMESTAMP', command, flags=re.IGNORECASE)
                 command = re.sub(r'\bdatetime year to fraction\(5\)', 'TIMESTAMP', command, flags=re.IGNORECASE)

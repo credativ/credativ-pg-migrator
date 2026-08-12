@@ -1150,20 +1150,30 @@ class TsqlParser:
                              prev_content = insert_lines[-1].strip()
                              should_continue = False
 
+                             ## An empty line is not what the statement goes on with - the line
+                             ## behind it is, and that is the one the rules below ask about. They
+                             ## used to ask about the empty line itself, so the SELECT of an
+                             ## 'INSERT ... SELECT' written with an empty line in front of it -
+                             ## the comments which stood there are taken out by Pass 2 - was not
+                             ## recognized as the continuation it is: the INSERT was cut off
+                             ## after its list of columns and the SELECT became a statement of
+                             ## its own, which the routine then returned as a result set.
+                             lookahead = next_l_check if current_content == "" else current_content
+
                              # Rule 67: prev ends with "," or "="
                              if prev_content.endswith(",") or prev_content.endswith("=") or prev_content.endswith("("):
                                  should_continue = True
 
                              # Rule 68: next line (current line) starts with "," or "="
-                             if current_content.startswith(",") or current_content.startswith("="):
+                             if lookahead.startswith(",") or lookahead.startswith("="):
                                  should_continue = True
 
                              # Rule 69: next line (current line) starts with "FROM"
-                             if re.match(r'^FROM\b', current_content, re.IGNORECASE):
+                             if re.match(r'^FROM\b', lookahead, re.IGNORECASE):
                                  should_continue = True
 
                              # INSERT ... SELECT continuation
-                             if re.match(r'^SELECT\b', current_content, re.IGNORECASE):
+                             if re.match(r'^(SELECT|VALUES)\b', lookahead, re.IGNORECASE):
                                  has_values = any(re.search(r'\bVALUES\b', l, re.IGNORECASE) for l in insert_lines)
                                  has_select = any(re.search(r'\bSELECT\b', l, re.IGNORECASE) for l in insert_lines)
                                  if not has_values and not has_select:
@@ -1881,22 +1891,23 @@ class TsqlParser:
 
     def pass_3b_split_inline_ifs(self):
         """
-        Pass 3b: Splits inline IF and WHILE statements.
-        Sybase allows `IF condition command` and `WHILE condition command`.
+        Pass 3b: Splits inline IF, ELSE and WHILE statements.
+        Sybase allows `IF condition command`, `ELSE command` and `WHILE condition command`.
         This pass splits such lines into two: `IF condition` and `command`.
 
         The WHILE was not split, so `while @i < 10 begin` kept the BEGIN of its body inside the
         condition. The BEGIN was then dropped, the loop was closed after the first statement of
         its body, and the END which the source wrote for that BEGIN was left over at the end of
-        the routine.
+        the routine. The ELSE was not split either: `else begin` was recognized as neither an
+        ELSE nor a statement and reached the target as 'else begin;'.
         """
-        self.log("Running Pass 3b: Split Inline IFs and WHILEs")
+        self.log("Running Pass 3b: Split Inline IFs, ELSEs and WHILEs")
         new_body_lines = []
         keywords = ["SELECT", "INSERT", "UPDATE", "DELETE", "PRINT", "EXEC", "EXECUTE", "BEGIN", "RETURN", "SET", "BREAK", "CONTINUE", "COMMIT", "ROLLBACK", "SAVE"]
 
         for line in self.body_lines:
             content = line.content.strip()
-            if re.match(r'^(IF|ELSE\s+IF|WHILE)\b', content, re.IGNORECASE):
+            if re.match(r'^(IF|ELSE\s+IF|ELSE|WHILE)\b', content, re.IGNORECASE):
                 in_single_quote = False
                 in_double_quote = False
                 paren_level = 0

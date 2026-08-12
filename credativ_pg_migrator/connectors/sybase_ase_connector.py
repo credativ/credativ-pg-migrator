@@ -1255,12 +1255,26 @@ class SybaseASEConnector(DatabaseConnector):
 
             funcproc_code = self._apply_types_mapping(funcproc_code, types_mapping)
 
-            if not implicit_return_schema:
+            ## A routine which declares an output parameter answers through that parameter, and
+            ## PostgreSQL refuses a function which has both a RETURNS TABLE and one of them, so
+            ## a result set is not looked for in such a routine at all - looking for one turned
+            ## the SELECT of an 'INSERT ... SELECT' into a RETURN QUERY of a set the routine
+            ## never returned.
+            header_parameters = re.search(r'CREATE\s+(?:OR\s+REPLACE\s+)?(?:PROC|PROCEDURE|FUNCTION)\s+[a-zA-Z0-9_\.]+(.*?)\bAS\b',
+                                          funcproc_code, flags=re.IGNORECASE | re.DOTALL)
+            declares_output_parameter = bool(header_parameters
+                                             and re.search(r'(?i)\b(?:OUT|OUTPUT)\b', header_parameters.group(1)))
+
+            if not implicit_return_schema and not declares_output_parameter:
                 temp_parser = TsqlParser(funcproc_code, self.config_parser, view_converter=self.convert_view_code, settings=settings, functions_mapping_converter=self.apply_sql_functions_mapping)
                 extracted_schema = temp_parser.extract_implicit_return_schema()
                 if extracted_schema:
                     implicit_return_schema = extracted_schema
                     self.config_parser.print_log_message('DEBUG', f"sybase_ase_connector: convert_funcproc_code: Dynamically inferred return schema: {implicit_return_schema}")
+            elif declares_output_parameter:
+                self.config_parser.print_log_message('DEBUG',
+                    f"sybase_ase_connector: convert_funcproc_code: {settings.get('funcproc_name')} declares an output "
+                    "parameter - its result is that parameter, so no result set is inferred for it.")
 
             is_implicit_return = bool(implicit_return_schema)
             parser = TsqlParser(funcproc_code, self.config_parser, implicit_return=is_implicit_return, view_converter=self.convert_view_code, settings=settings, functions_mapping_converter=self.apply_sql_functions_mapping)
@@ -1324,14 +1338,44 @@ class SybaseASEConnector(DatabaseConnector):
 
                  for p in param_parts:
                      p_clean = p.strip()
-                     output_match = re.search(r'\bOUTPUT\b', p_clean, flags=re.IGNORECASE)
-                     if output_match:
-                         p_clean = re.sub(r'\bOUTPUT\b', '', p_clean, flags=re.IGNORECASE).strip()
+
+                     ## Sybase writes the mode of a parameter behind its type and accepts both
+                     ## words for it ('@id int output', '@id numeric(19,0) out'), while
+                     ## PostgreSQL writes the mode in front of the name. Only OUTPUT was read,
+                     ## so the OUT of '@event_queue_id numeric(19, 0) out' stayed where it stood
+                     ## and PostgreSQL answered 'syntax error at or near "out"'. A parameter of
+                     ## Sybase declared this way is passed by reference and carries its incoming
+                     ## value into the routine, which is INOUT here.
+                     mode_match = re.search(r'(?i)\b(?:OUTPUT|OUT)\b\s*$', p_clean)
+                     if mode_match is None:
+                         ## some routines write the mode in front of the default value
+                         mode_match = re.search(r'(?i)\b(?:OUTPUT|OUT)\b(?=\s*=)', p_clean)
+                     if mode_match:
+                         p_clean = (p_clean[:mode_match.start()] + p_clean[mode_match.end():]).strip()
                          p_clean = "INOUT " + p_clean
 
                      p_clean = self._apply_types_mapping(p_clean, types_mapping)
 
+                     ## The default of a bit parameter is written as 0 or 1 by Sybase, and the
+                     ## type became boolean here - PostgreSQL answers 'argument of DEFAULT must
+                     ## be type boolean, not type integer'.
+                     p_clean = re.sub(r'(?i)\b(BOOLEAN)(\s*(?:=|DEFAULT)\s*)0\b', r'\1\2false', p_clean)
+                     p_clean = re.sub(r'(?i)\b(BOOLEAN)(\s*(?:=|DEFAULT)\s*)1\b', r'\1\2true', p_clean)
+
                      processed_params.append(p_clean)
+
+                 ## PostgreSQL takes every parameter behind one carrying a default for an input
+                 ## parameter and refuses the list with 'input parameters after one with a
+                 ## default value must also have defaults'. Sybase has no such rule and writes
+                 ## its output parameters where it likes, so an output parameter behind a default
+                 ## is given one of its own - the callers pass it, and NULL is what it holds
+                 ## before the routine writes it.
+                 default_seen = False
+                 for index, p_clean in enumerate(processed_params):
+                     if re.search(r'(?i)(=|\bDEFAULT\b)', p_clean):
+                         default_seen = True
+                     elif default_seen:
+                         processed_params[index] = p_clean + " DEFAULT NULL"
 
                  pg_params_str = ", ".join(processed_params)
                  output_params = re.findall(r'\b(?:INOUT|OUT)\b', pg_params_str, flags=re.IGNORECASE)
@@ -1350,6 +1394,16 @@ class SybaseASEConnector(DatabaseConnector):
             
             if explicit_func_return:
                  returns_clause = f"RETURNS {explicit_func_return}"
+            elif output_params:
+                 ## The result of a routine with output parameters is the row of those
+                 ## parameters, which PostgreSQL builds itself. A RETURNS TABLE next to them is
+                 ## refused outright - 'OUT and INOUT arguments aren't allowed in TABLE
+                 ## functions' - so the output parameters are what the routine returns.
+                 if len(output_params) > 1:
+                      returns_clause = "RETURNS record"
+                 else:
+                      single_out = re.search(r'(?i)\b(?:INOUT|OUT)\s+[a-zA-Z0-9_]+\s+([a-zA-Z0-9_]+(?:\s*\([^)]*\))?)', pg_params_str)
+                      returns_clause = f"RETURNS {single_out.group(1)}" if single_out else "RETURNS record"
             elif is_implicit_return:
                  if has_explicit_return_value and len(implicit_return_schema) == 1:
                       # If a function mixes RETURN and SELECT, and returns 1 column, force it to be a scalar return
@@ -1373,15 +1427,6 @@ class SybaseASEConnector(DatabaseConnector):
                            col_defs.append(f'"{c_name}" {t_mapped}')
                       if col_defs:
                            returns_clause = f"RETURNS TABLE ({', '.join(col_defs)})"
-            elif output_params:
-                 if len(output_params) > 1:
-                      returns_clause = "RETURNS RECORD"
-                 else:
-                      single_out = re.search(r'\b(?:INOUT|OUT)\s+[a-zA-Z0-9_]+\s+([a-zA-Z0-9_]+(?:\(.*\))?)', pg_params_str, flags=re.IGNORECASE)
-                      if single_out:
-                           returns_clause = f"RETURNS {single_out.group(1)}"
-                      else:
-                           returns_clause = "RETURNS RECORD"
             elif has_explicit_return_value:
                  returns_clause = "RETURNS integer"
 

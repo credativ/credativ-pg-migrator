@@ -158,21 +158,31 @@ class TsqlParser:
             clean_content = line.rstrip()
             self.raw_lines.append(SourceLine(idx + 1, clean_content))
 
-    def mask_comments_and_literals(self, content: str, in_block_comment: bool):
+    def mask_comments_and_literals(self, content: str, in_block_comment):
         """
         The line with its comments and string literals replaced by spaces, and the state of the
         block comment at the end of it. The result has the length of the original, so a position
         found in it addresses the same character of the original line.
+
+        A block comment may contain another one, in Transact-SQL as in PostgreSQL, so the state
+        carried from line to line is how many of them are open. It used to be the answer to
+        whether one was open at all, and the first '*/' of a comment framed by rows of dashes
+        ended it while the comment went on.
         """
+        comment_depth = int(in_block_comment)
         masked = list(content)
         index = 0
         length = len(content)
         while index < length:
-            if in_block_comment:
+            if comment_depth > 0:
                 if content.startswith('*/', index):
                     masked[index] = masked[index + 1] = ' '
                     index += 2
-                    in_block_comment = False
+                    comment_depth -= 1
+                elif content.startswith('/*', index):
+                    masked[index] = masked[index + 1] = ' '
+                    index += 2
+                    comment_depth += 1
                 else:
                     masked[index] = ' '
                     index += 1
@@ -180,7 +190,7 @@ class TsqlParser:
             if content.startswith('/*', index):
                 masked[index] = masked[index + 1] = ' '
                 index += 2
-                in_block_comment = True
+                comment_depth += 1
                 continue
             if content.startswith('--', index):
                 for position in range(index, length):
@@ -202,7 +212,7 @@ class TsqlParser:
                     index += 1
                 continue
             index += 1
-        return ''.join(masked), in_block_comment
+        return ''.join(masked), comment_depth
 
     def find_header_end(self):
         """
@@ -737,103 +747,70 @@ class TsqlParser:
         self.log("Running Pass 2: Extract Comments")
 
         new_body_lines = []
-        in_comment_block = False
+        comment_depth = 0
         current_comment_lines = []
         current_comment_start_line = -1
+
+        def close_comment():
+            # Rule: "remove all spaces ... keep new line characters"
+            self.comments.append({
+                "line": current_comment_start_line,
+                "content": "\n".join(l.strip() for l in current_comment_lines)
+            })
 
         for line in self.body_lines:
             content = line.content.strip()
 
-            if in_comment_block:
+            if comment_depth > 0:
                 current_comment_lines.append(line.content)
-                # Check for end of comment
-                # Pass 2 ensures */ is at end of line (or at least split) if it was inline?
-                # Does text containing '*/' end the block?
-                if "*/" in content:
-                    # Ends on same line
-                    # check if */ is not quoted? Assuming comments don't care about quotes inside them?
-                    # Rule 44: "Any key words which might be part of a comment are not parsed as key words"
-                    # But finding the END of the comment?
-                    # "end with the closest */ group"
-
-                    # We just assume if "*/" is present, it closes it.
-                    in_comment_block = False
-
-                    # Rule: "remove all spaces ... keep new line characters"
-                    cleaned_lines = [l.strip() for l in current_comment_lines]
-                    full_comment_text = "\n".join(cleaned_lines)
-
-                    self.comments.append({
-                        "line": current_comment_start_line,
-                        "content": full_comment_text
-                    })
+                ## A comment may contain another one, and the comment ends where as many '*/'
+                ## have been read as there were '/*'. Ending it at the first '*/' tore a comment
+                ## framed by rows of dashes apart - what followed the row was read as code and
+                ## the '*/' of the comment itself was left over as a statement of its own.
+                comment_depth += content.count('/*') - content.count('*/')
+                if comment_depth <= 0:
+                    comment_depth = 0
+                    close_comment()
                     current_comment_lines = []
                 continue
 
             # Not in comment block
             if content.startswith("/*"):
-                in_comment_block = True
+                comment_depth = content.count('/*') - content.count('*/')
                 current_comment_start_line = line.line_number
                 current_comment_lines.append(line.content)
 
-                if "*/" in content:
+                if comment_depth <= 0:
                     # Ends on same line
-                    in_comment_block = False
-
-                    # Rule: "remove all spaces ... keep new line characters"
-                    cleaned_lines = [l.strip() for l in current_comment_lines]
-                    full_comment_text = "\n".join(cleaned_lines)
-
-                    self.comments.append({
-                        "line": current_comment_start_line,
-                        "content": full_comment_text
-                    })
+                    comment_depth = 0
+                    close_comment()
                     current_comment_lines = []
                 continue
 
             if content.startswith("--"):
                 # Single line comment
-                # Rule 47: convert to /* ... */
-                # Rule 48: remove previous */
-
-                # Remove leading --
-                raw_text = line.content
-                # Check: line.content might have indentation?
-                # "starts with --" -> from stripped content.
-                # We want to preserve content?
                 # Rule 47: "All comments starting with '--' must be encapsulated into '/*' and '*/'"
-                # Example: "-- foo" -> "/* -- foo */" ? Or "/* foo */"?
-                # Usually we wrap the whole thing.
-
-                encapsulated = "/*" + raw_text + "*/"
-
-                # Rule: "replace all patterns of '*/ */' with single '*/'" (New Pass 2 rule)
-                # But wait, this applies to ALL comments at the end of the pass.
-                # The "encapsulate --" part is during the pass.
-                # I should just append the encapsulated comment here.
-                # The rule saying "only the last */ group ... kept" was REMOVED/CHANGED.
-                # So I DO NOT remove previous */ here explicitly?
-                # The new rule says: "at the end of this step iterate ... replace '*/ */' ... with single '*/'".
-                # So here I just encapsulate.
+                ## The text of the comment is not SQL, so a '/*' or a '*/' standing in it is taken
+                ## apart: either of them would open or close a comment which the text does not
+                ## mean, and the '*/' of '-- see the note */' closed the comment written around it
+                ## and left the rest of the line behind as code.
+                raw_text = line.content.replace('/*', '/ *').replace('*/', '* /')
 
                 self.comments.append({
                     "line": line.line_number,
-                    "content": encapsulated
+                    "content": "/*" + raw_text + "*/"
                 })
                 continue
 
             # If not a comment, keep the line
             new_body_lines.append(line)
 
-        # End of loop.
-        # "at the end of this step iterate through all lines of comments array..."
-        # Rule: "replace pattern '*/ */' with single '*/'"
-
-        for comment in self.comments:
-            # Pattern: "*/" followed by ZERO, one or more space(s) followed by "*/"
-            # Regex: \*/\s*\*/
-            # Replace with: */
-            comment['content'] = re.sub(r'\*/\s*\*/', '*/', comment['content'])
+        ## A comment which never ends takes the rest of the routine with it - the lines are kept
+        ## as the comment they belong to and the comment is closed, so that nothing is lost.
+        if current_comment_lines:
+            self.log("Pass 2: a block comment was not closed - it is closed at the end of the routine")
+            current_comment_lines.append("*/")
+            close_comment()
 
         self.body_lines = new_body_lines
 

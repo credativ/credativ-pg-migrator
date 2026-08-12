@@ -1395,9 +1395,25 @@ class SybaseASEConnector(DatabaseConnector):
                         has_explicit_return_value = True
                         break
 
+            ## A procedure of Sybase answers with a status code and with its output parameters at
+            ## the same time - 'return 0' for the run which worked and 'return -1' for the one
+            ## which did not, next to the '@id output' it wrote. A function of PostgreSQL answers
+            ## with one thing, and it refuses the two next to each other outright: 'RETURN cannot
+            ## have a parameter in function with OUT parameters'. The status becomes an output
+            ## parameter of its own, so the routine answers with the record of both and no caller
+            ## loses the value it read.
+            status_parameter = None
+            if output_params and has_explicit_return_value:
+                 status_parameter = 'locvar_sybase_status'
+                 pg_params_str += f", OUT {status_parameter} INTEGER"
+                 output_params.append('OUT')
+                 self.config_parser.print_log_message('DEBUG',
+                     f"sybase_ase_connector: convert_funcproc_code: {proc_name} returns a status code next to its output "
+                     f"parameter(s) - the status is returned as the additional output parameter {status_parameter}.")
+
             returns_clause = "RETURNS void"
             convert_to_scalar_return = False
-            
+
             if explicit_func_return:
                  returns_clause = f"RETURNS {explicit_func_return}"
             elif output_params:
@@ -1451,6 +1467,13 @@ class SybaseASEConnector(DatabaseConnector):
             # Re-run pass_11 with the customized header to let the parser cleanly merge it
             final_output = parser.pass_11_assemble_output(pg_header_str)
             
+            if status_parameter:
+                 ## the status the routine returned is written to the parameter which carries it
+                 for line_obj in final_output:
+                      match = re.match(r'(?i)^(\s*)RETURN\s+(?!QUERY\b|NEXT\b)([^;]+?)\s*;?\s*$', line_obj.content)
+                      if match:
+                           line_obj.content = f"{match.group(1)}{status_parameter} := {match.group(2)}; RETURN;"
+
             if convert_to_scalar_return:
                  for line_obj in final_output:
                       content = line_obj.content

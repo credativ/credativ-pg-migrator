@@ -1945,6 +1945,8 @@ class MigratorTables:
             method_name TEXT,
             params TEXT,
             values_anonymized BIGINT DEFAULT 0,
+            values_truncated BIGINT DEFAULT 0,
+            values_refitted BIGINT DEFAULT 0,
             table_rows BIGINT DEFAULT 0,
             inserted_at TIMESTAMP DEFAULT clock_timestamp()
             )
@@ -1956,8 +1958,8 @@ class MigratorTables:
         self.protocol_connection.execute_query(f"""
             INSERT INTO "{self.protocol_schema}"."{table_name}"
             (worker_id, source_schema_name, source_table_name, target_schema_name, target_table_name,
-            column_name, method_name, params, values_anonymized, table_rows)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            column_name, method_name, params, values_anonymized, values_truncated, values_refitted, table_rows)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
             str(settings.get('worker_id', '')),
             settings.get('source_schema_name', ''),
@@ -1968,6 +1970,8 @@ class MigratorTables:
             settings.get('method_name', ''),
             str(settings.get('params', '')),
             settings.get('values_anonymized', 0),
+            settings.get('values_truncated', 0),
+            settings.get('values_refitted', 0),
             settings.get('table_rows', 0),
         ))
 
@@ -1982,16 +1986,19 @@ class MigratorTables:
             cursor = self.protocol_connection.connection.cursor()
             cursor.execute(f"""
                 SELECT target_schema_name, target_table_name, column_name, method_name,
-                       sum(values_anonymized), sum(table_rows)
+                       sum(values_anonymized), sum(values_truncated), sum(values_refitted), sum(table_rows)
                 FROM "{self.protocol_schema}"."{table_name}"
                 GROUP BY 1, 2, 3, 4
             """)
             for row in cursor.fetchall():
-                target_schema_name, target_table_name, column_name, method_name, values_anonymized, table_rows = row
+                (target_schema_name, target_table_name, column_name, method_name,
+                 values_anonymized, values_truncated, values_refitted, table_rows) = row
                 stats[(target_table_name, column_name)] = {
                     'schema': target_schema_name,
                     'method': method_name,
                     'values': int(values_anonymized or 0),
+                    'truncated': int(values_truncated or 0),
+                    'refitted': int(values_refitted or 0),
                     'rows': int(table_rows or 0),
                 }
             cursor.close()
@@ -4642,7 +4649,7 @@ class MigratorTables:
                 from credativ_pg_migrator.anonymization.routing import MigratorAnonymizer
                 anonymizer = MigratorAnonymizer(self.config_parser.config)
                 # what the workers really did - the configuration alone says nothing about it
-                actual_stats = self.fetch_anonymization_stats() if anonymizer.is_active() else {}
+                actual_stats = self.fetch_anonymization_stats()
                 matched_columns = set()
                 if anonymizer.is_active():
                     raw_tables = self.fetch_all_tables()
@@ -4748,6 +4755,29 @@ class MigratorTables:
                     lines.append(f"WARNING: {len(rules_without_column)} configured rules matched no migrated column - check the table and column names:")
                     for rule_description in sorted(rules_without_column):
                         lines.append(f"   - {rule_description}")
+
+                # values which did not fit into the target column - see anonymization.on_value_too_long
+                truncated_columns = []
+                refitted_columns = []
+                for (stats_table_name, stats_column_name), stats_row in actual_stats.items():
+                    stats_full_table_name = f"{stats_row['schema']}.{stats_table_name}" if stats_row['schema'] else stats_table_name
+                    stats_method = stats_row['method'] or 'no anonymization rule'
+                    if stats_row['truncated']:
+                        truncated_columns.append(f"{stats_full_table_name}.{stats_column_name} ({stats_method}): {stats_row['truncated']} values cut to the length of the target column")
+                    if stats_row['refitted']:
+                        refitted_columns.append(f"{stats_full_table_name}.{stats_column_name} ({stats_method}): {stats_row['refitted']} values regenerated until they fit into the target column")
+
+                if truncated_columns:
+                    lines.append("")
+                    lines.append(f"WARNING: {len(truncated_columns)} columns did not fit into the target column and their values were cut (anonymization.on_value_too_long: fit):")
+                    for column_description in sorted(truncated_columns):
+                        lines.append(f"   - {column_description}")
+
+                if refitted_columns:
+                    lines.append("")
+                    lines.append(f"{len(refitted_columns)} columns did not fit into the target column, the anonymization method was called again until the value did (anonymization.on_value_too_long: find_fitting_value):")
+                    for column_description in sorted(refitted_columns):
+                        lines.append(f"   - {column_description}")
             except Exception as e:
                 lines.append(f"Error computing anonymization stats: {e}")
 

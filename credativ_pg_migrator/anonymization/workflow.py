@@ -167,6 +167,19 @@ class AnonymizationWorkflow:
                 else:
                     self.config_parser.print_log_message('DEBUG', f"anonymization_workflow: Worker {worker_id}: Table {target_table}: no anonymization rule matches any column, data is copied unchanged.")
 
+            # Length of the target columns, and the counters of the values which did not fit into
+            # them - a value is never cut silently, see anonymization.on_value_too_long.
+            col_max_lengths = {}
+            for col in target_columns:
+                max_len = col.get('character_maximum_length')
+                if max_len is not None and max_len != '':
+                    try:
+                        col_max_lengths[col['column_name']] = int(max_len)
+                    except ValueError:
+                        pass
+            length_stats = {}
+            reported_length_columns = set()
+
             select_sql = f'SELECT {", ".join([f"{col}" for col in col_names])} FROM "{source_schema}"."{source_table}"'
             
             src_cursor = source_conn.connection.cursor(name=f"cursor_{worker_id}")
@@ -188,34 +201,33 @@ class AnonymizationWorkflow:
                 reading_duration = time.time() - reading_start_time
                 
                 transforming_start_time = time.time()
-                
-                col_max_lengths = {}
-                for col in target_columns:
-                    max_len = col.get('character_maximum_length')
-                    if max_len is not None and max_len != '':
-                        try:
-                            col_max_lengths[col['column_name']] = int(max_len)
-                        except ValueError:
-                            pass
 
-                # Convert rows to dicts for anonymizer
+                # Convert rows to dicts for anonymizer. The call also enforces the length of the
+                # target columns - for the anonymized columns and for the ones copied unchanged.
                 formatted_data = []
                 for idx, row in enumerate(rows):
                     row_dict = dict(zip(col_names, row))
-                    if self.anonymizer.is_active():
-                        row_dict = self.anonymizer.anonymize_row(target_table, row_dict, stats=anonymization_stats)
-                    
-                    # Truncate string values that exceed column limits
-                    for col_name, max_len in col_max_lengths.items():
-                        if isinstance(row_dict.get(col_name), str):
-                            if len(row_dict[col_name]) > max_len:
-                                row_dict[col_name] = row_dict[col_name][:max_len]
-                                
+                    row_dict = self.anonymizer.anonymize_row(
+                        target_table, row_dict,
+                        stats=anonymization_stats,
+                        max_lengths=col_max_lengths,
+                        length_stats=length_stats)
+
                     formatted_data.append([row_dict[col] for col in col_names])
 
                     if idx > 0 and idx % 10000 == 0:
                         self.config_parser.print_log_message('INFO', f"anonymization_workflow: Worker {worker_id}: Anonymized {idx} rows of {target_table} in current batch...")
-                
+
+                # first occurrence per column, so that a long copy reports it while it runs and
+                # not only in the summary - INFO, because WARNING is not printed by default
+                for length_column, length_counts in length_stats.items():
+                    if length_column not in reported_length_columns:
+                        reported_length_columns.add(length_column)
+                        if length_counts['truncated']:
+                            self.config_parser.print_log_message('INFO', f"anonymization_workflow: Worker {worker_id}: Table {target_table}: WARNING: values of column {length_column} do not fit into the target column and are cut (anonymization.on_value_too_long: fit).")
+                        if length_counts['refitted']:
+                            self.config_parser.print_log_message('INFO', f"anonymization_workflow: Worker {worker_id}: Table {target_table}: values of column {length_column} did not fit into the target column, the anonymization method was called again until they did (anonymization.on_value_too_long: find_fitting_value).")
+
                 transforming_duration = time.time() - transforming_start_time
                 
                 # Determine __RAW_SQL__ injection
@@ -280,7 +292,10 @@ class AnonymizationWorkflow:
             source_conn.disconnect()
             target_conn.disconnect()
 
+            recorded_length_columns = set()
             for (stat_column, stat_method), values_anonymized in sorted(anonymization_stats.items()):
+                column_length_stats = length_stats.get(stat_column, {})
+                recorded_length_columns.add(stat_column)
                 self.migrator_tables.insert_anonymization_stats({
                     'worker_id': worker_id,
                     'source_schema_name': source_schema,
@@ -291,11 +306,33 @@ class AnonymizationWorkflow:
                     'method_name': stat_method,
                     'params': anonymization_rules.get(stat_column, (None, {}))[1],
                     'values_anonymized': values_anonymized,
+                    'values_truncated': column_length_stats.get('truncated', 0),
+                    'values_refitted': column_length_stats.get('refitted', 0),
                     'table_rows': total_inserted_rows,
                 })
                 if values_anonymized == 0:
                     # INFO on purpose - WARNING is not printed with the default log level
                     self.config_parser.print_log_message('INFO', f"anonymization_workflow: Worker {worker_id}: Table {target_table}: WARNING: rule '{stat_method}' for column {stat_column} replaced no value - all {total_inserted_rows} copied values were NULL.")
+
+            # a column copied unchanged whose values did not fit is recorded as well - it was
+            # modified by the migration, and that must not stay in the log only
+            for length_column, length_counts in sorted(length_stats.items()):
+                if length_column in recorded_length_columns:
+                    continue
+                self.migrator_tables.insert_anonymization_stats({
+                    'worker_id': worker_id,
+                    'source_schema_name': source_schema,
+                    'source_table_name': source_table,
+                    'target_schema_name': target_schema,
+                    'target_table_name': target_table,
+                    'column_name': length_column,
+                    'method_name': '',
+                    'params': '',
+                    'values_anonymized': 0,
+                    'values_truncated': length_counts.get('truncated', 0),
+                    'values_refitted': length_counts.get('refitted', 0),
+                    'table_rows': total_inserted_rows,
+                })
 
             shortest_batch_seconds = min(batch_durations) if batch_durations else 0
             longest_batch_seconds = max(batch_durations) if batch_durations else 0

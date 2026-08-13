@@ -65,6 +65,42 @@ summary reports from those counts. A rule which matched a column but replaced no
 configured rule which matched no migrated column at all, are both listed as warnings in the
 summary - see the example output below.
 
+## Values Not Fitting Into the Target Column
+
+A string value can be longer than the target column - the target column may be narrower than the
+data of the source, or the anonymization method may produce longer output than the original
+value. What happens then is configured, never silent:
+
+```yaml
+anonymization:
+  # error (default) | fit | find_fitting_value
+  on_value_too_long: find_fitting_value
+  # only for find_fitting_value - how many times the method may be called for one value
+  find_fitting_value_attempts: 10
+```
+
+* **`error`** (default) - the table fails and the migration stops, naming the table, the column,
+  the length of the value and the length of the column. Cutting the value would destroy data and
+  hide the real problem; a checksum validation of the target would fail later, or - worse - the
+  cut would be uniform enough that it would not.
+* **`fit`** - the value is cut to the length of the column. Every cut is counted per column,
+  written to `<migration>_anonymization_stats` (`values_truncated`), reported the first time it
+  happens for a column while the copy runs, and listed as a warning of the summary.
+* **`find_fitting_value`** - the anonymization method is called again, up to
+  `find_fitting_value_attempts` times, until it returns a value which fits. The number of values
+  which had to be regenerated is recorded (`values_refitted`) and reported in the summary. If the
+  method returns the same value every time - `deterministic_hash_mask`, `static_mask` and every
+  other deterministic method do - it is recognized at the first repetition and the run stops
+  instead of trying again. When the attempts are exhausted, the run stops as well.
+
+The setting applies to the columns copied unchanged too. Such a column cannot be regenerated, so
+`find_fitting_value` reports it as an error naming the column - widen the target column, or use
+`fit` to cut those values knowingly.
+
+The value itself never appears in a message or in the protocol tables - it is the personal data
+this workflow exists to protect. A `postgres_anon_native` value is not measured at all: it is a
+function call for the target server, not the value the target will store.
+
 ## Available Anonymization Methods
 
 The following methods are pre-registered and ready for use in your configuration files.

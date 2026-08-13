@@ -74,6 +74,8 @@ This document provides a simplified overview and hierarchy of the configuration 
 ## 8. Anonymization (`anonymization`)
 - `tables`: Explicit per-table, per-column assignment of anonymization methods (e.g. `faker_name`, `deterministic_hash_mask`).
 - `regex_mappings`: Broad regex-based assignments connecting matching table/column combinations to anonymization methods.
+- `on_value_too_long`: What to do with a string value which does not fit into the length of the target column - `error` (stop and report, the default), `fit` (cut the value, counted and reported), `find_fitting_value` (call the anonymization method again until its result fits).
+- `find_fitting_value_attempts`: How many times the method may be called for one value with `find_fitting_value`. Default `10`.
 - *See the [Data Anonymization Workflow](workflow/anonymization.md) for full method details.*
 
 ## 9. Summary Settings (`summary`)

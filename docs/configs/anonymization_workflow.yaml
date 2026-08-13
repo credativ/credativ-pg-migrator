@@ -111,6 +111,17 @@ migration:
 # >>> ADJUST EVERYTHING BELOW - these names are examples, not defaults
 # ---------------------------------------------------------------------------
 anonymization:
+  # What to do with a string value which does not fit into the length of the target column -
+  # either because the target column is narrower than the source data, or because the method
+  # produces longer values than the original. The value is never cut silently.
+  #   error               stop and name the table, the column and the two lengths (default)
+  #   fit                 cut the value, counted per column and reported in the summary
+  #   find_fitting_value  call the method again until its result fits (a deterministic method,
+  #                       which returns the same value every time, is recognized and stops the run)
+  on_value_too_long: "error"          # >>> ADJUST
+  # only for find_fitting_value - how many times the method may be called for one value
+  find_fitting_value_attempts: 10
+
   tables:
     customers:
       full_name:

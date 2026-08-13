@@ -13,6 +13,31 @@ class AnonymizationConfigError(ValueError):
     pass
 
 
+class AnonymizationValueTooLongError(ValueError):
+    """
+    A value does not fit into the target column and the configuration does not say what to do
+    with it. Cutting it silently destroys data and hides the real problem - a target column
+    narrower than the source data, or a method producing longer output than the original.
+    """
+    pass
+
+
+# anonymization.on_value_too_long - what to do with a string value which does not fit into the
+# length of the target column
+VALUE_TOO_LONG_POLICIES = (
+    # stop the migration and report the column - the default
+    'error',
+    # cut the value to the length of the column, counted and reported, never silent
+    'fit',
+    # call the anonymization method again until its result fits, stop when it cannot
+    'find_fitting_value',
+)
+DEFAULT_FIND_FITTING_VALUE_ATTEMPTS = 10
+# a value produced for the target server ("__RAW_SQL__:anon.fake_city()") is a function call,
+# not the data - its length says nothing about the length of the value the target will store
+RAW_SQL_PREFIX = '__RAW_SQL__:'
+
+
 def _compile_regex_robust(pattern):
     """
     Helper to compile regular expressions in a way that is robust to Python 3.11+
@@ -43,11 +68,31 @@ class MigratorAnonymizer:
         self.compiled_regexes = []
         self._check_tables_config(errors)
         self._compile_regex_mappings(errors)
+        self._check_value_too_long_config(errors)
         if errors:
             raise AnonymizationConfigError(
                 "Invalid 'anonymization' configuration - the run is stopped because the listed columns "
                 "would keep their original values while the migration reports success:"
                 + "".join(f"\n  - {error}" for error in errors))
+
+    def _check_value_too_long_config(self, errors):
+        self.on_value_too_long = self.anonymization_config.get('on_value_too_long', 'error')
+        self.find_fitting_value_attempts = self.anonymization_config.get(
+            'find_fitting_value_attempts', DEFAULT_FIND_FITTING_VALUE_ATTEMPTS)
+
+        if self.on_value_too_long not in VALUE_TOO_LONG_POLICIES:
+            errors.append(f"anonymization.on_value_too_long: '{self.on_value_too_long}' is not a known policy - "
+                          f"use one of: {', '.join(VALUE_TOO_LONG_POLICIES)}")
+            self.on_value_too_long = 'error'
+
+        try:
+            self.find_fitting_value_attempts = int(self.find_fitting_value_attempts)
+        except (TypeError, ValueError):
+            errors.append(f"anonymization.find_fitting_value_attempts: '{self.find_fitting_value_attempts}' is not a number")
+            self.find_fitting_value_attempts = DEFAULT_FIND_FITTING_VALUE_ATTEMPTS
+        if self.find_fitting_value_attempts < 1:
+            errors.append(f"anonymization.find_fitting_value_attempts: {self.find_fitting_value_attempts} - at least one attempt is needed")
+            self.find_fitting_value_attempts = DEFAULT_FIND_FITTING_VALUE_ATTEMPTS
 
     def _check_method(self, method_name, location, errors):
         if method_name is None or method_name == '':
@@ -156,27 +201,121 @@ class MigratorAnonymizer:
                 rules[column_name] = (method_name, params)
         return rules
 
-    def anonymize_row(self, table_name, row_dict, stats=None):
+    def anonymize_row(self, table_name, row_dict, stats=None, max_lengths=None, length_stats=None):
         """
         Replace every value covered by a rule. NULL values are left untouched - they carry no
         personal data. If 'stats' is a dict, it is filled with
         { (column_name, method_name): number of values replaced }.
+
+        When 'max_lengths' is given as { column_name: length of the target column }, every
+        string value which does not fit is handled according to anonymization.on_value_too_long -
+        for the columns carrying a rule and for the columns copied as they are. The counts of
+        the values which had to be changed to fit end in 'length_stats'.
         """
         for col_name, value in row_dict.items():
-            if value is None:
-                continue
-            method_name, params = self.get_method_for_column(table_name, col_name)
-            if not method_name:
-                continue
-            func = anonymization_registry.get(method_name)
-            if func is None:
-                # Startup validation should have caught this - but an unresolvable method must
-                # never end as a skipped column with the original value copied to the target.
-                raise AnonymizationConfigError(
-                    f"anonymization: table '{table_name}', column '{col_name}': method '{method_name}' "
-                    f"is not registered - known methods are: {', '.join(anonymization_registry.names())}")
-            row_dict[col_name] = func(value, params)
-            if stats is not None:
-                stats_key = (col_name, method_name)
-                stats[stats_key] = stats.get(stats_key, 0) + 1
+            method_name = None
+            params = {}
+            func = None
+
+            if value is not None:
+                method_name, params = self.get_method_for_column(table_name, col_name)
+                if method_name:
+                    func = anonymization_registry.get(method_name)
+                    if func is None:
+                        # Startup validation should have caught this - but an unresolvable method
+                        # must never end as a skipped column with the original value copied to
+                        # the target.
+                        raise AnonymizationConfigError(
+                            f"anonymization: table '{table_name}', column '{col_name}': method '{method_name}' "
+                            f"is not registered - known methods are: {', '.join(anonymization_registry.names())}")
+                    anonymized_value = func(value, params)
+                    row_dict[col_name] = anonymized_value
+                    if stats is not None:
+                        stats_key = (col_name, method_name)
+                        stats[stats_key] = stats.get(stats_key, 0) + 1
+                else:
+                    anonymized_value = value
+
+                if max_lengths:
+                    max_length = max_lengths.get(col_name)
+                    if (max_length and isinstance(anonymized_value, str)
+                            and not anonymized_value.startswith(RAW_SQL_PREFIX)
+                            and len(anonymized_value) > max_length):
+                        row_dict[col_name] = self._fit_value({
+                            'table_name': table_name,
+                            'column_name': col_name,
+                            'original_value': value,
+                            'value': anonymized_value,
+                            'max_length': max_length,
+                            'method_name': method_name,
+                            'params': params,
+                            'func': func,
+                            'length_stats': length_stats,
+                        })
         return row_dict
+
+    def _count_length_event(self, length_stats, column_name, event):
+        if length_stats is None:
+            return
+        counts = length_stats.setdefault(column_name, {'truncated': 0, 'refitted': 0})
+        counts[event] += 1
+
+    def _fit_value(self, settings):
+        """
+        A string value which is longer than the target column. The value itself is never part of
+        a message - it is the personal data this workflow exists to protect.
+        """
+        table_name = settings['table_name']
+        column_name = settings['column_name']
+        original_value = settings['original_value']
+        value = settings['value']
+        max_length = settings['max_length']
+        method_name = settings['method_name']
+        params = settings['params']
+        func = settings['func']
+        length_stats = settings['length_stats']
+
+        rule_description = f"rule '{method_name}'" if method_name else "no anonymization rule"
+        location = f"anonymization: table '{table_name}', column '{column_name}' ({rule_description})"
+
+        if self.on_value_too_long == 'fit':
+            self._count_length_event(length_stats, column_name, 'truncated')
+            return value[:max_length]
+
+        if self.on_value_too_long == 'find_fitting_value':
+            if func is None:
+                raise AnonymizationValueTooLongError(
+                    f"{location}: a value of {len(value)} characters does not fit into the target column "
+                    f"({max_length} characters) and the column has no anonymization rule, so no other value "
+                    f"can be generated for it. Widen the target column, or set "
+                    f"anonymization.on_value_too_long to 'fit' to cut such values.")
+
+            candidate = value
+            for attempt in range(1, self.find_fitting_value_attempts + 1):
+                new_candidate = func(original_value, params)
+                if not isinstance(new_candidate, str):
+                    # the method stopped producing a string - the length of the target column
+                    # does not describe such a value any more
+                    return new_candidate
+                if len(new_candidate) <= max_length:
+                    self._count_length_event(length_stats, column_name, 'refitted')
+                    return new_candidate
+                if new_candidate == candidate:
+                    raise AnonymizationValueTooLongError(
+                        f"{location}: method '{method_name}' returns the same value of {len(new_candidate)} "
+                        f"characters every time, it cannot produce one fitting into the target column "
+                        f"({max_length} characters). Widen the target column, choose a method producing "
+                        f"shorter values, or set anonymization.on_value_too_long to 'fit' to cut such values.")
+                candidate = new_candidate
+
+            raise AnonymizationValueTooLongError(
+                f"{location}: method '{method_name}' did not produce a value fitting into the target column "
+                f"({max_length} characters) in {self.find_fitting_value_attempts} attempts. Raise "
+                f"anonymization.find_fitting_value_attempts, widen the target column, or set "
+                f"anonymization.on_value_too_long to 'fit' to cut such values.")
+
+        raise AnonymizationValueTooLongError(
+            f"{location}: a value of {len(value)} characters does not fit into the target column "
+            f"({max_length} characters). Cutting it would destroy data silently - set "
+            f"anonymization.on_value_too_long to 'fit' to cut such values, or to 'find_fitting_value' "
+            f"to let the anonymization method produce a value which fits.")

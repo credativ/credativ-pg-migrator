@@ -75,6 +75,15 @@ class ConfigParser:
 
         # These messages are sent as INFO on purpose - WARNING is not printed with the default
         # log level, and a message saying that nothing is anonymized must always be visible.
+        if not anonymization_config:
+            if self.is_anonymization_workflow():
+                self.print_log_message('INFO', "config_parser: validate_anonymization_config: WARNING: Workflow is 'anonymization' but no rules are configured - the run will be a plain data copy, nothing will be anonymized.")
+            return True
+
+        # the whole section is checked, including on_value_too_long, even when it carries no rules
+        from credativ_pg_migrator.anonymization.routing import MigratorAnonymizer
+        anonymizer = MigratorAnonymizer(self.config)
+
         if not has_rules:
             if self.is_anonymization_workflow():
                 self.print_log_message('INFO', "config_parser: validate_anonymization_config: WARNING: Workflow is 'anonymization' but no rules are configured - the run will be a plain data copy, nothing will be anonymized.")
@@ -83,9 +92,7 @@ class ConfigParser:
         if not self.is_anonymization_workflow():
             self.print_log_message('INFO', f"config_parser: validate_anonymization_config: WARNING: Anonymization rules are configured but the workflow is '{self.get_workflow()}' - the rules are ignored and no data will be anonymized.")
 
-        from credativ_pg_migrator.anonymization.routing import MigratorAnonymizer
-        anonymizer = MigratorAnonymizer(self.config)
-        self.print_log_message('INFO', f"config_parser: validate_anonymization_config: {anonymizer.rules_count} anonymization rules validated, all methods are registered.")
+        self.print_log_message('INFO', f"config_parser: validate_anonymization_config: {anonymizer.rules_count} anonymization rules validated, all methods are registered. Values not fitting into the target column: {anonymizer.on_value_too_long}.")
         return True
 
 

@@ -166,7 +166,7 @@ class InformixConnector(DatabaseConnector):
     CLAUSES_AFTER_FROM = (r'(?i)\b(WHERE|GROUP\s+BY|HAVING|ORDER\s+BY|UNION|INTERSECT|EXCEPT'
                           r'|LIMIT|OFFSET|FOR\s+UPDATE|WITH\s+(?:NO\s+)?LOCKS|INTO\s+TEMP)\b')
 
-    def scan_sql_text(self, text):
+    def scan_sql_text(self, text, mask_identifiers=True):
         """
         The text with its string literals and comments blanked out, and the depth of parentheses
         of every one of its characters.
@@ -174,6 +174,10 @@ class InformixConnector(DatabaseConnector):
         A position found in the blanked text addresses the same character of the original, so a
         keyword can be looked for where SQL means it - not inside a literal, and not in a
         subquery when the clause of the query around it is the one being read.
+
+        A quoted identifier is blanked as well, so that a keyword spelled inside one is not read
+        as a keyword. It is kept when `mask_identifiers` is off, for a caller which looks for a
+        name and not for a keyword - the qualifier of `"informix".equal(...)` is one.
         """
         masked = list(text)
         depths = [0] * len(text)
@@ -181,14 +185,25 @@ class InformixConnector(DatabaseConnector):
         index = 0
         while index < len(text):
             character = text[index]
-            if character in ("'", '"'):
-                quote = character
+            if character == '"':
+                ## the parentheses of a quoted identifier are part of the name, they are not read
+                end = index + 1
+                while end < len(text) and text[end] != '"':
+                    end += 1
+                end = min(end + 1, len(text))
+                for position in range(index, end):
+                    depths[position] = depth
+                    if mask_identifiers:
+                        masked[position] = ' '
+                index = end
+                continue
+            if character == "'":
                 masked[index] = ' '
                 depths[index] = depth
                 index += 1
                 while index < len(text):
                     depths[index] = depth
-                    closing = text[index] == quote
+                    closing = text[index] == "'"
                     masked[index] = ' '
                     index += 1
                     if closing:
@@ -674,6 +689,98 @@ class InformixConnector(DatabaseConnector):
                 "informix_connector: convert_matches_operator: A MATCHES operator whose pattern is not a literal was left in the code - PostgreSQL does not know the operator, it has to be rewritten manually.")
         return code
 
+    ## The operators which Informix writes as a call to a function of its own system schema when it
+    ## stores the text of a view. `is_active = 't'` on a BOOLEAN column is kept as
+    ## `"informix".equal(is_active, 't')`, and there is no such function in PostgreSQL.
+    OPERATOR_FUNCTIONS = {
+        'equal': '=', 'notequal': '<>',
+        'lessthan': '<', 'lessthanorequal': '<=',
+        'greaterthan': '>', 'greaterthanorequal': '>=',
+        'plus': '+', 'minus': '-', 'times': '*', 'divide': '/',
+        'concat': '||', 'like': 'LIKE', 'notlike': 'NOT LIKE', 'matches': 'MATCHES',
+    }
+    UNARY_OPERATOR_FUNCTIONS = {'negate': '-'}
+
+    def convert_operator_functions(self, code):
+        """
+        The operators which Informix stores as a call to a function of its system schema, written as
+        the operators they are.
+
+        The text of a view in `sysviews` is not the text the author wrote - the server writes the
+        query back from its parsed form, and an operator whose operands need one of its own
+        implementations is written as a call: `is_active = 't'` becomes
+        `"informix".equal(is_active, 't')`, `a || b` becomes `"informix".concat(a, b)`. The
+        qualifier is the system schema of Informix, so the schema replacement of the migration
+        turned it into a function of the target schema and PostgreSQL answered
+        `function public.equal(boolean, unknown) does not exist`.
+
+        The conversion runs before the schema is replaced, so the qualifier is still the one of
+        Informix and a function of the user which happens to carry one of these names is not
+        touched.
+        """
+        pattern = re.compile(r'(?i)(?<![\w."])"?informix"?\s*\.\s*(?P<name>[a-zA-Z_]\w*)\s*\(')
+        while True:
+            masked, depths = self.scan_sql_text(code, mask_identifiers=False)
+            match = None
+            for candidate in pattern.finditer(masked):
+                name = candidate.group('name').lower()
+                if name in self.OPERATOR_FUNCTIONS or name in self.UNARY_OPERATOR_FUNCTIONS:
+                    match = candidate
+                    break
+            if match is None:
+                return code
+
+            ## the arguments reach up to the parenthesis which closes the call
+            opening = match.end() - 1
+            closing = next((position for position in range(opening + 1, len(code))
+                            if masked[position] == ')' and depths[position] == depths[opening]), None)
+            if closing is None:
+                self.config_parser.print_log_message('WARNING',
+                    f"informix_connector: convert_operator_functions: the call of {match.group('name')} is not closed - "
+                    "it is left as it is")
+                return code
+
+            name = match.group('name').lower()
+            ## an argument may be a call of its own, so it is converted before it is used
+            arguments = [self.convert_operator_functions(argument)
+                         for argument in self.split_top_level_commas(code[opening + 1:closing])]
+
+            if name in self.UNARY_OPERATOR_FUNCTIONS and len(arguments) == 1:
+                replacement = f"({self.UNARY_OPERATOR_FUNCTIONS[name]}{arguments[0]})"
+            elif name in self.OPERATOR_FUNCTIONS and len(arguments) == 2:
+                replacement = f"({arguments[0]} {self.OPERATOR_FUNCTIONS[name]} {arguments[1]})"
+            else:
+                self.config_parser.print_log_message('WARNING',
+                    f"informix_connector: convert_operator_functions: {match.group('name')} of Informix was called with "
+                    f"{len(arguments)} argument(s), which is not the operator it stands for - the call is left as it is "
+                    "and has to be rewritten manually")
+                return code
+
+            self.config_parser.print_log_message('DEBUG',
+                f"informix_connector: convert_operator_functions: {code[match.start():closing + 1].strip()} "
+                f"converted to {replacement}")
+            code = code[:match.start()] + replacement + code[closing + 1:]
+
+    def clause_end(self, masked, depths, start, depth):
+        """
+        Where the clause of a query beginning at the given position ends.
+
+        A clause ends at the keyword which begins the next one, at the semicolon which ends the
+        statement, or at the parenthesis which closes the query it belongs to - all of them read
+        on the depth of the query itself, so that a subquery inside the clause ends nothing. The
+        semicolon was not read before, and the ` ;` which Informix writes at the end of the text
+        of a view was taken for a part of the last condition: it ended up inside the ON clause the
+        conversion built, as `ON ((x1.country_code = x0.country_code ) ;)`.
+        """
+        for keyword in re.finditer(self.CLAUSES_AFTER_FROM, masked[start:]):
+            position = start + keyword.start()
+            if depths[position] == depth:
+                return position
+        for position in range(start, len(masked)):
+            if depths[position] < depth or (masked[position] == ';' and depths[position] == depth):
+                return position
+        return len(masked)
+
     def outer_join_table_reference(self, item):
         """
         The name a column of a table reference is addressed by - its alias, or the table itself
@@ -812,18 +919,7 @@ class InformixConnector(DatabaseConnector):
             from_clause = None
             for match in re.finditer(r'(?i)\bFROM\b', masked):
                 depth = depths[match.start()]
-                end = len(code)
-                for keyword in re.finditer(self.CLAUSES_AFTER_FROM, masked[match.end():]):
-                    position = match.end() + keyword.start()
-                    if depths[position] == depth:
-                        end = position
-                        break
-                else:
-                    ## the query may also end with the parenthesis which encloses it
-                    for position in range(match.end(), len(code)):
-                        if depths[position] < depth:
-                            end = position
-                            break
+                end = self.clause_end(masked, depths, match.end(), depth)
                 items = self.split_top_level_commas(code[match.end():end])
                 if any(re.match(r'(?i)^OUTER\b', item) for item in items):
                     from_clause = {'start': match.end(), 'end': end, 'depth': depth}
@@ -837,17 +933,7 @@ class InformixConnector(DatabaseConnector):
             where_match = re.compile(r'(?i)\s*\bWHERE\b').match(masked, from_clause['end'])
             if where_match:
                 where_start = where_match.end()
-                where_end = len(code)
-                for keyword in re.finditer(self.CLAUSES_AFTER_FROM, masked[where_start:]):
-                    position = where_start + keyword.start()
-                    if depths[position] == from_clause['depth']:
-                        where_end = position
-                        break
-                else:
-                    for position in range(where_start, len(code)):
-                        if depths[position] < from_clause['depth']:
-                            where_end = position
-                            break
+                where_end = self.clause_end(masked, depths, where_start, from_clause['depth'])
 
             predicates = []
             if where_start is not None:
@@ -889,6 +975,9 @@ class InformixConnector(DatabaseConnector):
     def convert_view_code(self, settings: dict):
         view_code = settings['view_code']
         converted_view_code = view_code
+        ## before the schema is replaced - the qualifier of these calls is the system schema of
+        ## Informix, and it is what tells them apart from a function of the user
+        converted_view_code = self.convert_operator_functions(converted_view_code)
         converted_view_code = converted_view_code.replace(f'''"{settings['source_schema_name']}".''', f'''"{settings['target_schema_name']}".''')
         converted_view_code = self.convert_outer_joins(converted_view_code)
         converted_view_code = self.convert_matches_operator(converted_view_code)

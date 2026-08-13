@@ -128,6 +128,7 @@ class MigratorTables:
         self.create_table_for_views()
         self.create_ddl_tables()
         self.create_table_for_mapping()
+        self.create_table_for_anonymization_stats()
 
     def prepare_data_types_substitution(self):
         # Drop table if exists
@@ -1922,6 +1923,82 @@ class MigratorTables:
             )
         """)
         self.config_parser.print_log_message('DEBUG3', f"migrator_tables: create_table_for_batches_stats: Table {table_name} created in schema {self.protocol_schema}.")
+
+    def create_table_for_anonymization_stats(self, drop_existing=True):
+        """
+        Record of the anonymization rules that really fired - one row per table, column and
+        method, with the number of values actually replaced. The summary reports from this
+        table, so a rule which never touched a value cannot be presented as a done job.
+        """
+        table_name = self.config_parser.get_protocol_name_anonymization_stats()
+        if drop_existing:
+            self.protocol_connection.execute_query(self.drop_table_sql.format(protocol_schema=self.protocol_schema, table_name=table_name))
+        self.protocol_connection.execute_query(f"""
+            CREATE TABLE IF NOT EXISTS "{self.protocol_schema}"."{table_name}"
+            (id SERIAL PRIMARY KEY,
+            worker_id TEXT,
+            source_schema_name TEXT,
+            source_table_name TEXT,
+            target_schema_name TEXT,
+            target_table_name TEXT,
+            column_name TEXT,
+            method_name TEXT,
+            params TEXT,
+            values_anonymized BIGINT DEFAULT 0,
+            table_rows BIGINT DEFAULT 0,
+            inserted_at TIMESTAMP DEFAULT clock_timestamp()
+            )
+        """)
+        self.config_parser.print_log_message('DEBUG3', f"migrator_tables: create_table_for_anonymization_stats: Table {table_name} created in schema {self.protocol_schema}.")
+
+    def insert_anonymization_stats(self, settings):
+        table_name = self.config_parser.get_protocol_name_anonymization_stats()
+        self.protocol_connection.execute_query(f"""
+            INSERT INTO "{self.protocol_schema}"."{table_name}"
+            (worker_id, source_schema_name, source_table_name, target_schema_name, target_table_name,
+            column_name, method_name, params, values_anonymized, table_rows)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """, (
+            str(settings.get('worker_id', '')),
+            settings.get('source_schema_name', ''),
+            settings.get('source_table_name', ''),
+            settings.get('target_schema_name', ''),
+            settings.get('target_table_name', ''),
+            settings.get('column_name', ''),
+            settings.get('method_name', ''),
+            str(settings.get('params', '')),
+            settings.get('values_anonymized', 0),
+            settings.get('table_rows', 0),
+        ))
+
+    def fetch_anonymization_stats(self):
+        """
+        What the anonymization workers really did, as
+        { (target_table_name, column_name): {'method': ..., 'values': ..., 'rows': ...} }.
+        """
+        table_name = self.config_parser.get_protocol_name_anonymization_stats()
+        stats = {}
+        try:
+            cursor = self.protocol_connection.connection.cursor()
+            cursor.execute(f"""
+                SELECT target_schema_name, target_table_name, column_name, method_name,
+                       sum(values_anonymized), sum(table_rows)
+                FROM "{self.protocol_schema}"."{table_name}"
+                GROUP BY 1, 2, 3, 4
+            """)
+            for row in cursor.fetchall():
+                target_schema_name, target_table_name, column_name, method_name, values_anonymized, table_rows = row
+                stats[(target_table_name, column_name)] = {
+                    'schema': target_schema_name,
+                    'method': method_name,
+                    'values': int(values_anonymized or 0),
+                    'rows': int(table_rows or 0),
+                }
+            cursor.close()
+        except Exception:
+            self.protocol_connection.connection.rollback()
+            raise
+        return stats
 
     def create_table_for_data_chunks(self):
         try:
@@ -4555,37 +4632,66 @@ class MigratorTables:
             anon_tables_data = []
             anon_tables = 0
             anon_columns = 0
+            anon_columns_with_values = 0
+            anon_values = 0
+            # rules which matched a column but replaced no value, and configured rules which
+            # matched no migrated column at all - both mean data was copied unchanged
+            rules_without_effect = []
+            rules_without_column = []
             try:
                 from credativ_pg_migrator.anonymization.routing import MigratorAnonymizer
                 anonymizer = MigratorAnonymizer(self.config_parser.config)
+                # what the workers really did - the configuration alone says nothing about it
+                actual_stats = self.fetch_anonymization_stats() if anonymizer.is_active() else {}
+                matched_columns = set()
                 if anonymizer.is_active():
                     raw_tables = self.fetch_all_tables()
                     for t_row in raw_tables:
                         table_data = self.decode_table_row(t_row)
-                        if table_data.get('source_table_rows_limited', 0) > 0:
-                            target_schema_name = table_data.get('target_schema_name', '')
-                            target_table_name = table_data['target_table_name']
-                            full_table_name = f"{target_schema_name}.{target_table_name}" if target_schema_name else target_table_name
+                        target_schema_name = table_data.get('target_schema_name', '')
+                        target_table_name = table_data['target_table_name']
+                        full_table_name = f"{target_schema_name}.{target_table_name}" if target_schema_name else target_table_name
+                        # an empty table has nothing to anonymize - its rules are not reported
+                        # as ineffective, but they did match a column of the migration
+                        table_has_rows = table_data.get('source_table_rows_limited', 0) > 0
 
-                            target_columns = table_data.get('target_columns', {})
-                            table_matched = False
-                            table_anon_cols = []
-                            for col_val in target_columns.values():
-                                col_name = col_val.get('column_name') if isinstance(col_val, dict) else col_val
-                                data_type = col_val.get('data_type', 'unknown') if isinstance(col_val, dict) else 'unknown'
-                                method, params = anonymizer.get_method_for_column(target_table_name, col_name)
-                                if method:
-                                    anon_columns += 1
-                                    table_matched = True
-                                    table_anon_cols.append({'name': col_name, 'data_type': data_type, 'method': method, 'params': params})
-                            if table_matched:
-                                anon_tables += 1
-                                anon_tables_data.append({
-                                    'table_name': full_table_name,
-                                    'columns': table_anon_cols
-                                })
+                        target_columns = table_data.get('target_columns', {})
+                        table_anon_cols = []
+                        for col_val in target_columns.values():
+                            col_name = col_val.get('column_name') if isinstance(col_val, dict) else col_val
+                            data_type = col_val.get('data_type', 'unknown') if isinstance(col_val, dict) else 'unknown'
+                            method, params = anonymizer.get_method_for_column(target_table_name, col_name)
+                            if not method:
+                                continue
+                            matched_columns.add((target_table_name, col_name))
+                            if not table_has_rows:
+                                continue
+                            anon_columns += 1
+                            stats_row = actual_stats.get((target_table_name, col_name))
+                            values_anonymized = stats_row['values'] if stats_row else 0
+                            anon_values += values_anonymized
+                            if values_anonymized > 0:
+                                anon_columns_with_values += 1
+                            elif stats_row is None:
+                                rules_without_effect.append(f"{full_table_name}.{col_name} ({method}) - the table was not processed by the anonymization copy")
+                            else:
+                                rules_without_effect.append(f"{full_table_name}.{col_name} ({method}) - no value replaced, every copied value was NULL")
+                            table_anon_cols.append({'name': col_name, 'data_type': data_type, 'method': method, 'params': params, 'values': values_anonymized})
+                        if table_anon_cols:
+                            anon_tables += 1
+                            anon_tables_data.append({
+                                'table_name': full_table_name,
+                                'columns': table_anon_cols
+                            })
 
-                lines.append(f"Anonymized {anon_columns} columns in {anon_tables} tables.")
+                    for cfg_table_name, cfg_table_rules in anonymizer.tables_config.items():
+                        for cfg_column_name in cfg_table_rules.keys():
+                            if (cfg_table_name, cfg_column_name) not in matched_columns:
+                                rules_without_column.append(f"anonymization.tables.{cfg_table_name}.{cfg_column_name}")
+
+                lines.append(f"Anonymization rules configured: {anonymizer.rules_count}")
+                lines.append(f"Columns matched by a rule: {anon_columns} in {anon_tables} tables")
+                lines.append(f"Values really replaced: {anon_values} in {anon_columns_with_values} columns")
 
                 if anon_tables_data:
                     top_anonymized_tables_limit = self.config_parser.get_summary_top_anonymized_tables()
@@ -4598,17 +4704,13 @@ class MigratorTables:
                         if idx > 1:
                             lines.append("")
                         col_count = len(t_data['columns'])
-                        lines.append(f"{idx}. {t_data['table_name']} ({col_count} columns anonymized)")
+                        table_values = sum(c['values'] for c in t_data['columns'])
+                        lines.append(f"{idx}. {t_data['table_name']} ({col_count} columns matched by a rule, {table_values} values replaced)")
 
                         sorted_cols = sorted(t_data['columns'], key=lambda x: x['name'])
                         display_cols = sorted_cols[:top_anonymized_columns_limit]
 
                         if display_cols:
-                            col_len = max([len(c['name']) for c in display_cols] + [11])
-                            type_len = max([len(c['data_type']) for c in display_cols] + [9])
-                            lines.append(f"   { 'Column Name'.ljust(col_len) } | { 'Data Type'.ljust(type_len) } | Method")
-                            lines.append(f"   { '-' * col_len }-+-{ '-' * type_len }-+-{ '-' * 20 }")
-
                             for col_info in display_cols:
                                 method_str = col_info['method']
                                 if col_info.get('params') and 'part' in col_info['params']:
@@ -4616,7 +4718,17 @@ class MigratorTables:
                                 elif col_info.get('params'):
                                     param_str = ", ".join(f"{k}: {v}" for k, v in col_info['params'].items())
                                     method_str += f" ({param_str})"
-                                lines.append(f"   { col_info['name'].ljust(col_len) } | { col_info['data_type'].ljust(type_len) } | { method_str }")
+                                col_info['method_str'] = method_str
+
+                            col_len = max([len(c['name']) for c in display_cols] + [11])
+                            type_len = max([len(c['data_type']) for c in display_cols] + [9])
+                            method_len = max([len(c['method_str']) for c in display_cols] + [20])
+                            values_len = 15
+                            lines.append(f"   { 'Column Name'.ljust(col_len) } | { 'Data Type'.ljust(type_len) } | { 'Method'.ljust(method_len) } | { 'Values replaced'.rjust(values_len) }")
+                            lines.append(f"   { '-' * col_len }-+-{ '-' * type_len }-+-{ '-' * method_len }-+-{ '-' * values_len }")
+
+                            for col_info in display_cols:
+                                lines.append(f"   { col_info['name'].ljust(col_len) } | { col_info['data_type'].ljust(type_len) } | { col_info['method_str'].ljust(method_len) } | { str(col_info['values']).rjust(values_len) }")
 
                         if col_count > top_anonymized_columns_limit:
                             lines.append(f"   - ... and {col_count - top_anonymized_columns_limit} more")
@@ -4624,6 +4736,18 @@ class MigratorTables:
                         show_examples = self.config_parser.get_summary_show_anonymization_examples()
                         if show_examples > 0:
                             self._append_anonymization_examples(lines, t_data['table_name'], display_cols, show_examples)
+
+                if rules_without_effect:
+                    lines.append("")
+                    lines.append(f"WARNING: {len(rules_without_effect)} rules replaced no value - the data of these columns was copied unchanged:")
+                    for rule_description in sorted(rules_without_effect):
+                        lines.append(f"   - {rule_description}")
+
+                if rules_without_column:
+                    lines.append("")
+                    lines.append(f"WARNING: {len(rules_without_column)} configured rules matched no migrated column - check the table and column names:")
+                    for rule_description in sorted(rules_without_column):
+                        lines.append(f"   - {rule_description}")
             except Exception as e:
                 lines.append(f"Error computing anonymization stats: {e}")
 

@@ -15,6 +15,8 @@ class AnonymizationWorkflow:
         if self.config_parser.get_source_db_type() != 'postgresql' or self.config_parser.get_target_db_type() != 'postgresql':
             raise ValueError("Anonymization workflow currently only supports PostgreSQL to PostgreSQL migrations.")
 
+        # Raises AnonymizationConfigError on an unknown method or a broken rule - the same check
+        # already ran at startup, this is the last line of defense before any data is read.
         self.anonymizer = MigratorAnonymizer(self.config_parser.config)
 
     def run(self):
@@ -22,6 +24,9 @@ class AnonymizationWorkflow:
 
         if not self.anonymizer.is_active():
             self.config_parser.print_log_message('WARNING', "anonymization_workflow: No anonymization rules found. Acting as standard PG-to-PG copy.")
+
+        # A resumed run does not pass through the planner, where the protocol tables are created
+        self.migrator_tables.create_table_for_anonymization_stats(drop_existing=False)
 
         # Temporarily disable standard data migration to let standard table worker create tables without copying data
         original_migrate_data = self.config_parser.config['migration'].get('migrate_data', True)
@@ -148,7 +153,20 @@ class AnonymizationWorkflow:
             if skipped_columns:
                 self.config_parser.print_log_message('DEBUG', f"anonymization_workflow: Worker {worker_id}: Table {target_table}: generated columns are computed by the target and excluded from the data copy: {', '.join(skipped_columns)}")
             col_names = [col['column_name'] for col in target_columns]
-            
+
+            # Rules matching this table, and a counter per rule - a rule which replaced no value
+            # is reported as such instead of being counted as a successful anonymization.
+            anonymization_rules = {}
+            anonymization_stats = {}
+            if self.anonymizer.is_active():
+                anonymization_rules = self.anonymizer.get_rules_for_columns(target_table, col_names)
+                for rule_column, (rule_method, _rule_params) in anonymization_rules.items():
+                    anonymization_stats[(rule_column, rule_method)] = 0
+                if anonymization_rules:
+                    self.config_parser.print_log_message('INFO', f"anonymization_workflow: Worker {worker_id}: Table {target_table}: anonymizing {len(anonymization_rules)} columns: {', '.join(f'{c} ({m})' for c, (m, _p) in sorted(anonymization_rules.items()))}")
+                else:
+                    self.config_parser.print_log_message('DEBUG', f"anonymization_workflow: Worker {worker_id}: Table {target_table}: no anonymization rule matches any column, data is copied unchanged.")
+
             select_sql = f'SELECT {", ".join([f"{col}" for col in col_names])} FROM "{source_schema}"."{source_table}"'
             
             src_cursor = source_conn.connection.cursor(name=f"cursor_{worker_id}")
@@ -185,7 +203,7 @@ class AnonymizationWorkflow:
                 for idx, row in enumerate(rows):
                     row_dict = dict(zip(col_names, row))
                     if self.anonymizer.is_active():
-                        row_dict = self.anonymizer.anonymize_row(target_table, row_dict)
+                        row_dict = self.anonymizer.anonymize_row(target_table, row_dict, stats=anonymization_stats)
                     
                     # Truncate string values that exceed column limits
                     for col_name, max_len in col_max_lengths.items():
@@ -261,7 +279,24 @@ class AnonymizationWorkflow:
             src_cursor.close()
             source_conn.disconnect()
             target_conn.disconnect()
-            
+
+            for (stat_column, stat_method), values_anonymized in sorted(anonymization_stats.items()):
+                self.migrator_tables.insert_anonymization_stats({
+                    'worker_id': worker_id,
+                    'source_schema_name': source_schema,
+                    'source_table_name': source_table,
+                    'target_schema_name': target_schema,
+                    'target_table_name': target_table,
+                    'column_name': stat_column,
+                    'method_name': stat_method,
+                    'params': anonymization_rules.get(stat_column, (None, {}))[1],
+                    'values_anonymized': values_anonymized,
+                    'table_rows': total_inserted_rows,
+                })
+                if values_anonymized == 0:
+                    # INFO on purpose - WARNING is not printed with the default log level
+                    self.config_parser.print_log_message('INFO', f"anonymization_workflow: Worker {worker_id}: Table {target_table}: WARNING: rule '{stat_method}' for column {stat_column} replaced no value - all {total_inserted_rows} copied values were NULL.")
+
             shortest_batch_seconds = min(batch_durations) if batch_durations else 0
             longest_batch_seconds = max(batch_durations) if batch_durations else 0
             average_batch_seconds = sum(batch_durations) / len(batch_durations) if batch_durations else 0

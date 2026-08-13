@@ -35,6 +35,36 @@ anonymization:
         salt: "my_secret_salt"
 ```
 
+## Rule Validation
+
+The whole `anonymization` section is validated at startup, before a single row is read. The run
+is aborted with a fatal error when a rule cannot be used:
+
+* the `method` is missing, empty, or not a string,
+* the `method` is not registered (a typo, or a name that was never implemented),
+* `params` is not a mapping,
+* `table_pattern` or `column_pattern` is not a valid regular expression,
+* `tables` / `regex_mappings` do not have the expected structure.
+
+All problems are collected and reported together, with the list of known method names:
+
+```text
+Invalid 'anonymization' configuration - the run is stopped because the listed columns would keep
+their original values while the migration reports success:
+  - anonymization.tables.customers.email: unknown anonymization method 'faker_emial' - known
+    methods are: consistent_integer_mask, custom_german_bank, custom_iban, ...
+```
+
+An unusable rule is never skipped at runtime. Skipping it would copy the original personal data
+into a target database that everybody afterwards treats as anonymized, while the migration
+reports success.
+
+The same principle applies to the reporting: the workers count the values they really replaced
+per table, column and method into the protocol table `<migration>_anonymization_stats`, and the
+summary reports from those counts. A rule which matched a column but replaced nothing, and a
+configured rule which matched no migrated column at all, are both listed as warnings in the
+summary - see the example output below.
+
 ## Available Anonymization Methods
 
 The following methods are pre-registered and ready for use in your configuration files.
@@ -166,16 +196,18 @@ public.movie_countries              |         103,011 |            2.94
 
 [ ANONYMIZATION WORKFLOW RESULTS ]
 --------------------------------------------------------------------------------
-Anonymized 6 columns in 3 tables.
+Anonymization rules configured: 6
+Columns matched by a rule: 6 in 3 tables
+Values really replaced: 571477 in 3 columns
 
 Top Tables with Most Anonymized Columns:
-1. public.movies (4 columns anonymized)
-   Column Name | Data Type | Method
-   ------------+-----------+---------------------
-   budget      | numeric   | numeric_noise
-   homepage    | text      | partial_mask
-   name        | text      | deterministic_hash_mask
-   revenue     | numeric   | consistent_integer_mask
+1. public.movies (4 columns matched by a rule, 277249 values replaced)
+   Column Name | Data Type | Method                   | Values replaced
+   ------------+-----------+--------------------------+----------------
+   budget      | numeric   | numeric_noise            |               0
+   homepage    | text      | partial_mask             |               0
+   name        | text      | deterministic_hash_mask  |          277249
+   revenue     | numeric   | consistent_integer_mask  |               0
 
    Examples (Original => Anonymized):
    Row 1 (PK: id=5):
@@ -204,10 +236,10 @@ Top Tables with Most Anonymized Columns:
      - name: 'Smoking in the Girls' Room' => '8722945cea77f7e2216b2376dbb793...'
      - revenue: 'None' => 'None'
 
-2. public.people (1 columns anonymized)
-   Column Name | Data Type | Method
-   ------------+-----------+---------------------
-   name        | text      | faker_name
+2. public.people (1 columns matched by a rule, 294184 values replaced)
+   Column Name | Data Type | Method                   | Values replaced
+   ------------+-----------+--------------------------+----------------
+   name        | text      | faker_name               |          294184
 
    Examples (Original => Anonymized):
    Row 1 (PK: id=1):
@@ -221,10 +253,10 @@ Top Tables with Most Anonymized Columns:
    Row 5 (PK: id=16):
      - name: 'Tamara Smart' => 'Anna Lorch'
 
-3. public.trailers (1 columns anonymized)
-   Column Name | Data Type | Method
-   ------------+-----------+---------------------
-   key         | text      | static_mask
+3. public.trailers (1 columns matched by a rule, 44 values replaced)
+   Column Name | Data Type | Method                   | Values replaced
+   ------------+-----------+--------------------------+----------------
+   key         | text      | static_mask              |              44
 
    Examples (Original => Anonymized):
    Row 1 (PK: id=400):
@@ -237,5 +269,13 @@ Top Tables with Most Anonymized Columns:
      - key: 'FQRgJTEw_OA' => 'YYYYYYYYYYY'
    Row 5 (PK: id=406):
      - key: 'atbuBxDO1Go' => 'YYYYYYYYYYY'
+
+WARNING: 3 rules replaced no value - the data of these columns was copied unchanged:
+   - public.movies.budget (numeric_noise) - no value replaced, every copied value was NULL
+   - public.movies.homepage (partial_mask) - no value replaced, every copied value was NULL
+   - public.movies.revenue (consistent_integer_mask) - no value replaced, every copied value was NULL
+
+WARNING: 1 configured rules matched no migrated column - check the table and column names:
+   - anonymization.tables.public.people.nmae
 ================================================================================
 ```

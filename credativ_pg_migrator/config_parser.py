@@ -58,6 +58,34 @@ class ConfigParser:
                 if not isinstance(entry, (list, tuple)) or len(entry) != 5:
                     raise ValueError("Please update your config file. Each entry in data_types_substitution must have 5 elements - [table_name, column_name, source_type, target_type, comment].")
 
+        self.validate_anonymization_config()
+
+        return True
+
+    def validate_anonymization_config(self):
+        """
+        Check every anonymization rule before any data is read.
+
+        A typo in a method name would otherwise be discovered only while the data is being
+        copied, where the rule is simply not applied - the original personal data would land
+        in a target that everybody treats as anonymized. Such a configuration is fatal here.
+        """
+        anonymization_config = self.get_anonymization_config()
+        has_rules = bool(anonymization_config.get('tables')) or bool(anonymization_config.get('regex_mappings'))
+
+        # These messages are sent as INFO on purpose - WARNING is not printed with the default
+        # log level, and a message saying that nothing is anonymized must always be visible.
+        if not has_rules:
+            if self.is_anonymization_workflow():
+                self.print_log_message('INFO', "config_parser: validate_anonymization_config: WARNING: Workflow is 'anonymization' but no rules are configured - the run will be a plain data copy, nothing will be anonymized.")
+            return True
+
+        if not self.is_anonymization_workflow():
+            self.print_log_message('INFO', f"config_parser: validate_anonymization_config: WARNING: Anonymization rules are configured but the workflow is '{self.get_workflow()}' - the rules are ignored and no data will be anonymized.")
+
+        from credativ_pg_migrator.anonymization.routing import MigratorAnonymizer
+        anonymizer = MigratorAnonymizer(self.config)
+        self.print_log_message('INFO', f"config_parser: validate_anonymization_config: {anonymizer.rules_count} anonymization rules validated, all methods are registered.")
         return True
 
 
@@ -493,6 +521,9 @@ class ConfigParser:
 
     def get_protocol_name_data_chunks(self):
         return f"{self.get_protocol_name()}_data_chunks"
+
+    def get_protocol_name_anonymization_stats(self):
+        return f"{self.get_protocol_name()}_anonymization_stats"
 
     def get_protocol_name_indexes(self):
         return f"{self.get_protocol_name()}_indexes"

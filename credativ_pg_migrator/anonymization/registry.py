@@ -14,4 +14,8 @@ class Registry:
     def is_registered(self, name: str):
         return name in self._methods
 
+    def names(self):
+        """All registered method names - used to report a typo in the config file."""
+        return sorted(self._methods.keys())
+
 anonymization_registry = Registry()

@@ -29,6 +29,7 @@ Critical for massive parallel imports and the ability to resume aborted migratio
 *   **`data_migration`**: Tracks overall row counts dynamically fetched from source vs. rows successfully inserted into the target table, marking if the load completed.
 *   **`data_chunks`**: Tracks discrete batches of data boundaries (e.g., `chunk_start`, `chunk_end`, `batch_size`) assigned to individual multithreaded workers (`worker_id`).
 *   **`batches_stats`**: Extremely granular performance metrics detailing exact read (`reading_seconds`), transform (`transforming_seconds`), and write (`writing_seconds`) times for each chunk.
+*   **`anonymization_stats`**: Written by the anonymization workflow only - one row per table, column and method with the number of values the rule really replaced (`values_anonymized`) out of the rows copied (`table_rows`). The summary reports the anonymization from this table, so a rule which never touched a value cannot be presented as a done job.
 
 ## 4. Substitution & Filtering Registers
 
